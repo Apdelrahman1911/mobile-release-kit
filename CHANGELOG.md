@@ -37,8 +37,30 @@ All notable changes to Mobile Release Kit are documented here. The project follo
   replaying ambiguous work. Bind profile bytes, actual read identity and complete
   observed metadata through admission/terminal recovery; preserve per-name conflicts
   across cleanup owners without implicit retry, including ambiguous setup-stage
-  inspection/removal. Keep EEXIST borrowed cleanup role-exclusive. QA-004 outer materialization cleanup
-  remains separate and open.
+  inspection/removal. Keep EEXIST borrowed cleanup role-exclusive. Account signing
+  and outer project build-input recovery remain distinct ownership protocols.
+- Own the complete outer build-input lifetime, including temporary service-file
+  replacement, cancellation-safe independent cleanup and exact-session recovery.
+  Preserve intervening project changes and retain ambiguous resource state without
+  automatic replay or broad deletion.
+- Revalidate the exact selected Android/iOS Firebase client bytes before build-input
+  publication; a previous validation cannot authorize a subsequently replaced client.
+- Keep private Store staging ancestry compatible from preparation through later
+  evidence publication, and emit CI completion only after the outer owner exits.
+- Reject nondefault `init --apply` configuration destinations before changing the
+  project because generated workflow callers use `release/mobile-release.json`.
+- Require actual successful HEAD, tree and clean-status observations for fresh source
+  authority. Dispatch metadata cannot substitute for an unavailable checkout read;
+  authenticated historical recovery keeps its original source identity.
+- Support only macOS's checked system-owned `/tmp` and `/var` aliases when reading
+  external inputs. Retain descriptor-bound ancestry, private-file and terminal
+  identity checks; lower symbolic links and ambiguous cleanup still fail closed.
+- Require complete retained-symbol coverage for every installed native slice under
+  `retain` or `required`, including nested code. Reject duplicate, missing and
+  unrecognized DWARF identities while preserving exact artifact correspondence.
+- Retain application-private publication and Store-lane resource ownership through
+  cancellation and terminal cleanup. Keep synchronous Play metadata helpers within
+  the guarded edit lifetime; no public release or automatic Store retry is added.
 - Authenticate both provisioning-profile CMS signatures and the exact production
   Apple iOS profile issuer under pinned public roots, with offline native policy,
   isolated bounded workers, cancellation containment and exact-byte no-clobber
@@ -62,8 +84,8 @@ All notable changes to Mobile Release Kit are documented here. The project follo
 - Require and correlate iOS IPA/archive native images, typed bundle metadata, resources and every
   present retained dSYM on private snapshots before candidate authorization. Bind archive/symbol
   hashes at execution, reject source-path ABA/substitution, and disable export stripping/thinning.
-  Preserve signature-only changes and authenticated historical recovery; complete missing-nested
-  symbol coverage remains a separate requirement.
+  Preserve signature-only changes and authenticated historical recovery. Complete
+  retained-symbol coverage is additionally enforced according to the configured policy.
 - Require bounded, reviewed Android release notes for every configured locale before candidate
   creation and production preparation. Generate an owner-completed default stub, bind exact raw
   text to the production intent, and use immutable validated notes in Supply workers without

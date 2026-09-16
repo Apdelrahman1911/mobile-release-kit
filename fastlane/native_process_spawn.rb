@@ -44,8 +44,27 @@ module MobileReleaseKit
     @poisoned = false
 
     class << self
+      def monotonic_clock
+        host = RbConfig::CONFIG.fetch("host_os")
+        if host.match?(/\Alinux/)
+          raise Error.new("runtime") unless Process.const_defined?(:CLOCK_MONOTONIC)
+          ["linux-monotonic-v1", Process::CLOCK_MONOTONIC].freeze
+        elsif host.match?(/\Adarwin/)
+          # CPython monotonic_ns uses mach_absolute_time on Darwin. Ruby's
+          # CLOCK_MONOTONIC is not an interchangeable epoch/suspend domain.
+          raise Error.new("runtime") unless Process.const_defined?(:CLOCK_UPTIME_RAW)
+          ["darwin-uptime-raw-v1", Process::CLOCK_UPTIME_RAW].freeze
+        else
+          raise Error.new("runtime")
+        end
+      end
+
+      def monotonic_domain
+        monotonic_clock.fetch(0)
+      end
+
       def monotonic_ns
-        Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+        Process.clock_gettime(monotonic_clock.fetch(1), :nanosecond)
       end
 
       def deep_freeze(value)

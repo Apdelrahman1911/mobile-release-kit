@@ -237,13 +237,18 @@ class PreparationContractsTests(unittest.TestCase):
     def test_complete_preparation_returns_every_byte_and_requirement_without_executing_assets(self):
         self.synthetic_source()
         before = {name: (self.source / name).read_bytes() for name in ("Gemfile.lock", ".github/verification-tools.json")}
-        for platform, file_count, request_count in (("linux", 115, 110), ("macos", 113, 109)):
-            with self.subTest(platform=platform), patch.object(self.prep, "remaining", wraps=self.prep.remaining) as clock:
+        macos_inventory = None
+        for platform, scope, file_count, request_count in (
+            ("linux", "platform", 115, 110), ("macos", "platform", 113, 109),
+            ("macos", "native-python", 113, 109), ("macos", "native-support", 113, 109),
+        ):
+            with self.subTest(platform=platform, scope=scope), patch.object(self.prep, "remaining", wraps=self.prep.remaining) as clock:
                 self.requests.clear()
                 self.replies.clear()
                 self.opener_factory.reset_mock()
-                result = self.prepare(platform, platform)
-                destination = self.root / platform
+                name = scope + "-" + platform
+                result = self.prepare(name, platform, scope=scope)
+                destination = self.root / name
                 files = {record["path"]: record for record in result["files"]}
                 self.assertEqual(len(files), file_count)
                 self.assertEqual(len(result["files"]), file_count)
@@ -256,6 +261,8 @@ class PreparationContractsTests(unittest.TestCase):
                     self.assertEqual((len(data), hashlib.sha256(data).hexdigest()), (record["bytes"], record["sha256"]))
                     self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
                 self.assertEqual(result["requirements"], {group: f"python/{group}-requirements.txt" for group in GROUPS})
+                self.assertEqual(result["gems"], "gems")
+                self.assertEqual(result["bundler"], "gems/" + self.manifest["bundler"]["filename"])
                 selected = {asset["name"]: asset for asset in self.manifest["wheels"] if platform in asset["platforms"]}
                 for group, names in GROUPS.items():
                     expected = "".join(f'{name}=={PINS[name]} --hash=sha256:{selected[name]["sha256"]}\n' for name in names)
@@ -278,11 +285,22 @@ class PreparationContractsTests(unittest.TestCase):
                     self.assertIsNone(result["actionlint"])
                     self.assertIsNone(result["actionlint_archive"])
                     self.assertFalse((destination / "actionlint").exists())
+                    if scope == "platform":
+                        macos_inventory = result
+                    else:
+                        self.assertEqual(result, macos_inventory)
         self.assertEqual({name: (self.source / name).read_bytes() for name in before}, before)
 
     def test_unsupported_nonempty_and_symlink_roots_never_adopt_or_overwrite_inputs(self):
         with self.assertRaisesRegex(self.prep.PreparationError, "unsupported_preparation_platform"):
             self.prepare(platform="windows")
+        for scope in ("native-python", "native-support"):
+            for platform in ("linux", "windows"):
+                with self.subTest(scope=scope, platform=platform), self.assertRaisesRegex(
+                    self.prep.PreparationError, "invalid_preparation_scope"
+                ):
+                    self.prepare("never-created", platform, scope=scope)
+                self.assertFalse((self.root / "never-created").exists())
         destination = self.root / "inputs"
         destination.mkdir()
         marker = destination / "inputs.json"

@@ -15,6 +15,8 @@ from . import __version__
 from .android import validate_aab, validate_aab_structure
 from .config import ConfigurationError, default_config, load_config
 from .credentials import credential_findings
+from .build_inputs import finite_scratch, invocation_custody
+from .cancellation import CleanupScope
 from .discovery import discover_project, git_context
 from .errors import MobileReleaseError, ValidationError
 from ._profile_callers import first_primary_context
@@ -53,7 +55,8 @@ from .provenance import (
 )
 from .reporting import FAILING_STATUSES, Finding, Report, Status
 from .stores import (
-    StoreRequest,
+    StoreRequest, StoreLaneReadback,
+    close_store_operation_resources, complete_store_operation, new_store_lane_evidence,
     execute_store_operation,
     guard_ci_mutation,
     prepare_store_operation,
@@ -94,7 +97,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     init_parser = commands.add_parser("init", help="Discover a project and propose thin configuration.")
     init_parser.add_argument("--root", type=Path, default=Path.cwd())
-    init_parser.add_argument("--config", default=DEFAULT_CONFIG)
+    init_parser.add_argument(
+        "--config", default=DEFAULT_CONFIG,
+        help="Apply requires release/mobile-release.json because generated workflow callers use that fixed path.",
+    )
     init_mode = init_parser.add_mutually_exclusive_group()
     init_mode.add_argument("--apply", action="store_true")
     init_mode.add_argument("--recover", action="store_true", help="Recover interrupted initialization without building or contacting Stores.")
@@ -156,6 +162,28 @@ def build_parser() -> argparse.ArgumentParser:
     local_recover.add_argument("--session", required=True)
     local_recover.add_argument("--confirm", required=True)
     local_recover.add_argument("--manual", action="store_true", help="Hold the lease during exceptional owner inspection; requires an interactive TTY.")
+
+    inputs_parser = commands.add_parser(
+        "build-inputs", help="Inspect or recover owned project build inputs; never build or contact Stores.",
+        allow_abbrev=False,
+    )
+    inputs_commands = inputs_parser.add_subparsers(dest="build_inputs_command", required=True)
+    inputs_status = inputs_commands.add_parser(
+        "status", help="Show bounded project input/recovery status.", allow_abbrev=False,
+    )
+    inputs_status.add_argument("--root", type=Path, required=True)
+    inputs_recover = inputs_commands.add_parser(
+        "recover", help="Restore only recorded owned inputs after original workers are idle.", allow_abbrev=False,
+    )
+    inputs_recover.add_argument("--root", type=Path, required=True)
+    inputs_recover.add_argument("--session", required=True, help="Exact 32-lowercase-hex session from status.")
+    inputs_recover.add_argument(
+        "--confirm", required=True, help="Must be project-build-inputs-are-idle-and-restore-owned-state.",
+    )
+    inputs_recover.add_argument(
+        "--manual", action="store_true",
+        help="Require interactive confirmation of original-worker quiescence; never bypass filesystem ownership.",
+    )
 
     status_parser = commands.add_parser(
         "status", help="Verify local immutable candidate/promotion evidence without Store mutation."
@@ -321,6 +349,11 @@ def _init_proposal(root: Path, *, include_git: bool = True) -> tuple[dict[str, A
 
 def _init(args: argparse.Namespace) -> int:
     root = args.root.expanduser().resolve()
+    if args.apply and _lexical_project_path(root, args.config) != root / DEFAULT_CONFIG:
+        raise ValidationError(
+            "init --apply requires --config release/mobile-release.json; "
+            "generated workflow callers use that fixed project path"
+        )
     if not args.apply and not args.recover:
         discovered, proposed = _init_proposal(root)
         print(json.dumps({"discovery": discovered, "proposedConfiguration": proposed}, indent=2))
@@ -332,18 +365,20 @@ def _init(args: argparse.Namespace) -> int:
                     outcome = workspace.recover()
                 except KeyboardInterrupt as error:
                     raise InitInterrupted("init recovery interrupted; preserve private state and run init --recover again") from error
-                print(json.dumps({"recovery": outcome, "requiresReview": True}, indent=2))
-                return 0
-            workspace.require_clean()
-            _, proposed = _init_proposal(root, include_git=False)
-            return _init_apply(args, root, proposed, workspace)
+                result = {"recovery": outcome, "requiresReview": True}
+            else:
+                workspace.require_clean()
+                _, proposed = _init_proposal(root, include_git=False)
+                result = _init_apply(args, root, proposed, workspace)
+        print(json.dumps(result, indent=2))
+        return 0
     except OSError as error:
         raise ValidationError(
             "init filesystem operation failed; preserve any private transaction state and use init --recover"
         ) from error
 
 
-def _init_apply(args: argparse.Namespace, root: Path, proposed: dict[str, Any], workspace: InitWorkspace) -> int:
+def _init_apply(args: argparse.Namespace, root: Path, proposed: dict[str, Any], workspace: InitWorkspace) -> dict[str, Any]:
     config_path = _lexical_project_path(root, args.config)
     template_dir = _find_template_dir(root, args.template_dir)
     if template_dir is None:
@@ -424,8 +459,7 @@ def _init_apply(args: argparse.Namespace, root: Path, proposed: dict[str, Any], 
         if payload is not None:
             (created if item.before is None else updated).append(item.path)
     workspace.apply(changes)
-    print(json.dumps({"created": created, "updated": updated, "requiresReview": True}, indent=2))
-    return 0
+    return {"created": created, "updated": updated, "requiresReview": True}
 
 
 def _doctor(args: argparse.Namespace) -> int:
@@ -614,7 +648,7 @@ def _require_ci_policy(config: Any, platform: str, stage: str) -> None:
         raise ValidationError(f"CI release policy/preflight is incomplete: {summary}")
 
 
-def _set_artifact_environment(artifacts: Mapping[str, Path]) -> None:
+def _set_artifact_environment(artifacts: Mapping[str, Path], *, resources: ExitStack, invocation) -> None:
     mapping = {
         "android-aab": "MOBILE_RELEASE_ANDROID_AAB_PATH",
         "android-mapping": "MOBILE_RELEASE_ANDROID_MAPPING_PATH",
@@ -622,9 +656,12 @@ def _set_artifact_environment(artifacts: Mapping[str, Path]) -> None:
         "ios-archive": "MOBILE_RELEASE_IOS_ARCHIVE_PATH",
         "ios-dsyms": "MOBILE_RELEASE_IOS_DSYMS_PATH",
     }
-    for name, path in artifacts.items():
-        if name in mapping:
-            os.environ[mapping[name]] = str(path)
+    # Exact original frame: remove stale other-platform names and restore only
+    # our unchanged keys at the encompassing invocation's checked cleanup.
+    resources.enter_context(invocation.environment({
+        variable: str(artifacts[name]) if name in artifacts else None
+        for name, variable in mapping.items()
+    }))
 
 
 def _validate_ci_artifact_selection(
@@ -793,6 +830,34 @@ def _guard_complete_output(
         ) from error
 
 
+def _ci_request(args: argparse.Namespace, config) -> StoreRequest:
+    output_dir = _repository_path(config, args.output_dir, label="output directory")
+    operation_intent_path = _repository_path(config,
+        args.operation_intent or output_dir / f"{args.ci_command}-operation-intent.json",
+        label="Store operation intent")
+    store_receipt_path = (_repository_path(config, args.store_receipt, label="Store receipt")
+                          if args.store_receipt else output_dir / "raw-store-receipt.json")
+    return StoreRequest(stage=args.ci_command, platform=args.platform, confirmation=args.confirm,
+        execute=args.execute_store, prepare=args.prepare_operation, output_dir=output_dir,
+        store_receipt=store_receipt_path, store_precondition=output_dir / "store-precondition.json",
+        operation_intent=operation_intent_path, recovery_run_id=args.recovery_run_id,
+        recovery_confirmation=args.recovery_confirmation)
+
+
+def _ci_complete(payload: Mapping[str, object], *, resources: ExitStack, lane_evidence, cancellation) -> dict[str, object]:
+    close_store_operation_resources(resources, lane_evidence, cancellation=cancellation)
+    cancellation.check()
+    return dict(payload)
+
+
+def _ci_store_completion(readback: StoreLaneReadback, *, resources: ExitStack,
+                         lane_evidence, cancellation) -> dict[str, object]:
+    # First close the actual post-use metadata/snapshot/environment contexts;
+    # then retire the still-original pending fence and allow final publication.
+    close_store_operation_resources(resources, lane_evidence, cancellation=cancellation)
+    return complete_store_operation(readback, lane_evidence=lane_evidence, cancellation=cancellation)
+
+
 def _ci(args: argparse.Namespace) -> int:
     modes = [args.prepare_operation, args.validate_operation_intent, args.execute_store]
     if sum(bool(value) for value in modes) != 1:
@@ -800,47 +865,38 @@ def _ci(args: argparse.Namespace) -> int:
             "ci requires exactly one of --prepare-operation, "
             "--validate-operation-intent, or --execute-store"
         )
-    # Keep temporary metadata alive through validation and final publication.
-    # It must not appear beside incompatible surviving evidence as a side effect
-    # of a failed invocation.
     with first_primary_context(ExitStack(), expose_owner=True) as (resources, cancellation):
-        temporary = resources.enter_context(tempfile.TemporaryDirectory(prefix="mobile-release-intent-metadata-"))
-        return _ci_operation(args, metadata_directory=Path(temporary), resources=resources, cancellation=cancellation)
+        config = load_config(args.config)
+        request = _ci_request(args, config)
+        # Original allocation precedes every metadata/snapshot/material effect.
+        record = new_store_lane_evidence(config, request, cancellation)
+        scope = CleanupScope(cancellation, lambda: close_store_operation_resources(
+            resources, record, cancellation=cancellation, primary=scope._first_error),
+            owns_cancellation=False, first_primary=True)
+        try:
+            with scope:
+                invocation = resources.enter_context(invocation_custody(config.root,
+                    mode="store", cancellation=cancellation, lane_evidence=record))
+                result = _ci_operation(args, config=config, request=request, resources=resources,
+                    cancellation=cancellation, lane_evidence=record, invocation=invocation)
+        finally:
+            scope.__exit__(*sys.exc_info())
+    # The operation payload remains provisional until the outer owner settles.
+    print(json.dumps(result))
+    return 0
 
 
-def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resources: ExitStack, cancellation=None) -> int:
-    config = load_config(args.config)
-    platform = args.platform
-    stage = args.ci_command
+def _ci_operation(args: argparse.Namespace, *, config, request: StoreRequest, resources: ExitStack,
+                  cancellation, lane_evidence, invocation) -> dict[str, object]:
+    platform, stage = args.platform, args.ci_command
     _require_ci_policy(config, platform, stage)
     release = config.release_version()
     source = git_context(config.root, cancellation=cancellation)
-    output_dir = _repository_path(config, args.output_dir, label="output directory")
+    output_dir, operation_intent_path, store_receipt_path = (
+        request.output_dir, request.operation_intent, request.store_receipt)
     if output_dir.exists() and not output_dir.is_dir():
         raise ValidationError("CI output path must be a directory")
-    operation_intent_path = _repository_path(
-        config,
-        args.operation_intent or output_dir / f"{stage}-operation-intent.json",
-        label="Store operation intent",
-    )
-    store_receipt_path = (
-        _repository_path(config, args.store_receipt, label="Store receipt")
-        if args.store_receipt
-        else output_dir / "raw-store-receipt.json"
-    )
-    request = StoreRequest(
-        stage=stage,
-        platform=platform,
-        confirmation=args.confirm,
-        execute=args.execute_store,
-        prepare=args.prepare_operation,
-        output_dir=output_dir,
-        store_receipt=store_receipt_path,
-        store_precondition=output_dir / "store-precondition.json",
-        operation_intent=operation_intent_path,
-        recovery_run_id=args.recovery_run_id,
-        recovery_confirmation=args.recovery_confirmation,
-    )
+    assert operation_intent_path is not None and store_receipt_path is not None
     guard_ci_mutation(request=request, config=config, release=release, git=source)
     if stage == "candidate":
         _guard_partial_candidate_output(
@@ -928,19 +984,18 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
             config, path, label=f"artifact {name}", must_exist=True
         )
     _validate_ci_artifact_selection(stage=stage, platform=platform, artifacts=artifacts)
-    _set_artifact_environment(artifacts)
+    _set_artifact_environment(artifacts, resources=resources, invocation=invocation)
 
     signing_evidence: Mapping[str, Any] | None = None
     signing_validity: SigningValidityInterval | None = None
     ios_snapshot = None
     records: list[dict[str, Any]] = []
-    current_metadata = metadata_directory / "store-metadata.zip"
-    build_metadata_archive(
-        config.project_path(config.section("metadata").get("root", "release/store")),
-        current_metadata,
-        platform=platform,
-    )
-    metadata_hash = sha256_file(current_metadata)
+    metadata = resources.enter_context(finite_scratch(layout="store-metadata",
+        cancellation=cancellation, lane_evidence=lane_evidence))
+    metadata_snapshot = metadata.metadata_archive(
+        config.project_path(config.section("metadata").get("root", "release/store")), platform=platform)
+    current_metadata = metadata.require(metadata_snapshot)
+    metadata_hash = metadata_snapshot.sha256
     if stage == "candidate":
         primary = "android-aab" if platform == "android" else "ios-ipa"
         if authenticated_intent is not None:
@@ -966,7 +1021,8 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
         else:
             # Inspect and sign-check the SAME private bytes, not mutable caller
             # paths bracketed by hashes (which would permit an A→B→A swap).
-            ios_snapshot = resources.enter_context(snapshot_ios_artifacts(artifacts, cancellation=cancellation))
+            ios_snapshot = resources.enter_context(snapshot_ios_artifacts(
+                artifacts, cancellation=cancellation, lane_evidence=lane_evidence))
             inspect_ios_artifact_set(
                 ios_snapshot, expected_bundle_id=config.section("ios")["bundleId"],
                 release=release, symbols_policy=config.section("ios").get("symbols", {}).get("policy", "disabled"),
@@ -996,7 +1052,6 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
             signing_evidence = ipa_signing_evidence(ios_snapshot.paths[primary], deadline=ios_snapshot.deadline, cancellation=cancellation)
             ios_snapshot.assert_unchanged()
         artifacts["store-metadata"] = current_metadata
-        _set_artifact_environment(artifacts)
         record_paths = {**artifacts, **(ios_snapshot.paths if ios_snapshot else {})}
         records = artifact_records(record_paths.items())
         if ios_snapshot:
@@ -1016,8 +1071,9 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
                 candidate_manifest=candidate, candidate_receipt=candidate_receipt,
                 external_receipt=external_receipt,
             )
-            print(json.dumps({"operationIntent": str(operation_intent_path), "sha256": existing["integrity"]["sha256"], "reused": True}))
-            return 0
+            return _ci_complete({"operationIntent": str(operation_intent_path),
+                "sha256": existing["integrity"]["sha256"], "reused": True}, resources=resources,
+                lane_evidence=lane_evidence, cancellation=cancellation)
         validate_evidence_output_path(operation_intent_path)
         if store_receipt_path.exists():
             raise ValidationError(
@@ -1025,10 +1081,14 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
                 "preparation cannot replace an interrupted operation's authorization"
             )
         if stage == "candidate":
-            copy_immutable_file(current_metadata, output_dir / "store-metadata.zip")
+            copy_immutable_file(current_metadata, output_dir / "store-metadata.zip", app_root=config.root, cancellation=cancellation)
         if ios_snapshot:
             ios_snapshot.deadline.check()
-        precondition = prepare_store_operation(config=config, release=release, request=request)
+        readback = prepare_store_operation(config=config, release=release, request=request,
+            lane_evidence=lane_evidence, cancellation=cancellation, invocation=invocation)
+        if type(readback) is not StoreLaneReadback:
+            raise ValidationError("Store preparation lacks its original provisional readback")
+        precondition = readback.provisional()
         if platform == "ios" and stage == "candidate":
             assert signing_validity is not None
             validate_preparation_signing_time(
@@ -1057,16 +1117,12 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
         )
         if ios_snapshot:
             ios_snapshot.deadline.check()
-        write_evidence(operation_intent_path, intent)
-        print(
-            json.dumps(
-                {
-                    "operationIntent": str(operation_intent_path),
-                    "sha256": intent["integrity"]["sha256"],
-                }
-            )
-        )
-        return 0
+        _ci_store_completion(readback, resources=resources, lane_evidence=lane_evidence,
+                             cancellation=cancellation)
+        write_evidence(operation_intent_path, intent, app_root=config.root, cancellation=cancellation)
+        return _ci_complete({"operationIntent": str(operation_intent_path),
+            "sha256": intent["integrity"]["sha256"]}, resources=resources,
+            lane_evidence=lane_evidence, cancellation=cancellation)
 
     if not operation_intent_path.is_file():
         raise ValidationError("an authenticated --operation-intent is required")
@@ -1088,8 +1144,8 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
         recovery_run_id=args.recovery_run_id,
     )
     if args.validate_operation_intent:
-        print(json.dumps({"operationIntent": str(operation_intent_path), "valid": True}))
-        return 0
+        return _ci_complete({"operationIntent": str(operation_intent_path), "valid": True},
+            resources=resources, lane_evidence=lane_evidence, cancellation=cancellation)
 
     if not (output_dir / f"{stage}-receipt.json").exists() and store_receipt_path.exists():
         # A raw-only partial output is evidence too. Validate it before creating
@@ -1130,8 +1186,8 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
                 receipt, store_receipt=load_store_receipt(store_receipt_path),
                 operation_intent=intent_document, candidate_manifest=manifest,
             )
-            print(json.dumps({"candidateManifest": str(manifest_path), "receipt": str(receipt_path), "reused": True}))
-            return 0
+            return _ci_complete({"candidateManifest": str(manifest_path), "receipt": str(receipt_path),
+                "reused": True}, resources=resources, lane_evidence=lane_evidence, cancellation=cancellation)
         validate_evidence_output_path(receipt_path)
         if manifest is None:
             validate_evidence_output_path(manifest_path)
@@ -1139,12 +1195,16 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
         # Complete finals above are returned byte-for-byte without any copy.
         validate_immutable_copy(current_metadata, output_dir / "store-metadata.zip")
         validate_immutable_copy(operation_intent_path, output_dir / f"{stage}-operation-intent.json")
-        copy_immutable_file(current_metadata, output_dir / "store-metadata.zip")
-        copy_immutable_file(operation_intent_path, output_dir / f"{stage}-operation-intent.json")
-        store = execute_store_operation(
-            config=config, release=release, request=request, operation_intent=intent_document
-        )
-        if manifest is None:
+        copy_immutable_file(current_metadata, output_dir / "store-metadata.zip", app_root=config.root, cancellation=cancellation)
+        copy_immutable_file(operation_intent_path, output_dir / f"{stage}-operation-intent.json", app_root=config.root, cancellation=cancellation)
+        readback = execute_store_operation(config=config, release=release, request=request,
+            operation_intent=intent_document, lane_evidence=lane_evidence,
+            cancellation=cancellation, invocation=invocation)
+        if type(readback) is not StoreLaneReadback:
+            raise ValidationError("Store execution lacks its original provisional readback")
+        store = readback.provisional()
+        new_manifest = manifest is None
+        if new_manifest:
             manifest = build_candidate_manifest(
                 config=config,
                 release=release,
@@ -1156,7 +1216,6 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
                 operation_intent=intent_document,
                 signing_evidence=signing_evidence,
             )
-            write_evidence(manifest_path, manifest)
         receipt = build_receipt(
             stage="candidate",
             platform=platform,
@@ -1164,9 +1223,13 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
             store_receipt=store,
             operation_intent=intent_document,
         )
-        write_evidence(receipt_path, receipt)
-        print(json.dumps({"candidateManifest": str(manifest_path), "receipt": str(receipt_path)}))
-        return 0
+        _ci_store_completion(readback, resources=resources, lane_evidence=lane_evidence,
+                             cancellation=cancellation)
+        if new_manifest:
+            write_evidence(manifest_path, manifest, app_root=config.root, cancellation=cancellation)
+        write_evidence(receipt_path, receipt, app_root=config.root, cancellation=cancellation)
+        return _ci_complete({"candidateManifest": str(manifest_path), "receipt": str(receipt_path)},
+            resources=resources, lane_evidence=lane_evidence, cancellation=cancellation)
 
     assert candidate is not None and candidate_receipt is not None
     filename = (
@@ -1194,15 +1257,18 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
             existing, store_receipt=load_store_receipt(store_receipt_path),
             operation_intent=intent_document, candidate_manifest=candidate,
         )
-        print(json.dumps({"receipt": str(receipt_path), "reused": True}))
-        return 0
+        return _ci_complete({"receipt": str(receipt_path), "reused": True}, resources=resources,
+                            lane_evidence=lane_evidence, cancellation=cancellation)
     validate_evidence_output_path(receipt_path)
     # The exact attested authorization travels with every new final artifact.
     # Failure here still occurs before any Store mutation.
-    copy_immutable_file(operation_intent_path, output_dir / f"{stage}-operation-intent.json")
-    store = execute_store_operation(
-        config=config, release=release, request=request, operation_intent=intent_document
-    )
+    copy_immutable_file(operation_intent_path, output_dir / f"{stage}-operation-intent.json", app_root=config.root, cancellation=cancellation)
+    readback = execute_store_operation(config=config, release=release, request=request,
+        operation_intent=intent_document, lane_evidence=lane_evidence,
+        cancellation=cancellation, invocation=invocation)
+    if type(readback) is not StoreLaneReadback:
+        raise ValidationError("Store execution lacks its original provisional readback")
+    store = readback.provisional()
     predecessor = candidate_receipt if stage == "external-testing" else external_receipt
     receipt = build_receipt(
         stage=stage,
@@ -1212,9 +1278,11 @@ def _ci_operation(args: argparse.Namespace, *, metadata_directory: Path, resourc
         operation_intent=intent_document,
         previous_receipt=predecessor,
     )
-    write_evidence(receipt_path, receipt)
-    print(json.dumps({"receipt": str(receipt_path)}))
-    return 0
+    _ci_store_completion(readback, resources=resources, lane_evidence=lane_evidence,
+                         cancellation=cancellation)
+    write_evidence(receipt_path, receipt, app_root=config.root, cancellation=cancellation)
+    return _ci_complete({"receipt": str(receipt_path)}, resources=resources,
+                        lane_evidence=lane_evidence, cancellation=cancellation)
 
 
 def _local_signing(args: argparse.Namespace) -> int:
@@ -1222,6 +1290,32 @@ def _local_signing(args: argparse.Namespace) -> int:
 
     result = (signing_status() if args.local_signing_command == "status" else
               recover_signing(args.session, args.confirm, manual=args.manual))
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["status"] in {"idle", "absent", "recovered"} else 1
+
+
+def _build_inputs(args: argparse.Namespace) -> int:
+    from .build_inputs import build_inputs_status, recover_build_inputs
+
+    try:
+        try:
+            root = args.root.expanduser()
+        except RuntimeError:
+            raise ValidationError("build inputs: project root home expansion is unavailable") from None
+        if ".." in root.parts:
+            raise ValidationError("build inputs: project root must not contain '..'")
+        if not root.is_absolute():
+            root = Path.cwd() / root
+        # Do not resolve links or normalize away traversal before the helper's
+        # pinned no-follow root walk. No config/discovery/credential work here.
+        if args.build_inputs_command == "status":
+            result = build_inputs_status(root)
+        elif args.build_inputs_command == "recover":
+            result = recover_build_inputs(root, session=args.session, confirm=args.confirm, manual=args.manual)
+        else:
+            raise ValidationError("build inputs: unsupported recovery command")
+    except OSError:
+        raise ValidationError("build inputs: filesystem operation failed; preserve private state for inspection") from None
     print(json.dumps(result, sort_keys=True))
     return 0 if result["status"] in {"idle", "absent", "recovered"} else 1
 
@@ -1236,6 +1330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "credentials": _credentials,
             "preflight": _preflight,
             "local-signing": _local_signing,
+            "build-inputs": _build_inputs,
             "status": _status,
             "explain": _explain,
             "ci": _ci,

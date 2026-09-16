@@ -508,7 +508,7 @@ def original_flow(root: Path, trace: Trace, *, auto_add=False):
         with signing.local_signing_lease(home=root / "home") as lease:
             with credentials._temporary_apple_signing_environment(
                     p12=root / "private/p12", password="fictional", profile=root / "private/profile",
-                    directory=root / "private", lease=lease):
+                    directory=root / "private", lease=lease, project_root=root / "project"):
                 trace.phase = "build"
                 lease.active.run(["build"], kind="build")
                 trace.phase = "cleanup"

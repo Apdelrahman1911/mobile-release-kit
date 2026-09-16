@@ -302,12 +302,24 @@ class NativeMachOTests(unittest.TestCase):
         self.assertEqual(before, hashlib.sha256(vendor.read_bytes()).hexdigest())
 
     def test_real_dsym_and_independently_valid_different_build_pair_rejected(self):
-        original = self.compile()
+        def compile_with_debug_object(name, *, arch="arm64", library=False):
+            path = self.root / name
+            object_path = path.with_name(path.name + ".o")
+            target = ("-target", f"{arch}-apple-ios15.0", "-isysroot", self.sdk)
+            # Keep real debug-map inputs alive through every dsymutil call;
+            # correctness must not depend on the driver's temporary objects.
+            self.run_tool("xcrun", "clang", *target, "-g", "-c", str(self.source), "-o", str(object_path))
+            self.run_tool("xcrun", "clang", *target, "-g", str(object_path),
+                          *(["-dynamiclib"] if library else []), "-o", str(path))
+            return path
+
+        original = compile_with_debug_object("app")
         self.sign(original, "com.example.reader")
         dsym = self.root / "native.dSYM"
         self.run_tool("xcrun", "dsymutil", str(original), "-o", str(dsym))
+        main_slices = inspect_macho(original)
         symbols = inspect_macho(dsym / "Contents/Resources/DWARF/app", dsym=True)
-        self.assertEqual({value.key for value in symbols}, {value.key for value in inspect_macho(original)})
+        self.assertEqual({value.key for value in symbols}, {value.key for value in main_slices})
         fixture = self.root / "fixture"
         fixture.mkdir()
         paths = artifact_set(fixture, nested=False, detached=False)
@@ -318,16 +330,127 @@ class NativeMachOTests(unittest.TestCase):
         retained = paths["ios-archive"] / "dSYMs"
         shutil.rmtree(retained)
         shutil.copytree(dsym, retained / "Native.dSYM")
+
+        def inspect(policy="retain"):
+            with snapshot_ios_artifacts(paths) as snapshot:
+                return inspect_ios_artifact_set(snapshot, expected_bundle_id="com.example.reader",
+                                                release=ReleaseVersion("1.2.3", 42), symbols_policy=policy)
+
         zip_tree(fixture / "export", paths["ios-ipa"])
-        with snapshot_ios_artifacts(paths) as snapshot:
-            self.assertEqual(inspect_ios_artifact_set(snapshot, expected_bundle_id="com.example.reader", release=ReleaseVersion("1.2.3", 42), symbols_policy="retain")["presentSymbolSlices"], 1)
+        self.assertEqual(inspect()["presentSymbolSlices"], 1)
+
+        # Use the same iPhoneOS architectures as the existing native FAT tests,
+        # not synthetic UUID headers or a mixed device/simulator universal file.
+        thin_libraries = [compile_with_debug_object(f"nested-{arch}.dylib", arch=arch, library=True)
+                          for arch in ("arm64", "arm64e")]
+        library = self.root / "libnested.dylib"
+        self.run_tool("xcrun", "lipo", "-create", *map(str, thin_libraries), "-output", str(library))
+        self.sign(library, "com.example.reader.nested")
+        library_slices = inspect_macho(library)
+        library_keys = {value.key for value in library_slices}
+        self.assertEqual(len(library_slices), 2)
+        self.assertEqual(len(library_keys), 2)
+        self.assertEqual(len({key[:2] for key in library_keys}), 2)
+        self.assertTrue(library_keys.isdisjoint(value.key for value in main_slices))
+        nested_dsym = self.root / "nested.dSYM"
+        self.run_tool("xcrun", "dsymutil", str(library), "-o", str(nested_dsym))
+        native_dwarf = nested_dsym / "Contents/Resources/DWARF" / library.name
+        nested_symbols = inspect_macho(native_dwarf, dsym=True)
+        self.assertEqual(len(nested_symbols), 2)
+        self.assertEqual({value.key for value in nested_symbols}, library_keys)
+        for app in (archived.parent, exported.parent):
+            (app / "Frameworks").mkdir()
+            shutil.copyfile(library, app / "Frameworks" / library.name)
+        retained_nested = retained / "Nested.dSYM"
+        shutil.copytree(nested_dsym, retained_nested)
+        retained_dwarf = retained_nested / "Contents/Resources/DWARF" / library.name
+        zip_tree(fixture / "export", paths["ios-ipa"])
+        complete = {"nativePaths": 2, "nativeIdentities": 3, "presentSymbolSlices": 3}
+        for policy in ("retain", "required"):
+            with self.subTest(case="complete-native-symbols", policy=policy):
+                self.assertEqual(inspect(policy), complete)
+
+        shutil.rmtree(retained_nested)
+        for policy in ("retain", "required"):
+            with self.subTest(case="missing-nested-dsym", policy=policy), self.assertRaisesRegex(
+                    ValidationError, "missing for installed native slices"):
+                inspect(policy)
+        self.assertEqual(inspect("disabled")["presentSymbolSlices"], 1)
+        shutil.copytree(nested_dsym, retained_nested)
+
+        thin_dwarf = self.root / "nested-arm64.dwarf"
+        self.run_tool("xcrun", "lipo", str(native_dwarf), "-thin", "arm64", "-output", str(thin_dwarf))
+        thin_symbols = inspect_macho(thin_dwarf, dsym=True)
+        self.assertEqual(len(thin_symbols), 1)
+        self.assertLess({value.key for value in thin_symbols}, library_keys)
+        shutil.copyfile(thin_dwarf, retained_dwarf)
+        for policy in ("retain", "required"):
+            with self.subTest(case="missing-nested-architecture", policy=policy), self.assertRaisesRegex(
+                    ValidationError, "missing for installed native slices"):
+                inspect(policy)
+        self.assertEqual(inspect("disabled")["presentSymbolSlices"], 2)
+        shutil.copyfile(native_dwarf, retained_dwarf)
+
+        duplicate = retained / "Duplicate.dSYM"
+        shutil.copytree(retained_nested, duplicate)
+        for policy in ("retain", "disabled"):
+            with self.subTest(case="duplicate-native-symbols", policy=policy), self.assertRaisesRegex(
+                    ValidationError, "duplicated"):
+                inspect(policy)
+        shutil.rmtree(duplicate)
+
         self.source.write_text("int main(void){return 4;}\n")
-        different = self.compile("other")
+        different = compile_with_debug_object("other")
         self.sign(different, "com.example.reader")
+        other_dsym = self.root / "other.dSYM"
+        self.run_tool("xcrun", "dsymutil", str(different), "-o", str(other_dsym))
+        other_dwarf = other_dsym / "Contents/Resources/DWARF/other"
+        other_symbols = inspect_macho(other_dwarf, dsym=True)
+        self.assertEqual({value.key for value in other_symbols},
+                         {value.key for value in inspect_macho(different)})
+        self.assertTrue({value.key for value in other_symbols}.isdisjoint(
+            library_keys | {value.key for value in main_slices}))
+        shutil.copyfile(other_dwarf, retained_dwarf)
+        with self.assertRaisesRegex(ValidationError, "unknown, substituted or duplicated"):
+            inspect("disabled")
+        shutil.copyfile(native_dwarf, retained_dwarf)
+
+        # Reuse the native LINKEDIT mutation: codesign verifies the altered
+        # binary, but its retained UUID does not erase different image content.
+        conflicting = self.root / "conflicting"
+        changed = bytearray(original.read_bytes())
+        position, string_offset = 32, None
+        for _ in range(struct.unpack_from("<I", changed, 16)[0]):
+            command, length = struct.unpack_from("<II", changed, position)
+            if command == 2:
+                string_offset = struct.unpack_from("<I", changed, position + 16)[0] + 1
+                break
+            position += length
+        self.assertIsNotNone(string_offset, "native conflict probe requires a real symbol string table")
+        changed[string_offset] ^= 1
+        conflicting.write_bytes(changed)
+        self.sign(conflicting, "com.example.reader")
+        conflicting_slices = inspect_macho(conflicting)
+        self.assertEqual({value.key for value in conflicting_slices}, {value.key for value in main_slices})
+        self.assertNotEqual(conflicting_slices, main_slices)
+        for app in (archived.parent, exported.parent):
+            (app / "Helpers").mkdir()
+            shutil.copyfile(conflicting, app / "Helpers/conflicting")
+        zip_tree(fixture / "export", paths["ios-ipa"])
+        for policy in ("retain", "disabled"):
+            with self.subTest(case="conflicting-installed-image", policy=policy), self.assertRaisesRegex(
+                    ValidationError, "conflicting binary contents"):
+                inspect(policy)
+        for app in (archived.parent, exported.parent):
+            (app / "Helpers/conflicting").unlink()
+            (app / "Helpers").rmdir()
+        zip_tree(fixture / "export", paths["ios-ipa"])
+        self.assertEqual(inspect(), complete)
+
         shutil.copyfile(different, exported)
         zip_tree(fixture / "export", paths["ios-ipa"])
-        with snapshot_ios_artifacts(paths) as snapshot, self.assertRaisesRegex(ValidationError, "Mach-O identity/content differs"):
-            inspect_ios_artifact_set(snapshot, expected_bundle_id="com.example.reader", release=ReleaseVersion("1.2.3", 42), symbols_policy="retain")
+        with self.assertRaisesRegex(ValidationError, "Mach-O identity/content differs"):
+            inspect()
 
 
 if __name__ == "__main__":

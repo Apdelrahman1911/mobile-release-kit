@@ -1,5 +1,9 @@
 # Credentials and external assets
 
+Production use is **NOT READY until** remediation verification and a new comprehensive
+production-readiness audit pass;
+see [preparation status](../README.md#preparation-status).
+
 The shared repository contains no application credential, private key, account identifier, signing asset, tester identity, or reviewer contact. Public certificate fingerprints and non-secret Store/team identifiers belong in the consuming application configuration.
 
 `mobile-release credentials` calculates requirements from enabled platforms and capabilities. It prints names and status only:
@@ -183,13 +187,44 @@ MOBILE_RELEASE_ASC_ISSUER_ID=...
 GOOGLE_APPLICATION_CREDENTIALS=/absolute/private/google-adc.json
 ```
 
-Set mode `0600`. The parser accepts strict `KEY=VALUE` records; it does not source the file, expand variables, execute substitutions, or log values. Paths must be absolute regular files, not symlinks. Ambient environment credentials are used only with an explicit opt-in flag.
+Set mode `0600`. The parser accepts strict `KEY=VALUE` records; it does not source the file,
+expand variables, execute substitutions, or log values. Private paths must be absolute regular
+files outside the project. Ambient environment credentials require explicit opt-in.
+
+On Darwin only, checked acquisition accepts the root-owned direct system aliases `/tmp` to
+`private/tmp` or `/private/tmp`, and `/var` to `private/var` or `/private/var`. The physical root,
+`/private` and `/private/var` must be system-protected; shared-writable `/private/tmp` must be
+root-owned and sticky. No lower-directory or leaf symlink, crossed/indirect alias, or `..`
+traversal is allowed. These exceptions do not relax project/recovery-root rules or permit changing
+OS aliases. Other platforms follow no symbolic links.
+
+The reader binds parent and file identity/metadata, bounded contents and successful descriptor
+retirement before returning bytes. Credential files are limited to 256 KiB, small material to
+4 MiB and general/ADC material to 32 MiB. Native path consumers borrow an exclusive `0600`
+snapshot from a finite scratch owner; they do not reopen the external original after selection.
+A successful path diagnostic alone grants no later-read or deletion authority.
+
+Standalone scratch owners freeze a nonempty `TMPDIR` at construction; absent or empty
+`TMPDIR` selects `/private/tmp` on macOS or `/tmp` on Linux. The parent must be a
+bounded absolute path without parent traversal. Rejection does not retry another
+location: `TMP`, `TEMP`, and Python's cached temporary directory are not fallbacks.
+Only default-selected macOS parents may use the genuine root-owned `/tmp` and `/var`
+aliases described above, with protected physical ancestry and original-descriptor
+checks. Lower links and aliases in explicit project/build/readback parents remain
+refused. Finite ownership, consumer finality and sandbox permissions are unchanged.
 
 Do not Base64-encode local files merely to match GitHub. Base64 is transport encoding, not encryption.
 
 ## Validation
 
 Credential inventory checks only strict Base64/path presence, safe external file location, permissions, and symlink rules. It does not claim that encoding proves cryptographic suitability.
+
+Required Firebase clients receive an application-identity check during signing-material validation
+and again on the exact bytes selected for build-input publication. Android clients must contain the
+configured application ID; the iOS client's `BUNDLE_ID` must match the configured Bundle ID. Missing,
+malformed or mismatched selected clients fail before any client-file replacement or build. An earlier
+PASS cannot authorize different bytes after an external file is rotated. This checks application
+identity, not Firebase project ownership, backend configuration or service availability.
 
 Signed final-artifact validation checks:
 
@@ -222,11 +257,22 @@ uploads. See [iOS entitlements](ios-entitlements.md) and
 [profile authority](ios-profile-authority.md). Local signed iOS builds acquire a
 persistent account-wide lease before private/application work; overlap fails safely
 before global mutation. Pending ownership needs [local signing recovery](local-signing.md),
-not lock/journal deletion. QA-004 outer materialization cleanup remains open:
-inner signing/profile cleanup alone does not prove decoded scratch removal or
-client-file restoration.
+not lock/journal deletion. The separate outer invocation reserves the environment before
+credential snapshots, then admits the applicable account and project. All offline/signing modes,
+including skip-builds, hold the project; online acquires no project/account owner. Original decoded
+inputs and client-file replacements remain under [build-input custody](build-inputs-recovery.md)
+through inner signing and consumer cleanup. Supplied owners are borrowed, never reacquired.
 
-Online preflight proves that the configured Google or Apple API credential can authenticate and see the intended Store application. Provider authentication is the authority for API-key suitability; a Base64 format check is not.
+Successful online preflight requires actual provider authentication and visibility of the intended
+Store application. Provider authentication, not Base64 formatting or a unit-test policy result,
+is the authority for API-key suitability.
+
+One live selection binds configuration, platforms, invocation and the original cancellation owner
+across material validation, the blocker gate, credential environment and Store adapters. P8 native
+validation and outbound Base64 use the same selected bytes; ADC JSON validation and the Ruby
+adapter use the same retained snapshot. When both are selected, P8 validation precedes ADC
+acquisition, so a P8 failure cannot trigger a later private ADC read. Changed, rejected, closed or
+foreign selections cannot authorize a query; a copied credential mapping is not that authority.
 
 Online ownership queries can run for an **unverified**, but not explicitly
 **blocked**, identity despite unrelated build/signing/metadata diagnostics. The
@@ -247,25 +293,33 @@ session pending, instead of letting outer cleanup retry it implicitly. Establish
 account quiescence and use [explicit local recovery](local-signing.md); never delete
 unknown stages or journals. Safely absent owned files require no deletion.
 
-- Install cleanup handlers before decoding or importing anything.
-- Use a mode-`0700` temporary directory and mode-`0600` files.
+- Arm cleanup and the original cancellation owner before acquiring private resources.
+- Use finite, owned mode-`0700` scratch directories and mode-`0600` files.
 - Use an ephemeral Apple keychain.
-- Remove temporary profiles, keychains, decoded files, and unsigned request material on success, error, cancellation, and injected failure.
+- On catchable exit, settle consumers/signing before removing unchanged owned inputs; retain
+  uncertain resources and report failure rather than retrying ambiguous cleanup.
 - Disable shell tracing around all credential operations.
 - Never upload credential directories, raw command output containing secrets, or private review/tester data as artifacts.
 - Reports may state that a named item exists or is invalid, never its value.
 
-The profile/signing/authentication owners protect default main-thread signal
-cleanup entry and resource handoff; cleanup is attempted once, not retried after
-an ambiguous descriptor close. Neither cancellation nor manual recheck can turn
-a fatal cleanup failure into success or authorize same-invocation retry. End the
-failed process, establish exact-owner quiescence and recover the original remaining
-session; a terminal close failure can already have removed it. Custom handlers,
-worker-thread cancellation and hard termination retain
-host semantics. **QA-004 remains open:** cancellation at outer build-input scratch
-or client-target restoration can leave material behind. Verify the exact owned
-paths and original client configuration before retrying; do not delete broad
-temporary-directory patterns or another task's state. These are unresolved
-blockers, not accepted exceptions to the cleanup requirements above.
+Outer build-input cleanup preserves admitted original client-file inode, bytes and exact mode,
+including empty/mode-`000` originals; it never chmods an original merely to read it. All selected
+targets are inspected before a no-replace publication batch. Restoration retires only unchanged
+owned replacements and restores unchanged backups into absence. Changed targets, parents,
+backups or unknown entries remain conflicts; no recursive cleanup removes foreign content.
+Environment restoration is conditional, same-owner LIFO; unresolved ownership prevents process reuse.
+
+Profile/signing/authentication and build-input owners share default main-thread signal protection
+and first-primary arbitration. Descriptors are retired before one close attempt; ambiguous closes
+are not retried. Neither cancellation nor manual recheck repairs fatal cleanup or authorizes a new
+operation in the failed invocation. End it and establish exact-owner quiescence. Resolve account
+signing first when necessary, then use [project-input status/recovery](build-inputs-recovery.md)
+for the original root/session. A terminal project control authorizes metadata retirement only,
+never re-comparison or restoration of current client files.
+
+Custom handlers and worker threads retain host semantics; hard termination/power loss cannot run
+cleanup. Pending `.mobile-release/build-inputs/` state may contain original client files or private
+material: never commit, upload or broadly delete it. Preserve unresolved evidence; an idle/absent
+later status does not turn the earlier failure into a pass.
 
 Secret rotation and IAM/account provisioning remain external administrator tasks. Run `credentials` and signing/online preflight after any rotation before the next candidate.

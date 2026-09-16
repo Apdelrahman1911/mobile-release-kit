@@ -714,6 +714,69 @@ class ProfileOwnerChannelTests(unittest.TestCase):
 
 
 class ProfileOwnerDeadlineTests(unittest.TestCase):
+    def test_pause_preserves_original_high_descriptor_interests_and_deadline(self):
+        for start, after_registration, expected in ((0, 0, 10), (0, 999_500_000, 0),
+                                                    (0, 1_000_000_000, None),
+                                                    (1_000_000_000, None, None)):
+            with self.subTest(start=start, after_registration=after_registration):
+                reader, writer, payload = _Lease(4097), _Lease(4098), _Lease(4099)
+                live = types.SimpleNamespace(reader=reader, writer=reader, eof=False,
+                                             reader_closed=False, writer_closed=False, pending=[b"frame"])
+                eof = types.SimpleNamespace(reader=_Lease(), writer=writer, eof=True,
+                                            reader_closed=False, writer_closed=False, pending=[b"frame"])
+                closed = types.SimpleNamespace(reader=_Lease(), writer=_Lease(), eof=False,
+                                               reader_closed=True, writer_closed=True, pending=[b"frame"])
+                empty = types.SimpleNamespace(reader=_Lease(), writer=_Lease(), eof=True,
+                                              reader_closed=False, writer_closed=False, pending=[])
+                excluded = (eof.reader, closed.reader, closed.writer, empty.reader, empty.writer)
+                for lease in excluded:
+                    lease.fileno = Mock(side_effect=AssertionError("closed/EOF/empty interest was used"))
+                watcher = Mock()
+                watcher.poll.return_value = [(4097, owner.select.POLLERR | owner.select.POLLHUP)]
+                with patch.object(owner.select, "poll", return_value=watcher) as factory, \
+                     patch.object(owner.select, "select", side_effect=AssertionError("select fallback")), \
+                     patch.object(owner.time, "monotonic_ns", side_effect=[start, after_registration]), \
+                     patch.object(owner.time, "sleep") as sleep, \
+                     patch.object(owner.os, "read") as read, patch.object(owner.os, "write") as write:
+                    owner._pause(1_000_000_000, (live, eof, closed, empty), (reader, payload))
+                    sleep.assert_not_called(); read.assert_not_called(); write.assert_not_called()
+                    if after_registration is None:
+                        factory.assert_not_called()
+                    else:
+                        self.assertEqual(watcher.register.call_args_list, [
+                            unittest.mock.call(4097, owner.select.POLLIN | owner.select.POLLOUT),
+                            unittest.mock.call(4099, owner.select.POLLIN),
+                            unittest.mock.call(4098, owner.select.POLLOUT)])
+                    if expected is None:
+                        watcher.poll.assert_not_called()
+                    else:
+                        watcher.poll.assert_called_once_with(expected)
+                self.assertFalse(live.eof)
+                self.assertEqual(live.pending, [b"frame"])
+                for lease in (reader, writer, payload, *excluded):
+                    self.assertEqual(lease.close_calls, 0)
+                    self.assertEqual(lease.state, "OPEN")
+
+        for operation, failure in (("fileno", SystemExit(3)), ("register", OSError("registration")),
+                                   ("poll", KeyboardInterrupt())):
+            with self.subTest(operation=operation):
+                reader, watcher = _Lease(4097), Mock()
+                selected = reader if operation == "fileno" else watcher
+                with patch.object(owner.select, "poll", return_value=watcher), \
+                     patch.object(owner.time, "monotonic_ns", return_value=0), \
+                     patch.object(owner.time, "sleep") as sleep, \
+                     patch.object(selected, operation, side_effect=failure):
+                    with self.assertRaises(type(failure)) as caught:
+                        owner._pause(1_000_000_000, extra_read=(reader,))
+                    self.assertIs(caught.exception, failure)
+                    self.assertEqual(reader.close_calls, 0)
+                    sleep.assert_not_called()
+        with patch.object(owner.time, "monotonic_ns", return_value=0), \
+             patch.object(owner.time, "sleep") as sleep, patch.object(owner.select, "poll") as factory:
+            owner._pause(5_000_000)
+            sleep.assert_called_once_with(.005)
+            factory.assert_not_called()
+
     def test_nested_cutoffs_share_one_original_clock_and_never_renew(self):
         now = 100_000_000_000
         deadline = types.SimpleNamespace(expires_at=1000.0)

@@ -126,6 +126,13 @@ Play has no supported mapping-file digest readback. When a candidate includes a
 mapping file, recovery may replace only that version code's mapping with the same
 intent-bound bytes and requires an acknowledged edit commit. This is a scoped
 same-byte replay, not independent Store proof of the mapping's hash.
+Before opening an edit, the adapter copies the intent-bound mapping into one
+private, hash-verified, read-only anonymous File. It sends that retained reader,
+not a pathname that can change during AAB validation. The single mapping request
+uses the original package/edit/version/type, no logical retry, and no SDK batch
+context. Cleanup uncertainty prevents a successful return or receipt; retained
+UNKNOWN ownership blocks another factory invocation in that process. Preserve
+the original intent and diagnostics for a fresh protected recovery invocation.
 
 Authenticated Android recovery retains the original artifact, signer, configuration,
 version and source bindings and checks the AAB's bounded ZIP structure. Completing
@@ -242,11 +249,14 @@ sealing/attestation/upload, then `--execute-store --operation-intent <original-p
 an attestation producer. A successful local JSON checksum or a diagnostic journal
 cannot replace the protected workflow's durable authenticated intent.
 
-A valid existing raw receipt can finish failed manifest/receipt persistence without
-another Store request. Existing immutable files are never overwritten. A surviving
-partial manifest requires its original matching raw observation and producer;
-otherwise preserve it and use a new empty output directory with the **same intent
-and original artifacts** for reconciliation, not a new candidate build.
+A raw receipt alone cannot finish failed manifest/receipt persistence in a later
+invocation: it lacks the original live composite completion. Copied matching bytes
+or an absent local pending marker do not restore that authority. Preserve raw-only
+or partial-manifest output and use the protected readback-first recovery route,
+with a new empty output directory and the **same authenticated intent and original
+artifacts**. This can require Store reads and the explicit Apple owner decisions
+described above; it never authorizes a replacement build. Existing immutable files
+are never overwritten, and complete authenticated final evidence is reused unchanged.
 
 Diagnostic journals explain progress but are not promotion authority. They retain
 bounded histories and execution claims, omit credentials/private review values and

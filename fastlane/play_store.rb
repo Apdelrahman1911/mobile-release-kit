@@ -4,6 +4,7 @@ require "digest"
 require "bigdecimal"
 require "fileutils"
 require "json"
+require "tempfile"
 require "time"
 require "supply"
 require "supply/options"
@@ -12,7 +13,7 @@ require_relative "release_support"
 
 module MobileReleaseKit
   # Supply 2.235.0 replaces Track.releases when it uploads or promotes a build.
-  # This adapter retains Supply's metadata implementation and Publisher's upload
+  # This adapter retains Supply's metadata helpers and Publisher's upload
   # protocol, but owns the edit lifecycle and singleton, current-validated AAB send.
   class PreservingSupplyUploader < Supply::Uploader
     CANONICALIZATION = "mrk-play-track-state-v2"
@@ -36,7 +37,166 @@ module MobileReleaseKit
       Google::Apis::ServerError,
     ].freeze
 
-    attr_reader :outcome, :state_evidence
+    # A mapping is sent from this one verified reader, never from a pathname
+    # checked earlier. This holder owns only its three Files and temporary name.
+    class MappingSnapshot
+      CHUNK_BYTES = 64 * 1024
+
+      attr_reader :reader, :cleanup_errors, :cleanup_records
+
+      def initialize(path:, size:, sha256:)
+        @path, @size, @sha256 = path, size, sha256
+        @slots, @cleanup_errors, @cleanup_records = {}, [], []
+        @state = :new
+      end
+
+      def acquire!
+        raise ContractError, "Mapping snapshot may only be acquired once" unless @state == :new
+
+        @state = :acquiring
+        source = acquire_file(:source) { File.open(@path, File::RDONLY | File::NOFOLLOW | File::NONBLOCK) }
+        original = source.stat
+        unless original.file? && original.size == @size && File.realpath(@path) == @path && same_inode?(File.lstat(@path), original)
+          raise ContractError, "Mapping input must be the exact regular intent-bound file"
+        end
+        writer = acquire_file(:writer) { Tempfile.create("mrk-play-mapping-") }
+        raise ContractError, "Mapping temporary writer must be private" unless (writer.stat.mode & 0o777) == 0o600
+        total = 0
+        loop do
+          chunk = source.read([CHUNK_BYTES, @size - total + 1].min)
+          break if chunk.nil?
+          raise ContractError, "Mapping input changed size while being copied" if chunk.empty? || total + chunk.bytesize > @size
+
+          write_chunk(writer, chunk)
+          total += chunk.bytesize
+        end
+        after = source.stat
+        unless total == @size && same_inode?(after, original) && after.size == original.size &&
+               after.mtime == original.mtime && after.ctime == original.ctime
+          raise ContractError, "Mapping input changed while being copied"
+        end
+        writer.flush
+        @reader = acquire_file(:reader) { File.open(@temporary.fetch(:path), File::RDONLY | File::NOFOLLOW) }
+        retained = @reader.stat
+        unless retained.file? && retained.size == @size && retained.nlink == 1 && same_inode?(retained, writer.stat)
+          raise ContractError, "Mapping snapshot inode differs from its owned writer"
+        end
+        digest = Digest::SHA256.new
+        copied = 0
+        while (chunk = @reader.read([CHUNK_BYTES, @size - copied + 1].min))
+          copied += chunk.bytesize
+          raise ContractError, "Mapping snapshot changed size" if chunk.empty? || copied > @size
+          digest.update(chunk)
+        end
+        unless copied == @size && digest.hexdigest == @sha256
+          raise ContractError, "Mapping snapshot differs from the authenticated intent bytes"
+        end
+        @reader.rewind
+        unlink_temporary
+        close_slot(:source)
+        close_slot(:writer)
+        raise @cleanup_errors.first unless @cleanup_errors.empty?
+        unless @reader.stat.nlink.zero? && @reader.stat.size == @size && @reader.stat.mtime == retained.mtime
+          raise ContractError, "Mapping snapshot did not become an anonymous unchanged reader"
+        end
+
+        @state = :ready
+        self
+      end
+
+      def ready? = @state == :ready
+      def closed? = @state == :closed
+
+      def cleanup!
+        # These are only the four bounded local disposal transitions, never a
+        # copy or network call. A pending interrupt cannot strand later slots.
+        Thread.handle_interrupt(Exception => :never) do
+          unlink_temporary
+          %i[source writer reader].each { |role| close_slot(role) }
+          @state = @cleanup_errors.empty? ? :closed : :unknown
+        end
+      end
+
+      private
+
+      def acquire_file(role)
+        file = nil
+        # Only acquisition and registration are inseparable. Copying and SDK
+        # calls remain interruptible; no block Tempfile owner can clean twice.
+        Thread.handle_interrupt(Exception => :never) do
+          file = yield
+          record = { role: role, resource: file, state: :open }
+          @slots[role] = record
+          @cleanup_records << record
+          if role == :writer
+            @temporary = { role: :temporary_name, path: file.path.dup.freeze, state: :open }
+            @cleanup_records << @temporary
+            @temporary[:identity] = file.stat
+          end
+        end
+        file.binmode
+        file.close_on_exec = true
+        file
+      end
+
+      def same_inode?(left, right)
+        left.file? && right.file? && left.dev == right.dev && left.ino == right.ino
+      end
+
+      def write_chunk(writer, chunk)
+        offset = 0
+        while offset < chunk.bytesize
+          written = writer.write(chunk.byteslice(offset, chunk.bytesize - offset))
+          unless written.is_a?(Integer) && written.positive? && written <= chunk.bytesize - offset
+            raise ContractError, "Mapping snapshot copy made invalid write progress"
+          end
+          offset += written
+        end
+      end
+
+      def close_slot(role)
+        Thread.handle_interrupt(Exception => :never) do
+          record = @slots.delete(role)
+          return unless record
+
+          # Keep the exact File on an UNKNOWN record before the one attempt.
+          # Never retry a numeric FD after an ambiguous close result.
+          record[:state] = :unknown
+          begin
+            record.fetch(:resource).close
+            record[:state] = :closed
+          rescue Exception => error # rubocop:disable Lint/RescueException -- preserve every cleanup outcome
+            record[:error] = error
+            @cleanup_errors << error
+          end
+        end
+      end
+
+      def unlink_temporary
+        Thread.handle_interrupt(Exception => :never) do
+          return unless @temporary && @temporary[:state] == :open
+
+          @temporary[:state] = :unknown
+          begin
+            identity = @temporary[:identity]
+            unless identity && same_inode?(File.lstat(@temporary.fetch(:path)), identity)
+              raise ContractError, "Mapping temporary name no longer identifies the owned inode"
+            end
+            File.unlink(@temporary.fetch(:path))
+            descriptor = @reader || @slots.fetch(:writer).fetch(:resource)
+            raise ContractError, "Mapping temporary inode still has a name" unless descriptor.stat.nlink.zero?
+
+            @temporary[:state] = :closed
+          rescue Exception => error # rubocop:disable Lint/RescueException
+            @temporary[:error] = error
+            @cleanup_errors << error
+          end
+        end
+      end
+    end
+    private_constant :MappingSnapshot
+
+    attr_reader :outcome, :state_evidence, :cleanup_failures
 
     def self.configuration(options)
       unless options[:skip_upload_aab] == true || (options[:aab].is_a?(String) && !options[:aab].empty?)
@@ -44,7 +204,7 @@ module MobileReleaseKit
       end
       # Never discover a binary from the toolkit working directory or adopt
       # ambient SUPPLY_* path defaults. Only pinned caller options select files.
-      paths = { apk: nil, apk_paths: nil, aab: nil, aab_paths: nil }
+      paths = { apk: nil, apk_paths: nil, aab: nil, aab_paths: nil, mapping: nil, mapping_paths: nil }
       available = Supply::Options.available_options.map do |item|
         next item unless paths.key?(item.key)
 
@@ -61,6 +221,87 @@ module MobileReleaseKit
       FastlaneCore::Configuration.create(available, paths.merge(options))
     end
 
+    FACTORY_GATE = Mutex.new
+    private_constant :FACTORY_GATE
+
+    # Supply.config is process-global. One bounded, strongly class-rooted cell
+    # keeps an UNKNOWN owner alive even when the original exception is frozen.
+    # All inherited factories use the same base cell/gate, not subclass copies.
+    def self.with_factory_custody
+      base = PreservingSupplyUploader
+      gate = FACTORY_GATE
+      locked = false
+      cell = nil
+      primary = nil
+      release_error = nil
+      boundary_error = nil
+      Thread.handle_interrupt(Exception => :never) do
+        begin
+          raise ContractError, "Another guarded Play factory owns this process" unless gate.try_lock
+
+          locked = true
+          if base.instance_variable_get(:@factory_custody)
+            raise ContractError, "A guarded Play invocation still owns unresolved cleanup"
+          end
+          cell = { cleanup_errors: [], owner_thread: Thread.current, owner_fiber: Fiber.current }
+          base.instance_variable_set(:@factory_custody, cell)
+          install = lambda do |uploader|
+            Thread.handle_interrupt(Exception => :never) do
+              unless base.instance_variable_get(:@factory_custody).equal?(cell) && !cell.key?(:uploader)
+                raise ContractError, "Guarded Play factory custody changed before installation"
+              end
+              cell[:uploader] = uploader
+            end
+          end
+          # Configuration/construction and all operation I/O remain cancellable.
+          Thread.handle_interrupt(Exception => :immediate) { yield install }
+        rescue Exception => error # rubocop:disable Lint/RescueException
+          owner = cell && cell[:uploader]
+          primary = owner&.instance_variable_get(:@primary_error) ||
+                    owner&.instance_variable_get(:@cleanup_failures)&.first || error
+          if cell
+            cell[:primary] = primary
+            # Ruby can copy a frozen exception on raise. Do not replace the
+            # exact operation error with that observed propagation value.
+            cell[:escaped_failure] = error
+          end
+        ensure
+          if locked
+            settled = false
+            begin
+              settled = !cell || !cell[:uploader] || cell.fetch(:uploader).cleanup_confirmed?
+              if !settled && !primary
+                release_error = ContractError.new("Guarded Play cleanup is not positively settled")
+                cell[:cleanup_errors] << release_error
+              end
+            rescue Exception => error # rubocop:disable Lint/RescueException
+              release_error = error
+              cell[:cleanup_errors] << error if cell
+            ensure
+              begin
+                # Keep the strong cell until unlock has positively returned.
+                # Other factories seeing it during this interval only refuse.
+                gate.unlock
+                locked = false
+                if cell && settled && !release_error && base.instance_variable_get(:@factory_custody).equal?(cell)
+                  base.instance_variable_set(:@factory_custody, nil)
+                end
+              rescue Exception => error # rubocop:disable Lint/RescueException
+                release_error ||= error
+                cell[:cleanup_errors] << error if cell
+              end
+            end
+          end
+        end
+      end
+    rescue Exception => boundary_error # rubocop:disable Lint/RescueException
+      cell[:cleanup_errors] << boundary_error if cell
+    ensure
+      failure = primary || release_error || boundary_error
+      raise failure, cause: failure.cause if failure
+    end
+    private_class_method :with_factory_custody
+
     def self.run(
       options:,
       journal_path:,
@@ -71,32 +312,41 @@ module MobileReleaseKit
       intent_sha256: nil,
       expected_bundle_sha256: nil,
       expected_bundle: nil,
+      expected_mapping: nil,
       bundle_validation: nil
     )
-      Supply.config = configuration(options)
-      uploader = new(
-        journal_path: journal_path,
-        before_mutation_guard: before_mutation_guard,
-        after_mutation_guard: after_mutation_guard,
-        metadata_languages: metadata_languages,
-        changelog_input: changelog_input,
-        intent_sha256: intent_sha256,
-        expected_bundle_sha256: expected_bundle_sha256,
-        expected_bundle: expected_bundle,
-        bundle_validation: bundle_validation,
-      )
-      uploader.perform_upload
-      uploader
+      with_factory_custody do |install|
+        Supply.config = configuration(options)
+        uploader = new(
+          journal_path: journal_path,
+          before_mutation_guard: before_mutation_guard,
+          after_mutation_guard: after_mutation_guard,
+          metadata_languages: metadata_languages,
+          changelog_input: changelog_input,
+          intent_sha256: intent_sha256,
+          expected_bundle_sha256: expected_bundle_sha256,
+          expected_bundle: expected_bundle,
+          expected_mapping: expected_mapping,
+          bundle_validation: bundle_validation,
+        )
+        install.call(uploader)
+        uploader.perform_upload
+        uploader
+      end
     end
 
-    def self.replay_mapping(options:, journal_path:, target_guard:, intent_sha256:)
-      Supply.config = configuration(options)
-      uploader = new(
-        journal_path: journal_path, before_mutation_guard: target_guard,
-        after_mutation_guard: target_guard, intent_sha256: intent_sha256,
-      )
-      uploader.perform_mapping_recovery
-      uploader
+    def self.replay_mapping(options:, journal_path:, target_guard:, intent_sha256:, expected_mapping:)
+      with_factory_custody do |install|
+        Supply.config = configuration(options)
+        uploader = new(
+          journal_path: journal_path, before_mutation_guard: target_guard,
+          after_mutation_guard: target_guard, intent_sha256: intent_sha256,
+          expected_mapping: expected_mapping,
+        )
+        install.call(uploader)
+        uploader.perform_mapping_recovery
+        uploader
+      end
     end
 
     def self.observe_existing(
@@ -107,15 +357,18 @@ module MobileReleaseKit
       version_code:,
       expected_status:
     )
-      Supply.config = configuration(options)
-      uploader = new(journal_path: journal_path)
-      present = uploader.observe_existing(
-        source_track: source_track,
-        destination_track: destination_track,
-        version_code: version_code,
-        expected_status: expected_status,
-      )
-      present ? uploader : nil
+      with_factory_custody do |install|
+        Supply.config = configuration(options)
+        uploader = new(journal_path: journal_path)
+        install.call(uploader)
+        present = uploader.observe_existing(
+          source_track: source_track,
+          destination_track: destination_track,
+          version_code: version_code,
+          expected_status: expected_status,
+        )
+        present ? uploader : nil
+      end
     end
 
     def self.assert_dependency_contract!
@@ -255,6 +508,7 @@ module MobileReleaseKit
       intent_sha256: nil,
       expected_bundle_sha256: nil,
       expected_bundle: nil,
+      expected_mapping: nil,
       bundle_validation: nil
     )
       super()
@@ -274,7 +528,11 @@ module MobileReleaseKit
       @intent_sha256 = intent_sha256
       @expected_bundle_sha256 = expected_bundle_sha256
       @expected_bundle = expected_bundle
+      @expected_mapping = expected_mapping
       @bundle_validation = bundle_validation
+      @cleanup_failures = []
+      @edit_cleanup_records = []
+      @active_edit_owner = nil
       @commit_failure_class = nil
       @reconciliation_failure_class = nil
       @terminal_failure_class = nil
@@ -287,6 +545,11 @@ module MobileReleaseKit
     # Supply::Uploader#perform_upload, this puts a complete state check directly
     # before a non-retrying, review-safe commit.
     def perform_upload
+      claim_invocation!
+      with_owned_operation { perform_upload_once }
+    end
+
+    def perform_upload_once
       FastlaneCore::PrintTable.print_values(
         config: Supply.config,
         hide_keys: [:issuer],
@@ -296,8 +559,10 @@ module MobileReleaseKit
       verify_config!
       reject_unsafe_supply_options!
       validate_changelog_input!
-      client.begin_edit(package_name: Supply.config[:package_name])
+      prepare_mapping_snapshot!
+      begin_owned_edit!
       @mutation_edit_id = client.current_edit.id.to_s
+      @mapping_edit_owner = @active_edit_owner if @mapping_snapshot
       precondition = @before_mutation_guard&.call(client)
 
       version_codes = reusable_bundle_version_codes(precondition)
@@ -309,6 +574,7 @@ module MobileReleaseKit
       # pre-upload read. Foreign matching state appearing during validation is
       # not recovery authority. Reuse/promotion still journals before mutation.
       persist_journal("mutation-dispatched")
+      @mapping_send_due = true
       upload_mapping(version_codes)
 
       if !version_codes.empty?
@@ -325,6 +591,7 @@ module MobileReleaseKit
       perform_upload_meta(version_codes, target_track)
       verify_guard_before_commit!
       @after_mutation_guard&.call(client)
+      assert_owned_edit!
       client.validate_current_edit!
       persist_journal("validated-before-commit")
       if Supply.config[:validate_only]
@@ -334,37 +601,38 @@ module MobileReleaseKit
 
       commit_and_reconcile!
       self
-    rescue Interrupt, SystemExit => e
-      @primary_error = e
-      @terminal_failure_class = e.class.name
-      persist_journal("cancelled", failure_class: e.class.name, failure_role: "terminal") rescue nil
-      raise
-    rescue Exception => e # rubocop:disable Lint/RescueException -- retain evidence for every failure
-      @primary_error = e
-      @terminal_failure_class = e.class.name
-      persist_journal("failed", failure_class: e.class.name, failure_role: "terminal") rescue nil
-      raise
-    ensure
-      abort_active_edit_without_masking
     end
+    private :perform_upload_once
 
     # Publisher has no mapping digest readback. Even when the track is already
     # final, recovery must replay the authenticated bytes in a fresh edit and
     # receive a successful commit response. Track-only readback cannot prove an
     # ambiguous mapping commit; another recovery can safely replay the same file.
     def perform_mapping_recovery
+      claim_invocation!
+      with_owned_operation(failure_phase: "mapping-recovery-failed", cancellation_phase: "mapping-recovery-failed") do
+        perform_mapping_recovery_once
+      end
+    end
+
+    def perform_mapping_recovery_once
       verify_config!
       reject_unsafe_supply_options!
       raise ContractError, "Mapping recovery requires exactly one mapping" unless Supply.config[:mapping] && !Supply.config[:mapping_paths]
-      client.begin_edit(package_name: Supply.config[:package_name])
+      prepare_mapping_snapshot!
+      begin_owned_edit!
       @mutation_edit_id = client.current_edit.id.to_s
+      @mapping_edit_owner = @active_edit_owner
       @before_mutation_guard&.call(client)
       persist_journal("mapping-recovery-dispatched")
-      upload_mapping([Supply.config[:version_code].to_i])
+      @mapping_send_due = true
+      upload_mapping([@invocation_version])
       @after_mutation_guard&.call(client)
+      assert_owned_edit!
       client.validate_current_edit!
       options = Google::Apis::RequestOptions.new
       options.retries = 0
+      assert_owned_edit!
       client.client.commit_edit(
         client.current_package_name, client.current_edit.id,
         changes_in_review_behavior: COMMIT_REVIEW_BEHAVIOR,
@@ -372,25 +640,26 @@ module MobileReleaseKit
         options: options,
       )
       clear_active_edit_handle!
-      client.begin_edit(package_name: Supply.config[:package_name])
+      begin_owned_edit!
       @readback_edit_id = client.current_edit.id.to_s
       @after_mutation_guard&.call(client)
       @outcome = "reconciled"
       persist_journal("mapping-replayed-and-committed")
       self
-    rescue Exception => e # rubocop:disable Lint/RescueException -- preserve cancellation without blind replay
-      @primary_error = e
-      @terminal_failure_class = e.class.name
-      persist_journal("mapping-recovery-failed", failure_class: e.class.name, failure_role: "terminal") rescue nil
-      raise
-    ensure
-      abort_active_edit_without_masking
     end
+    private :perform_mapping_recovery_once
 
     def observe_existing(source_track:, destination_track:, version_code:, expected_status:)
+      claim_invocation!
+      with_owned_operation do
+        observe_existing_once(source_track: source_track, destination_track: destination_track, version_code: version_code, expected_status: expected_status)
+      end
+    end
+
+    def observe_existing_once(source_track:, destination_track:, version_code:, expected_status:)
       verify_config!
       reject_unsafe_supply_options!
-      client.begin_edit(package_name: Supply.config[:package_name])
+      begin_owned_edit!
       @readback_edit_id = client.current_edit.id.to_s
       destination = fetch_track(destination_track)
       destination_state = self.class.track_state(destination, destination_track)
@@ -423,21 +692,166 @@ module MobileReleaseKit
       build_state_evidence!(destination_state, source_state, mode: "observation")
       persist_journal("observed-existing")
       true
-    rescue Interrupt, SystemExit => e
-      @primary_error = e
-      @terminal_failure_class = e.class.name
-      persist_journal("cancelled", failure_class: e.class.name, failure_role: "terminal") rescue nil
-      raise
-    rescue Exception => e # rubocop:disable Lint/RescueException
-      @primary_error = e
-      @terminal_failure_class = e.class.name
-      persist_journal("failed", failure_class: e.class.name, failure_role: "terminal") rescue nil
-      raise
-    ensure
-      abort_active_edit_without_masking
+    end
+    private :observe_existing_once
+
+    def cleanup_confirmed?
+      @cleanup_failures.empty? && @active_edit_owner.nil? && (!@mapping_snapshot || @mapping_snapshot.closed?)
     end
 
     private
+
+    def with_owned_operation(failure_phase: "failed", cancellation_phase: "cancelled")
+      boundary_error = nil
+      # Install the cleanup handoff before any owned resource can be acquired.
+      # Only bookkeeping/disposal transitions are deferred: the whole body,
+      # abort request and diagnostic I/O explicitly remain interruptible.
+      Thread.handle_interrupt(Exception => :never) do
+        begin
+          Thread.handle_interrupt(Exception => :immediate) { yield }
+        rescue Exception => error # rubocop:disable Lint/RescueException
+          phase = error.is_a?(Interrupt) || error.is_a?(SystemExit) ? cancellation_phase : failure_phase
+          record_operation_failure(phase, error)
+        ensure
+          finalize_owned_resources
+        end
+      end
+    rescue Exception => boundary_error # rubocop:disable Lint/RescueException
+      # Ruby checks pending exceptions while restoring the caller's mask.
+      # Disposal has run; retain this late error without replacing the body or
+      # first cleanup error. It must never turn into a successful return.
+      record_cleanup_failure(boundary_error)
+      persist_cleanup_diagnostics([boundary_error])
+    ensure
+      failure = @primary_error || @cleanup_failures.first || boundary_error
+      # Preserve the captured object and cause in our records. Ruby 3.3 itself
+      # can duplicate a frozen exception during raise; do not mutate or wrap it.
+      raise failure, cause: failure.cause if failure
+    end
+
+    def claim_invocation!
+      # This is outside the operation body's rescue/ensure. A rejected inner
+      # invocation must not dispose the outer invocation's edit or reader.
+      cell = PreservingSupplyUploader.instance_variable_get(:@factory_custody)
+      if cell && !cell[:uploader].equal?(self)
+        raise ContractError, "Another guarded Play factory retains process ownership"
+      end
+      raise ContractError, "A guarded Play uploader is single-use" if @invocation_started
+
+      @invocation_started = true
+      @owner_thread, @owner_fiber = Thread.current, Fiber.current
+      @invocation_config = Supply.config
+      @invocation_package = Supply.config[:package_name].to_s.dup.freeze
+      version = Supply.config[:version_code]
+      unless (version.is_a?(Integer) || version.is_a?(String)) && version.to_s.match?(/\A[1-9][0-9]*\z/) && !@invocation_package.empty?
+        raise ContractError, "Guarded Play invocation requires an explicit package and positive version"
+      end
+      @invocation_version = version.to_i
+      @mapping_path = Supply.config[:mapping]
+      @mapping_path = @mapping_path.dup.freeze if @mapping_path.is_a?(String)
+      if @expected_mapping.is_a?(Hash)
+        @expected_mapping = @expected_mapping.to_h { |key, value| [key, value.is_a?(String) ? value.dup.freeze : value] }.freeze
+      end
+      filename = @expected_mapping.is_a?(Hash) && @expected_mapping["fileName"]
+      @mapping_type = filename.is_a?(String) && (File.extname(filename).downcase == ".zip" ? "nativeCode" : "proguard").freeze
+    end
+
+    def assert_unbatched_owner!
+      unless Thread.current.equal?(@owner_thread) && Fiber.current.equal?(@owner_fiber) && Thread.current[:google_api_batch].nil?
+        raise ContractError, "Guarded Play requests require their original synchronous non-batch context"
+      end
+    end
+
+    def prepare_mapping_snapshot!
+      assert_unbatched_owner!
+      if Supply.config[:mapping_paths] || Supply.config[:mapping] != @mapping_path
+        raise ContractError, "Guarded Play mapping selection changed or selected multiple paths"
+      end
+      return if @mapping_path.nil? && @expected_mapping.nil?
+
+      bound = @expected_mapping
+      unless !Supply.config[:track_promote_to] && @mapping_path.is_a?(String) &&
+             @mapping_path.start_with?(File::SEPARATOR) && !@mapping_path.match?(/[\x00-\x1f\x7f]/) &&
+             bound.is_a?(Hash) && bound["logicalName"] == "android-mapping" &&
+             bound["size"].is_a?(Integer) && bound["size"].positive? &&
+             bound["sha256"].is_a?(String) && bound["sha256"].match?(/\A[0-9a-f]{64}\z/) &&
+             bound["fileName"].is_a?(String) && !bound["fileName"].empty? &&
+             (File.extname(@mapping_path).downcase == ".zip") == (File.extname(bound["fileName"]).downcase == ".zip")
+        raise ContractError, "Mapping path, bytes and type require one authenticated intent record"
+      end
+      @mapping_snapshot = MappingSnapshot.new(path: @mapping_path, size: bound.fetch("size"), sha256: bound.fetch("sha256"))
+      @mapping_snapshot.acquire!
+    end
+
+    def begin_owned_edit!
+      assert_unbatched_owner!
+      unless Supply.config.equal?(@invocation_config) && Supply.config[:package_name].to_s == @invocation_package
+        raise ContractError, "Guarded Play invocation configuration changed"
+      end
+      current = client
+      service = current.client
+      if @invocation_client && (!current.equal?(@invocation_client) || !service.equal?(@invocation_service))
+        raise ContractError, "Guarded Play invocation client changed"
+      end
+      raise ContractError, "Guarded Play adapter cannot adopt an existing edit" if @active_edit_owner || current.current_edit
+
+      @invocation_client, @invocation_service = current, service
+      owner = { client: current, service: service, package: @invocation_package, state: :opening }
+      @edit_cleanup_records << owner
+      @active_edit_owner = owner
+      current.begin_edit(package_name: @invocation_package)
+      owner[:edit] = current.current_edit
+      owner[:id] = current.current_edit&.id.to_s.dup.freeze
+      unless owner[:edit] && !owner[:id].empty? && current.current_package_name.to_s == @invocation_package
+        raise ContractError, "Google Play did not return the owned package/edit"
+      end
+      owner[:state] = :open
+      assert_owned_edit!(owner)
+      owner
+    end
+
+    def assert_owned_edit!(owner = @active_edit_owner)
+      assert_unbatched_owner!
+      unless owner && owner[:state] == :open && @active_edit_owner.equal?(owner) &&
+             @client.equal?(owner[:client]) && @client.client.equal?(owner[:service]) &&
+             @client.current_edit.equal?(owner[:edit]) && @client.current_edit.id.to_s == owner[:id] &&
+             @client.current_package_name.to_s == owner[:package] &&
+             Supply.config.equal?(@invocation_config) && Supply.config[:package_name].to_s == @invocation_package &&
+             Supply.config[:version_code].to_s == @invocation_version.to_s
+        raise ContractError, "Guarded Play request no longer owns its original client/package/edit/version"
+      end
+    end
+
+    def upload_mapping(version_codes)
+      unless @mapping_send_due && !@mapping_send_consumed
+        raise ContractError, "Mapping send is not authorized or has already been consumed"
+      end
+      unless @mapping_snapshot
+        raise ContractError, "Unbound ambient mapping cannot be uploaded" if Supply.config[:mapping] || Supply.config[:mapping_paths]
+
+        @mapping_send_consumed = true
+        return
+      end
+      unless @mapping_snapshot.ready? && version_codes.is_a?(Array) && version_codes.length == 1 &&
+             (version_codes.first.is_a?(Integer) || version_codes.first.is_a?(String)) &&
+             version_codes.first.to_s == @invocation_version.to_s && Supply.config[:mapping] == @mapping_path && !Supply.config[:mapping_paths]
+        raise ContractError, "Mapping send differs from its authenticated singleton binding"
+      end
+      assert_owned_edit!(@mapping_edit_owner)
+      reader = @mapping_snapshot.reader
+      reader.rewind
+      options = Google::Apis::RequestOptions.new
+      options.retries = 0
+      # No application callback between this final no-batch check, consuming
+      # the one-use grant and invoking the pinned synchronous generated API.
+      assert_unbatched_owner!
+      @mapping_send_consumed = true
+      @mapping_send_due = false
+      @mapping_edit_owner.fetch(:service).upload_edit_deobfuscationfile(
+        @invocation_package, @mapping_edit_owner.fetch(:id), @invocation_version, @mapping_type,
+        upload_source: reader, content_type: "application/octet-stream", options: options,
+      )
+    end
 
     def validate_changelog_input!
       if Supply.config[:skip_upload_changelogs]
@@ -477,6 +891,43 @@ module MobileReleaseKit
         raise ContractError, "Play changelog worker differs from the validated locale/version scope"
       end
       AndroidPublisher::LocalizedText.new(language: language, text: @validated_changelogs.fetch(language))
+    end
+
+    # Keep metadata on the original edit/configuration owner. Supply's pinned
+    # QueueWorker can leave other locale workers running when a join raises;
+    # our edit cleanup must never race a worker still issuing metadata requests.
+    def perform_upload_meta(version_codes, track_name)
+      return unless (!Supply.config[:skip_upload_metadata] || !Supply.config[:skip_upload_images] ||
+                     !Supply.config[:skip_upload_changelogs] || !Supply.config[:skip_upload_screenshots]) && metadata_path
+
+      # The invocation and uploaded-version guards already require one positive
+      # version; promotion uses the same explicit configuration fallback.
+      version_codes = [Supply.config[:version_code]] if version_codes.empty?
+      version_codes.each do |version_code|
+        FastlaneCore::UI.user_error!("Could not find folder #{metadata_path}") unless File.directory?(metadata_path)
+        track, release = fetch_track_and_release!(track_name, version_code)
+        FastlaneCore::UI.user_error!("Unable to find the requested track - '#{Supply.config[:track]}'") unless track
+        FastlaneCore::UI.user_error!("Could not find release for version code '#{version_code}' to update changelog") unless release
+
+        release_notes = []
+        all_languages.reject { |language| language.start_with?(".") }.each do |language|
+          begin
+            FastlaneCore::UI.message("Preparing uploads for language '#{language}'...")
+            start_time = Time.now
+            listing = client.listing_for_language(language)
+            upload_metadata(language, listing) unless Supply.config[:skip_upload_metadata]
+            upload_images(language) unless Supply.config[:skip_upload_images]
+            upload_screenshots(language) unless Supply.config[:skip_upload_screenshots]
+            release_notes << upload_changelog(language, version_code) unless Supply.config[:skip_upload_changelogs]
+            FastlaneCore::UI.message("Uploaded all items for language '#{language}'... (#{Time.now - start_time} secs)")
+          rescue StandardError => error
+            # Match Supply's ordinary per-locale error context without wrapping
+            # Interrupt/SystemExit or allowing a later locale to begin.
+            FastlaneCore::UI.abort_with_message!("#{language} - #{error}")
+          end
+        end
+        upload_changelogs(release_notes, release, track, track_name) unless release_notes.empty?
+      end
     end
 
     def all_languages
@@ -523,6 +974,7 @@ module MobileReleaseKit
       options.retries = 0
       persist_journal("mutation-dispatched")
       aab = final_bundle_path!
+      assert_owned_edit!
       result = client.client.upload_edit_bundle(
         client.current_package_name, client.current_edit.id,
         upload_source: aab, content_type: "application/octet-stream",
@@ -561,6 +1013,9 @@ module MobileReleaseKit
       unless Supply.config[:skip_upload_aab] == true || (Supply.config[:aab].is_a?(String) && !Supply.config[:aab].empty? && !Supply.config[:track_promote_to])
         raise ContractError, "New Play uploads require one explicit AAB path and no promotion options"
       end
+      if Supply.config[:mapping_paths] || (Supply.config[:track_promote_to] && (Supply.config[:mapping] || @expected_mapping))
+        raise ContractError, "Guarded Play adapter forbids mapping batches and mappings during promotion"
+      end
       if Supply.config[:version_codes_to_retain]&.any?
         FastlaneCore::UI.user_error!("Guarded Play adapter does not accept version_codes_to_retain")
       end
@@ -576,7 +1031,7 @@ module MobileReleaseKit
     end
 
     def validate_uploaded_version_codes!(version_codes)
-      expected = Supply.config[:version_code].to_i.to_s
+      expected = @invocation_version.to_s
       unless version_codes.length == 1 && (version_codes.first.is_a?(Integer) || version_codes.first.is_a?(String)) && version_codes.first.to_s == expected
         FastlaneCore::UI.user_error!("Google Play upload returned an unexpected version code")
       end
@@ -783,6 +1238,7 @@ module MobileReleaseKit
       request_options = Google::Apis::RequestOptions.new
       request_options.retries = 0
       begin
+        assert_owned_edit!
         client.client.commit_edit(
           client.current_package_name,
           client.current_edit.id,
@@ -827,7 +1283,10 @@ module MobileReleaseKit
     end
 
     def verify_committed_state!(reconciled: false)
-      client.begin_edit(package_name: Supply.config[:package_name])
+      # This is terminal readback on both commit paths. The invocation driver
+      # owns its abort together with mapping disposal, so no inner ensure can
+      # replace a real readback failure or race the final cleanup handoff.
+      begin_owned_edit!
       @readback_edit_id = client.current_edit.id.to_s
       destination = state_for(@guard.fetch(:destination_name))
       @guard[:destination_observed] = destination
@@ -846,8 +1305,6 @@ module MobileReleaseKit
       @after_mutation_guard&.call(client)
       build_state_evidence!(destination, source, mode: "mutation")
       persist_journal("committed-and-read-back")
-    ensure
-      abort_active_edit_without_masking
     end
 
     def build_state_evidence!(destination, source, mode:)
@@ -892,19 +1349,94 @@ module MobileReleaseKit
     end
 
     def clear_active_edit_handle!
-      client.current_edit = nil
-      client.current_package_name = nil
+      assert_owned_edit!
+      @active_edit_owner.fetch(:client).current_edit = nil
+      @active_edit_owner.fetch(:client).current_package_name = nil
+      # Commit/reconciliation, not an abort receipt, now owns remote outcome.
+      @active_edit_owner[:state] = :released_after_commit
+      @active_edit_owner = nil
     end
 
     def abort_active_edit_without_masking
-      return unless defined?(@client) && @client && client.current_edit
+      Thread.handle_interrupt(Exception => :never) do
+        owner = @active_edit_owner
+        return unless owner && !owner[:cleanup_attempted]
 
-      original_error = $!
-      client.abort_current_edit
-    rescue Exception => cleanup_error # rubocop:disable Lint/RescueException
-      raise cleanup_error unless @primary_error || original_error
+        begin
+          owner[:cleanup_attempted] = true
+          assert_owned_edit!(owner)
+          owner[:state] = :unknown
+          Thread.handle_interrupt(Exception => :immediate) { owner.fetch(:client).abort_current_edit }
+          unless owner.fetch(:client).current_edit.nil? && owner.fetch(:client).current_package_name.nil?
+            raise ContractError, "Owned Play edit abort did not clear its original handle"
+          end
+          owner[:state] = :closed
+          @active_edit_owner = nil
+        rescue Exception => cleanup_error # rubocop:disable Lint/RescueException
+          owner[:state] = :unknown
+          owner[:error] = cleanup_error
+          record_cleanup_failure(cleanup_error)
+        end
+      end
+    end
 
-      FastlaneCore::UI.important("Could not delete the uncommitted Google Play edit; original failure preserved")
+    def record_operation_failure(phase, error)
+      @primary_error ||= error
+      @terminal_failure_class = @primary_error.class.name
+      Thread.handle_interrupt(Exception => :immediate) do
+        persist_journal(phase, failure_class: @primary_error.class.name, failure_role: "terminal")
+      end
+    rescue Exception => journal_error # rubocop:disable Lint/RescueException
+      record_cleanup_failure(journal_error)
+    end
+
+    def record_cleanup_failure(error)
+      @cleanup_failures << error unless @cleanup_failures.any? { |recorded| recorded.equal?(error) }
+    end
+
+    def finalize_owned_resources
+      begin
+        abort_active_edit_without_masking
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        record_cleanup_failure(error)
+      ensure
+        begin
+          @mapping_snapshot&.cleanup!
+        rescue Exception => error # rubocop:disable Lint/RescueException
+          record_cleanup_failure(error)
+        ensure
+          Array(@mapping_snapshot&.cleanup_errors).each { |error| record_cleanup_failure(error) }
+        end
+      end
+      # Deliver a pending cancellation only after all independent disposal
+      # attempts, including when there was no edit/network call to deliver it.
+      begin
+        Thread.handle_interrupt(Exception => :immediate) { nil }
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        record_cleanup_failure(error)
+      end
+      persist_cleanup_diagnostics(@cleanup_failures.dup)
+    end
+
+    def persist_cleanup_diagnostics(errors)
+      return if errors.empty?
+
+      Thread.handle_interrupt(Exception => :never) do
+        first = @primary_error || @cleanup_failures.first || errors.first
+        @terminal_failure_class ||= first.class.name
+        phase = first.is_a?(Interrupt) || first.is_a?(SystemExit) ? "cancelled" : "failed"
+        # Existing class-only role; journal I/O may fail or be interrupted but
+        # must not replace the primary or prevent other disposal/diagnostics.
+        errors.each do |error|
+          begin
+            Thread.handle_interrupt(Exception => :immediate) do
+              persist_journal(phase, failure_class: error.class.name, failure_role: "terminal")
+            end
+          rescue Exception => journal_error # rubocop:disable Lint/RescueException
+            record_cleanup_failure(journal_error)
+          end
+        end
+      end
     end
 
     def journal_document(phase, observed_at:, history:)

@@ -1944,17 +1944,80 @@ class CICoordinatorResultTests(unittest.TestCase):
     def test_every_ruby_suite_requires_its_exact_class_and_method_completion_inventory(self):
         controller = controller_module()
         paths = fixture_paths(controller)
+        fixture = (ROOT / "tests/workflow/upload_process_fixture.rb").read_text()
+
+        def literal_words(source, prefix, suffix, word_pattern):
+            # These four fixed copy catalogs and one rewrite list are literal
+            # source contracts, not a Ruby evaluator or general-purpose parser.
+            self.assertEqual(source.count(prefix), 1, prefix)
+            body, delimiter, _tail = source.split(prefix)[1].partition(suffix)
+            self.assertEqual(delimiter, suffix)
+            words = tuple(body.split())
+            self.assertTrue(words)
+            self.assertEqual(len(words), len(set(words)))
+            for word in words:
+                self.assertRegex(word, word_pattern)
+            return words
+
+        catalogs = []
+        for filename, name in (("test_native_upload_validation.rb", "PROOF_FILES"),
+                               ("test_native_signal_observation.rb", "SOURCE_FILES")):
+            catalogs.append(literal_words((ROOT / "tests/workflow" / filename).read_text(),
+                                          f"\n  {name} = %w[", "].freeze\n", r"^[a-z0-9_/]+\.rb\Z"))
+        for name in ("NativeOrderProbe", "NativeSignalProbe"):
+            prefix = f"\n  class {name}\n"
+            self.assertEqual(fixture.count(prefix), 1)
+            body, delimiter, _tail = fixture.split(prefix)[1].partition("\n  end\n")
+            self.assertEqual(delimiter, "\n  end\n")
+            catalogs.append(literal_words(body, "\n    SOURCES = %w[", "].freeze\n", r"^[a-z0-9_/]+\.rb\Z"))
+        for catalog in catalogs:
+            self.assertEqual(catalog, catalogs[0])
+            self.assertEqual(catalog[0], "tests/workflow/upload_process_fixture.rb")
+            for filename in catalog:
+                self.assertTrue((ROOT / filename).is_file(), filename)
+
+        pending, dependencies = ["fastlane/native_upload_validation.rb"], {}
+        while pending:
+            filename = pending.pop()
+            if filename in dependencies:
+                continue
+            self.assertIn(filename, catalogs[0], "copied native fixture is missing a required library")
+            names = []
+            for line in (ROOT / filename).read_text().splitlines():
+                if "require_relative" in line:
+                    # A changed/dynamic require shape must be reviewed rather
+                    # than silently omitted from the finite dependency walk.
+                    self.assertRegex(line, r'^\s*require_relative "[a-z_][a-z0-9_]*"\s*\Z')
+                    names.append(line.split('"')[1])
+            self.assertEqual(len(names), len(set(names)))
+            dependencies[filename] = tuple(names)
+            pending.extend(f"fastlane/{name}.rb" for name in names)
+        adapter_class = "\n  class AdapterDriver < NativeSetupDriver\n"
+        self.assertEqual(fixture.count(adapter_class), 1)
+        adapter_source, delimiter, _tail = fixture.split(adapter_class)[1].partition("\n  end\n")
+        self.assertEqual(delimiter, "\n  end\n")
+        self.assertEqual(adapter_source.count("\n    def prepare_native\n"), 1)
+        adapter_body, delimiter, _tail = adapter_source.split("\n    def prepare_native\n")[1].partition("\n    end\n")
+        self.assertEqual(delimiter, "\n    end\n")
+        rewrites = literal_words(adapter_body, "\n        changes = %w[", "].map do |name|\n", r"^[a-z_][a-z0-9_]*\Z")
+        self.assertEqual(rewrites, dependencies["fastlane/native_upload_validation.rb"])
+
         suites = {
             "ruby-support": ("test_fastlane_support.rb", {"FastlaneReleaseSupportTest"}, 12),
+            "ruby-store_document": ("test_store_document.rb", {"StoreDocumentPublicationTest"}, 13),
+            "ruby-store_lane_lifetime": ("test_store_lane_lifetime.rb", {"StoreLaneLifetimeTest"}, 19),
+            "ruby-store_lane_nested_validation": ("test_store_lane_nested_validation.rb", {"StoreLaneNestedValidationTest"}, 13),
+            "ruby-store_lane_resources": ("test_store_lane_resources.rb", {"StoreLaneResourcesTest"}, 9),
+            "ruby-store_lane_runtime": ("test_store_lane_runtime.rb", {"StoreLaneRuntimeTest"}, 12),
             "ruby-native-spawn": ("test_native_process_spawn.rb", {"NativeProcessSpawnTests"}, 52),
             "ruby-native-owner": ("test_native_upload_process.rb",
                                   {"NativeUploadProtocolTest", "NativeUploadTaskSlotTest", "NativeUploadRoleTest"}, 52),
             "ruby-native-capture": ("test_native_upload_validation.rb", {"NativeUploadValidationTest"}, 22),
             "ruby-native-signal-observation": ("test_native_signal_observation.rb", {"NativeSignalObservationTest"}, 1),
-            "ruby-play_store": ("test_play_store.rb", {"PreservingSupplyUploaderTests"}, 35),
-            "ruby-play_lanes": ("test_play_lanes.rb", {"PlayReleaseLanesTest", "BoundedPlayImageTest"}, 46),
+            "ruby-play_store": ("test_play_store.rb", {"PreservingSupplyUploaderTests"}, 44),
+            "ruby-play_lanes": ("test_play_lanes.rb", {"PlayReleaseLanesTest", "BoundedPlayImageTest"}, 50),
             "ruby-apple_store": ("test_apple_store.rb", {"AppleOperationTransportTest", "AppleStoreContractTest"}, 7),
-            "ruby-apple_lanes": ("test_apple_lanes.rb", {"AppleReleaseLanesTest"}, 23),
+            "ruby-apple_lanes": ("test_apple_lanes.rb", {"AppleReleaseLanesTest"}, 29),
             "ruby-apple_production": ("test_apple_production.rb", {"AppleProductionTest", "AppleCreateRetryContractTest"}, 47),
             "ruby-apple_production_lane": ("test_apple_production_lane.rb", {"AppleProductionLaneTest"}, 2),
             "ruby-apple_asset_upload": ("test_apple_asset_upload.rb", {"AppleAssetUploadTest"}, 8),

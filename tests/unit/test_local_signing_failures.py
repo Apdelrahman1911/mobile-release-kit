@@ -1,10 +1,12 @@
 """Fatal recovery boundaries use actual handles/journals, never real keychains."""
 from __future__ import annotations
 
+import base64
 import errno
 import io
 import json
 import os
+import plistlib
 import signal
 import stat
 import sys
@@ -16,12 +18,12 @@ from types import FunctionType, SimpleNamespace
 from unittest.mock import patch
 
 import mobile_release
-from mobile_release import cancellation, cli, credentials, local_signing as signing, owned_process as owned
+from mobile_release import build_inputs, cancellation, cli, credentials, local_signing as signing, owned_process as owned
 from mobile_release.cancellation import DefaultCancellation, cancellation_owner
 from mobile_release.errors import CredentialError
 from workflow.local_signing_workload import worker_timeout
 from .ios_entitlement_helpers import profile
-from .local_signing_helpers import NativeSigningModel, fictional_signing_profile, model_result
+from .local_signing_helpers import NativeSigningModel, completed_case_directory, fictional_signing_profile, model_result
 from .local_signing_algorithm_helpers import refuse_signing_execution
 from .local_signing_workspace import NativeCaseWorkspaceMixin
 from workflow.local_signing_regression_catalog import HANDLER_RESTORATION_VARIANTS
@@ -336,9 +338,13 @@ raise SystemExit(status)
     def signing_context(self, root, home, model, *, runner=None):
         private = root / "private"
         private.mkdir(mode=0o700, exist_ok=True)
+        project = root / "project"
+        project.mkdir(mode=0o700, exist_ok=True)
         p12, supplied = root / "input.p12", root / "input.mobileprovision"
         p12.write_bytes(b"fictional-p12")
         supplied.write_bytes(CONTENT)
+        p12.chmod(0o600)
+        supplied.chmod(0o600)
         payload = profile()
         payload["UUID"] = UUID
         stack = ExitStack()
@@ -348,6 +354,7 @@ raise SystemExit(status)
         stack.enter_context(patch("mobile_release.credentials._run_private", side_effect=runner or model))
         context = credentials._temporary_apple_signing_environment(
             p12=p12, password="fictional-password", profile=supplied, directory=private, home=home,
+            project_root=project,
         )
         return stack, context
 
@@ -942,10 +949,11 @@ raise SystemExit(status)
 
 
 class InertAccountCleanupTests(unittest.TestCase):
-    """Actual wrapper exits, modeled acquisition returns; no files or children.
+    """Actual wrapper exits; no child process or native signing operation.
 
-    These tests prove early admission, error precedence and original guard routing
-    only. Modeled descriptors never enter native execution or stand in for a receipt.
+    Selected-input paths use task-private files/owners; descriptor-fault paths
+    retain inert acquisition returns. They prove admission, error precedence and
+    guard routing, never fabricated native authentication or finality receipts.
     """
 
     @staticmethod
@@ -1097,7 +1105,15 @@ class InertAccountCleanupTests(unittest.TestCase):
     def test_apple_entry_primary_cannot_hide_independent_session_close_failure(self):
         from .test_lifetime_evidence import handler_model
 
-        with handler_model():
+        with completed_case_directory(prefix="mrk-inert-entry-") as root, handler_model():
+            project, private = root / "project", root / "private"
+            project.mkdir(mode=0o700)
+            private.mkdir(mode=0o700)
+            p12, source = private / "input.p12", private / "input.profile"
+            p12.write_bytes(b"fictional-p12")
+            source.write_bytes(CONTENT)
+            p12.chmod(0o600)
+            source.chmod(0o600)
             guard = DefaultCancellation(owned.ProcessCleanupError, "fixed")
             guard.install(); guard.activate()
             primary = CredentialError("ordinary session entry")
@@ -1115,8 +1131,8 @@ class InertAccountCleanupTests(unittest.TestCase):
             with patch.object(credentials, "_authenticated_signing_profile", return_value=(CONTENT, {"UUID": UUID})), \
                     self.assertRaises(owned.ProcessError) as caught:
                 with credentials._temporary_apple_signing_environment(
-                    p12=Path("/modeled/input.p12"), password="fictional", profile=Path("/modeled/input.profile"),
-                    directory=Path("/modeled/private"), lease=lease,
+                    p12=p12, password="fictional", profile=source,
+                    directory=private, project_root=project, lease=lease,
                 ):
                     self.fail("entry error was suppressed")
             self.assertTrue(caught.exception.fatal)
@@ -1155,11 +1171,13 @@ class InertAccountCleanupTests(unittest.TestCase):
                 try:
                     with ExitStack() as stack:
                         factory = stack.enter_context(patch.object(credentials, "local_signing_lease", wraps=signing.local_signing_lease))
+                        invocations = stack.enter_context(patch.object(credentials, "invocation_custody", wraps=build_inputs.invocation_custody))
                         stack.enter_context(patch.object(signing.SigningLease, "acquire", acquire))
                         sentinels = [stack.enter_context(patch.object(component, name, side_effect=AssertionError("material work before admission")))
-                                     for component, name in ((credentials, "_private_path_error"),
-                                                             (credentials.tempfile, "TemporaryDirectory"),
-                                                             (credentials, "_restore_build_targets"),
+                                     for component, name in ((credentials, "read_external_bytes"),
+                                                             (build_inputs.InvocationCustody, "project"),
+                                                             (build_inputs.FiniteScratch, "acquire"),
+                                                             (build_inputs.BuildInputs, "replace_all"),
                                                              (credentials, "_materialize"),
                                                              (credentials, "_temporary_apple_signing_environment"))]
                         with self.assertRaisesRegex(CredentialError, expected) as caught:
@@ -1175,6 +1193,7 @@ class InertAccountCleanupTests(unittest.TestCase):
                         self.assertEqual(admissions, [] if rejection in {"busy", "mismatched"} else ["admit"])
                         self.assertEqual(platform_reads, [] if rejection in {"quarantined", "mismatched"} else ["read"])
                         self.assertEqual(factory.call_count, int(rejection == "busy"))
+                        self.assertEqual(invocations.call_count, int(rejection == "busy"))
                         for sentinel in sentinels:
                             sentinel.assert_not_called()
                         self.assertFalse(guard.lifetime_ledger.fatal)
@@ -1182,6 +1201,8 @@ class InertAccountCleanupTests(unittest.TestCase):
                     guard.restore()
 
     def test_materializer_routes_one_exact_lease_through_all_cleanup_and_leaves_borrowed_owner_open(self):
+        from mobile_release.config import load_config
+        from .helpers import android_config, ios_config, write_project
         from .test_lifetime_evidence import handler_model
 
         cases = (("standalone", ("ios",), True, None),
@@ -1190,85 +1211,239 @@ class InertAccountCleanupTests(unittest.TestCase):
                  ("unsigned", ("ios",), False, None),
                  ("android", ("android",), True, None))
         for mode, selected, prepare, primary in cases:
-            with self.subTest(mode=mode), handler_model():
+            with self.subTest(mode=mode), completed_case_directory(prefix="mrk-inert-materializer-") as root, handler_model():
                 guard = DefaultCancellation(owned.ProcessCleanupError, "fixed")
                 guard.install(); guard.activate()
-                events, owners, consumed, yielded = [], [], [], []
-                supplied = signing.SigningLease(guard) if mode == "borrowed" else None
-                if supplied is not None:
-                    owners.append(supplied)
+                home = root / "home"
+                home.mkdir(mode=0o700)
+                platform = selected[0]
+                configuration = ios_config() if platform == "ios" else android_config()
+                configuration["services"][platform + "Firebase"] = "required"
+                config = load_config(write_project(root / "project", configuration, platform=platform))
+                target = config.root / ("iosApp/GoogleService-Info.plist" if platform == "ios" else "app/google-services.json")
+                if platform == "ios":
+                    target.with_suffix(".plist.example").write_bytes(b"public Firebase marker")
+                target.write_bytes(b"original client bytes")
+                target.chmod(0o640)
+                original_inode = target.stat().st_ino
+                selected_client = (plistlib.dumps({"BUNDLE_ID": configuration["ios"]["bundleId"]})
+                    if platform == "ios" else json.dumps({"client": [{"client_info": {"android_client_info": {
+                        "package_name": configuration["android"]["applicationId"]}}}]}).encode())
+                values = {
+                    "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64": base64.b64encode(b"fictional-p12").decode(),
+                    "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64": base64.b64encode(CONTENT).decode(),
+                    "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": "fictional",
+                    ("MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64" if platform == "ios" else
+                     "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64"): base64.b64encode(selected_client).decode(),
+                }
+                events, owners, children, consumed, yielded = [], [], [], [], []
+                original_acquire, original_close = signing.SigningLease.acquire, signing.SigningLease.close
+                original_admit = signing.SigningLease._admit_execution
+                original_scratch_acquire = build_inputs.FiniteScratch.acquire
+                original_restore, original_dispose = build_inputs.BuildInputs._restore, build_inputs.FiniteScratch._dispose
+                original_invocation_acquire = build_inputs.InvocationCustody.acquire
+                original_invocation_cleanup = build_inputs.InvocationCustody.cleanup
+                original_project_acquire = build_inputs._Project.acquire
+                original_project_cleanup = build_inputs._Project.cleanup
+                invocation_owners = []
+
+                def acquire_invocation(invocation):
+                    self.assertIs(invocation.cancellation, guard)
+                    self.assertIsNone(invocation.project_owner)
+                    result = original_invocation_acquire(invocation)
+                    self.assertIs(build_inputs._ENV_OWNER, invocation)
+                    invocation_owners.append(invocation)
+                    events.append("environment-enter")
+                    return result
+
+                def cleanup_invocation(invocation):
+                    self.assertIs(invocation, invocation_owners[0])
+                    self.assertIsNone(invocation.child)
+                    self.assertIsNone(invocation.project_owner)
+                    self.assertEqual(guard.handler_state, "ACTIVE")
+                    result = original_invocation_cleanup(invocation)
+                    self.assertFalse(invocation.reserved)
+                    self.assertIsNone(build_inputs._ENV_OWNER)
+                    events.append("environment-exit")
+                    return result
+
+                def acquire_project(project):
+                    invocation = invocation_owners[0]
+                    self.assertIs(build_inputs._ENV_OWNER, invocation)
+                    self.assertIs(invocation.project_owner, project)
+                    self.assertIs(project.guard, guard)
+                    self.assertIs(invocation.signing_lease, owners[0] if owners else None)
+                    result = original_project_acquire(project)
+                    events.append("project-enter")
+                    return result
+
+                def cleanup_project(project):
+                    self.assertIs(build_inputs._ENV_OWNER, invocation_owners[0])
+                    self.assertEqual(guard.handler_state, "ACTIVE")
+                    result = original_project_cleanup(project)
+                    self.assertTrue(project.claimed)
+                    self.assertIsNone(project.meta.number)
+                    events.append("project-exit")
+                    return result
+
                 @contextmanager
-                def stage(name, value):
-                    events.append(name + "-enter")
-                    try:
-                        yield value
-                    finally:
-                        events.append(name + "-exit")
-                def acquire(owner, **_kwargs):
-                    owners.append(owner)
+                def observe_custody():
+                    with ExitStack() as stack:
+                        stack.enter_context(patch.object(build_inputs.InvocationCustody, "acquire", new=acquire_invocation))
+                        stack.enter_context(patch.object(build_inputs.InvocationCustody, "cleanup", new=cleanup_invocation))
+                        stack.enter_context(patch.object(build_inputs._Project, "acquire", new=acquire_project))
+                        stack.enter_context(patch.object(build_inputs._Project, "cleanup", new=cleanup_project))
+                        yield
+
+                def acquire(owner, **kwargs):
                     self.assertIs(owner.cancellation, guard)
+                    self.assertIs(build_inputs._ENV_OWNER, invocation_owners[0])
+                    self.assertIsNone(invocation_owners[0].project_owner)
+                    result = original_acquire(owner, **kwargs)
+                    owners.append(owner)
                     events.append("lease-enter")
+                    return result
+
                 def close(owner):
                     self.assertIs(owner, owners[0])
+                    self.assertEqual(guard.handler_state, "ACTIVE")
+                    self.assertIs(build_inputs._ENV_OWNER, invocation_owners[0])
+                    self.assertIsNone(invocation_owners[0].project_owner)
+                    result = original_close(owner)
                     events.append("lease-exit")
-                def admit(owner):
+                    return result
+
+                def admit(owner, *args, **kwargs):
                     self.assertIs(owner, owners[0])
                     events.append("admit")
-                def scratch(**_kwargs):
+                    return original_admit(owner, *args, **kwargs)
+
+                def acquire_scratch(scratch):
+                    result = original_scratch_acquire(scratch)
+                    self.assertIs(scratch.cancellation, guard)
+                    self.assertEqual(scratch.layout, "build")
+                    child = scratch.journal
+                    self.assertIsInstance(child, build_inputs.BuildInputs)
+                    self.assertIs(child.invocation.cancellation, guard)
+                    self.assertIs(child.invocation.signing_lease, owners[0] if owners else None)
+                    children.append(child)
                     events.append("scratch-create")
-                    return stage("scratch", "/modeled/scratch")
+                    return result
+
+                def restore(child, row):
+                    self.assertIs(child, children[0])
+                    self.assertIs(child.cancellation, guard)
+                    self.assertEqual(guard.handler_state, "ACTIVE")
+                    result = original_restore(child, row)
+                    self.assertEqual(target.read_bytes(), b"original client bytes")
+                    events.append("targets-exit")
+                    return result
+
+                def dispose(scratch, **kwargs):
+                    self.assertIs(scratch, children[0].scratch)
+                    self.assertEqual(target.read_bytes(), b"original client bytes")
+                    self.assertEqual(guard.handler_state, "ACTIVE")
+                    result = original_dispose(scratch, **kwargs)
+                    events.append("scratch-exit")
+                    return result
+
+                @contextmanager
                 def signer(**kwargs):
+                    # Inert signing seam only; real account/project/input owners
+                    # below never receive a fabricated native completion record.
                     self.assertIs(kwargs["lease"], owners[0])
                     self.assertIs(kwargs["cancellation"], guard)
+                    self.assertIs(kwargs["directory"], children[0].scratch)
+                    for name, expected in (("p12", b"fictional-p12"), ("profile", CONTENT)):
+                        snapshot = kwargs[name]
+                        self.assertIsInstance(snapshot, build_inputs.InputSnapshot)
+                        self.assertEqual(kwargs["directory"].require(snapshot).read_bytes(), expected)
                     self.assertEqual(guard.handler_state, "ACTIVE")
-                    return stage("signing", {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": "modeled"})
-                def materialize(_values, _base64_name, _path_name, directory, filename, **_kwargs):
-                    return directory / filename if filename in {"distribution.p12", "profile.mobileprovision"} else None
+                    self.assertEqual(target.read_bytes(), selected_client)
+                    events.append("signing-enter")
+                    try:
+                        yield {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": UUID}
+                    finally:
+                        self.assertEqual(guard.handler_state, "ACTIVE")
+                        events.append("signing-exit")
+
                 def platforms():
                     for platform in selected:
                         consumed.append(platform)
                         yield platform
-                def body():
+
+                def body(supplied):
                     with credentials.materialize_build_inputs(
-                        SimpleNamespace(root=Path("/modeled/project"), section=lambda _name: {}),
-                        values={"MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": "fictional"},
-                        platforms=platforms(), prepare_ios_signing=prepare,
+                        config, values=values, platforms=platforms(), prepare_ios_signing=prepare,
                         signing_lease=supplied, cancellation=guard,
                     ) as materialized:
-                        yielded.append(materialized)
+                        yielded.append(dict(materialized))
+                        self.assertEqual(target.read_bytes(), selected_client)
                         if primary is not None:
                             raise primary
+
                 try:
-                    with patch.object(credentials, "local_signing_lease", wraps=signing.local_signing_lease) as factory, \
-                            patch.object(signing.SigningLease, "acquire", acquire), \
-                            patch.object(signing.SigningLease, "close", close), \
-                            patch.object(signing.SigningLease, "_admit_execution", admit), \
-                            patch.object(credentials.tempfile, "TemporaryDirectory", side_effect=scratch), \
-                            patch.object(credentials, "_restore_build_targets", side_effect=lambda _backups: stage("targets", None)), \
-                            patch.object(credentials, "_materialize", side_effect=materialize), \
-                            patch.object(credentials, "_temporary_apple_signing_environment", side_effect=signer) as signing_context, \
-                            patch.object(Path, "chmod"):
-                        if primary is None:
-                            body()
-                        else:
-                            with self.assertRaises(KeyboardInterrupt) as caught:
-                                body()
-                            self.assertIs(caught.exception, primary)
-                        signed = prepare and "ios" in selected
-                        owned_lease = signed and supplied is None
-                        self.assertEqual(consumed, list(selected))
-                        self.assertEqual(yielded, [{"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": "modeled"}] if signed else [{}])
-                        self.assertEqual(factory.call_count, int(owned_lease))
-                        self.assertEqual(signing_context.call_count, int(signed))
-                        self.assertEqual(events.count("admit"), int(signed))
-                        expected = (["signing-exit"] if signed else []) + ["targets-exit", "scratch-exit"]
-                        if owned_lease:
-                            expected.append("lease-exit")
-                            self.assertLess(events.index("lease-enter"), events.index("scratch-create"))
-                            factory.assert_called_once_with(cancellation=guard)
-                        self.assertEqual([event for event in events if event.endswith("-exit")], expected)
-                        self.assertEqual(guard.handler_state, "ACTIVE")
-                        self.assertFalse(guard.lifetime_ledger.fatal)
+                    borrowed = (signing.local_signing_lease(home=home, cancellation=guard)
+                                if mode == "borrowed" else nullcontext(None))
+                    with borrowed as supplied:
+                        if supplied is not None:
+                            owners.append(supplied)
+                            borrowed_fd = supplied.fd
+                        with patch.object(credentials, "local_signing_lease",
+                                side_effect=lambda **kwargs: signing.local_signing_lease(home=home, **kwargs)) as factory, \
+                                patch.object(credentials, "invocation_custody", wraps=build_inputs.invocation_custody) as invocations, \
+                                patch.object(signing.SigningLease, "acquire", new=acquire), \
+                                patch.object(signing.SigningLease, "close", new=close), \
+                                patch.object(signing.SigningLease, "_admit_execution", new=admit), \
+                                observe_custody(), \
+                                patch.object(build_inputs.FiniteScratch, "acquire", new=acquire_scratch), \
+                                patch.object(build_inputs.BuildInputs, "_restore", new=restore), \
+                                patch.object(build_inputs.FiniteScratch, "_dispose", new=dispose), \
+                                patch.object(credentials, "_temporary_apple_signing_environment", side_effect=signer) as signing_context, \
+                                patch("mobile_release.discovery.discover_project", return_value={}), \
+                                patch("mobile_release.discovery.selected_android_module", return_value=":app"):
+                            if primary is None:
+                                body(supplied)
+                            else:
+                                with self.assertRaises(KeyboardInterrupt) as caught:
+                                    body(supplied)
+                                self.assertIs(caught.exception, primary)
+                            signed = prepare and "ios" in selected
+                            owned_lease = signed and supplied is None
+                            self.assertEqual(consumed, list(selected))
+                            self.assertEqual(yielded, [{"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": UUID}] if signed else [{}])
+                            self.assertEqual(factory.call_count, int(owned_lease))
+                            self.assertEqual(signing_context.call_count, int(signed))
+                            self.assertEqual(invocations.call_count, 1)
+                            self.assertEqual(len(owners), int(signed))
+                            self.assertEqual(len(children), 1)
+                            self.assertEqual(events.count("admit"), 2 if supplied is not None else int(signed))
+                            expected = (["signing-exit"] if signed else []) + ["targets-exit", "scratch-exit", "project-exit"]
+                            if owned_lease:
+                                expected.append("lease-exit")
+                                self.assertLess(events.index("lease-enter"), events.index("scratch-create"))
+                                factory.assert_called_once_with(cancellation=guard)
+                            expected.append("environment-exit")
+                            self.assertEqual([event for event in events if event in {
+                                "environment-enter", "lease-enter", "project-enter", "scratch-create"}],
+                                ["environment-enter"] + (["lease-enter"] if owned_lease else [])
+                                + ["project-enter", "scratch-create"])
+                            self.assertEqual([event for event in events if event.endswith("-exit")], expected)
+                            self.assertEqual(target.read_bytes(), b"original client bytes")
+                            self.assertEqual((target.stat().st_ino, stat.S_IMODE(target.stat().st_mode)), (original_inode, 0o640))
+                            child = children[0]
+                            self.assertTrue(child.claimed)
+                            self.assertFalse(child.created or child.scratch.created)
+                            self.assertIsNone(child.slot.number)
+                            self.assertIsNone(child.scratch.slot.number)
+                            self.assertIsNone(child.invocation.child)
+                            self.assertTrue(child.invocation.claimed)
+                            if supplied is not None:
+                                supplied.assert_owner()
+                                self.assertEqual(supplied.fd, borrowed_fd)
+                                self.assertTrue(supplied.locked)
+                            self.assertEqual(guard.handler_state, "ACTIVE")
+                            self.assertFalse(guard.lifetime_ledger.fatal)
                 finally:
                     guard.restore()
 
@@ -1276,20 +1451,33 @@ class InertAccountCleanupTests(unittest.TestCase):
 class InertPkcs12CallerTests(unittest.TestCase):
     """Actual caller fallback policy, not process/profile/finality qualification.
 
-    Every prerequisite and runner below is inert. No native custody is issued,
-    fictional certificate bytes are never authenticated, and no files are used.
+    Native/session prerequisites and runners below are explicitly inert. Real
+    task-private files and snapshots exercise the caller input contract; no
+    native custody or profile-authentication/finality evidence is issued.
     """
 
     @contextmanager
     def caller(self, site, outcomes):
         from .test_lifetime_evidence import handler_model
 
-        with handler_model():
+        with completed_case_directory(prefix="mrk-inert-pkcs12-") as root, handler_model():
+            project, private, home = root / "project", root / "private", root / "home"
+            for directory in (project, private, home):
+                directory.mkdir(mode=0o700)
+            p12, source = private / "input.p12", private / "input.profile"
+            p12.write_bytes(b"fictional-p12")
+            source.write_bytes(CONTENT)
+            p12.chmod(0o600)
+            source.chmod(0o600)
+            values = {"MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PATH": str(p12),
+                      "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_PATH": str(source),
+                      "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": "fictional"}
             guard = DefaultCancellation(owned.ProcessCleanupError, "fixed")
             guard.install(); guard.activate()
             trace = SimpleNamespace(extractions=[], commands=[], lifecycle=[], guard=guard)
             results = iter(outcomes)
             execution_source = object()
+
             def run(argv, **kwargs):
                 trace.commands.append(list(argv))
                 if site == "validator":
@@ -1297,18 +1485,25 @@ class InertPkcs12CallerTests(unittest.TestCase):
                     self.assertIs(kwargs["execution_source"], execution_source)
                 if argv[:2] == ["openssl", "pkcs12"]:
                     trace.extractions.append(list(argv))
+                    self.assertNotIn("-out", argv)
                     outcome = next(results, 0)
                     if isinstance(outcome, BaseException):
                         raise outcome
-                    return SimpleNamespace(returncode=outcome, stdout="", stderr="")
+                    # Inert return values only, not completed native receipts.
+                    # Empty validator stdout retains its post-extraction INVALID
+                    # gate; signing needs bytes to exercise later caller cleanup.
+                    output = "-----BEGIN CERTIFICATE-----\nfictional\n" if site == "signing" else ""
+                    return SimpleNamespace(returncode=outcome, stdout=output, stderr="")
                 self.assertEqual(argv[0], "security")
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
+
             def finish():
                 trace.lifecycle.append("finish")
                 return False
+
             session = SimpleNamespace(
                 fd=311, state={"inflight": None}, intent={"profile": {"stage": "modeled-stage"}},
-                keychain=Path("/modeled/keychain"), unresolved=False, journal_failed=False, cleaning=False,
+                keychain=home / "modeled-keychain", unresolved=False, journal_failed=False, cleaning=False,
                 bind_runner=lambda *_args, **_kwargs: None, open=lambda **_kwargs: None,
                 prepare=lambda *_args: None, profile_event=lambda *_args, **_kwargs: None,
                 run=run, activate=lambda: trace.lifecycle.append("activate"),
@@ -1317,35 +1512,37 @@ class InertPkcs12CallerTests(unittest.TestCase):
                 close=lambda: trace.lifecycle.append("close"),
             )  # Modeled FD311 is never passed to an OS or native owner.
             trace.session = session
-            lease = SimpleNamespace(cancellation=guard, active=None, home=Path("/modeled/home"),
+            lease = SimpleNamespace(cancellation=guard, active=None, home=home,
                                     _admit_execution=lambda: None, session=lambda: session)
+
             def invoke(body=None):
                 if site == "signing":
                     with credentials._temporary_apple_signing_environment(
-                        p12=Path("/modeled/input.p12"), password="fictional",
-                        profile=Path("/modeled/input.profile"), directory=Path("/modeled/private"),
-                        lease=lease, cancellation=guard,
+                        p12=p12, password="fictional", profile=source, directory=private,
+                        project_root=project, lease=lease, cancellation=guard,
                     ) as updates:
                         if body is not None:
                             body()
                         return updates
                 return credentials._validate_apple_signing_material(
-                    SimpleNamespace(root=Path("/modeled/project"), section=lambda _name: {}),
-                    {"MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": "fictional"},
-                    Path("/modeled/private"), execution_source=execution_source, cancellation=guard,
+                    SimpleNamespace(root=project, section=lambda _name: {}), values,
+                    scratch, execution_source=execution_source, cancellation=guard,
                 )
+
             try:
-                with patch.object(credentials, "_authenticated_signing_profile", return_value=(CONTENT, {"UUID": UUID})), \
+                # Borrowing the real validator scratch keeps this test at the
+                # original private caller boundary. Its mocked run method never
+                # registers native work or changes the guard's process ledger.
+                selected_scratch = (build_inputs.finite_scratch(layout="signing-validation", parent=private,
+                                    cancellation=guard) if site == "validator" else nullcontext(None))
+                with selected_scratch as scratch, \
+                        patch.object(credentials, "_authenticated_signing_profile", return_value=(CONTENT, {"UUID": UUID})), \
                         patch.object(credentials, "_temporary_profile_installation", side_effect=lambda *_args, **_kwargs: nullcontext()), \
-                        patch.object(credentials, "_materialize", side_effect=lambda _values, _base64, _path, directory, name, **_kw: directory / name), \
                         patch("mobile_release.ios_profiles.load_authenticated_profile", return_value={}), \
                         patch("mobile_release.ios._profile_validity"), \
                         patch.object(credentials, "consume_profile_evidence"), \
                         patch.object(credentials, "_run_private", side_effect=run), \
-                        patch.object(Path, "exists", return_value=False), \
-                        patch.object(Path, "is_file", return_value=False), patch.object(Path, "chmod"):
-                    # The validator's ordinary file gate stops after P12 calls.
-                    # This tests fallback routing, never fictional cert validity.
+                        patch.object(credentials, "run_owned", side_effect=AssertionError("inert caller attempted native execution")):
                     yield invoke, trace
             finally:
                 guard.restore()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 import re
@@ -8,19 +10,30 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import Mapping
 
 from .config import ConfigurationError, ReleaseConfig, ReleaseVersion
 from .credentials import (
-    credential_values_for_purpose,
+    SelectedStoreMaterial,
+    _selected_store_material,
     credential_values_from_environment,
 )
-from .discovery import GitContext
+from .build_inputs import (
+    FiniteScratch, InvocationCustody, _app_private_directory, finite_scratch, invocation_custody,
+    store_private_namespace,
+)
+from .cancellation import CleanupScope, DefaultCancellation
+from .checked_files import read_readback_bytes
+from .owned_process import ProcessError, preserve_lifetime_error, run_owned
+from ._profile_callers import first_primary_context
+from ._store_lane_evidence import StoreLaneCallEvidence, StoreLaneEvidenceError
+from ._store_lane_files import StoreLaneAttempt, StoreLaneFiles
+from .discovery import GitContext, valid_observed_source
 from .errors import MutationGuardError, StoreOperationError, ValidationError
-from .reporting import Finding, Status
+from .reporting import FAILING_STATUSES, Finding, Status
 from .provenance import (
     _reject_duplicate_pairs,
     load_store_receipt,
@@ -60,6 +73,7 @@ RUNTIME_ENVIRONMENT_NAMES = {
     "BUNDLE_PATH",
     "BUNDLE_WITHOUT",
     "CI",
+    "DEVELOPER_DIR",
     "GEM_HOME",
     "GEM_PATH",
     "HOME",
@@ -102,13 +116,16 @@ def _repository_path(config: ReleaseConfig, value: str | Path, label: str) -> Pa
         ) from error
 
 
-def _private_app_directory(config: ReleaseConfig, relative: str) -> Path:
-    directory = _repository_path(config, relative, "tool-owned Store directory")
-    if directory.exists() and not directory.is_dir():
-        raise StoreOperationError("tool-owned Store path must be a directory")
-    directory.mkdir(parents=True, exist_ok=True)
-    # Recheck after creation so a pre-existing symlinked parent can never be hidden by mkdir.
-    return _repository_path(config, relative, "tool-owned Store directory")
+def _private_app_directory(config: ReleaseConfig, relative: str, *,
+                           cancellation: DefaultCancellation) -> Path:
+    if relative != ".mobile-release/store":
+        raise StoreOperationError("unsupported private Store namespace")
+    # Same original checked persistent-namespace owner as Store invocations.
+    # Existing unsafe state is refused, never chmodded/adopted or removed.
+    _repository_path(config, relative, "tool-owned Store directory")
+    with store_private_namespace(config.root, cancellation=cancellation) as owner:
+        owner.check()
+        return owner.path
 
 
 def _play_state_journal_path(receipt_path: Path) -> Path:
@@ -161,6 +178,8 @@ def guard_ci_mutation(
         raise MutationGuardError(f"Store operation requires the {expected_environment} environment")
     if not git.repository or not git.repository_id or not git.commit or not git.tree or not git.ref:
         raise MutationGuardError("immutable GitHub repository/source identity is incomplete")
+    if not valid_observed_source(git):
+        raise MutationGuardError("Store operation requires an observed full Git commit/tree and provably clean worktree")
     if request.recovery_run_id:
         if not re.fullmatch(r"[1-9][0-9]*", request.recovery_run_id):
             raise MutationGuardError("recovery_run_id must be a positive workflow run ID")
@@ -169,8 +188,6 @@ def guard_ci_mutation(
             raise MutationGuardError("recovery requires the immutable dispatch head SHA")
     elif env.get("GITHUB_SHA") != git.commit:
         raise MutationGuardError("GITHUB_SHA does not exactly match the checked-out Git commit")
-    if git.dirty is not False:
-        raise MutationGuardError("Store operation requires a provably clean worktree")
     expected_branch = config.section("source").get(
         "productionBranch" if request.stage == "production-submit" else "candidateBranch", "main"
     )
@@ -189,17 +206,14 @@ def _store_environment(
     request: StoreRequest,
     receipt_path: Path,
     tooling_root: Path,
+    *, material: SelectedStoreMaterial, invocation: InvocationCustody,
+    lane_evidence: StoreLaneCallEvidence, source_environment: Mapping[str, str],
+    authority: Mapping[str, object],
 ) -> dict[str, str]:
-    source_environment = os.environ.copy()
+    material.require_store(config=config, platform=request.platform, invocation=invocation,
+                           lane_evidence=lane_evidence)
     env = _runtime_environment(source_environment)
-    credentials = credential_values_for_purpose(
-        config,
-        credential_values_from_environment(source_environment),
-        stage="production" if request.stage == "production-submit" else request.stage,
-        purpose="store",
-        platforms=(request.platform,),
-    )
-    env.update(credentials)
+    env.update(material.lane_environment(platform=request.platform))
     for name in STORE_OPERATION_ENVIRONMENT_NAMES:
         if not (raw_path := source_environment.get(name)):
             continue
@@ -237,7 +251,6 @@ def _store_environment(
         env["MOBILE_RELEASE_RECOVERY_RUN_ID"] = request.recovery_run_id
     if request.recovery_confirmation:
         env["MOBILE_RELEASE_RECOVERY_CONFIRMATION"] = request.recovery_confirmation
-    authority = workflow_authority(request.stage)
     env["MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON"] = json.dumps(
         authority, sort_keys=True, separators=(",", ":")
     )
@@ -275,9 +288,11 @@ def _store_environment(
     return env
 
 
-def _require_fastlane_bundle(tooling_root: Path) -> None:
+def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancellation | None = None,
+                             source_environment: Mapping[str, str] | None = None) -> None:
     gemfile = tooling_root / "Gemfile"
-    environment = _runtime_environment(os.environ)
+    source_environment = os.environ if source_environment is None else source_environment
+    environment = _runtime_environment(source_environment)
     environment.update(
         {
             "BUNDLE_GEMFILE": str(gemfile),
@@ -287,7 +302,7 @@ def _require_fastlane_bundle(tooling_root: Path) -> None:
             "FASTLANE_SKIP_UPDATE_CHECK": "true",
         }
     )
-    if shutil.which("ruby") is None:
+    if shutil.which("ruby", path=environment.get("PATH")) is None:
         raise StoreOperationError(
             "Pinned Store tooling requires Ruby 3.3.12 and Bundler 4.0.16; "
             "dependencies are never installed automatically."
@@ -295,16 +310,18 @@ def _require_fastlane_bundle(tooling_root: Path) -> None:
 
     def run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
         try:
-            return subprocess.run(
+            return run_owned(
                 argv,
                 cwd=tooling_root,
-                env=environment,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                environ=environment,
+                capture=True,
                 timeout=60,
-                check=False,
+                cancellation=cancellation,
             )
+        except ProcessError as error:
+            if error.fatal:
+                raise
+            return None
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             return None
 
@@ -363,147 +380,435 @@ def _require_fastlane_bundle(tooling_root: Path) -> None:
             )
 
 
-def _run_store_lane(
-    *,
-    config: ReleaseConfig,
-    release: ReleaseVersion,
-    request: StoreRequest,
-) -> Path:
-    lane = LANES[(request.stage, request.platform)]
-    receipt_path = (
-        request.store_precondition or request.output_dir / "store-precondition.json"
-        if request.prepare
-        else request.store_receipt
-        or Path(
-            os.environ.get(
-                "MOBILE_RELEASE_STORE_RECEIPT_PATH", request.output_dir / "raw-store-receipt.json"
-            )
-        )
-    )
-    receipt_path = _repository_path(config, receipt_path, "Store receipt path")
-    tooling_root = resolve_tooling_root()
-    if tooling_root is None:
-        raise StoreOperationError(
-            "shared Fastlane assets are unavailable; install the complete pinned distribution "
-            "or set MOBILE_RELEASE_TOOLING_ROOT"
-        )
-    runner = tooling_root / "fastlane/run_lane.rb"
-    if not _complete_tooling_root(tooling_root):
-        raise StoreOperationError("pinned shared Fastlane/Gem bundle is incomplete")
-    _require_fastlane_bundle(tooling_root)
-    receipt_path.parent.mkdir(parents=True, exist_ok=True)
-    if receipt_path.exists() or receipt_path.is_symlink():
-        raise StoreOperationError(
-            "Store output path already exists; authoritative state is never overwritten"
-        )
-    command = ["bundle", "exec", "ruby", str(runner), lane]
+def store_output_path(config: ReleaseConfig, request: StoreRequest, *,
+                      source_environment: Mapping[str, str] | None = None) -> Path:
+    source = os.environ if source_environment is None else source_environment
+    value = (request.store_precondition or request.output_dir / "store-precondition.json"
+             if request.prepare else request.store_receipt or Path(source.get(
+                 "MOBILE_RELEASE_STORE_RECEIPT_PATH", request.output_dir / "raw-store-receipt.json")))
+    return _repository_path(config, value, "Store output path")
+
+
+def new_store_lane_evidence(config: ReleaseConfig, request: StoreRequest,
+                            cancellation: DefaultCancellation) -> StoreLaneCallEvidence:
+    """Allocate before entering any outer metadata/snapshot/material context."""
+    return StoreLaneCallEvidence(cancellation, lane=LANES[(request.stage, request.platform)],
+        output=store_output_path(config, request), nonce=secrets.token_bytes(16))
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class StoreLaneReadback:
+    """Provisional checked bytes, NOT final Store evidence or cleanup authority."""
+
+    _record: StoreLaneCallEvidence
+    _output: Path
+    _content: bytes
+    _document: dict[str, object]
+
+    def provisional(self) -> dict[str, object]:
+        # Caller post-lane policy may inspect a copy before dependent cleanup;
+        # no public evidence may be written until complete_store_operation.
+        return copy.deepcopy(self._document)
+
+
+def _decode_store_document(content: bytes) -> dict[str, object]:
     try:
-        with tempfile.TemporaryDirectory(prefix="mobile-release-store-run-") as temporary:
-            runner_directory = Path(temporary)
-            runner_directory.chmod(0o700)
-            completed = subprocess.run(
-                command,
-                cwd=runner_directory,
-                env=_store_environment(config, release, request, receipt_path, tooling_root),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=60 * 60,
-                check=False,
-            )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise StoreOperationError(f"Store lane failed or timed out: {lane}") from error
-    if completed.returncode:
-        raise StoreOperationError(f"Store lane failed with exit {completed.returncode}: {lane}")
-    return receipt_path
+        result = json.loads(content.decode("utf-8"), object_pairs_hook=_reject_duplicate_pairs,
+                            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    except (UnicodeError, ValueError, RecursionError):
+        raise StoreOperationError("Store lane returned an invalid bounded document") from None
+    if type(result) is not dict:
+        raise StoreOperationError("Store lane returned a non-object document")
+    return result
 
 
-def prepare_store_operation(
-    *, config: ReleaseConfig, release: ReleaseVersion, request: StoreRequest
-) -> dict[str, object]:
+def _require_original_lane(record: StoreLaneCallEvidence, cancellation: DefaultCancellation,
+                           config: ReleaseConfig, request: StoreRequest) -> None:
+    if type(record) is not StoreLaneCallEvidence or type(cancellation) is not DefaultCancellation:
+        raise StoreLaneEvidenceError(attempted=False)
+    record._origin(cancellation)
+    record._require(record._lane == LANES[(request.stage, request.platform)]
+                    and record._output == str(store_output_path(config, request)))
+
+
+def _raise_lane_primary(record: StoreLaneCallEvidence, cancellation: DefaultCancellation,
+                        primary: BaseException) -> None:
+    record._remember(primary)
+    if isinstance(record._primary, (KeyboardInterrupt, SystemExit)):
+        raise record._primary
+    facts, verdict = cancellation.lifetime_ledger.verdict(), record.verdict(cancellation=cancellation)
+    if not verdict.dependents_settled or not facts.cleanup_complete:
+        error = ProcessError("Store lane lifetime or dependent cleanup is unconfirmed",
+            dispatched=record._attempted, contained=verdict.dependents_settled and facts.contained,
+            cleanup_complete=verdict.dependents_settled and facts.cleanup_complete)
+        for previous in (record._primary, *record._secondary, cancellation.lifetime_ledger._primary,
+                         *cancellation.lifetime_ledger._secondary):
+            preserve_lifetime_error(error, previous=previous)
+        raise error from None
+    if isinstance(primary, ProcessError):
+        raise primary
+    if isinstance(primary, (OSError, subprocess.TimeoutExpired)):
+        raise StoreOperationError(f"Store lane failed or timed out: {record._lane}") from None
+    raise primary
+
+
+def settle_store_operation(record: StoreLaneCallEvidence, *, cancellation: DefaultCancellation,
+                           primary: BaseException | None = None) -> None:
+    """Retire the original fence only AFTER every attached dependent has closed.
+
+    May settle an original ordinary failure/no-target route, but never publishes
+    receipt authority. Independent original handle closes run after any error.
+    """
+    from .ios_artifacts import _LaneSnapshotOwner
+
+    if type(record) is not StoreLaneCallEvidence:
+        raise StoreLaneEvidenceError()
+    record._origin(cancellation)
+    first = None
+    pending = record._pending_attempt
+    try:
+        record.finish(cancellation=cancellation, primary=primary)
+        invocation = getattr(record, "_caller_invocation", None)
+        record._require(invocation is not None or not record._attempted)
+        if invocation is not None:
+            record._require(type(invocation) is InvocationCustody
+                            and invocation._lane_closed_for(record, cancellation))
+        for role in ("metadata", "ios-snapshot", "store-selection"):
+            binding = record._resources.get(role)
+            if binding is None:
+                continue
+            owner = binding._owner
+            expected = _LaneSnapshotOwner if role == "ios-snapshot" else FiniteScratch
+            record._require(type(owner) is expected and owner._lane_closed_for(record, binding, cancellation))
+        verdict, facts = record.verdict(cancellation=cancellation), cancellation.lifetime_ledger.verdict()
+        record._require(verdict.dependents_settled and facts.cleanup_complete)
+        files_binding = record._resources.get("terminal")
+        if files_binding is not None:
+            files = files_binding._owner
+            record._require(type(files) is StoreLaneFiles and files._receipt_closed_for(record))
+        if pending is not None:
+            record._require(type(pending) is StoreLaneAttempt and pending.record is record)
+            if pending.phase == "PENDING":
+                pending.retire()
+            else:
+                record._require(pending.phase == "RETIRED"
+                    or not record._attempted and pending.phase in ("NEW", "ABSENT"))
+    except BaseException as error:
+        first = error
+        record._remember(error)
+    finally:
+        if type(pending) is StoreLaneAttempt:
+            try:
+                pending.close(primary=primary or first)
+            except BaseException as error:
+                record._remember(error)
+                if first is None:
+                    first = error
+    if first is not None:
+        _raise_lane_primary(record, cancellation, primary or first)
+
+
+def close_store_operation_resources(resources: ExitStack, record: StoreLaneCallEvidence, *,
+                                    cancellation: DefaultCancellation,
+                                    primary: BaseException | None = None,
+                                    retire_marker: bool = True) -> None:
+    """Fixed encompassing cleanup, not an arbitrary resource callback contract."""
+    first = None
+    try:
+        record.finish(cancellation=cancellation, primary=primary)
+    except BaseException as error:
+        first = error
+        record._remember(error)
+        cancellation._abort(error)
+    try:
+        resources.close()
+    except BaseException as error:
+        if first is None:
+            first = error
+        record._remember(error)
+        cancellation._abort(error)
+    if retire_marker:
+        try:
+            settle_store_operation(record, cancellation=cancellation, primary=primary or first)
+        except BaseException as error:
+            record._remember(error)
+            if first is None:
+                first = error
+    if first is not None:
+        _raise_lane_primary(record, cancellation, primary or first)
+
+
+def complete_store_operation(readback: StoreLaneReadback, *, lane_evidence: StoreLaneCallEvidence,
+                             cancellation: DefaultCancellation) -> dict[str, object]:
+    """Final original gate; context closure and exact bytes cannot be substituted."""
+    if type(readback) is not StoreLaneReadback or readback._record is not lane_evidence:
+        raise StoreLaneEvidenceError()
+    lane_evidence._origin(cancellation)
+    files = lane_evidence._files_owner()
+    lane_evidence._require(readback._output == Path(lane_evidence._output)
+        and readback._content == files.checked_document()
+        and readback._document == _decode_store_document(readback._content))
+    settle_store_operation(lane_evidence, cancellation=cancellation)
+    lane_evidence.require_receipt(lane=lane_evidence._lane, output=readback._output,
+        sha256=hashlib.sha256(readback._content).digest(), cancellation=cancellation)
+    return copy.deepcopy(readback._document)
+
+
+def _run_store_lane(
+    *, config: ReleaseConfig, release: ReleaseVersion, request: StoreRequest,
+    lane_evidence: StoreLaneCallEvidence, cancellation: DefaultCancellation,
+    material: SelectedStoreMaterial, invocation: InvocationCustody, resources: ExitStack,
+    source_environment: Mapping[str, str], authority: Mapping[str, object],
+    tooling_root: Path, operation_intent: Mapping[str, object] | None,
+) -> bytes:
+    """One original Store command; returns provisional checked bytes only."""
+    record = lane_evidence
+    _require_original_lane(record, cancellation, config, request)
+    record._require(not record._sealed and not record._attempted and not record._finished and not record._failed)
+    receipt_path = _repository_path(config, Path(record._output), "Store output path")
+    lane = record._lane
+    # Pure path/material refusal comes before reserving the lane's file owner;
+    # a rejected input is not an ambiguous scratch acquisition.
+    if os.path.lexists(receipt_path):
+        raise StoreOperationError("Store output path already exists; authoritative state is never overwritten")
+    environment = _store_environment(config, release, request, receipt_path, tooling_root,
+        material=material, invocation=invocation, lane_evidence=record,
+        source_environment=source_environment, authority=authority)
+    # Preparation may be the first producer of staging/<stage>/<platform>.
+    # Retain its original private ancestry on the encompassing resource stack
+    # through the command, terminal read, file disposal and final scope checks.
+    # A point-in-time mkdir (or chmod of existing state) is not that custody.
+    namespace = resources.enter_context(_app_private_directory(
+        receipt_path.parent, app_root=config.root, cancellation=cancellation))
+    if namespace is None:
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        _repository_path(config, receipt_path, "Store output path")
+    # Inputs and exact bundle have already been admitted. Preserve the selected
+    # HOME for the original Altool/Java route; do not invent a shell override.
+    pending = StoreLaneAttempt(record, cancellation, app_root=config.root,
+        mode="prepare" if request.prepare else "execute",
+        intent_sha256=None if request.prepare else bytes.fromhex(operation_intent["integrity"]["sha256"]),
+        executed_by=None if request.prepare else dict(authority))
+    files = StoreLaneFiles(record, cancellation, app_root=config.root,
+                           mode="prepare" if request.prepare else "execute", shell_home=False)
+    completed, content, primary = None, None, None
+    try:
+        files.acquire()
+        pending.acquire()  # Exclusive original refusal fence before command sealing/creation.
+        environment = files.prepare_environment(environment)
+        snapshot_binding = record._resources.get("ios-snapshot")
+        if snapshot_binding is not None:
+            from .ios_artifacts import _LaneSnapshotOwner
+
+            snapshot = snapshot_binding._owner
+            record._require(type(snapshot) is _LaneSnapshotOwner)
+            snapshot.admit(record, cancellation)
+        argv = record.seal_command(runner=tooling_root / "fastlane/run_lane.rb", cwd=files.cwd,
+                                   environ=environment, cancellation=cancellation)
+        try:
+            completed = run_owned(argv, cwd=files.cwd, environ=environment, capture=False,
+                timeout=3600, cancellation=cancellation,
+                _evidence=record.command_evidence(cancellation=cancellation))
+        except BaseException as error:
+            primary = error
+            record._remember(error)
+        if record._attempted:
+            try:
+                files.read_terminal(primary=primary)
+            except BaseException as error:
+                record._remember(error)
+                if primary is None:
+                    primary = error
+        if primary is None:
+            if completed is None or completed.returncode:
+                primary = StoreOperationError(f"Store lane failed: {lane}")
+            else:
+                content = files.checked_document()
+    except BaseException as error:
+        record._remember(error)
+        if primary is None:
+            primary = error
+    finally:
+        try:
+            record.finish(cancellation=cancellation, primary=primary)
+        except BaseException as error:
+            record._remember(error)
+            if primary is None:
+                primary = error
+        try:
+            files.dispose()
+        except BaseException as error:
+            record._remember(error)
+            if primary is None:
+                primary = error
+        finally:
+            try:
+                files.close(primary=primary)
+            except BaseException as error:
+                record._remember(error)
+                if primary is None:
+                    primary = error
+        # The pending owner and its original directory FDs remain rooted on
+        # this record. Outer metadata/snapshot post-use and cleanup come first.
+        if namespace is not None:
+            try:
+                namespace.check()
+            except BaseException as error:
+                record._remember(error)
+                if primary is None:
+                    primary = error
+    if primary is not None:
+        _raise_lane_primary(record, cancellation, primary)
+    record._require(type(content) is bytes)
+    return content
+
+
+def _raw_readback(*, record: StoreLaneCallEvidence, cancellation: DefaultCancellation,
+                  config: ReleaseConfig, release: ReleaseVersion, request: StoreRequest,
+                  operation_intent: Mapping[str, object]) -> StoreLaneReadback:
+    output = Path(record._output)
+    if record._attempted:
+        # Same live original owner only. No new caller-provided pathname read.
+        content = record._files_owner().checked_document()
+        raw = _decode_store_document(content)
+    else:
+        raw = validate_store_receipt(load_store_receipt(output), config=config, release=release,
+            stage=request.stage, platform=request.platform, operation_intent=operation_intent,
+            recovery_run_id=request.recovery_run_id)
+        probe = StoreLaneAttempt(record, cancellation, app_root=config.root, mode="execute",
+            intent_sha256=bytes.fromhex(raw["operationIntentSha256"]), executed_by=raw["executedBy"])
+        probe.require_absent()  # Refusal-only lookup of ORIGINAL, not the new dispatch identity.
+        raise StoreOperationError(
+            "Raw Store evidence lacks its original live composite completion. Preserve the original "
+            "intent/artifacts and use the existing protected readback-first recovery route; "
+            "marker absence, copied bytes or a new output directory cannot authorize reuse.")
+    document = validate_store_receipt(raw, config=config, release=release, stage=request.stage,
+        platform=request.platform, operation_intent=operation_intent, recovery_run_id=request.recovery_run_id)
+    return StoreLaneReadback(record, output, content, document)
+
+
+def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request: StoreRequest,
+                     operation_intent: Mapping[str, object] | None,
+                     lane_evidence: StoreLaneCallEvidence | None,
+                     cancellation: DefaultCancellation | None,
+                     invocation: InvocationCustody | None) -> dict[str, object] | StoreLaneReadback:
+    borrowed = lane_evidence is not None
+    if invocation is not None and not borrowed:
+        raise StoreLaneEvidenceError(attempted=False)
+    if borrowed:
+        if type(lane_evidence) is not StoreLaneCallEvidence:
+            raise StoreLaneEvidenceError(attempted=False)
+        if cancellation is None:
+            cancellation = lane_evidence._guard
+        lane_evidence._origin(cancellation)
+    with first_primary_context(ExitStack(), cancellation=cancellation, expose_owner=True) as (resources, guard):
+        record = lane_evidence if borrowed else new_store_lane_evidence(config, request, guard)
+        _require_original_lane(record, guard, config, request)
+        scope = CleanupScope(guard, lambda: close_store_operation_resources(
+            resources, record, cancellation=guard, primary=scope._first_error,
+            retire_marker=not borrowed), owns_cancellation=False, first_primary=True)
+        try:
+            with scope:
+                # The original encompassing environment owner is admitted
+                # before tooling probes, private input selection or raw reuse.
+                if invocation is None:
+                    invocation = resources.enter_context(invocation_custody(
+                        config.root, mode="store", cancellation=guard, lane_evidence=record))
+                else:
+                    record._require(type(invocation) is InvocationCustody and invocation.mode == "store"
+                                    and invocation.lane_evidence is record
+                                    and getattr(record, "_caller_invocation", None) is invocation)
+                    invocation.require(root=config.root, cancellation=guard)
+                if not request.prepare:
+                    if operation_intent is None or request.operation_intent is None:
+                        raise StoreOperationError("Store execution requires its authenticated original operation intent")
+                    validate_operation_intent(operation_intent)
+                    intent_path = _repository_path(config, request.operation_intent, "operation intent path")
+                    if load_operation_intent(intent_path) != operation_intent:
+                        raise StoreOperationError("operation-intent file differs from the validated authorization")
+                output = Path(record._output)
+                if os.path.lexists(output):
+                    if request.prepare:
+                        raise StoreOperationError("Store precondition output already exists; it is never renamed or adopted")
+                    readback = _raw_readback(record=record, cancellation=guard, config=config, release=release,
+                                             request=request, operation_intent=operation_intent)
+                else:
+                    source_environment = dict(os.environ)
+                    authority = workflow_authority(request.stage)
+                    tooling_root = resolve_tooling_root()
+                    if tooling_root is None or not _complete_tooling_root(tooling_root):
+                        raise StoreOperationError("Pinned shared Fastlane/Gem tooling is unavailable or incomplete")
+                    _require_fastlane_bundle(tooling_root, cancellation=guard,
+                                             source_environment=source_environment)
+                    material = resources.enter_context(_selected_store_material(config,
+                        values=credential_values_from_environment(source_environment), platforms=(request.platform,),
+                        stage="production" if request.stage == "production-submit" else request.stage,
+                        invocation=invocation, cancellation=guard, lane_evidence=record))
+                    findings = material.validate()
+                    if any(item.status in FAILING_STATUSES for item in findings):
+                        raise StoreOperationError("Selected Store credential material is missing or invalid")
+                    content = _run_store_lane(config=config, release=release, request=request,
+                        lane_evidence=record, cancellation=guard, material=material, invocation=invocation,
+                        resources=resources, source_environment=source_environment, authority=authority,
+                        tooling_root=tooling_root,
+                        operation_intent=operation_intent)
+                    raw = _decode_store_document(content)
+                    document = (validate_store_precondition(raw, stage=request.stage, platform=request.platform)
+                                if request.prepare else validate_store_receipt(raw, config=config, release=release,
+                                    stage=request.stage, platform=request.platform, operation_intent=operation_intent,
+                                    recovery_run_id=request.recovery_run_id))
+                    readback = StoreLaneReadback(record, output, content, document)
+        finally:
+            scope.__exit__(*sys.exc_info())
+        return readback if borrowed else complete_store_operation(readback, lane_evidence=record, cancellation=guard)
+
+
+def prepare_store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request: StoreRequest,
+                            lane_evidence: StoreLaneCallEvidence | None = None,
+                            cancellation: DefaultCancellation | None = None,
+                            invocation: InvocationCustody | None = None) -> dict[str, object] | StoreLaneReadback:
     if not request.prepare or request.execute:
         raise StoreOperationError("Store preparation requires prepare-only mode")
-    initial_path = _repository_path(config, request.store_precondition or request.output_dir / "store-precondition.json", "Store precondition path")
-    if initial_path.exists():
-        # A raw precondition has no source/authority binding until sealed into
-        # an intent. Preserve this diagnostic but capture fresh read-only state
-        # instead of signing stale state under potentially changed inputs.
-        validate_store_precondition(load_store_receipt(initial_path), stage=request.stage, platform=request.platform)
-        request = replace(request, store_precondition=initial_path.with_name(f"store-precondition-{secrets.token_hex(16)}.json"))
-    receipt_path = _run_store_lane(config=config, release=release, request=request)
-    if not receipt_path.is_file():
-        raise StoreOperationError(
-            "Store preparation did not produce authoritative readback at "
-            "MOBILE_RELEASE_STORE_RECEIPT_PATH"
-        )
-    raw = load_store_receipt(receipt_path)
-    return validate_store_precondition(raw, stage=request.stage, platform=request.platform)
+    return _store_operation(config=config, release=release, request=request, operation_intent=None,
+                            lane_evidence=lane_evidence, cancellation=cancellation, invocation=invocation)
 
 
-def execute_store_operation(
-    *,
-    config: ReleaseConfig,
-    release: ReleaseVersion,
-    request: StoreRequest,
-    operation_intent: Mapping[str, object] | None = None,
-) -> dict[str, object]:
+def execute_store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request: StoreRequest,
+                            operation_intent: Mapping[str, object] | None = None,
+                            lane_evidence: StoreLaneCallEvidence | None = None,
+                            cancellation: DefaultCancellation | None = None,
+                            invocation: InvocationCustody | None = None) -> dict[str, object] | StoreLaneReadback:
     if not request.execute or request.prepare:
         raise StoreOperationError("Store execution requires execute-only mode")
-    if operation_intent is None:
-        raise StoreOperationError("Store execution requires an authenticated operation intent")
-    validate_operation_intent(operation_intent)
-    if request.operation_intent is None:
-        raise StoreOperationError("Store execution requires the original operation-intent file")
-    intent_path = _repository_path(config, request.operation_intent, "operation intent path")
-    if load_operation_intent(intent_path) != operation_intent:
-        raise StoreOperationError("operation-intent file differs from the validated authorization")
-    receipt_path = request.store_receipt or Path(
-        os.environ.get(
-            "MOBILE_RELEASE_STORE_RECEIPT_PATH", request.output_dir / "raw-store-receipt.json"
-        )
-    )
-    receipt_path = _repository_path(config, receipt_path, "Store receipt path")
-    if not receipt_path.exists():
-        try:
-            _run_store_lane(config=config, release=release, request=request)
-        except StoreOperationError as error:
-            # Never echo Fastlane stderr: it may contain private API bodies.
-            # A strictly validated public inventory is safe/actionable instead.
-            if request.platform == "ios":
-                journal = receipt_path.with_name(f"{receipt_path.stem}-apple-state.json")
-                if journal.is_file() and not journal.is_symlink():
-                    try:
-                        diagnostic = load_store_receipt(journal)
-                        history = diagnostic.get("history", [])
-                        if isinstance(history, list):
-                            for event in reversed(history[-256:]):
-                                if isinstance(event, dict) and "createRetryInventory" in event:
-                                    inventory = validate_create_retry_inventory(event["createRetryInventory"], operation_intent=operation_intent)
-                                    confirmation = f"retry-ios-operation-creates:{operation_intent['integrity']['sha256']}:{canonical_sha256(inventory)}"
-                                    raise StoreOperationError(
-                                        "Apple create outcome is ambiguous. Retain the original intent/artifacts; "
-                                        "independently resolve whether prior requests were accepted, then use a NEW "
-                                        "protected first-attempt recovery dispatch with --recovery-run-id "
-                                        f"{operation_intent['authorizedBy']['runId']} --recovery-confirmation {confirmation}. "
-                                        "Repeated absence alone is not proof of rejection."
-                                    ) from error
-                    except ValidationError:
-                        pass
-            raise
-    if not receipt_path.is_file() or receipt_path.is_symlink():
-        raise StoreOperationError(
-            "Store operation did not produce authoritative readback at "
-            "MOBILE_RELEASE_STORE_RECEIPT_PATH"
-        )
-    raw = load_store_receipt(receipt_path)
-    return validate_store_receipt(
-        raw,
-        config=config,
-        release=release,
-        stage=request.stage,
-        platform=request.platform,
-        operation_intent=operation_intent,
-        recovery_run_id=request.recovery_run_id,
-    )
+    try:
+        return _store_operation(config=config, release=release, request=request,
+            operation_intent=operation_intent, lane_evidence=lane_evidence, cancellation=cancellation,
+            invocation=invocation)
+    except StoreOperationError as error:
+        # Fatal ProcessError and original interruptions never enter this ordinary
+        # recovery-diagnostic branch, nor authorize another Store launch.
+        receipt_path = store_output_path(config, request)
+        if request.platform == "ios" and operation_intent is not None:
+            journal = receipt_path.with_name(f"{receipt_path.stem}-apple-state.json")
+            if journal.is_file() and not journal.is_symlink():
+                try:
+                    diagnostic = load_store_receipt(journal)
+                    history = diagnostic.get("history", [])
+                    if isinstance(history, list):
+                        for event in reversed(history[-256:]):
+                            if isinstance(event, dict) and "createRetryInventory" in event:
+                                inventory = validate_create_retry_inventory(event["createRetryInventory"], operation_intent=operation_intent)
+                                confirmation = f"retry-ios-operation-creates:{operation_intent['integrity']['sha256']}:{canonical_sha256(inventory)}"
+                                raise StoreOperationError(
+                                    "Apple create outcome is ambiguous. Retain the original intent/artifacts; "
+                                    "independently resolve whether prior requests were accepted, then use a NEW "
+                                    "protected first-attempt recovery dispatch with --recovery-run-id "
+                                    f"{operation_intent['authorizedBy']['runId']} --recovery-confirmation {confirmation}. "
+                                    "Repeated absence alone is not proof of rejection."
+                                ) from error
+                except ValidationError:
+                    pass
+        raise
 
 
 def online_preflight_findings(
@@ -511,152 +816,113 @@ def online_preflight_findings(
     config: ReleaseConfig,
     release: ReleaseVersion,
     platforms: tuple[str, ...],
+    material: SelectedStoreMaterial,
+    invocation: InvocationCustody,
 ) -> list[Finding]:
+    if type(material) is not SelectedStoreMaterial or type(invocation) is not InvocationCustody:
+        raise StoreOperationError("Online preflight requires its original selected material and invocation")
+    material.require(config=config, platforms=platforms, invocation=invocation)
+    cancellation = invocation.cancellation
+    explicit_readback = os.environ.get("MOBILE_RELEASE_PREFLIGHT_READBACK_PATH")
+    # One caller filename cannot safely hold two platforms without overwriting.
+    # Refuse before even the tooling probes; never invent filename suffixes.
+    if explicit_readback and len(platforms) != 1:
+        raise StoreOperationError("An explicit preflight readback path requires exactly one platform")
+    explicit_path = (_repository_path(config, explicit_readback, "Store preflight readback path")
+                     if explicit_readback else None)
+    if explicit_path is not None and os.path.lexists(explicit_path):
+        raise StoreOperationError("Refusing to overwrite an existing Store preflight readback")
     tooling_root = resolve_tooling_root()
     if tooling_root is None:
-        return [
-            Finding(
-                "store.online.tooling",
-                Status.FAIL,
-                "Shared Fastlane assets are unavailable; install the complete pinned distribution "
-                "or set MOBILE_RELEASE_TOOLING_ROOT.",
-                category="store-access",
-            )
-        ]
-    runner = tooling_root / "fastlane/run_lane.rb"
-    gemfile = tooling_root / "Gemfile"
+        return [Finding("store.online.tooling", Status.FAIL,
+            "Shared Fastlane assets are unavailable; install the complete pinned distribution "
+            "or set MOBILE_RELEASE_TOOLING_ROOT.", category="store-access")]
+    runner, gemfile = tooling_root / "fastlane/run_lane.rb", tooling_root / "Gemfile"
     if not _complete_tooling_root(tooling_root):
-        return [
-            Finding(
-                "store.online.fastfile",
-                Status.FAIL,
-                "Pinned shared Fastlane/Gem bundle is incomplete.",
-                category="store-access",
-            )
-        ]
+        return [Finding("store.online.fastfile", Status.FAIL,
+                        "Pinned shared Fastlane/Gem bundle is incomplete.", category="store-access")]
     try:
-        _require_fastlane_bundle(tooling_root)
+        _require_fastlane_bundle(tooling_root, cancellation=cancellation)
+    except ProcessError:
+        raise
     except StoreOperationError as error:
-        return [
-            Finding(
-                "store.online.bundle",
-                Status.FAIL,
-                str(error),
-                category="store-access",
-            )
-        ]
+        return [Finding("store.online.bundle", Status.FAIL, str(error), category="store-access")]
+    # An explicit filename below the same private application namespace must
+    # not let ordinary recursive mkdir create that namespace0755 under0022.
+    # Public repository outputs retain their separate existing path policy.
+    private_root = (_private_app_directory(config, ".mobile-release/store", cancellation=cancellation)
+                    if explicit_path is None or explicit_path.is_relative_to(config.root / ".mobile-release")
+                    else None)
+    if explicit_path is not None:
+        explicit_path.parent.mkdir(parents=True, exist_ok=True)
+        explicit_path = _repository_path(config, explicit_path, "Store preflight readback path")
     findings: list[Finding] = []
-    private_root = _private_app_directory(config, ".mobile-release/store")
-    explicit_readback = os.environ.get("MOBILE_RELEASE_PREFLIGHT_READBACK_PATH")
-    temporary_context = (
-        tempfile.TemporaryDirectory(prefix="online-preflight-", dir=private_root)
-        if not explicit_readback
-        else None
-    )
-    temporary = temporary_context.__enter__() if temporary_context else None
-    try:
-        for platform in platforms:
-            report_path = _repository_path(
-                config,
-                explicit_readback or Path(temporary or "") / f"{platform}.json",
-                "Store preflight readback path",
-            )
-            if report_path.exists() and not report_path.is_file():
-                raise StoreOperationError("Store preflight readback path must be a regular file")
-            report_path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                report_path.unlink(missing_ok=True)
-            except OSError as error:
-                raise StoreOperationError("could not clear stale Store preflight readback") from error
-            source_environment = os.environ.copy()
-            env = _runtime_environment(source_environment)
-            env.update(
-                credential_values_for_purpose(
-                    config,
-                    credential_values_from_environment(source_environment),
-                    stage="candidate",
-                    purpose="store",
-                    platforms=(platform,),
-                )
-            )
-            env.update(
-                {
+    for platform in platforms:
+        material.require(config=config, platforms=platforms, invocation=invocation)
+        # Close each platform's actual output/cwd scopes before another platform
+        # can start; an unresolved writer or disposal cannot become a diagnostic
+        # that allows later commands to continue.
+        with finite_scratch(layout="online-runner", cancellation=cancellation) as runner_scratch:
+            output_context = (finite_scratch(layout="online-readback", cancellation=cancellation,
+                                              parent=private_root)
+                              if explicit_path is None else nullcontext(None))
+            with output_context as output:
+                evidence = None
+                if output is not None:
+                    from ._command_process import CommandCallEvidence
+
+                    evidence = CommandCallEvidence(cancellation)
+                    report_path = output.output_path(platform, evidence=evidence)
+                else:
+                    assert explicit_path is not None
+                    report_path = _repository_path(config, explicit_path, "Store preflight readback path")
+                    if os.path.lexists(report_path):
+                        raise StoreOperationError("Refusing to overwrite an existing Store preflight readback")
+                runner_scratch._owner()
+                runner_scratch._check()
+                runner_directory = runner_scratch._path
+                environment = _runtime_environment(os.environ)
+                environment.update(material.lane_environment(platform=platform))
+                environment.update({
                     "MOBILE_RELEASE_APP_ROOT": str(config.root),
                     "MOBILE_RELEASE_CONFIG_PATH": str(config.path),
                     "MOBILE_RELEASE_PREFLIGHT_READBACK_PATH": str(report_path),
                     "BUNDLE_GEMFILE": str(gemfile),
-                }
-            )
-            lane = f"{platform}_online_preflight"
-            try:
-                with tempfile.TemporaryDirectory(
-                    prefix="mobile-release-online-run-"
-                ) as runner_temporary:
-                    runner_directory = Path(runner_temporary)
-                    runner_directory.chmod(0o700)
-                    completed = subprocess.run(
-                        ["bundle", "exec", "ruby", str(runner), lane],
-                        cwd=runner_directory,
-                        env=env,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=15 * 60,
-                        check=False,
-                    )
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                completed = None
-            if completed is None or completed.returncode:
-                findings.append(
-                    Finding(
-                        f"store.online.{platform}",
-                        Status.FAIL,
-                        f"Non-publishing {platform} Store preflight failed.",
-                        category="store-access",
-                    )
-                )
-                continue
-            if report_path.is_symlink() or not report_path.is_file():
-                findings.append(
-                    Finding(
-                        f"store.online.{platform}",
-                        Status.FAIL,
-                        f"Non-publishing {platform} Store preflight produced no safe readback.",
-                        category="store-access",
-                    )
-                )
-                continue
-            try:
-                raw = json.loads(
-                    report_path.read_text(encoding="utf-8"),
-                    object_pairs_hook=_reject_duplicate_pairs,
-                )
-                _validate_online_readback(raw, config=config, release=release, platform=platform)
-            except (
-                json.JSONDecodeError,
-                UnicodeDecodeError,
-                StoreOperationError,
-                ValidationError,
-            ) as error:
-                findings.append(
-                    Finding(
-                        f"store.online.{platform}",
-                        Status.FAIL,
-                        str(error),
-                        category="store-access",
-                    )
-                )
-                continue
-            findings.append(
-                Finding(
-                    f"store.online.{platform}",
-                    Status.PASS,
+                })
+                argv = (("bundle", "exec", "ruby", str(runner), platform + "_online_preflight")
+                        if evidence is None else evidence.seal_readback(
+                            runner=runner, cwd=runner_directory, environ=environment))
+                try:
+                    completed = run_owned(argv, cwd=runner_directory, environ=environment,
+                                          capture=False, timeout=15 * 60,
+                                          cancellation=cancellation, _evidence=evidence)
+                except ProcessError as error:
+                    if error.fatal:
+                        raise
+                    completed = None
+                except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                    completed = None
+                if completed is None or completed.returncode:
+                    findings.append(Finding(f"store.online.{platform}", Status.FAIL,
+                        f"Non-publishing {platform} Store preflight failed.", category="store-access"))
+                    continue
+                try:
+                    content = (output.read_output(platform) if output is not None
+                               else read_readback_bytes(report_path, cancellation=cancellation))
+                    raw = json.loads(content.decode("utf-8"), object_pairs_hook=_reject_duplicate_pairs)
+                    _validate_online_readback(raw, config=config, release=release, platform=platform)
+                except (json.JSONDecodeError, UnicodeDecodeError, StoreOperationError,
+                        ValidationError, OSError) as error:
+                    if isinstance(error, ProcessError) and error.fatal:
+                        raise
+                    findings.append(Finding(f"store.online.{platform}", Status.FAIL,
+                        "Non-publishing Store preflight returned missing, unsafe or inconsistent readback.",
+                        category="store-access"))
+                    continue
+                material.require(config=config, platforms=platforms, invocation=invocation)
+                findings.append(Finding(f"store.online.{platform}", Status.PASS,
                     f"Non-publishing {platform} Store access, identity, destinations, and build uniqueness are valid.",
-                    category="store-access",
-                )
-            )
-    finally:
-        if temporary_context is not None:
-            temporary_context.__exit__(None, None, None)
+                    category="store-access"))
     return findings
 
 

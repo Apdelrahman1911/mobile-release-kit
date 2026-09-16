@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from .cancellation import DefaultCancellation
 
 if TYPE_CHECKING:
-    from ._command_process import AccountExecutionScope, JournalledCommandBinding
+    from ._command_process import AccountExecutionScope, CommandCallEvidence, JournalledCommandBinding
 from .errors import CredentialError, ValidationError
 
 REQUEST_LIMIT = 2 * 1024 * 1024
@@ -135,19 +135,24 @@ def _valid_request(value: dict) -> None:
 
 def run_owned(
     argv: Sequence[str], *, environ: Mapping[str, str] | None = None, cwd: Path | None = None,
-    timeout: int = 30, capture: bool = True, output_limit: int = PRIVATE_OUTPUT_LIMIT,
+    timeout: int = 30, capture: bool = True, text: bool = True,
+    output_limit: int = PRIVATE_OUTPUT_LIMIT,
     cancellation: DefaultCancellation | None = None, on_start: Callable[[int], None] | None = None,
     cleanup: bool = False, execution_scope: AccountExecutionScope | None = None,
     journal_binding: JournalledCommandBinding | None = None,
-) -> subprocess.CompletedProcess[str]:
+    _evidence: CommandCallEvidence | None = None,
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     """Run through the original C/A/W owner, including unconditional cleanup.
 
     ``on_start`` is informational; only an original journal binding's durable
     owner callback can authorize a journalled command. Ordinary results are not
     ownership capabilities. A negative result retains exec-boundary ambiguity.
+    ``text=False`` preserves bounded stdout/stderr bytes without UTF-8 decoding;
+    this parent-local result choice changes no native protocol or authority.
     """
     from ._command_process import run_command
 
-    return run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture,
+    return run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture, text=text,
                        output_limit=output_limit, cancellation=cancellation, on_start=on_start,
-                       cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding)
+                       cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding,
+                       _evidence=_evidence)

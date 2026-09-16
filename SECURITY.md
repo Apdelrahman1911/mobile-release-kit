@@ -1,5 +1,9 @@
 # Security policy
 
+Production use is **NOT READY until** remediation verification and a new comprehensive
+production-readiness audit pass;
+see [preparation status](README.md#preparation-status).
+
 ## Reporting a vulnerability
 
 Do not open a public issue containing a secret, signing asset, private Store response, tester identity, reviewer contact, or exploitable release-pipeline detail. Use GitHub's private security-advisory reporting for this repository. If private reporting is unavailable, contact the repository owner through a private channel listed on the GitHub account and include only enough non-secret detail to establish contact.
@@ -36,6 +40,10 @@ The final public-release decision is intentionally outside automation.
   must correspond. Signature-neutral hashes permit only bounded signing changes; complete signed
   artifact hashes authenticate the actual retained bytes, including signature-allocation slack
   that native codesign may not cover. UUIDs alone do not authenticate binaries or debug data.
+  Under `retain`/`required`, retained dSYMs must cover every unique installed native slice,
+  including extensions, frameworks, dylibs and helpers; there is no vendor/installed-Swift exemption.
+  Under `disabled`, every present symbol still must be known, valid and unique. Detached symbols
+  must equal the archive inventory and cannot repair an incomplete archive.
   Original archive/symbol bindings remain mandatory for incomplete-operation execution/recovery.
 - Every iOS signed entitlement is compared with its own app/extension's modern DER profile
   content, with typed allowlist rules and explicit architecture selection. Profileless code cannot
@@ -50,16 +58,24 @@ The final public-release decision is intentionally outside automation.
   loans, durable command generations and original-custodian settlement fences constrain
   recovery; a recorded PID or current filename cannot authorize it. Uncertain ownership is
   preserved, not reset by loading a journal; see [local recovery](docs/local-signing.md).
-  Atomic profile installation alone is not a lifetime lease. QA-004 remains open:
-  default cancellation can interrupt outer build-input scratch/client restoration.
-  Inner profile/signing/native-resource ownership does not cover that outer owner.
+  Atomic profile installation alone is not a lifetime lease. The separate outer build-input owner
+  reserves the environment, admits the applicable account, then holds the project before private
+  or application work. Offline/signing skip-builds still holds the project; online holds only the
+  environment reservation. Inner signing cleanup does not substitute for project-input settlement;
+  see [project-input recovery](docs/build-inputs-recovery.md).
 - Historical Android recovery retains authenticated original signing/identity evidence rather than
   requiring an accepted build to remain eligible for a new upload. Every actual new AAB send repeats
   current pinned native validation in a credential-free child, full Store-state classification and a
   final exact-byte check. It cannot fall back to APK/batch/default discovery or a retrying Supply
   upload. The owned request disables logical retries without replacing Google's resumable protocol.
 - Expected public certificate fingerprints are reviewed application policy.
-- Local files live outside the repository with restrictive permissions.
+- Private external inputs are bounded regular files outside the project with restrictive permissions.
+  Darwin alone permits root-owned direct `/tmp` → `/private/tmp` and `/var` → `/private/var`
+  aliases with protected physical ancestry; lower/leaf links, indirect/crossed aliases and `..`
+  are rejected. Checked acquisition binds descriptor/path identity through the final close;
+  consumers use selected bytes or an owned snapshot, never a later reopen of the original name.
+  This is not a blanket hardlink ban or protection from hostile same-user namespace changes.
+  See [external input rules](docs/credentials.md#local-credential-file).
 - Initialization uses a root-directory lock and private recoverable staging on supported local
   Linux/macOS filesystems. Never commit/upload `.mobile-release-init-prepare/`,
   `.mobile-release-init/` or `.mobile-release-init-cleanup/`: their backups can contain original
@@ -68,11 +84,20 @@ The final public-release decision is intentionally outside automation.
   overwrite or delete user files. This coordinates cooperating commands, not a hostile same-user
   process or a compromised filesystem. See [initialization recovery](docs/init-recovery.md).
 - Temporary credential cleanup is attempted on catchable exit paths and failures are reported.
-  Profile/signing/authentication owners protect default main-thread cleanup dispatch/entry,
-  track exact resources and report ambiguous cleanup without unsafe retries. QA-004 means
-  outer materialization still requires correction; it is not an accepted cleanup exception.
+  Profile/signing/authentication and outer build-input owners share the original cancellation
+  ledger, protect default main-thread cleanup entry, and preserve the first interruption.
+  Build-input replacement preserves admitted original inode/bytes/exact mode and restores only
+  into absence after retiring unchanged owned publications. Foreign edits, changed backups/parents
+  and unknown entries are retained. Scratch cleanup uses a finite inventory, not recursive deletion;
+  uncertain consumers retain possibly used inputs while independent safe cleanup is attempted.
+  Environment frames restore only unchanged installed values in owner-bound LIFO order;
+  unresolved environment ownership stops reuse in that process. Descriptors are retired before
+  their sole close attempt. Caller input/readback destinations are never adopted for deletion.
   Hard termination/power loss cannot run cleanup; private residual paths and global local-signing
   state require owned cleanup or hosted-runner disposal, not a blanket guarantee of deletion.
+  Normal project recovery needs original persisted consumer finality. Its narrow TTY manual
+  confirmation adds an exact-worker operator fact, not repaired containment. A valid terminal
+  control permits metadata retirement only, never another read/restore of current application files.
 - Secret values and private identities are not logged, summarized, cached, attested, or uploaded as artifacts.
 - Store jobs remove preparation ADC files before intent attestation/upload, then separately acquire
   execution credentials and remove them before diagnostics/final actions. Apple P8/review/HMAC values
@@ -172,7 +197,7 @@ These are implementation and verification requirements, not a native pass or an
 overall READY verdict. Required source/installed-platform evidence remains
 separate from fixture readiness and VM disposal. The account-signing lifetime
 uses its own command owner and durable recovery protocol; it cannot borrow a
-profile decoder's finality or prove QA-004 outer restoration safe.
+profile decoder's finality or replace the outer build-input owner's separate settlement evidence.
 
 ## Supply-chain rules
 
@@ -198,6 +223,12 @@ profile decoder's finality or prove QA-004 outer restoration safe.
   lockfile rewriting. Admission checks both the isolated helper's default Fiddle
   and the locked bundle's actual loaded origin, not one version string for both.
 - A candidate records repository ID, commit, Git tree, configuration/metadata hashes, final artifact hashes, public signers, Store build IDs, and original authorization/actual execution/final producer identities.
+- Fresh source authority requires successful full HEAD/tree observations and `dirty is False`.
+  Git runs with inherited routing/configuration overrides removed and hooks/fsmonitor/replacements
+  disabled; equal successful starting/ending HEAD observations bracket the read. Failed/malformed
+  identity, failed status or observed drift fails closed. `GITHUB_SHA` remains a separate dispatch
+  comparison, never fallback source authority. Linked/detached worktrees are supported; this is
+  not an atomic checkout snapshot or protection against hostile same-user ABA changes.
 - Promotion never rebuilds.
 - Reruns fail closed when source, bytes, signer, Store identity, or receipts disagree.
 - Before mutation, an attested immutable intent must already exist as a retained service artifact.

@@ -10,7 +10,7 @@ import importlib.util
 import json
 import sys
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, lru_cache
 from pathlib import Path
 from types import MappingProxyType
 
@@ -236,6 +236,14 @@ SEMANTIC_PLANNING = MappingProxyType({
 })
 
 
+def _case_identifier(schema, kind, name, specification):
+    return digest({"schema": schema, "kind": kind, "name": name,
+                   "specification": json.loads(specification)})
+
+
+_cached_case_identifier = lru_cache(maxsize=1024, typed=True)(_case_identifier)
+
+
 @dataclass(frozen=True)
 class Case:
     kind: str
@@ -254,8 +262,12 @@ class Case:
 
     @property
     def identifier(self):
-        return digest({"schema": SCHEMA, "kind": self.kind, "name": self.name,
-                       "specification": json.loads(self.specification)})
+        values = (SCHEMA, self.kind, self.name, self.specification)
+        # Only exact immutable strings enter the bounded memo. Other json.loads
+        # inputs, including mutable bytearray, retain their uncached behavior.
+        if all(type(value) is str for value in values):
+            return _cached_case_identifier(*values)
+        return _case_identifier(*values)
 
     @property
     def scheduling_units(self):

@@ -21,7 +21,7 @@ from mobile_release.reporting import Report
 from .helpers import android_config, ios_config, write_project
 from .ios_entitlement_helpers import profile
 from .local_signing_helpers import NativeSigningModel
-from .local_signing_persistent import _materializer_directory
+from .local_signing_persistent import MaterializerObservation
 from workflow.local_signing_regression_catalog import PREFLIGHT_CANCELLATION_VARIANTS
 
 
@@ -143,12 +143,17 @@ class SigningCompositionTests(unittest.TestCase):
             original_cleanup = ios_profiles.ScratchLease.cleanup
             original_capture = profile_owner.capture_profile
             original_mkdtemp = tempfile.mkdtemp
-            original_temporary_directory = tempfile.TemporaryDirectory
-            material_directories = []
+            materialization = MaterializerObservation(preflight_module.materialize_build_inputs)
 
             @contextmanager
-            def lease_context():
-                with signing.local_signing_lease(home=home) as lease:
+            def lease_context(*, cancellation):
+                self.assertIsInstance(cancellation, DefaultCancellation)
+                actual, owns = cancellation_owner(cancellation, CredentialError, 'restore')
+                self.assertIs(actual, cancellation)
+                self.assertFalse(owns)
+                with signing.local_signing_lease(home=home, cancellation=cancellation) as lease:
+                    self.assertIs(lease.cancellation, cancellation)
+                    self.assertFalse(held)
                     held.append(lease)
                     yield lease
 
@@ -298,17 +303,28 @@ class SigningCompositionTests(unittest.TestCase):
                 authenticate('early')
                 return []
 
-            def build(config, *, signed, signing_session, execution_source=None):
+            def build(config, *, signed, signing_session, execution_source=None, cancellation=None):
                 check_guard('build')
+                self.assertIs(cancellation, held[0].cancellation)
                 self.assertTrue(signed)
                 self.assertIs(signing_session, held[0].active)
                 self.assertIsNotNone(execution_source)
+                invocation, _project, lease, guard = materialization.outer
+                materialization.live(root=config.root, invocation=invocation, lease=lease, guard=guard)
                 self.assertEqual(signing_session.run(['build'], kind='build').returncode, 0)
                 return {}
 
             real_body = preflight_module._preflight
             def body(*args, **kwargs):
+                invocation = kwargs['invocation']
+                self.assertIs(invocation.cancellation, held[0].cancellation)
+                self.assertIs(kwargs['signing_lease'], held[0])
+                materialization.bind_outer(root=config.root, invocation=invocation,
+                                           lease=kwargs['signing_lease'], guard=held[0].cancellation)
                 report = real_body(*args, **kwargs)
+                # Original child retirement must precede late authentication;
+                # the same invocation/account/project remain live here.
+                materialization.child_settled(outers_live=True)
                 self.assertIsNone(held[0].active)
                 authenticate('late')
                 return report
@@ -317,15 +333,13 @@ class SigningCompositionTests(unittest.TestCase):
                 for target, function in (('local_signing_lease', lease_context), ('_preflight', body),
                                           ('validate_signing_material', validate), ('run_ios_build', build)):
                     patches.enter_context(patch.object(preflight_module, target, side_effect=function))
+                patches.enter_context(patch.object(preflight_module, 'materialize_build_inputs',
+                                                   new=materialization.context))
                 patches.enter_context(patch.object(preflight_module, 'doctor', side_effect=lambda *_, **__: Report(command='fixture')))
                 patches.enter_context(patch.object(preflight_module, 'resolve_credential_values', return_value=values))
                 patches.enter_context(patch.object(preflight_module, 'credential_findings', return_value=[]))
                 patches.enter_context(patch.object(preflight_module, 'effective_identity_findings', return_value=[]))
                 patches.enter_context(patch('mobile_release.credentials._run_private', side_effect=model))
-                patches.enter_context(patch('mobile_release.credentials.tempfile.TemporaryDirectory',
-                                            side_effect=lambda *args, **kwargs: _materializer_directory(
-                                                original_temporary_directory, private, material_directories,
-                                                *args, **kwargs)))
                 # Independent fictional material metadata only. Dedicated early
                 # and late profile calls above still use the real capture owner.
                 patches.enter_context(patch('mobile_release.credentials._authenticated_signing_profile',
@@ -335,6 +349,8 @@ class SigningCompositionTests(unittest.TestCase):
                         preflight_module.preflight(config, mode='signing', platforms=('ios',), run_builds=True)
                 else:
                     result = preflight_module.preflight(config, mode='signing', platforms=('ios',), run_builds=True)
+            materialization.child_settled(expected=int(not cancel_at or cancel_at[0] == 'late'))
+            materialization.outer_settled()
             if cancel_at:
                 self.assertEqual(issued, [cancel_at])
                 self.assertIs(interruption.exception, calls[-1][2])
@@ -347,9 +363,6 @@ class SigningCompositionTests(unittest.TestCase):
                 self.assertEqual(stages, ['early', 'capture', 'build', 'late', 'capture'])
                 self.assertEqual(returned, ['early', 'late'])
             self.assertTrue(all(not path.exists() for path in scratches))
-            self.assertEqual(len(material_directories), int(cancel_at is None or cancel_at[0] == 'late'))
-            self.assertTrue(all(path.parent == private and not os.path.lexists(path)
-                                for path in material_directories))
             self.assertFalse(list(root.glob('model-bridge-*')))
             self.assertEqual(model.preferences, model.original)
             self.assertEqual(signing.signing_status(home=home)['status'], 'idle')

@@ -1,5 +1,9 @@
 # Troubleshooting
 
+Production use is **NOT READY until** remediation verification and a new comprehensive
+production-readiness audit pass;
+see [preparation status](../README.md#preparation-status).
+
 Start with the earliest failing command. Do not bypass an inexpensive failure and wait for CI to rediscover it.
 
 ## Finding statuses
@@ -57,7 +61,19 @@ Apple:
 - reject expired, development, ad-hoc, wildcard, or `get-task-allow=true` profiles;
 - verify archive and exported IPA, including nested frameworks/extensions.
 
-If the workflow fails after credential import, verify temporary keychains/profiles/decoded files were removed before retrying.
+If the workflow fails after credential import, establish exact-owner quiescence and inspect the
+original signing/project-input status before retrying. Successful inner cleanup alone does not
+prove outer inputs settled; never clear a journal or delete broad temporary paths.
+
+### External input path rejected
+
+Private inputs must be absolute, outside the project, regular and owner-restricted (`0600`).
+Darwin accepts only root-owned direct `/tmp` → `/private/tmp` and `/var` → `/private/var`
+system aliases with protected physical ancestry. Lower/leaf links, indirect/crossed aliases and
+`..` are rejected; other platforms follow no symlinks. Do not alter OS aliases or relax the
+checks. Use an independently owned safe private location and the documented
+[input limits](credentials.md#local-credential-file). Project/recovery roots still need their
+original physical, no-symlink path.
 
 ### Signed entitlement or modern profile comparison fails
 
@@ -92,15 +108,33 @@ If the workflow fails after credential import, verify temporary keychains/profil
   attempt in the same invocation. Once the exact owner is idle, recover the same
   remaining session in a fresh invocation. Default-signal protection does not
   cover custom host handlers or hard termination.
-- QA-004 separately leaves outer build-input scratch/client restoration vulnerable
-  to cancellation at cleanup entry. Verify decoded scratch removal and original
-  client configuration before retrying. Do not infer outer cleanup from successful
-  inner profile/keychain cleanup, or remove another task's files.
+
+## Build-input ownership or restoration failed
+
+Use `mobile-release build-inputs status --root <original-project>` without running the project.
+`busy` requires the original owner to finish; unresolved lifetime/environment ownership requires
+ending the failed invocation, not another operation in it. Resolve pending account signing first
+when necessary, then follow [project-input recovery](build-inputs-recovery.md) with the exact
+root/session and confirmation. The command never discovers/builds the application or accesses Stores.
+
+Changed targets, parents, backups and unknown reserved entries are conflicts. Preserve foreign
+files separately without changing the retained controls; never force-overwrite a destination or
+delete `.mobile-release/build-inputs/` to retry. Normal recovery requires original persisted consumer
+finality. TTY-only `--manual` adds an independently established exact-worker fact, not repaired
+containment or permission to ignore filesystem conflicts. `cleanup-only` permits metadata
+retirement, never another comparison/restoration of current client files. A later idle/absent
+status does not repair the earlier failed result.
 
 ## dSYM or Crashlytics failure
 
 - Use the dSYM from the exact archived candidate.
-- Compare executable and dSYM UUID sets.
+- Under `retain`/`required`, supply one dSYM slice for every unique installed CPU/subtype/UUID,
+  including all nested apps/extensions, frameworks, dylibs and suffixless helpers. One missing
+  nested architecture fails; vendor libraries and installed Swift runtimes have no exemption.
+- Identical installed copies can share a symbol identity; duplicate/unknown DWARF identities fail.
+  Under `disabled`, omissions are allowed but every present symbol is still validated.
+- Detached dSYMs must equal the retained archive inventory; they cannot repair missing archive
+  symbols. UUID matching alone is not binary/debug-data authenticity.
 - Do not search an arbitrary DerivedData directory.
 - For `retain`, archive, validate, and retain the exact symbols without contacting Crashlytics.
 - There is no automated third-party symbol-upload stage. `required` is a fail-closed
@@ -182,6 +216,12 @@ not treated as collateral loss. Resolve concurrent
 Console edits before retrying; the tool never rolls back by overwriting current Store state.
 
 ## Git source rejected after a protected rebase
+
+First establish a real, clean checkout: both full HEAD observations, its derived tree and status
+must succeed. Failed status is unknown, not clean; an environment SHA, tag or version cannot
+replace missing Git authority. Inherited Git routing/config overrides are deliberately ignored;
+linked/detached worktrees are supported. A changed ending HEAD rejects the observation. Do not
+rewrite `GITHUB_SHA` to disguise a mismatch between dispatch and original recovery source.
 
 Fetch enough history. The accepted alternatives are direct ancestry or exact-tree equality with a real merge base. An unrelated repository/history with the same copied tree is intentionally rejected.
 

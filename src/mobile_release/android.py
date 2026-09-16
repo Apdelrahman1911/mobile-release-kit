@@ -11,12 +11,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .config import ReleaseConfig, ReleaseVersion
+from .cancellation import DefaultCancellation
+from .build_inputs import BuildInputs, finite_scratch
+from .checked_files import BUNDLETOOL_MAX_BYTES, copy_bundletool, read_external_bytes
 from .credentials import artifact_validation_environment
 from .discovery import discover_project, selected_android_module
-from .owned_process import run_owned
+from .owned_process import ProcessError, run_owned
 from .errors import ValidationError
 from .reporting import Finding, Status
-from .tooling import canonical_external_path, recreate_private_build_directory
+from .tooling import private_build_directory
 
 MAX_ENTRY_SIZE = 512 * 1024 * 1024
 MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024
@@ -72,63 +75,45 @@ def _validate_zip(path: Path) -> list[str]:
         raise ValidationError(f"AAB is not a valid ZIP bundle: {path}") from error
 
 
-def _bundletool_manifest(path: Path) -> str | None:
+def _bundletool_manifest(path: Path, *, cancellation: DefaultCancellation | None = None) -> str | None:
     jar_value = os.environ.get("MOBILE_RELEASE_BUNDLETOOL_JAR")
     if not jar_value:
         return None
-    try:
-        jar = canonical_external_path(Path(jar_value), label="bundletool")
-    except (FileNotFoundError, OSError, ValidationError) as error:
-        raise ValidationError(
-            "bundletool must be a regular file without symbolic-link components"
-        ) from error
-    if not jar.is_file():
-        raise ValidationError("bundletool must be a regular file without symbolic-link components")
-    digest = hashlib.sha256()
-    with jar.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    if digest.hexdigest() != BUNDLETOOL_SHA256:
-        raise ValidationError(
-            f"bundletool must be the pinned {BUNDLETOOL_VERSION} JAR with its reviewed SHA-256"
+    with finite_scratch(layout="bundletool", cancellation=cancellation) as scratch:
+        snapshot = copy_bundletool(
+            Path(jar_value), scratch=scratch, maximum_bytes=BUNDLETOOL_MAX_BYTES,
+            expected_sha256=BUNDLETOOL_SHA256,
         )
-    try:
-        result = subprocess.run(
-            [
-                "java",
-                "-jar",
-                str(jar),
-                "dump",
-                "manifest",
-                f"--bundle={path}",
-                "--module=base",
-            ],
-            env=_validation_environment(),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=60,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
+        jar = scratch.require(snapshot)
+        try:
+            result = run_owned(
+                ["java", "-jar", str(jar), "dump", "manifest", f"--bundle={path}", "--module=base"],
+                environ=_validation_environment(), timeout=60, cancellation=scratch.cancellation,
+            )
+        except ProcessError as error:
+            if error.fatal:
+                raise
+            return None
+        scratch.require(snapshot)
     if result.returncode:
         raise ValidationError("bundletool could not inspect the final AAB manifest")
     return result.stdout
 
 
-def _signer_fingerprint(path: Path) -> str | None:
+def _signer_fingerprint(path: Path, *, cancellation: DefaultCancellation | None = None) -> str | None:
     environment = _validation_environment()
     try:
-        result = subprocess.run(
+        result = run_owned(
             ["keytool", "-printcert", "-jarfile", str(path)],
-            env=environment,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            environ=environment,
+            capture=True,
             timeout=30,
-            check=False,
+            cancellation=cancellation,
         )
+    except ProcessError as error:
+        if error.fatal:
+            raise
+        return None
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
     if result.returncode:
@@ -155,20 +140,22 @@ def _signer_fingerprint(path: Path) -> str | None:
     return fingerprints.pop()
 
 
-def _verify_jar_signature(path: Path) -> bool | None:
+def _verify_jar_signature(path: Path, *, cancellation: DefaultCancellation | None = None) -> bool | None:
     """Verify every signed AAB entry; permit only the expected untrusted-root warning."""
 
     environment = _validation_environment()
     try:
-        result = subprocess.run(
+        result = run_owned(
             ["jarsigner", "-verify", "-strict", str(path)],
-            env=environment,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            environ=environment,
+            capture=True,
             timeout=120,
-            check=False,
+            cancellation=cancellation,
         )
+    except ProcessError as error:
+        if error.fatal:
+            raise
+        raise ValidationError("jarsigner could not complete final AAB verification") from None
     except FileNotFoundError:
         return None
     except (subprocess.TimeoutExpired, OSError) as error:
@@ -249,7 +236,9 @@ def _verify_jar_signature(path: Path) -> bool | None:
     return True
 
 
-def _canonicalize_aab_signature(path: Path, *, execution_source=None) -> None:
+def _canonicalize_aab_signature(path: Path, *, project_root: Path, execution_source=None,
+                                cancellation: DefaultCancellation | None = None,
+                                build_inputs: BuildInputs | None = None) -> None:
     """Re-sign the final copy so JAR stream and central-directory views agree."""
 
     required = (
@@ -263,43 +252,57 @@ def _canonicalize_aab_signature(path: Path, *, execution_source=None) -> None:
         raise ValidationError(
             "Android final signing inputs are incomplete: " + ", ".join(missing)
         )
-    try:
-        keystore = canonical_external_path(
-            Path(os.environ["MOBILE_RELEASE_ANDROID_KEYSTORE_PATH"]),
-            label="Android keystore",
-        )
-    except (FileNotFoundError, OSError, ValidationError) as error:
-        raise ValidationError("Android keystore must be a regular non-symlink file") from error
-    if not keystore.is_file():
-        raise ValidationError("Android keystore must be a regular non-symlink file")
     signing_environment = _validation_environment()
     for name in (
         "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
         "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
     ):
         signing_environment[name] = os.environ[name]
-    try:
-        result = run_owned(
-            [
-                "jarsigner",
-                "-keystore",
-                str(keystore),
-                "-storepass:env",
-                "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
-                "-keypass:env",
-                "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
-                str(path),
-                os.environ["MOBILE_RELEASE_ANDROID_KEY_ALIAS"],
-            ],
-            environ=signing_environment,
-            capture=True,
-            timeout=120,
-            execution_scope=None if execution_source is None else execution_source.new_scope(),
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
-        raise ValidationError("jarsigner could not canonicalize the final AAB signature") from error
-    if result.returncode:
-        raise ValidationError("jarsigner could not canonicalize the final AAB signature")
+
+    def sign(keystore: Path, guard: DefaultCancellation) -> None:
+        try:
+            result = run_owned(
+                ["jarsigner", "-keystore", str(keystore), "-storepass:env",
+                 "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD", "-keypass:env",
+                 "MOBILE_RELEASE_ANDROID_KEY_PASSWORD", str(path),
+                 os.environ["MOBILE_RELEASE_ANDROID_KEY_ALIAS"]],
+                environ=signing_environment, capture=True, timeout=120, cancellation=guard,
+                execution_scope=None if execution_source is None else execution_source.new_scope(),
+            )
+        except ProcessError as error:
+            if error.fatal:
+                raise
+            raise ValidationError("jarsigner could not canonicalize the final AAB signature") from None
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+            raise ValidationError("jarsigner could not canonicalize the final AAB signature") from error
+        if result.returncode:
+            raise ValidationError("jarsigner could not canonicalize the final AAB signature")
+
+    if build_inputs is not None:
+        if type(build_inputs) is not BuildInputs:
+            raise ValidationError("Android signing requires its original build-input owner")
+        invocation = build_inputs.invocation
+        guard = invocation.cancellation if cancellation is None else cancellation
+        invocation.require(root=project_root, cancellation=guard, signing_lease=invocation.signing_lease)
+        if invocation.child is not build_inputs or build_inputs.claimed:
+            raise ValidationError("Android signing requires its live materialization")
+        scratch = build_inputs.scratch
+        snapshot = scratch.require_input("android-keystore")
+        keystore = scratch.require(snapshot)
+        if str(keystore) != os.environ["MOBILE_RELEASE_ANDROID_KEYSTORE_PATH"]:
+            raise ValidationError("Android signing input differs from the selected materialization")
+        sign(keystore, guard)
+        scratch.require(snapshot)
+    else:
+        # A standalone caller has no materializer capability: select checked
+        # bytes once instead of treating an environment pathname as admission.
+        with finite_scratch(layout="signing-validation", cancellation=cancellation) as scratch:
+            content = read_external_bytes(Path(os.environ["MOBILE_RELEASE_ANDROID_KEYSTORE_PATH"]),
+                                          kind="private-general", project_root=project_root,
+                                          cancellation=scratch.cancellation)
+            snapshot = scratch.put("android-keystore", content)
+            sign(scratch.require(snapshot), scratch.cancellation)
+            scratch.require(snapshot)
 
 
 def validate_aab_structure(path: Path) -> list[str]:
@@ -325,6 +328,7 @@ def validate_aab(
     expected_fingerprint: str | None,
     require_tools: bool = False,
     check_signer: bool = True,
+    cancellation: DefaultCancellation | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     try:
@@ -341,8 +345,10 @@ def validate_aab(
         return [Finding("android.aab.structure", Status.FAIL, str(error), category="android-artifact")]
 
     try:
-        manifest = _bundletool_manifest(path)
+        manifest = _bundletool_manifest(path, cancellation=cancellation)
     except ValidationError as error:
+        if isinstance(error, ProcessError) and error.fatal:
+            raise
         findings.append(
             Finding("android.aab.manifest", Status.FAIL, str(error), category="android-artifact")
         )
@@ -404,8 +410,10 @@ def validate_aab(
         )
     else:
         try:
-            signature_verified = _verify_jar_signature(path)
+            signature_verified = _verify_jar_signature(path, cancellation=cancellation)
         except ValidationError as error:
+            if isinstance(error, ProcessError) and error.fatal:
+                raise
             findings.append(
                 Finding("android.aab.signature", Status.FAIL, str(error), category="android-artifact")
             )
@@ -431,8 +439,10 @@ def validate_aab(
         if signature_verified is not True:
             return findings
         try:
-            fingerprint = _signer_fingerprint(path)
+            fingerprint = _signer_fingerprint(path, cancellation=cancellation)
         except ValidationError as error:
+            if isinstance(error, ProcessError) and error.fatal:
+                raise
             findings.append(
                 Finding("android.aab.signer", Status.FAIL, str(error), category="android-artifact")
             )
@@ -480,7 +490,17 @@ def _copy_unique(pattern: str, destination: Path, *, required: bool) -> Path | N
     return destination
 
 
-def run_android_build(config: ReleaseConfig, *, signed: bool, execution_source=None) -> dict[str, Path]:
+def run_android_build(config: ReleaseConfig, *, signed: bool, execution_source=None,
+                      cancellation: DefaultCancellation | None = None,
+                      build_inputs: BuildInputs | None = None) -> dict[str, Path]:
+    if build_inputs is not None:
+        if type(build_inputs) is not BuildInputs:
+            raise ValidationError("Android build requires its original build-input owner")
+        invocation = build_inputs.invocation
+        cancellation = invocation.cancellation if cancellation is None else cancellation
+        invocation.require(root=config.root, cancellation=cancellation, signing_lease=invocation.signing_lease)
+        if invocation.child is not build_inputs or build_inputs.claimed:
+            raise ValidationError("Android build requires its live materialization")
     discovered = discover_project(config.root, include_git=False)
     module = selected_android_module(config, discovered)
     if not module:
@@ -492,66 +512,77 @@ def run_android_build(config: ReleaseConfig, *, signed: bool, execution_source=N
     if not wrapper.is_file():
         raise ValidationError("Gradle wrapper is missing")
     release = config.release_version()
-    output = recreate_private_build_directory(config, "android")
-    env = os.environ.copy()
-    env["MOBILE_RELEASE_REQUIRE_SIGNING"] = "true" if signed else "false"
-    # The committed release source is authoritative. Never let ambient CI
-    # counters silently replace the reviewed version while Gradle evaluates.
-    env["MOBILE_RELEASE_VERSION_NAME"] = release.name
-    env["MOBILE_RELEASE_BUILD_NUMBER"] = str(release.build)
-    try:
-        result = run_owned(
-            [str(wrapper), "--no-daemon", "--stacktrace", task],
-            cwd=config.root,
-            environ=env,
-            capture=False,
-            timeout=45 * 60,
-            execution_scope=None if execution_source is None else execution_source.new_scope(),
-        )
-    except (subprocess.TimeoutExpired, OSError) as error:
-        raise ValidationError("Android release build exceeded 45 minutes") from error
-    if result.returncode:
-        raise ValidationError(f"Android release task failed: {task}")
+    with private_build_directory(config, "android", cancellation=cancellation) as build_directory:
+        output = build_directory.path
+        cancellation = build_directory.cancellation
+        env = os.environ.copy()
+        env["MOBILE_RELEASE_REQUIRE_SIGNING"] = "true" if signed else "false"
+        # The committed release source is authoritative. Never let ambient CI
+        # counters silently replace the reviewed version while Gradle evaluates.
+        env["MOBILE_RELEASE_VERSION_NAME"] = release.name
+        env["MOBILE_RELEASE_BUILD_NUMBER"] = str(release.build)
+        try:
+            result = run_owned(
+                [str(wrapper), "--no-daemon", "--stacktrace", task],
+                cwd=config.root,
+                environ=env,
+                capture=False,
+                timeout=45 * 60,
+                cancellation=cancellation,
+                execution_scope=None if execution_source is None else execution_source.new_scope(),
+            )
+        except (subprocess.TimeoutExpired, OSError) as error:
+            raise ValidationError("Android release build exceeded 45 minutes") from error
+        if result.returncode:
+            raise ValidationError(f"Android release task failed: {task}")
 
-    module_relative = module.lstrip(":").replace(":", "/") or "."
-    module_dir = config.project_path(module_relative)
-    bundle_matches = sorted((module_dir / "build/outputs/bundle" / variant).glob("*.aab"))
-    if len(bundle_matches) != 1:
-        raise ValidationError(
-            f"expected exactly one {variant} AAB, found {len(bundle_matches)} under {module_dir}"
+        build_directory.check()
+        module_relative = module.lstrip(":").replace(":", "/") or "."
+        module_dir = config.project_path(module_relative)
+        bundle_matches = sorted((module_dir / "build/outputs/bundle" / variant).glob("*.aab"))
+        if len(bundle_matches) != 1:
+            raise ValidationError(
+                f"expected exactly one {variant} AAB, found {len(bundle_matches)} under {module_dir}"
+            )
+        bundle_source = config.project_path(str(bundle_matches[0]))
+        if not bundle_source.is_file():
+            raise ValidationError("release AAB output must be a regular file")
+        aab = output / "app-release.aab"
+        if aab.is_symlink():
+            raise ValidationError("normalized AAB destination must not be a symlink")
+        build_directory.check()
+        shutil.copy2(bundle_source, aab)
+        build_directory.check()
+        if signed:
+            _canonicalize_aab_signature(aab, project_root=config.root, execution_source=execution_source,
+                                        cancellation=cancellation, build_inputs=build_inputs)
+        result_paths = {"android-aab": aab}
+        mapping = module_dir / "build/outputs/mapping" / variant / "mapping.txt"
+        mapping = config.project_path(str(mapping))
+        if mapping.is_file():
+            destination = output / "mapping.txt"
+            if mapping.is_symlink() or destination.is_symlink():
+                raise ValidationError("R8 mapping source/destination must not be a symlink")
+            build_directory.check()
+            shutil.copy2(mapping, destination)
+            build_directory.check()
+            result_paths["android-mapping"] = destination
+        native_candidates = sorted(
+            path
+            for path in (module_dir / "build/outputs").rglob("*.zip")
+            if "native" in path.name.lower() and variant.lower() in str(path).lower()
         )
-    bundle_source = config.project_path(str(bundle_matches[0]))
-    if not bundle_source.is_file():
-        raise ValidationError("release AAB output must be a regular file")
-    aab = output / "app-release.aab"
-    if aab.is_symlink():
-        raise ValidationError("normalized AAB destination must not be a symlink")
-    shutil.copy2(bundle_source, aab)
-    if signed:
-        _canonicalize_aab_signature(aab, execution_source=execution_source)
-    result_paths = {"android-aab": aab}
-    mapping = module_dir / "build/outputs/mapping" / variant / "mapping.txt"
-    mapping = config.project_path(str(mapping))
-    if mapping.is_file():
-        destination = output / "mapping.txt"
-        if mapping.is_symlink() or destination.is_symlink():
-            raise ValidationError("R8 mapping source/destination must not be a symlink")
-        shutil.copy2(mapping, destination)
-        result_paths["android-mapping"] = destination
-    native_candidates = sorted(
-        path
-        for path in (module_dir / "build/outputs").rglob("*.zip")
-        if "native" in path.name.lower() and variant.lower() in str(path).lower()
-    )
-    if len(native_candidates) > 1:
-        raise ValidationError("multiple native-symbol archives were produced")
-    if native_candidates:
-        native_source = config.project_path(str(native_candidates[0]))
-        if not native_source.is_file():
-            raise ValidationError("native-symbol output must be a regular file")
-        destination = output / "native-symbols.zip"
-        if native_source.is_symlink() or destination.is_symlink():
-            raise ValidationError("native-symbol source/destination must not be a symlink")
-        shutil.copy2(native_source, destination)
-        result_paths["android-native-symbols"] = destination
-    return result_paths
+        if len(native_candidates) > 1:
+            raise ValidationError("multiple native-symbol archives were produced")
+        if native_candidates:
+            native_source = config.project_path(str(native_candidates[0]))
+            if not native_source.is_file():
+                raise ValidationError("native-symbol output must be a regular file")
+            destination = output / "native-symbols.zip"
+            if native_source.is_symlink() or destination.is_symlink():
+                raise ValidationError("native-symbol source/destination must not be a symlink")
+            build_directory.check()
+            shutil.copy2(native_source, destination)
+            build_directory.check()
+            result_paths["android-native-symbols"] = destination
+        return result_paths

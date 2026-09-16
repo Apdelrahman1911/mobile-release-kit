@@ -6,6 +6,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import time
 import unittest
 import zipimport
 from pathlib import Path
@@ -20,7 +21,9 @@ PATTERNS = ("test_ios_profile_authority.py", "test_ios_profile_trust.py", "test_
             "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
             "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
             "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
-            "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py")
+            "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py",
+            "test_build_inputs.py", "test_checked_files.py", "test_source_observation.py",
+            "test_credentials_metadata.py", "test_cli_and_build.py", "test_app_private.py")
 PREREQUISITES = (
     ("openssl-version", ("/usr/bin/openssl", "version")),
     ("clang-discovery", ("/usr/bin/xcrun", "--find", "clang")),
@@ -91,6 +94,8 @@ POISON_PARTITIONS = (
     ("poison-signing-foreign-mixed-handlers", "unit.test_local_signing_composition.SigningCompositionTests.test_foreign_and_mixed_signal_owners_are_never_silently_overwritten_or_borrowed"),
     ("poison-profile-authenticator-publication", "unit.test_ios_entitlements.SignedEntitlementInventoryTests.test_mocked_authenticator_without_owner_publication_remains_fatal"),
     ("poison-recovery-profile-cleanup", "unit.test_operation_recovery.IosOperationRecoveryTests.test_profile_cleanup_uncertainty_stops_actual_fresh_validation_before_any_store_access"),
+    ("poison-recovery-inspection-deadline", "unit.test_operation_recovery.IosOperationRecoveryTests.test_shared_deadline_prevents_next_authorization_boundary_and_retains_snapshots"),
+    ("poison-recovery-readback-deadline", "unit.test_operation_recovery.IosOperationRecoveryTests.test_deadline_after_readback_preserves_precondition_and_retains_snapshot"),
     ("poison-profile-authentication-order", "unit.test_ios_profile_authority.CMSFramingTests.test_profile_requires_both_authentications_in_order_then_complete_correlation"),
     ("poison-profile-setup-unlink", "unit.test_ios_profile_installation.ProfileInstallationTests.test_ambiguous_setup_stage_unlink_is_not_implicitly_retried_or_resolved"),
     ("poison-profile-collision", "unit.test_ios_profile_installation.ProfileInstallationTests.test_collision_symlink_fifo_and_invalid_input_never_overwrite_existing_state"),
@@ -140,7 +145,8 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "workflow.profile_process_fixture", "workflow.process_fixture"}),
      frozenset({"mobile_release", "mobile_release._native_process", "mobile_release._command_process",
                 "mobile_release.owned_process", "mobile_release.cancellation", "mobile_release._lifetime_evidence",
-                "mobile_release.errors"})),
+                "mobile_release.errors",
+                "mobile_release._store_lane_contract"})),
     ("workflow.test_command_fence_failure", ("workflow", "unit"),
      frozenset({"workflow", "workflow.test_command_fence_failure", "workflow.command_bootstrap_fixture",
                 "workflow.command_fence_failure_fixture", "workflow.local_signing_case_owner",
@@ -152,7 +158,10 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.owned_process", "mobile_release.cancellation", "mobile_release._lifetime_evidence",
                 "mobile_release.errors", "mobile_release.local_signing", "mobile_release._profile_callers",
                 "mobile_release.credentials", "mobile_release.config", "mobile_release.reporting",
-                "mobile_release.tooling"})),
+                "mobile_release._store_lane_contract",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files",
+                "mobile_release.init_transaction"})),
     ("workflow.test_command_account_lifecycle", ("workflow", "unit"),
      frozenset({"workflow", "workflow.test_command_account_lifecycle", "workflow.command_bootstrap_fixture",
                 "workflow.command_fence_failure_fixture", "workflow.command_account_lifecycle_fixture", "workflow.local_signing_case_owner",
@@ -164,7 +173,10 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.owned_process", "mobile_release.cancellation", "mobile_release._lifetime_evidence",
                 "mobile_release.errors", "mobile_release.local_signing", "mobile_release._profile_callers",
                 "mobile_release.credentials", "mobile_release.config", "mobile_release.reporting",
-                "mobile_release.tooling"})),
+                "mobile_release._store_lane_contract",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files",
+                "mobile_release.init_transaction"})),
     ("unit.test_local_signing_persistent", ("workflow", "unit"),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_helpers", "unit.local_signing_persistent",
                 "unit.test_local_signing_persistent", "workflow", "workflow.local_signing_bridge",
@@ -175,7 +187,9 @@ ISOLATED_NEGATIVE_IMPORTS = (
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
                 "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
                 "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
-                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.build_inputs",
+                "mobile_release.checked_files",
+                "mobile_release.init_transaction"})),
     ("unit.test_local_signing_composition", ("workflow", "unit"),
      frozenset({"unit", "unit.helpers", "unit.ios_entitlement_helpers", "unit.local_signing_helpers",
                 "unit.local_signing_persistent", "unit.test_local_signing_composition", "workflow",
@@ -188,7 +202,13 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.ios_profiles", "mobile_release.local_signing", "mobile_release.macho",
                 "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
                 "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
-                "mobile_release.tooling", "mobile_release.workflow"})),
+                "mobile_release.tooling", "mobile_release.workflow",
+                "mobile_release._command_process",
+                "mobile_release._store_lane_contract",
+                "mobile_release._store_lane_evidence",
+                "mobile_release._store_lane_files",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files"})),
     ("unit.test_ios_entitlements", ("unit",),
      frozenset({"unit", "unit.ios_artifact_helpers", "unit.ios_entitlement_helpers", "unit.test_ios_entitlements"}),
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
@@ -197,10 +217,13 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.init_transaction", "mobile_release.inspection", "mobile_release.ios",
                 "mobile_release.ios_der", "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary",
                 "mobile_release.ios_profiles", "mobile_release.local_signing", "mobile_release.owned_process",
-                "mobile_release.reporting", "mobile_release.tooling"})),
+                "mobile_release.reporting", "mobile_release.tooling",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files"})),
     ("unit.test_operation_recovery", ("unit",),
      frozenset({"unit", "unit.evidence_helpers", "unit.helpers", "unit.ios_artifact_helpers",
-                "unit.ios_entitlement_helpers", "unit.test_operation_recovery"}),
+                "unit.ios_entitlement_helpers", "unit.test_operation_recovery",
+                "unit.store_lane_model"}),
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
                 "mobile_release._profile_callers", "mobile_release._profile_process", "mobile_release.android",
                 "mobile_release.cancellation", "mobile_release.cli", "mobile_release.config", "mobile_release.credentials",
@@ -209,7 +232,13 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary", "mobile_release.ios_profiles",
                 "mobile_release.local_signing", "mobile_release.macho", "mobile_release.metadata",
                 "mobile_release.owned_process", "mobile_release.preflight", "mobile_release.provenance",
-                "mobile_release.reporting", "mobile_release.stores", "mobile_release.tooling", "mobile_release.workflow"})),
+                "mobile_release.reporting", "mobile_release.stores", "mobile_release.tooling", "mobile_release.workflow",
+                "mobile_release._command_process",
+                "mobile_release._store_lane_contract",
+                "mobile_release._store_lane_evidence",
+                "mobile_release._store_lane_files",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files"})),
     ("unit.test_ios_profile_authority", ("unit",),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.ios_profile_helpers", "unit.test_ios_profile_authority"}),
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
@@ -223,7 +252,9 @@ ISOLATED_NEGATIVE_IMPORTS = (
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
                 "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
                 "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
-                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.build_inputs",
+                "mobile_release.checked_files",
+                "mobile_release.init_transaction"})),
     ("unit.test_local_signing_failures", ("workflow", "unit"),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
                 "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
@@ -237,7 +268,12 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.ios_entitlements", "mobile_release.local_signing", "mobile_release.macho",
                 "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
                 "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
-                "mobile_release.tooling", "mobile_release.workflow"})),
+                "mobile_release.tooling", "mobile_release.workflow",
+                "mobile_release._store_lane_contract",
+                "mobile_release._store_lane_evidence",
+                "mobile_release._store_lane_files",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files"})),
     ("unit.test_local_signing_profile_identity", ("workflow", "unit"),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
                 "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
@@ -251,13 +287,21 @@ ISOLATED_NEGATIVE_IMPORTS = (
                 "mobile_release.ios_entitlements", "mobile_release.local_signing", "mobile_release.macho",
                 "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
                 "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
-                "mobile_release.tooling", "mobile_release.workflow"})),
+                "mobile_release.tooling", "mobile_release.workflow",
+                "mobile_release._store_lane_contract",
+                "mobile_release._store_lane_evidence",
+                "mobile_release._store_lane_files",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files"})),
     ("unit.test_owned_process", ("unit",),
      frozenset({"unit", "unit.test_owned_process"}),
      frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
                 "mobile_release._native_process", "mobile_release._profile_callers", "mobile_release.cancellation",
                 "mobile_release.config", "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
-                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release._store_lane_contract",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files",
+                "mobile_release.init_transaction"})),
 )
 # These selected methods reach fixed lazy dependencies. Own them before the
 # singleton proof; never import the rest of a family just because it is allowed.
@@ -799,20 +843,56 @@ def _publish_failure(phase: str, records: list[dict], original: BaseException | 
                 pass  # Never replace the original prerequisite/interruption.
 
 
-def _result_class(expected, state):
+def _result_class(expected, state, *, progress_timing=False):
     expected_ids = frozenset(expected)
     allowed = _diagnostic_ids(expected)
+    try:
+        if type(progress_timing) is not bool:
+            raise AssertionError("native progress timing requires an exact boolean")
+        if progress_timing:
+            # Only the ordinary result lifetime is observed, never the outer
+            # gate deadline. Retain this callable before any test can rebind it.
+            monotonic_ns = time.monotonic_ns
+            origin_ns = monotonic_ns()
+            if type(origin_ns) is not int or origin_ns < 0:
+                raise AssertionError("native progress clock origin is invalid")
+            previous_ns = origin_ns
+    except BaseException:
+        state["failed"] = True
+        raise
+
+    def elapsed_prefix():
+        nonlocal previous_ns
+        if not progress_timing:
+            return ""  # All other entrypoints remain clock-free and byte-identical.
+        sample_ns = monotonic_ns()
+        if type(sample_ns) is not int or sample_ns < previous_ns:
+            raise AssertionError("native progress clock sample is invalid")
+        elapsed_ms = (sample_ns - origin_ns) // 1_000_000
+        if not 0 <= elapsed_ms <= 3_600_000:
+            raise AssertionError("native progress elapsed time exceeds its diagnostic range")
+        previous_ns = sample_ns
+        return f"MRK_NATIVE_ELAPSED_MS={elapsed_ms}\n"
 
     class Result(unittest.TextTestResult):
         def startTest(self, test):
             if state["failed"]:
                 self.stop()
                 raise AssertionError("a native adverse callback prohibits a later test")
-            # TextTestResult writes a partial header here. Native stderr during
-            # the body could split it from the later success token, so retain
-            # only the documented bookkeeping until the final callback.
+            # Never leave TextTestResult's partial header open across native
+            # stderr. This complete, expected-ID-only line is a start report,
+            # not a body-entry or completion receipt.
             try:
                 unittest.TestResult.startTest(self, test)
+                identifier = test.id()
+                if type(identifier) is not str or identifier not in expected_ids or len(identifier) > 512:
+                    raise AssertionError("native start differs from the exact expected test IDs")
+                method = identifier.rsplit(".", 1)[-1]
+                line = f"\n{elapsed_prefix()}{method} ({identifier})\n"
+                written = self.stream.write(line)
+                if type(written) is not int or written != len(line):
+                    raise OSError("native start write was incomplete")
+                self.stream.flush()
             except BaseException:
                 state["failed"] = True
                 self.stop()
@@ -827,7 +907,7 @@ def _result_class(expected, state):
                 if type(identifier) is not str or identifier not in expected_ids or len(identifier) > 512:
                     raise AssertionError("native success differs from the exact expected test IDs")
                 method = identifier.rsplit(".", 1)[-1]
-                line = f"\n{method} ({identifier}) ... ok\n"
+                line = f"\n{elapsed_prefix()}{method} ({identifier}) ... ok\n"
                 written = self.stream.write(line)
                 if type(written) is not int or written != len(line):
                     raise OSError("native success write was incomplete")
@@ -964,7 +1044,8 @@ def run(*, installed_wheel=False, partition="all") -> int:
     state = {"failed": False, "records": []}
     try:
         result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True, descriptions=False,
-                                         resultclass=_result_class(expected, state)).run(suite)
+                                         resultclass=_result_class(expected, state,
+                                                                   progress_timing=partition == "ordinary")).run(suite)
         if result.skipped:
             print("FAIL: required native verification must not contain skipped tests", file=sys.stderr)
         success = result.wasSuccessful() and not result.skipped and not state["failed"] and result.testsRun == len(expected)

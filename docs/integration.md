@@ -130,6 +130,12 @@ release/store/
 .github/workflows/mobile-production-submit.yml
 ```
 
+Generated callers always read `release/mobile-release.json`. `init --apply` rejects a
+`--config` target elsewhere before acquiring the project workspace or writing files; an
+equivalent relative or absolute default target still uses the existing path/symlink checks.
+Other commands retain custom configuration paths, and `init --recover` does not use this
+restriction or a configuration file, so historical initialization journals remain recoverable.
+
 `--apply` creates the required locale/review/TestFlight text files as empty review prompts. Empty
 content intentionally fails metadata preflight until the product owner completes it. Existing
 regular metadata files are preserved even with `--force`; a symlink or non-file at a required
@@ -222,13 +228,16 @@ Every signed entitlement must fit its own bundle's modern DER profile grants on
 every native architecture. Profileless frameworks/libraries/helpers must not claim
 entitlements; no parent-profile fallback exists. Missing DER, unsupported grant
 expressions and inconsistent slices fail before a fresh Store intent or upload.
-See [iOS entitlement rules](ios-entitlements.md), including the separate unresolved
-Apple profile issuer-authentication blocker (QA-002); do not activate production
-based solely on these content comparisons.
+See [iOS entitlement rules](ios-entitlements.md) and [profile authority](ios-profile-authority.md).
+Both the outer CMS and exact embedded DER CMS independently authenticate against pinned
+Apple roots and the production-purpose issuer policy; content comparisons alone are
+insufficient. This is offline issuance verification, not current revocation status.
 
-The toolkit supports `ios.symbols.policy: retain`: it checks every present archive dSYM against
-the IPA/archive native identity set (requiring primary-app symbols), retains
-them with the candidate, and never contacts Crashlytics or another third party. Automated symbol
+The toolkit supports `ios.symbols.policy: retain`: archive dSYMs must cover every unique
+installed CPU/subtype/UUID identity across apps, extensions, frameworks, dylibs and helpers.
+Identical installed copies may share one symbol identity; there is no vendor or Swift exemption.
+It checks correspondence with the IPA/archive, retains the complete symbol inventory with
+the candidate, and never contacts Crashlytics or another third party. Automated symbol
 upload is intentionally not part of the shared pipeline. `required` is a fail-closed activation
 sentinel: its argv is syntax-checked but never executed, and signing preflight blocks until a
 separately guarded candidate-stage integration exists. Do not select `required` expecting an

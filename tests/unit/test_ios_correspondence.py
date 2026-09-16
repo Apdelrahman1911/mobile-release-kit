@@ -181,6 +181,16 @@ class IOSSetCorrespondenceTests(unittest.TestCase):
             return inspect_ios_artifact_set(snapshot, expected_bundle_id="com.example.reader",
                                             release=ReleaseVersion("1.2.3", 42), symbols_policy=policy)
 
+    def inspect_archive(self, archive, *, policy="retain"):
+        from mobile_release.ios_artifacts import inspect_archive_symbols
+
+        with snapshot_ios_artifacts({"ios-archive": archive}) as snapshot:
+            symbols = inspect_archive_symbols(snapshot.unpack("ios-archive"), expected_bundle_id="com.example.reader",
+                                              release=ReleaseVersion("1.2.3", 42), symbols_policy=policy,
+                                              deadline=snapshot.deadline)
+            snapshot.assert_unchanged()
+            return symbols
+
     def test_full_nested_pair_both_tree_and_packed_symbols_correspond(self):
         for packed in (False, True):
             with self.subTest(packed=packed):
@@ -369,19 +379,120 @@ class IOSSetCorrespondenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "duplicated"):
             self.inspect(paths)
 
-    def test_present_symbols_always_validated_main_policy_and_mrk009_missing_nested_boundary(self):
+    def test_every_installed_native_image_requires_symbols_under_retention(self):
+        for name in ("Reader", "Widget", "ReaderKit", "libexample.dylib", "helper"):
+            with self.subTest(image=name):
+                root = self.root / name
+                root.mkdir()
+                paths = artifact_set(root, detached=False)
+                shutil.rmtree(paths["ios-archive"] / "dSYMs" / (name + ".dSYM"))
+                for policy in ("retain", "required"):
+                    with self.subTest(policy=policy), self.assertRaisesRegex(ValidationError, "missing for installed native slices"):
+                        self.inspect(paths, policy=policy)
+                self.assertEqual(self.inspect(paths, policy="disabled")["presentSymbolSlices"], 4)
+
+    def test_embedded_dwarf_prefix_cannot_hide_unvalidated_native_symbols(self):
+        paths = artifact_set(self.root, detached=False)
+        archive = paths["ios-archive"]
+        hidden = archive / "dSYMs/Reader.dSYM/Extra/Contents/Resources/DWARF/extra"
+        hidden.parent.mkdir(parents=True)
+        for name in ("Reader", "unknown"):
+            # All canonical symbols remain valid. Neither a duplicate nor an
+            # unrelated native object may be ignored at a lookalike DWARF path.
+            hidden.write_bytes(native_image(name, dsym=True))
+            for policy in ("disabled", "retain", "required"):
+                with self.subTest(payload=name, policy=policy, entry="paired"), \
+                        self.assertRaisesRegex(ValidationError, "native object outside retained DWARF inventory"):
+                    self.inspect(paths, policy=policy)
+                with self.subTest(payload=name, policy=policy, entry="archive"), \
+                        self.assertRaisesRegex(ValidationError, "native object outside retained DWARF inventory"):
+                    self.inspect_archive(archive, policy=policy)
+
+    def test_archive_only_retention_requires_nested_symbols_and_disabled_allows_omissions(self):
+        paths = artifact_set(self.root, detached=False)
+        archive = paths["ios-archive"]
+        for policy in ("retain", "required"):
+            self.assertEqual(self.inspect_archive(archive, policy=policy), 5)
+        shutil.rmtree(archive / "dSYMs/helper.dSYM")
+        for policy in ("retain", "required"):
+            with self.subTest(policy=policy), self.assertRaisesRegex(ValidationError, "missing for installed native slices"):
+                self.inspect_archive(archive, policy=policy)
+        self.assertEqual(self.inspect_archive(archive, policy="disabled"), 4)
+        shutil.rmtree(archive / "dSYMs")
+        self.assertEqual(self.inspect_archive(archive, policy="disabled"), 0)
+
+    def test_nested_architectures_with_the_same_uuid_require_cpu_and_subtype_coverage(self):
+        for other_cpu, other_subtype in ((0x100000C, 2), (0x1000007, 0)):
+            with self.subTest(cpu=other_cpu, subtype=other_subtype):
+                root = self.root / f"{other_cpu}-{other_subtype}"
+                root.mkdir()
+                paths = artifact_set(root, detached=False)
+                complete = fat_image([native_image("helper"),
+                                      native_image("helper", cpu=other_cpu, subtype=other_subtype)])
+                for app in (paths["ios-archive"] / "Products/Applications/Reader.app", root / "export/Payload/Reader.app"):
+                    (app / "Helpers/helper").write_bytes(complete)
+                zip_tree(root / "export", paths["ios-ipa"])
+                # The one retained helper slice has the same UUID as both
+                # installed slices, but cannot cover a different CPU/subtype.
+                with self.assertRaisesRegex(ValidationError, "missing for installed native slices"):
+                    self.inspect(paths)
+                self.assertEqual(self.inspect(paths, policy="disabled"),
+                                 {"nativePaths": 5, "nativeIdentities": 6, "presentSymbolSlices": 5})
+                dwarf = paths["ios-archive"] / "dSYMs/helper.dSYM/Contents/Resources/DWARF/helper"
+                dwarf.write_bytes(fat_image([native_image("helper", cpu=other_cpu, subtype=other_subtype, dsym=True),
+                                            native_image("helper", dsym=True)], reverse=True))
+                self.assertEqual(self.inspect(paths, policy="required"),
+                                 {"nativePaths": 5, "nativeIdentities": 6, "presentSymbolSlices": 6})
+                dwarf.write_bytes(native_image("helper", cpu=other_cpu, subtype=99, dsym=True))
+                with self.assertRaisesRegex(ValidationError, "unknown, substituted or duplicated"):
+                    self.inspect(paths, policy="disabled")
+
+    def test_disabled_policy_rejects_unknown_malformed_and_duplicate_present_symbols(self):
         paths = artifact_set(self.root, detached=False)
         shutil.rmtree(paths["ios-archive"] / "dSYMs/helper.dSYM")
-        # This issue validates present symbols; MRK-009 will enforce missing
-        # nested/per-slice coverage. Do not disguise that still-open limitation.
-        self.assertEqual(self.inspect(paths)["presentSymbolSlices"], 4)
         shutil.rmtree(paths["ios-archive"] / "dSYMs/Reader.dSYM")
-        with self.assertRaisesRegex(ValidationError, "main-app"):
-            self.inspect(paths)
         self.assertEqual(self.inspect(paths, policy="disabled")["presentSymbolSlices"], 3)
-        (paths["ios-archive"] / "dSYMs/Widget.dSYM/Contents/Resources/DWARF/Widget").write_bytes(native_image("unknown", dsym=True))
-        with self.assertRaises(ValidationError):
+        dwarf = paths["ios-archive"] / "dSYMs/Widget.dSYM/Contents/Resources/DWARF/Widget"
+        original = dwarf.read_bytes()
+        for name, contents in (("unknown", native_image("unknown", dsym=True)), ("malformed", b"not a Mach-O object")):
+            dwarf.write_bytes(contents)
+            with self.subTest(symbol=name), self.assertRaises(ValidationError):
+                self.inspect(paths, policy="disabled")
+        dwarf.write_bytes(original)
+        duplicate = dwarf.with_name("another-direct-DWARF-file")
+        duplicate.write_bytes(original)
+        with self.assertRaisesRegex(ValidationError, "duplicated"):
             self.inspect(paths, policy="disabled")
+        shutil.rmtree(paths["ios-archive"] / "dSYMs")
+        self.assertEqual(self.inspect(paths, policy="disabled")["presentSymbolSlices"], 0)
+
+    def test_detached_symbols_cannot_repair_an_incomplete_archive(self):
+        paths = artifact_set(self.root)
+        shutil.rmtree(paths["ios-archive"] / "dSYMs/helper.dSYM")
+        for policy in ("retain", "required"):
+            with self.subTest(policy=policy), self.assertRaisesRegex(ValidationError, "missing for installed native slices"):
+                self.inspect(paths, policy=policy)
+        with self.assertRaisesRegex(ValidationError, "detached dSYMs differ"):
+            self.inspect(paths, policy="disabled")
+
+    def test_unknown_symbol_policy_rejected_before_archive_or_paired_inventory(self):
+        from mobile_release.ios_artifacts import inspect_archive_symbols
+
+        policies = ("", "main-only", None, True, [])
+        with patch("mobile_release.ios_artifacts._archive_application", side_effect=AssertionError("archive inventory reached")) as inventory:
+            for policy in policies:
+                with self.subTest(entry="archive", policy=policy), self.assertRaisesRegex(ValidationError, "unknown symbol policy"):
+                    inspect_archive_symbols(self.root / "absent.xcarchive", expected_bundle_id="com.example.reader",
+                                            release=ReleaseVersion("1.2.3", 42), symbols_policy=policy)
+            inventory.assert_not_called()
+        paths = artifact_set(self.root)
+        with snapshot_ios_artifacts(paths) as snapshot:
+            with patch.object(snapshot, "unpack", side_effect=AssertionError("paired inventory reached")) as unpack:
+                for policy in policies:
+                    with self.subTest(entry="paired", policy=policy), self.assertRaisesRegex(ValidationError, "unknown symbol policy"):
+                        inspect_ios_artifact_set(snapshot, expected_bundle_id="com.example.reader",
+                                                 release=ReleaseVersion("1.2.3", 42), symbols_policy=policy)
+                unpack.assert_not_called()
 
     def test_missing_archive_rejected_under_all_symbol_policies(self):
         paths = artifact_set(self.root)
@@ -428,6 +539,12 @@ class IOSSetCorrespondenceTests(unittest.TestCase):
         zip_tree(self.root / "export", paths["ios-ipa"])
         with self.assertRaises(ValidationError):
             self.inspect(paths)
+        source.with_name("unknown.dylib").rename(source)
+        zip_tree(self.root / "export", paths["ios-ipa"])
+        shutil.rmtree(paths["ios-archive"] / "dSYMs/libexample.dylib.dSYM")
+        with self.assertRaisesRegex(ValidationError, "missing for installed native slices"):
+            self.inspect(paths)
+        self.assertEqual(self.inspect(paths, policy="disabled")["presentSymbolSlices"], 4)
 
     def test_unimplemented_ancillary_roots_fail_clearly(self):
         paths = artifact_set(self.root)
@@ -658,6 +775,7 @@ class IOSPreflightCorrespondenceTests(unittest.TestCase):
                     self.assertNotEqual(native.call_args.args[0], paths["ios-ipa"])
 
     def test_project_artifact_check_cannot_modify_the_original_after_validation(self):
+        from mobile_release.cancellation import DefaultCancellation
         from mobile_release.config import load_config
         from mobile_release.preflight import preflight
         from mobile_release.reporting import Report, Status
@@ -667,8 +785,18 @@ class IOSPreflightCorrespondenceTests(unittest.TestCase):
             root = Path(tmp)
             config = load_config(write_project(root, ios_config(), platform="ios"))
             paths = artifact_set(root)
-            def checks(_config, phase, *, environ, execution_source=None):
+            phases, guards = [], []
+
+            def checks(_config, phase, *, environ, execution_source, cancellation):
+                self.assertIs(_config, config)
                 self.assertIsNone(execution_source)
+                self.assertIsInstance(cancellation, DefaultCancellation)
+                if guards:
+                    self.assertIs(cancellation, guards[0])
+                else:
+                    guards.append(cancellation)
+                cancellation.check()
+                phases.append(phase)
                 self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", environ)
                 self.assertNotIn("MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64", environ)
                 if phase == "iosArtifact":
@@ -678,6 +806,7 @@ class IOSPreflightCorrespondenceTests(unittest.TestCase):
             stack.enter_context(patch("mobile_release.preflight.run_project_checks", side_effect=checks))
             stack.enter_context(patch("mobile_release.preflight.validate_ipa", return_value=[]))
             report = preflight(config, mode="offline", platforms=("ios",), run_builds=False, artifacts=paths)
+            self.assertEqual(phases, ["preflight", "iosArtifact"])
             self.assertEqual([item.status for item in report.findings if item.code == "ios.artifacts.correspondence"], [Status.FAIL])
 
 

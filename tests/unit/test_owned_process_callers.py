@@ -1,6 +1,7 @@
 """Exercise real descendant lifetime through every synchronous preflight caller."""
 from __future__ import annotations
 
+import base64
 import json
 import os
 import plistlib
@@ -11,7 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -184,7 +185,7 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
             self.fail(f"original command finality unconfirmed; preserving fictional fixture {root}")
         shutil.rmtree(root)
 
-    def test_real_git_fsmonitor_descendants_finish_before_discovery_returns_or_cancels(self):
+    def test_real_git_discovery_suppresses_hooks_and_explicit_commands_reap_descendants(self):
         for mode in ("success", "failure", "timeout", "cancel"):
             with self.subTest(mode=mode):
                 root = Path(tempfile.mkdtemp(prefix="mrk-owned-git-")).resolve()
@@ -200,15 +201,41 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                     with patch.dict(os.environ, environment, clear=True), \
                          bounded_commands(mode, heartbeat) as outcomes:
                         for args in (("init", "-q"), ("add", "."),
-                                     ("-c", "user.name=Fictional", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Fixture"),
-                                     ("config", "core.fsmonitor", str(hook))):
+                                     ("-c", "user.name=Fictional", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Fixture")):
                             self.assertEqual(run_owned(["git", *args], cwd=project, environ=environment, timeout=15).returncode, 0)
+                        baseline = run_owned(["git", "rev-parse", "HEAD", "HEAD^{tree}"],
+                                             cwd=project, environ=environment, capture=True, timeout=15)
+                        self.assertEqual(baseline.returncode, 0)
+                        head, tree = baseline.stdout.splitlines()
+                        self.assertEqual(run_owned(["git", "config", "core.fsmonitor", str(hook)],
+                                                   cwd=project, environ=environment, timeout=15).returncode, 0)
+                        # Source discovery must suppress even a genuine executable
+                        # repository hook, not merely contain it after execution.
+                        result = discovery.discover_project(config.root)
+                        self.assertEqual((result["git"]["commit"], result["git"]["tree"]), (head, tree))
+                        self.assertIs(result["git"]["dirty"], False)
+                        self.assertFalse(os.path.lexists(ready))
+                        self.assertFalse(os.path.lexists(heartbeat))
+
+                        # Deliberately opt only this fixture command into the
+                        # hook to retain real Git descendant-lifecycle coverage.
+                        argv = ["git", "--no-pager", "-c", "core.fsmonitor=" + str(hook),
+                                "-c", "core.fsmonitorHookVersion=2", "status", "--porcelain=v1"]
                         if mode == "cancel":
                             with self.assertRaises(KeyboardInterrupt):
-                                discovery.discover_project(config.root)
+                                run_owned(argv, cwd=project, environ=environment, timeout=15)
+                        elif mode == "timeout":
+                            with self.assertRaises(ProcessError) as caught:
+                                run_owned(argv, cwd=project, environ=environment, timeout=15)
+                            self.assertTrue(caught.exception.dispatched)
+                            self.assertTrue(caught.exception.contained)
+                            self.assertTrue(caught.exception.cleanup_complete)
+                            self.assertFalse(caught.exception.fatal)
                         else:
-                            result = discovery.discover_project(config.root)
-                            self.assertIn("git", result)
+                            # Git can fall back successfully when its fsmonitor
+                            # hook exits7; that is not a Git command exit7.
+                            command_result = run_owned(argv, cwd=project, environ=environment, timeout=15)
+                            self.assertEqual(command_result.returncode, 0)
                     self.observed_absent(ready, heartbeat, outcomes)
                 finally:
                     self.finish(root, stop, outcomes)
@@ -239,11 +266,16 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                     copied = config.root / ".mobile-release/build/android/app-release.aab"
                     keystore = root / "fictional-keystore"
                     keystore.write_bytes(b"fictional-keystore")
+                    keystore.chmod(0o600)
+                    original_key = keystore.stat()
+                    original_keystore = (original_key.st_dev, original_key.st_ino,
+                                         original_key.st_mode, keystore.read_bytes())
                     signing_values = {"MOBILE_RELEASE_ANDROID_KEYSTORE_PATH": str(keystore),
                                       "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": "fixture-password",
                                       "MOBILE_RELEASE_ANDROID_KEY_ALIAS": "fixture-alias",
                                       "MOBILE_RELEASE_ANDROID_KEY_PASSWORD": "fixture-key-password"}
-                    environment = {"PATH": str(binary) + ":/usr/bin:/bin", "HOME": str(root), "LC_ALL": "C",
+                    environment = {"PATH": str(binary) + ":/usr/bin:/bin", "HOME": str(root),
+                                   "TMPDIR": str(root), "LC_ALL": "C",
                                    "MOBILE_RELEASE_VERSION_NAME": "9.9.9", "MOBILE_RELEASE_BUILD_NUMBER": "999", **signing_values}
                     wrapper = config.root / "gradlew"
                     if caller == "gradle":
@@ -257,7 +289,15 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                         wrapper.chmod(0o700)
                         before = (f"assert Path(sys.argv[-2])==Path({str(copied)!r})\n"
                                   f"assert Path({str(copied)!r}).read_bytes()==Path({str(source)!r}).read_bytes()\n"
-                                  "assert sys.argv[1:3]==['-keystore'," + repr(str(keystore)) + "]\n"
+                                  "assert sys.argv[1]=='-keystore'\n"
+                                  "selected=Path(sys.argv[2])\n"
+                                  f"assert selected!=Path({str(keystore)!r})\n"
+                                  f"assert selected.parent.parent==Path({str(root)!r})\n"
+                                  "assert selected.name=='android-keystore'\n"
+                                  "assert selected.is_file() and not selected.is_symlink()\n"
+                                  "assert selected.stat().st_mode & 0o777 == 0o600\n"
+                                  "assert selected.parent.stat().st_mode & 0o777 == 0o700\n"
+                                  f"assert selected.read_bytes()==Path({str(keystore)!r}).read_bytes()==b'fictional-keystore'\n"
                                   "assert '-storepass:env' in sys.argv and '-keypass:env' in sys.argv\n"
                                   "assert 'MOBILE_RELEASE_APPLE_API_KEY_P8_BASE64' not in os.environ\n"
                                   "assert 'ACTIONS_ID_TOKEN_REQUEST_TOKEN' not in os.environ\n"
@@ -286,10 +326,16 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                                     android.run_android_build(config, signed=caller == "signer")
                         self.observed_absent(ready, heartbeat, outcomes)
                         self.assertEqual(source.read_bytes(), b"fictional-unsigned-bundle")
+                        current_key = keystore.stat()
+                        self.assertEqual((current_key.st_dev, current_key.st_ino, current_key.st_mode,
+                                          keystore.read_bytes()), original_keystore)
                         self.assertEqual(len(calls), 1 if caller == "gradle" else 2)
                         self.assertFalse(calls[0][2])
                         if caller == "signer":
                             self.assertTrue(calls[-1][2])
+                            selected = Path(calls[-1][0][2])
+                            self.assertFalse(os.path.lexists(selected))
+                            self.assertFalse(os.path.lexists(selected.parent))
                     finally:
                         self.finish(root, stop, outcomes)
 
@@ -311,6 +357,7 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                 p12, source = private / "p12", private / "profile"
                 p12.write_bytes(b"fictional-p12")
                 source.write_bytes(b"fictional-profile")
+                p12.chmod(0o600); source.chmod(0o600)
                 model = NativeSigningModel(home)
                 native_calls = []
 
@@ -352,7 +399,8 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                      patch.object(discovery, "run_owned", side_effect=AssertionError("static discovery executed Git")) as git:
                     with signing.local_signing_lease(home=home) as lease:
                         with credentials._temporary_apple_signing_environment(p12=p12, password="fictional", profile=source,
-                                                                            directory=private, lease=lease) as env:
+                                                                            directory=private, lease=lease,
+                                                                            project_root=config.root) as env:
                             with patch.dict(os.environ, {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": env["MOBILE_RELEASE_IOS_PROFILE_SPECIFIER"]}):
                                 result = ios.run_ios_build(config, signed=True, signing_session=lease.active)
                             self.assertEqual(result["ios-ipa"].read_bytes(), b"fictional-unvalidated-ipa")
@@ -362,6 +410,180 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                 self.assertEqual(len(native_calls), 3)
                 self.assertEqual(model.preferences, model.original)
                 self.assertEqual(signing.signing_status(home=home)["status"], "idle")
+
+
+def _exercise_owned_readback(root: Path, mode: str) -> dict:
+    """Real owner/output integration with an inert, exclusive synthetic writer.
+
+    Bundler/Store behavior and P8 authentication are not the subject of this
+    fixture. The original command, result, slot, finality, selected bytes, reader
+    and cleanup are real and never replaced. Fatal scenarios run in a separate
+    original owned interpreter, never poison another test's warm parent.
+    """
+    from mobile_release import build_inputs as inputs, stores
+    from mobile_release.reporting import Finding, Status
+
+    assert mode in {"success", "collision", "reader-close"}
+    value = android_config()
+    value["ios"] = ios_config()["ios"]
+    value["metadata"]["iosLocales"] = ["en-US"]
+    config = load_config(write_project(root / "project", value))
+    source = root / "adc.json"
+    adc = b'{"type":"external_account"}'
+    source.write_bytes(adc); source.chmod(0o600)
+    p8 = b"fictional selected bytes; not an authentication fixture"
+    values = {"GOOGLE_APPLICATION_CREDENTIALS": str(source),
+              "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": base64.b64encode(p8).decode("ascii"),
+              "MOBILE_RELEASE_ASC_KEY_ID": "ABCDEFGHIJ",
+              "MOBILE_RELEASE_ASC_ISSUER_ID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+    tools = root / "tools"
+    (tools / "fastlane").mkdir(parents=True)
+    runner = tools / "fastlane/run_lane.rb"
+    runner.write_text("# Synthetic writer admission only; never a Store lane.\n")
+    (tools / "Gemfile").write_text("# No dependencies are loaded by this fixture.\n")
+    bin_dir = root / "bin"; bin_dir.mkdir(mode=0o700)
+    script = bin_dir / "bundle"
+    script.write_text("#!" + sys.executable + "\n" +
+        "import json,os,sys\nfrom pathlib import Path\n"
+        "expected=json.loads((Path(__file__).parent/'request.json').read_bytes())\n"
+        "assert sys.argv[1:]==expected['argv'][1:]\n"
+        "assert os.getcwd()==expected['cwd'] and dict(os.environ)==expected['environment']\n"
+        "path=os.environ['MOBILE_RELEASE_PREFLIGHT_READBACK_PATH']\n"
+        "try: fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)\n"
+        "except FileExistsError: raise SystemExit(23)\n"
+        "data=json.dumps(expected['readback'],separators=(',',':')).encode('utf-8')\n"
+        "try:\n assert os.write(fd,data)==len(data)\n os.fsync(fd)\n"
+        "finally: os.close(fd)\n", encoding="utf-8")
+    script.chmod(0o700)
+    outputs, calls, reads, read_scopes, injected = [], [], [], [], []
+    original_call, original_read, original_close = stores.run_owned, inputs.FiniteScratch.read_output, inputs._FD.close
+
+    def observed_call(argv, **kwargs):
+        environment, cwd = kwargs["environ"], kwargs["cwd"]
+        platform = argv[-1].removesuffix("_online_preflight")
+        assert argv == ("bundle", "exec", "ruby", str(runner), platform + "_online_preflight")
+        assert kwargs["capture"] is False and kwargs["timeout"] == 900
+        if platform == "android":
+            selected = Path(environment["GOOGLE_APPLICATION_CREDENTIALS"])
+            assert selected != source and selected.read_bytes() == adc
+        else:
+            assert base64.b64decode(environment["MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"], validate=True) == p8
+        path = Path(environment["MOBILE_RELEASE_PREFLIGHT_READBACK_PATH"])
+        assert not path.exists() and not path.is_symlink()
+        readback = {"schemaVersion": 1, "platform": platform, "appIdentity": "com.example.reader",
+                    "buildNumber": 42, "buildUnused": True, "observedAt": "2026-01-01T00:00:00Z"}
+        readback.update({"requiredTracks": ["internal", "closed-testing"], "closedTesterAssignmentVerified": True}
+            if platform == "android" else {"appStoreAppId": "1234567890", "externalGroup": "External Testers"})
+        request = bin_dir / "request.json"
+        request.write_text(json.dumps({"argv": list(argv), "cwd": str(cwd), "environment": environment,
+                                       "readback": readback}), encoding="utf-8")
+        request.chmod(0o600)
+        if mode == "collision":
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as target:
+                target.write(b"foreign synthetic occupant")
+        outputs.append((path, cwd, path.stat() if mode == "collision" else None))
+        result = original_call(argv, **kwargs)
+        evidence = kwargs["_evidence"]
+        outcome = evidence._slot.read()
+        assert outcome.original_finality is not None and outcome._engine.phase == "CLOSED"
+        assert outcome.run_tool.attempted and outcome.run_tool.retired
+        assert outcome.create_w.attempted and outcome.create_w.retired
+        assert outcome.result_integrity == "complete" and outcome.termination == "normal-exit"
+        assert result.returncode == outcome.returncode == (23 if mode == "collision" else 0)
+        calls.append((platform, outcome))
+        return result
+
+    def read_output(scratch, role):
+        read_scopes.append((scratch, role))
+        data = original_read(scratch, role)
+        reads.append((role, data))
+        return data
+
+    def close(slot):
+        selected = False
+        if mode == "reader-close" and not injected and outputs and slot.number is not None:
+            before, named = os.fstat(slot.number), outputs[0][0].stat()
+            selected = (before.st_dev, before.st_ino) == (named.st_dev, named.st_ino)
+        original_close(slot)
+        if selected:
+            injected.append(slot)
+            assert slot.number is None
+            raise OSError("synthetic original reader close returned then failed")
+
+    with original_command_outcomes() as outcomes, ExitStack() as patches:
+        patches.enter_context(patch.dict(os.environ, {"PATH": str(bin_dir) + ":/usr/bin:/bin",
+            "HOME": str(root), "TMPDIR": str(root), "LC_ALL": "C", "LANG": "C"}, clear=True))
+        patches.enter_context(patch.object(stores, "resolve_tooling_root", return_value=tools))
+        patches.enter_context(patch.object(stores, "_complete_tooling_root", return_value=True))
+        patches.enter_context(patch.object(stores, "_require_fastlane_bundle", return_value=None))
+        # Only cryptographic policy is inert. Selection/custody and outbound
+        # bytes remain the real original material, not a fabricated owner.
+        patches.enter_context(patch.object(credentials, "_validate_selected_p8",
+            return_value=Finding("fixture.p8-policy", Status.PASS, "synthetic policy boundary")))
+        patches.enter_context(patch.object(stores, "run_owned", new=observed_call))
+        patches.enter_context(patch.object(inputs.FiniteScratch, "read_output", new=read_output))
+        patches.enter_context(patch.object(inputs._FD, "close", new=close))
+        failure, findings = None, None
+        try:
+            with inputs.invocation_custody(config.root, mode="online") as invocation:
+                with credentials._selected_store_material(config, values=values,
+                        platforms=("android", "ios"), invocation=invocation) as material:
+                    assert all(item.status is Status.PASS for item in material.validate())
+                    source.write_bytes(b"external source changed after selection")
+                    findings = stores.online_preflight_findings(config=config, release=config.release_version(),
+                        platforms=("android", "ios"), material=material, invocation=invocation)
+        except ProcessError as error:
+            failure = error
+        assert outcomes and all_original_commands_final(outcomes)
+        if mode == "success":
+            assert failure is None and [item.status for item in findings] == [Status.PASS, Status.PASS]
+            assert [platform for platform, _outcome in calls] == ["android", "ios"]
+            assert [role for role, _data in reads] == ["android", "ios"]
+            assert all(not path.parent.exists() and not cwd.exists() for path, cwd, _old in outputs)
+        else:
+            assert failure is not None and failure.fatal and findings is None
+            assert [platform for platform, _outcome in calls] == ["android"] and not reads
+            path, cwd, before = outputs[0]
+            assert path.is_file() and not cwd.exists()
+            if mode == "collision":
+                now = path.stat()
+                assert (now.st_dev, now.st_ino, now.st_mode) == (before.st_dev, before.st_ino, before.st_mode)
+                assert path.read_bytes() == b"foreign synthetic occupant" and not read_scopes
+            else:
+                assert len(injected) == len(read_scopes) == 1
+                scratch, role = read_scopes[0]
+                assert scratch.records[role]["binding_attempted"] and scratch.records[role]["binding"] is None
+                # Teardown may not adopt/retry the lost reader result.
+                assert json.loads(path.read_bytes())["platform"] == "android"
+        assert source.read_bytes() == b"external source changed after selection"
+        assert (config.root / ".mobile-release/store").is_dir()
+    return {"case": mode, "writers": len(calls), "originalCommandsFinal": True}
+
+
+class OwnedReadbackNativeTests(unittest.TestCase):
+    def exercise(self, mode):
+        with settled_native_fixture("mrk-readback-owner-") as root:
+            code = ("import json,sys;from pathlib import Path;sys.path[:0]=sys.argv[1:3];"
+                    "from unit.test_owned_process_callers import _exercise_owned_readback;"
+                    "print(json.dumps(_exercise_owned_readback(Path(sys.argv[3]),sys.argv[4])))")
+            result = run_owned([sys.executable, "-I", "-S", "-B", "-c", code,
+                str(Path(mobile_release.__file__).resolve().parent.parent), str(Path(__file__).parents[1]), str(root), mode],
+                cwd=root, environ={"PATH": "/usr/bin:/bin", "HOME": str(root), "TMPDIR": str(root),
+                                   "LC_ALL": "C", "LANG": "C"}, timeout=60, output_limit=64 * 1024)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(json.loads(result.stdout), {"case": mode, "writers": 2 if mode == "success" else 1,
+                                                       "originalCommandsFinal": True})
+
+    def test_actual_online_writer_binds_selected_bytes_and_disposes_each_platform(self):
+        self.exercise("success")
+
+    def test_actual_exclusive_writer_collision_is_not_adopted_and_stops_next_platform(self):
+        self.exercise("collision")
+
+    def test_late_original_read_close_failure_cannot_publish_or_retry_an_output(self):
+        self.exercise("reader-close")
 
 
 if __name__=='__main__':unittest.main()

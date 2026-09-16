@@ -23,6 +23,12 @@ module MobileReleaseKit
       upload_changelogs(release_notes, release, track, track_name)
     end
   end
+
+  # Unlike the metadata/track-only harness above, this inherits the production
+  # mapping sender and its admission/one-use checks without a mapping stub.
+  class PlayMappingHarness < PreservingSupplyUploader
+    def perform_upload_meta(_version_codes, _track_name); end
+  end
 end
 
 class FakePlayClient
@@ -164,9 +170,11 @@ class PreservingSupplyUploaderTests < Minitest::Test
     @temporary = File.realpath(Dir.mktmpdir("mrk-play-test-"))
     @key = File.join(@temporary, "adc.json")
     @aab = File.join(@temporary, "candidate.aab")
+    @mapping = File.join(@temporary, "mapping.txt")
     @journal = File.join(@temporary, "play-state.json")
     File.write(@key, "{}\n", mode: "w", perm: 0o600)
     File.write(@aab, "not-a-real-aab", mode: "w", perm: 0o600)
+    File.binwrite(@mapping, "original mapping\x00bytes\xff".b)
   end
 
   def teardown
@@ -235,6 +243,43 @@ class PreservingSupplyUploaderTests < Minitest::Test
     uploader.metadata_hook = hook
     FastlaneCore::PrintTable.stub(:print_values, nil) { uploader.perform_upload }
     uploader
+  end
+
+  def mapping_record
+    { "logicalName" => "android-mapping", "fileName" => File.basename(@mapping),
+      "size" => File.size(@mapping), "sha256" => Digest::SHA256.file(@mapping).hexdigest }
+  end
+
+  def mapping_uploader(client, guard: ->(_client) { { phase: :before, bundles: [] } }, validation: ->(_path) {}, expected: mapping_record)
+    Supply.config = MobileReleaseKit::PreservingSupplyUploader.configuration(candidate_options(mapping: @mapping))
+    bundle = { "logicalName" => "android-aab", "fileName" => File.basename(@aab), "size" => File.size(@aab), "sha256" => Digest::SHA256.file(@aab).hexdigest }
+    MobileReleaseKit::PlayMappingHarness.new(
+      journal_path: @journal, client: client, before_mutation_guard: guard,
+      expected_bundle_sha256: bundle.fetch("sha256"), expected_bundle: bundle,
+      expected_mapping: expected, bundle_validation: validation,
+    )
+  end
+
+  def raise_and_freeze_actual(error, cause: nil)
+    refute error.frozen?
+    begin
+      raise error, cause: cause
+    ensure
+      # Freeze the actual exception already unwinding, not a preconstructed
+      # frozen object which Ruby would copy on its very first raise.
+      error.freeze
+    end
+  end
+
+  def assert_native_frozen_propagation(primary, propagated)
+    assert primary.frozen?
+    # Pinned Ruby 3.3.12 duplicates frozen exceptions with a backtrace on raise.
+    # The adapter must retain the exact original separately, not wrap/mutate it.
+    refute_same primary, propagated
+    assert_equal primary.class, propagated.class
+    assert_equal primary.message, propagated.message
+    assert_equal primary.backtrace, propagated.backtrace
+    assert_same primary.cause, propagated.cause
   end
 
   def unrelated_releases
@@ -470,6 +515,532 @@ class PreservingSupplyUploaderTests < Minitest::Test
       assert_instance_of Google::Apis::Core::ResumableUploadCommand, commands.first
       assert_equal 0, commands.first.options.retries
       assert_equal 1, http.requests.count { |name, _| name == "start" }
+    end
+  end
+
+  def test_mapping_uses_production_one_use_sender_and_real_sdk_caller_file_lifetime
+    previous = Google::Apis::RequestOptions.default.retries
+    Google::Apis::RequestOptions.default.retries = 5
+    %i[success lost_start lost_body].each do |mode|
+      FileUtils.rm_f(@journal)
+      http = SyntheticResumableHTTP.new(mode, response_kind: :mapping)
+      service = AndroidPublisher::AndroidPublisherService.new
+      client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+      commands, releases, sources, routes = [], [], [], []
+      close_attempts = 0
+      uploader = nil
+      client.define_singleton_method(:upload_mapping) { |*| raise "Supply's pathname/retry wrapper must not run" }
+      client.define_singleton_method(:upload_edit_deobfuscationfile) do |*args, **keywords|
+        routes << args
+        sources << keywords.fetch(:upload_source)
+        service.upload_edit_deobfuscationfile(*args, **keywords)
+      end
+      test = self
+      service.define_singleton_method(:execute_or_queue_command) do |command, &_block|
+        commands << command
+        file = command.upload_source
+        test.assert_same uploader.instance_variable_get(:@mapping_snapshot).reader, file
+        test.assert_instance_of File, file
+        test.assert_equal 0, file.stat.nlink
+        test.assert file.close_on_exec?
+        test.assert_raises(IOError) { file.write("must not be writable") }
+        test.assert_raises(MobileReleaseKit::ContractError) { uploader.send(:upload_mapping, [200]) }
+        close = file.method(:close)
+        file.define_singleton_method(:close) { close_attempts += 1; close.call }
+        release = command.class.instance_method(:release!).bind(command)
+        command.define_singleton_method(:release!) do
+          release.call
+          releases << [file, file.closed?]
+        end
+        command.execute(http)
+      end
+      guard = lambda do |_|
+        # A rejected nested operation cannot run the first owner's ensure.
+        assert_raises(MobileReleaseKit::ContractError) { uploader.perform_upload }
+        refute uploader.instance_variable_get(:@mapping_snapshot).reader.closed?
+        assert_raises(MobileReleaseKit::ContractError) { uploader.send(:upload_mapping, [200]) }
+        { phase: :before, bundles: [] }
+      end
+      uploader = mapping_uploader(client, guard: guard)
+      assert_equal MobileReleaseKit::PreservingSupplyUploader, uploader.method(:upload_mapping).owner
+      operation = -> { FastlaneCore::PrintTable.stub(:print_values, nil) { uploader.perform_upload } }
+      if mode == :success
+        operation.call
+        assert_equal File.binread(@mapping), http.content
+        assert_equal 1, client.commits.length
+      else
+        assert_raises(Google::Apis::ServerError, Google::Apis::TransmissionError, &operation)
+        assert_empty client.commits
+        assert_empty client.updates
+      end
+      assert_equal 1, commands.length
+      assert_equal [["com.example.app", "edit-1", 200, "proguard"]], routes
+      assert_instance_of Google::Apis::Core::ResumableUploadCommand, commands.first
+      assert_equal 0, commands.first.options.retries
+      assert_equal [sources.first, false], releases.fetch(0), "SDK release must not close caller IO"
+      assert_equal 1, releases.length
+      assert_equal 1, close_attempts
+      assert sources.first.closed?, "only outer owned cleanup closes the reader"
+      assert http.sources.all? { |source| source.equal?(sources.first) }
+      assert_equal 1, http.requests.count { |name, _| name == "start" }
+      assert_raises(MobileReleaseKit::ContractError) { uploader.send(:upload_mapping, [200]) }
+      assert_raises(MobileReleaseKit::ContractError) { uploader.perform_mapping_recovery }
+    end
+  ensure
+    Google::Apis::RequestOptions.default.retries = previous
+  end
+
+  def test_mapping_batch_context_rejects_before_any_enqueue_or_deferred_reader_escape
+    %i[initial after_guard].each do |timing|
+      FileUtils.rm_f(@journal)
+      previous_batch = Thread.current[:google_api_batch]
+      previous_service = Thread.current[:google_api_batch_service]
+      queued = []
+      batch = Object.new
+      batch.define_singleton_method(:add) { |command, &_| queued << command }
+      service = AndroidPublisher::AndroidPublisherService.new
+      assert_equal Google::Apis::Core::BaseService, service.method(:execute_or_queue_command).owner
+      client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+      client.define_singleton_method(:upload_edit_deobfuscationfile) { |*args, **keywords| service.upload_edit_deobfuscationfile(*args, **keywords) }
+      activate = lambda do
+        Thread.current[:google_api_batch] = batch
+        Thread.current[:google_api_batch_service] = service
+      end
+      guard = lambda do |_|
+        activate.call if timing == :after_guard
+        { phase: :before, bundles: [] }
+      end
+      uploader = mapping_uploader(client, guard: guard)
+      assert_equal MobileReleaseKit::PreservingSupplyUploader, uploader.method(:upload_mapping).owner
+      activate.call if timing == :initial
+      failure = assert_raises(MobileReleaseKit::ContractError) { uploader.perform_mapping_recovery }
+      assert_empty queued, "rejecting only after enqueue would let reader custody escape"
+      assert_empty client.commits
+      assert_empty client.updates
+      snapshot = uploader.instance_variable_get(:@mapping_snapshot)
+      if timing == :initial
+        assert_nil snapshot
+        assert_empty client.events
+      else
+        assert failure.backtrace_locations.any? { |frame| frame.base_label == "upload_mapping" },
+               "the late batch must be rejected by mapping admission, not an earlier AAB gate"
+        assert uploader.instance_variable_get(:@mapping_send_due)
+        refute uploader.instance_variable_get(:@mapping_send_consumed)
+        assert snapshot.reader.closed?
+        assert_equal 0, client.aborts, "cleanup must not enqueue an abort in the caller's batch"
+        refute uploader.cleanup_confirmed?
+        assert_equal :unknown, uploader.instance_variable_get(:@active_edit_owner).fetch(:state)
+      end
+    ensure
+      Thread.current[:google_api_batch] = previous_batch
+      Thread.current[:google_api_batch_service] = previous_service
+    end
+  end
+
+  def test_mapping_acquisition_faults_refuse_before_store_and_dispose_each_owned_file_once
+    %i[digest size growth short_read write zero_write interrupt source_close writer_close].each do |fault|
+      FileUtils.rm_f(@journal)
+      original = "original mapping\x00bytes\xff".b
+      File.binwrite(@mapping, original)
+      expected = mapping_record
+      expected["sha256"] = "0" * 64 if fault == :digest
+      expected["size"] += 1 if fault == :size
+      client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+      uploader = mapping_uploader(client, expected: expected)
+      files, attempts = {}, Hash.new(0)
+      interrupt = Interrupt.new("synthetic bounded copy cancellation")
+      instrument = lambda do |file, role|
+        files[role] = file
+        close = file.method(:close)
+        file.define_singleton_method(:close) do
+          attempts[role] += 1
+          close.call
+          raise IOError, "synthetic confirmed-close response failure" if fault == :"#{role}_close"
+        end
+        file
+      end
+      original_open = File.method(:open)
+      original_create = Tempfile.method(:create)
+      mapping_path = @mapping
+      open = lambda do |*args, **keywords, &block|
+        file = original_open.call(*args, **keywords, &block)
+        if !block && args.first == mapping_path
+          instrument.call(file, :source)
+          read = file.method(:read)
+          first = true
+          file.define_singleton_method(:read) do |length|
+            raise interrupt if fault == :interrupt
+            bytes = read.call(length)
+            if first && bytes
+              File.binwrite(mapping_path, original + "X") if fault == :growth
+              bytes = bytes.byteslice(0, bytes.bytesize - 1) if fault == :short_read
+            end
+            first = false
+            bytes
+          end
+        elsif !block && args.first.is_a?(String) && File.basename(args.first).start_with?("mrk-play-mapping-") &&
+              args[1].is_a?(Integer) && (args[1] & (File::WRONLY | File::RDWR)) == File::RDONLY
+          instrument.call(file, :reader)
+        end
+        file
+      end
+      create = lambda do |*args, **keywords|
+        file = instrument.call(original_create.call(*args, **keywords), :writer)
+        file.define_singleton_method(:write) { |*| raise IOError, "synthetic snapshot write failure" } if fault == :write
+        file.define_singleton_method(:write) { |*| 0 } if fault == :zero_write
+        file
+      end
+      failure = nil
+      File.stub(:open, open) do
+        Tempfile.stub(:create, create) do
+          failure = assert_raises(MobileReleaseKit::ContractError, IOError, Interrupt) do
+            FastlaneCore::PrintTable.stub(:print_values, nil) { uploader.perform_upload }
+          end
+        end
+      end
+      assert_same interrupt, failure if fault == :interrupt
+      assert_empty client.events, "#{fault}: acquisition must finish before begin_edit"
+      assert files.values.all?(&:closed?), "all injected closes really close before their synthetic error"
+      assert attempts.values.all? { |count| count == 1 }, "#{fault}: never retry an ambiguous close"
+      assert_equal(fault == :growth ? original + "X" : original, File.binread(@mapping))
+      holder = uploader.instance_variable_get(:@mapping_snapshot)
+      assert holder.cleanup_records.select { |record| record[:role] == :temporary_name }.all? { |record| !File.exist?(record.fetch(:path)) }
+      if %i[source_close writer_close].include?(fault)
+        refute uploader.cleanup_confirmed?
+        unknown = holder.cleanup_records.select { |record| record[:state] == :unknown }
+        assert_equal [fault == :source_close ? :source : :writer], unknown.map { |record| record.fetch(:role) }
+        assert_same files.fetch(unknown.first.fetch(:role)), unknown.first.fetch(:resource)
+      end
+    end
+  end
+
+  def test_mapping_cleanup_preserves_a_replaced_temporary_name_and_retains_unknown_identity
+    client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+    uploader = mapping_uploader(client)
+    original_create = Tempfile.method(:create)
+    path = held = original_id = foreign_id = nil
+    create = lambda do |*args, **keywords|
+      writer = original_create.call(*args, **keywords)
+      path = writer.path
+      held = File.join(@temporary, "held-original-mapping-snapshot")
+      original_id = [writer.stat.dev, writer.stat.ino]
+      flush = writer.method(:flush)
+      writer.define_singleton_method(:flush) do
+        flush.call
+        File.rename(path, held)
+        File.binwrite(path, "foreign-name-owner")
+        foreign_id = [File.lstat(path).dev, File.lstat(path).ino]
+      end
+      writer
+    end
+    Tempfile.stub(:create, create) do
+      assert_raises(MobileReleaseKit::ContractError) do
+        FastlaneCore::PrintTable.stub(:print_values, nil) { uploader.perform_upload }
+      end
+    end
+    assert_empty client.events
+    assert_equal "foreign-name-owner", File.binread(path)
+    holder = uploader.instance_variable_get(:@mapping_snapshot)
+    assert holder.cleanup_records.select { |record| record[:resource] }.all? { |record| record.fetch(:resource).closed? }
+    name = holder.cleanup_records.find { |record| record[:role] == :temporary_name }
+    assert_equal :unknown, name.fetch(:state)
+    assert_equal original_id, [name.fetch(:identity).dev, name.fetch(:identity).ino]
+    refute uploader.cleanup_confirmed?
+  ensure
+    # Only this test created the replacement and moved pathname. The product
+    # correctly preserves both; test teardown removes exact proven test inodes.
+    [[path, foreign_id], [held, original_id]].each do |name, identity|
+      next unless name && identity && File.exist?(name)
+      assert_equal identity, [File.lstat(name).dev, File.lstat(name).ino]
+      File.unlink(name)
+    end
+  end
+
+  def test_mapping_recovery_never_adopts_changed_client_edit_or_version
+    %i[client edit version].each do |changed|
+      FileUtils.rm_f(@journal)
+      client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+      foreign = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+      sends = []
+      client.define_singleton_method(:upload_edit_deobfuscationfile) { |*| sends << :original }
+      foreign.define_singleton_method(:upload_edit_deobfuscationfile) { |*| sends << :foreign }
+      uploader = nil
+      guard = lambda do |_|
+        case changed
+        when :client then uploader.instance_variable_set(:@client, foreign)
+        when :edit then client.current_edit = FakePlayClient::Edit.new("foreign-edit")
+        when :version then Supply.config[:version_code] = 201
+        end
+      end
+      uploader = mapping_uploader(client, guard: guard)
+      assert_raises(MobileReleaseKit::ContractError) { uploader.perform_mapping_recovery }
+      assert_empty sends
+      assert_empty client.commits
+      assert_equal 0, client.aborts, "changed routing must not delete a replacement edit"
+      assert_equal 0, foreign.aborts
+      assert uploader.instance_variable_get(:@mapping_snapshot).reader.closed?
+      assert_raises(MobileReleaseKit::ContractError) { uploader.perform_mapping_recovery }
+    end
+  end
+
+  def test_direct_operation_never_uses_an_unrelated_caller_rescue_to_suppress_cleanup_failure
+    %i[upload recovery observation].each do |operation|
+      FileUtils.rm_f(@journal)
+      client = FakePlayClient.new(
+        "internal" => track("internal", unrelated_releases),
+        "closed" => track("closed", unrelated_releases),
+      )
+      abort_error = IOError.new("synthetic abort response failure")
+      close_error = IOError.new("synthetic reader-close response failure")
+      unless operation == :recovery
+        abort = client.method(:abort_current_edit)
+        client.define_singleton_method(:abort_current_edit) { abort.call; raise abort_error }
+      end
+      reader = nil
+      close_attempts = 0
+      if operation == :observation
+        Supply.config = MobileReleaseKit::PreservingSupplyUploader.configuration(promotion_options)
+        uploader = MobileReleaseKit::PlayStoreHarness.new(journal_path: @journal, client: client)
+        call = lambda do
+          uploader.observe_existing(source_track: "internal", destination_track: "closed", version_code: 200, expected_status: "completed")
+        end
+      else
+        client.define_singleton_method(:upload_edit_deobfuscationfile) do |*, **|
+          AndroidPublisher::DeobfuscationFilesUploadResponse.new
+        end
+        guard = lambda do |_|
+          observed_reader = uploader.instance_variable_get(:@mapping_snapshot).reader
+          if reader
+            assert_same reader, observed_reader
+          else
+            reader = observed_reader
+            close = reader.method(:close)
+            reader.define_singleton_method(:close) { close_attempts += 1; close.call; raise close_error }
+          end
+          { phase: :before, bundles: [] }
+        end
+        uploader = mapping_uploader(client, guard: guard)
+        call = if operation == :upload
+                 -> { FastlaneCore::PrintTable.stub(:print_values, nil) { uploader.perform_upload } }
+               else
+                 -> { uploader.perform_mapping_recovery }
+               end
+      end
+      unrelated = ArgumentError.new("synthetic unrelated caller rescue")
+      failure = nil
+      begin
+        raise unrelated
+      rescue ArgumentError
+        assert_same unrelated, $!
+        failure = assert_raises(IOError, &call)
+      end
+      expected = operation == :recovery ? [close_error] : [abort_error]
+      expected << close_error if operation == :upload
+      assert_same expected.first, failure
+      assert_equal expected, uploader.cleanup_failures
+      refute uploader.cleanup_confirmed?
+      assert_equal 1, client.aborts
+      assert_nil client.current_edit, "the injected abort error follows actual fake deletion"
+      if reader
+        assert reader.closed?, "an abort failure must not skip independent reader cleanup"
+        assert_equal 1, close_attempts
+      end
+    end
+  end
+
+  def test_pending_cleanup_interrupts_preserve_first_primary_and_independent_disposal
+    %i[handoff during_abort between_actions].product([false, true]).each do |timing, body_fails|
+      FileUtils.rm_f(@journal)
+      client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+      client.define_singleton_method(:upload_edit_deobfuscationfile) do |*, **|
+        AndroidPublisher::DeobfuscationFilesUploadResponse.new
+      end
+      interruption = Interrupt.new("synthetic pending cleanup interruption")
+      primary = RuntimeError.new("synthetic actual frozen operation primary")
+      primary.set_backtrace(["synthetic-cleanup.rb:1"])
+      original_cause = ArgumentError.new("synthetic original operation cause")
+      reader = nil
+      reader_close = nil
+      close_attempts = 0
+      uploader = nil
+      guard = lambda do |_|
+        reader = uploader.instance_variable_get(:@mapping_snapshot).reader
+        reader_close = reader.method(:close)
+        reader.define_singleton_method(:close) { close_attempts += 1; reader_close.call }
+      end
+      uploader = mapping_uploader(client, guard: guard)
+      guard_calls = 0
+      uploader.instance_variable_set(:@after_mutation_guard, lambda do |_|
+        guard_calls += 1
+        raise_and_freeze_actual(primary, cause: original_cause) if body_fails && guard_calls == 2
+      end)
+      abort_entries = 0
+      abort_continued_after_interrupt = false
+      client_abort = client.method(:abort_current_edit)
+      client.define_singleton_method(:abort_current_edit) do
+        abort_entries += 1
+        if timing == :during_abort
+          Thread.current.raise(interruption)
+          abort_continued_after_interrupt = true
+        end
+        client_abort.call
+      end
+      pending_observed = false
+      if timing == :handoff
+        finalize = uploader.method(:finalize_owned_resources)
+        uploader.define_singleton_method(:finalize_owned_resources) do
+          Thread.current.raise(interruption)
+          pending_observed = Thread.pending_interrupt?(Interrupt)
+          finalize.call
+        end
+      elsif timing == :between_actions
+        abort = uploader.method(:abort_active_edit_without_masking)
+        uploader.define_singleton_method(:abort_active_edit_without_masking) do
+          abort.call
+          Thread.current.raise(interruption)
+          pending_observed = Thread.pending_interrupt?(Interrupt)
+        end
+      end
+
+      failure = assert_raises(body_fails ? RuntimeError : Interrupt) { uploader.perform_mapping_recovery }
+
+      if body_fails
+        assert_same primary, uploader.instance_variable_get(:@primary_error)
+        assert_native_frozen_propagation(primary, failure)
+        assert_equal ["synthetic-cleanup.rb:1"], primary.backtrace
+        assert_same original_cause, primary.cause
+      else
+        assert_nil uploader.instance_variable_get(:@primary_error)
+        assert_same interruption, failure
+      end
+      assert_equal [interruption], uploader.cleanup_failures
+      assert_equal 1, close_attempts
+      assert reader.closed?, "cancellation cannot skip the independent retained-reader close"
+      assert_equal 1, client.commits.length
+      assert_equal(timing == :handoff ? 0 : 1, abort_entries)
+      refute abort_continued_after_interrupt, "the actual abort request must remain interruptible"
+      if timing == :between_actions
+        assert_nil uploader.instance_variable_get(:@active_edit_owner)
+        assert_equal 1, client.aborts
+      else
+        owner = uploader.instance_variable_get(:@active_edit_owner)
+        assert_equal :unknown, owner.fetch(:state)
+        assert owner.fetch(:cleanup_attempted)
+        assert_same interruption, owner.fetch(:error)
+        assert_equal 0, client.aborts, "an interrupted dispatch must not be retried"
+      end
+      assert pending_observed unless timing == :during_abort
+      refute Thread.pending_interrupt?(Interrupt)
+      refute uploader.cleanup_confirmed?
+    ensure
+      # Only this fixture's exact local reader; a regression must not leave an
+      # open test File behind. No real Store edit or worker exists in this test.
+      reader_close.call if reader && !reader.closed?
+    end
+  end
+
+  def test_frozen_primary_keeps_unknown_cleanup_rooted_and_blocks_every_factory_before_configuration
+    base = MobileReleaseKit::PreservingSupplyUploader
+    assert_nil base.instance_variable_get(:@factory_custody)
+    primary = RuntimeError.new("synthetic frozen primary")
+    primary.set_backtrace(["synthetic-mapping.rb:1"])
+    abort_error = RuntimeError.new("synthetic abort response failure")
+    close_error = IOError.new("synthetic reader-close response failure")
+    client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+    abort = client.method(:abort_current_edit)
+    client.define_singleton_method(:abort_current_edit) { abort.call; raise abort_error }
+    reader = nil
+    close_attempts = 0
+    guard = lambda do |_|
+      owner = base.instance_variable_get(:@factory_custody).fetch(:uploader)
+      reader = owner.instance_variable_get(:@mapping_snapshot).reader
+      config = Supply.config
+      assert_raises(MobileReleaseKit::ContractError) { base.run(options: Object.new, journal_path: @journal) }
+      assert_same config, Supply.config
+      refute reader.closed?, "a rejected reentrant factory cannot run the first owner's cleanup"
+      close = reader.method(:close)
+      reader.define_singleton_method(:close) { close_attempts += 1; close.call; raise close_error }
+      raise_and_freeze_actual(primary)
+    end
+    failure = nil
+    Supply::Client.stub(:make_from_config, client) do
+      FastlaneCore::PrintTable.stub(:print_values, nil) do
+        failure = assert_raises(RuntimeError) do
+          MobileReleaseKit::PlayMappingHarness.run(
+            options: candidate_options(mapping: @mapping), journal_path: @journal,
+            expected_mapping: mapping_record, before_mutation_guard: guard,
+          )
+        end
+      end
+    end
+    assert_native_frozen_propagation(primary, failure)
+    assert_equal ["synthetic-mapping.rb:1"], failure.backtrace
+    assert_nil failure.cause
+    cell = base.instance_variable_get(:@factory_custody)
+    owner = cell.fetch(:uploader)
+    assert_same primary, cell.fetch(:primary)
+    assert_same primary, owner.instance_variable_get(:@primary_error)
+    assert_equal [abort_error, close_error], owner.cleanup_failures
+    assert_same reader, owner.instance_variable_get(:@mapping_snapshot).cleanup_records.find { |record| record[:role] == :reader }.fetch(:resource)
+    assert_equal 1, close_attempts
+    assert_equal 1, client.aborts
+    assert reader.closed?
+    config = Supply.config
+    assert_raises(MobileReleaseKit::ContractError) { MobileReleaseKit::PlayMappingHarness.run(options: Object.new, journal_path: @journal) }
+    assert_raises(MobileReleaseKit::ContractError) do
+      base.replay_mapping(options: Object.new, journal_path: @journal, target_guard: nil, intent_sha256: nil, expected_mapping: nil)
+    end
+    assert_raises(MobileReleaseKit::ContractError) do
+      base.observe_existing(options: Object.new, journal_path: @journal, source_track: "internal", destination_track: "closed", version_code: 200, expected_status: "completed")
+    end
+    assert_same config, Supply.config
+    assert_same cell, base.instance_variable_get(:@factory_custody)
+    foreign = base.new(journal_path: @journal, client: FakePlayClient.new)
+    assert_raises(MobileReleaseKit::ContractError) { foreign.perform_upload }
+    assert_raises(MobileReleaseKit::ContractError) { foreign.perform_mapping_recovery }
+    assert_raises(MobileReleaseKit::ContractError) { foreign.observe_existing(source_track: "internal", destination_track: "closed", version_code: 200, expected_status: "completed") }
+    history = JSON.parse(File.read(@journal)).fetch("history")
+    assert history.all? { |row| !row.key?("failureRole") || %w[commit reconciliation terminal].include?(row["failureRole"]) }
+    refute File.read(@journal).include?(close_error.message)
+  ensure
+    # Test-only reset after independently proving that the injected errors
+    # happened AFTER real local close and fake edit deletion. Production has no
+    # reset/retry API and must retain UNKNOWN custody until context end.
+    if cell && base.instance_variable_get(:@factory_custody).equal?(cell)
+      assert reader.closed?
+      assert_nil client.current_edit
+      base.instance_variable_set(:@factory_custody, nil)
+    end
+  end
+
+  def test_factory_query_and_unlock_errors_keep_the_strong_cell_without_masking_frozen_primary
+    base = MobileReleaseKit::PreservingSupplyUploader
+    gate = base.const_get(:FACTORY_GATE, false)
+    %i[query unlock].each do |fault|
+      assert_nil base.instance_variable_get(:@factory_custody)
+      primary = RuntimeError.new("synthetic frozen factory primary")
+      primary.set_backtrace(["synthetic-factory.rb:1"])
+      secondary = IOError.new("synthetic factory #{fault} failure")
+      owner = Object.new # Deliberately owns no File, edit, process or network work.
+      owner.define_singleton_method(:cleanup_confirmed?) { fault == :query ? (raise secondary) : true }
+      unlock = gate.method(:unlock)
+      gate.define_singleton_method(:unlock) { unlock.call; raise secondary } if fault == :unlock
+      failure = assert_raises(RuntimeError) do
+        base.send(:with_factory_custody) { |install| install.call(owner); raise_and_freeze_actual(primary) }
+      end
+      assert_native_frozen_propagation(primary, failure)
+      cell = base.instance_variable_get(:@factory_custody)
+      assert_same owner, cell.fetch(:uploader)
+      assert_same primary, cell.fetch(:primary)
+      assert_includes cell.fetch(:cleanup_errors), secondary
+      assert_raises(MobileReleaseKit::ContractError) { base.send(:with_factory_custody) { flunk "busy cell reached factory body" } }
+    ensure
+      gate.singleton_class.remove_method(:unlock) if fault == :unlock && gate.singleton_methods(false).include?(:unlock)
+      # This isolated fixture has no real resource to settle; remove only its
+      # exact synthetic cell after proving the Mutex was actually released.
+      assert gate.try_lock
+      gate.unlock
+      base.instance_variable_set(:@factory_custody, nil) if cell && base.instance_variable_get(:@factory_custody).equal?(cell)
     end
   end
 
@@ -848,6 +1419,7 @@ class PreservingSupplyUploaderTests < Minitest::Test
 
   def test_post_commit_mismatch_fails_without_repair_or_second_commit
     client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
+    client.abort_error = IOError.new("synthetic readback abort failure")
     client.post_commit_transform = lambda do |tracks|
       tracks.fetch("internal").releases.first.name = "concurrent-console-change"
       tracks
@@ -858,6 +1430,7 @@ class PreservingSupplyUploaderTests < Minitest::Test
     assert_match(/differs from the validated edit/, error.message)
     assert_equal 1, client.commits.length
     assert_equal 1, client.updates.length
+    assert_equal 1, client.aborts, "readback cleanup must preserve the actual mismatch without retry"
     journal = JSON.parse(File.read(@journal))
     observed_names = journal.dig("destination", "observed", "releases").map { |item| item["name"] }
     assert_includes observed_names, "concurrent-console-change"
@@ -893,18 +1466,24 @@ class PreservingSupplyUploaderTests < Minitest::Test
   end
 
   def test_successful_commit_cleanup_failure_retains_verified_state
-    client = FakePlayClient.new("internal" => track("internal", unrelated_releases))
-    client.abort_error = RuntimeError.new("readback cleanup failure")
+    %i[success lost_success].each do |behavior|
+      FileUtils.rm_f(@journal)
+      client = FakePlayClient.new("internal" => track("internal", unrelated_releases), commit_behavior: behavior)
+      client.abort_error = RuntimeError.new("readback cleanup failure")
 
-    error = assert_raises(RuntimeError) { run_uploader(candidate_options, client) }
+      error = assert_raises(RuntimeError) { run_uploader(candidate_options, client) }
 
-    assert_match(/readback cleanup failure/, error.message)
-    journal = JSON.parse(File.read(@journal))
-    assert_equal "failed", journal.fetch("phase")
-    assert_equal "mutated", journal.fetch("outcome")
-    assert journal.fetch("stateEvidence")
-    assert journal.dig("destination", "observed")
-    assert_equal "RuntimeError", journal.dig("failures", "terminal")
+      assert_same client.abort_error, error
+      journal = JSON.parse(File.read(@journal))
+      assert_equal "failed", journal.fetch("phase")
+      assert_equal(behavior == :success ? "mutated" : "reconciled", journal.fetch("outcome"))
+      assert journal.fetch("stateEvidence")
+      assert journal.dig("destination", "observed")
+      assert_equal "RuntimeError", journal.dig("failures", "terminal")
+      refute journal.fetch("failures").key?("reconciliation"), "cleanup uncertainty is not a failed Store readback"
+      assert_equal 1, client.aborts, "the final driver must not retry an uncertain abort"
+      assert_equal 1, client.commits.length
+    end
   end
 
   def test_observation_only_existing_release_never_mutates_or_commits
@@ -1011,10 +1590,11 @@ end
 # request construction, state transitions, retry loop and response decoding.
 class SyntheticResumableHTTP
   Reply = Struct.new(:status_code, :header, :body)
-  attr_reader :requests, :content
+  attr_reader :requests, :content, :sources
 
-  def initialize(mode)
+  def initialize(mode, response_kind: :bundle)
     @mode, @requests = mode, []
+    @response_kind, @sources = response_kind, []
   end
 
   def response(state, body = "{}")
@@ -1038,8 +1618,9 @@ class SyntheticResumableHTTP
     command = options.fetch(:header).fetch("X-Goog-Upload-Command")
     raise "unexpected synthetic protocol command" unless command == "upload, finalize"
     @requests << [command, url]
-    @content = options.fetch(:body).read
+    @sources << options.fetch(:body)
+    @content = @sources.last.read
     raise Errno::ECONNRESET, "synthetic accepted-body response loss" if @mode == :lost_body
-    response("final", '{"versionCode":200}')
+    response("final", @response_kind == :mapping ? "{}" : '{"versionCode":200}')
   end
 end

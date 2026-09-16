@@ -47,6 +47,7 @@ class LocalSigningTests(NativeCaseWorkspaceMixin, unittest.TestCase):
         self.private = self.root / "private"; self.private.mkdir(mode=0o700)
         self.p12, self.input = self.private / "identity.p12", self.private / "input.mobileprovision"
         self.p12.write_bytes(b"fictional-p12"); self.input.write_bytes(b"fictional-authenticated-profile")
+        self.p12.chmod(0o600); self.input.chmod(0o600)
         self.model = NativeSigningModel(self.home)
         self.uuid = profile()["UUID"]
         self.destination = self.home / "Library/MobileDevice/Provisioning Profiles" / (self.uuid + ".mobileprovision")
@@ -59,7 +60,7 @@ class LocalSigningTests(NativeCaseWorkspaceMixin, unittest.TestCase):
 
     def context(self, **kwargs):
         return _temporary_apple_signing_environment(p12=self.p12, password="fictional-password", profile=self.input,
-                                                    directory=self.private, home=self.home, **kwargs)
+                                                    directory=self.private, home=self.home, project_root=self.project, **kwargs)
 
     def assert_clean(self):
         self.assertEqual(self.model.preferences, self.model.original)
@@ -101,7 +102,7 @@ class LocalSigningTests(NativeCaseWorkspaceMixin, unittest.TestCase):
     def test_full_preflight_busy_before_doctor_credentials_application_checks(self):
         config = load_config(write_project(self.project, ios_config(), platform="ios"))
         with signing.local_signing_lease(home=self.home):
-            with patch("mobile_release.preflight.local_signing_lease", side_effect=lambda: signing.local_signing_lease(home=self.home)), \
+            with patch("mobile_release.preflight.local_signing_lease", side_effect=lambda **kwargs: signing.local_signing_lease(home=self.home, **kwargs)), \
                  patch("mobile_release.preflight.doctor", side_effect=AssertionError("not admitted")):
                 report = preflight(config, mode="signing", platforms=("ios",), run_builds=True)
         self.assertFalse(report.ok)

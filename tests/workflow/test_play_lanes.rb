@@ -89,6 +89,39 @@ class PlayReleaseLanesTest < Minitest::Test
 
   def service = @service
 
+  def test_document_publication_retains_original_owner_before_mkdir_and_refuses_uncertain_reuse
+    output = File.join(@root, "precondition.json")
+    ENV["MOBILE_RELEASE_STORE_RECEIPT_PATH"] = output
+    invocation = MobileReleaseKit::StoreLaneLifetime::Invocation.new(
+      lane: "android_internal_upload", nonce: "n" * 16, output: output,
+      mode: "prepare", run_deadline_ns: MobileReleaseKit::NativeUploadProcess.monotonic_ns + 60_000_000_000,
+    )
+    original = nil
+    failure = IOError.new("Synthetic mkdir failure before publication")
+    mkdir = lambda do |*_, **_|
+      original = @fastfile.instance_variable_get(:@store_document_publication)
+      assert_instance_of MobileReleaseKit::StoreDocument::Publication, original
+      assert_same original, invocation.instance_variable_get(:@document_reservation)
+      refute original.successful?
+      raise failure
+    end
+    MobileReleaseKit::StoreLaneLifetime.stub(:current_invocation, invocation) do
+      FileUtils.stub(:mkdir_p, mkdir) do
+        assert_same failure, assert_raises(IOError) {
+          @fastfile.atomic_store_document({ schemaVersion: 1 }, label: "a Store precondition")
+        }
+      end
+      assert_same original, @fastfile.instance_variable_get(:@store_document_publication)
+      assert_raises(MobileReleaseKit::StoreLaneLifetime::LifetimeError) { invocation.require_upload_continuation! }
+      assert_raises(FastlaneCore::Interface::FastlaneError) {
+        @fastfile.atomic_store_document({ schemaVersion: 1 }, label: "a Store precondition")
+      }
+      assert_same original, @fastfile.instance_variable_get(:@store_document_publication)
+      refute File.exist?(output)
+      refute File.exist?("#{output}.tmp-#{Process.pid}")
+    end
+  end
+
   def validate_upload(aab)
     # Only native validation is substituted here. The actual lane, precondition
     # classification, upload request/options, readback and persistence run.
@@ -617,6 +650,67 @@ class PlayReleaseLanesTest < Minitest::Test
     assert_equal 3, @service.commits.length # original, ambiguous scoped replay, acknowledged scoped replay
   end
 
+  def test_mapping_send_keeps_original_bytes_through_validation_and_path_replacement
+    { "txt" => "proguard", "zip" => "nativeCode" }.each do |extension, type|
+      reset_case
+      prepare("candidate", mapping: true)
+      path = File.join(@root, "mapping.#{extension}")
+      original = File.binread(File.join(@root, "mapping.txt"))
+      File.binwrite(path, original)
+      ENV["MOBILE_RELEASE_ANDROID_MAPPING_PATH"] = File.basename(path)
+      @payload.fetch("artifacts").find { |record| record["logicalName"] == "android-mapping" }["fileName"] = File.basename(path)
+      save_intent
+      replaced = false
+      @validation_hook = lambda do |_|
+        replacement = File.join(@root, "replacement-mapping")
+        File.binwrite(replacement, "B" * original.bytesize)
+        File.rename(replacement, path)
+        replaced = true
+      end
+      @service.after_request = lambda do |entry|
+        # Restore A only AFTER the mapping body was consumed: the legacy path
+        # sender would have sent B, despite later hash checks observing A again.
+        File.binwrite(path, original) if entry.fetch(:path).include?("/deobfuscationFiles/")
+      end
+      execute
+      assert replaced
+      assert_equal original, File.binread(path)
+      assert_equal original, @service.state.fetch("mappings")[["200", type]]
+      mappings = @service.mutations.select { |row| row[:path].include?("/deobfuscationFiles/") }
+      assert_equal 1, mappings.length
+      assert_equal 0, mappings.first.fetch(:retries)
+      assert_equal Digest::SHA256.hexdigest(original), mappings.first.fetch(:upload_sha256)
+      assert_equal 1, @service.mutations.count { |row| row[:path].end_with?("/bundles") }
+      assert_equal @unrelated, @service.state.fetch("tracks").fetch("internal").fetch("releases").reject { |row| row["versionCodes"] == ["200"] }
+    end
+  end
+
+  def test_mapping_only_recovery_keeps_original_bytes_when_target_guard_changes_path
+    prepare("candidate", mapping: true)
+    execute
+    File.unlink(File.join(@root, "receipt.json"))
+    retry_process
+    before = @service.clone(@service.state.fetch("tracks"))
+    path = File.join(@root, "mapping.txt")
+    original = File.binread(path)
+    changed = false
+    @service.after_request = lambda do |entry|
+      if !changed && @service.supply_client.current_edit && entry[:method] == :get && entry[:path].end_with?("/bundles")
+        File.binwrite(path, "B" * original.bytesize)
+        changed = true
+      elsif entry[:path].include?("/deobfuscationFiles/")
+        File.binwrite(path, original)
+      end
+    end
+    execute
+    assert changed, "the mutation must occur inside the owned recovery target guard"
+    assert_equal original, @service.state.fetch("mappings")[["200", "proguard"]]
+    assert_equal before, @service.state.fetch("tracks")
+    assert_equal 1, @service.mutations.count { |row| row[:path].end_with?("/bundles") }
+    assert_equal 2, @service.commits.length
+    assert_equal "reconciled", receipt.fetch("result")
+  end
+
   def test_mapping_not_bound_to_intent_or_renamed_endpoint_type_fails_before_any_write
     prepare("candidate")
     ENV["MOBILE_RELEASE_ANDROID_MAPPING_PATH"] = "mapping.txt"
@@ -795,6 +889,98 @@ class PlayReleaseLanesTest < Minitest::Test
     assert_equal 1, @service.commits.length
     assert_equal "draft", receipt.fetch("state")
     assert_equal "reconciled", receipt.fetch("result")
+  end
+
+  def test_multilocale_metadata_is_synchronous_and_failure_stops_later_locales
+    owner_thread, owner_fiber = Thread.current, Fiber.current
+    failures = [nil, IOError.new("Synthetic first-locale failure"),
+                Interrupt.new("Synthetic first-locale interruption"), SystemExit.new(23, "Synthetic first-locale exit")]
+    failures.each_with_index do |failure, index|
+      reset_case unless index.zero?
+      locales = %w[en-US de-DE]
+      config_path = File.join(@root, "release/mobile-release.json")
+      config = JSON.parse(File.read(config_path))
+      config.fetch("metadata")["androidLocales"] = locales
+      File.write(config_path, JSON.generate(config))
+      locales.each do |locale|
+        folder = File.join(@root, "release/store/android", locale)
+        FileUtils.mkdir_p(File.join(folder, "changelogs"))
+        FileUtils.mkdir_p(File.join(folder, "images/phoneScreenshots"))
+        File.write(File.join(folder, "title.txt"), "Approved #{locale} title")
+        File.write(File.join(folder, "changelogs/default.txt"), "Approved #{locale} notes")
+        File.binwrite(File.join(folder, "images/icon.png"), "Approved #{locale} icon")
+        File.binwrite(File.join(folder, "images/phoneScreenshots/01.png"), "Approved #{locale} screenshot")
+        @service.state.fetch("listings")[locale] = listing(locale, "Existing #{locale} title")
+        @service.add_image(locale, "icon", "Existing #{locale} icon")
+        @service.add_image(locale, "phoneScreenshots", "Existing #{locale} screenshot")
+      end
+      @service.add_image("fr-FR", "icon", "Untouched French icon")
+      @service.add_image("fr-FR", "phoneScreenshots", "Untouched French screenshot")
+      fresh_process
+      prepare("production-submit")
+      initial = @service.clone(@service.state)
+      observed_owners = []
+      @service.before_request = lambda do |_entry|
+        observed_owners << [Thread.current, Fiber.current]
+      end
+      failed_entry = nil
+      failure_index = nil
+      if failure
+        @service.after_request = lambda do |entry|
+          next unless entry.fetch(:method) == :put && entry.fetch(:path).end_with?("/listings/en-US")
+
+          failed_entry = entry
+          failure_index = @service.requests.length - 1
+          raise failure
+        end
+        if failure.is_a?(StandardError)
+          translated = assert_raises(FastlaneCore::Interface::FastlaneCommonException) { execute }
+          assert_equal "en-US - #{failure.message}", translated.message
+          assert_same failure, translated.cause
+        else
+          assert_same failure, assert_raises(failure.class) { execute }
+        end
+        refute_nil failed_entry, "the actual first-locale listing mutation must be reached"
+        # Precondition reads may inspect every locale. After the failed write,
+        # however, the only permitted request is disposal of that original edit.
+        abort_path = failed_entry.fetch(:path).delete_suffix("/listings/en-US")
+        assert_equal [[:delete, abort_path]], @service.requests.drop(failure_index + 1).map { |entry| [entry.fetch(:method), entry.fetch(:path)] }
+        refute @service.mutations.any? { |entry| entry.fetch(:path).include?("/listings/de-DE") }
+        assert_empty @service.commits
+        assert_empty @service.edits
+        assert_nil @service.supply_client.current_edit
+        assert_nil @service.supply_client.current_package_name
+        assert_equal initial, @service.state
+        assert_no_receipt
+        @service.after_request = nil
+        # A new invocation in this same Ruby process must regain factory
+        # custody only after the original edit was positively cleaned up.
+        retry_process
+      end
+      execute
+      refute_empty observed_owners
+      observed_owners.uniq.each do |thread, fiber|
+        assert_same owner_thread, thread
+        assert_same owner_fiber, fiber
+      end
+      locales.each do |locale|
+        assert_equal "Approved #{locale} title", @service.state.fetch("listings").fetch(locale).fetch("title")
+        { "icon" => "Approved #{locale} icon", "phoneScreenshots" => "Approved #{locale} screenshot" }.each do |type, bytes|
+          assert_equal [Digest::SHA256.hexdigest(bytes)], @service.state.fetch("images").fetch([locale, type]).map { |row| row.fetch("sha256") }
+        end
+      end
+      target = @service.state.fetch("tracks").fetch("production").fetch("releases").find { |row| row["versionCodes"] == ["200"] }
+      assert_equal locales.to_h { |locale| [locale, "Approved #{locale} notes"] }, target.fetch("releaseNotes").to_h { |row| [row.fetch("language"), row.fetch("text")] }
+      assert_equal initial.fetch("listings").fetch("fr-FR"), @service.state.fetch("listings").fetch("fr-FR")
+      %w[icon phoneScreenshots].each do |type|
+        assert_equal initial.fetch("images").fetch(["fr-FR", type]), @service.state.fetch("images").fetch(["fr-FR", type])
+      end
+      assert_equal @unrelated, @service.state.fetch("tracks").fetch("production").fetch("releases").reject { |row| row["versionCodes"] == ["200"] }
+      assert_equal 1, @service.commits.length
+      assert_empty @service.edits
+      assert_equal "draft", receipt.fetch("state")
+      assert_equal receipt.dig("storeState", "metadataExpectedSha256"), receipt.dig("storeState", "metadataCommittedSha256")
+    end
   end
 
   def test_real_supply_image_order_replacement_is_proved_before_commit_and_retains_untouched_assets

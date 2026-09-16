@@ -1052,13 +1052,25 @@ def _pause(deadline_ns: int, channels: tuple[_Channel, ...] = (), extra_read: tu
     timeout = min(POLL_SECONDS, max(0, (deadline_ns - time.monotonic_ns()) / NANOSECOND))
     if timeout <= 0:
         return
-    readers = [channel.reader.fileno() for channel in channels if not channel.eof and not channel.reader_closed]
-    readers.extend(lease.fileno() for lease in extra_read)
-    writers = [channel.writer.fileno() for channel in channels if channel.pending and not channel.writer_closed]
-    if readers or writers:
-        select.select(readers, writers, (), timeout)
-    else:
+    readers = tuple(channel.reader for channel in channels if not channel.eof and not channel.reader_closed) + extra_read
+    writers = tuple(channel.writer for channel in channels if channel.pending and not channel.writer_closed)
+    if not readers and not writers:
         time.sleep(timeout)
+        return
+    # As in the command owner, readiness is only a hint for original checked IO.
+    # poll owns no descriptor and does not impose select's FD_SETSIZE limit.
+    # Its error/hangup events are not EOF, complete frames or producer finality.
+    readiness = select.poll()
+    masks: dict[int, int] = {}
+    for leases, mask in ((readers, select.POLLIN), (writers, select.POLLOUT)):
+        for lease in leases:
+            descriptor = lease.fileno()
+            masks[descriptor] = masks.get(descriptor, 0) | mask
+    for descriptor, mask in masks.items():
+        readiness.register(descriptor, mask)
+    left = (deadline_ns - time.monotonic_ns()) / NANOSECOND
+    if left > 0:
+        readiness.poll(int(min(POLL_SECONDS, left) * 1000))
 
 
 class _Channel:

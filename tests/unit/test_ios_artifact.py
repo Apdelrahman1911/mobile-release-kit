@@ -214,9 +214,9 @@ class IosArtifactTests(unittest.TestCase):
                     "Completed", (), {"returncode": 0, "stdout": b"", "stderr": b""}
                 )()
 
-            with patch("mobile_release.ios.sys.platform", "darwin"), patch(
+            with patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")), patch(
                 "mobile_release.ios.shutil.which", return_value="/usr/bin/tool"
-            ), patch("mobile_release.ios.subprocess.run", side_effect=fake_codesign), patch(
+            ), patch("mobile_release.ios.run_owned", side_effect=fake_codesign), patch(
                 "mobile_release.ios._codesign_leaf_fingerprint", return_value="a" * 64
             ):
                 identities = _nested_codesign_identities(app, root / "certificates")
@@ -292,7 +292,7 @@ class IosArtifactTests(unittest.TestCase):
             ("Sep  6 12:00:00 2026 GMT", "Sep  5 12:00:00 2026 GMT"),
         ):
             calls = []
-            with self.subTest(before=before, after=after), tempfile.TemporaryDirectory() as temporary, patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios._utc_now", return_value=now), patch("mobile_release.ios.subprocess.run", side_effect=self._fake_native_certificate(before=before, after=after, calls=calls)):
+            with self.subTest(before=before, after=after), tempfile.TemporaryDirectory() as temporary, patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios._utc_now", return_value=now), patch("mobile_release.ios.run_owned", side_effect=self._fake_native_certificate(before=before, after=after, calls=calls)):
                 with self.assertRaises(ValidationError):
                     code = Path(temporary) / "Reader"
                     code.write_bytes(native_image())
@@ -305,7 +305,7 @@ class IosArtifactTests(unittest.TestCase):
     def test_extracted_leaf_interval_is_returned_with_current_lower_boundary_inclusive(self) -> None:
         now = datetime(2026, 9, 5, 12, tzinfo=timezone.utc)
         calls, intervals = [], []
-        with tempfile.TemporaryDirectory() as temporary, patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios._utc_now", return_value=now), patch("mobile_release.ios.subprocess.run", side_effect=self._fake_native_certificate(before="Sep  5 12:00:00 2026 GMT", after="Sep  6 12:00:00 2026 GMT", calls=calls)):
+        with tempfile.TemporaryDirectory() as temporary, patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios._utc_now", return_value=now), patch("mobile_release.ios.run_owned", side_effect=self._fake_native_certificate(before="Sep  5 12:00:00 2026 GMT", after="Sep  6 12:00:00 2026 GMT", calls=calls)):
             code = Path(temporary) / "Reader"
             code.write_bytes(native_image())
             self.assertEqual(_codesign_fingerprint(code, Path(temporary), _validity_intervals=intervals), "aa" * 32)
@@ -329,7 +329,7 @@ class IosArtifactTests(unittest.TestCase):
                         Path(prefix + "0").write_bytes(b"fake leaf")
                         return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
                     return completed
-                with self.subTest(dates=dates), patch("mobile_release.ios.subprocess.run", side_effect=native), self.assertRaises(ValidationError):
+                with self.subTest(dates=dates), patch("mobile_release.ios.run_owned", side_effect=native), self.assertRaises(ValidationError):
                     _codesign_leaf_fingerprint(root / "Reader", root / "leaf")
                 self.assertEqual(calls[-1][0], "openssl", "date rejection must inspect the actual newly extracted leaf")
         for date in ("Sep  1 12:00:00 2026", "Sep  1 12:00:00 2026 +00:00", "Feb 30 12:00:00 2026 GMT", "Sep  1 12:00:60 2026 GMT", "SEP  1 12:00:00 2026 GMT"):
@@ -341,7 +341,7 @@ class IosArtifactTests(unittest.TestCase):
         def run(argv, **kwargs):
             calls.append(argv)
             return types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"certificate expired and resources may be corrupt")
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios.subprocess.run", side_effect=run):
+        with patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios.run_owned", side_effect=run):
             with self.assertRaisesRegex(ValidationError, "codesign rejected"):
                 _codesign_fingerprint(Path("Reader.app"), Path("temporary"))
         self.assertEqual(len(calls), 1)
@@ -376,7 +376,7 @@ class IosArtifactTests(unittest.TestCase):
         signer = hashlib.sha256(certificate).hexdigest()
         leaf = SigningValidityInterval(now - timedelta(days=2), now + timedelta(days=2))
         nested = SigningValidityInterval(now - timedelta(hours=1), now + timedelta(hours=1))
-        def primary(_app, _temporary, *, _validity_intervals=None, deadline=None):
+        def primary(_app, _temporary, *, _validity_intervals=None, deadline=None, cancellation=None):
             self.assertIsNotNone(deadline)
             deadline.check()
             _validity_intervals.append(leaf)
@@ -455,7 +455,7 @@ class IosArtifactTests(unittest.TestCase):
 
                 def native(argv, **kwargs):
                     native_calls.append(argv)
-                    self.assertFalse(set(secret_names) & kwargs["env"].keys())
+                    self.assertFalse(set(secret_names) & kwargs["environ"].keys())
                     if argv[0] == "security":
                         raise AssertionError("decode-only CMS is not profile authority")
                     if "--entitlements" in argv:
@@ -489,10 +489,10 @@ class IosArtifactTests(unittest.TestCase):
                     return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
                 stack.enter_context(patch.dict(os.environ, {key: "fictional-sensitive-value" for key in secret_names}))
-                stack.enter_context(patch("mobile_release.ios.sys.platform", "darwin"))
+                stack.enter_context(patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")))
                 stack.enter_context(patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"))
                 stack.enter_context(patch("mobile_release.ios._utc_now", return_value=now))
-                stack.enter_context(patch("mobile_release.ios.subprocess.run", side_effect=native))
+                stack.enter_context(patch("mobile_release.ios.run_owned", side_effect=native))
                 stack.enter_context(cms_seam.profile_authentication())
                 findings, interval = validate_ipa_current_signing(
                     ipa, expected_bundle_id="com.example.reader", expected_team_id="ABCDE12345",
@@ -508,6 +508,143 @@ class IosArtifactTests(unittest.TestCase):
                 else:
                     self.assertIsNone(interval)
                     self.assertTrue(any(item.status in FAILING_STATUSES for item in findings), defect)
+
+    def test_native_scratch_removal_requires_original_containment_and_keeps_first_interruption(self):
+        from mobile_release import _command_process as command, ios
+        from mobile_release.owned_process import ProcessError
+        from .test_lifetime_evidence import guard, handler_model
+
+        # These are local filesystem/ledger models, never native finality
+        # evidence. No process can start; the fixture owns its outer directory.
+        for mode in ("settled-invalid", "unpublished", "observation-error", "interrupted-unpublished"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as root, handler_model(), \
+                    patch.object(ios, "_RETAINED_NATIVE_SCRATCH", []) as retained, \
+                    patch.object(command.native, "create", side_effect=AssertionError("no native fixture dispatch")):
+                owner = guard()
+                primary = KeyboardInterrupt("first interruption") if mode.startswith("interrupted") else ValidationError("invalid synthetic IPA")
+                expected = KeyboardInterrupt if isinstance(primary, KeyboardInterrupt) else (
+                    ValidationError if mode == "settled-invalid" else ProcessError)
+                try:
+                    with ExitStack() as observation, self.assertRaises(expected) as caught:
+                        with ios._native_scratch(prefix="ipa-", directory=Path(root), cancellation=owner) as (scratch, actual):
+                            self.assertIs(actual, owner)
+                            temporary = retained[-1][0]
+                            self.assertFalse(temporary.finalizer.alive)
+                            (scratch / "synthetic-input").write_bytes(b"owned fixture")
+                            if "unpublished" in mode:
+                                engine = command._Outer(owner, False, 30, None, None, suppress_cancel=False)
+                                self.assertFalse(engine.ctx.child_acquisition.attempted)
+                                self.assertIsNone(engine.slot.read())
+                            elif mode == "observation-error":
+                                observation.enter_context(patch.object(owner.lifetime_ledger, "verdict",
+                                                                       side_effect=RuntimeError("observation failed")))
+                            raise primary
+                    self.assertEqual(scratch.exists(), mode != "settled-invalid")
+                    self.assertEqual(owner.lifetime_ledger.fatal, mode != "settled-invalid")
+                    self.assertEqual(bool(retained), mode != "settled-invalid")
+                    if mode == "settled-invalid" or isinstance(primary, KeyboardInterrupt):
+                        self.assertIs(caught.exception, primary)
+                    else:
+                        self.assertTrue(caught.exception.fatal)
+                    if retained:
+                        self.assertFalse(retained[0][0].finalizer.alive)
+                        self.assertEqual((scratch / "synthetic-input").read_bytes(), b"owned fixture")
+                finally:
+                    owner.restore()
+
+    def test_native_scratch_incomplete_acquisition_never_publishes_successful_cleanup(self):
+        from mobile_release import ios
+        from mobile_release.owned_process import ProcessError
+        from .test_lifetime_evidence import guard, handler_model
+
+        acquire = ios.OwnedTemporaryDirectory.acquire
+        for mode in ("no-name", "return-lost", "identity-missing"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as root, handler_model(), \
+                    patch.object(ios, "_RETAINED_NATIVE_SCRATCH", []) as retained:
+                owner = guard()
+                primary = KeyboardInterrupt("acquisition return lost") if mode == "return-lost" else OSError("acquisition failed")
+
+                def fail(temporary):
+                    self.assertFalse(temporary.finalizer.alive)
+                    if mode != "no-name":
+                        acquire(temporary)
+                        if mode == "identity-missing":
+                            temporary.state["identity"] = None
+                    raise primary
+
+                try:
+                    with patch.object(ios.OwnedTemporaryDirectory, "acquire", new=fail), \
+                            self.assertRaises(KeyboardInterrupt if mode == "return-lost" else ProcessError) as caught:
+                        with ios._native_scratch(prefix="ipa-", directory=Path(root), cancellation=owner):
+                            self.fail("incomplete acquisition was yielded")
+                    self.assertTrue(owner.lifetime_ledger.fatal)
+                    self.assertEqual(len(retained), 1)
+                    temporary, actual, state = retained[0]
+                    self.assertIs(actual, owner)
+                    self.assertFalse(temporary.finalizer.alive)
+                    self.assertTrue(state["attempted"])
+                    self.assertFalse(state["acquired"])
+                    self.assertEqual(state["removed"], mode != "no-name")
+                    if mode == "return-lost":
+                        self.assertIs(caught.exception, primary)
+                    else:
+                        self.assertTrue(caught.exception.fatal)
+                    self.assertFalse(list(Path(root).iterdir()))
+                finally:
+                    owner.restore()
+
+    def test_outer_native_scratch_cannot_remove_retained_inner_namespace(self):
+        from mobile_release import ios
+        from mobile_release.owned_process import ProcessError
+        from .test_lifetime_evidence import guard, handler_model
+
+        cleanup = ios.OwnedTemporaryDirectory.cleanup
+        for mode in ("replacement", "missing-root", "remove-failure", "interrupted-replacement"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as root, handler_model(), \
+                    patch.object(ios, "_RETAINED_NATIVE_SCRATCH", []) as retained:
+                owner, calls = guard(), []
+                primary = KeyboardInterrupt("first body interruption")
+
+                def observed(temporary):
+                    calls.append(Path(temporary.name))
+                    if mode == "remove-failure" and Path(temporary.name) == inner:
+                        raise PermissionError("synthetic one-attempt cleanup failure")
+                    cleanup(temporary)
+
+                try:
+                    with patch.object(ios.OwnedTemporaryDirectory, "cleanup", new=observed), \
+                            self.assertRaises(KeyboardInterrupt if mode.startswith("interrupted") else ProcessError) as caught:
+                        with ios._native_scratch(prefix="outer-", directory=Path(root), cancellation=owner) as (outer, actual):
+                            with ios._native_scratch(prefix="inner-", directory=outer, cancellation=actual) as (inner, same):
+                                self.assertIs(same, owner)
+                                (inner / "original").write_bytes(b"original fixture")
+                                moved = outer / "moved-inner"
+                                if mode != "remove-failure":
+                                    inner.rename(moved)
+                                    if mode != "missing-root":
+                                        inner.mkdir(mode=0o700)
+                                        (inner / "replacement").write_bytes(b"replacement fixture")
+                                if mode.startswith("interrupted"):
+                                    raise primary
+                    self.assertTrue(outer.is_dir())
+                    self.assertEqual(calls, [] if mode == "missing-root" else [inner])
+                    self.assertEqual(len(retained), 2)
+                    self.assertTrue(all(not item[0].finalizer.alive for item in retained))
+                    self.assertTrue(owner.lifetime_ledger.fatal)
+                    self.assertTrue(owner.lifetime_ledger.verdict().contained,
+                                    "filesystem uncertainty cannot invent a living native consumer")
+                    if mode == "remove-failure":
+                        self.assertEqual((inner / "original").read_bytes(), b"original fixture")
+                    else:
+                        self.assertEqual((moved / "original").read_bytes(), b"original fixture")
+                        if mode != "missing-root":
+                            self.assertEqual((inner / "replacement").read_bytes(), b"replacement fixture")
+                    if mode.startswith("interrupted"):
+                        self.assertIs(caught.exception, primary)
+                    else:
+                        self.assertTrue(caught.exception.fatal and caught.exception.contained)
+                finally:
+                    owner.restore()
 
 
 if __name__ == "__main__":

@@ -197,13 +197,7 @@ jobs:
         workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
         app_root="$(cd app && pwd -P)"
         [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
-        output=app/.mobile-release
-        if [[ -e "$output" || -L "$output" ]]; then
-          [[ -d "$output" && ! -L "$output" ]]
-          [[ -z "$(find "$output" -mindepth 1 -print -quit)" ]]
-        fi
-        mkdir -p -- "$output"
-        [[ ! -L "$output" && "$(cd "$output" && pwd -P)" == "$app_root/.mobile-release" ]]
+        python -P -m mobile_release.workflow prepare-app-private --app-root "$app_root" --role empty-root
       if: success() && (steps.resolve.outputs.mode == 'prepare' || steps.resolve.outputs.mode == 'resume')
     - name: Verify original source tree and stage authenticated inputs
       if: success() && (steps.resolve.outputs.mode == 'prepare' || steps.resolve.outputs.mode == 'resume')
@@ -568,13 +562,7 @@ jobs:
         workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
         app_root="$(cd app && pwd -P)"
         [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
-        output=app/.mobile-release
-        if [[ -e "$output" || -L "$output" ]]; then
-          [[ -d "$output" && ! -L "$output" ]]
-          [[ -z "$(find "$output" -mindepth 1 -print -quit)" ]]
-        fi
-        mkdir -p -- "$output"
-        [[ ! -L "$output" && "$(cd "$output" && pwd -P)" == "$app_root/.mobile-release" ]]
+        python -P -m mobile_release.workflow prepare-app-private --app-root "$app_root" --role empty-root
       if: success() && (steps.resolve.outputs.mode == 'prepare' || steps.resolve.outputs.mode == 'resume')
     - name: Verify original source tree and stage authenticated inputs
       if: success() && (steps.resolve.outputs.mode == 'prepare' || steps.resolve.outputs.mode == 'resume')

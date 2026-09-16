@@ -4349,7 +4349,7 @@ class CISandboxPureTests(unittest.TestCase):
 
         for case in ("valid", "five-second-cap", "no-record", "malformed", "record-limit", "reader-error", "readonly-close-error", "stat-error",
                      "identity-drift", "expired-before", "expired-binding", "expired-return", "cancelled-before", "cancelled-return",
-                     "collector-error", "successful-observation-but-raised", "collector-interrupt"):
+                     "stat-sigint", "stat-sigterm", "collector-error", "successful-observation-but-raised", "collector-interrupt"):
             with self.subTest(native_abort_root_collector=case):
                 session = session_double(self.module, "darwin")
                 session.domain_finality = True
@@ -4390,6 +4390,8 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual((path, follow_symlinks), (tool, False))
                     if case == "stat-error":
                         raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                    if case in {"stat-sigint", "stat-sigterm"}:
+                        session._interrupted(2 if case == "stat-sigint" else 15, None)
                     return SimpleNamespace(**(vars(node) | ({"st_ino": 92} if case == "identity-drift" else {})))
 
                 def collect(argv, *, seconds, deadline):
@@ -4410,7 +4412,8 @@ class CISandboxPureTests(unittest.TestCase):
 
                 collector, reader, domain = Mock(side_effect=collect), Mock(side_effect=read), Mock(return_value={})
                 with patch.multiple(self.module, os=SimpleNamespace(stat=named), subprocess=SimpleNamespace(),
-                        socket=SimpleNamespace(), signal=SimpleNamespace(), resource=SimpleNamespace(), _small_command=collector,
+                        socket=SimpleNamespace(), signal=SimpleNamespace(SIGALRM=14, SIGINT=2, SIGTERM=15),
+                        resource=SimpleNamespace(), _small_command=collector,
                         _domain=domain, time=SimpleNamespace(monotonic=lambda: clock.now)), \
                      patch.object(session, "_native_abort_read", reader), \
                      patch.object(Path, "open", side_effect=AssertionError("collector fixture cannot open host files")), \
@@ -4421,13 +4424,20 @@ class CISandboxPureTests(unittest.TestCase):
                     expected_status = "collector-error" if pending else {
                         "valid": "matched-denial", "five-second-cap": "matched-denial", "no-record": "no-record", "malformed": "malformed", "record-limit": "limit",
                         "expired-before": "deadline", "expired-binding": "deadline", "expired-return": "deadline",
-                        "cancelled-before": "cancelled", "cancelled-return": "cancelled"}.get(case, "unavailable")
+                        "cancelled-before": "cancelled", "cancelled-return": "cancelled",
+                        "stat-sigint": "cancelled", "stat-sigterm": "cancelled"}.get(case, "unavailable")
                     self.assertEqual(result["log_status"], expected_status)
                     self.assertEqual(collector.call_count, int(invoked))
                     self.assertEqual((session._direct_producer_pending, session.domain_finality), (pending, not invoked))
                     self.assertEqual(result.get("log_sha256"), hashlib.sha256(raw).hexdigest() if invoked and not pending else None)
                     if case in {"valid", "five-second-cap"}:
                         self.assertEqual(result["denials"], [{"operation": "file-read-data", "resource_role": "stdio-device", "public_path": "/dev/null"}])
+                    if case in {"stat-sigint", "stat-sigterm"}:
+                        self.assertTrue(session.cancelled)
+                        self.assertTrue(abort["log_attempted"])
+                        self.assertEqual(result, {"log_status": "cancelled"})
+                        self.assertEqual(session.cleanup_errors, [])
+                        self.assertEqual(abort["diagnostic_error"], {"code": "CANCELLED", "producer_pending": False})
                     reads_before, calls_before = reader.call_count, collector.call_count
                     self.assertEqual(session._native_abort_log(abort), {"log_status": "unavailable"})
                     self.assertEqual((reader.call_count, collector.call_count), (reads_before, calls_before))
@@ -4734,6 +4744,330 @@ class CISandboxPureTests(unittest.TestCase):
                 self.assertFalse(row["ok"] or row["subject_ok"])
                 self.assertNotIn("native_abort_diagnostic", row)
                 self.assertEqual(row["persisted"], [0, 0])
+
+    @contextmanager
+    def _checked_fixture_model(self):
+        """In-memory finite tree; every filesystem operation stays in this model."""
+        session = session_double(self.module, "darwin")
+        session._checked_files = None
+        rig = SimpleNamespace(session=session, nodes={}, fds={}, data={}, positions={}, links={}, events=[],
+            next_inode=100, next_fd=700, closed=[], write_calls=0, partial_write=False,
+            fail_close=None, fail_initial_stat=False, fail_file_stat=False, link_mode_fault=None, now=0.0)
+
+        def add(path, mode, *, uid=0, gid=0, data=None):
+            if path in rig.nodes:
+                raise FileExistsError("synthetic collision")
+            rig.next_inode += 1
+            rig.nodes[path] = SimpleNamespace(st_dev=5, st_ino=rig.next_inode, st_mode=mode,
+                st_uid=uid, st_gid=gid, st_nlink=1, st_size=len(data or b""), st_mtime_ns=1, st_ctime_ns=1)
+            if data is not None:
+                rig.data[path] = bytearray(data)
+            return path
+
+        roots = session._checked_paths()
+        for path in (Path("/"), Path("/private"), Path("/private/var"), Path("/private/var/folders"),
+                     Path("/private/tmp"), session.root, session.fixture_controls):
+            add(path, stat.S_IFDIR | (0o1777 if path == Path("/private/tmp") else 0o755))
+        for path, target in ((Path("/tmp"), "private/tmp"), (Path("/var"), "private/var")):
+            add(path, stat.S_IFLNK | 0o777, data=target.encode())
+            rig.links[path] = target
+        rig.roots, rig.add = roots, add
+
+        def path_at(name, dir_fd=None):
+            return Path(name) if dir_fd is None else rig.fds[dir_fd] / name
+
+        def named(name, *, dir_fd=None, follow_symlinks=False):
+            self.assertIs(follow_symlinks, False)
+            path = path_at(name, dir_fd)
+            if path not in rig.nodes:
+                raise FileNotFoundError("synthetic absent entry")
+            return rig.nodes[path]
+
+        def opened(name, flags, mode=0o777, *, dir_fd=None):
+            path = path_at(name, dir_fd)
+            self.assertTrue(flags & os.O_NOFOLLOW and flags & os.O_CLOEXEC)
+            if flags & os.O_CREAT:
+                self.assertTrue(flags & os.O_EXCL)
+                add(path, stat.S_IFREG | mode, data=b"")
+            elif path not in rig.nodes:
+                raise FileNotFoundError("synthetic absent open")
+            rig.next_fd += 1
+            rig.fds[rig.next_fd] = path
+            rig.positions[rig.next_fd] = 0
+            rig.events.append(("open", rig.next_fd, path))
+            return rig.next_fd
+
+        def held(fd):
+            self.assertNotIn(fd, rig.closed)
+            if rig.fail_initial_stat:
+                raise OSError("synthetic first fstat failed")
+            if rig.fail_file_stat and rig.write_calls and stat.S_ISREG(rig.nodes[rig.fds[fd]].st_mode):
+                raise OSError("synthetic persisted file extent unavailable")
+            return rig.nodes[rig.fds[fd]]
+
+        def closed(fd):
+            self.assertNotIn(fd, rig.closed, "ambiguous close was retried")
+            rig.closed.append(fd)
+            rig.events.append(("close", fd))
+            if fd == rig.fail_close:
+                raise OSError("synthetic owned close failed")
+
+        def mkdir(name, mode, *, dir_fd):
+            path = path_at(name, dir_fd)
+            rig.events.append(("mkdir", path))
+            add(path, stat.S_IFDIR | mode)
+
+        def write(fd, value):
+            rig.write_calls += 1
+            if rig.partial_write and rig.write_calls == 2:
+                raise OSError("synthetic second write failed")
+            raw = bytes(value[:7] if rig.partial_write else value)
+            path = rig.fds[fd]
+            rig.data[path].extend(raw)
+            rig.nodes[path].st_size = len(rig.data[path])
+            return len(raw)
+
+        def chown(fd, uid, gid):
+            info = held(fd)
+            info.st_uid, info.st_gid = uid, gid
+
+        def chmod(fd, mode):
+            info = held(fd)
+            info.st_mode = stat.S_IFMT(info.st_mode) | mode
+
+        def symlink(target, name, *, dir_fd):
+            path = path_at(name, dir_fd)
+            # Darwin honors the controller's restrictive077 creation mask.
+            add(path, stat.S_IFLNK | 0o700, data=target.encode())
+            rig.links[path] = target
+
+        def lchmod(path, mode):
+            self.assertIn(path, tuple(root / "lower-link" for root in roots))
+            self.assertEqual(mode, 0o777)
+            info = rig.nodes[path]
+            self.assertTrue(stat.S_ISLNK(info.st_mode))
+            rig.events.append(("lchmod", path, mode))
+            if rig.link_mode_fault == "no-effect":
+                return
+            info.st_mode = stat.S_IFLNK | mode
+            info.st_ctime_ns += 1
+            if rig.link_mode_fault == "after-effect-error":
+                raise OSError("synthetic lower-link mode error after effect")
+            if rig.link_mode_fault == "identity":
+                info.st_ino += 100
+            if rig.link_mode_fault == "parent":
+                rig.nodes[path.parent].st_ino += 100
+
+        def readlink(name, *, dir_fd=None):
+            return rig.links[path_at(name, dir_fd)]
+
+        def seek(fd, position, whence):
+            self.assertEqual((position, whence), (0, os.SEEK_SET))
+            rig.positions[fd] = 0
+            return 0
+
+        def read(fd, maximum):
+            path, start = rig.fds[fd], rig.positions[fd]
+            raw = bytes(rig.data[path][start:start + maximum])
+            rig.positions[fd] += len(raw)
+            return raw
+
+        class Entries:
+            def __init__(inner, fd):
+                inner.names = [SimpleNamespace(name=path.name) for path in rig.nodes
+                               if path.parent == rig.fds[fd] and path != path.parent]
+            def __enter__(inner):
+                return iter(inner.names)
+            def __exit__(inner, *_):
+                return False
+
+        def unlink(name, *, dir_fd):
+            path = path_at(name, dir_fd)
+            self.assertIn(path, rig.nodes)
+            self.assertFalse(stat.S_ISDIR(rig.nodes[path].st_mode))
+            rig.events.append(("unlink", path))
+            del rig.nodes[path]
+
+        def rmdir(name, *, dir_fd):
+            path = path_at(name, dir_fd)
+            self.assertTrue(stat.S_ISDIR(rig.nodes[path].st_mode))
+            self.assertFalse(any(other.parent == path for other in rig.nodes))
+            rig.events.append(("rmdir", path))
+            del rig.nodes[path]
+
+        def idle(*, deadline):
+            self.assertLessEqual(deadline, session.deadline)
+            rig.events.append(("idle", deadline))
+            session.domain_finality = True
+
+        constants = {name: getattr(os, name) for name in ("O_RDONLY", "O_RDWR", "O_CREAT", "O_EXCL", "O_DIRECTORY",
+                     "O_NOFOLLOW", "O_CLOEXEC", "SEEK_SET")}
+        fake_os = SimpleNamespace(**constants, open=opened, close=closed, fstat=held, stat=named,
+            get_inheritable=lambda fd: False, mkdir=mkdir, write=write, fchown=chown, fchmod=chmod,
+            fsync=lambda fd: held(fd), symlink=symlink, lchmod=lchmod, readlink=readlink, lseek=seek, read=read,
+            scandir=Entries, unlink=unlink, rmdir=rmdir)
+        with patch.multiple(self.module, os=fake_os, time=SimpleNamespace(monotonic=lambda: rig.now),
+                _canonical=Path, subprocess=SimpleNamespace(), signal=SimpleNamespace(), socket=SimpleNamespace()), \
+             patch.object(Path, "lstat", lambda path: named(path)), \
+             patch.object(session, "ensure_idle", side_effect=idle):
+            yield rig
+
+    def test_checked_file_fixture_binding_is_fixed_disjoint_and_has_no_environment_authority(self):
+        session = session_double(self.module, "darwin")
+        roots = session._checked_paths()
+        self.assertEqual(roots, (session.root / "fixture-controls/checked-files",
+                                Path("/private/var/folders/mrk-pure-fixture-checked-files")))
+        for name, value in (("platform", "linux"), ("root", Path("/private/tmp/has.dot")),
+                            ("fixture_controls", session.work / "fixture-controls"),
+                            ("runner_temp", roots[1]), ("runner_home", roots[0].parent),
+                            ("tool_prefixes", (roots[0] / "runtime",))):
+            with self.subTest(checked_binding=name), patch.object(session, name, value), \
+                 self.assertRaises(self.module.SessionError):
+                session._checked_paths()
+        with self._checked_fixture_model() as rig:
+            rig.session.prepare_checked_files("source", deadline=50.0)
+            state = rig.session._checked_files
+            for change in ("session", "roots", "closed"):
+                original = state[change]
+                state[change] = object() if change == "session" else (Path("/foreign"),) if change == "roots" else True
+                with self.subTest(original_state_binding=change), self.assertRaises(self.module.SessionError):
+                    rig.session._checked_binding(state)
+                state[change] = original
+            rig.session.fail("synthetic fixture finished")
+            rig.session._close_checked_files()
+
+    def test_checked_file_originals_survive_both_phases_and_are_disposed_only_at_terminal_finality(self):
+        with self._checked_fixture_model() as rig:
+            session = rig.session
+            session.prepare_checked_files("source", deadline=50.0)
+            state = session._checked_files
+            self.assertEqual([event for event in rig.events if event[0] == "lchmod"],
+                             [("lchmod", root / "lower-link", 0o777) for root in rig.roots])
+            for root in rig.roots:
+                for name in self.module._CHECKED_DIRECTORY_NAMES:
+                    self.assertEqual(stat.S_IMODE(rig.nodes[root / name].st_mode), 0o555)
+                for name, _content in self.module._CHECKED_FILE_CONTENTS:
+                    self.assertEqual(stat.S_IMODE(rig.nodes[root / name].st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(rig.nodes[root / "lower-link"].st_mode), 0o777)
+            original = {path: vars(info).copy() for path, info in rig.nodes.items()}
+            session.verify_checked_files("source", deadline=50.0)
+            session.verify_checked_files("source", deadline=50.0)
+            session.prepare_checked_files("wheel", deadline=75.0)
+            session.verify_checked_files("wheel", deadline=75.0)
+            self.assertEqual({path: vars(info).copy() for path, info in rig.nodes.items()}, original)
+            self.assertEqual((session.persisted_bytes, state["note"]["persisted_bytes"]), (96, 96))
+            self.assertEqual(state["note"]["postcaptures"], {"source": 2, "wheel": 1})
+            self.assertFalse(state["note"]["ok"] or state["note"]["roots_removed"])
+            self.assertFalse(any(event[0] in {"unlink", "rmdir"} for event in rig.events))
+            def domain(*_, **__):
+                rig.events.append(("terminal-domain",))
+                return []
+            with patch.object(self.module, "_domain", side_effect=domain), \
+                 patch.object(session, "_close_home_boundary", return_value=[]), \
+                 patch.object(session, "_close_userns_boundary", return_value=[]):
+                session.close(keep_timer=True)
+            self.assertTrue(session.closed and session.domain_finality)
+            self.assertTrue(state["closed"] and state["note"]["ok"] and state["note"]["roots_removed"])
+            self.assertFalse(any(path == root or root in path.parents for path in rig.nodes for root in rig.roots))
+            self.assertIn(Path("/private/var/folders"), rig.nodes)
+            self.assertIn(session.fixture_controls, rig.nodes)
+            self.assertEqual(len(rig.closed), len(rig.fds))
+            self.assertEqual(len(set(rig.closed)), len(rig.closed))
+            self.assertLess(rig.events.index(("terminal-domain",)), next(i for i, event in enumerate(rig.events) if event[0] == "unlink"))
+            self.assertEqual(session.persisted_bytes, 96, "disposal must not refund persisted bytes")
+            self.assertEqual(session._close_checked_files(), [])
+
+    def test_checked_file_mutation_or_unknown_finality_retains_originals_and_retires_each_handle(self):
+        for case in ("identity", "bytes", "growth", "unavailable-extent", "extra-entry", "alias", "deadline", "unknown-finality", "active-producer", "missing-wheel", "prior-failure"):
+            with self.subTest(checked_fixture_failure=case), self._checked_fixture_model() as rig:
+                session = rig.session
+                session.prepare_checked_files("source", deadline=50.0)
+                state = session._checked_files
+                if case == "identity":
+                    rig.nodes[rig.roots[0] / "external/material"].st_ino += 100
+                elif case == "bytes":
+                    rig.data[rig.roots[0] / "external/material"][0] = ord("X")
+                elif case == "growth":
+                    path = rig.roots[0] / "external/material"
+                    rig.data[path].extend(b"extra")
+                    rig.nodes[path].st_size += 5
+                elif case == "unavailable-extent":
+                    rig.fail_file_stat = True
+                elif case == "extra-entry":
+                    rig.add(rig.roots[1] / "unexpected", stat.S_IFREG | 0o600, data=b"foreign")
+                elif case == "alias":
+                    rig.links[Path("/tmp")] = "private/var"
+                elif case == "unknown-finality":
+                    session.domain_finality = False
+                elif case == "active-producer":
+                    session._busy = True
+                elif case == "prior-failure":
+                    session.fail("synthetic earlier original failure")
+                if case in {"identity", "bytes", "growth", "unavailable-extent", "extra-entry", "alias", "deadline"}:
+                    error = BaseExceptionGroup if case in {"identity", "growth", "unavailable-extent"} else self.module.SessionError
+                    with self.assertRaises(error):
+                        session.verify_checked_files("source", deadline=51.0 if case == "deadline" else 50.0)
+                rig.fail_close = next(iter(rig.fds))
+                errors = session._close_checked_files()
+                self.assertTrue(errors)
+                self.assertFalse(state["note"]["ok"] or state["note"]["roots_removed"])
+                self.assertTrue(all(root in rig.nodes for root in rig.roots))
+                self.assertFalse(any(event[0] in {"unlink", "rmdir"} for event in rig.events))
+                self.assertEqual(len(rig.closed), len(rig.fds))
+                self.assertEqual(session._close_checked_files(), [])
+                self.assertEqual(session.persisted_bytes, 101 if case == "growth" else 96)
+                self.assertEqual(state["note"]["persisted_bytes"], session.persisted_bytes)
+                self.assertEqual(state["note"]["persisted_bytes_known"], case not in {"identity", "unavailable-extent"})
+
+    def test_checked_file_collision_partial_write_and_first_observation_failure_keep_known_accounting(self):
+        link_faults = ("after-effect-error", "no-effect", "identity", "parent")
+        for case in ("collision", "partial-write", "first-observation", "unmeasured", "wheel-unmeasured", *link_faults):
+            with self.subTest(checked_fixture_preparation=case), self._checked_fixture_model() as rig:
+                if case == "collision":
+                    rig.add(rig.roots[0], stat.S_IFDIR | 0o700, uid=42)
+                elif case == "partial-write":
+                    rig.partial_write = True
+                elif case == "first-observation":
+                    rig.fail_initial_stat = True
+                elif case in link_faults:
+                    rig.link_mode_fault = case
+                else:
+                    if case == "wheel-unmeasured":
+                        rig.session.prepare_checked_files("source", deadline=50.0)
+                        rig.session.verify_checked_files("source", deadline=50.0)
+                    rig.fail_file_stat = True
+                error = (FileExistsError if case == "collision" else
+                         OSError if case in {"first-observation", "after-effect-error"} else
+                         self.module.SessionError if case in link_faults else BaseExceptionGroup)
+                with self.assertRaises(error):
+                    rig.session.prepare_checked_files("wheel" if case == "wheel-unmeasured" else "source",
+                                                       deadline=75.0 if case == "wheel-unmeasured" else 50.0)
+                state = rig.session._checked_files
+                self.assertIsNotNone(rig.session.failure)
+                self.assertTrue(state["closed"])
+                self.assertEqual(len(rig.closed), len(rig.fds))
+                self.assertEqual(len(set(rig.closed)), len(rig.closed))
+                self.assertFalse(any(event[0] in {"unlink", "rmdir"} for event in rig.events))
+                self.assertFalse(state["note"]["ok"] or state["note"]["roots_removed"])
+                self.assertEqual(rig.session.persisted_bytes,
+                                 7 if case == "partial-write" else 96 if case == "wheel-unmeasured" else 48 if case in link_faults else 0)
+                self.assertEqual(state["note"]["persisted_bytes_known"], case not in {"unmeasured", "wheel-unmeasured"})
+                if case == "wheel-unmeasured":
+                    self.assertEqual((len(state["files"]), len(state["links"])), (4, 2))
+                    self.assertTrue(all(row["accounted"] for row in [*state["files"], *state["links"]]),
+                                    "historical creation measurements must not clear a later unknown extent")
+                if case == "collision":
+                    self.assertEqual(rig.nodes[rig.roots[0]].st_uid, 42)
+                elif case == "partial-write":
+                    self.assertEqual(bytes(rig.data[rig.roots[0] / "external/material"]), b"selecte")
+                elif case == "unmeasured":
+                    self.assertEqual(bytes(rig.data[rig.roots[0] / "external/material"]), b"selected private bytes")
+                elif case in link_faults:
+                    self.assertIn(rig.roots[0] / "lower-link", rig.nodes)
+                    self.assertEqual([event for event in rig.events if event[0] == "lchmod"],
+                                     [("lchmod", rig.roots[0] / "lower-link", 0o777)])
+                    self.assertIsNone(state["links"][0]["identity"], "failed mode cannot publish a frozen original")
+                self.assertEqual(rig.session._close_checked_files(), [])
 
     def test_native_input_reads_and_rechecks_keep_original_custody_bytes_and_close_errors(self):
         path, raw = Path("/synthetic/native/input.py"), b"immutable native input\n"
@@ -5087,6 +5421,42 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertIsNotNone(session.failure)
                 if case == "prior-failure":
                     self.assertEqual(session.failure, "original owner failure")
+
+        # Only the enclosing preparation endpoint grows. Stop at the first
+        # admitted idle boundary, before state, files or controls are acquired.
+        for endpoint in (900.0, 900.001, 1500.0, 1500.001):
+            with self.subTest(native_preparation_endpoint=endpoint):
+                session = session_double(self.module, "darwin")
+                session.deadline = 3300.0
+                rig = _Collection(self.module, session)
+                stopped = RuntimeError("synthetic stop before native preparation acquisition")
+                with rig.scope(), patch.object(self.module.time, "monotonic", return_value=0.0), \
+                     patch.object(session, "ensure_idle", side_effect=stopped) as idle, ExitStack() as stack:
+                    filesystem = [stack.enter_context(patch.object(Path, method,
+                        side_effect=AssertionError("endpoint check may not acquire or inspect paths")))
+                        for method in ("resolve", "stat", "lstat", "open", "mkdir", "chmod", "unlink", "rmdir",
+                                       "read_bytes", "read_text", "write_bytes", "iterdir")]
+                    private_file = stack.enter_context(patch.object(self.module, "_private_file",
+                        side_effect=AssertionError("endpoint check may not create a policy or receipt")))
+                    if endpoint <= 1500.0:
+                        with self.assertRaises(RuntimeError) as caught:
+                            session.prepare_native_authority("source", deadline=endpoint)
+                        self.assertIs(caught.exception, stopped)
+                        idle.assert_called_once_with(deadline=endpoint)
+                    else:
+                        with self.assertRaisesRegex(self.module.SessionError, "renewed or duplicate phase"):
+                            session.prepare_native_authority("source", deadline=endpoint)
+                        idle.assert_not_called()
+                    for operation in filesystem:
+                        operation.assert_not_called()
+                    private_file.assert_not_called()
+                    session._argv.assert_not_called()
+                self.assertEqual(session._native_authority, {})
+                self.assertIsNone(session._native_preparing)
+                self.assertEqual(session.admission_results, [])
+                self.assertEqual(rig.opened, [])
+                self.assertFalse(any(event[0] == "popen" for event in rig.events))
+                self.assertEqual(session.deadline, 3300.0)
 
     def test_native_authority_preparation_is_exclusive_once_only_and_keeps_six_fixed_control_routes(self):
         for case in ("source", "wheel", "read-creator-failure-source", "read-creator-failure-wheel", "input-failure", "cwd-collision", "mkdir-after-effect", "leaf-owner-after-effect",
@@ -6236,15 +6606,21 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual(len(clocks), 2)
 
     def test_native_authority_run_admits_only_exact_prepared_profiles_and_keeps_original_capture(self):
-        cases = ("source", "wheel", "unknown-profile", "public-control", "linux", "not-admitted", "admitting", "env", "cwd",
-                 "state-root", "state-policy", "state-phase", "argv", "python-flags", "cpu", "seconds", "limit",
-                 "no-cutoff", "changed-cutoff", "unlatched", "cancel-control", "unprepared", "started", "completed",
+        successes = ("source", "wheel", "source-expanded-cutoff", "wheel-expanded-cutoff")
+        cases = (*successes, "unknown-profile", "public-control", "linux", "not-admitted", "admitting", "env", "cwd",
+                 "state-root", "state-policy", "state-phase", "argv", "python-flags", "cpu", "seconds", "seconds-over-authority", "seconds-expanded", "limit",
+                 "no-cutoff", "changed-cutoff", "changed-expanded-cutoff", "unlatched", "cancel-control", "unprepared", "started", "completed",
                  "closed", "busy", "original-owned", "direct-pending", "unknown-domain", "ordinary-overlap")
         for case in cases:
             with self.subTest(native_profile_invocation=case):
                 session = session_double(self.module, "linux" if case == "linux" else "darwin")
-                phase = "wheel" if case == "wheel" else "source"
-                state = native_state_double(session, phase)
+                expanded = case in {"source-expanded-cutoff", "wheel-expanded-cutoff", "changed-expanded-cutoff",
+                                    "seconds-over-authority", "seconds-expanded"}
+                if expanded:
+                    session.deadline = 3300.0
+                cutoff = 1500.0 if expanded else 1.0
+                phase = "wheel" if case in {"wheel", "wheel-expanded-cutoff"} else "source"
+                state = native_state_double(session, phase, deadline=cutoff)
                 rig = _Collection(self.module, session)
                 rig.snapshot_rows = {(rig.child.pid, rig.child.pid): ((session.uid,) * 3, (session.gid,) * 3, 65536)}
                 session.admitted, session._admitting = case != "not-admitted", case == "admitting"
@@ -6266,12 +6642,13 @@ class CISandboxPureTests(unittest.TestCase):
                 elif case == "python-flags":
                     command[2] = "-s"  # Not -S: site/.pth must not be initialized.
                 kwargs = dict(cwd=state["cwd"], env={}, seconds=900, output_limit=8 * self.module.MiB,
-                    cpu_seconds=180, profile="native-authority-" + phase, absolute_deadline=1.0)
+                    cpu_seconds=180, profile="native-authority-" + phase, absolute_deadline=cutoff)
                 changes = {"unknown-profile": {"profile": "native-authority-arbitrary"}, "public-control": {"profile": "native-control"},
                     "ordinary-overlap": {"profile": "ordinary"}, "env": {"env": {"PYTHONSAFEPATH": "1"}},
                     "cwd": {"cwd": session.work}, "cpu": {"cpu_seconds": 179}, "seconds": {"seconds": 899},
+                    "seconds-over-authority": {"seconds": 901}, "seconds-expanded": {"seconds": 1500},
                     "limit": {"output_limit": self.module.MiB}, "no-cutoff": {"absolute_deadline": None},
-                    "changed-cutoff": {"absolute_deadline": 0.9}}
+                    "changed-cutoff": {"absolute_deadline": 0.9}, "changed-expanded-cutoff": {"absolute_deadline": 1499.9}}
                 kwargs.update(changes.get(case, {}))
                 input_states = []
 
@@ -6290,7 +6667,7 @@ class CISandboxPureTests(unittest.TestCase):
                      patch.object(Path, "stat", side_effect=AssertionError("profile test must use only closed fake metadata seams")), ExitStack() as stack:
                     if case == "unknown-domain":
                         stack.enter_context(patch.object(self.module, "_domain", side_effect=OSError("synthetic unknown native finality")))
-                    if case in {"source", "wheel"}:
+                    if case in successes:
                         result = session.run(command, **kwargs)
                         self.assertTrue(result.ok, result)
                         self.assertTrue(result.waited and result.stdout_eof and result.stderr_eof and result.finality)
@@ -6299,6 +6676,14 @@ class CISandboxPureTests(unittest.TestCase):
                         self.assertEqual(input_states, [False, True])
                         self.assertTrue(state["started"] and state["completed"] and state["closed"])
                         self.assertEqual(rig.domain_calls, 3)
+                        observed_cutoffs = [event[1] for event in rig.events if event[0] == "root-snapshot"]
+                        self.assertEqual(len(observed_cutoffs), 1)
+                        if expanded:
+                            self.assertGreaterEqual(observed_cutoffs[0], 900.0)
+                            self.assertLess(observed_cutoffs[0], 901.0)
+                            self.assertLess(observed_cutoffs[0], cutoff)
+                        else:
+                            self.assertEqual(observed_cutoffs, [cutoff])
                         argv_builder.assert_called_once_with(command, 180, profile="native-authority-" + phase)
                         inventory.assert_called_once_with(state)
                         call = next(event for event in rig.events if event[0] == "popen")
@@ -6321,7 +6706,8 @@ class CISandboxPureTests(unittest.TestCase):
                         inventory.assert_not_called()
                         self.assertEqual(rig.opened, [])
                         self.assertFalse(any(event[0] == "popen" for event in rig.events))
-                self.assertEqual(session.deadline, 100.0)
+                self.assertEqual(state["deadline"], cutoff)
+                self.assertEqual(session.deadline, 3300.0 if expanded else 100.0)
 
         # Exercise the real private collector -> native parser -> public row
         # bridge. Loading this helper only defines inert functions; every
@@ -8143,6 +8529,65 @@ class CISandboxPureTests(unittest.TestCase):
                 with self.assertRaises(self.module.SessionError):
                     rig.collect()
 
+    def test_all_capture_preparation_boundaries_refuse_cancelled_or_failed_launches(self):
+        for platform in ("linux", "darwin"):
+            for boundary in ("capture-open", "last-observation"):
+                for reason in ("sigint", "sigterm", "failure"):
+                    with self.subTest(platform=platform, boundary=boundary, reason=reason):
+                        session = session_double(self.module, platform)
+                        rig = _Collection(self.module, session)
+                        original_open = rig.open
+
+                        def refuse():
+                            if reason == "failure":
+                                session.fail("preparation predicate failed")
+                            else:
+                                session._interrupted(2 if reason == "sigint" else 15, None)
+
+                        def opened(*args):
+                            fd = original_open(*args)
+                            if boundary == "capture-open" and len(rig.opened) == 2:
+                                refuse()
+                            return fd
+
+                        def observed(abort, name):
+                            self.assertIsNone(abort)
+                            self.assertEqual(name, "wall_before")
+                            if boundary == "last-observation":
+                                refuse()
+
+                        # A refusal does not excuse independent capture-close
+                        # failures or permit any action against a nonexistent child.
+                        close_failure = boundary == "capture-open" and reason == "sigterm"
+                        if close_failure:
+                            rig.fsync_errors, rig.fd_close_errors = {0}, {1}
+                        with rig.scope(), \
+                             patch.object(self.module, "signal", SimpleNamespace(SIGALRM=14)), \
+                             patch.object(self.module.os, "open", side_effect=opened), \
+                             patch.object(session, "_native_abort_stamp", side_effect=observed):
+                            result = session.run([str(session.python), "--synthetic"],
+                                cwd=session.work, env={}, seconds=900, output_limit=64,
+                                absolute_deadline=0.5)
+                        self.assertFalse(result.ok or result.waited or result.stdout_eof or result.stderr_eof
+                                         or result.finality or result.timed_out)
+                        self.assertEqual(result.cancelled, reason != "failure")
+                        self.assertEqual(session.failure, "preparation predicate failed" if reason == "failure"
+                                         else "controller cancellation")
+                        self.assertEqual(result.primary_error, session.failure)
+                        self.assertIsNone(session._active)
+                        self.assertFalse(session._busy)
+                        self.assertEqual(session.deadline, 100.0)
+                        self.assertEqual((result.persisted, session.persisted_bytes), ((0, 0), 0))
+                        self.assertFalse(any(e[0] in {"popen", "read", "root-snapshot", "wait-original",
+                            "terminate-original", "kill-original", "cleanup"} for e in rig.events))
+                        self.assertEqual([e for e in rig.events if e[0] == "capture-close"],
+                                         [("capture-close", 100), ("capture-close", 101)])
+                        self.assertEqual(rig.events.count(("selector-close",)), 1)
+                        if close_failure:
+                            self.assertIn("capture fsync OSError", result.cleanup_errors)
+                            self.assertIn("capture close OSError", result.cleanup_errors)
+                        self.assertEqual(session.cleanup_errors, list(result.cleanup_errors))
+
     def test_absolute_deadline_validation_and_preparation_expiry_precede_any_capture(self):
         for endpoint in (True, False, 0, -1.0, float("nan"), float("inf"), -float("inf"),
                          "0.5", 100.001):
@@ -8243,30 +8688,30 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertTrue(result.timed_out)
                     self.assertIsNotNone(session.failure)
 
-        # Two genuine in-memory captures share ONE old endpoint. The second
-        # enters after most preparation time has elapsed; it cannot renew900s.
+        # Successive in-memory captures share ONE logical gate endpoint, not
+        # source/wheel endpoints or a renewed per-capture allowance.
         session = session_double(self.module)
-        session.deadline = 1500.0
+        session.deadline = 3300.0
         first = _Collection(self.module, session, stdout=(b"first phase\n",))
         first.now, first.exit_at = 100.0, 100.08
-        first_result = first.collect(seconds=900, absolute_deadline=900.0)
+        first_result = first.collect(seconds=900, absolute_deadline=1500.0)
         self.assertTrue(first_result.ok, first_result)
         first_persisted = session.persisted_bytes
         second = _Collection(self.module, session, stdout=(b"second phase\n",))
-        second.now, second.exit_at = 899.8, 900.5
-        second_result = second.collect(seconds=900, absolute_deadline=900.0)
+        second.now, second.exit_at = 1499.8, 1500.5
+        second_result = second.collect(seconds=1500, absolute_deadline=1500.0)
         self.assertIsNot(first_result, second_result)
         self.assertFalse(second_result.ok)
         self.assertTrue(second_result.timed_out)
         self.assertLess(second_result.duration, 2.0)
-        self.assertEqual(session.deadline, 1500.0)
+        self.assertEqual(session.deadline, 3300.0)
         self.assertEqual(session._run_number, 2)
         self.assertEqual(session.persisted_bytes, first_persisted + len(b"second phase\n"))
-        self.assertTrue(all(e[1] <= 900.0 for e in second.events if e[0] == "cleanup-deadline"))
-        self.assertTrue(all(e[2] <= 900.0 for e in second.events if e[0] == "domain-deadline" and e[1] > 1))
+        self.assertTrue(all(e[1] <= 1500.0 for e in second.events if e[0] == "cleanup-deadline"))
+        self.assertTrue(all(e[2] <= 1500.0 for e in second.events if e[0] == "domain-deadline" and e[1] > 1))
         self.assertIsNotNone(session.failure)
         with self.assertRaises(self.module.SessionError):
-            _Collection(self.module, session).collect(seconds=900, absolute_deadline=900.0)
+            _Collection(self.module, session).collect(seconds=1500, absolute_deadline=1500.0)
 
     def test_expected_negative_subject_isolated_but_cannot_rehabilitate_real_failure(self):
         session = session_double(self.module)

@@ -641,12 +641,28 @@ module UploadProcessFixture
     !!(root && @domain_disposal_required && (@expected_unknown_roots || {}).key?(root) && cleanup_unresolved?(root))
   end
 
+  # This fixture exchanges absolute endpoints with CPython and the original
+  # Ruby native owner. Match that finite domain; never fit/translate epochs.
+  # Selection is lazy: importing a fixture neither samples nor loads product.
+  def clock_identifier
+    host = RbConfig::CONFIG.fetch("host_os")
+    name = if host.match?(/\Alinux/)
+             :CLOCK_MONOTONIC
+           elsif host.match?(/\Adarwin/)
+             :CLOCK_UPTIME_RAW
+           end
+    unless name && Process.const_defined?(name, false)
+      raise Failure.new("clock", "fixture requires its supported native monotonic domain")
+    end
+    Process.const_get(name, false)
+  end
+
   def clock
-    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    Process.clock_gettime(clock_identifier)
   end
 
   def clock_ns
-    Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+    Process.clock_gettime(clock_identifier, :nanosecond)
   end
 
   def atomic_json(path, value)
@@ -2059,7 +2075,7 @@ module UploadProcessFixture
     end
   end
 
-  # Fixture copies have their own provenance, never the original six-file hash
+  # Fixture copies have their own provenance, never the original source hash
   # map. Replacing helper argv here changes only a test dispatch, not SpawnSpec
   # semantics or a production hook. Ordinary installed gates never call this.
   def copied_helper(directory, label, insertion)
@@ -2642,7 +2658,8 @@ module UploadProcessFixture
     }.transform_values(&:freeze).freeze
     SOURCES = %w[tests/workflow/upload_process_fixture.rb tests/workflow/upload_process_ownership.rb
                  fastlane/native_upload_validation.rb fastlane/native_process_spawn.rb
-                 fastlane/native_upload_process.rb fastlane/release_support.rb].freeze
+                 fastlane/native_upload_process.rb fastlane/release_support.rb
+                 fastlane/store_lane_lifetime.rb].freeze
     FINITE_VALIDATOR = "STDOUT.write(\"native-order-complete\\n\")\n".freeze
     CALLER_EXIT_STATUS = 47
     class BodyFailure < StandardError; end
@@ -3046,7 +3063,8 @@ module UploadProcessFixture
                native-setup-post-reap-cancel].freeze
     SOURCES = %w[tests/workflow/upload_process_fixture.rb tests/workflow/upload_process_ownership.rb
                  fastlane/native_upload_validation.rb fastlane/native_process_spawn.rb
-                 fastlane/native_upload_process.rb fastlane/release_support.rb].freeze
+                 fastlane/native_upload_process.rb fastlane/release_support.rb
+                 fastlane/store_lane_lifetime.rb].freeze
     CONTROL_STATES = %w[reserved unknown retired-before-first-nil-wait reaped].freeze
     ROUTES = %w[custodian-group keeper-self-group custodian-direct-keeper fixture].freeze
     MAX_REQUESTS = 64
@@ -4139,7 +4157,7 @@ module UploadProcessFixture
       outer = File.join(base, "native_upload_validation.rb")
       adapter = File.join(base, "#{@platform}_upload_validation.rb")
       if @base_mode == "immediate-deadline" || @base_mode == "no-deadline"
-        changes = %w[release_support native_process_spawn native_upload_process].map do |name|
+        changes = %w[release_support native_process_spawn native_upload_process store_lane_lifetime].map do |name|
           [%(require_relative "#{name}"), "require #{File.join(base, "#{name}.rb").inspect}"]
         end
         if @base_mode == "no-deadline"
@@ -4227,7 +4245,7 @@ module UploadProcessFixture
         "Current IPA signing/profile validation failed; no new upload is authorized (inspect the original IPA with credential-free preflight)" :
         "Current AAB signing/identity validation failed; no new upload is authorized (inspect the original AAB with credential-free preflight)"
       unless arguments == [@expected_environment, @expected_argv, @parameters.fetch(:tooling_directory)] &&
-             keywords == {max_seconds: ADAPTER_RUN_LIMIT, max_output_bytes: @gate::MAX_OUTPUT_BYTES, label: label, failure_message: failure}
+             keywords == {max_seconds: ADAPTER_RUN_LIMIT, max_output_bytes: @gate::MAX_OUTPUT_BYTES, label: label, failure_message: failure, store_binding: nil}
         raise Failure.new("fixture-input", "complete actual adapter capture contract changed")
       end
       @observed["adapterCallObserved"] = true

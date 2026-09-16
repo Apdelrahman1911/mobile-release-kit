@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import os
 import stat
@@ -15,7 +16,9 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import _GeneratorContextManager
 from pathlib import Path
+from types import GeneratorType
 
 from mobile_release.local_signing import DB_NAME, LOCK_NAME
 
@@ -28,14 +31,198 @@ class OwnerResolutionRefused(RuntimeError):
     """Independent fictional owner lacks authority; not a production exception."""
 
 
-def _materializer_directory(original, private, created, *args, **kwargs):
-    """Route only this fixture's materializer into its real model input root."""
-    if kwargs.get('prefix') != 'mobile-release-build-inputs-':
-        return original(*args, **kwargs)
-    assert not args and set(kwargs) == {'prefix'}, 'materializer allocation contract changed'
-    owner = original(dir=private, **kwargs)
-    created.append(Path(owner.name))
-    return owner
+class MaterializerObservation:
+    """Passive original-context oracle; never acquire, admit, recover or clean."""
+    def __init__(self, factory):
+        from mobile_release import build_inputs
+        self.inputs, self.factory = build_inputs, factory
+        self.code = inspect.unwrap(factory).__code__
+        assert self.code.co_flags & inspect.CO_GENERATOR, "original materializer is not a generator"
+        self.contexts = []
+        self.outer = self.inner = None
+        self.fields, self.prefixes, self.parents, self.identities = {}, {}, {}, {}
+        self.slots = {"outer": [], "child": []}
+        self.slot_groups, self.slot_numbers = {}, {}
+
+    def context(self, *args, **kwargs):
+        context = self.factory(*args, **kwargs)  # Original arguments/exception/return, never a proxy.
+        assert type(context) is _GeneratorContextManager, "original materializer context changed"
+        generator = context.gen
+        assert type(generator) is GeneratorType and generator.gi_code is self.code \
+            and generator.gi_frame is not None, "original materializer generator changed"
+        frame = generator.gi_frame
+        self.contexts.append((context, generator, frame, frame.f_locals.get("build_inputs")))
+        return context
+
+    def _field(self, owner, name):
+        key, current = (id(owner), name), getattr(owner, name)
+        if key not in self.fields:
+            self.fields[key] = owner, current
+        original_owner, original = self.fields[key]
+        assert owner is original_owner and current is original, "original materializer field replaced: " + name
+        return original
+
+    def _slot(self, slot, group):
+        assert type(slot) is self.inputs._FD and slot.guard is self.outer[3], "foreign materializer descriptor"
+        if slot not in self.slot_groups:
+            self.slot_groups[slot] = group
+            self.slots[group].append(slot)
+        assert self.slot_groups[slot] == group, "materializer descriptor crossed ownership groups"
+        if slot.number is not None:
+            assert type(slot.number) is int and slot.number >= 0, "invalid original materializer descriptor"
+            self.slot_numbers.setdefault(slot, slot.number)
+            assert self.slot_numbers[slot] == slot.number, "original materializer descriptor retargeted"
+
+    def _slot_list(self, owner, name, group):
+        current = self._field(owner, name)
+        assert type(current) is list, "original descriptor inventory is not a list"
+        key = id(owner), name
+        prefix = self.prefixes.get(key, ())
+        assert len(current) >= len(prefix) and all(now is old for now, old in zip(current, prefix)), \
+            "original materializer descriptor inventory changed"
+        self.prefixes[key] = tuple(current)  # Preserve late original cleanup slots too.
+        for slot in current:
+            self._slot(slot, group)
+
+    def _identity(self, owner, name):
+        original = self._field(owner, name)
+        assert type(original) is dict and original.get("mode") == 0o700, "materializer identity is not private"
+        key = id(owner), name
+        self.identities.setdefault(key, dict(original))
+        assert original == self.identities[key], "original materializer identity changed"
+
+    def _outer_inventory(self):
+        invocation, project, _lease, guard = self.outer
+        assert invocation.root == project.root == self.root and invocation.mode == "build" \
+            and invocation.cancellation is project.guard is guard, "original outer binding changed"
+        self._field(invocation, "environment_lock")
+        self._field(invocation, "frames")
+        directory = self._field(project, "directory")
+        assert type(directory) is self.inputs._Directory and directory.path == self.root \
+            and directory.guard is guard, "foreign project ancestry"
+        self._slot(self._field(project, "meta"), "outer")
+        self._slot_list(directory, "slots", "outer")
+
+    def _child_inventory(self):
+        child, scratch, _record = self.inner
+        assert child.invocation is self.outer[0] and child.project is self.outer[1] \
+            and child.cancellation is scratch.cancellation is self.outer[3] \
+            and self._field(child, "scratch") is scratch and scratch.journal is child, "original child custody changed"
+        self._field(child, "creation")
+        self._field(scratch, "creation")
+        self._identity(child, "identity")
+        self._identity(scratch, "identity")
+        self._identity(child.project, "meta_identity")
+        self._slot(self._field(child, "slot"), "child")
+        self._slot(self._field(scratch, "slot"), "child")
+        parent = self._field(scratch, "parent")
+        assert type(parent) is self.inputs._Directory and parent.guard is self.outer[3] \
+            and parent.path == self.root / ".mobile-release/build-inputs" \
+            and scratch.name == "scratch", "materializer scratch parent changed"
+        self._slot_list(parent, "slots", "child")
+        self._slot_list(scratch, "writer_slots", "child")
+        self._slot_list(child, "control_slots", "child")
+        parents = self._field(child, "parents")
+        assert type(parents) is dict and set(self.parents) <= set(parents), "original target ancestry disappeared"
+        for name, directory in parents.items():
+            self.parents.setdefault(name, directory)
+            assert self.parents[name] is directory and type(directory) is self.inputs._Directory \
+                and directory.guard is self.outer[3], "target ancestry changed"
+            self._slot_list(directory, "slots", "child")
+
+    def bind_outer(self, *, root, invocation, lease, guard):
+        from mobile_release.local_signing import SigningLease
+        assert type(invocation) is self.inputs.InvocationCustody, "materializer invocation is not original"
+        project = invocation.project_owner
+        assert type(project) is self.inputs._Project and type(lease) is SigningLease, \
+            "materializer outer owner is not original"
+        assert invocation.root == project.root == root and invocation.mode == "build" \
+            and invocation.signing_lease is lease and invocation.cancellation is project.guard is lease.cancellation is guard, \
+            "materializer outer identity differs"
+        assert invocation.active and invocation.reserved and not invocation.claimed \
+            and invocation.lock_result is True and invocation.reservation_state == "ACQUIRED" and not project.claimed, \
+            "materializer outer custody is not live"
+        current = invocation, project, lease, guard
+        if self.outer is None:
+            self.root, self.outer = root, current
+        assert self.root == root and all(now is old for now, old in zip(current, self.outer)), "original outers changed"
+        self._outer_inventory()
+        assert project.directory.slots and all(slot.number is not None and slot.open_state == "OPEN"
+                                               and slot.close_state == "NOT_ATTEMPTED"
+                                               for slot in project.directory.slots), "project ancestry is not live"
+
+    def live(self, *, root, lease, guard, invocation=None, scratch=None):
+        candidates = [record for record in self.contexts if record[3] is not None]
+        assert len(candidates) == 1, "expected exactly one original inner materializer"
+        record, = candidates
+        context, generator, frame, parameter = record
+        assert context.gen is generator and generator.gi_code is self.code and generator.gi_frame is frame, \
+            "original inner materializer is not live"
+        values = frame.f_locals  # Read the retained ORIGINAL frame, never the outer wrapper's child local.
+        child, actual_invocation, actual_scratch = values["build_inputs"], values["invocation"], values["scratch"]
+        assert child is parameter and type(child) is self.inputs.BuildInputs \
+            and type(actual_scratch) is self.inputs.FiniteScratch, "original inner parameter changed"
+        assert values["config"].root == root and values["signing_lease"] is lease and values["cancellation"] is guard \
+            and (invocation is None or actual_invocation is invocation) and (scratch is None or actual_scratch is scratch), \
+            "original inner materializer bindings differ"
+        self.bind_outer(root=root, invocation=actual_invocation, lease=lease, guard=guard)
+        assert actual_invocation.child is child and child.scratch is actual_scratch \
+            and child.invocation is actual_invocation and child.project is actual_invocation.project_owner \
+            and child.prepared and not child.claimed and child.created and child.creation["state"] == "CREATED" \
+            and actual_scratch.active and not actual_scratch.claimed and actual_scratch.created \
+            and actual_scratch.creation["state"] == "CREATED", "materializer child is not the original live owner"
+        current = child, actual_scratch, record
+        if self.inner is None:
+            self.inner = current
+        assert all(now is old for now, old in zip(current, self.inner)), "first observed materializer child changed"
+        self._child_inventory()
+        assert actual_scratch.parent.slots and all(slot.number is not None and slot.open_state == "OPEN"
+                   and slot.close_state == "NOT_ATTEMPTED" for slot in (
+                       child.project.meta, child.slot, actual_scratch.slot, *actual_scratch.parent.slots)), \
+            "materializer project and scratch are not live"
+        return child
+
+    def _closed(self, group):
+        assert all(slot.guard is self.outer[3] and slot.number is None and slot.close_state == "CLOSED"
+                   for slot in self.slots[group]), "original " + group + " descriptors did not settle"
+
+    def child_settled(self, *, expected=1, outers_live=False):
+        assert type(expected) is int and expected in (0, 1), "unknown materializer observation count"
+        if expected == 0:
+            assert not self.contexts and self.inner is None, "early cancellation entered materialization"
+            return
+        assert self.inner is not None and sum(record[3] is not None for record in self.contexts) == 1, \
+            "original materializer was not observed"
+        child, scratch, _record = self.inner
+        self._outer_inventory()
+        self._child_inventory()
+        assert all(context.gen is generator and generator.gi_code is self.code and generator.gi_frame is None
+                   for context, generator, _frame, _parameter in self.contexts), "original materializer context still lives"
+        assert child.claimed and not child.created and child.creation["state"] == "RETIRED" \
+            and not scratch.created and scratch.creation["state"] == "RETIRED" \
+            and self.outer[0].child is None, "original materialization did not retire"
+        self._closed("child")
+        private = self.root / ".mobile-release"
+        assert not any(os.path.lexists(path) for path in (private / "build-inputs/scratch", private / "build-inputs",
+                       private / "build-inputs-complete.json", private / "build-inputs-complete.stage")), \
+            "original materializer namespace remains"
+        # Borrowed scratch disposal does not call FiniteScratch.cleanup: active,
+        # claimed, records and tokens are NOT standalone terminal receipts here.
+        if outers_live:
+            invocation, project, lease, guard = self.outer
+            assert invocation.project_owner is project, "project ended before late authentication"
+            self.bind_outer(root=self.root, invocation=invocation, lease=lease, guard=guard)
+
+    def outer_settled(self):
+        assert self.outer is not None, "original invocation was not observed"
+        invocation, project, lease, guard = self.outer
+        self._outer_inventory()
+        assert invocation.signing_lease is lease and invocation.cancellation is project.guard is lease.cancellation is guard \
+            and invocation.claimed and not invocation.active and not invocation.reserved \
+            and invocation.lock_result is None and invocation.reservation_state == "RELEASED" \
+            and not invocation.frames and invocation.project_owner is None and invocation.child is None \
+            and project.claimed, "original materializer outers did not retire"
+        self._closed("outer")
 
 
 def write_json(path: Path, value: object) -> None:
@@ -190,6 +377,8 @@ def initialize(root: Path, *, borrowed=False):
     home, private = root / "home", root / "private"
     home.mkdir(mode=0o700)
     private.mkdir(mode=0o700)
+    # Private fixture inputs are deliberately outside the named project root.
+    (root / "project").mkdir(mode=0o700)
     original = {"default": str(home / "fictional login.keychain-db"),
                 "search": [str(home / "fictional login.keychain-db"), str(home / "f\\ictional أرشيف.keychain-db")]}
     sentinels = []
@@ -435,6 +624,15 @@ class PersistentSigningModel:
             namespace.remove()
             complete = True
             self.state = json.loads(self.path.read_bytes())
+            result_observer = getattr(self.trace, "observe_original_result", None)
+            if result_observer is not None:
+                # Observe the returned target capture, never a projected/fake
+                # stream or an effect-END callback that precedes stdout.
+                require(result is target_result, "original target result identity differs")
+                original_result = (result.returncode, result.stdout, result.stderr)
+                result_observer(self, command_argv, result)
+                require((result.returncode, result.stdout, result.stderr) == original_result,
+                        "original target result was changed by its observer")
             # Only args are projected; return/status/streams and the selected
             # scope's original outcome are never manufactured or replaced.
             result = subprocess.CompletedProcess(argv, result.returncode, result.stdout, result.stderr)
@@ -520,12 +718,24 @@ class PersistentSigningModel:
         elif command in {"set-keychain-settings", "unlock-keychain", "import", "set-key-partition-list", "build"}:
             self.transaction()
         elif command == "openssl":
-            assert "-out" in argv
-            destination = Path(argv[argv.index("-out") + 1])
-            destination.relative_to(self.root / "private")
+            arguments = list(argv[1:])
+            if arguments[:2] == ["pkcs12", "-legacy"]:
+                arguments.pop(1)
+            assert len(arguments) == 7 and arguments[:2] == ["pkcs12", "-in"]
+            assert arguments[3:5] in (["-clcerts", "-nokeys"], ["-nocerts", "-nodes"],
+                                     ["-cacerts", "-nokeys"])
+            assert arguments[5:] == ["-passin", "env:MOBILE_RELEASE_LOCAL_P12_PASSWORD"]
+            source = Path(arguments[2])
+            source.relative_to(self.root)
+            assert source.name == "distribution.p12" and not source.is_symlink()
+            details = source.lstat()
+            assert stat.S_ISREG(details.st_mode) and stat.S_IMODE(details.st_mode) == 0o600
+            assert details.st_uid == os.getuid() and details.st_nlink == 1 and details.st_size > 0
             # Exercise all three production imports, including the chain branch.
-            self.effect("extract", lambda: destination.write_bytes(
-                b"-----BEGIN CERTIFICATE-----\nfictional-not-a-certificate\n"))
+            # The real fixed target emits this string only after DONE/EOF; no
+            # extraction path is opened or written by the modeled native tool.
+            stdout = self.effect("extract", lambda:
+                "-----BEGIN CERTIFICATE-----\nfictional-not-a-certificate\n")
         elif command == "delete-keychain":
             keychain = Path(self.state["keychain"])
             assert str(keychain) not in [self.state["preferences"]["default"], *self.state["preferences"]["search"]]

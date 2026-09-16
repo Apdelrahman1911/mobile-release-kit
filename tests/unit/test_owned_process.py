@@ -112,6 +112,58 @@ class CommandContractTests(unittest.TestCase):
         self.assertIs(run.call_args.kwargs["execution_scope"], source)
         self.assertIs(run.call_args.kwargs["journal_binding"], binding)
         self.assertIs(run.call_args.kwargs["cancellation"], guard)
+        self.assertIs(run.call_args.kwargs["text"], True)
+
+    def test_capture_encoding_admission_precedes_owner_and_fixed_evidence_stays_text_only(self):
+        with patch.object(command, "cancellation_owner") as owner, patch.object(command, "_Outer") as outer:
+            for value in (None, 0, 1, "false", b"", object()):
+                with self.subTest(value=type(value).__name__), self.assertRaises(owned.ProcessError):
+                    owned.run_owned(["fictional"], text=value)
+            owner.assert_not_called()
+            outer.assert_not_called()
+            guard = DefaultCancellation(owned.ProcessCleanupError, "fixture")
+            evidence = command.CommandCallEvidence(guard)
+            refused = ValueError("fixed evidence admission seam")
+            with patch.object(evidence, "_attempt", side_effect=refused) as attempt:
+                with self.assertRaises(ValueError) as caught:
+                    owned.run_owned(["fictional"], text=False, cancellation=guard, _evidence=evidence)
+            self.assertIs(caught.exception, refused)
+            self.assertIs(attempt.call_args.kwargs["ordinary"], False)
+            owner.assert_not_called()
+            outer.assert_not_called()
+
+    def test_conversion_failure_publishes_incomplete_original_no_creation_outcome(self):
+        # No native acquisition or constructed native receipt: the actual
+        # original owner positively knows that it never created a helper.
+        for text in (True, False):
+            for failure in (MemoryError("capture allocation"), KeyboardInterrupt("capture interruption")):
+                for first in (None, ValueError("earlier failure")):
+                    with self.subTest(text=text, failure=type(failure).__name__, earlier=first is not None):
+                        class FailedConversion(bytearray):
+                            def decode(self, *_args, **_kwargs):
+                                raise failure
+
+                            def __bytes__(self):
+                                raise failure
+
+                        guard = DefaultCancellation(owned.ProcessCleanupError, "fixture")
+                        engine = command._Outer(guard, True, 30, None, None,
+                                                suppress_cancel=False, text=text)
+                        engine.handlers_complete = engine.local_cleanup_complete = True
+                        engine.create_route.retire(); engine.run_route.retire()
+                        engine.outputs[1] = FailedConversion()
+                        if first is not None:
+                            engine.ctx.record(first)
+                        outcome = engine.publish()
+                        self.assertIs(engine.slot.read(), outcome)
+                        self.assertEqual(outcome.no_target.kind, "NO_W_CREATION")
+                        self.assertIsNotNone(outcome.original_finality)
+                        self.assertEqual(outcome.result_integrity, "incomplete")
+                        self.assertIsNone(engine.decoded)
+                        self.assertIs(engine.ctx.primary, failure if first is None else first)
+                        if isinstance(failure, KeyboardInterrupt):
+                            self.assertIs(engine.ctx.first_interruption, failure)
+                        self.assertTrue(guard.lifetime_ledger.verdict().contained)
 
     def test_native_record_roundtrip_preserves_bytes_and_original_path_components(self):
         env = {"PATH": ":relative:relative:/bin", "EMPTY": "", "LARGE": "x" * 9000}
@@ -1331,6 +1383,9 @@ class CommandSourceOwnerTests(unittest.TestCase):
             session.unresolved = True
             session.close()
             with patch.object(credentials, "_private_path_error", side_effect=AssertionError("private path observed")), \
+                 patch.object(credentials, "read_external_bytes", side_effect=AssertionError("private input read")), \
+                 patch.object(credentials, "invocation_custody", side_effect=AssertionError("invocation acquired")), \
+                 patch.object(credentials, "finite_scratch", side_effect=AssertionError("private scratch acquired")), \
                  patch.object(credentials, "_materialize", side_effect=AssertionError("material written")), \
                  patch.object(credentials, "_authenticated_signing_profile", side_effect=AssertionError("profile authenticated")):
                 with self.assertRaises(local_signing.SigningPending):
@@ -1343,7 +1398,7 @@ class CommandSourceOwnerTests(unittest.TestCase):
                 with self.assertRaises(local_signing.SigningPending):
                     with credentials._temporary_apple_signing_environment(
                         p12=Path("/fictional/input.p12"), password="fictional", profile=Path("/fictional/input.profile"),
-                        directory=lease.home, lease=lease,
+                        directory=lease.home, project_root=lease.home.parent / "project", lease=lease,
                     ):
                         self.fail("revoked signing entered")
 
@@ -1352,6 +1407,14 @@ class CommandSourceOwnerTests(unittest.TestCase):
         from mobile_release.errors import CredentialError
 
         with self.assertRaises(owned.ProcessError) as final_failure, self.source_lease() as lease:
+            project, private = lease.home.parent / "project", lease.home.parent / "private"
+            project.mkdir(mode=0o700)
+            private.mkdir(mode=0o700)
+            p12, source = private / "input.p12", private / "input.profile"
+            p12.write_bytes(b"fictional-p12")
+            source.write_bytes(b"fictional profile")
+            p12.chmod(0o600)
+            source.chmod(0o600)
             sessions, native_cleanup = [], []
             def prepare(session, *_args):
                 sessions.append(session)
@@ -1362,15 +1425,16 @@ class CommandSourceOwnerTests(unittest.TestCase):
                 on_conflict()
                 raise CredentialError("modeled profile conflict")
                 yield  # pragma: no cover - preserves the actual context protocol.
-            with patch.object(credentials, "_authenticated_signing_profile", return_value=(b"fictional", {"UUID": "fictional"})), \
+            with patch.object(credentials, "_authenticated_signing_profile",
+                              return_value=(b"fictional", {"UUID": "12345678-1234-1234-1234-1234567890AB"})), \
                  patch.object(local_signing.SigningSession, "prepare", new=prepare), \
                  patch.object(local_signing.SigningSession, "cleanup_native", new=lambda session: native_cleanup.append(session)), \
                  patch.object(local_signing.SigningSession, "finish", side_effect=AssertionError("conflicted session finalized")), \
                  patch.object(credentials, "_temporary_profile_installation", new=conflict), \
                  self.assertRaises(owned.ProcessError):
                 with credentials._temporary_apple_signing_environment(
-                    p12=Path("/fictional/input.p12"), password="fictional", profile=Path("/fictional/input.profile"),
-                    directory=lease.home, lease=lease,
+                    p12=p12, password="fictional", profile=source,
+                    directory=private, project_root=project, lease=lease,
                 ):
                     self.fail("conflicted signing entered")
             self.assertEqual(len(sessions), 1)
@@ -1524,8 +1588,23 @@ class OwnedProcessTests(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout, result.stderr), (7, "fictional\n", "fixture-error\n"))
         result = owned.run_owned(self.command('print("not captured")'), cwd=self.root, capture=False)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        binary = self.command('import os; os.write(1,b"\\x00\\xffnative"); os.write(2,b"\\xfe\\x00diagnostic")')
+        result = owned.run_owned(binary, cwd=self.root, text=False)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (0, b"\x00\xffnative", b"\xfe\x00diagnostic"))
+        self.assertIs(type(result.stdout), bytes)
+        self.assertIs(type(result.stderr), bytes)
+        self.assertEqual(self.outcomes[-1].result_integrity, "complete")
         with self.assertRaises(owned.ProcessError) as raised:
-            owned.run_owned(self.command('import os; os.write(1,b"private-canary"*1000)'), cwd=self.root, output_limit=256)
+            owned.run_owned(binary, cwd=self.root)
+        self.assertTrue(raised.exception.contained and raised.exception.cleanup_complete)
+        self.assertEqual(self.outcomes[-1].result_integrity, "incomplete")
+        result = owned.run_owned(self.command('print("not captured")'), cwd=self.root,
+                                 capture=False, text=False)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"", b""))
+        with self.assertRaises(owned.ProcessError) as raised:
+            owned.run_owned(self.command('import os; os.write(1,b"private-canary"*1000)'),
+                            cwd=self.root, output_limit=256, text=False)
         self.assertTrue(raised.exception.dispatched and raised.exception.contained)
         self.assertNotIn("private-canary", str(raised.exception))
 
@@ -1546,6 +1625,8 @@ class OwnedProcessTests(unittest.TestCase):
         self.assertEqual(result.returncode, -signal.SIGTERM)
 
     def test_owned_descendants_settle_before_success_timeout_or_failure_returns(self):
+        from mobile_release.ios import _run_native
+
         for mode in ("success", "failure", "timeout"):
             with self.subTest(mode=mode):
                 ready, heartbeat, stop = (self.root / (mode + "-" + name) for name in ("ready", "heartbeat", "stop"))
@@ -1560,11 +1641,13 @@ class OwnedProcessTests(unittest.TestCase):
                 try:
                     if mode == "timeout":
                         with self.assertRaises(owned.ProcessError) as raised:
-                            owned.run_owned(self.command(code), timeout=3)
+                            _run_native(self.command(code), timeout=3)
                         self.assertTrue(raised.exception.dispatched and raised.exception.contained)
                     else:
-                        result = owned.run_owned(self.command(code), timeout=8)
+                        result = _run_native(self.command(code), timeout=8)
                         self.assertEqual(result.returncode, 7 if mode == "failure" else 0)
+                        self.assertIs(type(result.stdout), bytes)
+                        self.assertIs(type(result.stderr), bytes)
                     self.assertTrue(heartbeat.is_file(), "real descendant never acknowledged")
                     observed = heartbeat.read_text(); time.sleep(.03)
                     self.assertEqual(heartbeat.read_text(), observed)

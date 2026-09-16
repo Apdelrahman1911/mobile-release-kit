@@ -3,19 +3,22 @@ from __future__ import annotations
 import io
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
 import zipfile
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from mobile_release.android import _bundletool_manifest
 from mobile_release.android_upload_validation import main, validate_current_upload
+from mobile_release.build_inputs import finite_scratch
 from mobile_release.config import load_config
 from mobile_release.credentials import artifact_validation_environment
 from mobile_release.errors import MobileReleaseError, ValidationError
+from mobile_release.owned_process import ProcessError
 from mobile_release.provenance import seal, sha256_file, verify_sealed
 from mobile_release.reporting import Finding, Status
 
@@ -68,9 +71,20 @@ class AndroidCurrentUploadTests(unittest.TestCase):
             "mobile_release.android._bundletool_manifest",
             return_value='<manifest package="com.example.reader" android:versionCode="42" android:versionName="1.2.3" />',
         ))
-        self.native = self.stack.enter_context(patch("mobile_release.android.subprocess.run", side_effect=self.native_command))
+        self.native_owner = self.stack.enter_context(patch(
+            "mobile_release._command_process.run_command",
+            side_effect=AssertionError("policy fixture must not acquire a native command owner"),
+        ))
+        self.native = self.stack.enter_context(patch("mobile_release.android.run_owned", side_effect=self.native_command))
 
     def native_command(self, argv, **kwargs):
+        self.assertIn(argv[0], {"jarsigner", "keytool"})
+        self.assertEqual(set(kwargs), {"environ", "capture", "timeout", "cancellation"})
+        self.assertEqual(kwargs["environ"], artifact_validation_environment(os.environ))
+        self.assertIs(kwargs["capture"], True)
+        self.assertEqual(kwargs["timeout"], {"jarsigner": 120, "keytool": 30}[argv[0]])
+        # The current-upload helper supplies the original default owner argument.
+        self.assertIsNone(kwargs["cancellation"])
         self.native_calls.append((list(argv), kwargs))
         if argv[0] == self.missing_tool:
             raise FileNotFoundError("synthetic unavailable tool")
@@ -96,10 +110,10 @@ class AndroidCurrentUploadTests(unittest.TestCase):
             "operationIntentSha256": self.intent["integrity"]["sha256"],
             "aabSha256": sha256_file(self.aab), "aabSize": self.aab.stat().st_size,
         })
-        self.manifest.assert_called_once_with(self.aab)
+        self.manifest.assert_called_once_with(self.aab, cancellation=None)
         self.assertEqual([argv[0] for argv, _ in self.native_calls], ["jarsigner", "keytool"])
         for _, kwargs in self.native_calls:
-            self.assertEqual(kwargs["env"], artifact_validation_environment(os.environ))
+            self.assertEqual(kwargs["environ"], artifact_validation_environment(os.environ))
 
     def test_current_warning_expiry_wrong_signer_and_missing_tools_never_allow_new_upload(self) -> None:
         for warning in (
@@ -127,12 +141,86 @@ class AndroidCurrentUploadTests(unittest.TestCase):
     def test_actual_bundletool_missing_or_wrong_pin_is_rejected_without_java(self) -> None:
         self.manifest.side_effect = _bundletool_manifest
         bad_jar = self.root / "bundletool-all-1.18.3.jar"
-        bad_jar.write_bytes(b"not the reviewed bundletool")
-        for jar in (None, str(self.root / "missing.jar"), str(bad_jar)):
-            environment = {} if jar is None else {"MOBILE_RELEASE_BUNDLETOOL_JAR": jar}
-            with self.subTest(jar=jar), patch.dict(os.environ, environment, clear=True), self.assertRaisesRegex(ValidationError, "ineligible"):
+        original_bytes = b"not the reviewed bundletool"
+        bad_jar.write_bytes(original_bytes)
+        source_before = bad_jar.lstat()
+        owners = []
+
+        @contextmanager
+        def scratch_for_fixture(**kwargs):
+            # The real failed-copy owner preserves its unbound file. Keep that
+            # residue inside this original fixture; never repair its finality.
+            with finite_scratch(parent=self.root, **kwargs) as scratch:
+                owners.append((scratch, dict(scratch.identity)))
+                yield scratch
+
+        with patch("mobile_release.android.finite_scratch", side_effect=scratch_for_fixture):
+            for jar in (None, str(self.root / "missing.jar")):
+                environment = {} if jar is None else {"MOBILE_RELEASE_BUNDLETOOL_JAR": jar}
+                with self.subTest(jar=jar), patch.dict(os.environ, environment, clear=True), \
+                     self.assertRaisesRegex(ValidationError, "ineligible") as rejected:
+                    self.validate()
+                self.assertNotIsInstance(rejected.exception, ProcessError)
+            self.assertEqual(len(owners), 1)  # An unset tool never acquires scratch.
+            self.assertFalse(owners[0][0]._path.exists())
+
+            native_calls = self.native.call_count
+            with self.subTest(jar=str(bad_jar)), \
+                 patch.dict(os.environ, {"MOBILE_RELEASE_BUNDLETOOL_JAR": str(bad_jar)}, clear=True), \
+                 self.assertRaises(ProcessError) as rejected:
                 self.validate()
+            # Wrong-length bytes were written before publication failed. The
+            # original retained-input cleanup failure must not become a finding.
+            self.assertIs(rejected.exception.dispatched, False)
+            self.assertIs(rejected.exception.contained, True)
+            self.assertIs(rejected.exception.cleanup_complete, False)
+            self.assertIs(rejected.exception.fatal, True)
+            self.assertEqual(self.native.call_count, native_calls)
+
+        self.assertEqual(len(owners), 2)
+        scratch, original_directory = owners[-1]
+        self.assertEqual(scratch.parent.path, self.root)
+        directory = scratch._path.lstat()
+        self.assertTrue(stat.S_ISDIR(directory.st_mode))
+        self.assertEqual(dict(device=directory.st_dev, inode=directory.st_ino,
+                              uid=directory.st_uid, gid=directory.st_gid,
+                              mode=stat.S_IMODE(directory.st_mode)), original_directory)
+        self.assertEqual(original_directory["mode"], 0o700)
+        self.assertTrue(scratch.claimed and scratch.created and not scratch.active)
+        self.assertFalse(scratch._cleanup_complete)
+        self.assertEqual(set(scratch.records), {"bundletool"})
+        self.assertIsNone(scratch.records["bundletool"]["binding"])
+        self.assertEqual(scratch.snapshots, {})
+        self.assertEqual(scratch.tokens, {})
+        self.assertEqual({path.name for path in scratch._path.iterdir()}, {"bundletool.jar"})
+        retained = scratch._path / "bundletool.jar"
+        observed = retained.lstat()
+        self.assertTrue(stat.S_ISREG(observed.st_mode))
+        identity = dict(device=observed.st_dev, inode=observed.st_ino, uid=observed.st_uid,
+                        gid=observed.st_gid, mode=stat.S_IMODE(observed.st_mode), links=observed.st_nlink)
+        created = scratch.records["bundletool"]["created"]
+        self.assertEqual(identity, {key: created[key] for key in identity})
+        self.assertEqual((identity["mode"], identity["links"], observed.st_size),
+                         (0o600, 1, len(original_bytes)))
+        self.assertEqual(retained.read_bytes(), original_bytes)
+        for owner, _ in owners:
+            slots = [*owner.parent.slots, owner.slot, *owner.writer_slots]
+            self.assertTrue(all(slot.number is None and slot.close_state == "CLOSED" for slot in slots))
+            self.assertEqual(owner.cancellation.handler_state, "RESTORED")
+            verdict = owner.cancellation.lifetime_ledger.verdict()
+            self.assertEqual((verdict.commands, verdict.profile_calls), (0, 0))
+            self.assertIs(verdict.command_dispatched, False)
+            self.assertIs(verdict.profile_dispatched, False)
+            self.assertIs(verdict.contained, True)
+            self.assertIs(verdict.fatal, owner is scratch)
+        self.native_owner.assert_not_called()
+        self.assertNotIn("java", [call.args[0][0] for call in self.native.call_args_list])
         self.assertNotIn("java", [argv[0] for argv, _ in self.native_calls])
+        self.assertEqual(bad_jar.read_bytes(), original_bytes)
+        source_after = bad_jar.lstat()
+        for name in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size",
+                     "st_mtime_ns", "st_ctime_ns"):
+            self.assertEqual(getattr(source_after, name), getattr(source_before, name))
 
     def test_fail_skip_or_incomplete_native_result_cannot_be_reused_as_a_pass(self) -> None:
         for result in ([], [Finding("android.aab.structure", Status.PASS, "partial")], *[

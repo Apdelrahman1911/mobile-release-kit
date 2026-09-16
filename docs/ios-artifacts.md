@@ -1,5 +1,9 @@
 # iOS artifact correspondence
 
+Production use is **NOT READY until** remediation verification and a new comprehensive
+production-readiness audit pass;
+see [preparation status](../README.md#preparation-status).
+
 ## Candidate inputs and validation boundaries
 
 Every iOS candidate requires an IPA **and its retained xcarchive**, even when
@@ -41,10 +45,18 @@ Store preparation never executes application build scripts or project checks.
   `_CodeSignature/CodeResources` and app/extension `embedded.mobileprovision` may
   differ. Extra signature-directory payload and native code hidden there fail.
 - Every **present** retained dSYM DWARF slice must match a shipped native identity;
-  unknown/substituted/duplicate symbols fail. `retain` additionally requires every
-  primary-app slice. Complete missing-nested/per-architecture coverage remains a
-  separate outstanding validation requirement; present-symbol consistency is not
-  proof of that stronger guarantee. No third-party symbol upload is performed.
+  unknown/substituted/duplicate symbols fail. Under `retain` or `required`, symbols
+  must cover **every unique installed CPU/subtype/UUID**, not only the primary app:
+  nested apps/extensions, frameworks, dylibs and suffixless helpers all count, with
+  every installed architecture required. Identical installed copies may share one
+  symbol identity; duplicate DWARF identities remain invalid. There is no vendor or
+  installed-Swift exemption. A missing nested slice is an unsupported retained-symbol
+  configuration, not a warning.
+- `disabled` permits omitted symbols, but every present symbol still must be valid,
+  known and unique. Detached dSYMs must exactly equal the archive's complete dSYM
+  inventory and cannot repair a missing archive slice. `required` additionally stays
+  a fail-closed upload sentinel: the configured upload command is never executed.
+  No third-party symbol uploader is implemented.
 
 Thin/fat, 32/64-bit Mach-O structures are bounded and parsed without executing code.
 Unknown load commands, overlapping sections/slices, forged signature extents,
@@ -68,9 +80,11 @@ Neither a UUID nor a signature-neutral hash independently proves authenticity or
 the semantic truth of arbitrary DWARF data. Native Apple signing/profile checks
 and original producer/attestation evidence remain required. Complete, per-slice
 signed-entitlement/profile-content comparison is described in
-[iOS entitlements](ios-entitlements.md). Apple profile issuer authentication is
-still a separate confirmed production blocker (QA-002), not a guarantee supplied
-by CMS decoding or the correspondence checks.
+[iOS entitlements](ios-entitlements.md). Apple profile issuer authentication is a
+separate native gate requiring both CMS signatures and the production Apple issuer
+policy under pinned roots; it is not supplied by decoding or correspondence checks.
+See [profile authority](ios-profile-authority.md). Issuer authentication alone does not
+prove artifact correspondence, complete symbol retention or overall readiness.
 
 ## Supported exporter and limits
 
@@ -115,8 +129,9 @@ profile/certificate expiry. Every actual new IPA send still runs isolated curren
 signing validation on an exact private IPA snapshot. Complete final-evidence reuse
 remains Store-free and needs no binary revalidation. See [recovery](recovery.md).
 
-Deadline failure removes private snapshots, not original artifacts or surviving
-evidence. If read-only Store preparation finished but intent publication failed,
+A deadline never authorizes deletion of original artifacts or surviving evidence;
+private snapshot cleanup still requires its owner's safe settlement. If read-only
+Store preparation finished but intent publication failed,
 retry with the unchanged candidate: the unsealed readback remains diagnostic,
 and a separate fresh readback is captured before authorization. No new upload,
 rebuild, re-signing, or replacement version is authorized by a timeout.

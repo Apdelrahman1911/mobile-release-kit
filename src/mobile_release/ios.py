@@ -7,24 +7,27 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import unicodedata
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from sys import exc_info
 from typing import TYPE_CHECKING, Any
 
 from .config import ReleaseConfig, ReleaseVersion
+from .cancellation import CleanupScope, DefaultCancellation, OwnedTemporaryDirectory, cancellation_owner
+from .build_inputs import _consumer_idle
 from .credentials import artifact_validation_environment
 from .discovery import discover_project, selected_ios_container, selected_ios_scheme
-from .owned_process import ProcessError
+from .owned_process import ProcessCleanupError, ProcessError, fatal_lifetime_error, run_owned
 from ._lifetime_evidence import ProfileCallEvidence
-from ._profile_callers import consume_profile_evidence, first_primary_context
+from ._profile_callers import consume_profile_evidence, fatal_cancellation_error, first_primary_context
 from .errors import ValidationError
 from .inspection import InspectionDeadline
 from .reporting import FAILING_STATUSES, Finding, Status
-from .tooling import recreate_private_build_directory
+from .tooling import private_build_directory
 
 if TYPE_CHECKING:
     from .local_signing import SigningSession
@@ -56,6 +59,9 @@ PROFILE_UUID_RE = re.compile(
 )
 MAX_GENERATED_FILES = 100_000
 MAX_GENERATED_BYTES = 8 * 1024 * 1024 * 1024
+NATIVE_OUTPUT_LIMIT = 8 * 1024 * 1024
+# Keep uncertain paths/owners observable; no GC or later call retries removal.
+_RETAINED_NATIVE_SCRATCH: list[tuple[OwnedTemporaryDirectory, DefaultCancellation, dict[str, bool]]] = []
 
 
 @dataclass(frozen=True)
@@ -125,16 +131,92 @@ def _validation_environment() -> dict[str, str]:
     return artifact_validation_environment(os.environ)
 
 
-def _run_native(argv: list[str], *, deadline: InspectionDeadline | None = None, **kwargs: Any) -> subprocess.CompletedProcess:
+def _run_native(
+    argv: list[str], *, timeout: int, text: bool = False,
+    deadline: InspectionDeadline | None = None, cancellation: DefaultCancellation | None = None,
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     # Never start another child after the shared inspection budget expires.
-    # Already-running tools keep their explicit subprocess timeout, not a new
+    # Already-running tools keep their explicit owned timeout, not a new
     # inspection clock. This is cooperative bounding, not syscall preemption.
     if deadline is not None:
         deadline.check()
-    result = subprocess.run(argv, **kwargs)
+    result = run_owned(argv, environ=_validation_environment(), capture=True, text=text,
+                       timeout=timeout, output_limit=NATIVE_OUTPUT_LIMIT, cancellation=cancellation)
     if deadline is not None:
         deadline.check()
     return result
+
+
+@contextmanager
+def _native_scratch(*, prefix: str, directory: Path | None = None,
+                    cancellation: DefaultCancellation | None = None):
+    """Private IPA inputs survive until their original consumers are settled."""
+    guard, owns = cancellation_owner(
+        cancellation, ProcessCleanupError, "IPA native workspace cleanup is unconfirmed",
+    )
+    temporary = OwnedTemporaryDirectory(prefix=prefix, dir=directory)
+    temporary.finalizer.detach()  # Before acquisition, including failed handoff.
+    state = {"attempted": False, "acquired": False, "removed": False}
+    record = (temporary, guard, state)
+    _RETAINED_NATIVE_SCRATCH.append(record)
+
+    def cleanup() -> None:
+        if not state["attempted"]:
+            _RETAINED_NATIVE_SCRATCH.remove(record)
+            return
+        earlier = fatal_lifetime_error(scope._first_error, "IPA native consumer is uncontained")
+        idle = _consumer_idle(guard)
+        facts = guard.lifetime_ledger.verdict()
+        # A settled consumer does not discharge an inner workspace's uncertain
+        # cleanup. Preserve the parent too, including when the exact original
+        # interruption carries no exception link to that inner cleanup failure.
+        if earlier is not None or guard.lifetime_ledger.fatal or not idle:
+            raise ProcessCleanupError(
+                "IPA native consumer or workspace cleanup is unconfirmed; preserving workspace",
+                dispatched=(facts.profile_dispatched is not False or facts.command_dispatched is not False
+                            or earlier is not None and earlier.dispatched),
+                contained=idle and (earlier is None or earlier.contained),
+            )
+        # A missing name/root is not evidence that an originally acquired tree
+        # was removed. Never let the generic owner's absent-path no-op discharge
+        # ambiguous acquisition or a renamed input namespace.
+        name = temporary.name
+        os.lstat(name)
+        identity = temporary.state["identity"]
+        temporary.cleanup()  # Original PID, UID/mode and root-inode checks.
+        try:
+            os.lstat(name)
+        except FileNotFoundError:
+            state["removed"] = True
+        else:
+            raise ProcessCleanupError("IPA native workspace remains after cleanup")
+        if not state["acquired"] or identity is None:
+            raise ProcessCleanupError("IPA native workspace acquisition was not confirmed")
+        _RETAINED_NATIVE_SCRATCH.remove(record)
+
+    scope = CleanupScope(guard, cleanup, owns_cancellation=owns,
+                         fork_cleanup=temporary.after_fork_child, first_primary=True)
+    try:
+        try:
+            with scope:
+                if owns:
+                    guard.install()
+                    guard.activate()
+                with guard.deferred():
+                    state["attempted"] = True
+                    temporary.acquire()
+                    state["acquired"] = True
+                yield Path(temporary.name), guard
+        finally:
+            scope.__exit__(*exc_info())
+        guard.check()
+    except BaseException as primary:
+        fatal = fatal_cancellation_error(
+            primary, guard, "IPA native workspace cleanup is unconfirmed; end this process before retrying",
+        )
+        if fatal is not None:
+            raise fatal from None
+        raise
 
 
 def _validated_ipa_entries(path: Path, *, deadline: InspectionDeadline | None = None) -> tuple[zipfile.ZipFile, list[zipfile.ZipInfo]]:
@@ -274,22 +356,19 @@ def _codesign_fingerprint(
     *,
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
+    cancellation: DefaultCancellation | None = None,
 ) -> str | None:
     if sys.platform != "darwin" or not shutil.which("codesign") or not shutil.which("openssl"):
         return None
     verify = _run_native(
         ["codesign", "--verify", "--all-architectures", "--deep", "--strict", "--verbose=2", str(app_path)],
-        deadline=deadline,
-        env=_validation_environment(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=60,
-        check=False,
+        deadline=deadline, cancellation=cancellation, timeout=60,
     )
     if verify.returncode:
         raise ValidationError("codesign rejected the exported application or nested code")
     return _codesign_leaf_fingerprint(
         app_path, temporary / "signer", _validity_intervals=_validity_intervals, deadline=deadline,
+        cancellation=cancellation,
     )
 
 
@@ -320,16 +399,18 @@ def _codesign_leaf_fingerprint(
     *,
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
+    cancellation: DefaultCancellation | None = None,
 ) -> str:
     deadline = deadline if deadline is not None else InspectionDeadline()
     fingerprints = []
     # Fresh private names for every object AND slice: successful extraction
     # without a leaf cannot reuse a stale certificate from another invocation.
-    with tempfile.TemporaryDirectory(prefix="mobile-release-leaf-", dir=prefix.parent) as directory:
+    with _native_scratch(prefix="mobile-release-leaf-", directory=prefix.parent,
+                         cancellation=cancellation) as (directory, guard):
         for index, architecture in enumerate(_code_architectures(code_path, deadline=deadline)):
             fingerprints.append(_codesign_slice_fingerprint(
                 code_path, Path(directory) / f"slice-{index}-", architecture=architecture,
-                _validity_intervals=_validity_intervals, deadline=deadline,
+                _validity_intervals=_validity_intervals, deadline=deadline, cancellation=guard,
             ))
     if len(set(fingerprints)) != 1:
         raise ValidationError("signed code architectures do not share the same leaf signer")
@@ -340,15 +421,11 @@ def _codesign_slice_fingerprint(
     code_path: Path, prefix: Path, *, architecture: str | None,
     _validity_intervals: list[SigningValidityInterval] | None,
     deadline: InspectionDeadline,
+    cancellation: DefaultCancellation | None = None,
 ) -> str:
     extract = _run_native(
         ["codesign", "-d", *_architecture_options(architecture), "--extract-certificates", str(prefix), str(code_path)],
-        deadline=deadline,
-        env=_validation_environment(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=30,
-        check=False,
+        deadline=deadline, cancellation=cancellation, timeout=30,
     )
     certificate = prefix.parent / f"{prefix.name}0"
     if (extract.returncode or certificate.is_symlink() or not certificate.is_file()
@@ -367,13 +444,7 @@ def _codesign_slice_fingerprint(
             "-sha256",
             "-dates",
         ],
-        deadline=deadline,
-        env=_validation_environment(),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=30,
-        check=False,
+        deadline=deadline, cancellation=cancellation, text=True, timeout=30,
     )
     if fingerprint.returncode:
         raise ValidationError("openssl could not inspect the leaf signing certificate")
@@ -455,12 +526,7 @@ def _nested_codesign_identities(
                 "=designated",
                 str(code_path),
             ],
-            deadline=deadline,
-            env=_validation_environment(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-            check=False,
+            deadline=deadline, cancellation=cancellation, timeout=30,
         )
         if requirement.returncode:
             raise ValidationError(
@@ -470,8 +536,7 @@ def _nested_codesign_identities(
         for architecture in _code_architectures(code_path, deadline=deadline):
             details = _run_native(
                 ["codesign", "-d", *_architecture_options(architecture), "--verbose=4", str(code_path)],
-                deadline=deadline, env=_validation_environment(), text=True,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
+                deadline=deadline, cancellation=cancellation, text=True, timeout=30,
             )
             if details.returncode:
                 raise ValidationError("codesign could not inspect a nested code architecture")
@@ -484,10 +549,10 @@ def _nested_codesign_identities(
         team = teams[0]
         fingerprint = _codesign_leaf_fingerprint(
             code_path, temporary / f"nested-signer-{index}-",
-            _validity_intervals=_validity_intervals, deadline=deadline,
+            _validity_intervals=_validity_intervals, deadline=deadline, cancellation=cancellation,
         )
         if code_path.is_dir() and code_path.suffix.lower() in {".app", ".appex"}:
-            entitlements = _codesign_entitlements(code_path, deadline=deadline)
+            entitlements = _codesign_entitlements(code_path, deadline=deadline, cancellation=cancellation)
             if entitlements is None:
                 raise ValidationError(
                     f"nested application entitlements could not be inspected: {code_path.name}"
@@ -502,7 +567,7 @@ def _nested_codesign_identities(
                 cancellation=cancellation,
             )
         elif code_path not in profiled_executables:
-            entitlements = _codesign_entitlements(code_path, deadline=deadline)
+            entitlements = _codesign_entitlements(code_path, deadline=deadline, cancellation=cancellation)
             if entitlements is None or entitlements:
                 raise ValidationError(
                     "profileless nested code has signed entitlement claims; frameworks, libraries, "
@@ -512,7 +577,8 @@ def _nested_codesign_identities(
     return result
 
 
-def _codesign_entitlements(app_path: Path, *, deadline: InspectionDeadline | None = None) -> dict[str, Any] | None:
+def _codesign_entitlements(app_path: Path, *, deadline: InspectionDeadline | None = None,
+                           cancellation: DefaultCancellation | None = None) -> dict[str, Any] | None:
     if sys.platform != "darwin" or not shutil.which("codesign"):
         return None
     from .ios_der import decode_der_dictionary
@@ -525,8 +591,7 @@ def _codesign_entitlements(app_path: Path, *, deadline: InspectionDeadline | Non
         for encoding, decode in (("--der", decode_der_dictionary), ("--xml", load_plist_dictionary)):
             result = _run_native(
                 ["codesign", "-d", *_architecture_options(architecture), "--entitlements", "-", encoding, str(app_path)],
-                deadline=deadline, env=_validation_environment(), stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, timeout=30, check=False,
+                deadline=deadline, cancellation=cancellation, timeout=30,
             )
             if result.returncode:
                 raise ValidationError("codesign could not inspect a signed entitlement architecture")
@@ -729,8 +794,7 @@ def _validate_ipa(
                 )
             )
 
-            with first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-ipa-"), cancellation=cancellation) as temporary_string:
-                temporary = Path(temporary_string)
+            with _native_scratch(prefix="mobile-release-ipa-", cancellation=cancellation) as (temporary, cancellation):
                 archive.extractall(temporary)
                 deadline.check()
                 app_path = temporary / app_prefix.rstrip("/")
@@ -775,7 +839,7 @@ def _validate_ipa(
                         )
                     )
 
-                entitlements = _codesign_entitlements(app_path, deadline=deadline)
+                entitlements = _codesign_entitlements(app_path, deadline=deadline, cancellation=cancellation)
                 if entitlements is None:
                     findings.append(
                         Finding(
@@ -811,6 +875,7 @@ def _validate_ipa(
 
                 fingerprint = _codesign_fingerprint(
                     app_path, temporary, _validity_intervals=_validity_intervals, deadline=deadline,
+                    cancellation=cancellation,
                 )
                 if fingerprint is None:
                     findings.append(
@@ -948,15 +1013,14 @@ def ipa_signing_evidence(path: Path, *, deadline: InspectionDeadline | None = No
         if len(plist_entries) != 1:
             raise ValidationError("IPA must contain exactly one application")
         app_prefix = plist_entries[0].filename.removesuffix("Info.plist")
-        with first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-profile-"), cancellation=cancellation) as temporary_string:
-            temporary = Path(temporary_string)
+        with _native_scratch(prefix="mobile-release-profile-", cancellation=cancellation) as (temporary, cancellation):
             archive.extractall(temporary)
             deadline.check()
             app_path = temporary / app_prefix.rstrip("/")
             profile_path = app_path / "embedded.mobileprovision"
             profile_path.write_bytes(archive.read(profile_entries[0]))
             profile = _profile_details(profile_path, deadline=deadline, cancellation=cancellation)
-            signer_fingerprint = _codesign_fingerprint(app_path, temporary, deadline=deadline)
+            signer_fingerprint = _codesign_fingerprint(app_path, temporary, deadline=deadline, cancellation=cancellation)
         if profile is None:
             raise ValidationError("iOS signing evidence extraction requires macOS security tooling")
         if signer_fingerprint is None:
@@ -1002,6 +1066,7 @@ def validate_xcarchive(
     release: ReleaseVersion,
     symbols_policy: str,
     require_tools: bool = False,
+    cancellation=None,
 ) -> list[Finding]:
     """Validate a private archive snapshot; a signed candidate also needs pairing.
 
@@ -1009,17 +1074,21 @@ def validate_xcarchive(
     ``require_tools`` remains compatible with archive-only preflight callers;
     signature authenticity is checked on the final IPA, not inferred here.
     """
-    from .ios_artifacts import inspect_archive_symbols, snapshot_ios_artifacts
+    from .ios_artifacts import _require_symbols_policy, inspect_archive_symbols, snapshot_ios_artifacts
 
     try:
-        with snapshot_ios_artifacts({"ios-archive": archive}) as snapshot:
+        _require_symbols_policy(symbols_policy)
+        with snapshot_ios_artifacts({"ios-archive": archive}, cancellation=cancellation) as snapshot:
             symbols = inspect_archive_symbols(
                 snapshot.unpack("ios-archive"), expected_bundle_id=expected_bundle_id,
-                release=release, require_main=symbols_policy in {"retain", "required"},
+                release=release, symbols_policy=symbols_policy,
                 deadline=snapshot.deadline,
             )
             snapshot.assert_unchanged()
     except (ValidationError, OSError) as error:
+        fatal = fatal_lifetime_error(error, "archive resource cleanup is unconfirmed; end this invocation")
+        if fatal is not None:
+            raise fatal from None
         message = str(error) if isinstance(error, ValidationError) else "Archive required layout is missing or unreadable."
         return [Finding("ios.archive.structure", Status.FAIL, message, category="ios-artifact")]
     return [
@@ -1027,7 +1096,9 @@ def validate_xcarchive(
                 "Archived application identity and committed version match; IPA correspondence is a separate paired check.",
                 category="ios-artifact"),
         Finding("ios.archive.dsym", Status.PASS if symbols else Status.NOT_APPLICABLE,
-                "Every present retained dSYM slice matches an archived native identity; this is not complete nested symbol coverage."
+                ("Retained dSYM slices cover the complete archived native inventory."
+                 if symbols_policy in {"retain", "required"} else
+                 "Every present retained dSYM slice matches an archived native identity.")
                 if symbols else "No dSYMs retained under disabled symbol policy.", category="ios-artifact"),
     ]
 
@@ -1040,6 +1111,7 @@ def _run_checked(
     environment_overrides: dict[str, str] | None = None,
     signing_session: SigningSession | None = None,
     execution_source=None,
+    cancellation: DefaultCancellation | None = None,
 ) -> None:
     from .owned_process import run_owned
 
@@ -1047,21 +1119,29 @@ def _run_checked(
     environment.update(environment_overrides or {})
     if signing_session is None:
         result = run_owned(argv, cwd=root, environ=environment, capture=False, timeout=timeout,
+                           cancellation=cancellation,
                            execution_scope=None if execution_source is None else execution_source.new_scope())
     else:
+        if cancellation is not None and signing_session.cancellation is not cancellation:
+            raise ValidationError("iOS build cancellation differs from its signing owner")
         result = signing_session.run(argv, kind="build", cwd=root, environ=environment, capture=False, timeout=timeout)
     if result.returncode:
         raise ValidationError(f"command failed with exit {result.returncode}: {argv[0]}")
 
 
 def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: SigningSession | None = None,
-                  execution_source=None) -> dict[str, Path]:
+                  execution_source=None, cancellation: DefaultCancellation | None = None) -> dict[str, Path]:
     if sys.platform != "darwin":
         raise ValidationError("iOS archive/export requires a macOS host")
-    if signed:
-        if signing_session is None:
-            raise ValidationError("signed iOS builds require an active account signing session")
+    if signed and signing_session is None:
+        raise ValidationError("signed iOS builds require an active account signing session")
+    if signing_session is not None:
         signing_session.assert_owner()
+        if cancellation is not None and signing_session.cancellation is not cancellation:
+            raise ValidationError("iOS build cancellation differs from its signing owner")
+        # The supported signing_session-only call must borrow its ORIGINAL
+        # guard before any new private output or preparation command is used.
+        cancellation = signing_session.cancellation
     discovered = discover_project(config.root, include_git=False)
     container = selected_ios_container(config, discovered)
     scheme = selected_ios_scheme(config, discovered)
@@ -1073,7 +1153,7 @@ def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: Signi
     release = config.release_version()
     if prepare := ios.get("prepareCommand"):
         _run_checked(list(prepare), config.root, 10 * 60, signing_session=signing_session,
-                     execution_source=execution_source)
+                     execution_source=execution_source, cancellation=cancellation)
         discovered = discover_project(config.root, include_git=False)
         container = selected_ios_container(config, discovered)
         if not container:
@@ -1082,115 +1162,126 @@ def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: Signi
     if not container_path.is_dir() or container_path.is_symlink():
         raise ValidationError("Configured Xcode project/workspace is missing or unsafe after preparation")
 
-    build_root = recreate_private_build_directory(config, "ios")
-    archive = build_root / "archive.xcarchive"
-    container_flag = "-workspace" if container[0] == "workspace" else "-project"
-    command = [
-        "xcodebuild",
-        container_flag,
-        str(container_path),
-        "-scheme",
-        scheme,
-        "-configuration",
-        ios.get("archiveConfiguration", "Release"),
-        "-destination",
-        "generic/platform=iOS",
-        "-archivePath",
-        str(archive),
-        "archive",
-        f"MARKETING_VERSION={release.name}",
-        f"CURRENT_PROJECT_VERSION={release.build}",
-    ]
-    if signed:
-        profile = os.environ.get("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER")
-        if not profile:
-            raise ValidationError("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER is required for signed export")
-        command.extend(
-            [
-                "MOBILE_RELEASE_IOS_CODE_SIGN_STYLE=Manual",
-                f"MOBILE_RELEASE_IOS_DEVELOPMENT_TEAM={ios.get('teamId', '')}",
-                f"MOBILE_RELEASE_IOS_PROVISIONING_PROFILE_SPECIFIER={profile}",
-                "MOBILE_RELEASE_IOS_CODE_SIGN_IDENTITY=Apple Distribution",
-            ]
-        )
-    else:
-        command.extend(["CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"])
-    build_environment = {
-        "MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS": "1",
-        "MOBILE_RELEASE_VERSION_NAME": release.name,
-        "MOBILE_RELEASE_BUILD_NUMBER": str(release.build),
-    }
-    _run_checked(
-        command,
-        config.root,
-        60 * 60,
-        environment_overrides=build_environment,
-        signing_session=signing_session,
-        execution_source=execution_source,
-    )
-    archive = config.project_path(str(archive))
-    _validate_generated_tree(archive, label="generated xcarchive")
-    result_paths: dict[str, Path] = {"ios-archive": archive}
-    dsym_source = archive / "dSYMs"
-    dsym_destination = build_root / "dsyms"
-    if dsym_source.is_dir():
-        dsym_source = config.project_path(str(dsym_source))
-        _validate_generated_tree(
-            dsym_source,
-            label="generated dSYMs",
-            maximum_files=20_000,
-            maximum_bytes=4 * 1024 * 1024 * 1024,
-        )
-        shutil.copytree(dsym_source, dsym_destination)
-        result_paths["ios-dsyms"] = dsym_destination
-    if not signed:
-        return result_paths
-
-    import plistlib
-
-    export_options = {
-        "method": "app-store-connect",
-        "destination": "export",
-        "signingStyle": "manual",
-        "teamID": ios.get("teamId"),
-        "signingCertificate": "Apple Distribution",
-        "provisioningProfiles": {ios.get("bundleId"): os.environ["MOBILE_RELEASE_IOS_PROFILE_SPECIFIER"]},
-        "stripSwiftSymbols": False,
-        "thinning": "<none>",
-        "uploadSymbols": False,
-    }
-    export_plist = build_root / "ExportOptions.plist"
-    with export_plist.open("wb") as handle:
-        plistlib.dump(export_options, handle, sort_keys=True)
-    export_dir = build_root / "export"
-    _run_checked(
-        [
+    with private_build_directory(config, "ios", cancellation=cancellation) as build_directory:
+        build_root = build_directory.path
+        cancellation = build_directory.cancellation
+        archive = build_root / "archive.xcarchive"
+        container_flag = "-workspace" if container[0] == "workspace" else "-project"
+        command = [
             "xcodebuild",
-            "-exportArchive",
+            container_flag,
+            str(container_path),
+            "-scheme",
+            scheme,
+            "-configuration",
+            ios.get("archiveConfiguration", "Release"),
+            "-destination",
+            "generic/platform=iOS",
             "-archivePath",
             str(archive),
-            "-exportPath",
-            str(export_dir),
-            "-exportOptionsPlist",
-            str(export_plist),
-        ],
-        config.root,
-        30 * 60,
-        environment_overrides=build_environment,
-        signing_session=signing_session,
-        execution_source=execution_source,
-    )
-    export_dir = config.project_path(str(export_dir))
-    _validate_generated_tree(export_dir, label="iOS export directory")
-    ipas = list(export_dir.glob("*.ipa"))
-    if len(ipas) != 1:
-        raise ValidationError(f"expected one exported IPA, found {len(ipas)}")
-    ipa_source = config.project_path(str(ipas[0]))
-    if ipa_source.is_symlink() or not ipa_source.is_file():
-        raise ValidationError("exported IPA must be a regular non-symlink file")
-    ipa = build_root / "app.ipa"
-    if ipa.is_symlink():
-        raise ValidationError("normalized IPA destination must not be a symlink")
-    shutil.copy2(ipa_source, ipa)
-    result_paths["ios-ipa"] = ipa
-    return result_paths
+            "archive",
+            f"MARKETING_VERSION={release.name}",
+            f"CURRENT_PROJECT_VERSION={release.build}",
+        ]
+        if signed:
+            profile = os.environ.get("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER")
+            if not profile:
+                raise ValidationError("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER is required for signed export")
+            command.extend(
+                [
+                    "MOBILE_RELEASE_IOS_CODE_SIGN_STYLE=Manual",
+                    f"MOBILE_RELEASE_IOS_DEVELOPMENT_TEAM={ios.get('teamId', '')}",
+                    f"MOBILE_RELEASE_IOS_PROVISIONING_PROFILE_SPECIFIER={profile}",
+                    "MOBILE_RELEASE_IOS_CODE_SIGN_IDENTITY=Apple Distribution",
+                ]
+            )
+        else:
+            command.extend(["CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"])
+        build_environment = {
+            "MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS": "1",
+            "MOBILE_RELEASE_VERSION_NAME": release.name,
+            "MOBILE_RELEASE_BUILD_NUMBER": str(release.build),
+        }
+        _run_checked(
+            command,
+            config.root,
+            60 * 60,
+            environment_overrides=build_environment,
+            signing_session=signing_session,
+            execution_source=execution_source,
+            cancellation=cancellation,
+        )
+        build_directory.check()
+        archive = config.project_path(str(archive))
+        _validate_generated_tree(archive, label="generated xcarchive")
+        result_paths: dict[str, Path] = {"ios-archive": archive}
+        dsym_source = archive / "dSYMs"
+        dsym_destination = build_root / "dsyms"
+        if dsym_source.is_dir():
+            dsym_source = config.project_path(str(dsym_source))
+            _validate_generated_tree(
+                dsym_source,
+                label="generated dSYMs",
+                maximum_files=20_000,
+                maximum_bytes=4 * 1024 * 1024 * 1024,
+            )
+            build_directory.check()
+            shutil.copytree(dsym_source, dsym_destination)
+            build_directory.check()
+            result_paths["ios-dsyms"] = dsym_destination
+        if not signed:
+            return result_paths
+
+        import plistlib
+
+        export_options = {
+            "method": "app-store-connect",
+            "destination": "export",
+            "signingStyle": "manual",
+            "teamID": ios.get("teamId"),
+            "signingCertificate": "Apple Distribution",
+            "provisioningProfiles": {ios.get("bundleId"): os.environ["MOBILE_RELEASE_IOS_PROFILE_SPECIFIER"]},
+            "stripSwiftSymbols": False,
+            "thinning": "<none>",
+            "uploadSymbols": False,
+        }
+        export_plist = build_root / "ExportOptions.plist"
+        build_directory.check()
+        with export_plist.open("wb") as handle:
+            plistlib.dump(export_options, handle, sort_keys=True)
+        export_dir = build_root / "export"
+        _run_checked(
+            [
+                "xcodebuild",
+                "-exportArchive",
+                "-archivePath",
+                str(archive),
+                "-exportPath",
+                str(export_dir),
+                "-exportOptionsPlist",
+                str(export_plist),
+            ],
+            config.root,
+            30 * 60,
+            environment_overrides=build_environment,
+            signing_session=signing_session,
+            execution_source=execution_source,
+            cancellation=cancellation,
+        )
+        build_directory.check()
+        export_dir = config.project_path(str(export_dir))
+        _validate_generated_tree(export_dir, label="iOS export directory")
+        ipas = list(export_dir.glob("*.ipa"))
+        if len(ipas) != 1:
+            raise ValidationError(f"expected one exported IPA, found {len(ipas)}")
+        ipa_source = config.project_path(str(ipas[0]))
+        if ipa_source.is_symlink() or not ipa_source.is_file():
+            raise ValidationError("exported IPA must be a regular non-symlink file")
+        ipa = build_root / "app.ipa"
+        if ipa.is_symlink():
+            raise ValidationError("normalized IPA destination must not be a symlink")
+        build_directory.check()
+        shutil.copy2(ipa_source, ipa)
+        build_directory.check()
+        result_paths["ios-ipa"] = ipa
+        return result_paths

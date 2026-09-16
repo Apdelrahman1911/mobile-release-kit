@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from mobile_release import local_signing as signing
+from mobile_release import build_inputs, local_signing as signing
 from workflow import local_signing_persistent_fixture as fixture
 from workflow import local_signing_semantic_catalog as catalog
 from workflow.local_signing_matrix_contract import digest
@@ -226,6 +226,8 @@ HEALTHY_EFFECTS = (
 )
 EXTRACT_NAMES = ("signing-certificate.pem", "signing-private-key.pem", "signing-chain.pem")
 IMPORT_NAMES = (EXTRACT_NAMES[1], EXTRACT_NAMES[0], EXTRACT_NAMES[2])
+EXTRACT_OPTIONS = (("-clcerts", "-nokeys"), ("-nocerts", "-nodes"), ("-cacerts", "-nokeys"))
+INPUT_PREFIX = "<ROOT>/private/<INPUTS>/"
 FICTIONAL_PEM = b"-----BEGIN CERTIFICATE-----\nfictional-not-a-certificate\n"
 assert len(HEALTHY_COMMANDS) == 50
 
@@ -396,6 +398,49 @@ class HealthyTrace(OriginalInputTrace):
         self.commands, self.checkpoints, self.effects = [], [], []
         self.effect_pending = None
         self.intent_bytes = None
+        self.original_scratch = None
+
+    def bound_original_scratch(self):
+        # This observation runs on O, not the Trace service or native target.
+        # Both compatibility/inner generator frames may borrow the same owner.
+        code = fixture.credentials._temporary_apple_signing_environment.__wrapped__.__code__
+        frame, scratch = sys._getframe(1), None
+        try:
+            for _ in range(64):
+                if frame is None:
+                    break
+                candidate = frame.f_locals.get("scratch") if frame.f_code is code else None
+                if type(candidate) is build_inputs.FiniteScratch:
+                    assert scratch is None or scratch is candidate, "two original input owners"
+                    scratch = candidate
+                frame = frame.f_back
+        finally:
+            del frame
+        assert type(scratch) is build_inputs.FiniteScratch and scratch.active and not scratch.claimed
+        assert scratch.pid == os.getpid() and scratch.cancellation is self.bound_session().lease.cancellation
+        assert scratch.layout == "signing-validation" and scratch.parent.path == self.root / "private"
+        assert self.original_scratch is None or self.original_scratch is scratch
+        opened, named = os.fstat(scratch.slot.number), scratch._path.lstat()
+        assert stat.S_ISDIR(opened.st_mode) and stat.S_IMODE(opened.st_mode) == 0o700
+        assert opened.st_uid == os.getuid()
+        assert (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid, opened.st_gid) == (
+            named.st_dev, named.st_ino, named.st_mode, named.st_uid, named.st_gid)
+        assert (opened.st_dev, opened.st_ino) == (scratch.identity["device"], scratch.identity["inode"])
+        self.original_scratch = scratch
+        return scratch
+
+    def original_input_file(self, role, expected):
+        scratch = self.original_scratch
+        snapshot = scratch.snapshots.get(role)
+        assert type(snapshot) is build_inputs.InputSnapshot and snapshot._owner is scratch
+        assert snapshot._role == role and snapshot._token is scratch.tokens[role]
+        name = "distribution.p12" if role == "distribution-p12" else role + ".pem"
+        path = scratch._path / name
+        facts = _read_expected_file(path, expected)
+        assert facts["mode"] == 0o600, "selected native input is not private"
+        assert all(facts[key] == scratch.records[role]["binding"][key] for key in facts)
+        assert facts["size"] == snapshot.size and facts["sha256"] == snapshot.sha256
+        return path, facts
 
     def preferences(self, role):
         baseline = copy.deepcopy(self.original_model_before["original"])
@@ -422,22 +467,53 @@ class HealthyTrace(OriginalInputTrace):
         record = {"ordinal": ordinal, "command": command, "mutation": signature[1], "phase": self.phase}
         if command in {"openssl", "import"}:
             assert (command == "openssl" and 6 <= ordinal <= 8) or (command == "import" and 9 <= ordinal <= 11)
+            scratch = self.bound_original_scratch()
+            if 7 <= ordinal <= 9:
+                # The previous original has returned; production, not W,
+                # has now published its captured stdout as an input snapshot.
+                extraction = self.effects[ordinal - 7]
+                assert extraction["commandOrdinal"] == ordinal - 1 and extraction["returncode"] == 0
+                previous = EXTRACT_NAMES[ordinal - 7]
+                _, facts = self.original_input_file(previous.removesuffix(".pem"), FICTIONAL_PEM)
+                assert all(facts[key] == extraction["stdout"][key] for key in ("size", "sha256"))
+                assert "file" not in extraction
+                extraction["file"] = facts
             name = EXTRACT_NAMES[ordinal - 6] if command == "openssl" else IMPORT_NAMES[ordinal - 9]
             if command == "openssl":
-                assert argv.count("-out") == 1
-                path = Path(argv[argv.index("-out") + 1])
+                path, facts = self.original_input_file("distribution-p12", b"fictional-p12")
+                assert argv[1:] == ("pkcs12", "-in", str(path), *EXTRACT_OPTIONS[ordinal - 6],
+                                    "-passin", "env:MOBILE_RELEASE_LOCAL_P12_PASSWORD")
+                record.update(inputPath=INPUT_PREFIX + "distribution.p12", inputFile=facts,
+                              outputPath=INPUT_PREFIX + name)
             else:
                 path = Path(argv[2])
-            assert path == self.root / "private" / name, "healthy input file routing differs"
-            record["inputPath"] = "<ROOT>/private/" + name
-            if command == "import":
-                facts = _read_expected_file(path, FICTIONAL_PEM)
-                if ordinal == 9:
-                    assert facts["mode"] == 0o600, "private key was not restricted before first import"
+                selected_path, facts = self.original_input_file(name.removesuffix(".pem"), FICTIONAL_PEM)
+                assert path == selected_path == scratch._path / name, "healthy input file routing differs"
+                assert argv[1:] == ("import", str(path), "-k", str(self.original_session.keychain),
+                                    "-T", "/usr/bin/codesign", "-T", "/usr/bin/security")
+                record["inputPath"] = INPUT_PREFIX + name
                 extraction = next(row for row in self.effects if row.get("path") == record["inputPath"])
-                assert all(facts[key] == extraction["file"][key] for key in ("device", "inode", "size", "sha256"))
+                assert facts == extraction["file"], "imported original snapshot changed after publication"
                 record["inputFile"] = facts
         self.commands.append(record)
+
+    def observe_original_result(self, model, command_argv, result):
+        assert model is self.original_model and command_argv == self.original_input
+        if Path(command_argv[0]).name != "openssl":
+            return
+        ordinal = self.command_ordinal
+        assert 6 <= ordinal <= 8 and self.effect_pending is None
+        assert type(result.returncode) is int and result.returncode == 0
+        assert result.stderr == "" and type(result.stdout) is str
+        content = result.stdout.encode("utf-8")
+        assert content == FICTIONAL_PEM, "original target stdout differs from the selected extraction"
+        record = self.effects[ordinal - 6]
+        assert record["commandOrdinal"] == ordinal and "stdout" not in record and "file" not in record
+        scratch = self.bound_original_scratch()
+        path = scratch._path / EXTRACT_NAMES[ordinal - 6]
+        assert not path.exists() and not path.is_symlink(), "native tool wrote an extraction destination"
+        record["returncode"] = result.returncode
+        record["stdout"] = {"size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
 
     def observe_intent(self, session, *, initial=False):
         content, info = fixture.read_fixture_file(session.path / "intent.json", limit=signing.CONTROL_LIMIT)
@@ -471,8 +547,8 @@ class HealthyTrace(OriginalInputTrace):
                   "occurrence": event["occurrence"], "commandOrdinal": self.command_ordinal,
                   "beforePreferences": model["preferences"]}
         if expected[0] == "extract":
-            record["path"] = self.commands[-1]["inputPath"]
-            path = self.root / "private" / EXTRACT_NAMES[len(self.effects)]
+            record["path"] = self.commands[-1]["outputPath"]
+            path = self.original_scratch._path / EXTRACT_NAMES[len(self.effects)]
             assert not path.exists() and not path.is_symlink(), "healthy extraction destination already existed"
         self.effect_pending = record
         return event
@@ -492,7 +568,10 @@ class HealthyTrace(OriginalInputTrace):
         assert record["beforePreferences"] == self.preferences(before_role)
         assert record["afterPreferences"] == self.preferences(after_role)
         if number < 3:
-            record["file"] = _read_expected_file(self.root / "private" / EXTRACT_NAMES[number], FICTIONAL_PEM)
+            # Effect-END precedes the target's stream emission and O's capture
+            # return. Neither event can authorize a manufactured file/receipt.
+            path = self.original_scratch._path / EXTRACT_NAMES[number]
+            assert not path.exists() and not path.is_symlink(), "native extract wrote a private input"
         self.effects.append(record)
 
     def checkpoint_wrapper(self, original):
@@ -551,6 +630,10 @@ class HealthyTrace(OriginalInputTrace):
     def result(self):
         value = super().result()
         assert self.effect_pending is None
+        scratch = self.original_scratch
+        assert scratch is not None and scratch.claimed and not scratch.active and not scratch.created
+        assert scratch.creation["state"] == "RETIRED" and scratch.slot.number is None
+        assert not scratch._path.exists() and not scratch._path.is_symlink(), "healthy input cleanup is incomplete"
         value["healthyContexts"] = {"commands": self.commands, "checkpoints": self.checkpoints, "effects": self.effects}
         assert_healthy_observation(self.root, value)
         return value
@@ -564,8 +647,13 @@ def assert_healthy_observation(root, value):
     assert tuple((row["command"], row["mutation"], False) for row in commands) == HEALTHY_COMMANDS
     assert [row["ordinal"] for row in commands] == list(range(1, 51))
     assert [row["phase"] for row in commands] == ["setup"] * 26 + ["build"] + ["cleanup"] * 23
-    assert [row.get("inputPath") for row in commands[5:11]] == ["<ROOT>/private/" + name for name in (*EXTRACT_NAMES, *IMPORT_NAMES)]
-    assert commands[8]["inputFile"]["mode"] == 0o600
+    expected_inputs = ("distribution.p12",) * 3 + IMPORT_NAMES
+    assert [row.get("inputPath") for row in commands[5:11]] == [INPUT_PREFIX + name for name in expected_inputs]
+    assert [row.get("outputPath") for row in commands[5:8]] == [INPUT_PREFIX + name for name in EXTRACT_NAMES]
+    assert all(row["inputFile"]["mode"] == 0o600 for row in commands[5:11])
+    assert commands[5]["inputFile"] == commands[6]["inputFile"] == commands[7]["inputFile"]
+    assert commands[5]["inputFile"]["size"] == len(b"fictional-p12")
+    assert commands[5]["inputFile"]["sha256"] == hashlib.sha256(b"fictional-p12").hexdigest()
     assert tuple((row["caller"], row["completedModelCalls"]) for row in checkpoints) == tuple(row[:2] for row in HEALTHY_CHECKPOINTS)
     assert [row["ordinal"] for row in checkpoints] == list(range(1, 12))
     assert len({row["intentSha256"] for row in checkpoints}) == 1
@@ -604,10 +692,12 @@ def assert_healthy_observation(root, value):
             ("baseline", "search"), ("search", "active"), ("active", "search"), ("search", "baseline"))):
         assert row["beforePreferences"] == preferences[before] and row["afterPreferences"] == preferences[after]
     for row, name in zip(effects[:3], EXTRACT_NAMES):
-        assert row["path"] == "<ROOT>/private/" + name
+        assert row["path"] == INPUT_PREFIX + name and type(row["returncode"]) is int and row["returncode"] == 0
+        assert row["stdout"] == {"size": len(FICTIONAL_PEM), "sha256": hashlib.sha256(FICTIONAL_PEM).hexdigest()}
         assert row["file"]["size"] == len(FICTIONAL_PEM) and row["file"]["sha256"] == hashlib.sha256(FICTIONAL_PEM).hexdigest()
+        assert row["file"]["mode"] == 0o600
         imported = next(command["inputFile"] for command in commands[8:11] if command["inputPath"] == row["path"])
-        assert all(imported[key] == row["file"][key] for key in ("device", "inode", "size", "sha256"))
+        assert imported == row["file"]
     publication = [event for event in value["events"] if event["operation"] == "replace"
                    and event["slot"] == catalog.SESSION + "/completed.pending"
                    and event["origin"] == catalog.LOCAL + "_write"]

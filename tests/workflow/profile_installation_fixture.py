@@ -7,6 +7,7 @@ This fixture therefore requires the reviewed disposable verification boundary.
 """
 from __future__ import annotations
 
+import ast
 import base64
 import inspect
 import json
@@ -16,6 +17,7 @@ import signal
 import stat
 import sys
 import tempfile
+import textwrap
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,7 +41,68 @@ from mobile_release.owned_process import ProcessError
 from unit.helpers import ios_config, write_project
 from unit.ios_entitlement_helpers import profile
 from unit.local_signing_helpers import NativeSigningModel, fictional_signing_profile, model_result
-from unit.local_signing_persistent import _materializer_directory
+from unit.local_signing_persistent import MaterializerObservation
+
+
+def _scope_yield_lines(source: str, *, function_name: str, first_line: int) -> tuple[int, int]:
+    """Select the original scope's publication, not a compatibility wrapper's."""
+    assert type(first_line) is int and first_line > 0, "invalid source origin"
+    tree = ast.parse(textwrap.dedent(source))
+    assert (len(tree.body) == 1 and isinstance(tree.body[0], ast.FunctionDef)
+            and tree.body[0].name == function_name), "expected one original function"
+
+    def own_nodes(nodes):
+        for node in nodes:
+            yield node
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                # Defaults/decorators still run in this frame; only the nested
+                # body belongs to a different code object.
+                for field, value in ast.iter_fields(node):
+                    if field == "body":
+                        continue
+                    children = value if isinstance(value, list) else [value]
+                    yield from own_nodes(child for child in children if isinstance(child, ast.AST))
+            else:
+                yield from own_nodes(ast.iter_child_nodes(node))
+
+    scopes = [node for node in own_nodes(tree.body[0].body)
+              if isinstance(node, (ast.With, ast.AsyncWith))
+              and any(isinstance(item.context_expr, ast.Name) and item.context_expr.id == "scope"
+                      for item in node.items)]
+    assert len(scopes) == 1, "expected one original scope owner"
+    owner = scopes[0]
+    assert (isinstance(owner, ast.With) and len(owner.items) == 1
+            and owner.items[0].optional_vars is None), "ambiguous scope entry"
+    publications = [node for node in own_nodes(owner.body) if isinstance(node, (ast.Yield, ast.YieldFrom))]
+    assert len(publications) == 1 and isinstance(publications[0], ast.Yield), "expected one scope-owned yield"
+    return first_line + owner.lineno - 1, first_line + publications[0].lineno - 1
+
+
+def _scope_yield_binding(values: dict, *, signing: bool, expected: tuple | None = None) -> tuple:
+    """Observe already-published original links without admitting any resource."""
+    scope, guard = values["scope"], values["cancellation"]
+    assert scope is not None and guard is not None and scope.cancellation is guard and not scope.claimed
+    binding = (scope, guard)
+    if signing:
+        owner, session, scratch = values["owner"], values["session"], values["scratch"]
+        assert owner.active is session and session.lease is owner and not session.closed
+        assert owner.cancellation is session.cancellation is guard
+        assert values["directory"] is scratch and scratch.cancellation is guard
+        assert scratch.active and not scratch.claimed
+        binding += (owner, session, scratch)
+        for name, role in (("p12", "distribution-p12"), ("profile", "apple-profile")):
+            snapshot = values[name]
+            assert snapshot._owner is scratch and snapshot._role == role
+            assert scratch.snapshots.get(role) is snapshot and scratch.tokens.get(role) is snapshot._token
+            record = scratch.records[role]
+            selected = record["binding"]
+            assert selected["size"] == snapshot.size and selected["sha256"] == snapshot.sha256
+            binding += (snapshot, snapshot._token, record, selected)
+    if expected is not None:
+        assert len(binding) == len(expected) and all(current is original for current, original in zip(binding, expected)), \
+            "original pre-yield ownership changed"
+    return binding
+
 
 
 @contextmanager
@@ -103,23 +166,25 @@ def run_case(mode: str, parent: Path) -> dict:
     standalone, materialized = mode.startswith("standalone-"), mode.startswith("material-")
     mode = mode.removeprefix("standalone-").removeprefix("material-")
     real_open, real_close, real_fstat, real_fdopen = os.open, os.close, os.fstat, os.fdopen
-    real_temporary_directory = tempfile.TemporaryDirectory
     real_signal = signal.signal
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
     assert previous == {signal.SIGINT: signal.default_int_handler, signal.SIGTERM: signal.SIG_DFL}
     captured, references, native_calls = {}, [], []
     post_result_cleanup = []
-    material_directories = []
     signals, reached, visits, cleanup_calls, target_scopes = [], [], [], [], []
+    target_bindings = []
+    materialization = MaterializerObservation(credentials.materialize_build_inputs) if materialized else None
     installation_code = credentials._temporary_profile_installation.__wrapped__.__code__
     signing_code = credentials._temporary_apple_signing_environment.__wrapped__.__code__
     target_function = credentials._temporary_profile_installation if standalone else (
         local_signing.local_signing_lease if mode in {"open-home", "partial-install", "restore-entry", "restore-active", "restore-term", "restore-int"}
         else credentials._temporary_apple_signing_environment)
-    target_code = target_function.__wrapped__.__code__
+    target_function = inspect.unwrap(target_function)
+    target_code = target_function.__code__
     lines, first = inspect.getsourcelines(target_function)
-    owner_line = next(first + index for index, text in enumerate(lines) if text.strip() == "with scope:")
-    yield_line = next(first + index for index, text in enumerate(lines) if text.strip().startswith("yield"))
+    assert first == target_code.co_firstlineno, "source does not match the original code"
+    owner_line, yield_line = _scope_yield_lines("".join(lines), function_name=target_code.co_name, first_line=first)
+    assert {owner_line, yield_line} <= {line for _, _, line in target_code.co_lines()}, "scope lines are not in original code"
     lines, first = inspect.getsourcelines(CleanupScope._exit_owned)
     exit_line = next(first + index for index, text in enumerate(lines) if "if self.claimed:" in text)
     lines, first = inspect.getsourcelines(DefaultCancellation.restore)
@@ -157,6 +222,14 @@ def run_case(mode: str, parent: Path) -> dict:
                 visits.append(True)
                 if not target_scopes:
                     target_scopes.append(frame.f_locals["scope"])
+                    if mode == "pre-yield" or materialized:
+                        target_bindings.append(_scope_yield_binding(frame.f_locals, signing=target_code is signing_code))
+                    if materialized:
+                        assert target_code is signing_code, "materialized cut must use the original signing scope"
+                        materialization.live(root=config.root, lease=frame.f_locals["owner"],
+                                             guard=frame.f_locals["cancellation"], scratch=frame.f_locals["scratch"])
+                else:
+                    assert frame.f_locals["scope"] is target_scopes[0], "original scope owner changed"
                 if mode == "cleanup-dispatch" and len(visits) == 2 and not reached:
                     assert not target_scopes[0].claimed
                     send(mode)
@@ -171,6 +244,9 @@ def run_case(mode: str, parent: Path) -> dict:
                         and frame.f_locals["self"] is target.cancellation and frame.f_lineno == restore_lines[mode]):
                     send(mode)
             if mode == "pre-yield" and not reached and frame.f_code is target_code and frame.f_lineno == yield_line:
+                assert len(target_scopes) == len(target_bindings) == 1, "original scope was not observed before publication"
+                assert frame.f_locals["scope"] is target_scopes[0], "pre-yield frame has a different scope"
+                _scope_yield_binding(frame.f_locals, signing=target_code is signing_code, expected=target_bindings[0])
                 send(mode)
             if frame.f_code in (installation_code, credentials._open_profile_directory.__code__, credentials._read_regular_at.__code__):
                 for name in ("descriptor", "child", "directory"):
@@ -198,10 +274,12 @@ def run_case(mode: str, parent: Path) -> dict:
 
     with completed_case_directory(parent) as root:
         home = root / "home"; home.mkdir(mode=0o700)
+        project = root / "project"; project.mkdir(mode=0o700)
         private = root / "private"; private.mkdir(mode=0o700)
         p12, supplied = private / "fake.p12", private / "profile"
         p12.write_bytes(b"fictional p12; never an identity")
         supplied.write_bytes(b"fictional authenticated profile bytes")
+        p12.chmod(0o600); supplied.chmod(0o600)
         destination = home / "Library/MobileDevice/Provisioning Profiles" / (profile()["UUID"] + ".mobileprovision")
         stage_fds = set()
 
@@ -289,14 +367,15 @@ def run_case(mode: str, parent: Path) -> dict:
                         values = {"MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64": base64.b64encode(p12.read_bytes()).decode(),
                                   "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64": base64.b64encode(supplied.read_bytes()).decode(),
                                   "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": "fictional-password"}
-                        stack.enter_context(patch.object(credentials.tempfile, "TemporaryDirectory",
-                            side_effect=lambda *args, **kwargs: _materializer_directory(
-                                real_temporary_directory, private, material_directories, *args, **kwargs)))
-                        stack.enter_context(patch.object(credentials, "local_signing_lease", side_effect=lambda **_kwargs: local_signing.local_signing_lease(home=home)))
+                        stack.enter_context(patch.object(credentials, "local_signing_lease",
+                            side_effect=lambda **kwargs: local_signing.local_signing_lease(home=home, **kwargs)))
+                        # The saved factory returns its exact original outer
+                        # and recursive inner contexts; only the inner counts.
+                        stack.enter_context(patch.object(credentials, "materialize_build_inputs", new=materialization.context))
                         context = credentials.materialize_build_inputs(config, values=values, platforms=("ios",), prepare_ios_signing=True)
                     else:
                         context = credentials._temporary_apple_signing_environment(
-                            p12=p12, password="fictional-password", profile=supplied, directory=private, home=home,
+                            p12=p12, password="fictional-password", profile=supplied, directory=private, home=home, project_root=project,
                         )
                     references.append(context)
                     with context:
@@ -320,10 +399,10 @@ def run_case(mode: str, parent: Path) -> dict:
                 finally:
                     sys.settrace(None)
                     sys.setprofile(None)
+            if materialized:
+                materialization.child_settled()
+                materialization.outer_settled()
             assert reached, "dangerous boundary was never reached"
-            assert len(material_directories) == int(materialized), "materializer allocation count changed"
-            assert all(path.parent == private and not os.path.lexists(path) for path in material_directories), \
-                "original materializer did not remove its private directory"
             if mode in {"unexpected-cleanup", "cleanup-error-signal"}:
                 status = local_signing.signing_status(home=home)
                 assert status["status"] == "pending", "ambiguous/failed cleanup must retain original authority"
@@ -366,6 +445,8 @@ def run_case(mode: str, parent: Path) -> dict:
                 assert any(argv[1] == "default-keychain" and "-s" in argv and argv[-1] == model.original["default"] for argv in native_calls)
             if mode == "partial-install":
                 assert len(signals) == 2 and not native_calls
+            if mode == "pre-yield":
+                assert reached == [mode] and len(signals) == 1, "original pre-yield cut was not delivered exactly once"
             return {"mode": requested_mode, "boundaries": reached, "signalCount": len(signals), "cleanupAttempts": len(cleanup_calls),
                     "ownedFilesAndDescriptorsGoneBeforeFallback": True, "handlersRestored": True,
                     "signingEffectsSynthetic": True, "nativeCallCount": len(native_calls),
@@ -378,6 +459,7 @@ def run_case(mode: str, parent: Path) -> dict:
             # disposes failed cases; successful cases proved all tracked FDs
             # gone above, before dropping these observation-only references.
             references.clear()
+            target_bindings.clear()
 
 
 if __name__ == "__main__":

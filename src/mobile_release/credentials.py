@@ -7,16 +7,15 @@ import json
 import os
 import re
 import secrets
-import shutil
 import ssl
 import stat
 import subprocess
-import tempfile
+import threading
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from sys import exc_info
 from typing import Any, Callable, Iterable, Mapping
 
@@ -24,11 +23,15 @@ from .cancellation import CleanupScope as _ProfileCleanup, DefaultCancellation a
 from .config import ConfigurationError, ReleaseConfig
 from .errors import CredentialError, ValidationError
 from .reporting import FAILING_STATUSES, Finding, Status
-from .tooling import canonical_external_path
+from .checked_files import inspect_external_path, read_external_bytes
+from .build_inputs import (
+    BuildInputs, FiniteScratch, InputSnapshot, InvocationCustody, TargetReplacement,
+    finite_scratch, invocation_custody,
+)
 from .local_signing import SigningLease, _same_file_state, local_signing_lease
 from .owned_process import ProcessCleanupError, ProcessError, preserve_lifetime_error, run_owned
 from ._lifetime_evidence import ProfileCallEvidence
-from ._profile_callers import consume_profile_evidence, fatal_cancellation_error, first_primary_context
+from ._profile_callers import consume_profile_evidence, fatal_cancellation_error
 
 STAGES = ("candidate", "external-testing", "production")
 ENVIRONMENT_NAMES = {
@@ -441,29 +444,18 @@ def _apple_review_requirements(stage: str, config: ReleaseConfig) -> list[Requir
     return requirements
 
 
-def load_credentials_file(path: Path, project_root: Path) -> dict[str, str]:
-    path = path.expanduser()
-    if not path.is_absolute():
-        raise CredentialError("credentials file path must be absolute")
+def load_credentials_file(
+    path: Path, project_root: Path, *, cancellation: _ProfileCancellation | None = None,
+) -> dict[str, str]:
     try:
-        resolved = canonical_external_path(path, label="credentials file")
-    except (FileNotFoundError, OSError, ValidationError) as error:
-        raise CredentialError("credentials file must not be a symlink") from error
-    if not resolved.is_file():
-        raise CredentialError("credentials file must be a regular file")
+        content = read_external_bytes(path, kind="credentials-file", project_root=project_root,
+                                      cancellation=cancellation)
+    except ProcessError:
+        raise
+    except ValidationError as error:
+        raise CredentialError(str(error)) from None
     try:
-        resolved.relative_to(project_root.resolve())
-    except ValueError:
-        pass
-    else:
-        raise CredentialError("credentials file must live outside the project repository")
-    mode = stat.S_IMODE(resolved.stat().st_mode)
-    if mode & 0o077:
-        raise CredentialError("credentials file must not be readable or writable by group/others")
-    if resolved.stat().st_size > 256 * 1024:
-        raise CredentialError("credentials file is unexpectedly large")
-    try:
-        lines = resolved.read_text(encoding="utf-8").splitlines()
+        lines = content.decode("utf-8").splitlines()
     except UnicodeDecodeError as error:
         raise CredentialError("credentials file must be UTF-8") from error
     values: dict[str, str] = {}
@@ -514,6 +506,7 @@ def resolve_credential_values(
     credentials_file: Path | None = None,
     credentials_from_env: bool = False,
     environ: Mapping[str, str] | None = None,
+    cancellation: _ProfileCancellation | None = None,
 ) -> dict[str, str]:
     """Resolve only allowlisted credentials; an explicit file wins by material family."""
 
@@ -526,7 +519,7 @@ def resolve_credential_values(
     if credentials_file is None:
         return resolved
 
-    file_values = load_credentials_file(credentials_file, config.root)
+    file_values = load_credentials_file(credentials_file, config.root, cancellation=cancellation)
     _reject_ambiguous_material(file_values, "credentials file")
     for alternatives in CREDENTIAL_MATERIAL_GROUPS:
         if alternatives & file_values.keys():
@@ -590,42 +583,33 @@ def _private_path_error(
     project_root: Path,
     *,
     maximum_size: int = MAX_PRIVATE_MATERIAL_SIZE,
+    cancellation: _ProfileCancellation | None = None,
 ) -> str | None:
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        return "The declared private path must be absolute."
-    for candidate in (path, *path.parents):
-        if candidate.is_symlink():
-            return "The declared private path must not traverse a symlink."
+    # This is diagnostic only. A successful observation does not authorize a
+    # subsequent reopen; each consumer selects bytes through the checked walk.
+    if maximum_size not in {SMALL_PRIVATE_MATERIAL_SIZE, MAX_PRIVATE_MATERIAL_SIZE}:
+        raise CredentialError("unknown private material size policy")
     try:
-        resolved = path.resolve(strict=True)
-    except OSError:
-        return "The declared private path does not exist."
-    if not resolved.is_file():
-        return "The declared private path must be a regular file."
-    try:
-        file_stat = resolved.stat()
-    except OSError:
-        return "The declared private path could not be inspected."
-    if file_stat.st_size < 1 or file_stat.st_size > maximum_size:
-        return "The declared private file is empty or exceeds its safety size limit."
-    if stat.S_IMODE(file_stat.st_mode) & 0o077:
-        return "The declared private file must not be accessible by group or others."
-    try:
-        resolved.relative_to(project_root.resolve())
-    except ValueError:
-        return None
-    return "Private credential material must live outside the project repository."
+        inspect_external_path(
+            Path(value), kind="private-small" if maximum_size == SMALL_PRIVATE_MATERIAL_SIZE else "private-general",
+            project_root=project_root, cancellation=cancellation,
+        )
+    except ProcessError:
+        raise
+    except ValidationError as error:
+        return str(error)
+    return None
 
 
 def _value_state(
-    name: str, values: Mapping[str, str], project_root: Path
+    name: str, values: Mapping[str, str], project_root: Path, *,
+    cancellation: _ProfileCancellation | None = None,
 ) -> tuple[Status, str | None]:
     value = values.get(name)
     if not value:
         return Status.MISSING, None
     if name.endswith("_PATH"):
-        if error := _private_path_error(value, project_root):
+        if error := _private_path_error(value, project_root, cancellation=cancellation):
             return Status.INVALID, error
     if name.endswith("_BASE64"):
         maximum_size = _material_size_limit(name)
@@ -695,12 +679,14 @@ def credential_findings(
     purpose: str = "full",
     platforms: Iterable[str] | None = None,
     environ: Mapping[str, str] | None = None,
+    cancellation: _ProfileCancellation | None = None,
 ) -> list[Finding]:
     env = resolve_credential_values(
         config,
         credentials_file=credentials_file,
         credentials_from_env=credentials_from_env,
         environ=environ,
+        cancellation=cancellation,
     )
     github_cache: dict[str, tuple[set[str], set[str], str | None]] = {}
     result: list[Finding] = []
@@ -760,7 +746,8 @@ def credential_findings(
             for candidate in candidates:
                 if status != Status.MISSING:
                     break
-                candidate_status, candidate_remediation = _value_state(candidate, env, config.root)
+                candidate_status, candidate_remediation = _value_state(candidate, env, config.root,
+                                                                       cancellation=cancellation)
                 if candidate_status != Status.MISSING:
                     configured_name = candidate
                     status = candidate_status
@@ -795,36 +782,59 @@ def credential_findings(
     return result
 
 
+def _selected_material_bytes(
+    values: Mapping[str, str], base64_name: str, path_name: str, *,
+    project_root: Path, cancellation: _ProfileCancellation | None = None,
+) -> bytes | None:
+    """Select an external source once, never return its filename to consumers."""
+    if values.get(base64_name) and values.get(path_name):
+        raise CredentialError("private material has mutually exclusive input sources")
+    maximum_size = _material_size_limit(base64_name)
+    if value := values.get(path_name):
+        if type(value) is not str:
+            raise CredentialError("private material path must be a string")
+        try:
+            return read_external_bytes(
+                Path(value), kind="private-small" if maximum_size == SMALL_PRIVATE_MATERIAL_SIZE else "private-general",
+                project_root=project_root, cancellation=cancellation,
+            )
+        except ProcessError:
+            raise
+        except ValidationError as error:
+            raise CredentialError(str(error)) from None
+    if value := values.get(base64_name):
+        if type(value) is not str or len(value) > ((maximum_size + 2) // 3) * 4 + 4:
+            raise CredentialError(f"{base64_name} exceeds its safety size limit")
+        try:
+            content = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            raise CredentialError(f"{base64_name} is not strict Base64") from None
+        if not content or len(content) > maximum_size:
+            raise CredentialError(f"{base64_name} decodes to an empty or oversized file")
+        return content
+    return None
+
+
 def _materialize(
     values: Mapping[str, str],
     base64_name: str,
     path_name: str,
-    directory: Path,
-    filename: str,
+    scratch: FiniteScratch,
+    role: str,
     *,
     project_root: Path,
-) -> Path | None:
-    if value := values.get(path_name):
-        if error := _private_path_error(
-            value, project_root, maximum_size=_material_size_limit(base64_name)
-        ):
-            raise CredentialError(f"{path_name} is unsafe: {error}")
-        return Path(value).expanduser().resolve(strict=True)
-    if value := values.get(base64_name):
-        maximum_size = _material_size_limit(base64_name)
-        if len(value) > ((maximum_size + 2) // 3) * 4 + 4:
-            raise CredentialError(f"{base64_name} exceeds its safety size limit")
-        try:
-            decoded = base64.b64decode(value, validate=True)
-        except (binascii.Error, ValueError) as error:
-            raise CredentialError(f"{base64_name} is not strict Base64") from error
-        if not decoded or len(decoded) > maximum_size:
-            raise CredentialError(f"{base64_name} decodes to an empty or oversized file")
-        path = directory / filename
-        path.write_bytes(decoded)
-        path.chmod(0o600)
-        return path
-    return None
+) -> InputSnapshot | None:
+    """Publish one checked selection; no consumer reopens its external source."""
+    content = _selected_material_bytes(values, base64_name, path_name, project_root=project_root,
+                                       cancellation=scratch.cancellation)
+    return None if content is None else scratch.put(role, content)
+
+
+def _material_guard(scratch: FiniteScratch, cancellation: _ProfileCancellation | None) -> _ProfileCancellation:
+    if type(scratch) is not FiniteScratch or cancellation is not None and cancellation is not scratch.cancellation:
+        raise CredentialError("private material cancellation owner differs from its scratch")
+    scratch._owner()
+    return scratch.cancellation
 
 
 def _run_private(
@@ -1282,12 +1292,15 @@ def _authenticated_signing_profile(profile: Path, *, cancellation: _ProfileCance
 
 @contextmanager
 def _temporary_apple_signing_environment(
-    *, p12: Path, password: str, profile: Path, directory: Path, home: Path | None = None,
+    *, p12: Path | InputSnapshot, password: str, profile: Path | InputSnapshot,
+    directory: Path | FiniteScratch, home: Path | None = None, project_root: Path | None = None,
     lease: SigningLease | None = None,
     cancellation: _ProfileCancellation | None = None,
 ):
     """Lease all account-global resources; keep ambiguous work recoverable."""
 
+    if type(directory) is not FiniteScratch and project_root is None:
+        raise CredentialError("standalone Apple input selection requires its explicit project root")
     lease_context = local_signing_lease(home=home, cancellation=cancellation) if lease is None else nullcontext(lease)
     with lease_context as owner:
         owner._admit_execution()
@@ -1296,15 +1309,35 @@ def _temporary_apple_signing_environment(
         if cancellation is not None and cancellation is not owner.cancellation:
             raise CredentialError("Apple material cancellation owner differs from its account lease")
         cancellation = owner.cancellation
+        if type(directory) is not FiniteScratch:
+            # Compatibility for private direct callers: they must name the
+            # actual project boundary. No guessed cwd/root or external reopen.
+            with finite_scratch(layout="signing-validation", cancellation=cancellation, parent=directory) as scratch:
+                selected_p12 = _materialize(
+                    {"MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PATH": str(p12)},
+                    "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64", "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PATH",
+                    scratch, "distribution-p12", project_root=project_root,
+                )
+                selected_profile = _materialize(
+                    {"MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_PATH": str(profile)},
+                    "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64", "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_PATH",
+                    scratch, "apple-profile", project_root=project_root,
+                )
+                with _temporary_apple_signing_environment(
+                    p12=selected_p12, password=password, profile=selected_profile,
+                    directory=scratch, lease=owner, cancellation=cancellation,
+                ) as updates:
+                    yield updates
+            return
+        scratch = directory
+        _material_guard(scratch, cancellation)
         # One genuine profile call finishes before any native account read.
-        supplied, profile_payload = _authenticated_signing_profile(profile, cancellation=cancellation)
+        supplied, profile_payload = _authenticated_signing_profile(scratch.require(profile), cancellation=cancellation)
+        scratch.require(profile)
         profile_uuid = profile_payload["UUID"]
 
         env = scrub_credential_capabilities(os.environ)
         env.update(HOME=str(owner.home), MOBILE_RELEASE_LOCAL_P12_PASSWORD=password)
-        certificate = directory / "signing-certificate.pem"
-        chain_certificates = directory / "signing-chain.pem"
-        private_key = directory / "signing-private-key.pem"
         keychain_password = secrets.token_hex(32)
         installed_profile = ExitStack()
         profile_conflict = False
@@ -1319,8 +1352,8 @@ def _temporary_apple_signing_environment(
                 raise CredentialError(f"could not {action} for local Apple signing preflight")
             return result
 
-        def extract(arguments: list[str], action: str) -> None:
-            base = ["openssl", "pkcs12", "-in", str(p12), *arguments,
+        def extract(arguments: list[str], action: str) -> bytes:
+            base = ["openssl", "pkcs12", "-in", str(scratch.require(p12)), *arguments,
                     "-passin", "env:MOBILE_RELEASE_LOCAL_P12_PASSWORD"]
             result = session.run(base, kind="extract")
             # Only a fully completed native nonzero allows the legacy-format
@@ -1328,11 +1361,14 @@ def _temporary_apple_signing_environment(
             if result.returncode < 0:
                 raise ProcessError("Apple extraction was interrupted; it cannot be retried", dispatched=True)
             if result.returncode > 0:
+                scratch.require(p12)
                 result = session.run(["openssl", "pkcs12", "-legacy", *base[2:]], kind="extract")
             if result.returncode < 0:
                 raise ProcessError("Apple legacy extraction was interrupted; no further extraction is allowed", dispatched=True)
             if result.returncode:
                 raise CredentialError(f"could not {action} for local Apple signing preflight")
+            scratch.require(p12)
+            return result.stdout.encode("utf-8")  # Original owned capture decoded strict UTF-8.
 
         def retain_profile() -> bool:
             return (session.unresolved or cancellation.lifetime_ledger.fatal
@@ -1441,15 +1477,18 @@ def _temporary_apple_signing_environment(
                             "configure the ephemeral keychain", "settings")
                     require(["security", "unlock-keychain", "-p", keychain_password, str(keychain)],
                             "unlock the ephemeral keychain", "unlock")
-                    extract(["-clcerts", "-nokeys", "-out", str(certificate)], "extract the Apple distribution certificate")
-                    extract(["-nocerts", "-nodes", "-out", str(private_key)], "extract the Apple distribution private key")
-                    extract(["-cacerts", "-nokeys", "-out", str(chain_certificates)], "extract the Apple distribution certificate chain")
-                    private_key.chmod(0o600)
-                    for path, action in ((private_key, "identity"), (certificate, "certificate"), (chain_certificates, "certificate chain")):
-                        if path == chain_certificates and (not path.is_file() or b"-----BEGIN CERTIFICATE-----" not in path.read_bytes()):
-                            continue
-                        require(["security", "import", str(path), "-k", str(keychain), "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"],
+                    certificate = scratch.put("signing-certificate", extract(
+                        ["-clcerts", "-nokeys"], "extract the Apple distribution certificate"))
+                    private_key = scratch.put("signing-private-key", extract(
+                        ["-nocerts", "-nodes"], "extract the Apple distribution private key"))
+                    chain = extract(["-cacerts", "-nokeys"], "extract the Apple distribution certificate chain")
+                    imports = [(private_key, "identity"), (certificate, "certificate")]
+                    if b"-----BEGIN CERTIFICATE-----" in chain:
+                        imports.append((scratch.put("signing-chain", chain), "certificate chain"))
+                    for snapshot, action in imports:
+                        require(["security", "import", str(scratch.require(snapshot)), "-k", str(keychain), "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"],
                                 f"import the Apple distribution {action}", "import")
+                        scratch.require(snapshot)
                     require(["security", "set-key-partition-list", "-S", "apple-tool:,apple:,codesign:", "-s", "-k", keychain_password, str(keychain)],
                             "authorize codesign to use the ephemeral keychain", "partition")
                     session.activate()
@@ -1474,8 +1513,14 @@ def _fingerprint_from_text(text: str) -> str | None:
 
 
 def _validate_android_material(
-    config: ReleaseConfig, values: Mapping[str, str], directory: Path, *, execution_source=None, cancellation: _ProfileCancellation | None = None,
+    config: ReleaseConfig, values: Mapping[str, str], directory: Path | FiniteScratch, *, execution_source=None, cancellation: _ProfileCancellation | None = None,
 ) -> Finding:
+    if type(directory) is not FiniteScratch:
+        with finite_scratch(layout="signing-validation", parent=directory, cancellation=cancellation) as scratch:
+            return _validate_android_material(config, values, scratch, execution_source=execution_source,
+                                              cancellation=scratch.cancellation)
+    scratch = directory
+    cancellation = _material_guard(scratch, cancellation)
     keystore = _materialize(
         values,
         "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64",
@@ -1513,7 +1558,7 @@ def _validate_android_material(
             "-list",
             "-v",
             "-keystore",
-            str(keystore),
+            str(scratch.require(keystore)),
             "-alias",
             values["MOBILE_RELEASE_ANDROID_KEY_ALIAS"],
             "-storepass:env",
@@ -1524,6 +1569,7 @@ def _validate_android_material(
         environ=env,
         execution_source=execution_source, cancellation=cancellation,
     )
+    scratch.require(keystore)
     output = result.stdout + result.stderr
     if result.returncode or "PrivateKeyEntry" not in output:
         return Finding(
@@ -1580,14 +1626,20 @@ def _validate_android_material(
 
 
 def _validate_p8(
-    config: ReleaseConfig, values: Mapping[str, str], directory: Path, *, execution_source=None, cancellation: _ProfileCancellation | None = None,
+    config: ReleaseConfig, values: Mapping[str, str], directory: Path | FiniteScratch, *, execution_source=None, cancellation: _ProfileCancellation | None = None,
 ) -> Finding:
+    if type(directory) is not FiniteScratch:
+        with finite_scratch(layout="signing-validation", parent=directory, cancellation=cancellation) as scratch:
+            return _validate_p8(config, values, scratch, execution_source=execution_source,
+                                cancellation=scratch.cancellation)
+    scratch = directory
+    cancellation = _material_guard(scratch, cancellation)
     p8 = _materialize(
         values,
         "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64",
         "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH",
         directory,
-        "AuthKey.p8",
+        "asc-p8",
         project_root=config.root,
     )
     if p8 is None:
@@ -1597,16 +1649,26 @@ def _validate_p8(
             "App Store Connect P8 private key is missing.",
             category="credentials",
         )
+    return _validate_selected_p8(lambda: scratch.require(p8), execution_source=execution_source,
+                                 cancellation=cancellation)
+
+
+def _validate_selected_p8(
+    selected_path: Callable[[], Path], *, execution_source=None,
+    cancellation: _ProfileCancellation | None = None,
+) -> Finding:
+    """Shared native P-256 checks; the selected owner rechecks each input use."""
     result = _run_private(
-        ["openssl", "pkey", "-in", str(p8), "-check", "-noout"],
+        ["openssl", "pkey", "-in", str(selected_path()), "-check", "-noout"],
         environ=scrub_credential_capabilities(os.environ),
         execution_source=execution_source, cancellation=cancellation,
     )
     public = _run_private(
-        ["openssl", "pkey", "-in", str(p8), "-pubout", "-text_pub", "-noout"],
+        ["openssl", "pkey", "-in", str(selected_path()), "-pubout", "-text_pub", "-noout"],
         environ=scrub_credential_capabilities(os.environ),
         execution_source=execution_source, cancellation=cancellation,
     )
+    selected_path()
     output = public.stdout + public.stderr
     if (
         result.returncode
@@ -1628,17 +1690,23 @@ def _validate_p8(
 
 
 def _validate_apple_signing_material(
-    config: ReleaseConfig, values: Mapping[str, str], directory: Path, *, execution_source=None, cancellation: _ProfileCancellation | None = None,
+    config: ReleaseConfig, values: Mapping[str, str], directory: Path | FiniteScratch, *, execution_source=None, cancellation: _ProfileCancellation | None = None,
 ) -> list[Finding]:
     from .ios import _profile_validity
     from .ios_profiles import load_authenticated_profile
 
+    if type(directory) is not FiniteScratch:
+        with finite_scratch(layout="signing-validation", parent=directory, cancellation=cancellation) as scratch:
+            return _validate_apple_signing_material(config, values, scratch, execution_source=execution_source,
+                                                    cancellation=scratch.cancellation)
+    scratch = directory
+    cancellation = _material_guard(scratch, cancellation)
     p12 = _materialize(
         values,
         "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64",
         "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PATH",
         directory,
-        "distribution.p12",
+        "distribution-p12",
         project_root=config.root,
     )
     profile = _materialize(
@@ -1646,7 +1714,7 @@ def _validate_apple_signing_material(
         "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64",
         "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_PATH",
         directory,
-        "profile.mobileprovision",
+        "apple-profile",
         project_root=config.root,
     )
     password = values.get("MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD")
@@ -1661,10 +1729,12 @@ def _validate_apple_signing_material(
             )
         )
         return findings
+    profile_path = scratch.require(profile)
     evidence = ProfileCallEvidence(operation="load")
     primary = None
     try:
-        payload = load_authenticated_profile(profile, cancellation=cancellation, _evidence=evidence)
+        payload = load_authenticated_profile(profile_path, cancellation=cancellation, _evidence=evidence)
+        scratch.require(profile)
     except BaseException as error:
         primary = error
     consume_profile_evidence(evidence, primary=primary,
@@ -1683,22 +1753,21 @@ def _validate_apple_signing_material(
         )]
     env = scrub_credential_capabilities(os.environ)
     env.update(values)
-    certificate = directory / "distribution-certificate.pem"
-    private_key = directory / "private-key.pem"
 
     def extract_pkcs12(arguments: list[str]) -> subprocess.CompletedProcess[str]:
-        command = ["openssl", "pkcs12", "-in", str(p12), *arguments]
+        command = ["openssl", "pkcs12", "-in", str(scratch.require(p12)), *arguments]
         result = _run_private(command, environ=env, execution_source=execution_source, cancellation=cancellation)
         if result.returncode < 0:
             raise ProcessError("Apple extraction was interrupted; it cannot be retried", dispatched=True)
         if result.returncode > 0:
             result = _run_private(
-                ["openssl", "pkcs12", "-legacy", "-in", str(p12), *arguments],
+                ["openssl", "pkcs12", "-legacy", "-in", str(scratch.require(p12)), *arguments],
                 environ=env,
                 execution_source=execution_source, cancellation=cancellation,
             )
         if result.returncode < 0:
             raise ProcessError("Apple legacy extraction was interrupted; no further extraction is allowed", dispatched=True)
+        scratch.require(p12)
         return result
 
     extract = extract_pkcs12(
@@ -1707,8 +1776,6 @@ def _validate_apple_signing_material(
             "-nokeys",
             "-passin",
             "env:MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD",
-            "-out",
-            str(certificate),
         ]
     )
     key_check = extract_pkcs12(
@@ -1717,13 +1784,9 @@ def _validate_apple_signing_material(
             "-nodes",
             "-passin",
             "env:MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD",
-            "-out",
-            str(private_key),
         ]
     )
-    if private_key.exists():
-        private_key.chmod(0o600)
-    if extract.returncode or key_check.returncode or not certificate.is_file():
+    if extract.returncode or key_check.returncode or not extract.stdout or not key_check.stdout:
         findings.append(
             Finding(
                 "credential-material.apple-p12",
@@ -1733,12 +1796,15 @@ def _validate_apple_signing_material(
             )
         )
         return findings
+    certificate_content = extract.stdout.encode("utf-8")
+    certificate = scratch.put("distribution-certificate", certificate_content)
+    private_key = scratch.put("private-key", key_check.stdout.encode("utf-8"))
     certificate_check = _run_private(
         [
             "openssl",
             "x509",
             "-in",
-            str(certificate),
+            str(scratch.require(certificate)),
             "-noout",
             "-checkend",
             "0",
@@ -1752,6 +1818,7 @@ def _validate_apple_signing_material(
         environ=env,
         execution_source=execution_source, cancellation=cancellation,
     )
+    scratch.require(certificate)
     fingerprint = _fingerprint_from_text(certificate_check.stdout + certificate_check.stderr)
     expected = config.section("ios").get("distributionCertificateSha256", "").replace(":", "").lower()
     certificate_output = certificate_check.stdout + certificate_check.stderr
@@ -1773,22 +1840,23 @@ def _validate_apple_signing_material(
         and re.search(rf"OU\s*=\s*{re.escape(team_id)}\b", certificate_output)
         and re.search(r"Code Signing", certificate_output, re.IGNORECASE)
     )
-    certificate_public = directory / "certificate-public.pem"
-    key_public = directory / "key-public.pem"
     cert_public_result = _run_private(
-        ["openssl", "x509", "-in", str(certificate), "-pubkey", "-noout", "-out", str(certificate_public)],
+        ["openssl", "x509", "-in", str(scratch.require(certificate)), "-pubkey", "-noout"],
         environ=env,
         execution_source=execution_source, cancellation=cancellation,
     )
+    scratch.require(certificate)
     key_public_result = _run_private(
-        ["openssl", "pkey", "-in", str(private_key), "-pubout", "-out", str(key_public)],
+        ["openssl", "pkey", "-in", str(scratch.require(private_key)), "-pubout"],
         environ=env,
         execution_source=execution_source, cancellation=cancellation,
     )
+    scratch.require(private_key)
     keys_match = (
         cert_public_result.returncode == 0
         and key_public_result.returncode == 0
-        and certificate_public.read_bytes() == key_public.read_bytes()
+        and bool(cert_public_result.stdout)
+        and cert_public_result.stdout.encode("utf-8") == key_public_result.stdout.encode("utf-8")
     )
     if (
         certificate_check.returncode
@@ -1835,7 +1903,7 @@ def _validate_apple_signing_material(
         )
         profile_certs = payload.get("DeveloperCertificates", [])
         try:
-            pem_text = certificate.read_text(encoding="ascii")
+            pem_text = certificate_content.decode("ascii")
             pem_match = re.search(
                 r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
                 pem_text,
@@ -1863,46 +1931,67 @@ def _validate_apple_signing_material(
     return findings
 
 
+def _firebase_content_matches_application(
+    content: bytes | None, *, platform: str, expected_identity: str | None,
+) -> bool:
+    """Check selected client bytes, not a previously inspected source pathname."""
+    if (type(content) is not bytes or not 0 < len(content) <= SMALL_PRIVATE_MATERIAL_SIZE
+            or type(expected_identity) is not str or not expected_identity):
+        return False
+    if platform == "android":
+        try:
+            payload = json.loads(content.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            return False
+        if type(payload) is not dict or type(payload.get("client")) is not list:
+            return False
+        matched = False
+        for client in payload["client"]:
+            if type(client) is not dict or type(client.get("client_info")) is not dict:
+                return False
+            info = client["client_info"].get("android_client_info")
+            if type(info) is not dict or type(info.get("package_name")) is not str or not info["package_name"]:
+                return False
+            matched |= info["package_name"] == expected_identity
+        return matched
+    if platform != "ios":
+        return False
+    import plistlib
+    from xml.parsers.expat import ExpatError
+
+    try:
+        payload = plistlib.loads(content)
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError, RecursionError, ExpatError):
+        return False
+    return (type(payload) is dict and type(payload.get("BUNDLE_ID")) is str
+            and payload["BUNDLE_ID"] == expected_identity)
+
+
 def _validate_firebase_material(
-    config: ReleaseConfig, values: Mapping[str, str], directory: Path, platform: str
+    config: ReleaseConfig, values: Mapping[str, str], directory: Path | FiniteScratch, platform: str,
+    *, cancellation: _ProfileCancellation | None = None,
 ) -> Finding | None:
     policy_key = f"{platform}Firebase"
     if config.section("services").get(policy_key) != "required":
         return None
     if platform == "android":
-        path = _materialize(
+        content = _selected_material_bytes(
             values,
             "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64",
             "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_PATH",
-            directory,
-            "google-services.json",
-            project_root=config.root,
+            project_root=config.root, cancellation=cancellation,
         )
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8")) if path else None
-            package_names = {
-                item.get("client_info", {}).get("android_client_info", {}).get("package_name")
-                for item in payload.get("client", [])
-            }
-            valid = config.section("android").get("applicationId") in package_names
-        except (AttributeError, json.JSONDecodeError, UnicodeDecodeError):
-            valid = False
     else:
-        import plistlib
-
-        path = _materialize(
+        content = _selected_material_bytes(
             values,
             "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64",
             "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_PATH",
-            directory,
-            "GoogleService-Info.plist",
-            project_root=config.root,
+            project_root=config.root, cancellation=cancellation,
         )
-        try:
-            payload = plistlib.loads(path.read_bytes()) if path else None
-            valid = payload.get("BUNDLE_ID") == config.section("ios").get("bundleId")
-        except (AttributeError, plistlib.InvalidFileException):
-            valid = False
+    valid = _firebase_content_matches_application(
+        content, platform=platform,
+        expected_identity=config.section(platform).get("applicationId" if platform == "android" else "bundleId"),
+    )
     return Finding(
         f"credential-material.{platform}-firebase",
         Status.PASS if valid else Status.INVALID,
@@ -1922,21 +2011,13 @@ def validate_signing_material(
     cancellation: _ProfileCancellation | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
-    for name in PRIVATE_CREDENTIAL_PATH_NAMES & values.keys():
-        if error := _private_path_error(values[name], config.root):
-            return [
-                Finding(
-                    "credential-material.private-path",
-                    Status.INVALID,
-                    error,
-                    category="credentials",
-                )
-            ]
-    with first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-credentials-"),
-                               cancellation=cancellation, expose_owner=True) as (temporary, cancellation):
-        directory = Path(temporary)
-        directory.chmod(0o700)
-        for platform in platforms:
+    selected = tuple(platforms)
+    if len(set(selected)) != len(selected) or any(platform not in {"android", "ios"} for platform in selected):
+        raise CredentialError("signing material requires an exact platform selection")
+    with finite_scratch(layout="signing-validation", cancellation=cancellation) as directory:
+        cancellation = directory.cancellation
+        values = credential_values_for_purpose(config, values, stage="candidate", purpose="signing", platforms=selected)
+        for platform in selected:
             try:
                 platform_findings = []
                 if platform == "android":
@@ -1948,7 +2029,7 @@ def validate_signing_material(
                 findings.extend(platform_findings)
                 if any(item.status in FAILING_STATUSES for item in platform_findings):
                     break
-                firebase = _validate_firebase_material(config, values, directory, platform)
+                firebase = _validate_firebase_material(config, values, directory, platform, cancellation=cancellation)
                 if firebase:
                     findings.append(firebase)
                     if firebase.status in FAILING_STATUSES:
@@ -1985,6 +2066,200 @@ def store_material_prerequisite_findings(
     return []
 
 
+class SelectedStoreMaterial:
+    """A live selection of exact Store-input bytes, not a mapping authorization.
+
+    Files belong to the borrowed finite scratch. This object adds no account,
+    project journal, command runner, or independent cleanup authority.
+    """
+
+    def __init__(self, config: ReleaseConfig, values: Mapping[str, str], platforms: tuple[str, ...],
+                 scratch: FiniteScratch, invocation: InvocationCustody | None,
+                 *, stage: str = "candidate") -> None:
+        if (not platforms or len(set(platforms)) != len(platforms)
+                or any(platform not in {"android", "ios"} for platform in platforms)):
+            raise CredentialError("Store material requires an exact platform selection")
+        self._config, self._root, self._config_path = config, config.root, config.path
+        self._configuration = self._configuration_bytes(config)
+        self._platforms, self._scratch, self._invocation = platforms, scratch, invocation
+        self._pid, self._thread = os.getpid(), threading.current_thread()
+        if stage not in STAGES:
+            raise CredentialError("Store material stage is unsupported")
+        self._stage = stage
+        self._values = credential_values_for_purpose(
+            config, values, stage=stage, purpose="store", platforms=platforms,
+        )
+        self._state = "selecting"
+        self._p8: InputSnapshot | None = None
+        self._adc: InputSnapshot | None = None
+        self._p8_content: bytes | None = None
+        self._adc_content: bytes | None = None
+
+    @staticmethod
+    def _configuration_bytes(config: ReleaseConfig) -> bytes:
+        return json.dumps(config.data, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True, allow_nan=False).encode("ascii")
+
+    def _owner(self) -> None:
+        if (self._pid != os.getpid() or self._thread is not threading.current_thread()
+                or self._state in {"closed", "rejected"}
+                or self._config.root != self._root or self._config.path != self._config_path
+                or self._configuration_bytes(self._config) != self._configuration):
+            raise CredentialError("Store material selection is closed, changed, or belongs to another invocation")
+        self._scratch._owner()
+        if self._invocation is not None:
+            if self._invocation.mode not in ("online", "store"):
+                raise CredentialError("Store material selection requires its online or Store invocation")
+            self._invocation.require(root=self._root, cancellation=self._scratch.cancellation)
+            if self._invocation.mode == "store":
+                record, binding = self._invocation.lane_evidence, self._scratch._lane_binding
+                if binding is None or binding._record is not record:
+                    raise CredentialError("Store material is not attached to its original composite record")
+                record._origin(self._scratch.cancellation)
+                record._resource(binding, self._scratch)
+
+    def _acquire(self) -> None:
+        self._owner()
+        if "ios" in self._platforms:
+            self._p8_content = _selected_material_bytes(
+                self._values, "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64", "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH",
+                project_root=self._root, cancellation=self._scratch.cancellation,
+            )
+            if self._p8_content is not None:
+                self._p8 = self._scratch.put("asc-p8", self._p8_content)
+        self._state = "selected"
+
+    def validate(self, *, execution_source=None) -> tuple[Finding, ...]:
+        self._owner()
+        if self._state != "selected":
+            raise CredentialError("Store material validation cannot be repeated")
+        self._state = "validating"
+        findings: list[Finding] = []
+        try:
+            if "ios" in self._platforms:
+                if self._p8 is None:
+                    findings.append(Finding("credential-material.apple-p8", Status.MISSING,
+                        "App Store Connect P8 private key is missing.", category="credentials"))
+                else:
+                    try:
+                        findings.append(_validate_selected_p8(
+                            lambda: self._scratch.require(self._p8), execution_source=execution_source,
+                            cancellation=self._scratch.cancellation,
+                        ))
+                    except ProcessError as error:
+                        if error.fatal:
+                            raise
+                        findings.append(Finding("credential-material.apple-p8", Status.INVALID,
+                                                str(error), category="credentials"))
+                if any(item.status in FAILING_STATUSES for item in findings):
+                    self._state = "rejected"
+                    return tuple(findings)
+            if "android" in self._platforms:
+                # Do not read a later platform's private input after an earlier
+                # validation failure. No lane can use this selection until the
+                # complete validation returns; its snapshot is then reused.
+                self._owner()
+                if adc := self._values.get("GOOGLE_APPLICATION_CREDENTIALS"):
+                    try:
+                        self._adc_content = read_external_bytes(Path(adc), kind="private-general",
+                            project_root=self._root, cancellation=self._scratch.cancellation)
+                    except ProcessError:
+                        raise
+                    except ValidationError as error:
+                        raise CredentialError(str(error)) from None
+                    self._adc = self._scratch.put("google-adc", self._adc_content)
+                valid = False
+                if self._adc is not None:
+                    self._scratch.require(self._adc)
+                    try:
+                        payload = json.loads(self._adc_content)
+                        valid = isinstance(payload, dict) and payload.get("type") in {
+                            "external_account", "service_account", "authorized_user",
+                        }
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        pass
+                findings.append(Finding("credential-material.google-adc", Status.PASS if valid else Status.INVALID,
+                    "Explicit Google ADC credential configuration is structurally valid." if valid
+                    else "Explicit Google ADC credential configuration is missing or malformed.", category="credentials"))
+            self._owner()
+            self._state = "validated" if not any(item.status in FAILING_STATUSES for item in findings) else "rejected"
+            return tuple(findings)
+        except BaseException:
+            self._state = "rejected"
+            raise
+
+    def require(self, *, config: ReleaseConfig, platforms: tuple[str, ...], invocation: InvocationCustody) -> None:
+        self._owner()
+        if (self._state != "validated" or type(invocation) is not InvocationCustody
+                or self._invocation is not invocation or config is not self._config
+                or tuple(platforms) != self._platforms):
+            raise CredentialError("Store execution requires its original validated material selection")
+
+    def require_store(self, *, config: ReleaseConfig, platform: str,
+                      invocation: InvocationCustody, lane_evidence) -> None:
+        self.require(config=config, platforms=(platform,), invocation=invocation)
+        if invocation.mode != "store" or invocation.lane_evidence is not lane_evidence:
+            raise CredentialError("Store lane requires its original Store material invocation")
+        lane_evidence._origin(self._scratch.cancellation)
+        binding = self._scratch._lane_binding
+        if binding is None or binding._record is not lane_evidence:
+            raise CredentialError("Store material composite binding differs")
+        lane_evidence._resource(binding, self._scratch)
+
+    def lane_environment(self, *, platform: str | None = None) -> dict[str, str]:
+        self._owner()
+        if self._state != "validated" or self._invocation is None:
+            raise CredentialError("standalone or unvalidated material grants no Store execution environment")
+        if platform is not None and platform not in self._platforms:
+            raise CredentialError("Store material was not selected for this platform")
+        selected = self._platforms if platform is None else (platform,)
+        result = credential_values_for_purpose(
+            self._config, self._values, stage=self._stage, purpose="store", platforms=selected,
+        )
+        if "ios" in selected:
+            if self._p8 is None or self._p8_content is None:
+                raise CredentialError("selected P8 material is unavailable")
+            self._scratch.require(self._p8)
+            result.pop("MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH", None)
+            result["MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"] = base64.b64encode(self._p8_content).decode("ascii")
+        if "android" in selected:
+            if self._adc is None:
+                raise CredentialError("selected ADC material is unavailable")
+            result["GOOGLE_APPLICATION_CREDENTIALS"] = str(self._scratch.require(self._adc))
+        return result
+
+    def _close(self) -> None:
+        self._state = "closed"
+        self._values = {}
+        self._p8_content = self._adc_content = None
+
+
+@contextmanager
+def _selected_store_material(
+    config: ReleaseConfig, *, values: Mapping[str, str], platforms: Iterable[str],
+    invocation: InvocationCustody | None = None, cancellation: _ProfileCancellation | None = None,
+    stage: str = "candidate", lane_evidence=None,
+):
+    if invocation is not None:
+        if type(invocation) is not InvocationCustody:
+            raise CredentialError("Store selection requires its actual invocation owner")
+        if cancellation is not None and cancellation is not invocation.cancellation:
+            raise CredentialError("Store selection cancellation differs from its invocation")
+        cancellation = invocation.cancellation
+        if lane_evidence is not invocation.lane_evidence:
+            raise CredentialError("Store selection composite differs from its original invocation")
+    elif lane_evidence is not None:
+        raise CredentialError("Composite Store selection requires its original invocation")
+    with finite_scratch(layout="store-selection", cancellation=cancellation,
+                        lane_evidence=lane_evidence) as scratch:
+        selected = SelectedStoreMaterial(config, values, tuple(platforms), scratch, invocation, stage=stage)
+        try:
+            selected._acquire()
+            yield selected
+        finally:
+            selected._close()
+
+
 def validate_store_material(
     config: ReleaseConfig,
     *,
@@ -1993,66 +2268,19 @@ def validate_store_material(
     execution_source=None,
     cancellation: _ProfileCancellation | None = None,
 ) -> list[Finding]:
-    selected = set(platforms)
+    selected = tuple(platforms)
     findings = store_material_prerequisite_findings(values=values, platforms=selected)
     if findings:
         return findings
-    for name in PRIVATE_CREDENTIAL_PATH_NAMES & values.keys():
-        if error := _private_path_error(values[name], config.root):
-            return [
-                Finding(
-                    "credential-material.private-path",
-                    Status.INVALID,
-                    error,
-                    category="credentials",
-                )
-            ]
-    with first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-store-credentials-"),
-                               cancellation=cancellation, expose_owner=True) as (temporary, cancellation):
-        directory = Path(temporary)
-        directory.chmod(0o700)
-        if "ios" in selected:
-            try:
-                findings.append(_validate_p8(config, values, directory, execution_source=execution_source, cancellation=cancellation))
-            except ProcessError as error:
-                if error.fatal:
-                    raise
-                findings.append(Finding("credential-material.apple-p8", Status.INVALID,
-                                        str(error), category="credentials"))
-            except (CredentialError, OSError) as error:
-                findings.append(
-                    Finding(
-                        "credential-material.apple-p8",
-                        Status.INVALID,
-                        str(error),
-                        category="credentials",
-                    )
-                )
-            if any(item.status in FAILING_STATUSES for item in findings):
-                return findings
-        if "android" in selected:
-            adc = values["GOOGLE_APPLICATION_CREDENTIALS"]
-            error = _private_path_error(adc, config.root)
-            try:
-                payload = json.loads(Path(adc).read_text(encoding="utf-8")) if not error else None
-                valid = isinstance(payload, dict) and payload.get("type") in {
-                    "external_account",
-                    "service_account",
-                    "authorized_user",
-                }
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                valid = False
-            findings.append(
-                Finding(
-                    "credential-material.google-adc",
-                    Status.PASS if valid else Status.INVALID,
-                    "Explicit Google ADC credential configuration is structurally valid."
-                    if valid
-                    else "Explicit Google ADC credential configuration is missing or malformed.",
-                    category="credentials",
-                )
-            )
-    return findings
+    try:
+        with _selected_store_material(config, values=values, platforms=selected,
+                                      cancellation=cancellation) as material:
+            return list(material.validate(execution_source=execution_source))
+    except ProcessError:
+        raise
+    except (CredentialError, OSError) as error:
+        return [Finding("credential-material.private-path", Status.INVALID,
+                        str(error), category="credentials")]
 
 
 def store_lane_environment(
@@ -2060,6 +2288,7 @@ def store_lane_environment(
     *,
     values: Mapping[str, str],
     platforms: Iterable[str],
+    cancellation: _ProfileCancellation | None = None,
 ) -> dict[str, str]:
     """Return only Store credentials, materializing a documented P8 path as in-memory Base64."""
 
@@ -2076,16 +2305,13 @@ def store_lane_environment(
         and not result.get("MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64")
         and (path_value := result.get("MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH"))
     ):
-        if error := _private_path_error(
-            path_value,
-            config.root,
-            maximum_size=SMALL_PRIVATE_MATERIAL_SIZE,
-        ):
-            raise CredentialError(f"MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH is unsafe: {error}")
         try:
-            content = Path(path_value).expanduser().resolve(strict=True).read_bytes()
-        except OSError as error:
-            raise CredentialError("App Store Connect P8 path could not be read") from error
+            content = read_external_bytes(Path(path_value), kind="private-small",
+                                          project_root=config.root, cancellation=cancellation)
+        except ProcessError:
+            raise
+        except ValidationError as error:
+            raise CredentialError(str(error)) from None
         result["MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"] = base64.b64encode(content).decode(
             "ascii"
         )
@@ -2093,19 +2319,35 @@ def store_lane_environment(
     return result
 
 
-@contextmanager
-def _restore_build_targets(backups: list[tuple[Path, bytes | None, int | None]]):
-    try:
-        yield
-    finally:
-        for target, content, mode in reversed(backups):
-            if content is None:
-                target.unlink(missing_ok=True)
-            else:
-                if target.is_symlink():
-                    target.unlink()
-                target.write_bytes(content)
-                target.chmod(mode or 0o600)
+_GENERATED_PROFILE_SPECIFIER = "MOBILE_RELEASE_IOS_PROFILE_SPECIFIER"
+
+
+class _MaterializedBuildEnvironment(dict[str, str]):
+    """Compatible mapping; generated iOS data borrows only its live child."""
+
+    def __init__(self, values: Mapping[str, str], inputs: BuildInputs, profile_specifier: str | None) -> None:
+        super().__init__(values)
+        self._inputs, self._invocation = inputs, inputs.invocation
+        self._cancellation = inputs.cancellation
+        self._lease = inputs.invocation.signing_lease
+        self._specifier, self._live = profile_specifier, True
+
+
+def materialized_profile_specifier(values: Mapping[str, str], *, invocation: InvocationCustody) -> str | None:
+    """Generated profile data is not a generic credential/environment capability."""
+    if _GENERATED_PROFILE_SPECIFIER not in values:
+        return None
+    if (type(values) is not _MaterializedBuildEnvironment or not values._live
+            or type(invocation) is not InvocationCustody or values._invocation is not invocation
+            or values._inputs.invocation is not invocation or invocation.child is not values._inputs
+            or values._inputs.claimed or not values._inputs.prepared
+            or values._cancellation is not invocation.cancellation or values._lease is not invocation.signing_lease
+            or invocation.mode != "build" or values._lease is None
+            or type(values._specifier) is not str or not PROFILE_UUID_RE.fullmatch(values._specifier)
+            or values[_GENERATED_PROFILE_SPECIFIER] != values._specifier):
+        raise CredentialError("generated profile selection requires its unchanged live iOS materialization")
+    invocation.require(root=invocation.root, cancellation=values._cancellation, signing_lease=values._lease)
+    return values._specifier
 
 
 @contextmanager
@@ -2117,194 +2359,144 @@ def materialize_build_inputs(
     prepare_ios_signing: bool = False,
     signing_lease: SigningLease | None = None,
     cancellation: _ProfileCancellation | None = None,
+    build_inputs: BuildInputs | None = None,
 ):
-    """Materialize configured client files temporarily and restore the exact prior tree."""
-
+    """Borrow one complete build-input lifetime, or acquire its outers once."""
     if signing_lease is not None:
         if cancellation is not None and cancellation is not signing_lease.cancellation:
             raise CredentialError("build material cancellation owner differs from its account lease")
+        # A quarantined borrowed owner must refuse before even evaluating the
+        # caller's platform iterable, let alone reserving environment/project
+        # state or selecting private input bytes.
         signing_lease._admit_execution()
         cancellation = signing_lease.cancellation
-    selected = set(platforms)
-    if prepare_ios_signing and "ios" in selected and signing_lease is None:
-        # Standalone signed callers need the same early account admission as
-        # preflight. Retain its exact guard/lease through all outer cleanup.
-        with local_signing_lease(cancellation=cancellation) as owner:
-            with materialize_build_inputs(
-                config, values=values, platforms=selected, prepare_ios_signing=True,
-                signing_lease=owner, cancellation=owner.cancellation,
-            ) as materialized:
-                yield materialized
-        return
-    if signing_lease is not None and prepare_ios_signing and "ios" in selected and signing_lease.active is not None:
+    selected = tuple(platforms)
+    if (not selected or len(set(selected)) != len(selected)
+            or any(platform not in {"android", "ios"} for platform in selected)):
+        raise CredentialError("build material requires an exact platform selection")
+    if (prepare_ios_signing and "ios" in selected and signing_lease is not None
+            and signing_lease.active is not None):
         raise CredentialError("this account lease already has an active signing context")
-    for name in PRIVATE_CREDENTIAL_PATH_NAMES & values.keys():
-        if error := _private_path_error(values[name], config.root):
-            raise CredentialError(error)
-    backups: list[tuple[Path, bytes | None, int | None]] = []
-    material_paths: dict[str, str] = {}
-    build_environment: dict[str, str] = {}
-    with (
-        first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-build-inputs-"),
-                              cancellation=cancellation, expose_owner=True) as (temporary, cancellation),
-        first_primary_context(_restore_build_targets(backups), cancellation=cancellation),
+    if build_inputs is None:
+        # Standalone order: guard/environment -> account -> project -> one
+        # child. A supplied lease is borrowed, never acquired/released here.
+        with invocation_custody(config.root, mode="build", cancellation=cancellation) as invocation:
+            lease_context = (local_signing_lease(cancellation=invocation.cancellation)
+                if prepare_ios_signing and "ios" in selected and signing_lease is None else nullcontext(signing_lease))
+            with lease_context as owner:
+                with invocation.project(signing_lease=owner), invocation.materialization(signing_lease=owner) as child:
+                    with materialize_build_inputs(config, values=values, platforms=selected,
+                        prepare_ios_signing=prepare_ios_signing, signing_lease=owner,
+                        cancellation=invocation.cancellation, build_inputs=child) as materialized:
+                        yield materialized
+        return
+    if type(build_inputs) is not BuildInputs or type(build_inputs.invocation) is not InvocationCustody:
+        raise CredentialError("build material requires its original materialization owner")
+    invocation = build_inputs.invocation
+    if (cancellation is not None and cancellation is not invocation.cancellation
+            or signing_lease is not invocation.signing_lease
+            or invocation.child is not build_inputs or build_inputs.claimed or build_inputs.prepared
+            or build_inputs.cancellation is not invocation.cancellation):
+        raise CredentialError("build material invocation, child or cancellation binding differs")
+    cancellation = invocation.cancellation
+    invocation.require(root=config.root, cancellation=cancellation, signing_lease=signing_lease)
+    if prepare_ios_signing and "ios" in selected:
+        if signing_lease is None or signing_lease.active is not None:
+            raise CredentialError("signed iOS material requires its unused original account lease")
+    scratch = build_inputs.scratch
+    _material_guard(scratch, cancellation)
+    values = dict(values)  # After environment/account/project admission, not before.
+    material: dict[str, InputSnapshot] = {}
+    for platform, base64_name, path_name, role in (
+        ("android", "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64", "MOBILE_RELEASE_ANDROID_KEYSTORE_PATH", "android-keystore"),
+        ("ios", "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64", "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PATH", "distribution-p12"),
+        ("ios", "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64", "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_PATH", "apple-profile"),
     ):
-        directory = Path(temporary)
-        directory.chmod(0o700)
-        material_specs = (
-            (
-                "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64",
-                "MOBILE_RELEASE_ANDROID_KEYSTORE_PATH",
-                "android-keystore",
-            ),
-            (
-                "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64",
-                "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PATH",
-                "distribution.p12",
-            ),
-            (
-                "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64",
-                "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_PATH",
-                "profile.mobileprovision",
-            ),
-            (
-                "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64",
-                "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH",
-                "AuthKey.p8",
-            ),
-        )
-        for base64_name, path_name, filename in material_specs:
-            if base64_name.startswith("MOBILE_RELEASE_ANDROID") and "android" not in selected:
-                continue
-            if base64_name.startswith(("MOBILE_RELEASE_APPLE", "MOBILE_RELEASE_ASC")) and "ios" not in selected:
-                continue
-            path = _materialize(
-                values,
-                base64_name,
-                path_name,
-                directory,
-                filename,
-                project_root=config.root,
-            )
-            if path:
-                material_paths[path_name] = str(path)
-                if path_name == "MOBILE_RELEASE_ANDROID_KEYSTORE_PATH":
-                    build_environment[path_name] = str(path)
+        if platform in selected:
+            snapshot = _materialize(values, base64_name, path_name, scratch, role, project_root=config.root)
+            if snapshot is not None:
+                material[role] = snapshot
 
-        if (
-            "android" in selected
-            and config.section("services").get("androidFirebase") == "required"
+    replacements: list[TargetReplacement] = []
+    if "android" in selected and config.section("services").get("androidFirebase") == "required":
+        from .discovery import discover_project, selected_android_module
+
+        content = _selected_material_bytes(values, "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64",
+            "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_PATH", project_root=config.root, cancellation=cancellation)
+        if not _firebase_content_matches_application(
+            content, platform="android", expected_identity=config.section("android").get("applicationId"),
         ):
-            from .discovery import discover_project, selected_android_module
+            raise CredentialError("Android Firebase client file is missing, malformed, or for another application")
+        module = selected_android_module(config, discover_project(config.root, include_git=False, cancellation=cancellation,
+            execution_source=None if signing_lease is None else signing_lease.execution_source()))
+        if not module:
+            raise CredentialError("Android Firebase material or application module is unavailable")
+        module_relative = module.lstrip(":").replace(":", "/")
+        try:
+            module_dir = config.project_path(module_relative)
+            target = config.project_path((module_relative + "/" if module_relative else "") + "google-services.json")
+        except ConfigurationError as error:
+            raise CredentialError("Android Firebase destination must not traverse a symbolic link") from error
+        if not module_dir.is_dir():
+            raise CredentialError("Android Firebase application module is unavailable")
+        replacements.append(TargetReplacement("android-services", PurePosixPath(target.relative_to(config.root)), content))
 
-            source = _materialize(
-                values,
-                "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64",
-                "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_PATH",
-                directory,
-                "google-services.json",
-                project_root=config.root,
-            )
-            module = selected_android_module(config, discover_project(config.root, include_git=False, cancellation=cancellation,
-                execution_source=None if signing_lease is None else signing_lease.execution_source()))
-            if not source or not module:
-                raise CredentialError("Android Firebase material or application module is unavailable")
-            module_relative = module.lstrip(":").replace(":", "/")
+    if "ios" in selected and config.section("services").get("iosFirebase") == "required":
+        content = _selected_material_bytes(values, "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64",
+            "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_PATH", project_root=config.root, cancellation=cancellation)
+        if not _firebase_content_matches_application(
+            content, platform="ios", expected_identity=config.section("ios").get("bundleId"),
+        ):
+            raise CredentialError("iOS Firebase client file is missing, malformed, or for another application")
+        examples = []
+        for path in config.root.rglob("GoogleService-Info.plist.example"):
+            cancellation.check()
+            if ".git" in path.parts or "build" in path.parts or ".mobile-release" in path.parts:
+                continue
             try:
-                module_dir = config.project_path(module_relative)
-                target = config.project_path(
-                    f"{module_relative}/google-services.json"
-                    if module_relative
-                    else "google-services.json"
-                )
+                examples.append(config.project_path(str(path)))
             except ConfigurationError as error:
-                raise CredentialError(
-                    "Android Firebase destination must not traverse a symbolic link"
-                ) from error
-            if not module_dir.is_dir():
-                raise CredentialError("Android Firebase application module is unavailable")
-            if target.is_symlink():
-                raise CredentialError("Android Firebase destination must not be a symlink")
-            backups.append(
-                (
-                    target,
-                    target.read_bytes() if target.is_file() else None,
-                    stat.S_IMODE(target.stat().st_mode) if target.is_file() else None,
-                )
-            )
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(source.read_bytes())
-            target.chmod(0o600)
-
-        if "ios" in selected and config.section("services").get("iosFirebase") == "required":
-            source = _materialize(
-                values,
-                "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64",
-                "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_PATH",
-                directory,
-                "GoogleService-Info.plist",
-                project_root=config.root,
-            )
-            examples = []
-            for path in config.root.rglob("GoogleService-Info.plist.example"):
-                if ".git" in path.parts or "build" in path.parts:
-                    continue
-                try:
-                    examples.append(config.project_path(str(path)))
-                except ConfigurationError as error:
-                    raise CredentialError(
-                        "iOS Firebase marker must not traverse a symbolic link"
-                    ) from error
-            if not source or len(examples) != 1:
-                raise CredentialError(
-                    "iOS Firebase requires exactly one tracked GoogleService-Info.plist.example"
-                )
+                raise CredentialError("iOS Firebase marker must not traverse a symbolic link") from error
+            if len(examples) > 1:
+                break
+        if len(examples) != 1:
+            raise CredentialError("iOS Firebase requires exactly one tracked GoogleService-Info.plist.example")
+        try:
             target = config.project_path(str(examples[0].with_suffix("")))
-            if examples[0].is_symlink() or target.is_symlink():
-                raise CredentialError("iOS Firebase source marker/destination must not be a symlink")
-            backups.append(
-                (
-                    target,
-                    target.read_bytes() if target.is_file() else None,
-                    stat.S_IMODE(target.stat().st_mode) if target.is_file() else None,
-                )
-            )
-            target.write_bytes(source.read_bytes())
-            target.chmod(0o600)
+        except ConfigurationError as error:
+            raise CredentialError("iOS Firebase destination must not traverse a symbolic link") from error
+        replacements.append(TargetReplacement("ios-services", PurePosixPath(target.relative_to(config.root)), content))
 
-        signing_context = nullcontext({})
-        if (
-            prepare_ios_signing
-            and "ios" in selected
-        ):
-            p12_value = material_paths.get("MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PATH")
-            profile_value = material_paths.get(
-                "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_PATH"
-            )
-            password = values.get("MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD")
-            if not p12_value or not profile_value or password is None:
-                raise CredentialError("Apple signing material is incomplete for a signed local build")
-            signing_context = _temporary_apple_signing_environment(
-                p12=Path(p12_value),
-                password=password,
-                profile=Path(profile_value),
-                directory=directory,
-                lease=signing_lease,
-                cancellation=cancellation,
-            )
-
-        with signing_context as signing_updates:
-            build_environment.update(signing_updates)
-            if "android" in selected:
-                for name in (
-                    "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
-                    "MOBILE_RELEASE_ANDROID_KEY_ALIAS",
-                    "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
-                ):
-                    if values.get(name):
-                        build_environment[name] = values[name]
-            if values.get("MOBILE_RELEASE_PROJECT_READ_TOKEN"):
-                build_environment["MOBILE_RELEASE_PROJECT_READ_TOKEN"] = values[
-                    "MOBILE_RELEASE_PROJECT_READ_TOKEN"
-                ]
-            yield dict(build_environment)
+    # All selected bytes and destinations precede the one fully staged batch.
+    # The existing owner checks every parent/original and rolls back safely.
+    build_inputs.replace_all(tuple(replacements))
+    build_environment: dict[str, str] = {}
+    if "android-keystore" in material:
+        build_environment["MOBILE_RELEASE_ANDROID_KEYSTORE_PATH"] = str(scratch.require(material["android-keystore"]))
+    signing_context = nullcontext({})
+    if prepare_ios_signing and "ios" in selected:
+        p12, profile = material.get("distribution-p12"), material.get("apple-profile")
+        password = values.get("MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD")
+        if p12 is None or profile is None or password is None:
+            raise CredentialError("Apple signing material is incomplete for a signed local build")
+        signing_context = _temporary_apple_signing_environment(p12=p12, password=password, profile=profile,
+            directory=scratch, lease=signing_lease, cancellation=cancellation)
+    with signing_context as signing_updates:
+        profile_specifier = signing_updates.get(_GENERATED_PROFILE_SPECIFIER)
+        if profile_specifier is not None:
+            if type(profile_specifier) is not str or not PROFILE_UUID_RE.fullmatch(profile_specifier):
+                raise CredentialError("local signing did not return a valid generated profile selection")
+            build_environment[_GENERATED_PROFILE_SPECIFIER] = profile_specifier
+        if "android" in selected:
+            for name in ("MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD", "MOBILE_RELEASE_ANDROID_KEY_ALIAS",
+                         "MOBILE_RELEASE_ANDROID_KEY_PASSWORD"):
+                if values.get(name):
+                    build_environment[name] = values[name]
+        if values.get("MOBILE_RELEASE_PROJECT_READ_TOKEN"):
+            build_environment["MOBILE_RELEASE_PROJECT_READ_TOKEN"] = values["MOBILE_RELEASE_PROJECT_READ_TOKEN"]
+        environment = _MaterializedBuildEnvironment(build_environment, build_inputs, profile_specifier)
+        try:
+            invocation.require(root=config.root, cancellation=cancellation, signing_lease=signing_lease)
+            yield environment
+        finally:
+            environment._live = False

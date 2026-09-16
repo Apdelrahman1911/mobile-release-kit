@@ -52,6 +52,7 @@ _WHEEL_DARWIN_SKIP_IDS = frozenset((*_G_DARWIN_ONLY_METHODS,
     "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_real_production_policy_accepts_apple_public_issuer_not_test_or_macos_purpose",
     "unit.test_ios_profile_authority.NativeProfileAuthorityTests.test_signed_outer_cannot_authorize_unsigned_or_substituted_inner_profile",
     "unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state",
+    "unit.test_checked_files.NativeCheckedFilesTests.test_actual_tmp_var_folders_and_physical_spellings_select_identical_private_bytes",
 ))
 
 
@@ -126,6 +127,8 @@ _PYTHON_POISON_FIXTURES = (
     ("poison-signing-foreign-mixed-handlers", "unit.test_local_signing_composition.SigningCompositionTests.test_foreign_and_mixed_signal_owners_are_never_silently_overwritten_or_borrowed"),
     ("poison-profile-authenticator-publication", "unit.test_ios_entitlements.SignedEntitlementInventoryTests.test_mocked_authenticator_without_owner_publication_remains_fatal"),
     ("poison-recovery-profile-cleanup", "unit.test_operation_recovery.IosOperationRecoveryTests.test_profile_cleanup_uncertainty_stops_actual_fresh_validation_before_any_store_access"),
+    ("poison-recovery-inspection-deadline", "unit.test_operation_recovery.IosOperationRecoveryTests.test_shared_deadline_prevents_next_authorization_boundary_and_retains_snapshots"),
+    ("poison-recovery-readback-deadline", "unit.test_operation_recovery.IosOperationRecoveryTests.test_deadline_after_readback_preserves_precondition_and_retains_snapshot"),
     ("poison-profile-authentication-order", "unit.test_ios_profile_authority.CMSFramingTests.test_profile_requires_both_authentications_in_order_then_complete_correlation"),
     ("poison-profile-setup-unlink", "unit.test_ios_profile_installation.ProfileInstallationTests.test_ambiguous_setup_stage_unlink_is_not_implicitly_retried_or_resolved"),
     ("poison-profile-collision", "unit.test_ios_profile_installation.ProfileInstallationTests.test_collision_symlink_fifo_and_invalid_input_never_overwrite_existing_state"),
@@ -150,6 +153,8 @@ HOSTED_GUARD = '''set -euo pipefail
 '''
 LINUX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'linux') }}"
 NATIVE_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos') }}"
+NATIVE_SUPPORT_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos' || inputs.verification_target == 'store-lane-macos') }}"
+STORE_NATIVE_SCOPE = "${{ github.event_name == 'workflow_dispatch' && inputs.verification_target == 'store-lane-macos' && 'store-lane' || 'native-support' }}"
 MATRIX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}"
 MATRIX_SHARD_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47]') }}"
 MATRIX_INCLUDE_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":20},{\"os\":\"ubuntu-24.04\",\"shard\":28},{\"os\":\"macos-26\",\"shard\":1},{\"os\":\"macos-26\",\"shard\":12},{\"os\":\"macos-26\",\"shard\":37}]' || '[]') }}"
@@ -157,7 +162,7 @@ ADAPTER_TARGET_CONDITION = "${{ github.event_name == 'workflow_dispatch' && (inp
 ADAPTER_OS_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-linux' && '[\"ubuntu-24.04\"]' || github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-macos' && '[\"macos-26\"]' || '[\"ubuntu-24.04\",\"macos-26\"]') }}"
 VERIFICATION_CONCURRENCY = "release-kit-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.verification_target || 'full' }}"
 AGGREGATE_GUARD = '''set -euo pipefail
-[[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success && "$MATRIX_RESULT" == success ]]
+[[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success && "$NATIVE_SUPPORT_RESULT" == success && "$MATRIX_RESULT" == success ]]
 '''
 LINUX_TOOL_SETUP = '''set -euo pipefail
 if [[ ! -x /usr/bin/bwrap ]]; then
@@ -205,10 +210,17 @@ def fixture_paths(controller):
                                 for line in ("312", "313", "314")))
 
 
-def coordinator_shell(platform: str) -> str:
+def coordinator_shell(platform: str, *, scope: str | None = None) -> str:
     if platform not in {"linux", "macos"}:
         raise ValueError("unsupported CI platform")
-    java = '--java-home "$JAVA_HOME_21_X64" ' if platform == "linux" else ""
+    if platform == "linux" and scope is None:
+        java = '--java-home "$JAVA_HOME_21_X64" '
+    elif platform == "macos" and scope in {None, "native-python"}:
+        java = '--scope native-python '
+    elif platform == "macos" and scope == "native-support":
+        java = '--scope "$MRK_SCOPE" '
+    else:
+        raise ValueError("unsupported CI scope")
     return '''set -euo pipefail
 ruby_executable="$(command -v ruby)"
 [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
@@ -236,23 +248,26 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(workflow["true"], {
             "pull_request": None, "push": {"branches": ["main"]},
             "workflow_dispatch": {"inputs": {"verification_target": {
-                "description": "Full verification, Linux/macOS-only evidence, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)",
-                "type": "choice", "required": True, "default": "full", "options": ["full", "linux", "macos", "signing-adapter", "signing-adapter-linux", "signing-adapter-macos", "signing-matrix-canary"],
+                "description": "Full verification, Linux/macOS-only evidence, Store-native macOS, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)",
+                "type": "choice", "required": True, "default": "full", "options": ["full", "linux", "macos", "store-lane-macos", "signing-adapter", "signing-adapter-linux", "signing-adapter-macos", "signing-matrix-canary"],
             }}},
         })
         self.assertEqual(workflow["concurrency"], {"group": VERIFICATION_CONCURRENCY, "cancel-in-progress": True})
-        self.assertEqual(set(workflow["jobs"]), {"test-linux", "test-native-profiles", "test-signing-matrix", "test-signing-adapter", "test"})
+        self.assertEqual(set(workflow["jobs"]), {"test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix", "test-signing-adapter", "test"})
         text = CI.read_text(encoding="utf-8")
         self.assertNotIn("secrets.", text)
         self.assertNotIn("id-token:", text)
         for platform, name, image in (("linux", "test-linux", "ubuntu-24.04"),
-                                      ("macos", "test-native-profiles", "macos-26")):
-            with self.subTest(platform=platform):
+                                      ("macos", "test-native-profiles", "macos-26"),
+                                      ("macos", "test-native-support", "macos-26")):
+            with self.subTest(job=name):
                 job = workflow["jobs"][name]
                 self.assertEqual(job["runs-on"], image)
                 self.assertEqual(job["timeout-minutes"], 60)
                 if platform == "linux":
                     self.assertEqual(job["if"], LINUX_TARGET_CONDITION)
+                elif name == "test-native-support":
+                    self.assertEqual(job["if"], NATIVE_SUPPORT_TARGET_CONDITION)
                 else:
                     self.assertEqual(job["if"], NATIVE_TARGET_CONDITION)
                 for forbidden in ("continue-on-error", "environment", "container", "services", "strategy", "defaults", "env"):
@@ -301,15 +316,25 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     "MRK_PYTHON_312": "${{ steps.python312.outputs.python-path }}",
                     "MRK_PYTHON_313": "${{ steps.python313.outputs.python-path }}",
                     "MRK_PYTHON_314": "${{ steps.python314.outputs.python-path }}",
+                    **({"MRK_SCOPE": STORE_NATIVE_SCOPE} if name == "test-native-support" else {}),
                 })
                 self.assertEqual(owner["shell"], "bash")
-                self.assertEqual(owner["run"], coordinator_shell(platform))
+                self.assertEqual(owner["run"], coordinator_shell(
+                    platform, scope="native-support" if name == "test-native-support" else None))
+        self.assertEqual(coordinator_shell("macos"), coordinator_shell("macos", scope="native-python"))
+        for platform, scope in (("unknown", None), ("linux", "native-python"),
+                                ("linux", "native-support"), ("linux", "platform"),
+                                ("macos", "platform"), ("macos", "store-lane"), ("macos", "unknown")):
+            with self.subTest(unsupported_coordinator=(platform, scope)), self.assertRaises(ValueError):
+                coordinator_shell(platform, scope=scope)
 
     def test_manual_native_candidate_routing_and_protected_aggregate_remain_fail_closed(self):
         workflow = load_workflow(CI)
-        linux, native, aggregate = (workflow["jobs"][name] for name in ("test-linux", "test-native-profiles", "test"))
+        linux, native, support, aggregate = (workflow["jobs"][name] for name in
+                                            ("test-linux", "test-native-profiles", "test-native-support", "test"))
         self.assertEqual(linux["if"], LINUX_TARGET_CONDITION)
         self.assertEqual(native["if"], NATIVE_TARGET_CONDITION)
+        self.assertEqual(support["if"], NATIVE_SUPPORT_TARGET_CONDITION)
         matrix = workflow["jobs"]["test-signing-matrix"]
         self.assertEqual(matrix["if"], MATRIX_TARGET_CONDITION)
         selection = matrix["strategy"]["matrix"]["shard"]
@@ -335,7 +360,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(matrix["strategy"]["matrix"]["os"], ["ubuntu-24.04", "macos-26"])
         for event, ref in (("pull_request", "refs/pull/1/merge"), ("push", "refs/heads/main"),
                            ("workflow_dispatch", "refs/heads/qa006-native-candidate")):
-            for target in ("full", "linux", "macos", "signing-adapter", "signing-adapter-linux", "signing-adapter-macos", "signing-matrix-canary", None, "", "unknown",
+            for target in ("full", "linux", "macos", "store-lane-macos", "signing-adapter", "signing-adapter-linux", "signing-adapter-macos", "signing-matrix-canary", None, "", "unknown",
                            "LINUX", "LiNuX", "linux ", " linux",
                            "MACOS", "mAcOs", "SIGNING-ADAPTER-MACOS", "signing-adapter-macos ",
                            "SIGNING-ADAPTER-LINUX", "signing-adapter-linux ",
@@ -351,12 +376,13 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     dispatch = event == "workflow_dispatch"
                     expected = {"test-linux": not dispatch or compared in {"full", "linux"},
                                 "test-native-profiles": not dispatch or compared in {"full", "macos"},
+                                "test-native-support": not dispatch or compared in {"full", "macos", "store-lane-macos"},
                                 "test-signing-matrix": not dispatch or compared in {"full", "signing-matrix-canary"},
                                 "test-signing-adapter": dispatch and compared in {"signing-adapter", "signing-adapter-linux", "signing-adapter-macos"}}
                     for name, enabled in expected.items():
                         self.assertEqual(evaluate_condition(workflow["jobs"][name]["if"], context,
                                                             success=True, cancelled=False), enabled)
-                    if dispatch and compared not in {"full", "linux", "macos", "signing-adapter", "signing-adapter-linux", "signing-adapter-macos", "signing-matrix-canary"}:
+                    if dispatch and compared not in {"full", "linux", "macos", "store-lane-macos", "signing-adapter", "signing-adapter-linux", "signing-adapter-macos", "signing-matrix-canary"}:
                         self.assertFalse(any(expected.values()))  # Skipped prerequisites cannot pass the pinned guard.
                     selected = canary_shards if evaluate_condition(canary_condition, context,
                         success=True, cancelled=False) else full_shards
@@ -381,11 +407,12 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         # This is the existing fixed job, not a synthesized cross-run status.
         # Pin every field before the harmless shell can be executed below.
         self.assertEqual({key: value for key, value in aggregate.items() if key != "steps"}, {
-            "needs": ["test-linux", "test-native-profiles", "test-signing-matrix"], "if": "${{ always() }}",
+            "needs": ["test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix"], "if": "${{ always() }}",
             "runs-on": "ubuntu-24.04", "timeout-minutes": 5, "permissions": {"contents": "read"},
         })
         self.assertEqual(aggregate["steps"][0], {"name": "Require every verification job to succeed", "env": {
             "LINUX_RESULT": "${{ needs.test-linux.result }}", "NATIVE_RESULT": "${{ needs.test-native-profiles.result }}",
+            "NATIVE_SUPPORT_RESULT": "${{ needs.test-native-support.result }}",
             "MATRIX_RESULT": "${{ needs.test-signing-matrix.result }}",
         }, "run": AGGREGATE_GUARD})
         self.assertEqual(len(aggregate["steps"]), 4)
@@ -393,23 +420,27 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(workflow["jobs"]["test-signing-matrix"]["if"], MATRIX_TARGET_CONDITION)
         self.assertTrue(evaluate_condition(aggregate["if"], {}, success=False, cancelled=True))
         states = ["failure", "cancelled", "skipped", "queued", "unavailable", "", None]
-        triples = [("success", "success", "success")]
+        results = [("success", "success", "success", "success")]
         for state in states:
-            triples.extend(((state, "success", "success"), ("success", state, "success"),
-                            ("success", "success", state), (state, state, state)))
+            results.extend(((state, "success", "success", "success"), ("success", state, "success", "success"),
+                            ("success", "success", state, "success"), ("success", "success", "success", state),
+                            (state, state, state, state)))
         body = aggregate["steps"][0]["run"]
-        for linux_result, native_result, matrix_result in triples:
-            with self.subTest(protected_results=(linux_result, native_result, matrix_result)):
+        for linux_result, native_result, support_result, matrix_result in results:
+            with self.subTest(protected_results=(linux_result, native_result, support_result, matrix_result)):
                 env = {"PATH": "/usr/bin:/bin"}
                 if linux_result is not None:
                     env["LINUX_RESULT"] = linux_result
                 if native_result is not None:
                     env["NATIVE_RESULT"] = native_result
+                if support_result is not None:
+                    env["NATIVE_SUPPORT_RESULT"] = support_result
                 if matrix_result is not None:
                     env["MATRIX_RESULT"] = matrix_result
                 result = subprocess.run(["bash", "--noprofile", "--norc", "-c", body],
                                         env=env, capture_output=True, timeout=5)
-                self.assertEqual(result.returncode == 0, linux_result == native_result == matrix_result == "success")
+                self.assertEqual(result.returncode == 0,
+                                 linux_result == native_result == support_result == matrix_result == "success")
                 self.assertEqual(result.stdout, b"")
 
         group = workflow["concurrency"]["group"]
@@ -426,9 +457,9 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         groups = {group_for("pull_request", None), group_for("push", None),
                   group_for("workflow_dispatch", "full"), group_for("workflow_dispatch", "linux"), group_for("workflow_dispatch", "macos"),
                   group_for("workflow_dispatch", "signing-adapter"), group_for("workflow_dispatch", "signing-adapter-linux"),
-                  group_for("workflow_dispatch", "signing-adapter-macos"),
+                  group_for("workflow_dispatch", "signing-adapter-macos"), group_for("workflow_dispatch", "store-lane-macos"),
                   group_for("workflow_dispatch", "signing-matrix-canary")}
-        self.assertEqual(len(groups), 9)  # Partial dispatch cannot cancel any full event/target.
+        self.assertEqual(len(groups), 10)  # Partial dispatch cannot cancel any full event/target.
         self.assertTrue(all("${{" not in value for value in groups))
         for absent in (None, ""):
             self.assertEqual(group_for("workflow_dispatch", absent), group_for("workflow_dispatch", "full"))
@@ -472,7 +503,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
 
     def test_actual_guard_rejects_non_hosted_or_missing_runner_identity(self):
         workflow = load_workflow(CI)
-        for name in ("test-linux", "test-native-profiles", "test-signing-matrix", "test-signing-adapter"):
+        for name in ("test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix", "test-signing-adapter"):
             body = workflow["jobs"][name]["steps"][0]["run"]
             self.assertEqual(body, HOSTED_GUARD)  # Do not execute arbitrary workflow text.
             for identity in ("github-hosted", "self-hosted", "", "GitHub-hosted", None):
@@ -505,9 +536,16 @@ sudo() {
             "JAVA_HOME_21_X64": "/fixture/jdk21", "GITHUB_STEP_SUMMARY": "/fixture/private summary",
         }
         workflow = load_workflow(CI)
-        for platform, job in (("linux", "test-linux"), ("macos", "test-native-profiles")):
+        for platform, job, scope in (("linux", "test-linux", None),
+                                     ("macos", "test-native-profiles", "native-python"),
+                                     ("macos", "test-native-support", "native-support"),
+                                     ("macos", "test-native-support", "store-lane")):
             body = workflow["jobs"][job]["steps"][-1]["run"]
-            self.assertEqual(body, coordinator_shell(platform))  # Only the inert, fixed shell may run.
+            self.assertEqual(body, coordinator_shell(
+                platform, scope="native-support" if job == "test-native-support" else None))
+            # Only support accepts the closed routing value from its fixed env;
+            # the profile owner must work without any MRK_SCOPE binding.
+            bound_env = {**env, **({"MRK_SCOPE": scope} if job == "test-native-support" else {})}
             expected = [
                 "-n", "env", "-i", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PYTHONSAFEPATH=1",
                 env["MRK_PYTHON"], "-I", "-B", ".github/scripts/verify_ci.py", "--platform", platform,
@@ -520,25 +558,27 @@ sudo() {
             ]
             if platform == "linux":
                 expected += ["--java-home", env["JAVA_HOME_21_X64"]]
+            else:
+                expected += ["--scope", scope]
             expected += ["--summary", env["GITHUB_STEP_SUMMARY"]]
             for status in (0, 1, 125):
-                with self.subTest(platform=platform, status=status):
+                with self.subTest(job=job, scope=scope, status=status):
                     result = subprocess.run(["bash", "--noprofile", "--norc", "-c", fixture + body],
-                                            env={**env, "FIXTURE_STATUS": str(status)},
+                                            env={**bound_env, "FIXTURE_STATUS": str(status)},
                                             capture_output=True, timeout=5)
                     self.assertEqual(result.returncode, status, result.stderr)
                     self.assertEqual(result.stdout.decode().split("\0"), [*expected, ""])
             for key in ("MRK_PYTHON", "FIXTURE_RUBY", "MRK_PYTHON_312", "MRK_PYTHON_313", "MRK_PYTHON_314"):
-                with self.subTest(platform=platform, relative_runtime=key):
+                with self.subTest(job=job, scope=scope, relative_runtime=key):
                     result = subprocess.run(["bash", "--noprofile", "--norc", "-c", fixture + body],
-                                            env={**env, "FIXTURE_STATUS": "0", key: "relative-runtime"},
+                                            env={**bound_env, "FIXTURE_STATUS": "0", key: "relative-runtime"},
                                             capture_output=True, timeout=5)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(result.stdout, b"")
 
     def test_failed_or_cancelled_setup_cannot_reach_the_controller(self):
         workflow = load_workflow(CI)
-        for name in ("test-linux", "test-native-profiles"):
+        for name in ("test-linux", "test-native-profiles", "test-native-support"):
             job = workflow["jobs"][name]
             owner = job["steps"][-1]
             for failed in job["steps"][:-1]:
@@ -566,7 +606,7 @@ class CIControllerContractTests(unittest.TestCase):
         step = controller.Step("native-profile-" + phase,
             argv=(str(python), "-I", "-B", str(ROOT / "tests/workflow/run_native_profile_checks.py"),
                   *(("--installed-wheel",) if phase == "wheel" else ())), cwd=paths.work,
-            env=tuple(sorted(controller.native_phase_environment(paths, "macos", phase).items())), seconds=900, parser="native")
+            env=tuple(sorted(controller.native_phase_environment(paths, "macos", phase).items())), seconds=1500, parser="native")
         rig = SimpleNamespace(controller=controller, paths=paths, step=step, now=100.0,
                               inventories=inventories, events=[], captures=[], changes={},
                               prepare_error=None, idle_error=None, run_error=None,
@@ -587,6 +627,12 @@ class CIControllerContractTests(unittest.TestCase):
             self.assertEqual((source, operating_system), (ROOT, rig.operating_system))
             rig.events.append(("delegation", operating_system, deadline))
             return rig.metadata
+
+        def snapshot(source, *, deadline):
+            self.assertEqual(source, ROOT)
+            rig.events.append(("snapshot", "native", deadline))
+            captured_metadata = rig.checks.signing_regression_metadata(source, "macos-26", deadline=deadline)
+            return MappingProxyType(dict(rig.inventories)), captured_metadata
 
         def idle(*, deadline):
             rig.events.append(("idle", deadline))
@@ -638,9 +684,23 @@ class CIControllerContractTests(unittest.TestCase):
             return capture
 
         rig.checks = SimpleNamespace(native_partition_ids=identities, inspect_native_package=package,
-                                     signing_regression_metadata=metadata,
+                                     signing_regression_metadata=metadata, native_capture_snapshot=snapshot,
+                                     NATIVE_AUTHORITY_IDS=checks.NATIVE_AUTHORITY_IDS,
                                      PYTHON_SINGLETON_CASES=_PYTHON_SINGLETON_FIXTURES)
-        rig.session = SimpleNamespace(ensure_idle=idle, prepare_native_authority=prepare, run=run)
+        def prepare_files(selected, *, deadline):
+            rig.events.append(("fixture-prepare", selected, deadline))
+            rig.session.persisted_bytes += 96
+            if getattr(rig, "fixture_prepare_error", None) is not None:
+                raise rig.fixture_prepare_error
+
+        def verify_files(selected, *, deadline):
+            rig.events.append(("fixture-reinspect", selected, deadline))
+            rig.session.persisted_bytes += getattr(rig, "reinspect_added_bytes", 0)
+            if getattr(rig, "fixture_verify_error", None) is not None:
+                raise rig.fixture_verify_error
+
+        rig.session = SimpleNamespace(ensure_idle=idle, prepare_native_authority=prepare, run=run,
+            prepare_checked_files=prepare_files, verify_checked_files=verify_files, persisted_bytes=0)
         return rig
 
     def _python_gate_fixture(self, phase="source", *, deadline=2500.0):
@@ -688,7 +748,7 @@ class CIControllerContractTests(unittest.TestCase):
         with patch.object(rig.controller.time, "monotonic", side_effect=lambda: rig.now), \
                 patch.object(rig.controller, "check_capacity"), patch.object(rig.controller, "parse_capture", side_effect=parse):
             return rig.controller.perform_step(step or rig.step, rig.paths, rig.session, rig.checks,
-                                               {}, platform, deadline=deadline)
+                                               getattr(rig, "source_inventory", {}), platform, deadline=deadline)
 
     def test_original_capture_reason_codes_are_finite_bounded_and_never_authorize_finality(self):
         controller = controller_module()
@@ -897,12 +957,148 @@ class CIControllerContractTests(unittest.TestCase):
             controller.failure_details(original, step, paths, deadline=1000.0)
         self.assertEqual(vars(original), before)
 
+    def test_native_test_frame_diagnostics_are_inventory_bound_private_and_never_finality(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        private = "PRIVATE_NATIVE_TEST_FRAME_CANARY"
+        native_id = ("unit.test_checked_files.NativeCheckedFilesTests."
+                     "test_actual_tmp_var_folders_and_physical_spellings_select_identical_private_bytes")
+        linux_id = ("unit.test_operation_recovery.IosOperationRecoveryTests."
+                    "test_profile_cleanup_uncertainty_stops_actual_fresh_validation_before_any_store_access")
+        source_files = ("src/mobile_release/build_inputs.py", "src/mobile_release/checked_files.py",
+                        "tests/unit/test_checked_files.py", "tests/unit/test_operation_recovery.py")
+        frame = lambda path, line: f'  File "{path}", line {line}, in {private}\n'
+
+        for phase in ("source", "wheel"):
+            package = paths.work / ("source-build/src/mobile_release" if phase == "source" else
+                                    "wheel-venv/lib/python3.11/site-packages/mobile_release")
+            opposite = paths.work / ("source-build/src/mobile_release" if phase == "wheel" else
+                                     "wheel-venv/lib/python3.11/site-packages/mobile_release")
+            for gate, partition, identifier, relative, module in (
+                    ("native-profile-" + phase, "ordinary", native_id, source_files[2], "checked_files.py"),
+                    ("python-full" if phase == "source" else "python-wheel", "poison-recovery-profile-cleanup",
+                     linux_id, source_files[3], "build_inputs.py")):
+                with self.subTest(phase=phase, gate=gate):
+                    step = controller.Step(gate, parser="native", native_partition=partition)
+                    checks = SimpleNamespace(native_partition_ids=lambda *_args, **_kwargs: (identifier,))
+                    test_path = paths.source / relative
+                    rejected = (frame("/other/" + relative, 81), frame(relative, 82),
+                        frame(package / "unknown.py", 83), frame(opposite / module, 84),
+                        frame(paths.source / "src/mobile_release" / module, 85),
+                        frame(test_path, 0), frame(test_path, -1), frame(test_path, "01"),
+                        frame(test_path, 1_000_000), frame(test_path, 2).lstrip(),
+                        frame(test_path, 3).replace("\n", " trailing\n"),
+                        frame(test_path, 4).replace(private, "not a function"))
+                    headers = frame(test_path, 810) + frame(package / module, 413).replace("\n", "\r\n")
+                    stderr = ("".join(rejected) + headers + "    private_source('" + private + "')\n"
+                              + "FileNotFoundError: " + private + " /private/signing\n").encode()
+                    callback = {"id": identifier, "outcome": "error", "category": "os-error",
+                                "errno": 2, "returncode": None}
+
+                    def capture(rows, *, ok=False, diagnostic_phase="tests"):
+                        stdout = (controller.NATIVE_DIAGNOSTIC_PREFIX + json.dumps({
+                            "schema": 1, "phase": diagnostic_phase, "records": rows}) + "\n").encode()
+                        return SimpleNamespace(ok=ok, returncode=1, waited=True, stdout_eof=True, stderr_eof=True,
+                            domain_finality=True, timed_out=False, cancelled=False, primary_error="command exited 1",
+                            cleanup_errors=(), stdout=stdout, stderr=stderr, persisted=(len(stdout), len(stderr)), duration=0.01)
+
+                    original = capture([callback])
+                    before = dict(vars(original))
+                    reported = controller.failure_details(original, step, paths, checks=checks, _source_files=source_files)
+                    expected = [{"file": relative, "line": 810}, {"file": "src/mobile_release/" + module, "line": 413}]
+                    self.assertEqual(reported["native_test_locations"], expected)
+                    for key, value in controller.capture_observations(original).items():
+                        self.assertEqual(reported[key], value)
+                    for hidden in (private, str(paths.source), str(package), "/private/signing", "private_source"):
+                        self.assertNotIn(hidden, json.dumps(reported))
+                    self.assertEqual(vars(original), before)
+                    with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                        controller.require_original_finality(original)
+                    reported["native_test_locations"].clear()
+                    self.assertEqual(vars(original), before)
+                    self.assertEqual(controller._native_test_failure_locations(
+                        "".join(rejected), paths, phase, source_files), [])
+                    self.assertEqual(controller._native_test_failure_locations(
+                        "".join(frame(test_path, line) for line in range(1, 13)), paths, phase, source_files),
+                        [{"file": relative, "line": line} for line in range(5, 13)])
+
+                    excluded = (capture([callback], ok=True), capture([]),
+                        capture([{**callback, "id": "unit.foreign.Other.test_case"}]),
+                        capture([{**callback, "outcome": "expected-failure"}]),
+                        *(capture([{**callback, "outcome": outcome, "category": "none", "errno": None}])
+                          for outcome in ("skip", "unexpected-success")),
+                        capture([{**callback, "id": "openssl-version"}], diagnostic_phase="prerequisite"))
+                    for omitted in excluded:
+                        with patch.object(controller, "_native_test_failure_locations") as projection:
+                            self.assertNotIn("native_test_locations", controller.failure_details(
+                                omitted, step, paths, checks=checks, _source_files=source_files))
+                            projection.assert_not_called()
+        for names in (list(source_files), source_files + (source_files[0],), source_files * 129,
+                      ("src/mobile_release/../private.py",), ("tests/foreign-name.py",), (False,)):
+            with self.subTest(invalid_scope=repr(names)[:100]), \
+                    self.assertRaisesRegex(controller.VerificationError, "NATIVE_DIAGNOSTIC_SCOPE"):
+                controller._native_test_failure_locations("", paths, "source", names)
+
+    def test_native_test_frame_diagnostics_flow_through_both_gates_and_keep_cutoff(self):
+        for platform in ("macos", "linux"):
+            for phase in ("source", "wheel"):
+                with self.subTest(platform=platform, phase=phase):
+                    rig = self._native_gate_fixture(phase) if platform == "macos" else self._python_gate_fixture(phase)
+                    controller = rig.controller
+                    partition = "ordinary" if platform == "macos" else "poison-recovery-profile-cleanup"
+                    identifier = rig.inventories[partition][0]
+                    relative = "tests/" + identifier.rsplit(".", 2)[0].replace(".", "/") + ".py"
+                    rig.source_inventory = {relative: {}, "src/mobile_release/build_inputs.py": {},
+                                            "README.md": {}}
+                    package = rig.paths.work / ("source-build/src/mobile_release" if phase == "source" else
+                                               "wheel-venv/lib/python3.11/site-packages/mobile_release")
+                    stderr = (f'  File "{rig.paths.source / relative}", line 815, in test_case\n'
+                              f'  File "{package / "build_inputs.py"}", line 413, in _physical_role\n').encode()
+                    callback = {"id": identifier, "outcome": "error", "category": "os-error",
+                                "errno": 2, "returncode": None}
+                    stdout = (controller.NATIVE_DIAGNOSTIC_PREFIX + json.dumps({
+                        "schema": 1, "phase": "tests", "records": [callback]}) + "\n").encode()
+                    rig.changes[partition] = dict(ok=False, returncode=1, primary_error="command exited 1",
+                        stdout=stdout, stderr=stderr, persisted=(len(stdout), len(stderr)))
+                    result = self._perform_native_fixture(rig, platform=platform)
+                    self.assertFalse(result.ok)
+                    self.assertEqual(result.error, "COMMAND_EXIT_OR_FINALITY")
+                    failed, = (row for row in result.details["partitions"] if row["status"] == "FAIL")
+                    self.assertEqual(failed["capture"]["native_test_locations"], [
+                        {"file": relative, "line": 815}, {"file": "src/mobile_release/build_inputs.py", "line": 413}])
+                    self.assertEqual(failed["capture"]["returncode"], 1)
+                    original = rig.captures[-1]
+                    before = dict(vars(original))
+                    part = dataclasses.replace(rig.step, parser="native", native_partition=partition)
+                    for now in (999.0, 1000.0):
+                        with patch.object(controller.time, "monotonic", return_value=now), \
+                                patch.object(controller, "_native_test_failure_locations", side_effect=ValueError("PRIVATE")):
+                            if now < 1000.0:
+                                reported = controller.failure_details(original, part, rig.paths,
+                                    checks=rig.checks, deadline=1000.0, _source_files=tuple(rig.source_inventory)[:2])
+                                self.assertEqual(reported["returncode"], 1)
+                                self.assertNotIn("native_test_locations", reported)
+                                self.assertNotIn("PRIVATE", json.dumps(reported))
+                            else:
+                                with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                                    controller.failure_details(original, part, rig.paths,
+                                        checks=rig.checks, deadline=1000.0, _source_files=tuple(rig.source_inventory)[:2])
+                    for ticks in ((1000.0,), (999.0, 1000.0), (999.0, 999.0, 1000.0),
+                                  (999.0, 999.0, 999.0, 999.0, 1000.0)):
+                        clock = iter(ticks)
+                        with patch.object(controller.time, "monotonic", side_effect=lambda: next(clock, 1000.0)), \
+                                self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                            controller._native_test_failure_locations(stderr.decode(), rig.paths, phase,
+                                tuple(rig.source_inventory)[:2], deadline=1000.0)
+                    self.assertEqual(vars(original), before)
+
     def test_native_gate_keeps_every_original_capture_record_and_one_source_wheel_cutoff(self):
-        for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
+        for phase, original_deadline, cutoff in (("source", 2500.0, 1600.0), ("wheel", 800.0, 800.0)):
             with self.subTest(phase=phase):
                 rig = self._native_gate_fixture(phase)
                 parts = ("authority", "ordinary", *rig.controller.PYTHON_SINGLETON_PARTITIONS)
-                result = self._perform_native_fixture(rig, deadline=original_deadline)
+                with patch.object(rig.checks, "native_partition_ids", side_effect=AssertionError("same-gate inventory rescan")):
+                    result = self._perform_native_fixture(rig, deadline=original_deadline)
                 self.assertTrue(result.ok, result)
                 self.assertEqual(result.details["stage"], "complete")
                 actual = sorted(set(rig.inventories["all"]) - set(rig.inventories["delegated"]))
@@ -918,6 +1114,8 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual([row["status"] for row in records], ["PASS"] * len(parts))
                 calls = [event for event in rig.events if event[0] == "run"]
                 self.assertEqual(len(calls), len(parts))
+                self.assertEqual([event for event in rig.events if event[0] == "snapshot"], [("snapshot", "native", cutoff)])
+                self.assertEqual([event for event in rig.events if event[0] == "inventory"], [])
                 self.assertEqual([event for event in rig.events if event[0] == "delegation"], [("delegation", "macos-26", cutoff)])
                 python = rig.paths.source_python if phase == "source" else rig.paths.wheel_python
                 entry = str(ROOT / "tests/workflow/run_native_profile_checks.py")
@@ -939,7 +1137,7 @@ class CIControllerContractTests(unittest.TestCase):
                 for index, (_, _, options) in enumerate(calls):
                     self.assertIs(options["dispose_retained_domain"], parts[index] in dict(_PYTHON_POISON_FIXTURES))
                     self.assertEqual(options["absolute_deadline"], cutoff)
-                    self.assertEqual(options["seconds"], 900)
+                    self.assertEqual(options["seconds"], 1500 if parts[index] == "ordinary" else 900)
                     self.assertEqual(options["cpu_seconds"], 180)
                     self.assertEqual(options["output_limit"], 8 * 1024**2)
                     self.assertEqual(records[index]["capture"],
@@ -952,11 +1150,126 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertIn(("package", package, cutoff), rig.events)
                 self.assertTrue(all(event[-1] == cutoff for event in rig.events if event[0] != "run"))
 
+    def test_native_prebound_inventory_is_closed_to_its_original_gate_roles(self):
+        for phase in ("source", "wheel"):
+            rig = self._native_gate_fixture(phase)
+            controller = rig.controller
+            ordinary = rig.inventories["ordinary"]
+            singleton = controller.PYTHON_SINGLETON_PARTITIONS[0]
+            original = SimpleNamespace(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
+                domain_finality=True, primary_error=None, cleanup_errors=(), stdout=b"", stderr=b"",
+                duration=0.01, timed_out=False, cancelled=False, persisted=(0, 0))
+            with patch.object(rig.checks, "native_partition_ids", side_effect=AssertionError("prebound parser rescan")) as reader:
+                for partition in ("authority", "ordinary", singleton):
+                    expected = rig.inventories[partition]
+                    step = dataclasses.replace(rig.step, native_partition=partition)
+                    original.stderr = ("".join(f"{name.rsplit('.', 1)[1]} ({name}) ... ok\n" for name in expected)
+                                       + f"\nRan {len(expected)} tests in 0.01s\n\nOK\n").encode()
+                    parsed = controller.parse_capture(step, original, rig.paths, "macos", rig.checks,
+                                                      _native_expected=expected)
+                    self.assertEqual(parsed.details["completed"], list(expected))
+                    callback = {"id": expected[0], "outcome": "error", "category": "os-error", "errno": 5,
+                                "returncode": None}
+                    failed = SimpleNamespace(**{**vars(original), "ok": False, "returncode": 1,
+                        "primary_error": "command exited 1", "stderr": b"",
+                        "stdout": (controller.NATIVE_DIAGNOSTIC_PREFIX + json.dumps({
+                            "schema": 1, "phase": "tests", "records": [callback]}) + "\n").encode()})
+                    value = controller.failure_details(failed, step, rig.paths, checks=rig.checks,
+                                                       platform="macos", _native_expected=expected)
+                    self.assertEqual(value["native_diagnostic"]["records"], [callback])
+                    self.assertEqual(value["returncode"], 1)
+                    with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                        controller.parse_capture(step, failed, rig.paths, "macos", rig.checks,
+                                                 _native_expected=expected)
+                reader.assert_not_called()
+
+            step = dataclasses.replace(rig.step, native_partition="ordinary")
+            cases = (({}, "linux", ordinary), ({"id": "python-full"}, "macos", ordinary),
+                ({"id": "foreign"}, "macos", ordinary), ({"parser": "check"}, "macos", ordinary),
+                ({"native_partition": "all"}, "macos", ordinary),
+                ({"native_partition": "delegated"}, "macos", rig.inventories["delegated"]),
+                ({"native_partition": "foreign"}, "macos", ordinary),
+                ({}, "macos", list(ordinary)), ({}, "macos", ()), ({}, "macos", (False,)),
+                ({}, "macos", tuple(reversed(ordinary))), ({}, "macos", ordinary + ordinary[:1]),
+                ({"native_partition": "authority"}, "macos", ordinary),
+                ({"native_partition": singleton}, "macos", ordinary[:1]),
+                ({"native_partition": singleton}, "macos", rig.inventories[controller.PYTHON_SINGLETON_PARTITIONS[1]]),
+                ({}, "macos", rig.inventories["authority"]), ({}, "macos", rig.inventories[singleton]))
+            for changes, platform, expected in cases:
+                with self.subTest(phase=phase, invalid_role=(changes, platform, expected)):
+                    selected = dataclasses.replace(step, **changes)
+                    with self.assertRaisesRegex(controller.VerificationError, "NATIVE_PREBOUND_EXPECTATIONS"):
+                        controller.parse_capture(selected, original, rig.paths, platform, rig.checks,
+                                                 _native_expected=expected)
+                    with self.assertRaisesRegex(controller.VerificationError, "NATIVE_PREBOUND_EXPECTATIONS"):
+                        controller.failure_details(original, selected, rig.paths, checks=rig.checks,
+                                                   platform=platform, _native_expected=expected)
+            with self.assertRaisesRegex(controller.VerificationError, "NATIVE_PREBOUND_EXPECTATIONS"):
+                controller.parse_capture(step, original, rig.paths, "macos", rig.checks,
+                                         _python_expected=ordinary, _native_expected=ordinary)
+            with self.assertRaisesRegex(controller.VerificationError, "NATIVE_PREBOUND_EXPECTATIONS"):
+                controller.failure_details(original, step, rig.paths, checks=rig.checks, platform="macos",
+                                           _python_expected=ordinary, _native_expected=ordinary)
+            with self.assertRaisesRegex(controller.VerificationError, "NATIVE_PREBOUND_EXPECTATIONS"):
+                controller.failure_details(original, _native_expected=ordinary)
+
+    def test_native_checked_file_fixtures_use_original_idle_capture_and_existing_accounting(self):
+        for case in ("success", "prepare-failed", "parser-failed", "idle-failed", "reinspect-failed", "byte-bound", "failed-reinspection-byte-bound"):
+            with self.subTest(checked_file_coordinator=case):
+                rig = self._native_gate_fixture()
+                failure = OSError("synthetic readonly fixture failure")
+                if case == "prepare-failed":
+                    rig.fixture_prepare_error = failure
+                elif case == "parser-failed":
+                    rig.changes["ordinary"] = {"stderr": b"OK\n"}
+                elif case == "idle-failed":
+                    rig.idle_error, rig.idle_failure_after = failure, 2
+                elif case == "reinspect-failed":
+                    rig.fixture_verify_error = failure
+                elif case == "byte-bound":
+                    rig.session.persisted_bytes = rig.controller.MATRIX_PERSISTED_LIMIT
+                elif case == "failed-reinspection-byte-bound":
+                    rig.fixture_verify_error = failure
+                    rig.reinspect_added_bytes = rig.controller.MATRIX_PERSISTED_LIMIT
+                original_total = rig.session.persisted_bytes
+                result = self._perform_native_fixture(rig)
+                self.assertEqual(result.ok, case == "success")
+                self.assertEqual(rig.session.persisted_bytes, original_total + 96 + getattr(rig, "reinspect_added_bytes", 0),
+                                 "partial or failed fixture persistence must remain charged")
+                events = rig.events
+                prepared = [event for event in events if event[0] == "fixture-prepare"]
+                self.assertEqual(prepared, [("fixture-prepare", "source", 1600.0)])
+                rechecks = [i for i, event in enumerate(events) if event[0] == "fixture-reinspect"]
+                for index in rechecks:
+                    self.assertEqual(events[index - 1], ("idle", 1600.0))
+                    self.assertTrue(any(event[0] == "run" for event in events[:index]))
+                # An original parser failure still gets independent reinspection
+                # if idle was genuinely established. Unknown idle never does.
+                expected = (1 + len(rig.controller.PYTHON_SINGLETON_PARTITIONS) if case == "success"
+                            else 1 if case in {"parser-failed", "reinspect-failed", "failed-reinspection-byte-bound"} else 0)
+                self.assertEqual(len(rechecks), expected)
+                if case in {"prepare-failed", "byte-bound"}:
+                    self.assertEqual(rig.captures, [])
+                elif case != "success":
+                    self.assertEqual(len(rig.captures), 2)
+                    row = result.details["partitions"][1]
+                    for field, value in rig.controller.capture_observations(rig.captures[1]).items():
+                        self.assertEqual(row["capture"][field], value)
+                    if case in {"reinspect-failed", "failed-reinspection-byte-bound"}:
+                        self.assertNotIn("checked_file_originals_preserved", row)
+                    if case == "failed-reinspection-byte-bound":
+                        self.assertGreater(rig.session.persisted_bytes, rig.controller.MATRIX_PERSISTED_LIMIT)
+                        self.assertEqual(result.details["failure"]["exception"], "ExceptionGroup")
+                if case == "success":
+                    for row in result.details["partitions"]:
+                        self.assertEqual(row.get("checked_file_originals_preserved"),
+                                         None if row["partition"] == "authority" else True)
+
     def test_native_gate_rejects_contract_or_partition_drift_without_launch(self):
         controller = controller_module()
         rig = self._native_gate_fixture()
         for changes in ({"kind": "inspection"}, {"argv": (*rig.step.argv, "--authority")},
-                        {"env": ()}, {"cwd": rig.paths.source}, {"seconds": 901},
+                        {"env": ()}, {"cwd": rig.paths.source}, {"seconds": 900}, {"seconds": 901}, {"seconds": 1501},
                         {"parser": "exit"}, {"native_partition": "authority"}, {"expected_tests": 5}):
             with self.subTest(changes=changes):
                 result = self._perform_native_fixture(rig, step=dataclasses.replace(rig.step, **changes))
@@ -966,7 +1279,9 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertEqual(rig.events, [])
         for mutation in ("missing", "duplicate", "overlap", "expanded-authority", "pooled-poison", "missing-poison", "pooled-fresh", "missing-fresh", "swapped-fresh",
                          "delegated-missing", "delegated-foreign", "delegated-duplicate", "delegated-overlap",
-                         "delegated-poison", "delegated-wrong-os", "obligation-missing", "obligation-empty", "obligation-foreign"):
+                         "delegated-poison", "delegated-wrong-os", "obligation-missing", "obligation-empty", "obligation-foreign",
+                         "snapshot-mutable", "snapshot-extra", "snapshot-missing", "snapshot-list", "snapshot-metadata",
+                         "snapshot-shape", "snapshot-string", "snapshot-key-subclass", "same-size-foreign-authority"):
             with self.subTest(mutation=mutation):
                 rig = self._native_gate_fixture()
                 if mutation == "missing":
@@ -977,6 +1292,32 @@ class CIControllerContractTests(unittest.TestCase):
                     rig.inventories["ordinary"] += rig.inventories["authority"][:1]
                 elif mutation == "expanded-authority":
                     rig.inventories["authority"] += rig.inventories["ordinary"][:1]
+                elif mutation == "same-size-foreign-authority":
+                    original = rig.inventories["authority"][0]
+                    foreign = "unit.synthetic.AuthorityTests.test_foreign"
+                    rig.inventories["authority"] = tuple(sorted((foreign, *rig.inventories["authority"][1:])))
+                    rig.inventories["all"] = tuple(sorted(foreign if name == original else name for name in rig.inventories["all"]))
+                elif mutation.startswith("snapshot-"):
+                    if mutation == "snapshot-extra":
+                        rig.inventories["foreign"] = ("unit.synthetic.Contracts.test_foreign",)
+                    elif mutation == "snapshot-missing":
+                        del rig.inventories["all"]
+                    elif mutation == "snapshot-list":
+                        rig.inventories["ordinary"] = list(rig.inventories["ordinary"])
+                    elif mutation == "snapshot-string":
+                        rig.inventories["ordinary"] = (False,)
+                    elif mutation == "snapshot-key-subclass":
+                        class Name(str):
+                            pass
+
+                        ids = rig.inventories.pop("ordinary")
+                        rig.inventories[Name("ordinary")] = ids
+                    elif mutation == "snapshot-metadata":
+                        rig.metadata = None
+                    elif mutation == "snapshot-shape":
+                        rig.checks.native_capture_snapshot = lambda *args, **kwargs: [MappingProxyType(rig.inventories), rig.metadata]
+                    else:
+                        rig.checks.native_capture_snapshot = lambda *args, **kwargs: (dict(rig.inventories), rig.metadata)
                 elif mutation == "pooled-poison":
                     rig.inventories["poison-wait-loss"] += rig.inventories["poison-startup-error"]
                 elif mutation == "missing-poison":
@@ -1070,22 +1411,31 @@ class CIControllerContractTests(unittest.TestCase):
 
     def test_native_gate_deadline_covers_preparation_every_original_and_final_reconciliation(self):
         parts = ("authority", "ordinary", *controller_module().PYTHON_SINGLETON_PARTITIONS)
-        for mode in ("preparation", *parts, "union"):
+        for mode in ("snapshot", "preparation", *parts, "union"):
             with self.subTest(mode=mode):
                 rig = self._native_gate_fixture()
-                if mode == "preparation":
-                    rig.prepare_advance = 900.0
+                if mode == "snapshot":
+                    original_snapshot = rig.checks.native_capture_snapshot
+
+                    def late_snapshot(*args, **kwargs):
+                        value = original_snapshot(*args, **kwargs)
+                        rig.now = 1600.0
+                        return value
+
+                    rig.checks.native_capture_snapshot = late_snapshot
+                elif mode == "preparation":
+                    rig.prepare_advance = 1500.0
                 elif mode in parts:
                     # One original cutoff: preparation has already consumed
                     # 100s. Expire during this exact original, not a renewed one.
-                    rig.run_advance = 801.0 / (parts.index(mode) + 1)
+                    rig.run_advance = 1401.0 / (parts.index(mode) + 1)
                 reconciliations = []
 
                 def late_sorted(values, *args, **kwargs):
                     result = sorted(values, *args, **kwargs)
                     if len(rig.captures) == len(parts) and tuple(result) == rig.inventories["all"]:
                         reconciliations.append(True)
-                        rig.now = 1000.0
+                        rig.now = 1600.0
                     return result
 
                 with contextlib.ExitStack() as stack:
@@ -1094,11 +1444,13 @@ class CIControllerContractTests(unittest.TestCase):
                     result = self._perform_native_fixture(rig)
                 self.assertFalse(result.ok)
                 self.assertEqual(result.error, "AGGREGATE_DEADLINE")
-                self.assertEqual(len(rig.captures), 0 if mode == "preparation" else len(parts) if mode == "union"
+                self.assertEqual(len(rig.captures), 0 if mode in {"snapshot", "preparation"} else len(parts) if mode == "union"
                                  else parts.index(mode) + 1)
                 records = result.details["partitions"]
-                if mode == "preparation":
+                if mode in {"snapshot", "preparation"}:
                     self.assertEqual([row["status"] for row in records], ["UNEXECUTED"] * len(parts))
+                    if mode == "snapshot":
+                        self.assertFalse(any(event[0] in {"package", "prepare", "run"} for event in rig.events))
                 elif mode == "authority":
                     self.assertEqual(records[1]["status"], "UNEXECUTED")
                 elif mode == "union":
@@ -1376,6 +1728,42 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertTrue(value["byte_truncated"] and value["dropped_partial_line"])
         self.assertIsNone(value["last_observed_start"])
 
+        # Relative native callback timing is optional lexical information,
+        # never a new pass/finality source or a replacement clock endpoint.
+        timing = b"MRK_NATIVE_ELAPSED_MS="
+        for milliseconds in (0, 1, 879_999, 3_600_000):
+            with self.subTest(elapsed_ms=milliseconds):
+                raw = (timing + str(milliseconds).encode() + b"\n" + header(first) + b" ... ok\n"
+                       + timing + str(milliseconds).encode() + b"\r\n" + header(second) + b"\r\n")
+                value = observation(raw)
+                self.assertEqual(value["last_observed_start"], {"id": second, "elapsed_ms": milliseconds})
+                self.assertEqual(value["last_observed_outcome"],
+                                 {"id": first, "outcome": "ok", "elapsed_ms": milliseconds})
+        for scalar in (b"", b"-1", b"+1", b"00", b"01", b"1.0", b"True", b"3600001",
+                       b"9999999", b"1" * 1025, private):
+            with self.subTest(invalid_elapsed=scalar[:16]):
+                value = observation(timing + scalar + b"\n" + header(first) + b" ... ok\n")
+                self.assertEqual(value["last_observed_start"], {"id": first})
+                self.assertEqual(value["last_observed_outcome"], {"id": first, "outcome": "ok"})
+                self.assertNotIn(private.decode(), json.dumps(value))
+        marker = timing + b"9\n"
+        for intervening in (b"\n", private + b"\n", b"x" * 1025 + b"\n",
+                            b"test_foreign (unit.foreign.Private.test_foreign)\n"):
+            value = observation(marker + intervening + header(first) + b"\n")
+            self.assertEqual(value["last_observed_start"], {"id": first})
+            self.assertNotIn(private.decode(), json.dumps(value))
+        self.assertEqual(observation(marker + header(first))["last_observed_start"], {"id": first})
+        self.assertIsNone(observation(timing + b"9" + header(first) + b"\n")["last_observed_start"])
+        self.assertIsNone(observation(marker + b"test_foreign (unit.foreign.Private.test_foreign)\n")
+                          ["last_observed_start"])
+        headline = header(first) + b"\n"
+        value = observation(marker + headline + b"x\n" * 2047)
+        self.assertTrue(value["lines_truncated"])
+        self.assertEqual(value["last_observed_start"], {"id": first})  # Preceding line fell outside the window.
+        value = observation(marker + headline + b"x" * (256 * 1024 - len(marker) - len(headline)) + b"\n")
+        self.assertTrue(value["byte_truncated"] and value["dropped_partial_line"])
+        self.assertEqual(value["last_observed_start"], {"id": first})  # Partial marker was discarded, not adopted.
+
         for phase in ("source", "wheel"):
             for diagnostic_error in (False, True):
                 with self.subTest(phase=phase, optional_diagnostic_error=diagnostic_error):
@@ -1419,6 +1807,61 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertNotIn("completed", result.details)
                     run_index = max(index for index, event in enumerate(rig.events) if event[0] == "run")
                     self.assertTrue(all(event[0] == "idle" for event in rig.events[run_index + 1:]))
+
+        for phase in ("source", "wheel"):
+            for mode in ("progress", "projection-error", "outer-expired", "late-success"):
+                with self.subTest(native_progress=(phase, mode)):
+                    rig = self._native_gate_fixture(phase)
+                    source_ids = rig.inventories["ordinary"]
+                    # Complete success and complete next-entry lines are
+                    # separate observations, never a receipt for the body.
+                    raw = header(source_ids[0]) + b" ... ok\n" + header(source_ids[1]) + b"\n" + private + b"\n"
+                    rig.run_advance = 700.5  # Original1600s endpoint expires in ordinary.
+                    rig.idle_error = rig.controller.VerificationError("AGGREGATE_DEADLINE")
+                    rig.idle_failure_after = 2
+                    rig.changes["ordinary"] = dict(stderr=raw, persisted=(0, len(raw)))
+                    if mode != "late-success":
+                        rig.changes["ordinary"].update(ok=False, returncode=None, waited=False,
+                            stdout_eof=False, stderr_eof=False, domain_finality=False, timed_out=True,
+                            primary_error="command/original aggregate deadline expired",
+                            cleanup_errors=("original child wait TimeoutError",))
+                    original_ids = rig.checks.native_partition_ids
+
+                    def identities(*args, **kwargs):
+                        self.assertLess(len(rig.captures), 2, "late failed-capture inventory read")
+                        return original_ids(*args, **kwargs)
+
+                    with patch.object(rig.checks, "native_partition_ids", side_effect=identities), \
+                            patch.object(rig.controller, "python_failure_progress",
+                                side_effect=RuntimeError(private.decode()) if mode == "projection-error" else None,
+                                wraps=rig.controller.python_failure_progress) as progress:
+                        result = self._perform_native_fixture(rig,
+                            deadline=1000.0 if mode == "outer-expired" else 2500.0)
+                    self.assertFalse(result.ok)
+                    self.assertEqual(result.error, "AGGREGATE_DEADLINE" if mode == "late-success"
+                                     else "COMMAND_EXIT_OR_FINALITY")
+                    rows = result.details["partitions"]
+                    self.assertEqual([row["status"] for row in rows],
+                                     ["PASS", "FAIL"] + ["UNEXECUTED"] * len(controller.PYTHON_SINGLETON_PARTITIONS))
+                    ordinary = rows[1]
+                    if mode == "progress":
+                        self.assertEqual(ordinary["python_progress"]["last_observed_start"], {"id": source_ids[1]})
+                        self.assertEqual(ordinary["python_progress"]["last_observed_outcome"],
+                                         {"id": source_ids[0], "outcome": "ok"})
+                    else:
+                        self.assertNotIn("python_progress", ordinary)
+                    self.assertEqual(progress.call_count, int(mode in ("progress", "projection-error")))
+                    self.assertEqual("python_progress_error" in ordinary, mode in ("projection-error", "outer-expired"))
+                    for key, observed in controller.capture_observations(rig.captures[-1]).items():
+                        self.assertEqual(ordinary["capture"][key], observed)
+                    self.assertNotIn(private.decode(), json.dumps(result.details))
+                    self.assertNotIn("completed", result.details)
+                    runs = [event for event in rig.events if event[0] == "run"]
+                    self.assertEqual(len(runs), 2)
+                    cutoff = 1000.0 if mode == "outer-expired" else 1600.0
+                    self.assertTrue(all(event[2]["absolute_deadline"] == cutoff for event in runs))
+                    final_run = max(index for index, event in enumerate(rig.events) if event[0] == "run")
+                    self.assertTrue(all(event[0] == "idle" for event in rig.events[final_run + 1:]))
 
         rig = self._python_gate_fixture()
         with patch.object(rig.checks, "python_capture_ids", side_effect=AssertionError("parser rescan")), \
@@ -2103,7 +2546,7 @@ class CIControllerContractTests(unittest.TestCase):
 
             result = controller.parse_capture(rig.step, capture(summary["tests"]), rig.paths, "linux", rig.checks)
             self.assertTrue(result.ok)
-            self.assertEqual(sum(row["outcome"] == "skip" for row in summary["tests"]), 20 if phase == "source" else 8)
+            self.assertEqual(sum(row["outcome"] == "skip" for row in summary["tests"]), 21 if phase == "source" else 9)
             for platform in ("macos", "darwin"):
                 with self.subTest(phase=phase, platform=platform), \
                         self.assertRaisesRegex(controller.VerificationError, "PYTHON_UNEXPECTED_SKIP_OR_FAILURE"):
@@ -2119,7 +2562,9 @@ class CIControllerContractTests(unittest.TestCase):
         controller = controller_module()
         before = ("source-copy", "source-environment", "source-dependencies", "bundler", "bundle-install",
                   "editable-install", "source-freeze", "source-pip-check", "bundle-check")
-        ruby = ("ruby-support", "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture", "ruby-native-signal-observation",
+        ruby = ("ruby-support", "ruby-store_document", "ruby-store_lane_lifetime",
+                "ruby-store_lane_nested_validation", "ruby-store_lane_resources", "ruby-store_lane_runtime",
+                "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture", "ruby-native-signal-observation",
                 "ruby-play_store", "ruby-play_lanes", "ruby-apple_store",
                 "ruby-apple_lanes", "ruby-apple_production", "ruby-apple_production_lane", "ruby-apple_asset_upload",
                 "ruby-ios_upload_validation", "ruby-android_upload_validation", "ruby-workflow-yaml", "ruby-supply-wif")
@@ -2129,44 +2574,149 @@ class CIControllerContractTests(unittest.TestCase):
         compatibility_wheel = ("python-compat-312-wheel", "python-compat-313-wheel", "python-compat-314-wheel")
         expected = {
             "linux": (*before, "native-process-abi-source", *compatibility_source, "python-full", *ruby,
-                      "ruby-packaged-capture-source", "fastfile", "actionlint", "jdk-signers", *wheel,
+                      "ruby-packaged-capture-source", "store-lane-native-source", "fastfile", "actionlint", "jdk-signers", *wheel,
                       "native-process-abi-wheel", *compatibility_wheel, "wheel-smoke", "wheel-consumer",
-                      "ruby-packaged-capture-wheel", "python-wheel", "source-integrity"),
+                      "ruby-packaged-capture-wheel", "store-lane-native-wheel", "python-wheel", "source-integrity"),
             "macos": (*before, "native-tools", "native-process-abi-source", *compatibility_source, "native-profile-source",
                       "ruby-ios_upload_validation", "ruby-native-spawn", "ruby-native-owner", "ruby-native-capture",
                       "ruby-native-signal-observation",
-                      "ruby-android_upload_validation", "ruby-packaged-capture-source",
+                      "ruby-android_upload_validation", "ruby-packaged-capture-source", "store-lane-native-source",
                       *wheel, "native-process-abi-wheel", *compatibility_wheel,
-                      "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel", "native-profile-wheel", "source-integrity"),
+                      "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel", "store-lane-native-wheel", "native-profile-wheel", "source-integrity"),
         }
-        for platform in expected:
-            steps = controller.catalog(fixture_paths(controller), platform, deadline=1000.0)
-            with self.subTest(platform=platform):
-                self.assertEqual(tuple(step.id for step in steps), expected[platform])
-                self.assertEqual(controller.required_gate_ids(platform), expected[platform])
-                self.assertEqual(len(steps), 51 if platform == "linux" else 39)
+        native_profiles = ("native-profile-source", "native-profile-wheel")
+        native_python = (*before, "native-tools", "native-process-abi-source", *compatibility_source,
+                         "native-profile-source", *wheel, "native-process-abi-wheel", *compatibility_wheel,
+                         "wheel-smoke", "wheel-consumer", "native-profile-wheel", "source-integrity")
+        native_support = tuple(name for name in expected["macos"] if name not in native_profiles)
+        self.assertEqual(set(native_python) | set(native_support), set(expected["macos"]))
+        self.assertEqual(set(expected["macos"]) - set(native_support), set(native_profiles))
+        self.assertEqual(set(native_python) - set(native_support), set(native_profiles))
+        catalogs = {}
+        for platform, scope, wanted, count in (("linux", "platform", expected["linux"], 58),
+                                               ("macos", "platform", expected["macos"], 41),
+                                               ("macos", "native-python", native_python, 31),
+                                               ("macos", "native-support", native_support, 39)):
+            steps = controller.catalog(fixture_paths(controller), platform, deadline=1000.0, scope=scope)
+            catalogs[platform, scope] = steps
+            with self.subTest(platform=platform, scope=scope):
+                ids = tuple(step.id for step in steps)
+                self.assertEqual(ids, wanted)
+                self.assertEqual(controller.required_gate_ids(platform, scope), wanted)
+                if scope == "platform":
+                    self.assertEqual(controller.required_gate_ids(platform), wanted)
+                self.assertEqual(len(steps), count)
+                self.assertEqual(len(set(ids)), count)
                 if platform == "macos":
-                    ids = tuple(step.id for step in steps)
-                    for prerequisite in ("native-tools", "native-process-abi-source", *compatibility_source):
-                        self.assertLess(ids.index(prerequisite), ids.index("native-profile-source"))
-                    self.assertLess(ids.index("native-profile-source"), ids.index("ruby-ios_upload_validation"))
-                    self.assertLess(ids.index("ruby-ios_upload_validation"), ids.index("ruby-native-spawn"))
-                    for gate in ("ruby-native-capture", "ruby-native-signal-observation",
-                                 "ruby-ios_upload_validation", "ruby-android_upload_validation"):
-                        self.assertLess(ids.index("native-tools"), ids.index(gate))
-                        self.assertLess(ids.index("native-profile-source"), ids.index(gate))
-                    self.assertLess(ids.index("native-profile-source"), ids.index("native-profile-wheel"))
+                    # Each fixed owner builds its own complete prerequisites;
+                    # no source/wheel ownership is supplied by the other job.
+                    self.assertEqual(tuple(name for name in ids if name in before), before)
+                    self.assertEqual(tuple(name for name in ids if name in wheel), wheel)
+                    self.assertLess(ids.index("native-tools"), ids.index("native-process-abi-source"))
+                    self.assertLess(ids.index("native-process-abi-source"), ids.index("wheel-copy"))
+                    self.assertLess(ids.index("wheel-pip-check"), ids.index("native-process-abi-wheel"))
+                    for prerequisite in compatibility_source:
+                        self.assertLess(ids.index("native-process-abi-source"), ids.index(prerequisite))
+                        self.assertLess(ids.index(prerequisite), ids.index("wheel-copy"))
+                    for prerequisite in compatibility_wheel:
+                        self.assertLess(ids.index("native-process-abi-wheel"), ids.index(prerequisite))
+                        self.assertLess(ids.index(prerequisite), ids.index("wheel-smoke"))
+                    if scope != "native-support":
+                        for prerequisite in ("native-tools", "native-process-abi-source", *compatibility_source):
+                            self.assertLess(ids.index(prerequisite), ids.index("native-profile-source"))
+                        self.assertLess(ids.index("native-profile-source"), ids.index("wheel-copy"))
+                        self.assertLess(ids.index("wheel-consumer"), ids.index("native-profile-wheel"))
+                        self.assertLess(ids.index("native-profile-source"), ids.index("native-profile-wheel"))
+                        self.assertEqual([step.seconds for step in steps if step.id in native_profiles], [1500, 1500])
+                    if scope != "native-python":
+                        self.assertLess(ids.index("ruby-ios_upload_validation"), ids.index("ruby-native-spawn"))
+                        for gate in ("ruby-native-capture", "ruby-native-signal-observation",
+                                     "ruby-ios_upload_validation", "ruby-android_upload_validation"):
+                            self.assertLess(ids.index("native-tools"), ids.index(gate))
+                            self.assertLess(ids.index("native-process-abi-source"), ids.index(gate))
+                            if scope == "platform":
+                                self.assertLess(ids.index("native-profile-source"), ids.index(gate))
             altered = [(), steps[:-1], (*steps, steps[-1]), (steps[1], steps[0], *steps[2:]),
                        (dataclasses.replace(steps[0], id="unknown-gate"), *steps[1:])]
             altered.extend((*steps[:index], *steps[index + 1:]) for index in range(len(steps)))
             for invalid in altered:
-                with self.subTest(platform=platform, ids=[step.id for step in invalid]):
+                with self.subTest(platform=platform, scope=scope, ids=[step.id for step in invalid]):
                     seen = []
                     with self.assertRaisesRegex(controller.VerificationError, "REQUIRED_GATE_INVENTORY"):
-                        controller.execute_pipeline(invalid, lambda step: seen.append(step.id), platform=platform)
+                        controller.execute_pipeline(invalid, lambda step: seen.append(step.id), platform=platform, scope=scope)
                     self.assertEqual(seen, [])
+        for scope in ("native-python", "native-support"):
+            scoped = catalogs["macos", scope]
+            self.assertEqual(scoped, tuple(step for step in catalogs["macos", "platform"]
+                                            if step.id in {row.id for row in scoped}))
+            for method in (controller.required_gate_ids, controller.catalog):
+                with self.subTest(linux_native_scope=scope, method=method.__name__), \
+                     self.assertRaisesRegex(controller.VerificationError, "UNSUPPORTED_VERIFICATION_SCOPE"):
+                    if method is controller.catalog:
+                        method(fixture_paths(controller), "linux", deadline=1000.0, scope=scope)
+                    else:
+                        method("linux", scope)
+        for scope in ("", "native", "native_python", "native_support", "native-python ", "native-support ",
+                      "NATIVE-PYTHON", "NATIVE-SUPPORT"):
+            for platform in ("linux", "macos"):
+                with self.subTest(platform=platform, unknown_scope=scope), \
+                     self.assertRaisesRegex(controller.VerificationError, "UNSUPPORTED_VERIFICATION_SCOPE"):
+                    controller.required_gate_ids(platform, scope)
         with self.assertRaisesRegex(controller.VerificationError, "UNSUPPORTED_PLATFORM"):
             controller.required_gate_ids("windows")
+
+        # Closed offline-input admission uses only synthetic bytes and fake
+        # metadata. No fixture directory, download, chmod or freeze can escape.
+        root = fixture_paths(controller).inputs
+        payload = b"synthetic offline native input\n"
+        names = ("inputs.json", "gems/bundler-4.0.16.gem", "gems/offline-fixture.gem",
+                 *(f"python/input-{index:03d}.whl" for index in range(148)))
+        files = [{"path": name, "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()} for name in names]
+        base = {"platform": "macos", "actionlint": None, "gems": "gems", "bundler": "gems/bundler-4.0.16.gem",
+                "manifest_sha256": "1" * 64, "lock_sha256": "2" * 64, "files": files[:100]}
+        for scope in ("native-python", "native-support"):
+            for count in (100, 150):
+                value = {**base, "files": files[:count]}
+                walk_rows = [(str(root), ["gems", "python"], ["inputs.json"]),
+                             (str(root / "gems"), [], ["bundler-4.0.16.gem", "offline-fixture.gem"]),
+                             (str(root / "python"), [], [Path(name).name for name in names[3:count]])]
+                with self.subTest(native_input_scope=scope, count=count), \
+                     patch.object(controller.time, "monotonic", return_value=0.0), \
+                     patch.object(controller.os, "walk", return_value=walk_rows) as walk_input, \
+                     patch.object(Path, "is_symlink", return_value=False), \
+                     patch.object(controller, "read_regular", return_value=payload) as reader, \
+                     patch.object(controller, "freeze_tree") as freeze, \
+                     patch.object(controller.os, "chmod", side_effect=AssertionError("native input may not chmod a tool")):
+                    result = controller.validate_inputs(root, value, deadline=1000.0, scope=scope)
+                    self.assertEqual(result, {"files": count, "bytes": count * len(payload),
+                        "tools_sha256": base["manifest_sha256"], "lock_sha256": base["lock_sha256"]})
+                    walk_input.assert_called_once_with(root, followlinks=False, onerror=controller.walk_error)
+                    self.assertEqual([call.args for call in reader.call_args_list], [(root / name,) for name in names[:count]])
+                    self.assertTrue(all(call.kwargs == {"deadline": 1000.0, "maximum": 16 * 1024**2}
+                                        for call in reader.call_args_list))
+                    freeze.assert_called_once_with(root, deadline=1000.0)
+            invalid_inputs = (
+                ({"platform": "linux"}, "UNSUPPORTED_VERIFICATION_SCOPE"),
+                ({"files": files[:13]}, "INPUT_INVENTORY_BOUND"),
+                ({"files": files[:99]}, "INPUT_INVENTORY_BOUND"),
+                ({"files": files}, "INPUT_INVENTORY_BOUND"),
+                ({"files": [*files[:99], files[0]]}, "INPUT_INVENTORY_BOUND"),
+                ({"actionlint": "actionlint"}, "NATIVE_INPUT_INVENTORY"),
+                ({"gems": None}, "NATIVE_INPUT_INVENTORY"),
+                ({"bundler": None}, "NATIVE_INPUT_INVENTORY"),
+                ({"files": [*files[:99], {**files[99], "path": "foreign/input.whl"}]}, "NATIVE_INPUT_INVENTORY"),
+            )
+            for index, (changes, error) in enumerate(invalid_inputs):
+                with self.subTest(native_input_scope=scope, invalid=index, error=error), contextlib.ExitStack() as stack:
+                    operations = [stack.enter_context(patch.object(owner, method,
+                        side_effect=AssertionError("refused native inventory may not inspect or freeze inputs")))
+                        for owner, method in ((controller.os, "walk"), (Path, "is_symlink"),
+                                              (controller, "read_regular"), (controller, "freeze_tree"),
+                                              (controller.os, "chmod"))]
+                    with self.assertRaisesRegex(controller.VerificationError, error):
+                        controller.validate_inputs(root, {**base, **changes}, deadline=1000.0, scope=scope)
+                    for operation in operations:
+                        operation.assert_not_called()
 
     def test_every_early_or_final_failure_is_latched_and_later_gates_are_unexecuted(self):
         controller = controller_module()
@@ -2279,13 +2829,15 @@ class CIControllerContractTests(unittest.TestCase):
     def test_one_original_deadline_and_headroom_limit_are_not_renewed(self):
         controller = controller_module()
         self.assertEqual(controller.AGGREGATE_SECONDS, 3300)
-        for platform in ("linux", "macos"):
-            for step in controller.catalog(fixture_paths(controller), platform, deadline=4321.5):
+        for platform, scope in (("linux", "platform"), ("macos", "platform"),
+                                 ("macos", "native-python"), ("macos", "native-support")):
+            for step in controller.catalog(fixture_paths(controller), platform, deadline=4321.5, scope=scope):
                 if "--deadline" in step.argv:
                     self.assertEqual(step.argv[step.argv.index("--deadline") + 1], "4321.5")
             for invalid in (float("nan"), float("inf"), -float("inf"), "4321.5", True):
-                with self.assertRaisesRegex(controller.VerificationError, "INVALID_DEADLINE"):
-                    controller.catalog(fixture_paths(controller), platform, deadline=invalid)
+                with self.subTest(platform=platform, scope=scope, invalid_deadline=invalid), \
+                     self.assertRaisesRegex(controller.VerificationError, "INVALID_DEADLINE"):
+                    controller.catalog(fixture_paths(controller), platform, deadline=invalid, scope=scope)
         with patch.object(controller.time, "monotonic", return_value=4321.499):
             controller.check_clock(4321.5)
         for now in (4321.5, 4322.0):
@@ -5151,69 +5703,80 @@ class CIProductEvidenceContractTests(unittest.TestCase):
     def test_python_capture_snapshot_reads_inventory_and_delegation_once_per_invocation(self):
         checks = ci_module("ci_checks")
         healthy = ("unit.synthetic.SnapshotTests.test_first", "unit.synthetic.SnapshotTests.test_second")
-        metadata = _g_metadata_fixture("ubuntu-24.04")
-        delegated = metadata[0]
-        complete = tuple(sorted(healthy + checks.PYTHON_SINGLETON_IDS + delegated))
-        parts = ("all", "delegated", "healthy", *checks.PYTHON_SINGLETON_PARTITIONS)
-        self.assertEqual(len(parts), 3 + len(_PYTHON_SINGLETON_FIXTURES))
-        for selection in ("full", "wheel"):
+        for selection in ("full", "wheel", "native"):
+            native = selection == "native"
+            operating_system = "macos-26" if native else "ubuntu-24.04"
+            metadata = _g_metadata_fixture(operating_system)
+            delegated = metadata[0]
+            authority = checks.NATIVE_AUTHORITY_IDS if native else ()
+            complete = tuple(sorted(healthy + authority + checks.PYTHON_SINGLETON_IDS + delegated))
+            parts = (("all", "ordinary", "authority", "delegated", *checks.PYTHON_SINGLETON_PARTITIONS) if native else
+                     ("all", "delegated", "healthy", *checks.PYTHON_SINGLETON_PARTITIONS))
+            active = "ordinary" if native else "healthy"
+
+            def acquire():
+                return (checks.native_capture_snapshot(ROOT, deadline=42.0) if native else
+                        checks.python_capture_snapshot(ROOT, selection, deadline=42.0))
+
             with self.subTest(selection=selection), \
                     patch.object(checks, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
                     patch.object(checks, "expected_python_ids", return_value=complete) as source, \
                     patch.object(checks, "signing_regression_metadata", return_value=metadata) as catalog:
-                snapshot = checks.python_capture_snapshot(ROOT, selection, deadline=42.0)
+                snapshot = acquire()
                 self.assertIs(type(snapshot), tuple)
                 inventories, captured_metadata = snapshot
                 self.assertIs(type(inventories), MappingProxyType)
                 self.assertIs(captured_metadata, metadata)
                 self.assertEqual(tuple(inventories), parts)
                 self.assertEqual(inventories["all"], complete)
-                self.assertEqual(inventories["healthy"], healthy)
+                self.assertEqual(inventories[active], healthy)
+                if native:
+                    self.assertEqual(inventories["authority"], authority)
                 self.assertEqual(inventories["delegated"], delegated)
                 self.assertEqual(tuple(inventories[name] for name in checks.PYTHON_SINGLETON_PARTITIONS),
                                  tuple((identifier,) for identifier in checks.PYTHON_SINGLETON_IDS))
                 self.assertTrue(all(type(ids) is tuple and ids and tuple(sorted(set(ids))) == ids
                                     for ids in inventories.values()))
-                joined = tuple(identifier for part in ("healthy", *checks.PYTHON_SINGLETON_PARTITIONS, "delegated")
+                joined = authority + tuple(identifier for part in (active, *checks.PYTHON_SINGLETON_PARTITIONS, "delegated")
                                for identifier in inventories[part])
                 self.assertEqual(tuple(sorted(joined)), complete)
                 self.assertEqual(len(joined), len(set(joined)))
                 source.assert_called_once_with(ROOT, selection, deadline=42.0)
-                catalog.assert_called_once_with(ROOT, "ubuntu-24.04", deadline=42.0)
-                for mapping, key in ((inventories, "healthy"), (captured_metadata[1], delegated[0])):
+                catalog.assert_called_once_with(ROOT, operating_system, deadline=42.0)
+                for mapping, key in ((inventories, active), (captured_metadata[1], delegated[0])):
                     with self.assertRaises(TypeError):
                         mapping[key] = ()
                 fresh = "unit.synthetic.SnapshotTests.test_third"
                 source.return_value = tuple(sorted(complete + (fresh,)))
-                second, second_metadata = checks.python_capture_snapshot(ROOT, selection, deadline=42.0)
+                second, second_metadata = acquire()
                 self.assertIsNot(second, inventories)
                 self.assertIs(second_metadata, metadata)
-                self.assertEqual(second["healthy"], healthy + (fresh,))
-                self.assertEqual(inventories["healthy"], healthy)
+                self.assertEqual(second[active], healthy + (fresh,))
+                self.assertEqual(inventories[active], healthy)
                 self.assertEqual(source.call_count, 2)
                 self.assertEqual(catalog.call_count, 2)
 
-        for expired_at, expected_calls in (("before", (0, 0)), ("inventory", (1, 0)), ("metadata", (1, 1))):
-            clock = [42.0 if expired_at == "before" else 10.0]
+            for expired_at, expected_calls in (("before", (0, 0)), ("inventory", (1, 0)), ("metadata", (1, 1))):
+                clock = [42.0 if expired_at == "before" else 10.0]
 
-            def acquire_source(*args, **kwargs):
-                if expired_at == "inventory":
-                    clock[0] = 42.0
-                return complete
+                def acquire_source(*args, **kwargs):
+                    if expired_at == "inventory":
+                        clock[0] = 42.0
+                    return complete
 
-            def acquire_metadata(*args, **kwargs):
-                if expired_at == "metadata":
-                    clock[0] = 42.0
-                return metadata
+                def acquire_metadata(*args, **kwargs):
+                    if expired_at == "metadata":
+                        clock[0] = 42.0
+                    return metadata
 
-            with self.subTest(expired_at=expired_at), \
-                    patch.object(checks, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
-                    patch.object(checks, "expected_python_ids", side_effect=acquire_source) as source, \
-                    patch.object(checks, "signing_regression_metadata", side_effect=acquire_metadata) as catalog, \
-                    patch.object(checks, "_python_capture_partition", side_effect=AssertionError("partition after acquisition expiry")):
-                with self.assertRaisesRegex(checks.CheckError, "DEADLINE_EXPIRED"):
-                    checks.python_capture_snapshot(ROOT, "full", deadline=42.0)
-                self.assertEqual((source.call_count, catalog.call_count), expected_calls)
+                with self.subTest(selection=selection, expired_at=expired_at), \
+                        patch.object(checks, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
+                        patch.object(checks, "expected_python_ids", side_effect=acquire_source) as source, \
+                        patch.object(checks, "signing_regression_metadata", side_effect=acquire_metadata) as catalog, \
+                        patch.object(checks, "_python_capture_partition", side_effect=AssertionError("partition after acquisition expiry")):
+                    with self.assertRaisesRegex(checks.CheckError, "DEADLINE_EXPIRED"):
+                        acquire()
+                    self.assertEqual((source.call_count, catalog.call_count), expected_calls)
         for selection in ("native", "healthy", "all", None, True, []):
             with self.subTest(invalid_selection=selection), \
                     patch.object(checks, "expected_python_ids", side_effect=AssertionError("invalid acquisition")), \
@@ -5308,11 +5871,18 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         checks = ci_module("ci_checks")
         poison = checks.PYTHON_SINGLETON_IDS
         delegated, requirements = _g_metadata_fixture("ubuntu-24.04")
+        store_rows = tuple((subcase, checks.STORE_NATIVE_PREFIX + method)
+                           for subcase, method in checks.STORE_NATIVE_ROWS)
+        store_ids = tuple(sorted({identifier for _, identifier in store_rows}))
+        self.assertEqual((len(store_rows), len(store_ids)), (15, 7))
         healthy = tuple(f"unit.synthetic.HealthyContracts.test_{name}" for name in ("first", "subject", "third"))
         complete = tuple(sorted(healthy + poison + delegated))
         for selection in ("full", "wheel"):
-            for outcome in ("success", "allowed-skip", "error", "failure", "skip", "subtest", "expected-failure", "unexpected-success",
-                            "missing-poison", "missing-delegated", "duplicate-discovery"):
+            native_store = store_ids if selection == "full" else ()
+            outcomes = ("success", "allowed-skip", "error", "failure", "skip", "subtest", "expected-failure", "unexpected-success",
+                        "missing-poison", "missing-delegated", "duplicate-discovery")
+            outcomes += ("missing-store", "duplicate-store") if selection == "full" else ("unexpected-store",)
+            for outcome in outcomes:
                 with self.subTest(selection=selection, outcome=outcome):
                     events, observations, retained = [], [], []
 
@@ -5326,8 +5896,8 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
                         def runTest(self):
                             events.append(self.identifier)
-                            if self.identifier in poison + delegated:
-                                raise AssertionError("a poison/delegated fixture must never execute in the healthy capture")
+                            if self.identifier in poison + delegated + store_ids:
+                                raise AssertionError("a poison/delegated/Store fixture must never execute in the healthy capture")
                             if self.identifier != healthy[1]:
                                 return
                             if outcome in {"error", "expected-failure"}:
@@ -5354,20 +5924,30 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
                     loaded = [Fixture(healthy[0]),
                               (ExpectedFixture if outcome in {"expected-failure", "unexpected-success"} else Fixture)(healthy[1]),
-                              Fixture(healthy[2]), *(Fixture(identifier) for identifier in poison + delegated)]
+                              Fixture(healthy[2]), *(Fixture(identifier) for identifier in poison + delegated + native_store)]
                     if outcome == "missing-poison":
                         loaded = [test for test in loaded if test.id() != poison[0]]
                     elif outcome == "missing-delegated":
-                        loaded.pop()
+                        loaded = [test for test in loaded if test.id() != delegated[-1]]
                     elif outcome == "duplicate-discovery":
                         loaded.append(Fixture(poison[0]))
+                    elif outcome == "missing-store":
+                        loaded = [test for test in loaded if test.id() != store_ids[0]]
+                    elif outcome in {"duplicate-store", "unexpected-store"}:
+                        loaded.append(Fixture(store_ids[0]))
                     suite = unittest.TestSuite(loaded)
                     framework = SimpleNamespace(TestSuite=unittest.TestSuite, TextTestResult=unittest.TextTestResult,
                         TextTestRunner=RetainingRunner,
                         TestLoader=lambda: SimpleNamespace(errors=[], discover=lambda *_args, **_kwargs: suite))
+
+                    def store_catalog(source_root, phase, *, deadline):
+                        self.assertEqual((source_root, phase, deadline), (ROOT, "source", 1000.0))
+                        return store_rows  # Fixed DATA only; no Store test/helper is imported or executed.
+
                     with patch.object(checks, "unittest", framework), \
                             patch.object(checks, "expected_python_ids", return_value=complete), \
                             patch.object(checks, "signing_regression_metadata", return_value=(delegated, requirements)), \
+                            patch.object(checks, "store_lane_native_rows", side_effect=store_catalog) as observed_store, \
                             patch.object(checks, "WHEEL_PATTERNS", ("test_fixed_fixture.py",)), \
                             patch.object(checks, "LINUX_MACOS_SKIPS", frozenset({healthy[1]}) if outcome == "allowed-skip" else frozenset()), \
                             patch.object(checks, "_remaining", return_value=10.0), \
@@ -5385,7 +5965,8 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                         else:
                             with self.assertRaises(checks.CheckError) as raised:
                                 checks.run_python_tests(ROOT, selection, 1000.0, observations, work_root=Path("/fixture/checks"))
-                            if outcome in {"missing-poison", "missing-delegated", "duplicate-discovery"}:
+                            if outcome in {"missing-poison", "missing-delegated", "duplicate-discovery",
+                                           "missing-store", "duplicate-store", "unexpected-store"}:
                                 self.assertEqual(events, [])
                                 self.assertEqual(str(raised.exception), "TEST_LOADED_INVENTORY")
                             else:
@@ -5399,8 +5980,14 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                                 with self.assertRaisesRegex(checks.CheckError, "TEST_CONTINUED_AFTER_FAILURE"):
                                     retained[0].startTest(Fixture(healthy[2]))
                                 self.assertTrue(retained[0].shouldStop)
+                    if selection == "full":
+                        observed_store.assert_called_once_with(ROOT, "source", deadline=1000.0)
+                    else:
+                        observed_store.assert_not_called()
                     self.assertFalse(set(events) & set(poison + delegated))
                     self.assertFalse({row["id"] for row in observations} & set(poison + delegated))
+                    self.assertFalse(set(events) & set(store_ids))
+                    self.assertFalse({row["id"] for row in observations} & set(store_ids))
 
     def test_native_partition_authority_is_exact_and_cannot_silently_expand(self):
         checks = ci_module("ci_checks")
@@ -5432,8 +6019,8 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                 selected = checks.native_partition_ids(ROOT, name, deadline=deadline)
                 self.assertEqual(selected, (identifier,))
                 poison.extend(selected)
-            self.assertEqual(inventory.call_count, 74)
-            self.assertEqual(metadata.call_count, 74)
+            self.assertEqual(inventory.call_count, 76)
+            self.assertEqual(metadata.call_count, 76)
         poison = tuple(poison)
         self.assertEqual(authority, checks.NATIVE_AUTHORITY_IDS)
         self.assertEqual(len(authority), 5)
@@ -5466,7 +6053,9 @@ class CIProductEvidenceContractTests(unittest.TestCase):
             "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
             "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
             "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
-            "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py"))
+            "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py",
+            "test_build_inputs.py", "test_checked_files.py", "test_source_observation.py",
+            "test_credentials_metadata.py", "test_cli_and_build.py", "test_app_private.py"))
         self.assertEqual(set(checks.WHEEL_PATTERNS), {
             "test_init_transaction.py", "test_ios_entitlements.py", "test_ios_plist_binary.py",
             "test_native_process.py", "test_profile_process_owner.py", "test_default_cancellation.py",
@@ -5476,7 +6065,9 @@ class CIProductEvidenceContractTests(unittest.TestCase):
             "test_local_signing_composition.py", "test_owned_process.py", "test_owned_process_callers.py",
             "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
             "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
-            "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py"})
+            "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py",
+            "test_build_inputs.py", "test_build_inputs_cli.py", "test_checked_files.py", "test_source_observation.py",
+            "test_ios_correspondence.py", "test_credentials_metadata.py", "test_cli_and_build.py"})
         for invalid in ("unknown", "Authority", "", None, True, []):
             with self.subTest(partition=invalid), self.assertRaisesRegex(checks.CheckError, "NATIVE_PARTITION"):
                 checks.native_partition_ids(ROOT, invalid, deadline=deadline)
@@ -5697,12 +6288,13 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         }
         native = {f"{group}.test_{method}" for group, methods in families.items() for method in methods}
         native.add("unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state")
+        native.add("unit.test_checked_files.NativeCheckedFilesTests.test_actual_tmp_var_folders_and_physical_spellings_select_identical_private_bytes")
         self.assertEqual(checks.linux_allowed_skips(), frozenset(native))
-        self.assertEqual(len(native), 20)
+        self.assertEqual(len(native), 21)
         wheel = checks.expected_python_ids(ROOT, "wheel")
         wheel_skips = set(wheel) & native
         self.assertEqual(wheel_skips, _WHEEL_DARWIN_SKIP_IDS)
-        self.assertEqual(len(wheel_skips), 8)
+        self.assertEqual(len(wheel_skips), 9)
         checks.validate_test_outcomes(wheel, [{"id": identifier, "outcome": "skip" if identifier in wheel_skips else "ok"}
                                              for identifier in wheel], "linux")
         ids = ("unit.fixture.Contracts.test_positive", *sorted(native))
@@ -5873,6 +6465,125 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                     else:
                         with self.assertRaises(checks.CheckError):
                             checks.inspect_wheel_consumer(root, ROOT, deadline=deadline)
+
+    def test_jdk_policy_transport_reaches_owned_callers_and_restores_original_binding(self):
+        """Actual Android policy callers, inert transport; no native/owner proof."""
+        from mobile_release import android, owned_process
+
+        checks = ci_module("ci_checks")
+        original, original_module, original_run = android.run_owned, android.subprocess, subprocess.run
+        scenarios = ("outside-warning-window", "inside-warning-window", "expired", "not-yet-valid")
+        warnings_by_case = (
+            "", "This jar contains entries whose signer certificate will expire within six months.\n",
+            "This jar contains entries whose signer certificate has expired.\n",
+            "This jar contains entries whose signer certificate is not yet valid.\n",
+        )
+        options = ["-Xms32m", "-Xmx256m", "-XX:MaxMetaspaceSize=256m",
+                   "-XX:CompressedClassSpaceSize=128m", "-XX:ReservedCodeCacheSize=128m"]
+
+        def deny_original(*_args, **_kwargs):
+            self.fail("the policy fixture must never invoke the native command owner")
+
+        for variant in ("success", "transport-failure", "custody-drift"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory(prefix="mrk-jdk-policy-contract-") as temporary:
+                root = Path(temporary).resolve()
+                home, work = root / "jdk", root / "work"
+                (home / "bin").mkdir(parents=True)
+                work.mkdir()
+                tools = {name: str(home / "bin" / name) for name in ("java", "keytool", "jarsigner")}
+                for path in tools.values():
+                    Path(path).write_bytes(b"Non-executable tool-location fixture.\n")
+                environment = {"JAVA_HOME": str(home), "PATH": str(home / "bin"), "LANG": "ambient", "LC_ALL": "ambient",
+                               "JAVA_TOOL_OPTIONS": "inert excluded setting", "MOBILE_RELEASE_DEPENDENCY_TOKEN": "synthetic-only"}
+                inspection = {name: environment[name] for name in ("JAVA_HOME", "PATH")}
+                inspection.update(LANG="C", LC_ALL="C")
+                deadline, calls, product_calls = time.monotonic() + 30.0, [], []
+                failure = checks.CheckError("JDK_INERT_TRANSPORT_FAILURE")
+
+                def child(argv, **kwargs):
+                    # Every possible process boundary is replaced before entry.
+                    self.assertIs(android.subprocess, original_module)
+                    self.assertIs(subprocess.run, original_run)
+                    self.assertEqual(set(kwargs), {"cwd", "deadline", "seconds", "environment", "status", "echo"})
+                    self.assertEqual(kwargs["deadline"], deadline)
+                    name = Path(argv[0]).name
+                    self.assertEqual(argv[0], tools[name])
+                    flags = options if name == "java" else ["-J" + option for option in options]
+                    self.assertEqual(argv[1:1 + len(flags)], flags)
+                    arguments = argv[1 + len(flags):]
+                    if not calls:
+                        self.assertEqual((name, arguments), ("java", ["-version"]))
+                        self.assertEqual(kwargs, {"cwd": work / "jdk-signers", "deadline": deadline,
+                            "seconds": 30, "environment": inspection, "status": 0, "echo": True})
+                        calls.append((name, arguments))
+                        return subprocess.CompletedProcess(argv, 0, b"", b'openjdk version "21.0.9"\n')
+                    index, step = divmod(len(calls) - 1, 6)
+                    scenario = scenarios[index]
+                    self.assertEqual(kwargs["cwd"], work / "jdk-signers" / scenario)
+                    self.assertEqual(name, ("keytool", "jarsigner", "jarsigner", "keytool", "jarsigner", "keytool")[step])
+                    self.assertEqual(arguments[0], ("-genkeypair", "-keystore", "-verify", "-exportcert", "-verify", "-printcert")[step])
+                    expected_env = dict(inspection)
+                    if step in {0, 1, 3}:
+                        expected_env["MRK_SYNTHETIC_PASSWORD"] = "disposable-test-password"
+                    self.assertEqual(kwargs["environment"], expected_env)
+                    self.assertEqual(kwargs["seconds"], 30 if step == 5 else 120)
+                    self.assertEqual(kwargs["status"], 4 if step in {2, 4} else 0)
+                    self.assertIs(kwargs["echo"], step != 3)
+                    calls.append((name, arguments))
+                    if step >= 4:
+                        self.assertIsNot(android.run_owned, deny_original)
+                        self.assertIs(owned_process.run_owned, deny_original)
+                        product_calls.append(name)
+                        expected_args = (["-verify", "-strict"] if step == 4 else ["-printcert", "-jarfile"])
+                        self.assertEqual(arguments, [*expected_args, str(kwargs["cwd"] / "synthetic.jar")])
+                    else:
+                        self.assertIs(android.run_owned, deny_original)
+                    if step == 5 and variant == "transport-failure":
+                        raise failure
+                    if step == 5 and variant == "custody-drift":
+                        android.run_owned = object()
+                    certificate = b"\x30synthetic-policy-contract:" + scenario.encode("ascii")
+                    stdout, stderr = b"", b""
+                    if step in {2, 4}:
+                        stdout = b"jar verified, with signer errors.\n"
+                        stderr = (
+                            "This jar contains entries whose certificate chain is invalid. Reason: "
+                            "PKIX path building failed: synthetic: unable to find valid certification path to requested target\n"
+                            "This jar contains entries whose signer certificate is self-signed.\n" + warnings_by_case[index]
+                        ).encode("ascii")
+                    elif step == 3:
+                        stdout = certificate
+                    elif step == 5:
+                        stdout = ("Signer #1:\n\nCertificate #1:\n SHA256: "
+                                  + hashlib.sha256(certificate).hexdigest() + "\n").encode("ascii")
+                    return subprocess.CompletedProcess(argv, kwargs["status"], stdout, stderr)
+
+                with patch.object(checks, "sys", SimpleNamespace(platform="linux", flags=SimpleNamespace(isolated=1, dont_write_bytecode=1))), \
+                        patch.object(checks, "os", SimpleNamespace(**{**vars(os), "getuid": lambda: 1000, "environ": environment})), \
+                        patch.object(checks, "shutil", SimpleNamespace(which=tools.get)), \
+                        patch.object(android, "os", SimpleNamespace(environ=environment)), \
+                        patch.object(owned_process, "run_owned", deny_original), \
+                        patch.object(android, "run_owned", deny_original), patch.object(checks, "_run_child", child):
+                    if variant == "success":
+                        result = checks.jdk_signers(ROOT, work, deadline)
+                        self.assertEqual(result["version"], "21.0.9")
+                        self.assertEqual(len(result["native_calls"]), 25)
+                        self.assertEqual([row["id"] for row in result["cases"]], list(scenarios))
+                        self.assertEqual([row["accepted"] for row in result["cases"]], [True, False, False, False])
+                        self.assertEqual(len({row["fingerprint"] for row in result["cases"]}), 4)
+                    else:
+                        expected = "JDK_INERT_TRANSPORT_FAILURE" if variant == "transport-failure" else "JDK_BINDING_CUSTODY"
+                        with self.assertRaisesRegex(checks.CheckError, "^" + expected + "$") as caught:
+                            checks.jdk_signers(ROOT, work, deadline)
+                        if variant == "transport-failure":
+                            self.assertIs(caught.exception, failure)
+                    self.assertIs(android.run_owned, deny_original)
+                    self.assertIs(owned_process.run_owned, deny_original)
+                self.assertEqual(len(calls), 25 if variant == "success" else 7)
+                self.assertEqual(product_calls, ["jarsigner", "keytool"] * (4 if variant == "success" else 1))
+                self.assertIs(android.run_owned, original)
+                self.assertIs(android.subprocess, original_module)
+                self.assertIs(subprocess.run, original_run)
 
     def test_jdk_diagnostic_classification_is_exact_but_is_not_native_evidence(self):
         checks = ci_module("ci_checks")

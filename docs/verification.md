@@ -42,11 +42,13 @@ runner may match these labels. The first-step `runner.environment` assertion is
 defense in depth, not proof of server-side scheduling. Retain actual runner/image
 metadata from the Actions job. Do not add container/service/self-hosted fallbacks.
 
-Both native jobs have a 60-minute job timeout and read-only contents permissions.
+The Linux job and both fixed macOS jobs have a 60-minute job timeout and read-only
+contents permissions.
 The full workflow additionally runs the finite local-signing matrix described
-below. The protected status job `test` requires the Linux and macOS platform jobs,
-the complete matrix job set, and a successful proof reduction; failed, cancelled,
-skipped, unavailable or queued is not success.
+below. The protected status job `test` requires `test-linux`, both
+`test-native-profiles` and `test-native-support`, the complete matrix job set, and
+a successful proof reduction; failed, cancelled, skipped, unavailable or queued
+is not success. Neither macOS job can substitute for its required companion.
 Never bypass branch protection or dispatch release/Store workflows for testing.
 
 For an intermediate Linux correction, manual `verification_target: linux` runs
@@ -54,8 +56,9 @@ the **same complete Linux source/wheel catalog and owner path**, without macOS o
 matrix jobs. The disposable hosted VM is required; a Linux OS or root access on
 the shared VPS does not admit the native/process suite or controller there.
 For an intermediate macOS-only correction, manual `verification_target: macos`
-omits Linux but runs the **same complete macOS catalog and owner path**. The
-partial selection, `signing-adapter`, runs only the two-OS smoke scope below.
+omits Linux and the matrix but runs **both fixed macOS source/wheel owners**,
+covering every gate in the complete macOS catalog. The partial selection,
+`signing-adapter`, runs only the two-OS smoke scope below.
 `signing-adapter-macos` selects the identical source/wheel smoke on macOS only
 when a Darwin-only change does not invalidate previously recorded Linux evidence.
 It does not supply fresh Linux evidence or satisfy the full protected gate.
@@ -161,7 +164,10 @@ The helpers under [`.github/scripts/`](../.github/scripts/) have separate roles:
 | `ci_native_authority.py` | Fixed macOS trust-service lookup and synthetic offline-evaluation controls; no general service-request interface. |
 
 These are CI internals, not a general command-execution API. The reviewed
-`required_gate_ids()` and `catalog()` select the complete platform sequence.
+`required_gate_ids()` and `catalog()` select the complete fixed scope sequence.
+The macOS-only `native-python` and `native-support` scopes are closed catalogs,
+not arbitrary shard selectors; `platform` retains the complete original catalog
+for explicit direct callers.
 Do not pass arbitrary user commands, replacement interpreters, custom execution
 roles, environment extensions, or shortened/subset gate lists. Internal sandbox
 entry roles are not independently supported launch commands.
@@ -177,6 +183,9 @@ Preparation downloads only public, allowlisted HTTPS inputs selected by
 checksum-bearing `Gemfile.lock`. Redirects, sizes, aggregate bytes, archive members
 and hashes are bounded. Preparation does not run a Gemfile, gemspec, downloaded
 installer, project backend, or package import; it does not restore shared caches.
+Both fixed macOS scopes prepare the same complete offline Python and gem inputs
+and pinned tools as the full macOS platform scope. Each job creates its own
+immutable bindings; splitting scheduling adds no network access to test subjects.
 
 Provider images do not necessarily have permissions compatible with a distinct
 numeric test identity. After setup and identity-collision checks, the disposable
@@ -443,18 +452,26 @@ is used to test denial. An ineffective/unavailable boundary prevents all gates.
 
 ## Deadlines, output and finality
 
-The controller uses one 3300-second aggregate deadline, plus fixed per-gate bounds;
-no failed gate receives a renewed execution allowance. Child CPU, file, descriptor,
-process and memory bounds supplement the hosted job timeout. The current capture
+Each controller owner/job uses one original 3300-second aggregate deadline, plus
+fixed per-gate bounds; no failed gate receives a renewed execution allowance.
+The two macOS owners have separate aggregates, not one cross-job 3300-second
+budget. Child CPU (180 seconds), file, descriptor, process and memory bounds
+supplement the hosted job timeout. The current capture
 limits are 8 MiB per ordinary stream, 16 MiB for selected installer streams, and
 256 MiB persisted per attempt. A 4 GiB + 512 MiB disk reserve is maintained.
 
-Each logical native source/wheel gate fixes `min(aggregate_deadline, start+900)`
+Each logical native source/wheel gate fixes `min(aggregate_deadline, start+1500)`
 before package inspection or role preparation. All original part captures,
 preparation, parsers, process finality and final union reconciliation use that
-same absolute cutoff; no later part receives a new 900-second budget. Exhausting
-the aggregate/explicit endpoint fails immediately, without a renewed grace
-period. Original-handle cleanup still runs; uncertain finality cannot pass.
+same absolute cutoff. The ordinary capture has a 1500-second relative maximum;
+authority and singleton captures retain their tighter 900-second relative maxima,
+always clamped to that original gate endpoint. Authority preparation and its
+postcondition inspection share the 1500-second endpoint: only the authority
+capture itself retains the exact 900-second contract. No later part renews the
+cutoff. Exhausting the aggregate/explicit endpoint fails immediately, without a
+renewed grace period. Original-handle cleanup still runs; uncertain finality
+cannot pass. These verification scheduling allocations do not change product
+deadlines or native-control permissions and do not predict a passing duration.
 
 The ordinary per-file logical-size limit is512MiB. Only the exact Linux
 `python-full` invocation uses `(1 << 32) + 1MiB`, preserving the genuine sparse
@@ -512,17 +529,59 @@ inventory; it does not waive the product behaviors that inventory was meant to t
 
 | Platform | Required gate families |
 |---|---|
-| Linux | Offline source installation; ABI/runtime compatibility gates; full Python discovery; all listed Ruby suites, including native/iOS/Android descendant regressions and actual packaged capture; Fastfile validation; first-party/template actionlint; real JDK signer checks; wheel build/inspection/install/smoke/consumer and selected installed-wheel Python checks; source integrity. |
-| macOS | Offline source installation; exact Xcode 26.3/native tools; ABI/runtime compatibility gates; source native-profile gate; all fixed Ruby primitive/helper/capture/adapter suites and separate native signal-observation proof; wheel build/inspection/install/smoke/consumer, including actual installed Ruby capture; installed-wheel native-profile gate; source integrity. |
+| Linux | Offline source installation; ABI/runtime compatibility gates; full Python discovery; all listed Ruby suites, including native/iOS/Android descendant regressions and actual packaged capture; separate source/wheel Store-native gates; Fastfile validation; first-party/template actionlint; real JDK signer checks; wheel build/inspection/install/smoke/consumer and selected installed-wheel Python checks; source integrity. |
+| macOS | Offline source installation; exact Xcode 26.3/native tools; ABI/runtime compatibility gates; source native-profile gate; all fixed Ruby primitive/helper/capture/adapter suites and separate native signal-observation proof; source/wheel Store-native gates; wheel build/inspection/install/smoke/consumer, including actual installed Ruby capture; installed-wheel native-profile gate; source integrity. |
 
-The macOS Ruby and source native-profile gates have no inter-suite dependency;
-both retain their own admission. The native-profile gate runs first after source
-ABI/compatibility so Python failures surface before the Ruby suites. The source
-catalog selects **51 Linux gates and 39 macOS gates**; these are required inventory
-counts, not completed or passing runs.
-Every selected gate remains required and any failure stops later gates. Recompute
+The complete `platform` catalog retains **58 Linux gates and 41 macOS gates**.
+Hosted full/PR/main and macOS-only verification execute the macOS obligations in
+two fixed jobs:
+
+- `test-native-profiles`, scope `native-python`: **31 gates**, retaining both
+  native Python source/wheel gates together with their original source/wheel
+  prerequisites, native tools, ABI, compatibility, smoke/consumer and integrity
+  checks.
+- `test-native-support`, scope `native-support`: **39 gates**, the complete old
+  macOS catalog minus only those two native Python gates. All six Ruby suites,
+  both packaged captures and both Store-native gates remain, with every original
+  prerequisite in relative order.
+
+Their 29 shared prerequisite gates establish independent bindings in each owner;
+the union covers all 41 distinct macOS gate obligations. Each source/wheel pair
+stays in one original Session, including source authority/ABI needed by its wheel
+phase. No cross-job receipt supplies authority or process ownership. These are
+required inventory counts, not completed or passing runs.
+Every selected gate remains required and any failure stops later gates within
+that owner. Recompute
 inventories when source changes; historical native totals cannot stand in for
 the complete current source-derived method identities and outcomes.
+
+The five Linux Store suites run sequentially in separate per-file captures.
+Their inert lifecycle models and private filesystem assertions do not prove
+native paired-clock behavior, real process exit/finality or Store integration.
+
+The separate Store-native gates require all15 source and14 installed-wheel rows
+for seven fixed logical methods, never raw/default discovery execution. Every
+row has its own original isolated Python domain under one300-second phase
+endpoint, with a tighter20-second case cutoff including capture/idle/accounting.
+Wheel proof retains the genuine source ordinary-exit control and unchanged
+fixture/tool bindings. `--scope store-lane` selects the required preparation,
+source/wheel ABI and Store gates and source integrity (22 Linux/23 macOS gates).
+The fixed `store-lane-macos` Actions target runs only `test-native-support` with
+scope `store-lane`; it does not run the native Python pair. Targeted success
+cannot satisfy the complete protected aggregate.
+
+Immutable source/tool/wheel bindings, original capture/IPC counts and idle-gated
+surviving-file scans are outside observations. The unchanged fixture separately
+checks its original launcher/request/diagnostics before eligible inner disposal;
+successful deleted files are not claimed to be reread by the outside owner.
+The8MiB case limit conservatively sums the inner observation, outside survivors
+and original captures, counting retained overlap twice rather than inventing
+identity credit. Diagnostic files are64KiB-bounded, with256KiB of captures and
+surviving diagnostic bytes per phase; none of this measures peak/transient disk.
+Actual scratch files and directories must share a device before native launch.
+Unknown outer finality retains the domain; inaccessible accounting is unavailable,
+never zero or PASS. Only original outside finality/idle permits outside disposal;
+that disposal is not evidence that an UNKNOWN product owner cleaned itself.
 
 The native capture suite and both platform adapter suites run without the
 separate signal-proof instrumentation. An additional fixed Ruby invocation on
@@ -629,9 +688,10 @@ family import closures, with exact selected source or actual installed-wheel
 origins. The primitive runner does not gain workflow imports from another family.
 There is no generic caller-supplied method selector or broad workflow import grant.
 
-All parts retain one fixed gate endpoint: 900 seconds for the affected Python
-gates, 120 for the Ruby owner, 310 for native capture and 300 for each adapter,
-always clamped to the original 3300-second job endpoint. Native capture additionally
+All parts retain one fixed gate endpoint: 1500 seconds for macOS native Python
+gates, 900 for the other affected Python gates, 120 for the Ruby owner, 310 for
+native capture and 300 for each adapter, always clamped to the original
+3300-second job endpoint. Native capture additionally
 caps its healthy 18-test partition at 180 seconds and each of its four fixed singletons
 at 30 seconds, including preparation, capture, result parsing and finality. Each
 singleton keeps its original 15-second driver and 5-second cleanup limits; another 10 seconds
@@ -640,16 +700,21 @@ extension. Setup and final-union bookkeeping share a separate 10 seconds. Every
 phase cutoff is fixed before its work; unused partition time cannot be donated,
 and setup time is deducted from the union allowance. These are finite scheduling
 ceilings, not guarantees of a passing run. Other gates retain their shared-cutoff
-behavior. The macOS authority capture and 2+2 prerequisite routing remain unchanged.
-These splits add no logical gates, jobs, builds, permission profiles or observers.
+behavior. The macOS authority capture's relative 900-second cap and 2+2
+prerequisite routing remain unchanged; authority preparation/postconditions share
+the amended native gate endpoint. Singleton partitioning itself adds no logical
+gates, jobs, builds, permission profiles or observers; the separate fixed macOS
+job scheduling is described above.
 
-On macOS the source native-profile gate runs immediately after native-tools,
-source ABI and compatibility prerequisites, then the fixed iOS adapter and other
-Ruby native gates retain their relative order. Linux runs its fixed 74 singleton
-Python partitions before the healthy source/wheel capture to expose small failures
+Within `native-python`, the macOS source native-profile gate follows native-tools,
+source ABI and compatibility prerequisites. The independent `native-support`
+owner retains the fixed iOS adapter and other Ruby native gates in their original
+relative order. Linux runs its fixed 76 singleton Python partitions (74 poison
+and 2 fresh) before the healthy source/wheel capture to expose small failures
 earlier. Name-based profiles, poison-only disposal, original finality and idle,
-all 51 Linux and 39 macOS gates, every partition and the original aggregate cutoffs
-remain mandatory. Earlier failure leaves later work explicitly unexecuted.
+all 58 Linux and 41 distinct macOS gate obligations, every partition and the
+original per-owner aggregate cutoffs remain mandatory. Earlier failure leaves
+later work explicitly unexecuted.
 
 The synthetic adapter process controls use a separate fixed timing profile:
 10 seconds for complete readiness (the existing five-second startup allowance,
@@ -796,7 +861,7 @@ The fixed QA-007 catalog additions are:
 | `ruby-native-spawn`, `ruby-native-owner` | Complete source-derived primitive and owner/protocol regression identities, in addition to the existing capture/adapter suites. |
 | `ruby-packaged-capture-source`, `ruby-packaged-capture-wheel` | Real source/installed capture and adapter finality; the wheel gate also owns the separate same-wheel missing-helper installation. Each logical gate has one 300-second cutoff, including preparation and finality. |
 
-All use the original 3300-second aggregate deadline. Compatibility gates do not
+All use the original per-owner 3300-second aggregate deadline. Compatibility gates do not
 rerun the whole project matrix, rebuild the wheel or install dependencies for
 three more interpreters. Their isolated package-only loader must use the same
 already-checked source or actual installed `py3-none-any` wheel bytes, with real
@@ -942,8 +1007,10 @@ These controls require applicable native source and installed paths on the
 admitted Linux/macOS platforms. Pure parser/state tests, a copied helper tree,
 protocol flags or disposal of the verification VM do not substitute for real
 runtime/ABI/process observations. The final catalog must reconcile every new
-method identity, partition and outcome without changing the five-method authority
-partition, 2+2 prerequisites or shared 900-second native logical-gate cutoff.
+method identity, partition and outcome while retaining the five-method authority
+partition and 2+2 prerequisites under the shared 1500-second native logical-gate
+cutoff. Authority and singleton captures retain their relative 900-second caps;
+preparation and postconditions share the original logical-gate endpoint.
 Every required healthy/singleton capture needs its own genuine finality/disposal;
 no control is claimed passed merely because it is listed here.
 
@@ -982,6 +1049,12 @@ excluded. Original failure survives failfast's later count mismatch; the parent
 filters the schema/identities and requires an empty callback list on success.
 Only genuinely completed fixed storage controls may appear as profile observations;
 they never replace original wait/EOF/domain finality or successful test outcomes.
+
+Ordinary native start/success headers also carry an optional bounded elapsed
+millisecond observation from one original monotonic clock. Failure diagnostics
+associate it only with the immediately following complete, source-known header.
+This reports callback timing, not body entry, completion, or a new deadline;
+other native roles retain their original untimed output.
 
 Ruby completion parsing binds each source-known verbose method prefix to exactly
 one timed successful terminal before the next method or footer. Ordinary multiline

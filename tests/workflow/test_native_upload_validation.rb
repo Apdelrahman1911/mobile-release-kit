@@ -17,6 +17,7 @@ class NativeUploadValidationTest < Minitest::Test
     fastlane/native_process_spawn.rb
     fastlane/native_upload_process.rb
     fastlane/release_support.rb
+    fastlane/store_lane_lifetime.rb
   ].freeze
   IDENTITY_PREDICATE = 'primary.equal?(@injected_error) && '
   UNEXPECTED_PRIMARY_RETHROW = <<~RUBY.lines.map { |line| "      #{line}" }.join.freeze

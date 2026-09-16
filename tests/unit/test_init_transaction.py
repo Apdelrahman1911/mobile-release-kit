@@ -11,7 +11,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -203,6 +202,12 @@ class InitTransactionTests(unittest.TestCase):
             self.assertEqual(set(report), {"discovery", "proposedConfiguration"})
             self.assertEqual(report["discovery"]["git"], git.as_dict())
             self.assertEqual(snapshot(root), before)
+            with patch("mobile_release.discovery.git_context", return_value=git):
+                custom_code, custom_output, custom_error = invoke(
+                    ["init", "--root", str(root), "--config", "release/alternate.json"]
+                )
+            self.assertEqual(custom_code, 0, custom_error)
+            self.assertEqual(json.loads(custom_output), report)
             with patch("mobile_release.discovery.git_context", side_effect=AssertionError("static proposal must not query Git")):
                 discovered, proposed = cli._init_proposal(root, include_git=False)
             self.assertEqual(discovered, {key: value for key, value in report["discovery"].items() if key != "git"})
@@ -225,9 +230,38 @@ class InitTransactionTests(unittest.TestCase):
                 self.assert_complete(root, force=True)
                 before = snapshot(root)
                 self.assertEqual(invoke(args)[0], 0)
+                self.assertEqual(invoke(args + ["--config", str(root / cli.DEFAULT_CONFIG)])[0], 0)
                 self.assertEqual(snapshot(root), before)
                 self.assert_no_state(root)
                 self.assertEqual(json.loads(invoke(["init", "--root", str(root), "--recover"])[1])["recovery"], "no-op")
+
+    def test_nondefault_apply_config_is_rejected_before_workspace(self) -> None:
+        for existing_default in (False, True):
+            with self.subTest(existing_default=existing_default), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                if existing_default:
+                    default = root / cli.DEFAULT_CONFIG
+                    default.parent.mkdir()
+                    default.write_bytes(b"existing configuration must not change\n")
+                before = snapshot(root)
+                for target in ("release/alternate.json", str(root / "release/alternate.json"),
+                               "Release/mobile-release.json", "../outside-config.json"):
+                    with self.subTest(target=target), patch.object(
+                        cli, "InitWorkspace", side_effect=AssertionError("must reject before workspace acquisition")
+                    ) as workspace, patch.object(
+                        cli, "_init_proposal", side_effect=AssertionError("must reject before discovery")
+                    ) as proposal:
+                        args = ["init", "--root", str(root), "--apply", "--config", target]
+                        if existing_default:
+                            args.append("--force")
+                        code, output, error = invoke(args)
+                    self.assertEqual((code, output), (2, ""))
+                    self.assertIn("inside the project" if target.startswith("../")
+                                  else "generated workflow callers", error)
+                    workspace.assert_not_called()
+                    proposal.assert_not_called()
+                    self.assertEqual(snapshot(root), before)
+                    self.assert_no_state(root)
 
     def test_every_real_write_boundary_before_and_after_failure_is_transactional(self) -> None:
         # Includes stage writes, directory creation/publication, backup moves,
@@ -285,6 +319,54 @@ class InitTransactionTests(unittest.TestCase):
         self.assertEqual(output, "")
         self.assertTrue(interrupted)
         self.assertIn("automatic recovery incomplete", error)
+
+    def test_success_json_waits_for_actual_workspace_exit(self) -> None:
+        original_exit = tx.InitWorkspace.__exit__
+        for action in ("apply", "recover"):
+            for error_type, expected_code in ((OSError, 2), (KeyboardInterrupt, 130)):
+                with self.subTest(action=action, error=error_type.__name__), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary).resolve()
+                    args = fixture(root, force=True)
+                    before = snapshot(root)
+                    if action == "recover":
+                        self.leave_pending(args)
+                        self.assertTrue(any((root / name).exists() for name in tx.STATE_NAMES))
+                        self.assertNotEqual(snapshot(root), before)
+                        args = ["init", "--root", str(root), "--recover", "--config", "release/alternate.json"]
+                    exits = []
+                    injected = error_type("fictional failure after workspace retirement")
+
+                    def failing_exit(workspace, kind, incoming, traceback):
+                        descriptor = workspace.fd
+                        returned = original_exit(workspace, kind, incoming, traceback)
+                        closed_errno = None
+                        try:
+                            os.fstat(descriptor)
+                        except OSError as error:
+                            closed_errno = error.errno
+                        exits.append((kind, incoming, traceback, descriptor, workspace.fd, closed_errno))
+                        # Inject only after the real exit returns. Do not replace
+                        # an unexpected body error or retry the retired FD.
+                        if kind is None:
+                            raise injected
+                        return returned
+
+                    with patch.object(tx.InitWorkspace, "__exit__", failing_exit):
+                        code, output, error = invoke(args)
+                    # Keep assertions outside the CLI's injected-error handling.
+                    self.assertEqual(len(exits), 1)
+                    kind, incoming, traceback, descriptor, retired, closed_errno = exits[0]
+                    self.assertEqual((kind, incoming, traceback), (None, None, None))
+                    self.assertGreaterEqual(descriptor, 0)
+                    self.assertEqual(retired, -1)
+                    self.assertEqual(closed_errno, errno.EBADF)
+                    self.assertEqual(code, expected_code, error)
+                    self.assertEqual(output, "")
+                    self.assert_no_state(root)
+                    if action == "apply":
+                        self.assert_complete(root, force=True)
+                    else:
+                        self.assertEqual(snapshot(root), before)
 
     def test_every_rollback_and_cleanup_boundary_can_fail_then_resume_without_lost_originals(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -849,28 +931,79 @@ class InitTransactionTests(unittest.TestCase):
             self.assertEqual(line, b"CHECKPOINT\n", f"child exited early: {line!r}")
             yield process
         finally:
-            # A failed leader can leave descendants holding pipes/locks. This
-            # session belongs only to this fixture; never kill by process name.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=10)
-            for stream in (process.stdin, process.stdout, process.stderr):
-                stream.close()
-            deadline = time.monotonic() + 5
-            while True:
+            # The fixed --child route only applies/recovers init filesystem
+            # work; it has no descendants. Retain the original Popen owner,
+            # never signal or probe its reusable numeric group after waiting.
+            with contextlib.ExitStack() as streams:
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    streams.callback(stream.close)
                 try:
-                    os.killpg(process.pid, 0)
-                except ProcessLookupError:
-                    break
-                self.assertLess(time.monotonic(), deadline, "owned test process group survived cleanup")
-                time.sleep(0.02)
+                    process.kill()
+                finally:
+                    process.wait(timeout=10)
 
     def kill_at(self, root: Path, mode: str, kind: str, label: str, when: str = "after") -> None:
         with self.stopped_child(root, mode, kind, label, when) as process:
-            os.killpg(process.pid, signal.SIGKILL)
-            self.assertEqual(process.wait(timeout=10), -signal.SIGKILL)
+            pass
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+
+    def test_stopped_child_has_one_original_stop_wait_owner_and_closes_each_stream(self) -> None:
+        # Inert fixture-call regression, not evidence of actual child finality.
+        # No numeric pid is available on this double and no native call is allowed.
+        for failures in ((), ("body",), ("kill",), ("wait",), ("stdin",), ("stdout",), ("stderr",),
+                         ("body", "kill", "wait", "stdin", "stdout", "stderr")):
+            with self.subTest(failures=failures):
+                calls = []
+                errors = {name: RuntimeError(f"synthetic {name} failure") for name in failures}
+
+                def reached(name):
+                    calls.append(name)
+                    if name in errors:
+                        raise errors[name]
+
+                def wait(*, timeout):
+                    self.assertEqual(timeout, 10)
+                    reached("wait")
+                    process.returncode = -signal.SIGKILL
+                    return process.returncode
+
+                process = SimpleNamespace(
+                    stdin=SimpleNamespace(close=lambda: reached("stdin")),
+                    stdout=SimpleNamespace(close=lambda: reached("stdout"), readline=lambda: b"CHECKPOINT\n"),
+                    stderr=SimpleNamespace(close=lambda: reached("stderr")),
+                    returncode=None, kill=lambda: reached("kill"), wait=wait,
+                )
+                with patch.object(subprocess, "Popen", return_value=process) as popen, patch.object(
+                        selectors, "DefaultSelector") as factory, patch.object(
+                        os, "kill", side_effect=AssertionError("unexpected numeric signal")), patch.object(
+                        os, "killpg", side_effect=AssertionError("unexpected group signal/probe")), patch.object(
+                        os, "waitpid", side_effect=AssertionError("unexpected numeric wait")):
+                    selector = factory.return_value.__enter__.return_value
+                    selector.select.return_value = [object()]
+
+                    def exercise():
+                        if "body" in errors:
+                            with self.stopped_child(Path("/fictional/init-root"), "apply", "mkdir", tx.PREPARING):
+                                raise errors["body"]
+                        else:
+                            self.kill_at(Path("/fictional/init-root"), "apply", "mkdir", tx.PREPARING)
+
+                    if errors:
+                        with self.assertRaises(RuntimeError) as caught:
+                            exercise()
+                        chain, error = [], caught.exception
+                        while error is not None:
+                            self.assertNotIn(error, chain)
+                            chain.append(error)
+                            error = error.__context__
+                        for original in errors.values():
+                            self.assertIn(original, chain)
+                    else:
+                        exercise()
+                    popen.assert_called_once()
+                    selector.register.assert_called_once_with(process.stdout, selectors.EVENT_READ)
+                    selector.select.assert_called_once_with(30)
+                self.assertEqual(calls, ["kill", "wait", "stderr", "stdout", "stdin"])
 
     def test_real_termination_in_each_phase_then_fresh_process_recovery(self) -> None:
         points = [
@@ -918,8 +1051,7 @@ class InitTransactionTests(unittest.TestCase):
                         self.assertIn("another init/recovery", error)
                         self.assertEqual(output, "")
                         self.assertEqual(snapshot(root), current)
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=10)
+                self.assertEqual(process.returncode, -signal.SIGKILL)
                 self.kill_at(root, "recover", kind, label)
                 code, _, error = invoke(["init", "--root", str(root), "--recover"])
                 self.assertEqual(code, 0, error)
@@ -1048,7 +1180,7 @@ class InitTransactionTests(unittest.TestCase):
 
 def child() -> None:
     root, mode, kind, label, when = Path(sys.argv[2]), *sys.argv[3:]
-    signal.alarm(45)  # Last-resort self-limit; the parent also owns/kills the group.
+    signal.alarm(45)  # Last-resort self-limit; the parent also owns/kills this child.
     stopped = []
 
     def checkpoint(_index, event, phase):

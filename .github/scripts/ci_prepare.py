@@ -373,8 +373,10 @@ def prepare_inputs(*, source_root: Path, destination: Path, platform: str, deadl
     in the result are relative to destination; no previous inputs.json is read.
     """
     remaining(deadline)
-    if scope not in {"platform", "signing-matrix", "signing-adapter"}:
+    if (scope not in {"platform", "signing-matrix", "signing-adapter", "store-lane", "native-python", "native-support"}
+            or scope in {"native-python", "native-support"} and platform != "macos"):
         raise PreparationError("invalid_preparation_scope")
+    include_gems = scope in {"platform", "store-lane", "native-python", "native-support"}
     source_root, destination = Path(source_root), Path(destination)
     if (not source_root.is_absolute() or source_root.resolve(strict=True) != source_root
             or not destination.is_absolute() or destination.parent.resolve(strict=True) != destination.parent
@@ -389,13 +391,13 @@ def prepare_inputs(*, source_root: Path, destination: Path, platform: str, deadl
         raise PreparationError("preparation_disk_reserve")
     destination.mkdir(mode=0o700)  # Existing directories/symlinks are NEVER resumed.
     budget = Budget(destination, deadline)
-    for name in ("python", *(("gems",) if scope == "platform" else ()),
+    for name in ("python", *(("gems",) if include_gems else ()),
                  *(("actionlint",) if platform == "linux" and scope == "platform" else ())):
         (destination / name).mkdir(mode=0o700)
     files = []
     for asset in wheels:
         files.append(download(asset, "python/" + asset["filename"], frozenset({"files.pythonhosted.org"}), budget))
-    for asset in gems if scope == "platform" else ():
+    for asset in gems if include_gems else ():
         files.append(download(asset, "gems/" + asset["filename"], frozenset({"rubygems.org"}), budget))
     requirements = {}
     selected = {asset["name"]: asset for asset in wheels}
@@ -411,8 +413,8 @@ def prepare_inputs(*, source_root: Path, destination: Path, platform: str, deadl
                               frozenset({"github.com", "release-assets.githubusercontent.com"}), budget))
         files.append(extract_actionlint(manifest["actionlint"], budget))
         actionlint = "actionlint/actionlint"
-    result = {"schema": 1, "platform": platform, "python": "python", "gems": "gems" if scope == "platform" else None,
-              "bundler": "gems/" + manifest["bundler"]["filename"] if scope == "platform" else None, "actionlint": actionlint,
+    result = {"schema": 1, "platform": platform, "python": "python", "gems": "gems" if include_gems else None,
+              "bundler": "gems/" + manifest["bundler"]["filename"] if include_gems else None, "actionlint": actionlint,
               "actionlint_archive": actionlint_archive, "requirements": requirements,
               "manifest_sha256": manifest_hash, "lock_sha256": lock_hash,
               "files": sorted(files, key=lambda item: item["path"])}

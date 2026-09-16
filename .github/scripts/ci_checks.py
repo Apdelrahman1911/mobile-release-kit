@@ -69,6 +69,8 @@ WHEEL_PATTERNS = (
     "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
     "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
     "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py",
+    "test_build_inputs.py", "test_build_inputs_cli.py", "test_checked_files.py", "test_source_observation.py",
+    "test_ios_correspondence.py", "test_credentials_metadata.py", "test_cli_and_build.py",
 )
 NATIVE_PATTERNS = (
     "test_ios_profile_authority.py", "test_ios_profile_trust.py",
@@ -80,6 +82,8 @@ NATIVE_PATTERNS = (
     "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
     "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
     "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py",
+    "test_build_inputs.py", "test_checked_files.py", "test_source_observation.py",
+    "test_credentials_metadata.py", "test_cli_and_build.py", "test_app_private.py",
 )
 # Only this source-known class may run with the fixed native trust-service role.
 # A newly added method must not silently enlarge that role's callset.
@@ -103,6 +107,36 @@ NATIVE_COMPATIBILITY_IDS = tuple(sorted(
 ))
 NATIVE_PUBLIC_API_IDS = (
     "unit.test_native_process.NativeProcessCompatibilityTests.test_native_public_api_atomic_duplication",
+)
+# Native Store cases have their own original Python domain for EVERY row. They
+# are not healthy/default discovery tests or profile-authority test methods.
+STORE_NATIVE_PREFIX = "workflow.test_store_lane_native.StoreLaneNativeTests."
+STORE_NATIVE_ROWS = (
+    ("ordinary-at-exit-control", "test_real_success_exit_and_original_fd_retirement"),
+    ("success0", "test_real_success_exit_and_original_fd_retirement"),
+    ("ordinary75", "test_real_ordinary_failure_is_settled75_without_receipt"),
+    ("system-exit0", "test_arbitrary_system_exit_is_unknown76"),
+    ("system-exit75", "test_arbitrary_system_exit_is_unknown76"),
+    ("terminal-close-return-loss", "test_real_close_and_link_return_loss_refuse_binding"),
+    ("terminal-link-return-loss", "test_real_close_and_link_return_loss_refuse_binding"),
+    ("nested-ios-success", "test_real_nested_family_settles_before_composite_disposal"),
+    ("nested-android-success", "test_real_nested_family_settles_before_composite_disposal"),
+    ("nested-android-inherited-pipe", "test_real_nested_family_settles_before_composite_disposal"),
+    ("bridge-success", "test_pinned_fastlane_bridges_own_generated_entries_before_dispatch"),
+    ("bridge-ordinary-error", "test_pinned_fastlane_bridges_own_generated_entries_before_dispatch"),
+    ("clock-brackets", "test_native_shared_clock_labels_samples_and_expiry"),
+    ("clock-expired", "test_native_shared_clock_labels_samples_and_expiry"),
+    ("clock-wrong-label", "test_native_shared_clock_labels_samples_and_expiry"),
+)
+STORE_NATIVE_PRODUCTS = (
+    *("fastlane/" + name for name in (
+        "release_support.rb", "native_process_spawn.rb", "native_upload_process.rb", "store_lane_lifetime.rb",
+        "native_upload_validation.rb", "ios_upload_validation.rb", "android_upload_validation.rb", "Fastfile",
+        "run_lane.rb", "store_document.rb", "store_lane_runtime.rb", "store_lane_resources.rb", "store_lane_fastlane_bridges.rb")),
+    *("src/mobile_release/" + name for name in (
+        "__init__.py", "ios_upload_validation.py", "android_upload_validation.py", "_native_process.py", "_profile_process.py",
+        "_command_process.py", "_store_lane_contract.py", "_store_lane_evidence.py", "_store_lane_files.py", "owned_process.py",
+        "cancellation.py", "_lifetime_evidence.py", "errors.py", "inspection.py")),
 )
 # These literal real negative proofs deliberately retain UNKNOWN custody. Each must
 # be the sole test in its own original ordinary Session capture, never skipped
@@ -167,6 +201,8 @@ PYTHON_POISON_CASES = (
     ("poison-signing-foreign-mixed-handlers", "unit.test_local_signing_composition.SigningCompositionTests.test_foreign_and_mixed_signal_owners_are_never_silently_overwritten_or_borrowed"),
     ("poison-profile-authenticator-publication", "unit.test_ios_entitlements.SignedEntitlementInventoryTests.test_mocked_authenticator_without_owner_publication_remains_fatal"),
     ("poison-recovery-profile-cleanup", "unit.test_operation_recovery.IosOperationRecoveryTests.test_profile_cleanup_uncertainty_stops_actual_fresh_validation_before_any_store_access"),
+    ("poison-recovery-inspection-deadline", "unit.test_operation_recovery.IosOperationRecoveryTests.test_shared_deadline_prevents_next_authorization_boundary_and_retains_snapshots"),
+    ("poison-recovery-readback-deadline", "unit.test_operation_recovery.IosOperationRecoveryTests.test_deadline_after_readback_preserves_precondition_and_retains_snapshot"),
     ("poison-profile-authentication-order", "unit.test_ios_profile_authority.CMSFramingTests.test_profile_requires_both_authentications_in_order_then_complete_correlation"),
     ("poison-profile-setup-unlink", "unit.test_ios_profile_installation.ProfileInstallationTests.test_ambiguous_setup_stage_unlink_is_not_implicitly_retried_or_resolved"),
     ("poison-profile-collision", "unit.test_ios_profile_installation.ProfileInstallationTests.test_collision_symlink_fifo_and_invalid_input_never_overwrite_existing_state"),
@@ -196,6 +232,7 @@ PYTHON_SINGLETON_PARTITIONS = PYTHON_POISON_PARTITIONS + PYTHON_FRESH_PARTITIONS
 PYTHON_SINGLETON_IDS = PYTHON_POISON_IDS + PYTHON_FRESH_IDS
 # Exact method identities, not a count, file-wide exemption or skip-message match.
 LINUX_MACOS_SKIPS = frozenset({
+    "unit.test_checked_files.NativeCheckedFilesTests.test_actual_tmp_var_folders_and_physical_spellings_select_identical_private_bytes",
     "unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state",
     "unit.test_local_signing_composition.SigningCompositionTests.test_full_preflight_shares_one_guard_through_early_authentication_signing_build_and_late_authentication",
     "unit.test_local_signing_composition.SigningCompositionTests.test_real_early_and_late_profile_cleanup_signals_under_full_preflight_never_return_cancelled_content",
@@ -223,6 +260,9 @@ TOOLING_FILES = (
     "fastlane/apple_create_retry.rb", "fastlane/ios_upload_validation.rb",
     "fastlane/android_upload_validation.rb", "fastlane/native_upload_validation.rb",
     "fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb",
+    "fastlane/store_document.rb", "fastlane/store_lane_lifetime.rb",
+    "fastlane/store_lane_resources.rb", "fastlane/store_lane_runtime.rb",
+    "fastlane/store_lane_fastlane_bridges.rb",
     "fastlane/release_support.rb", "fastlane/run_lane.rb", "schemas/candidate.schema.json",
     "schemas/project.schema.json", "schemas/receipt.schema.json",
     "schemas/store-operation-intent.schema.json", "templates/mobile-release.json",
@@ -860,6 +900,40 @@ def linux_allowed_skips() -> frozenset[str]:
     return LINUX_MACOS_SKIPS
 
 
+def store_lane_native_rows(source_root: Path, phase: str, *, deadline: float | None = None) -> tuple[tuple[str, str], ...]:
+    """Independent static catalog: exactly 15 source/14 wheel originals, seven IDs.
+
+    The fixture's literal table is checked against this outside authority, not
+    imported/executed or accepted from its eventual diagnostic stdout.
+    """
+    _require(type(phase) is str and phase in {"source", "wheel"}, "STORE_NATIVE_PHASE")
+    directory = Path(source_root) / "tests/workflow"
+    fixture = directory / "store_lane_native_fixture.py"
+    parsed = ast.parse(_read_regular(fixture, deadline=deadline), filename=str(fixture))
+    tables = [node.value for node in parsed.body if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == "CASE_ROWS" for target in node.targets)]
+    _require(len(tables) == 1, "STORE_NATIVE_ROW_TABLE")
+    _require(ast.literal_eval(tables[0]) == STORE_NATIVE_ROWS, "STORE_NATIVE_ROW_TABLE")
+    tests = directory / "test_store_lane_native.py"
+    parsed = ast.parse(_read_regular(tests, deadline=deadline), filename=str(tests))
+    methods = []
+    for node in parsed.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        names = [item.name for item in node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and item.name.startswith("test")]
+        if names:
+            _require(node.name == "StoreLaneNativeTests" and len(node.bases) == 1
+                     and isinstance(node.bases[0], ast.Attribute) and node.bases[0].attr == "TestCase"
+                     and isinstance(node.bases[0].value, ast.Name) and node.bases[0].value.id == "unittest",
+                     "STORE_NATIVE_TEST_CLASS")
+            methods.extend(names)
+    _require(len(methods) == len(set(methods)) == 7
+             and set(methods) == {name for _, name in STORE_NATIVE_ROWS}, "STORE_NATIVE_METHOD_INVENTORY")
+    rows = STORE_NATIVE_ROWS if phase == "source" else STORE_NATIVE_ROWS[1:]
+    return tuple((subcase, STORE_NATIVE_PREFIX + method) for subcase, method in rows)
+
+
 def expected_python_ids(source_root: Path, selection: str = "full", *, deadline: float | None = None) -> tuple[str, ...]:
     """Statically derive the exact methods; never import or execute a test file.
 
@@ -875,6 +949,12 @@ def expected_python_ids(source_root: Path, selection: str = "full", *, deadline:
         _require(sorted(path.name for path in paths) == sorted(patterns), "TEST_PATTERN_INVENTORY")
     result = []
     for path in paths:
+        if selection == "full" and path == tests / "workflow/test_store_lane_native.py":
+            # These exact methods are REQUIRED by the two separate Store gates.
+            # Validate their closed inventory here before excluding their raw
+            # discovery bodies; they never borrow the healthy Python domain.
+            store_lane_native_rows(source_root, "source", deadline=deadline)
+            continue
         module = ".".join(path.relative_to(tests).with_suffix("").parts)
         parsed = ast.parse(_read_regular(path, deadline=deadline), filename=str(path))
         classes = set()
@@ -897,7 +977,7 @@ def expected_python_ids(source_root: Path, selection: str = "full", *, deadline:
         result.extend(module_ids)
     _require(bool(result) and len(result) == len(set(result)), "TEST_EMPTY_OR_DUPLICATE_INVENTORY")
     if selection == "full":
-        _require(len(LINUX_MACOS_SKIPS) == 20 and LINUX_MACOS_SKIPS <= set(result), "TEST_NATIVE_INVENTORY_DRIFT")
+        _require(len(LINUX_MACOS_SKIPS) == 21 and LINUX_MACOS_SKIPS <= set(result), "TEST_NATIVE_INVENTORY_DRIFT")
     return tuple(sorted(result))
 
 
@@ -1010,21 +1090,40 @@ def python_capture_snapshot(source_root: Path, selection: str, *, deadline: floa
     return MappingProxyType(partitions), metadata
 
 
+def _native_capture_partitions(complete: tuple[str, ...], delegated: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
+    """Pure projection of one complete native inventory; no execution receipts."""
+    prefix = "unit.test_ios_profile_authority.NativeProfileAuthorityTests."
+    authority = tuple(identifier for identifier in complete if identifier.startswith(prefix))
+    _require(authority == NATIVE_AUTHORITY_IDS, "NATIVE_AUTHORITY_INVENTORY")
+    ordinary_complete = tuple(identifier for identifier in complete if identifier not in authority)
+    ordinary = _python_capture_partition(ordinary_complete, "healthy", delegated)
+    poison = {name: _python_capture_partition(ordinary_complete, name, delegated) for name in PYTHON_SINGLETON_PARTITIONS}
+    joined = authority + ordinary + delegated + tuple(identifier for ids in poison.values() for identifier in ids)
+    _require(len(joined) == len(set(joined)) and tuple(sorted(joined)) == complete, "NATIVE_PARTITION_UNION")
+    return {"all": complete, "ordinary": ordinary, "authority": authority, "delegated": delegated, **poison}
+
+
 def native_partition_ids(source_root: Path, partition: str = "all", *, deadline: float | None = None) -> tuple[str, ...]:
     """macOS authority5/ordinary/singletons, plus data-only pending G obligations."""
     _require(type(partition) is str and partition in {"all", "ordinary", "authority", "delegated", *PYTHON_SINGLETON_PARTITIONS},
              "NATIVE_PARTITION")
     complete = expected_python_ids(source_root, "native", deadline=deadline)
-    prefix = "unit.test_ios_profile_authority.NativeProfileAuthorityTests."
-    authority = tuple(identifier for identifier in complete if identifier.startswith(prefix))
-    _require(authority == NATIVE_AUTHORITY_IDS, "NATIVE_AUTHORITY_INVENTORY")
-    ordinary_complete = tuple(identifier for identifier in complete if identifier not in authority)
     delegated, _required = signing_regression_metadata(source_root, "macos-26", deadline=deadline)
-    ordinary = _python_capture_partition(ordinary_complete, "healthy", delegated)
-    poison = {name: _python_capture_partition(ordinary_complete, name, delegated) for name in PYTHON_SINGLETON_PARTITIONS}
-    joined = authority + ordinary + delegated + tuple(identifier for ids in poison.values() for identifier in ids)
-    _require(len(joined) == len(set(joined)) and tuple(sorted(joined)) == complete, "NATIVE_PARTITION_UNION")
-    return {"all": complete, "ordinary": ordinary, "authority": authority, "delegated": delegated, **poison}[partition]
+    return _native_capture_partitions(complete, delegated)[partition]
+
+
+def native_capture_snapshot(source_root: Path, *, deadline: float
+                            ) -> tuple[MappingProxyType, tuple[tuple[str, ...], MappingProxyType]]:
+    """One outside-owner native inventory per gate; subject discovery stays fresh."""
+    _remaining(deadline, 3300)
+    complete = expected_python_ids(source_root, "native", deadline=deadline)
+    _remaining(deadline, 3300)
+    metadata = signing_regression_metadata(source_root, "macos-26", deadline=deadline)
+    _remaining(deadline, 3300)
+    delegated, _requirements = metadata
+    partitions = _native_capture_partitions(complete, delegated)
+    _remaining(deadline, 3300)
+    return MappingProxyType(partitions), metadata
 
 
 def native_compatibility_ids(source_root: Path, *, public_only: bool = False,
@@ -1189,9 +1288,13 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
                 _require(not loader.errors, "TEST_DISCOVERY_ERROR")
             loaded = tuple(flatten(suite))
             actual = tuple(test.id() for test in loaded)
-            _require(len(actual) == len(set(actual)) and tuple(sorted(actual)) == complete, "TEST_LOADED_INVENTORY")
+            native_store = (tuple(sorted({identifier for _, identifier in
+                            store_lane_native_rows(source_root, "source", deadline=deadline)}))
+                            if selection == "full" and (source_root / "tests/workflow/test_store_lane_native.py").is_file() else ())
+            _require(len(actual) == len(set(actual)) and tuple(sorted(actual)) == tuple(sorted((*complete, *native_store))),
+                     "TEST_LOADED_INVENTORY")
             # Discovery still proves the complete source inventory. Only the
-            # source-fixed poison/G methods are withheld for their actual owners.
+            # source-fixed poison/G/Store methods are withheld for their actual owners.
             suite = unittest.TestSuite(test for test in loaded if test.id() in expected)
             _require(tuple(sorted(test.id() for test in flatten(suite))) == expected, "TEST_HEALTHY_INVENTORY")
             result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True, resultclass=Result).run(suite)
@@ -1593,7 +1696,7 @@ def jdk_signers(source_root: Path, work_root: Path, deadline: float) -> dict:
     _remaining(deadline, 3300)
     _require(sys.platform == "linux" and os.getuid() != 0
              and sys.flags.isolated == 1 and sys.flags.dont_write_bytecode == 1, "JDK_PLATFORM")
-    from mobile_release import android
+    from mobile_release import android, owned_process
     _require(_read_regular(Path(android.__file__), deadline=deadline)
              == _read_regular(source_root / "src/mobile_release/android.py", deadline=deadline), "JDK_PRODUCT_BYTES")
     home = Path(os.environ.get("JAVA_HOME", ""))
@@ -1651,9 +1754,7 @@ def jdk_signers(source_root: Path, work_root: Path, deadline: float) -> dict:
         _require(0 < len(certificate) <= 64 * 1024 and certificate.startswith(b"\x30"), "JDK_DER_EXPORT")
 
         class ProductRunner:
-            """Module-local transport only; all native bytes remain genuine."""
-            PIPE = subprocess.PIPE
-            TimeoutExpired = subprocess.TimeoutExpired
+            """Policy transport only; the separate owner matrix proves custody."""
 
             def __init__(self):
                 self.results = []
@@ -1662,17 +1763,18 @@ def jdk_signers(source_root: Path, work_root: Path, deadline: float) -> dict:
                 index = len(self.results)
                 _require(index < 2, "JDK_EXTRA_PRODUCT_CALL")
                 expected_argv = ["jarsigner", "-verify", "-strict", str(jar)] if index == 0 else ["keytool", "-printcert", "-jarfile", str(jar)]
-                _require(argv == expected_argv and kwargs == {"env": environment, "text": True, "stdout": subprocess.PIPE,
-                         "stderr": subprocess.PIPE, "timeout": 120 if index == 0 else 30, "check": False}, "JDK_PRODUCT_CALL")
+                _require(argv == expected_argv and kwargs == {"environ": environment, "capture": True,
+                         "timeout": 120 if index == 0 else 30, "cancellation": None}, "JDK_PRODUCT_CALL")
                 value = call(argv[0], argv[1:], directory, status=4 if index == 0 else 0, seconds=120 if index == 0 else 30)
                 self.results.append(value)
                 return subprocess.CompletedProcess(argv, value.returncode, value.stdout.decode("utf-8", "strict"), value.stderr.decode("utf-8", "strict"))
 
         facade = ProductRunner()
-        original, original_run = android.subprocess, subprocess.run
-        _require(original is subprocess, "JDK_PRODUCT_BINDING")
+        transport = facade.run  # Retain this exact bound method for custody.
+        original, original_subprocess, original_run = android.run_owned, android.subprocess, subprocess.run
+        _require(original is owned_process.run_owned and original_subprocess is subprocess, "JDK_PRODUCT_BINDING")
         try:
-            android.subprocess = facade
+            android.run_owned = transport
             rejected = False
             try:
                 accepted = android._verify_jar_signature(jar)
@@ -1686,8 +1788,12 @@ def jdk_signers(source_root: Path, work_root: Path, deadline: float) -> dict:
             fingerprint = android._signer_fingerprint(jar)
             _require(len(facade.results) == 2 and fingerprint == hashlib.sha256(certificate).hexdigest(), "JDK_PRODUCT_FINGERPRINT")
         finally:
-            _require(android.subprocess is facade and subprocess.run is original_run, "JDK_BINDING_CUSTODY")
-            android.subprocess = original
+            try:
+                _require(android.run_owned is transport and owned_process.run_owned is original
+                         and android.subprocess is original_subprocess and subprocess.run is original_run,
+                         "JDK_BINDING_CUSTODY")
+            finally:
+                android.run_owned = original
         _require(fingerprint not in {item["fingerprint"] for item in cases}, "JDK_REUSED_CERTIFICATE")
         cases.append({"id": scenario, "accepted": accepted, "strict_status": 4, "fingerprint": fingerprint})
     _require(len(calls) == 25 and len(cases) == 4, "JDK_CALL_INVENTORY")

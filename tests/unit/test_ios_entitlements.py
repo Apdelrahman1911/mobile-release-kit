@@ -6,6 +6,7 @@ import plistlib
 import shutil
 import struct
 import tempfile
+import types
 import unittest
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -387,9 +388,9 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
         self.exported = self.root / "export/Payload/Reader.app"
         self.native = NativeProfileSeam()
         self.stack = ExitStack(); self.addCleanup(self.stack.close)
-        self.stack.enter_context(patch("mobile_release.ios.sys.platform", "darwin"))
+        self.stack.enter_context(patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")))
         self.stack.enter_context(patch("mobile_release.ios.shutil.which", return_value="/fictional/native/tool"))
-        self.stack.enter_context(patch("mobile_release.ios.subprocess.run", side_effect=self.native))
+        self.stack.enter_context(patch("mobile_release.ios.run_owned", side_effect=self.native))
         self.stack.enter_context(self.native.profile_authentication())
         self.install_profiles()
 
@@ -399,11 +400,11 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
                 identity = plistlib.loads((bundle / "Info.plist").read_bytes())["CFBundleIdentifier"]
                 (bundle / "embedded.mobileprovision").write_bytes(modern_profile_bytes(profile(bundle_id=identity)))
 
-    def validate(self):
+    def validate(self, *, cancellation=None):
         zip_tree(self.root / "export", self.paths["ios-ipa"])
         return validate_ipa_current_signing(self.paths["ios-ipa"], expected_bundle_id=BUNDLE, expected_team_id=TEAM,
                                             expected_fingerprint=hashlib.sha256(CERTIFICATE).hexdigest(),
-                                            release=ReleaseVersion("1.2.3", 42))
+                                            release=ReleaseVersion("1.2.3", 42), cancellation=cancellation)
 
     def assert_rejected(self, text=""):
         findings, interval = self.validate()
@@ -530,7 +531,7 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
                 if "--xml" in argv and Path(argv[-1]).name == bundle:
                     result.stdout = add_discardable_root_dictionary(result.stdout)
                 return result
-            with self.subTest(entitlements=bundle), patch("mobile_release.ios.subprocess.run", side_effect=malformed):
+            with self.subTest(entitlements=bundle), patch("mobile_release.ios.run_owned", side_effect=malformed):
                 self.assert_rejected("XML plist")
 
     def test_profile_content_reader_authenticates_exact_outer_and_inner_bytes(self):
@@ -571,23 +572,119 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
         self.assertFalse(self.native.cms_captures or self.native.calls)
 
     def test_all_new_native_profile_slice_calls_receive_no_credentials_or_runtime_injection(self):
+        from .test_lifetime_evidence import guard, handler_model
+
         canaries = {key: "private-native-canary" for key in (
             "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8", "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD",
             "GOOGLE_APPLICATION_CREDENTIALS", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "GH_TOKEN",
             "DYLD_INSERT_LIBRARIES", "PYTHONPATH", "OPENSSL_CONF", "BUNDLE_GEMFILE",
         )}
-        with patch.dict(os.environ, {**canaries, "PATH": "/fictional/native"}, clear=True):
-            findings, interval = self.validate()
+        with handler_model() as (handlers, signal_calls, _):
+            handlers.update({signum: (lambda *_args: None) for signum in handlers})
+            owner = guard()
+            self.assertFalse(owner.previous, "fixture must have zero installed default handlers")
+            try:
+                with patch.dict(os.environ, {**canaries, "PATH": "/fictional/native"}, clear=True):
+                    findings, interval = self.validate(cancellation=owner)
+                    evidence = ipa_signing_evidence(self.paths["ios-ipa"], cancellation=owner)
+                self.assertEqual(evidence["certificateSha256"], hashlib.sha256(CERTIFICATE).hexdigest())
+                self.assertEqual(owner.handler_state, "ACTIVE", "borrowers restored the original guard")
+                self.assertFalse(signal_calls)
+                self.assertTrue(all(item["guard"] is owner for item in self.native.cms_captures))
+            finally:
+                owner.restore()
         self.assertIsNotNone(interval, findings)
         self.assertTrue(self.native.cms_calls)
         self.assertTrue(any("--architecture" in argv for argv, _ in self.native.calls))
         for argv, kwargs in self.native.calls:
             with self.subTest(operation=argv[0]):
-                environment = kwargs["env"]
+                environment = kwargs["environ"]
                 self.assertFalse(set(canaries) & environment.keys())
                 self.assertNotIn("private-native-canary", environment.values())
                 self.assertEqual(environment["PATH"], "/fictional/native")
                 self.assertEqual(environment["LC_ALL"], "C")
+                self.assertIs(kwargs["cancellation"], owner)
+                self.assertIs(kwargs["capture"], True)
+                self.assertIs(kwargs["text"], argv[0] == "openssl" or "--verbose=4" in argv)
+                self.assertEqual(kwargs["timeout"], 60 if "--deep" in argv else 30)
+                self.assertEqual(kwargs["output_limit"], 8 * 1024 * 1024)
+        forms = {("openssl" if argv[0] == "openssl" else
+                  next(item for item in ("--deep", "--extract-certificates", "--test-requirement",
+                                         "--verbose=4", "--entitlements") if item in argv))
+                 for argv, _kwargs in self.native.calls}
+        self.assertEqual(forms, {"openssl", "--deep", "--extract-certificates", "--test-requirement",
+                                 "--verbose=4", "--entitlements"})
+
+    def test_native_certificate_failure_stops_both_public_callers_without_losing_fatality(self):
+        from mobile_release import _command_process as command, ios
+        from mobile_release.owned_process import ProcessError
+        from .test_lifetime_evidence import guard, handler_model
+
+        # Caller/finality integration only. Even the unpublished original slot
+        # below never acquires native resources; all directories belong to this
+        # fixture and can be removed after its preservation assertions.
+        for route in ("validation", "evidence"):
+            for mode in ("ordinary", "fatal", "interrupt"):
+                with self.subTest(route=route, mode=mode), handler_model(), \
+                        patch.object(ios, "_RETAINED_NATIVE_SCRATCH", []) as retained, \
+                        patch.object(tempfile, "tempdir", str(self.root)), \
+                        patch.object(command.native, "create", side_effect=AssertionError("no native fixture dispatch")):
+                    owner, calls, original_slots = guard(), [], []
+                    first_profile = len(self.native.cms_calls)
+                    primary = (KeyboardInterrupt("first native interruption") if mode == "interrupt" else
+                               ProcessError("native lifetime unconfirmed", dispatched=True,
+                                            contained=False, cleanup_complete=False))
+
+                    def native(argv, **kwargs):
+                        calls.append(argv)
+                        self.assertIs(kwargs["cancellation"], owner)
+                        if "--extract-certificates" not in argv:
+                            return self.native(argv, **kwargs)
+                        if mode == "ordinary":
+                            return types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"synthetic invalid signature")
+                        if mode == "interrupt":
+                            engine = command._Outer(owner, False, kwargs["timeout"], None, None,
+                                                    suppress_cancel=False, text=kwargs["text"])
+                            self.assertFalse(engine.ctx.child_acquisition.attempted)
+                            original_slots.append(engine.slot)
+                        raise primary
+
+                    def invoke():
+                        if route == "validation":
+                            return self.validate(cancellation=owner)
+                        zip_tree(self.root / "export", self.paths["ios-ipa"])
+                        return ipa_signing_evidence(self.paths["ios-ipa"], cancellation=owner)
+
+                    try:
+                        with patch.object(ios, "run_owned", side_effect=native):
+                            if mode == "ordinary" and route == "validation":
+                                findings, interval = invoke()
+                                self.assertIsNone(interval)
+                                self.assertTrue(any(item.code == "ios.ipa.validation" and item.status in FAILING_STATUSES
+                                                    for item in findings))
+                            else:
+                                expected = KeyboardInterrupt if mode == "interrupt" else (
+                                    ValidationError if mode == "ordinary" else ProcessError)
+                                with self.assertRaises(expected) as caught:
+                                    invoke()
+                                if mode == "interrupt":
+                                    self.assertIs(caught.exception, primary)
+                                elif mode == "fatal":
+                                    self.assertTrue(caught.exception.fatal and caught.exception.dispatched)
+                                    self.assertFalse(caught.exception.contained)
+                        self.assertIn("--extract-certificates", calls[-1])
+                        self.assertEqual(sum("--extract-certificates" in argv for argv in calls), 1)
+                        self.assertFalse(any(argv[0] == "openssl" or "--verbose=4" in argv for argv in calls))
+                        self.assertEqual(len(self.native.cms_calls) - first_profile, 2,
+                                         "later nested profiles were inspected after the first failure")
+                        self.assertEqual(owner.lifetime_ledger.fatal, mode != "ordinary")
+                        self.assertEqual(bool(retained), mode != "ordinary")
+                        self.assertTrue(all(not item[0].finalizer.alive and Path(item[0].name).is_dir()
+                                            for item in retained))
+                        self.assertTrue(all(slot.read() is None for slot in original_slots))
+                        self.assertEqual(owner.handler_state, "ACTIVE")
+                    finally:
+                        owner.restore()
 
     def test_safe_basename_and_all_architecture_decode_views_are_enforced(self):
         info = self.exported / "Info.plist"
@@ -603,7 +700,7 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
             if "--xml" in argv:
                 result.stdout = plistlib.dumps({"not-the-der-view": True})
             return result
-        with patch("mobile_release.ios.subprocess.run", side_effect=conflicting), self.assertRaisesRegex(ValidationError, "DER/XML views disagree"):
+        with patch("mobile_release.ios.run_owned", side_effect=conflicting), self.assertRaisesRegex(ValidationError, "DER/XML views disagree"):
             _codesign_entitlements(self.exported)
 
 

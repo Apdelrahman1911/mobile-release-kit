@@ -20,13 +20,15 @@ from .credentials import (
     credential_values_for_purpose,
     is_credential_capability_name,
     materialize_build_inputs,
+    materialized_profile_specifier,
     resolve_credential_values,
     scrub_credential_capabilities,
-    store_lane_environment,
     store_material_prerequisite_findings,
+    _selected_store_material,
     validate_signing_material,
-    validate_store_material,
 )
+from .build_inputs import BuildInputError, InvocationCustody, invocation_custody
+from .cancellation import DefaultCancellation
 from .discovery import (
     discover_project,
     git_context,
@@ -57,7 +59,7 @@ def _normalized_fingerprint(value: str | None) -> str | None:
     return value.replace(":", "") if value else None
 
 
-def _xcode_toolchain_finding(*, execution_source=None) -> Finding:
+def _xcode_toolchain_finding(*, execution_source=None, cancellation: DefaultCancellation | None = None) -> Finding:
     if sys.platform != "darwin" or not shutil.which("xcodebuild"):
         return Finding(
             "ios.xcode-toolchain",
@@ -73,6 +75,7 @@ def _xcode_toolchain_finding(*, execution_source=None) -> Finding:
             capture=True,
             output_limit=OUTPUT_LIMIT,
             timeout=30,
+            cancellation=cancellation,
             execution_scope=None if execution_source is None else execution_source.new_scope(),
         )
     except ProcessError as error:
@@ -99,8 +102,21 @@ def _xcode_toolchain_finding(*, execution_source=None) -> Finding:
     )
 
 
-def _effective_android_identity_finding(config: ReleaseConfig, *, execution_source=None) -> Finding:
-    discovered = discover_project(config.root, include_git=False)
+def _identity_query_environment(config: ReleaseConfig, *, project_read_token: str | None) -> dict[str, str]:
+    environment = scrub_credential_capabilities(os.environ)
+    # This generated signing-routing hint is not a generic credential, but
+    # identity queries must not borrow it from an unrelated signing context.
+    environment.pop("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER", None)
+    if config.section("source").get("projectReadTokenRequired") and project_read_token:
+        environment["MOBILE_RELEASE_PROJECT_READ_TOKEN"] = project_read_token
+    return environment
+
+
+def _effective_android_identity_finding(config: ReleaseConfig, *, project_read_token: str | None = None,
+                                       execution_source=None,
+                                       cancellation: DefaultCancellation | None = None) -> Finding:
+    discovered = discover_project(config.root, include_git=False, cancellation=cancellation,
+                                  execution_source=execution_source)
     module = selected_android_module(config, discovered)
     wrapper = config.root / "gradlew"
     if not module or wrapper.is_symlink() or not wrapper.is_file():
@@ -144,7 +160,7 @@ gradle.projectsEvaluated {
 }
 """.replace("__MODULE__", module)
     release = config.release_version()
-    environment = scrub_credential_capabilities(os.environ)
+    environment = _identity_query_environment(config, project_read_token=project_read_token)
     environment.update(
         {
             "MOBILE_RELEASE_VERSION_NAME": release.name,
@@ -171,6 +187,7 @@ gradle.projectsEvaluated {
                 capture=True,
                 output_limit=OUTPUT_LIMIT,
                 timeout=10 * 60,
+                cancellation=cancellation,
                 execution_scope=None if execution_source is None else execution_source.new_scope(),
             )
     except ProcessError as error:
@@ -216,9 +233,11 @@ gradle.projectsEvaluated {
 
 
 def _xcode_application_identities(
-    config: ReleaseConfig, *, configuration: str, execution_source=None,
+    config: ReleaseConfig, *, configuration: str, project_read_token: str | None = None, execution_source=None,
+    cancellation: DefaultCancellation | None = None,
 ) -> tuple[set[str], str | None]:
-    discovered = discover_project(config.root, include_git=False)
+    discovered = discover_project(config.root, include_git=False, cancellation=cancellation,
+                                  execution_source=execution_source)
     container = selected_ios_container(config, discovered)
     scheme = selected_ios_scheme(config, discovered)
     if not container or not scheme:
@@ -241,10 +260,11 @@ def _xcode_application_identities(
                 "-json",
             ],
             cwd=config.root,
-            environ=scrub_credential_capabilities(os.environ),
+            environ=_identity_query_environment(config, project_read_token=project_read_token),
             capture=True,
             output_limit=OUTPUT_LIMIT,
             timeout=5 * 60,
+            cancellation=cancellation,
             execution_scope=None if execution_source is None else execution_source.new_scope(),
         )
     except ProcessError as error:
@@ -274,7 +294,9 @@ def _xcode_application_identities(
     return identities, None
 
 
-def _effective_ios_identity_finding(config: ReleaseConfig, *, execution_source=None) -> Finding:
+def _effective_ios_identity_finding(config: ReleaseConfig, *, project_read_token: str | None = None,
+                                  execution_source=None,
+                                  cancellation: DefaultCancellation | None = None) -> Finding:
     if sys.platform != "darwin" or not shutil.which("xcodebuild"):
         return Finding(
             "ios.debug-identity.effective",
@@ -285,7 +307,7 @@ def _effective_ios_identity_finding(config: ReleaseConfig, *, execution_source=N
     ios = config.section("ios")
     if prepare := ios.get("prepareCommand"):
         release = config.release_version()
-        environment = scrub_credential_capabilities(os.environ)
+        environment = _identity_query_environment(config, project_read_token=project_read_token)
         environment.update(
             {
                 "MOBILE_RELEASE_VERSION_NAME": release.name,
@@ -300,6 +322,7 @@ def _effective_ios_identity_finding(config: ReleaseConfig, *, execution_source=N
                 environ=environment,
                 capture=False,
                 timeout=10 * 60,
+                cancellation=cancellation,
                 execution_scope=None if execution_source is None else execution_source.new_scope(),
             )
         except ProcessError as error:
@@ -315,11 +338,15 @@ def _effective_ios_identity_finding(config: ReleaseConfig, *, execution_source=N
                 "The configured Xcode preparation command failed before identity proof.",
                 category="identity",
             )
-    debug_ids, debug_error = _xcode_application_identities(config, configuration="Debug", execution_source=execution_source)
+    debug_ids, debug_error = _xcode_application_identities(config, configuration="Debug",
+                                project_read_token=project_read_token, execution_source=execution_source,
+                                cancellation=cancellation)
     archive_ids, archive_error = (set(), "Debug identity proof failed")
     if not debug_error and len(debug_ids) == 1:
         archive_ids, archive_error = _xcode_application_identities(
-            config, configuration=ios.get("archiveConfiguration", "Release"), execution_source=execution_source,
+            config, configuration=ios.get("archiveConfiguration", "Release"),
+            project_read_token=project_read_token, execution_source=execution_source,
+            cancellation=cancellation,
         )
     store_identity = ios.get("bundleId")
     if debug_error or archive_error or len(debug_ids) != 1 or len(archive_ids) != 1:
@@ -349,14 +376,17 @@ def _effective_ios_identity_finding(config: ReleaseConfig, *, execution_source=N
 
 
 def effective_identity_findings(
-    config: ReleaseConfig, platforms: Iterable[str], *, execution_source=None,
+    config: ReleaseConfig, platforms: Iterable[str], *, project_read_token: str | None = None, execution_source=None,
+    cancellation: DefaultCancellation | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     for platform in platforms:
         if platform == "android" and config.platform_enabled("android"):
-            findings.append(_effective_android_identity_finding(config, execution_source=execution_source))
+            findings.append(_effective_android_identity_finding(config, project_read_token=project_read_token,
+                                                                 execution_source=execution_source, cancellation=cancellation))
         elif platform == "ios" and config.platform_enabled("ios"):
-            findings.append(_effective_ios_identity_finding(config, execution_source=execution_source))
+            findings.append(_effective_ios_identity_finding(config, project_read_token=project_read_token,
+                                                             execution_source=execution_source, cancellation=cancellation))
         if findings and findings[-1].status in FAILING_STATUSES:
             break
     return findings
@@ -543,7 +573,8 @@ def _platform_policy_findings(config: ReleaseConfig, platform: str) -> list[Find
     return findings
 
 
-def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None, *, execution_source=None) -> Report:
+def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None, *, execution_source=None,
+           cancellation: DefaultCancellation | None = None) -> Report:
     report = Report("doctor", context={"config": str(config.path), "root": str(config.root)})
     selected = tuple(platforms if platforms is not None else config.enabled_platforms)
     try:
@@ -564,7 +595,7 @@ def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None, *, exe
             remediation="Fix the single committed version source before building.",
         )
 
-    discovered = discover_project(config.root, execution_source=execution_source)
+    discovered = discover_project(config.root, execution_source=execution_source, cancellation=cancellation)
     report.context["discovery"] = discovered
     report.context["git"] = discovered["git"]
     if not selected:
@@ -701,7 +732,7 @@ def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None, *, exe
                 category="identity",
                 remediation="Run buildful preflight on macOS so Xcode can prove effective identities.",
             )
-        report.extend([_xcode_toolchain_finding(execution_source=execution_source)])
+        report.extend([_xcode_toolchain_finding(execution_source=execution_source, cancellation=cancellation)])
 
     gitignore = config.root / ".gitignore"
     ignored = False
@@ -728,6 +759,7 @@ def run_project_checks(
     *,
     environ: Mapping[str, str] | None = None,
     execution_source=None,
+    cancellation: DefaultCancellation | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     execution_environment = (
@@ -770,6 +802,7 @@ def run_project_checks(
                 environ=execution_environment,
                 capture=False,
                 timeout=30 * 60,
+                cancellation=cancellation,
                 execution_scope=None if execution_source is None else execution_source.new_scope(),
             )
         except (ProcessError, FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
@@ -809,26 +842,19 @@ def run_project_checks(
 
 
 @contextmanager
-def _credential_environment(values: Mapping[str, str]) -> Iterator[None]:
+def _credential_environment(values: Mapping[str, str], *, invocation: InvocationCustody) -> Iterator[None]:
+    invocation.require(root=invocation.root, cancellation=invocation.cancellation,
+                       signing_lease=invocation.signing_lease)
     capability_names = {
         key for key in os.environ if is_credential_capability_name(key)
-    } | ALLOWED_CREDENTIAL_NAMES
-    previous: dict[str, str | None] = {
-        key: os.environ.get(key) for key in capability_names
-    }
-    for key in capability_names:
-        os.environ.pop(key, None)
-    os.environ.update(
-        {key: value for key, value in values.items() if key in ALLOWED_CREDENTIAL_NAMES}
-    )
-    try:
+    } | ALLOWED_CREDENTIAL_NAMES | {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER"}
+    updates: dict[str, str | None] = {key: None for key in capability_names}
+    updates.update({key: value for key, value in values.items() if key in ALLOWED_CREDENTIAL_NAMES})
+    profile = materialized_profile_specifier(values, invocation=invocation)
+    if profile is not None:
+        updates["MOBILE_RELEASE_IOS_PROFILE_SPECIFIER"] = profile
+    with invocation.environment(updates):
         yield
-    finally:
-        for key, old in previous.items():
-            if old is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = old
 
 
 def _online_query_blockers(
@@ -870,16 +896,24 @@ def preflight(
     require_tools: bool = False,
 ) -> Report:
     selected = tuple(platforms)
+    if mode not in {"offline", "signing", "online"}:
+        raise ValidationError(f"unsupported preflight mode: {mode}")
     arguments = dict(mode=mode, platforms=selected, run_builds=run_builds, artifacts=artifacts,
                      credentials_file=credentials_file, credentials_from_env=credentials_from_env,
                      require_tools=require_tools)
     try:
-        if mode == "signing" and run_builds and "ios" in selected and config.platform_enabled("ios"):
-            # Admission precedes doctor, private validation, application checks,
-            # preparation and all builds, even across distinct consumer projects.
-            with local_signing_lease() as lease:
-                return _preflight(config, **arguments, signing_lease=lease)
-        return _preflight(config, **arguments)
+        # Reserve process-global environment before credential snapshots, then
+        # account (when applicable), then continuous project admission. Even
+        # --skip-builds may run application checks and must hold that project.
+        with invocation_custody(config.root, mode="online" if mode == "online" else "build") as invocation:
+            if mode == "online":
+                return _preflight(config, **arguments, invocation=invocation)
+            if mode == "signing" and run_builds and "ios" in selected and config.platform_enabled("ios"):
+                with local_signing_lease(cancellation=invocation.cancellation) as lease:
+                    with invocation.project(signing_lease=lease):
+                        return _preflight(config, **arguments, signing_lease=lease, invocation=invocation)
+            with invocation.project(signing_lease=None):
+                return _preflight(config, **arguments, invocation=invocation)
     except ProcessError as error:
         report = Report(command=f"preflight --{mode}")
         report.add("preflight.process-lifetime", Status.FAIL,
@@ -889,6 +923,11 @@ def preflight(
                    "If local-signing status reports pending ownership, follow the original session recovery guide; "
                    "an early command failure does not create a recoverable signing session.")
         return _stop_preflight(report, "Further commands, private validation and builds were not executed.")
+    except BuildInputError as error:
+        report = Report(command=f"preflight --{mode}")
+        report.add("preflight.build-input-ownership", Status.FAIL, str(error), category="lifecycle",
+                   remediation="Wait for the original invocation or inspect build-inputs status for this project.")
+        return _stop_preflight(report, "Further application, credential and Store work was not executed.")
     except CredentialError as error:
         if mode != "signing" or not run_builds or "ios" not in selected or not config.platform_enabled("ios"):
             raise
@@ -914,13 +953,15 @@ def _preflight(
     credentials_from_env: bool = False,
     require_tools: bool = False,
     signing_lease: SigningLease | None = None,
+    invocation: InvocationCustody,
 ) -> Report:
     if mode not in {"offline", "signing", "online"}:
         raise ValidationError(f"unsupported preflight mode: {mode}")
     selected = tuple(platforms)
     execution_source = None if signing_lease is None else signing_lease.execution_source()
-    cancellation = None if signing_lease is None else signing_lease.cancellation
-    report = doctor(config, selected, execution_source=execution_source)
+    cancellation = invocation.cancellation
+    invocation.require(root=config.root, cancellation=cancellation, signing_lease=signing_lease)
+    report = doctor(config, selected, execution_source=execution_source, cancellation=cancellation)
     report.command = f"preflight --{mode}"
     invalid = set(selected) - set(config.enabled_platforms)
     if invalid:
@@ -942,6 +983,7 @@ def _preflight(
         config,
         credentials_file=credentials_file,
         credentials_from_env=credentials_from_env,
+        cancellation=cancellation,
     )
     build_credential_values = credential_values_for_purpose(
         config,
@@ -984,7 +1026,8 @@ def _preflight(
         )
     else:
         report.extend(
-            run_project_checks(config, "preflight", environ=project_check_environment, execution_source=execution_source)
+            run_project_checks(config, "preflight", environ=project_check_environment,
+                               execution_source=execution_source, cancellation=cancellation)
         )
     if (
         mode != "online"
@@ -1010,10 +1053,11 @@ def _preflight(
             credential_findings(
                 config,
                 stage="candidate",
-                credentials_file=credentials_file,
-                credentials_from_env=credentials_from_env,
+                credentials_from_env=True,
+                environ=credential_values,
                 purpose="signing" if mode == "signing" else "store",
                 platforms=selected,
+                cancellation=cancellation,
             )
         )
         report.extend(credential_checks)
@@ -1039,48 +1083,39 @@ def _preflight(
         )
         credential_checks.extend(material_checks)
         report.extend(material_checks)
-    elif mode == "online":
-        material_checks = validate_store_material(
-            config, values=store_credential_values, platforms=selected, execution_source=execution_source, cancellation=cancellation,
-        )
-        credential_checks.extend(material_checks)
-        report.extend(material_checks)
     if release is None:
         return report
     if mode == "online":
-        blockers = _online_query_blockers(config, selected, credential_checks)
-        if blockers:
-            report.add(
-                "store.online.gate",
-                Status.SKIP,
-                "Non-publishing Store API checks were skipped because prerequisites are incomplete: "
-                + ", ".join(blockers),
-                category="store-access",
-            )
-            return report
         try:
-            online_environment = store_lane_environment(
-                config, values=credential_values, platforms=selected
-            )
-            with _credential_environment(online_environment):
-                report.extend(
-                    online_preflight_findings(
-                        config=config, release=release, platforms=selected
-                    )
-                )
+            # The same immutable selection spans native validation, the gate,
+            # environment and actual adapters; originals are never reopened.
+            with _selected_store_material(config, values=store_credential_values,
+                    platforms=selected, invocation=invocation, cancellation=cancellation) as material:
+                material_checks = material.validate()
+                credential_checks.extend(material_checks)
+                report.extend(material_checks)
+                blockers = _online_query_blockers(config, selected, credential_checks)
+                if blockers:
+                    report.add("store.online.gate", Status.SKIP,
+                        "Non-publishing Store API checks were skipped because prerequisites are incomplete: "
+                        + ", ".join(blockers), category="store-access")
+                    return report
+                with _credential_environment(material.lane_environment(), invocation=invocation):
+                    report.extend(online_preflight_findings(config=config, release=release, platforms=selected,
+                                                           material=material, invocation=invocation))
         except ProcessError:
             raise
         except CredentialError as error:
             report.add("store.online.materialization", Status.FAIL, str(error), category="store-access")
         return report
     if report.ok and run_builds:
-        identity_values = {
-            name: value
-            for name, value in build_credential_values.items()
-            if name == "MOBILE_RELEASE_PROJECT_READ_TOKEN"
-        }
-        with _credential_environment(identity_values):
-            report.extend(effective_identity_findings(config, selected, execution_source=execution_source))
+        project_read_token = (build_credential_values.get("MOBILE_RELEASE_PROJECT_READ_TOKEN")
+                             if config.section("source").get("projectReadTokenRequired") else None)
+        identity_values = ({"MOBILE_RELEASE_PROJECT_READ_TOKEN": project_read_token} if project_read_token else {})
+        with _credential_environment(identity_values, invocation=invocation):
+            report.extend(effective_identity_findings(config, selected, project_read_token=project_read_token,
+                                                      execution_source=execution_source,
+                                                      cancellation=cancellation))
     if not report.ok:
         report.add(
             "preflight.early-exit",
@@ -1131,36 +1166,35 @@ def _preflight(
                 purpose="signing",
                 platforms=(platform,),
             )
-            material_context = (
-                materialize_build_inputs(
-                    config,
-                    values=platform_values,
-                    platforms=(platform,),
-                    prepare_ios_signing=mode == "signing" and platform == "ios",
-                    signing_lease=signing_lease,
-                )
-                if mode == "signing"
-                else nullcontext(
-                    {
-                        name: value
-                        for name, value in platform_values.items()
-                        if name == "MOBILE_RELEASE_PROJECT_READ_TOKEN"
-                    }
-                )
-            )
             try:
-                with _credential_environment({}):
-                    with material_context as materialized_environment, _credential_environment(
-                        materialized_environment
-                    ):
-                        if platform == "android":
-                            collected.update(
-                                run_android_build(config, signed=mode == "signing", execution_source=execution_source)
-                            )
-                        else:
-                            collected.update(run_ios_build(config, signed=mode == "signing",
-                                                           signing_session=signing_lease.active if signing_lease is not None else None,
-                                                           execution_source=execution_source))
+                with _credential_environment({}, invocation=invocation):
+                    child_context = (invocation.materialization(signing_lease=signing_lease)
+                                     if mode == "signing" else nullcontext(None))
+                    with child_context as build_inputs:
+                        material_context = (
+                            materialize_build_inputs(
+                                config, values=platform_values, platforms=(platform,),
+                                prepare_ios_signing=platform == "ios", signing_lease=signing_lease,
+                                cancellation=cancellation, build_inputs=build_inputs,
+                            ) if mode == "signing" else nullcontext({
+                                name: value for name, value in platform_values.items()
+                                if name == "MOBILE_RELEASE_PROJECT_READ_TOKEN"
+                            })
+                        )
+                        with material_context as materialized_environment, _credential_environment(
+                            materialized_environment, invocation=invocation
+                        ):
+                            if platform == "android":
+                                collected.update(run_android_build(
+                                    config, signed=mode == "signing", execution_source=execution_source,
+                                    cancellation=cancellation, build_inputs=build_inputs,
+                                ))
+                            else:
+                                collected.update(run_ios_build(
+                                    config, signed=mode == "signing",
+                                    signing_session=signing_lease.active if signing_lease is not None else None,
+                                    execution_source=execution_source, cancellation=cancellation,
+                                ))
             except ProcessError as error:
                 if error.fatal:
                     raise
@@ -1185,6 +1219,7 @@ def _preflight(
                 expected_fingerprint=android.get("uploadCertificateSha256"),
                 require_tools=require_tools or mode == "signing",
                 check_signer=mode == "signing",
+                cancellation=cancellation,
             )
         )
         artifact_environment = artifact_validation_environment(os.environ)
@@ -1196,7 +1231,8 @@ def _preflight(
             }
         )
         report.extend(
-            run_project_checks(config, "androidArtifact", environ=artifact_environment, execution_source=execution_source)
+            run_project_checks(config, "androidArtifact", environ=artifact_environment,
+                               execution_source=execution_source, cancellation=cancellation)
         )
     elif "android" in selected and not run_builds:
         report.add(
@@ -1218,6 +1254,7 @@ def _preflight(
                 release=release,
                 symbols_policy=symbols_policy,
                 require_tools=require_tools or mode == "signing",
+                cancellation=cancellation,
             )
             report.extend(archive_findings)
             if mode == "signing" and symbols_policy == "required":
@@ -1268,11 +1305,12 @@ def _preflight(
                     if report.ok:
                         snapshot.deadline.check()
                         report.extend(run_project_checks(config, "iosArtifact", environ=artifact_environment,
-                                                         execution_source=execution_source))
+                                                         execution_source=execution_source,
+                                                         cancellation=cancellation))
                     snapshot.assert_unchanged()
                     if archive:
                         report.add("ios.artifacts.correspondence", Status.PASS,
-                                   "IPA/archive native images, resources and every present retained dSYM correspond; nested symbol completeness is a separate requirement.",
+                                   "IPA/archive native images and resources correspond; retained dSYMs satisfy the configured symbol-inventory policy.",
                                    category="ios-artifact")
             except ValidationError as error:
                 if isinstance(error, ProcessError) and error.fatal:

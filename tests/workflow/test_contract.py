@@ -12,7 +12,7 @@ from pathlib import Path
 
 from mobile_release.stores import _play_state_journal_path
 
-from .workflow_harness import load_workflow, step_by_id
+from .workflow_harness import evaluate_condition, load_workflow, step_by_id
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -184,8 +184,14 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(2, text.count("build_flag=--run-builds"))
         self.assertEqual(2, text.count("build_flag=--skip-builds"))
-        self.assertIn("build-validation-deferred-android.json", text)
-        self.assertIn("build-validation-deferred-ios.json", text)
+        for platform in ("android", "ios"):
+            job = load_workflow(REUSABLE["preflight"])["jobs"][platform]
+            run = next(step["run"] for step in job["steps"] if step["name"].startswith("Run credential-free"))
+            self.assertIn(f"python -P -m mobile_release.workflow write-deferred-report --app-root . --platform {platform}", run)
+            self.assertNotIn("mkdir", run)
+            self.assertNotIn("jq -n", run)
+            self.assertLess(run.index("build_flag=--skip-builds"), run.index("write-deferred-report"))
+            self.assertLess(run.index("write-deferred-report"), run.index("python -P -m mobile_release preflight"))
         self.assertEqual(2, text.count("credentialed build validation will run"))
 
     def test_mutations_share_non_cancelling_concurrency(self) -> None:
@@ -239,8 +245,9 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("secrets.", text)
         self.assertNotRegex(text, r"(?m)^\s*environment\s*:")
         workflow = load_workflow(SHARED_CI)
-        for platform, job in (("linux", "test-linux"), ("macos", "test-native-profiles")):
-            self.assertEqual(workflow["jobs"][job]["steps"][-1]["run"], coordinator_shell(platform))
+        for platform, job, scope in (("linux", "test-linux", None), ("macos", "test-native-profiles", "native-python"),
+                                     ("macos", "test-native-support", "native-support")):
+            self.assertEqual(workflow["jobs"][job]["steps"][-1]["run"], coordinator_shell(platform, scope=scope))
         controller = controller_module()
         paths = fixture_paths(controller)
         catalog = controller.catalog(paths, "linux", deadline=12345.0)
@@ -258,6 +265,8 @@ class ReusableWorkflowContractTests(unittest.TestCase):
             "test_native_upload_validation.rb", "test_native_signal_observation.rb",
             "test_native_process_spawn.rb", "test_native_upload_process.rb", "test_installed_ruby_capture.rb",
             "test_workflow_yaml.rb", "test_supply_wif.rb",
+            "test_store_document.rb", "test_store_lane_lifetime.rb", "test_store_lane_nested_validation.rb",
+            "test_store_lane_resources.rb", "test_store_lane_runtime.rb",
         })
         self.assertEqual(gates["fastfile"].argv, (*paths.bundle, "exec", str(paths.ruby),
                                               str(ROOT / "fastlane/run_lane.rb"), "--validate"))
@@ -290,6 +299,9 @@ class ReusableWorkflowContractTests(unittest.TestCase):
             "fastlane/apple_production.rb", "fastlane/apple_asset_upload.rb", "fastlane/apple_create_retry.rb",
             "fastlane/ios_upload_validation.rb", "fastlane/android_upload_validation.rb", "fastlane/native_upload_validation.rb",
             "fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb",
+            "fastlane/store_document.rb", "fastlane/store_lane_lifetime.rb",
+            "fastlane/store_lane_resources.rb", "fastlane/store_lane_runtime.rb",
+            "fastlane/store_lane_fastlane_bridges.rb",
             "fastlane/release_support.rb", "fastlane/run_lane.rb", "schemas/project.schema.json", "schemas/candidate.schema.json",
             "schemas/receipt.schema.json", "schemas/store-operation-intent.schema.json", "templates/mobile-release.json",
             "templates/workflows/mobile-preflight.yml", "templates/workflows/mobile-candidate.yml",
@@ -545,19 +557,97 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         )
 
     def test_online_preflight_returns_before_any_project_or_build_execution(self) -> None:
-        source = read(PREFLIGHT_SOURCE)
-        online_project_gate = source.index('if mode == "online":')
-        online_store_gate = source.index('if mode == "online":', online_project_gate + 1)
-        online_return = source.index("        return report", online_store_gate)
-        effective_identity = source.index("effective_identity_findings", online_return)
-        project_build_loop = source.index("if run_builds:", effective_identity)
-        self.assertIn("else:", source[online_project_gate:online_store_gate])
-        self.assertIn("run_project_checks", source[online_project_gate:online_store_gate])
-        self.assertLess(online_return, effective_identity)
-        self.assertLess(online_return, project_build_loop)
+        tree = ast.parse(read(PREFLIGHT_SOURCE))
+
+        def only(nodes, role):
+            self.assertEqual(1, len(nodes), role)
+            return nodes[0]
+
+        def is_call(node, name):
+            if not isinstance(node, ast.Call):
+                return False
+            target = node.func
+            return (isinstance(target, ast.Name) and target.id == name or
+                    isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and
+                    f"{target.value.id}.{target.attr}" == name)
+
+        def calls(node, name):
+            return [child for child in ast.walk(node) if is_call(child, name)]
+
+        online_test = ast.dump(ast.parse('mode == "online"', mode="eval").body)
+
+        def online_guard(node):
+            return isinstance(node, ast.If) and ast.dump(node.test) == online_test
+
+        functions = {
+            name: only([node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name], name)
+            for name in ("preflight", "_preflight")
+        }
+        wrapper, implementation = functions["preflight"], functions["_preflight"]
+        forbidden = ("run_project_checks", "effective_identity_findings", "validate_signing_material",
+                     "materialize_build_inputs", "run_android_build", "run_ios_build",
+                     "local_signing_lease", "invocation.project")
+
+        # Online delegates inside the original custody, before any project or
+        # signing admission. Inspect this public route as well as its callee.
+        custody = only([node for node in ast.walk(wrapper) if isinstance(node, ast.With) and
+                        any(is_call(item.context_expr, "invocation_custody") for item in node.items)],
+                       "public invocation custody")
+        custody_name = only([item.optional_vars for item in custody.items
+                             if is_call(item.context_expr, "invocation_custody")], "original invocation binding")
+        self.assertIsInstance(custody_name, ast.Name)
+        self.assertEqual("invocation", custody_name.id)
+        entry = only([node for node in custody.body if online_guard(node)], "public online branch")
+        delegation = only(entry.body, "unconditional public online delegation")
+        self.assertIsInstance(delegation, ast.Return)
+        self.assertTrue(is_call(delegation.value, "_preflight"))
+        original = only([item.value for item in delegation.value.keywords if item.arg == "invocation"],
+                        "delegated original invocation")
+        self.assertIsInstance(original, ast.Name)
+        self.assertEqual("invocation", original.id)
+        for name in forbidden:
+            admissions = calls(wrapper, name)
+            if name in ("invocation.project", "local_signing_lease"):
+                self.assertTrue(admissions, name)
+            for call in admissions:
+                owner = only([node for node in custody.body if call in ast.walk(node)], name)
+                self.assertLess(custody.body.index(entry), custody.body.index(owner), name)
+
+        guards = [node for node in implementation.body if online_guard(node)]
+        project_checks = [call for call in calls(implementation, "run_project_checks") if len(call.args) > 1 and
+                          isinstance(call.args[1], ast.Constant) and call.args[1].value == "preflight"]
+        self.assertTrue(project_checks, "actual preflight project checks")
+        project_gate = only([node for node in guards if any(call in ast.walk(statement)
+                             for statement in node.orelse for call in project_checks)], "online project-check bypass")
+        self.assertEqual(set(project_checks), {call for statement in project_gate.orelse
+                                              for call in calls(statement, "run_project_checks")})
+
+        # The prerequisite-only online branch has conditional returns too.
+        # Only the actual query branch's direct tail return blocks all fallthrough.
+        self.assertEqual(1, len(calls(implementation, "online_preflight_findings")))
+        query_gate = only([node for node in guards if calls(node, "online_preflight_findings")],
+                          "actual online query branch")
+        online_return = query_gate.body[-1]
+        self.assertIsInstance(online_return, ast.Return)
+        self.assertIsInstance(online_return.value, ast.Name)
+        self.assertEqual("report", online_return.value.id)
+        for guard in (entry, project_gate, query_gate):
+            for statement in guard.body:
+                for name in forbidden:
+                    self.assertFalse(calls(statement, name), name)
+
+        for name in ("effective_identity_findings", "run_android_build", "run_ios_build"):
+            downstream = calls(implementation, name)
+            self.assertTrue(downstream, name)
+            for call in downstream:
+                owner = only([node for node in implementation.body if call in ast.walk(node)], name)
+                self.assertLess(implementation.body.index(query_gate), implementation.body.index(owner), name)
+        build_gate = only([node for node in implementation.body if isinstance(node, ast.If) and
+                           isinstance(node.test, ast.Name) and node.test.id == "run_builds" and
+                           calls(node, "run_android_build") and calls(node, "run_ios_build")], "actual build loop")
+        self.assertLess(implementation.body.index(query_gate), implementation.body.index(build_gate))
 
     def test_candidate_handoff_is_fixed_checksum_bound_and_revalidated(self) -> None:
-        candidate = read(REUSABLE["candidate"])
         for platform, primary in (("android", "app-release.aab"), ("ios", "app.ipa")):
             build = load_workflow(REUSABLE["candidate"])["jobs"][f"{platform}_build"]
             store = load_workflow(REUSABLE["candidate"])["jobs"][f"{platform}_store"]
@@ -570,7 +660,14 @@ class ReusableWorkflowContractTests(unittest.TestCase):
                 self.assertEqual("${{ needs." + platform + "_build.outputs.handoff_digest }}", resolve["env"]["MOBILE_RELEASE_HANDOFF_DIGEST"])
                 self.assertIn("--handoff-digest", resolve["run"])
                 self.assertIn('[[ "$MOBILE_RELEASE_HANDOFF_DIGEST" =~ ^[0-9a-f]{64}$ ]]', resolve["run"])
-                self.assertIn("SHA256SUMS", job_block(candidate, f"{platform}_build"))
+                normalize = next(step for step in build["steps"] if step["name"].startswith("Normalize and checksum"))
+                self.assertEqual("app", normalize["working-directory"])
+                self.assertEqual("set -euo pipefail\n" +
+                                 f"python -P -m mobile_release.workflow normalize-handoff --app-root . --platform {platform}",
+                                 normalize["run"].strip())
+                self.assertLess(build["steps"].index(normalize), build["steps"].index(handoff))
+                signed = next(step for step in build["steps"] if step["name"].startswith("Build, sign, and validate"))
+                self.assertLess(build["steps"].index(signed), build["steps"].index(normalize))
                 self.assertIn(primary, step_by_id(store, "prepare")["run"])
                 self.assertIn("--execute-store", step_by_id(store, "execute")["run"])
 
@@ -678,17 +775,65 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertEqual(2, preflight.count("if-no-files-found: warn"))
 
     def test_every_app_writing_job_establishes_a_non_symlink_private_root(self) -> None:
-        for name, path in REUSABLE.items():
-            text = read(path)
-            with self.subTest(workflow=name):
-                app_checkouts = len(re.findall(r"(?m)^\s+path: app\s*$", text))
-                self.assertGreaterEqual(app_checkouts, 2)
-                self.assertEqual(
-                    app_checkouts,
-                    text.count("Establish safe private workflow output directory"),
-                )
-                self.assertEqual(app_checkouts, text.count('[[ -d "$output" && ! -L "$output" ]]'))
-                self.assertEqual(app_checkouts, text.count('find "$output" -mindepth 1 -print -quit'))
+        expected = {
+            "preflight": {"android", "ios"},
+            "candidate": {"android_online", "android_build", "android_store",
+                          "ios_online", "ios_build", "ios_store"},
+            "external-testing": {"android", "ios"},
+            "production-submit": {"android", "ios"},
+        }
+        condition = "success() && (steps.resolve.outputs.mode == 'prepare' || steps.resolve.outputs.mode == 'resume')"
+        script = "\n".join((
+            "set -euo pipefail",
+            'workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"',
+            'app_root="$(cd app && pwd -P)"',
+            '[[ ! -L app && "$app_root" == "$workspace_root/app" ]]',
+            'python -P -m mobile_release.workflow prepare-app-private --app-root "$app_root" --role empty-root',
+        ))
+        for workflow, names in expected.items():
+            jobs = load_workflow(REUSABLE[workflow])["jobs"]
+            app_jobs = {key for key, job in jobs.items()
+                        if any(step.get("with", {}).get("path") == "app" for step in job["steps"])}
+            self.assertEqual(names, app_jobs)
+            for key in sorted(names):
+                with self.subTest(workflow=workflow, job=key):
+                    steps = jobs[key]["steps"]
+                    roots = [step for step in steps if step["name"] == "Establish safe private workflow output directory"]
+                    self.assertEqual(1, len(roots))
+                    root = roots[0]
+                    self.assertEqual(script, root["run"].strip())
+                    self.assertNotIn("working-directory", root)
+                    root_index = steps.index(root)
+                    checkout = next(step for step in steps if step.get("with", {}).get("path") == "app")
+                    tooling = next(step for step in steps if step.get("with", {}).get("path") == "tooling")
+                    python = next(step for step in steps if step["name"] == "Set up Python")
+                    self.assertEqual("${{ job.workflow_sha }}", tooling["with"]["ref"])
+                    self.assertEqual("${{ job.workflow_repository }}", tooling["with"]["repository"])
+                    for prerequisite in (checkout, tooling, python):
+                        self.assertLess(steps.index(prerequisite), root_index)
+                    verified = [index for index, step in enumerate(steps[:root_index])
+                                if '[[ "$(git -C tooling rev-parse HEAD)" == "$MOBILE_RELEASE_TOOLING_SHA" ]]' in step.get("run", "")]
+                    self.assertTrue(verified, "private setup must run only from the verified tooling checkout")
+                    self.assertLess(steps.index(tooling), verified[-1])
+                    staging = workflow in PROMOTION_ONLY or key.endswith("_store")
+                    if staging:
+                        self.assertEqual(condition, root["if"])
+                        self.assertEqual(condition, checkout["if"])
+                        stage = next(step for step in steps if "mobile_release.workflow stage" in step.get("run", ""))
+                        self.assertEqual(condition, stage["if"])
+                        self.assertLess(steps.index(step_by_id(jobs[key], "resolve")), steps.index(checkout))
+                        self.assertLess(root_index, steps.index(stage))
+                        for mode in ("fresh", "prepare", "resume", "complete"):
+                            context = {"steps": {"resolve": {"outputs": {"mode": mode}}}}
+                            self.assertEqual(mode in {"prepare", "resume"}, evaluate_condition(root["if"], context, success=True, cancelled=False))
+                            self.assertFalse(evaluate_condition(root["if"], context, success=False, cancelled=False))
+                    else:
+                        self.assertNotIn("if", root)
+                    for index, step in enumerate(steps):
+                        run = step.get("run", "")
+                        if (step.get("uses", "").startswith("google-github-actions/auth@") or
+                                any(command in run for command in ("mobile_release doctor", "mobile_release preflight", "mobile_release ci"))):
+                            self.assertLess(root_index, index)
 
     def test_candidate_retains_exact_manifest_bound_metadata_and_validation_report(self) -> None:
         for platform in ("android", "ios"):

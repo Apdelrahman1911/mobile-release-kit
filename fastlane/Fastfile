@@ -14,6 +14,7 @@ require_relative "apple_production"
 require_relative "apple_create_retry"
 require_relative "ios_upload_validation"
 require_relative "android_upload_validation"
+require_relative "store_document"
 
 PLAY_SCOPE = "https://www.googleapis.com/auth/androidpublisher"
 IOS_PLATFORM = Spaceship::ConnectAPI::Platform::IOS
@@ -143,25 +144,26 @@ def require_operation_intent!(operation, platform)
 end
 
 def atomic_store_document(contents, label:)
+  if @store_document_publication && !@store_document_publication.successful?
+    UI.user_error!("Previous Store document publication is unconfirmed; preserve existing files")
+  end
   path = safe_app_path(required_env("MOBILE_RELEASE_STORE_RECEIPT_PATH"), must_exist: false)
   UI.user_error!("Refusing to overwrite #{label}") if File.exist?(path) || File.symlink?(path)
+  publication = MobileReleaseKit::StoreDocument::Publication.new(path: path, contents: contents)
+  # Root the same original owner before mkdir or any publication effect. An
+  # interrupted/uncertain attempt must remain visible to invocation finality.
+  @store_document_publication = publication
+  invocation = MobileReleaseKit::StoreLaneLifetime.current_invocation
+  invocation&.reserve_store_document!(publication)
   FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
-  temporary = "#{path}.tmp-#{Process.pid}"
-  File.open(temporary, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
-    file.write(JSON.pretty_generate(contents))
-    file.write("\n")
-    file.flush
-    file.fsync
-  end
-  # Link is an exclusive publication; a competing writer cannot be overwritten
-  # between the initial existence check and this final durable boundary.
-  File.link(temporary, path)
-ensure
-  FileUtils.rm_f(temporary) if defined?(temporary) && temporary
+  publication.publish!
+  invocation&.record_store_document!(publication)
+  publication
 end
 
 def write_precondition(operation:, platform:, identity:, snapshot:)
   version = release_version
+  MobileReleaseKit::StoreLaneLifetime.require_upload_continuation!
   atomic_store_document(
     {
       schemaVersion: 1,
@@ -194,6 +196,7 @@ def write_receipt(operation:, platform:, identity:, result:, extra:)
     authorizedBy: intent.fetch(:payload).fetch("authorizedBy"),
     executedBy: MobileReleaseKit.execution_authority(ENV),
   }.merge(extra)
+  MobileReleaseKit::StoreLaneLifetime.require_upload_continuation!
   atomic_store_document(receipt, label: "a Store receipt")
 end
 
@@ -690,6 +693,7 @@ def replay_recovered_play_mapping!(intent_snapshot)
   MobileReleaseKit::PreservingSupplyUploader.replay_mapping(
     options: options, journal_path: play_state_journal_path,
     intent_sha256: operation_intent.fetch(:digest),
+    expected_mapping: expected_play_mapping,
     target_guard: ->(client) { require_play_target_in_edit!(client, "candidate", intent_snapshot) },
   )
 end
@@ -818,10 +822,17 @@ def guarded_play_upload(options, stage:, intent_snapshot:, release_notes: nil)
     intent_sha256: operation_intent.fetch(:digest),
     expected_bundle_sha256: expected.fetch("sha256"),
     expected_bundle: expected,
+    expected_mapping: stage == "candidate" ? expected_play_mapping : nil,
     bundle_validation: stage == "candidate" ? ->(aab) { validate_current_android_upload!(aab) } : nil,
   )
 rescue MobileReleaseKit::ContractError => e
   UI.user_error!(e.message)
+end
+
+def expected_play_mapping
+  records = operation_intent.fetch(:payload).fetch("artifacts").select { |artifact| artifact["logicalName"] == "android-mapping" }
+  UI.user_error!("Mapping execution requires a unique authenticated intent record") if records.length > 1
+  records.first
 end
 
 def play_upload_options
@@ -829,7 +840,7 @@ def play_upload_options
   mapping_value = ENV["MOBILE_RELEASE_ANDROID_MAPPING_PATH"].to_s.strip
   mapping = mapping_value.empty? ? nil : safe_app_path(mapping_value)
   if mapping
-    bound = operation_intent.fetch(:payload).fetch("artifacts").find { |artifact| artifact["logicalName"] == "android-mapping" }
+    bound = expected_play_mapping
     unless bound && bound["size"] == File.size(mapping) && bound["sha256"] == Digest::SHA256.file(mapping).hexdigest &&
            (File.extname(bound.fetch("fileName")).downcase == ".zip") == (File.extname(mapping).downcase == ".zip")
       UI.user_error!("Mapping bytes and deobfuscation type must match the authenticated intent")
@@ -2012,8 +2023,13 @@ lane :ios_testflight_internal do
       write_apple_state_journal("cancelled", "failureClass" => e.class.name) rescue nil
       raise
     rescue StandardError => e
+      MobileReleaseKit::StoreLaneLifetime.require_upload_continuation!
+      MobileReleaseKit::StoreLaneLifetime.require_ios_dispatch_not_refused!
       upload_error = e
       write_apple_state_journal("upload-response-ambiguous", "failureClass" => e.class.name)
+    else
+      MobileReleaseKit::StoreLaneLifetime.require_upload_continuation!
+      MobileReleaseKit::StoreLaneLifetime.require_ios_dispatch_not_refused!
     end
     begin
       build = poll_exact_ios_build(app, timeout: upload_error ? 600 : 3_600)

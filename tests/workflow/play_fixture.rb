@@ -1,7 +1,8 @@
 # frozen_string_literal: true
 
 # A credential-free Publisher service at the generated SDK command boundary.
-# Supply's real listing/changelog/image/mapping adapters and the pinned Google's
+# Supply's real listing/changelog/image adapters, the owned mapping sender and
+# the pinned Google's
 # request serializers/response parsers remain in use. No request can use a socket.
 require "bundler/setup"
 require "fastlane"
@@ -58,6 +59,19 @@ class PlayFixture
     requests.select { |entry| entry.fetch(:path).end_with?(":commit") }
   end
 
+  def upload_bytes(source)
+    return File.binread(source) if source.is_a?(String)
+
+    raise "Expected caller-owned File upload" unless source.is_a?(File)
+    position = source.pos
+    begin
+      source.rewind
+      source.read
+    ensure
+      source.pos = position
+    end
+  end
+
   def execute(command)
     url = command.url.respond_to?(:expand) ? command.url.expand(command.params) : command.url
     path = url.path
@@ -67,7 +81,7 @@ class PlayFixture
       method: command.method, path: path, body: body, params: clone(command.params),
       command_class: command.class.name,
       query: clone(command.query), retries: command.options.retries,
-      upload_sha256: upload && Digest::SHA256.file(upload).hexdigest,
+      upload_sha256: upload && Digest::SHA256.hexdigest(upload_bytes(upload)),
       mutation: command.method != :get && (path.include?("/tracks/") || path.include?("/bundles") || path.include?("/deobfuscationFiles/") || path.include?("/listings/") || path.end_with?(":commit")),
     }
     @requests << entry
@@ -113,14 +127,14 @@ class PlayFixture
       return { "bundles" => clone(pending.fetch("bundles")) } if method == :get
       raise "Unexpected bundle method" unless method == :post
       raise Google::Apis::ClientError, "duplicate version" if pending.fetch("bundles").any? { |item| item["versionCode"] == @code }
-      bundle = { "versionCode" => @code, "sha256" => Digest::SHA256.file(upload).hexdigest }
+      bundle = { "versionCode" => @code, "sha256" => Digest::SHA256.hexdigest(upload_bytes(upload)) }
       pending.fetch("bundles") << bundle
       state.fetch("bundles") << clone(bundle) if persist_bundles_outside_edit
       return bundle
     end
     if segments[0] == "apks" && segments[2] == "deobfuscationFiles"
       raise "Unexpected mapping method" unless method == :post
-      pending.fetch("mappings")[[segments[1], segments[3]]] = File.binread(upload)
+      pending.fetch("mappings")[[segments[1], segments[3]]] = upload_bytes(upload)
       return {}
     end
     if segments[0] == "tracks"

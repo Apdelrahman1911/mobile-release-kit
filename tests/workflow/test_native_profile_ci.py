@@ -55,6 +55,12 @@ _NATIVE_PATTERN_FIXTURES = (
     "test_command_fence_failure.py",
     "test_local_signing_attempts.py",
     "test_command_account_lifecycle.py",
+    "test_build_inputs.py",
+    "test_checked_files.py",
+    "test_source_observation.py",
+    "test_credentials_metadata.py",
+    "test_cli_and_build.py",
+    "test_app_private.py",
 )
 _FIXTURE_MODULE = "unit.native_diagnostic_fixture"
 _FIXTURE_METHODS = ("test_01_before", "test_02_subject", "test_03_after",
@@ -65,7 +71,9 @@ _FIXTURE_METHODS = ("test_01_before", "test_02_subject", "test_03_after",
                     "test_16_support", "test_17_support", "test_18_support",
                     "test_19_support", "test_20_support", "test_21_support",
                     "test_22_support", "test_23_support", "test_24_support",
-                    "test_25_support", "test_26_support", "test_27_support")
+                    "test_25_support", "test_26_support", "test_27_support",
+                    "test_28_support", "test_29_support", "test_30_support",
+                    "test_31_support", "test_32_support", "test_33_support")
 _FIXTURE_IDS = tuple(f"{_FIXTURE_MODULE}.Fixture.{name}" for name in _FIXTURE_METHODS)
 _PROFILE_PRODUCT_FIXTURES = frozenset({
     "mobile_release", "mobile_release._native_process", "mobile_release._profile_process",
@@ -103,7 +111,8 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "workflow.profile_process_fixture", "workflow.process_fixture"}),
      frozenset({"mobile_release", "mobile_release._native_process", "mobile_release._command_process",
                 "mobile_release.owned_process", "mobile_release.cancellation", "mobile_release._lifetime_evidence",
-                "mobile_release.errors"})),
+                "mobile_release.errors",
+                "mobile_release._store_lane_contract"})),
     ("workflow.test_command_fence_failure", ("workflow", "unit"),
      frozenset({"workflow", "workflow.test_command_fence_failure", "workflow.command_bootstrap_fixture",
                 "workflow.command_fence_failure_fixture", "workflow.local_signing_case_owner",
@@ -115,7 +124,10 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.owned_process", "mobile_release.cancellation", "mobile_release._lifetime_evidence",
                 "mobile_release.errors", "mobile_release.local_signing", "mobile_release._profile_callers",
                 "mobile_release.credentials", "mobile_release.config", "mobile_release.reporting",
-                "mobile_release.tooling"})),
+                "mobile_release._store_lane_contract",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files",
+                "mobile_release.init_transaction"})),
     ("workflow.test_command_account_lifecycle", ("workflow", "unit"),
      frozenset({"workflow", "workflow.test_command_account_lifecycle", "workflow.command_bootstrap_fixture",
                 "workflow.command_fence_failure_fixture", "workflow.command_account_lifecycle_fixture", "workflow.local_signing_case_owner",
@@ -127,7 +139,10 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.owned_process", "mobile_release.cancellation", "mobile_release._lifetime_evidence",
                 "mobile_release.errors", "mobile_release.local_signing", "mobile_release._profile_callers",
                 "mobile_release.credentials", "mobile_release.config", "mobile_release.reporting",
-                "mobile_release.tooling"})),
+                "mobile_release._store_lane_contract",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files",
+                "mobile_release.init_transaction"})),
     ("unit.test_local_signing_persistent", ("workflow", "unit"),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_helpers", "unit.local_signing_persistent",
                 "unit.test_local_signing_persistent", "workflow", "workflow.local_signing_bridge",
@@ -138,7 +153,9 @@ _ISOLATED_IMPORT_FIXTURES = (
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
                 "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
                 "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
-                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.build_inputs",
+                "mobile_release.checked_files",
+                "mobile_release.init_transaction"})),
     ("unit.test_local_signing_composition", ("workflow", "unit"),
      frozenset({"unit", "unit.helpers", "unit.ios_entitlement_helpers", "unit.local_signing_helpers",
                 "unit.local_signing_persistent", "unit.test_local_signing_composition", "workflow",
@@ -151,7 +168,13 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.ios_profiles", "mobile_release.local_signing", "mobile_release.macho",
                 "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
                 "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
-                "mobile_release.tooling", "mobile_release.workflow"})),
+                "mobile_release.tooling", "mobile_release.workflow",
+                "mobile_release._command_process",
+                "mobile_release._store_lane_contract",
+                "mobile_release._store_lane_evidence",
+                "mobile_release._store_lane_files",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files"})),
     ("unit.test_ios_entitlements", ("unit",),
      frozenset({"unit", "unit.ios_artifact_helpers", "unit.ios_entitlement_helpers", "unit.test_ios_entitlements"}),
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
@@ -160,10 +183,13 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.init_transaction", "mobile_release.inspection", "mobile_release.ios",
                 "mobile_release.ios_der", "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary",
                 "mobile_release.ios_profiles", "mobile_release.local_signing", "mobile_release.owned_process",
-                "mobile_release.reporting", "mobile_release.tooling"})),
+                "mobile_release.reporting", "mobile_release.tooling",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files"})),
     ("unit.test_operation_recovery", ("unit",),
      frozenset({"unit", "unit.evidence_helpers", "unit.helpers", "unit.ios_artifact_helpers",
-                "unit.ios_entitlement_helpers", "unit.test_operation_recovery"}),
+                "unit.ios_entitlement_helpers", "unit.test_operation_recovery",
+                "unit.store_lane_model"}),
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
                 "mobile_release._profile_callers", "mobile_release._profile_process", "mobile_release.android",
                 "mobile_release.cancellation", "mobile_release.cli", "mobile_release.config", "mobile_release.credentials",
@@ -172,7 +198,13 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.ios_entitlements", "mobile_release.ios_plist_binary", "mobile_release.ios_profiles",
                 "mobile_release.local_signing", "mobile_release.macho", "mobile_release.metadata",
                 "mobile_release.owned_process", "mobile_release.preflight", "mobile_release.provenance",
-                "mobile_release.reporting", "mobile_release.stores", "mobile_release.tooling", "mobile_release.workflow"})),
+                "mobile_release.reporting", "mobile_release.stores", "mobile_release.tooling", "mobile_release.workflow",
+                "mobile_release._command_process",
+                "mobile_release._store_lane_contract",
+                "mobile_release._store_lane_evidence",
+                "mobile_release._store_lane_files",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files"})),
     ("unit.test_ios_profile_authority", ("unit",),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.ios_profile_helpers", "unit.test_ios_profile_authority"}),
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
@@ -186,7 +218,9 @@ _ISOLATED_IMPORT_FIXTURES = (
      frozenset({"mobile_release", "mobile_release._lifetime_evidence", "mobile_release._native_process",
                 "mobile_release._profile_callers", "mobile_release.cancellation", "mobile_release.config",
                 "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
-                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.build_inputs",
+                "mobile_release.checked_files",
+                "mobile_release.init_transaction"})),
     ("unit.test_local_signing_failures", ("workflow", "unit"),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
                 "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
@@ -200,7 +234,12 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.ios_entitlements", "mobile_release.local_signing", "mobile_release.macho",
                 "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
                 "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
-                "mobile_release.tooling", "mobile_release.workflow"})),
+                "mobile_release.tooling", "mobile_release.workflow",
+                "mobile_release._store_lane_contract",
+                "mobile_release._store_lane_evidence",
+                "mobile_release._store_lane_files",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files"})),
     ("unit.test_local_signing_profile_identity", ("workflow", "unit"),
      frozenset({"unit", "unit.ios_entitlement_helpers", "unit.local_signing_algorithm_helpers",
                 "unit.local_signing_helpers", "unit.local_signing_persistent", "unit.local_signing_workspace",
@@ -214,13 +253,21 @@ _ISOLATED_IMPORT_FIXTURES = (
                 "mobile_release.ios_entitlements", "mobile_release.local_signing", "mobile_release.macho",
                 "mobile_release.metadata", "mobile_release.owned_process", "mobile_release.preflight",
                 "mobile_release.provenance", "mobile_release.reporting", "mobile_release.stores",
-                "mobile_release.tooling", "mobile_release.workflow"})),
+                "mobile_release.tooling", "mobile_release.workflow",
+                "mobile_release._store_lane_contract",
+                "mobile_release._store_lane_evidence",
+                "mobile_release._store_lane_files",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files"})),
     ("unit.test_owned_process", ("unit",),
      frozenset({"unit", "unit.test_owned_process"}),
      frozenset({"mobile_release", "mobile_release._command_process", "mobile_release._lifetime_evidence",
                 "mobile_release._native_process", "mobile_release._profile_callers", "mobile_release.cancellation",
                 "mobile_release.config", "mobile_release.credentials", "mobile_release.errors", "mobile_release.local_signing",
-                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release.tooling"})),
+                "mobile_release.owned_process", "mobile_release.reporting", "mobile_release._store_lane_contract",
+                "mobile_release.build_inputs",
+                "mobile_release.checked_files",
+                "mobile_release.init_transaction"})),
 )
 _ISOLATED_PRIME_FIXTURES = (
     ("unit.test_ios_entitlements", ("mobile_release.ios_profiles", "mobile_release.ios_plist_binary")),
@@ -328,12 +375,30 @@ def _inert_native_suites(outcome="success", *, subtests=3, unknown_id=False):
         def test_27_support(self):
             pass
 
+        def test_28_support(self):
+            pass
+
+        def test_29_support(self):
+            pass
+
+        def test_30_support(self):
+            pass
+
+        def test_31_support(self):
+            pass
+
+        def test_32_support(self):
+            pass
+
+        def test_33_support(self):
+            pass
+
     Fixture.__module__, Fixture.__qualname__ = _FIXTURE_MODULE, "Fixture"
     if outcome in {"expected-failure", "unexpected-success"}:
         Fixture.test_02_subject = unittest.expectedFailure(Fixture.test_02_subject)
     if unknown_id:
-        # This case exercises unknown adverse attribution, not an earlier
-        # successful test presenting an unauthorized completion identity.
+        # Immediate identity drift exercises inventory/start admission. The
+        # adverse-callback case separately drifts only after its body starts.
         Fixture.id = lambda self: ("PRIVATE_UNRECOGNIZED_ID" if unittest.TestCase.id(self) == _FIXTURE_IDS[1]
                                    else unittest.TestCase.id(self))
 
@@ -480,22 +545,24 @@ class _DiagnosticSink(io.StringIO):
 class NativeProfileCITests(unittest.TestCase):
     def test_macos_upload_process_contracts_require_all_suites_and_pinned_ruby(self):
         workflow = load_workflow(Path(__file__).parents[2] / ".github/workflows/ci.yml")
-        native = workflow["jobs"]["test-native-profiles"]
         linux_ruby = next(step for step in workflow["jobs"]["test-linux"]["steps"]
                           if step.get("uses", "").startswith("ruby/setup-ruby@"))
-        ruby = next(step for step in native["steps"]
-                    if step.get("uses", "").startswith("ruby/setup-ruby@"))
-        self.assertEqual(ruby["uses"], linux_ruby["uses"])
-        self.assertEqual(ruby["with"], {"ruby-version": "3.3.12", "bundler": "none", "bundler-cache": False})
-        step = native["steps"][-1]
-        self.assertEqual(step["run"], coordinator_shell("macos"))
-        self.assertLess(native["steps"].index(ruby), native["steps"].index(step))
-        for required in (ruby, step):
-            self.assertNotIn("if", required)
-            self.assertNotIn("continue-on-error", required)
+        for name, scope in (("test-native-profiles", "native-python"), ("test-native-support", "native-support")):
+            with self.subTest(job=name):
+                native = workflow["jobs"][name]
+                ruby = next(step for step in native["steps"]
+                            if step.get("uses", "").startswith("ruby/setup-ruby@"))
+                self.assertEqual(ruby["uses"], linux_ruby["uses"])
+                self.assertEqual(ruby["with"], {"ruby-version": "3.3.12", "bundler": "none", "bundler-cache": False})
+                step = native["steps"][-1]
+                self.assertEqual(step["run"], coordinator_shell("macos", scope=scope))
+                self.assertLess(native["steps"].index(ruby), native["steps"].index(step))
+                for required in (ruby, step):
+                    self.assertNotIn("if", required)
+                    self.assertNotIn("continue-on-error", required)
         controller = controller_module()
         paths = fixture_paths(controller)
-        steps = controller.catalog(paths, "macos", deadline=12345.0)
+        steps = controller.catalog(paths, "macos", deadline=12345.0, scope="native-support")
         suites = {
             "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", 32),
             "ruby-native-spawn": ("test_native_process_spawn.rb", 52),
@@ -523,7 +590,7 @@ class NativeProfileCITests(unittest.TestCase):
                     calls.append(item.id)
                     return controller.CheckResult(item.id != failed)
 
-                report = controller.execute_pipeline(steps, perform, platform="macos")
+                report = controller.execute_pipeline(steps, perform, platform="macos", scope="native-support")
                 self.assertEqual(report.ok, failed is None)
                 expected_calls = ids if failed is None else ids[:ids.index(failed) + 1]
                 self.assertEqual(calls, expected_calls)
@@ -531,23 +598,27 @@ class NativeProfileCITests(unittest.TestCase):
                     self.assertTrue(all(row["status"] == "UNEXECUTED" for row in report.rows[len(calls):]))
 
     def test_native_source_and_wheel_catalog_follow_the_protected_platform_route(self):
-        from .test_ci_verification import NATIVE_TARGET_CONDITION
+        from .test_ci_verification import NATIVE_TARGET_CONDITION, NATIVE_SUPPORT_TARGET_CONDITION
         workflow = load_workflow(Path(__file__).parents[2] / ".github/workflows/ci.yml")
         aggregate = workflow["jobs"]["test"]
-        # CIWorkflowIsolationTests executes the current three-result guard,
+        # CIWorkflowIsolationTests executes the current four-result guard,
         # including every unsuccessful predecessor; do not replay its old
         # two-result shell matrix here. Retain this distinct native gate binding.
         self.assertIn("test-native-profiles", aggregate["needs"])
-        native_job = workflow["jobs"]["test-native-profiles"]
-        self.assertEqual(native_job["runs-on"], "macos-26")
-        self.assertEqual(native_job["permissions"], {"contents": "read"})
-        self.assertEqual(native_job["if"], NATIVE_TARGET_CONDITION)
-        self.assertNotIn("continue-on-error", native_job)
-        self.assertNotIn("environment", native_job)
-        self.assertEqual(native_job["steps"][-1]["run"], coordinator_shell("macos"))
+        self.assertIn("test-native-support", aggregate["needs"])
+        for name, scope, condition in (("test-native-profiles", "native-python", NATIVE_TARGET_CONDITION),
+                                       ("test-native-support", "native-support", NATIVE_SUPPORT_TARGET_CONDITION)):
+            with self.subTest(job=name):
+                native_job = workflow["jobs"][name]
+                self.assertEqual(native_job["runs-on"], "macos-26")
+                self.assertEqual(native_job["permissions"], {"contents": "read"})
+                self.assertEqual(native_job["if"], condition)
+                self.assertNotIn("continue-on-error", native_job)
+                self.assertNotIn("environment", native_job)
+                self.assertEqual(native_job["steps"][-1]["run"], coordinator_shell("macos", scope=scope))
         controller = controller_module()
         paths = fixture_paths(controller)
-        catalog = controller.catalog(paths, "macos", deadline=12345.0)
+        catalog = controller.catalog(paths, "macos", deadline=12345.0, scope="native-python")
         checks = [item for item in catalog if item.id in {"native-profile-source", "native-profile-wheel"}]
         self.assertEqual([item.id for item in checks], ["native-profile-source", "native-profile-wheel"])
         gate = str(paths.source / "tests/workflow/run_native_profile_checks.py")
@@ -785,7 +856,18 @@ class NativeProfileCITests(unittest.TestCase):
 
         for fault in ("unknown-id", "write", "short", "flush", "interrupt"):
             with self.subTest(fault=fault):
-                suites, module, _ = _inert_native_suites("error", unknown_id=fault == "unknown-id")
+                suites, module, events = _inert_native_suites("error")
+                if fault == "unknown-id":
+                    original_subject = module.Fixture.test_02_subject
+
+                    def unknown_at_callback(case):
+                        try:
+                            original_subject(case)
+                        except OSError:
+                            case.id = lambda: "PRIVATE_UNRECOGNIZED_ID"
+                            raise
+
+                    module.Fixture.test_02_subject = unknown_at_callback
                 output = _DiagnosticSink(fault)
                 with patch.dict(sys.modules, {_FIXTURE_MODULE: module}), _inert_native_gate(suites=suites, stderr=output):
                     if fault == "interrupt":
@@ -794,6 +876,7 @@ class NativeProfileCITests(unittest.TestCase):
                         self.assertIs(raised.exception, output.interruption)
                     else:
                         self.assertEqual(gate.run(), 1)
+                self.assertEqual(events, ["before", "subject"])
                 self.assertEqual(output.attempts, 0 if fault == "unknown-id" else 1)
                 if fault == "unknown-id":
                     self.assertEqual(_native_envelopes(output.getvalue()), [])
@@ -847,63 +930,83 @@ class NativeProfileCITests(unittest.TestCase):
                         "category": "os-error", "errno": errno.EDQUOT, "returncode": None})
                 self.assertNotIn("PRIVATE", json.dumps(diagnostic))
 
-        # Success is a final callback, not permission to ignore a reporting
-        # failure. Real unittest must stop even if a partial/full line escaped.
+        # Start reporting must finish before the body; success is still a
+        # separate final callback. Either reporting failure stops real unittest
+        # even if a partial/full line escaped.
         class IntegerSubclass(int):
             pass
 
-        for fault in ("short", "integer-subclass", "write", "flush", "interrupt"):
-            with self.subTest(success_reporting=fault):
-                original = (KeyboardInterrupt("PRIVATE_SUCCESS_REPORTING_INTERRUPT") if fault == "interrupt"
-                            else OSError(errno.EDQUOT, "PRIVATE_SUCCESS_REPORTING_FAILURE"))
-                state, retained = {"failed": False, "records": []}, []
+        class RetainingReportingRunner(unittest.TextTestRunner):
+            def _makeResult(self):
+                result = super()._makeResult()
+                retained.append(result)
+                return result
 
-                class CompletionSink(io.StringIO):
+        for timed, reporting_phase, fault in itertools.product((False, True), ("start", "success"),
+                ("short", "bool", "integer-subclass", "write", "flush", "interrupt")):
+            with self.subTest(timed=timed, reporting_phase=reporting_phase, fault=fault):
+                original = (KeyboardInterrupt("PRIVATE_REPORTING_INTERRUPT") if fault == "interrupt"
+                            else OSError(errno.EDQUOT, "PRIVATE_REPORTING_FAILURE"))
+                state, retained = {"failed": False, "records": []}, []
+                suffix = " ... ok" if reporting_phase == "success" else ""
+                prefix = "MRK_NATIVE_ELAPSED_MS=0\n" if timed else ""
+                line = f"\n{prefix}{_FIXTURE_METHODS[0]} ({_FIXTURE_IDS[0]}){suffix}\n"
+                clock = Mock(return_value=1_000_000)
+
+                class ReportingSink(io.StringIO):
                     attempts = 0
-                    complete_written = False
+                    report_written = False
+                    flush_attempts = 0
 
                     def write(self, text):
-                        if text.startswith("\n") and text.endswith(" ... ok\n"):
+                        if text == line:
                             self.attempts += 1
                             if fault in {"write", "interrupt"}:
                                 raise original
                             if fault == "short":
                                 return super().write(text[:-1])
                             written = super().write(text)
-                            self.complete_written = True
+                            self.report_written = True
+                            if fault == "bool":
+                                return True
                             return IntegerSubclass(written) if fault == "integer-subclass" else written
                         return super().write(text)
 
                     def flush(self):
-                        if fault == "flush" and self.complete_written:
+                        if self.attempts:
+                            self.flush_attempts += 1
+                        if fault == "flush" and self.report_written:
                             raise original
                         return super().flush()
 
-                class RetainingSuccessRunner(unittest.TextTestRunner):
-                    def _makeResult(self):
-                        result = super()._makeResult()
-                        retained.append(result)
-                        return result
-
                 suites, module, executed = _inert_native_suites()
-                output = CompletionSink()
-                runner = RetainingSuccessRunner(stream=output, verbosity=2, descriptions=False, failfast=True,
-                                                 resultclass=gate._result_class(_FIXTURE_IDS, state))
-                with self.assertRaises(type(original)) as raised:
-                    runner.run(unittest.TestSuite(suites))
+                output = ReportingSink()
+                with patch.object(gate, "time", SimpleNamespace(monotonic_ns=clock)):
+                    runner = RetainingReportingRunner(stream=output, verbosity=2, descriptions=False, failfast=True,
+                        resultclass=gate._result_class(_FIXTURE_IDS, state, **({"progress_timing": True} if timed else {})))
+                    with self.assertRaises(type(original)) as raised:
+                        runner.run(unittest.TestSuite(suites))
                 if fault in {"write", "flush", "interrupt"}:
                     self.assertIs(raised.exception, original)
                 else:
-                    self.assertEqual(str(raised.exception), "native success write was incomplete")
+                    self.assertEqual(str(raised.exception), f"native {reporting_phase} write was incomplete")
                 self.assertTrue(state["failed"])
-                self.assertEqual(executed, ["before"])
+                self.assertEqual(state["records"], [])
+                self.assertEqual(executed, [] if reporting_phase == "start" else ["before"])
                 self.assertEqual(output.attempts, 1)
+                self.assertEqual(output.flush_attempts, 1 if fault == "flush" else 0)
                 result, = retained
                 self.assertTrue(result.shouldStop)
                 self.assertEqual(result.testsRun, 1)
                 saved = output.getvalue()
-                if fault in {"short", "integer-subclass", "flush"}:
-                    self.assertIn(_FIXTURE_IDS[0], saved)  # Written bytes are not magically withdrawn.
+                if fault == "short":
+                    self.assertIn(line[:-1], saved)  # Written bytes are not magically withdrawn.
+                elif fault in {"bool", "integer-subclass", "flush"}:
+                    self.assertIn(line, saved)
+                else:
+                    self.assertNotIn(line, saved)
+                if reporting_phase == "start":
+                    self.assertNotIn(" ... ok\n", saved)
                 self.assertNotIn("\nOK\n", saved)
                 for callback in (result.startTest, result.addSuccess):
                     result.shouldStop = False
@@ -912,25 +1015,172 @@ class NativeProfileCITests(unittest.TestCase):
                     self.assertTrue(result.shouldStop)
                     self.assertEqual(output.getvalue(), saved)
                     self.assertEqual(output.attempts, 1)
+                self.assertEqual(clock.call_count, (2 if reporting_phase == "start" else 3) if timed else 0)
 
-        # Lifecycle pseudo-IDs are allowed for failure attribution only; even a
-        # real expected ID must not emit success after an earlier failure.
-        for identifier, failed in (("PRIVATE_FOREIGN_ID", False), (None, False),
-                (f"setUpClass ({_FIXTURE_MODULE}.Fixture)", False), (_FIXTURE_IDS[0], True)):
-            with self.subTest(success_id=identifier, prior_failure=failed):
+        # Disabled reporters must not even inspect a clock. Explicit False and
+        # the historical default retain exactly the same complete writes.
+        class ForbiddenClock:
+            @property
+            def monotonic_ns(self):
+                raise AssertionError("a disabled reporter must not inspect the clock")
+
+        class TimingStream(io.StringIO):
+            def __init__(self):
+                super().__init__()
+                self.writes = []
+                self.flushes = 0
+
+            def write(self, text):
+                self.writes.append(text)
+                return super().write(text)
+
+            def flush(self):
+                self.flushes += 1
+                return super().flush()
+
+        for options in ({}, {"progress_timing": False}):
+            with self.subTest(timing_options=options), patch.object(gate, "time", ForbiddenClock()):
+                output, state = TimingStream(), {"failed": False, "records": []}
+                result = gate._result_class(_FIXTURE_IDS, state, **options)(output, False, 2)
+                case = SimpleNamespace(id=lambda: _FIXTURE_IDS[0])
+                result.startTest(case)
+                result.addSuccess(case)
+                self.assertEqual(output.writes, [f"\n{_FIXTURE_METHODS[0]} ({_FIXTURE_IDS[0]}){suffix}\n"
+                                                 for suffix in ("", " ... ok")])
+                self.assertEqual(output.flushes, 2)
+                self.assertFalse(state["failed"])
+                self.assertFalse(result.shouldStop)
+        for invalid in (None, 0, 1, 0.0, "ordinary", IntegerSubclass(1)):
+            with self.subTest(invalid_timing_flag=invalid), patch.object(gate, "time", ForbiddenClock()):
+                state = {"failed": False, "records": []}
+                with self.assertRaisesRegex(AssertionError, "native progress timing requires an exact boolean"):
+                    gate._result_class(_FIXTURE_IDS, state, progress_timing=invalid)
+                self.assertTrue(state["failed"])
+                self.assertEqual(state["records"], [])
+
+        # Equal samples, sub-millisecond movement and the inclusive bounded
+        # millisecond are valid; no rounded value can hide a raw decrease.
+        for origin, samples, elapsed in (
+                (0, (0, 0), (0, 0)),
+                (1_000_000, (1_000_001, 1_999_999), (0, 0)),
+                (0, (3_600_000_000_000, 3_600_000_999_999), (3_600_000, 3_600_000))):
+            with self.subTest(origin=origin, samples=samples):
+                clock = Mock(side_effect=(origin, *samples))
+                output, state = TimingStream(), {"failed": False, "records": []}
+                with patch.object(gate, "time", SimpleNamespace(monotonic_ns=clock)):
+                    result = gate._result_class(_FIXTURE_IDS, state, progress_timing=True)(output, False, 2)
+                    case = SimpleNamespace(id=lambda: _FIXTURE_IDS[0])
+                    result.startTest(case)
+                    result.addSuccess(case)
+                self.assertEqual(output.writes, [
+                    f"\nMRK_NATIVE_ELAPSED_MS={milliseconds}\n{_FIXTURE_METHODS[0]} ({_FIXTURE_IDS[0]}){suffix}\n"
+                    for milliseconds, suffix in zip(elapsed, ("", " ... ok"))])
+                self.assertEqual(output.flushes, 2)
+                self.assertEqual(clock.call_count, 3)
+                self.assertFalse(state["failed"])
+                self.assertFalse(result.shouldStop)
+
+        clock_ns = 1_000_000
+        clock_failures = []
+        for phase, preceding in (("origin", ()), ("start", (clock_ns,)), ("success", (clock_ns, clock_ns))):
+            for label, invalid in (("bool", True), ("float", 1.0), ("integer-subclass", IntegerSubclass(clock_ns))):
+                clock_failures.append((phase, label, (*preceding, invalid), None,
+                                       "native progress clock " + ("origin" if phase == "origin" else "sample") + " is invalid"))
+            for exception in (OSError, KeyboardInterrupt, SystemExit):
+                original = exception("PRIVATE_CLOCK_FAILURE")
+                clock_failures.append((phase, exception.__name__, (*preceding, original), original, None))
+        clock_failures.extend((
+            ("origin", "negative-origin", (-1,), None, "native progress clock origin is invalid"),
+            ("start", "negative-delta", (clock_ns, clock_ns - 1), None, "native progress clock sample is invalid"),
+            ("success", "same-millisecond-regression", (clock_ns, clock_ns + 999_999, clock_ns + 999_998),
+             None, "native progress clock sample is invalid"),
+        ))
+        for phase, preceding in (("start", (clock_ns,)), ("success", (clock_ns, clock_ns))):
+            for label, invalid in (("oversized", clock_ns + 3_600_001_000_000), ("huge", 1 << 32768)):
+                clock_failures.append((phase, label, (*preceding, invalid), None,
+                                       "native progress elapsed time exceeds its diagnostic range"))
+        for phase, label, samples, original, message in clock_failures:
+            with self.subTest(clock_phase=phase, clock_fault=label):
+                state, retained = {"failed": False, "records": []}, []
+                suites, module, executed = _inert_native_suites()
+                output, clock = TimingStream(), Mock(side_effect=samples)
+                construction = Mock(wraps=RetainingReportingRunner)
+                with patch.object(gate, "time", SimpleNamespace(monotonic_ns=clock)), \
+                        self.assertRaises(type(original) if original is not None else AssertionError) as raised:
+                    construction(stream=output, verbosity=2, descriptions=False, failfast=True,
+                        resultclass=gate._result_class(_FIXTURE_IDS, state, progress_timing=True)).run(unittest.TestSuite(suites))
+                if original is not None:
+                    self.assertIs(raised.exception, original)
+                else:
+                    # In particular, huge integers fail before decimal formatting.
+                    self.assertEqual(str(raised.exception), message)
+                self.assertTrue(state["failed"])
+                self.assertEqual(state["records"], [])
+                self.assertEqual(executed, ["before"] if phase == "success" else [])
+                expected_writes = [f"\nMRK_NATIVE_ELAPSED_MS=0\n{_FIXTURE_METHODS[0]} ({_FIXTURE_IDS[0]})\n"] if phase == "success" else []
+                self.assertEqual(output.writes, expected_writes)
+                self.assertEqual(output.flushes, len(expected_writes))
+                self.assertEqual(output.getvalue(), "".join(expected_writes))
+                if phase == "origin":
+                    construction.assert_not_called()
+                    self.assertEqual(retained, [])
+                else:
+                    construction.assert_called_once()
+                    result, = retained
+                    self.assertTrue(result.shouldStop)
+                    self.assertEqual(result.testsRun, 1)
+                    for callback in (result.startTest, result.addSuccess):
+                        result.shouldStop = False
+                        with self.assertRaisesRegex(AssertionError, "prohibits"):
+                            callback(module.Fixture("test_03_after"))
+                        self.assertTrue(result.shouldStop)
+                        self.assertEqual(output.writes, expected_writes)
+                self.assertEqual(clock.call_count, len(samples))
+
+        # Preserve the immediate unknown-ID fixture: its private identity must
+        # be refused before the subject body, not mistaken for an adverse body.
+        suites, module, executed = _inert_native_suites(unknown_id=True)
+        output, state, retained = io.StringIO(), {"failed": False, "records": []}, []
+        runner = RetainingReportingRunner(stream=output, verbosity=2, descriptions=False, failfast=True,
+                                         resultclass=gate._result_class(_FIXTURE_IDS, state))
+        with self.assertRaisesRegex(AssertionError, "native start differs from the exact expected test IDs"):
+            runner.run(unittest.TestSuite(suites))
+        self.assertEqual(executed, ["before"])
+        self.assertTrue(state["failed"])
+        self.assertEqual(state["records"], [])
+        result, = retained
+        self.assertTrue(result.shouldStop)
+        self.assertEqual(result.testsRun, 2)
+        self.assertEqual(result.errors, [])
+        self.assertNotIn("PRIVATE", output.getvalue())
+        self.assertNotIn(_FIXTURE_IDS[1], output.getvalue())
+        self.assertNotIn("\nOK\n", output.getvalue())
+
+        # Lifecycle pseudo-IDs are allowed for failure attribution only. Neither
+        # start nor success may emit them or proceed after an earlier failure.
+        class StringSubclass(str):
+            pass
+
+        oversized = _FIXTURE_IDS[0] + "x" * (513 - len(_FIXTURE_IDS[0]))
+        for callback_name, (identifier, failed) in itertools.product(("startTest", "addSuccess"),
+                (("PRIVATE_FOREIGN_ID", False), (None, False), (StringSubclass(_FIXTURE_IDS[0]), False),
+                 (oversized, False), (f"setUpClass ({_FIXTURE_MODULE}.Fixture)", False), (_FIXTURE_IDS[0], True))):
+            with self.subTest(callback=callback_name, reported_id=identifier, prior_failure=failed):
                 output, state = io.StringIO(), {"failed": failed, "records": []}
-                result = gate._result_class(_FIXTURE_IDS, state)(output, False, 2)
+                result = gate._result_class((*_FIXTURE_IDS, oversized), state)(output, False, 2)
                 with self.assertRaises(AssertionError):
-                    result.addSuccess(SimpleNamespace(id=lambda: identifier))
+                    getattr(result, callback_name)(SimpleNamespace(id=lambda: identifier))
                 self.assertTrue(state["failed"])
                 self.assertTrue(result.shouldStop)
                 self.assertEqual(output.getvalue(), "")
-        for exception in (OSError, KeyboardInterrupt, SystemExit):
-            original = exception("PRIVATE_SUCCESS_ID_FAILURE")
+        for callback_name, exception in itertools.product(("startTest", "addSuccess"),
+                                                          (OSError, KeyboardInterrupt, SystemExit)):
+            original = exception("PRIVATE_REPORTING_ID_FAILURE")
             output, state = io.StringIO(), {"failed": False, "records": []}
             result = gate._result_class(_FIXTURE_IDS, state)(output, False, 2)
-            with self.subTest(identity_failure=exception.__name__), self.assertRaises(exception) as raised:
-                result.addSuccess(SimpleNamespace(id=Mock(side_effect=original)))
+            with self.subTest(callback=callback_name, identity_failure=exception.__name__), \
+                    self.assertRaises(exception) as raised:
+                getattr(result, callback_name)(SimpleNamespace(id=Mock(side_effect=original)))
             self.assertIs(raised.exception, original)
             self.assertTrue(state["failed"])
             self.assertTrue(result.shouldStop)
@@ -1581,14 +1831,31 @@ class NativeProfileCITests(unittest.TestCase):
         entries = (("public", None, public_id), ("ordinary", None, public_id),
                    *(("isolated", partition, identifier)
                      for partition, identifier in (_PYTHON_POISON_FIXTURES[0], *_PYTHON_FRESH_FIXTURES)))
-        for (entrypoint, partition, identifier), notice in itertools.product(entries,
+        for (entrypoint, partition, identifier), phase, notice in itertools.product(entries, ("source", "wheel"),
                 ("SYNTHETIC_NATIVE_NOTICE\n", "SYNTHETIC_NATIVE_NOTICE")):
-            with self.subTest(entrypoint=entrypoint, partition=partition, terminated_notice=notice.endswith("\n")):
-                expected, executed = (identifier,), []
+            with self.subTest(entrypoint=entrypoint, partition=partition, phase=phase,
+                              terminated_notice=notice.endswith("\n")):
+                expected, executed, started, writes = (identifier,), [], [], []
+                timed = entrypoint == "ordinary"
+                origin = 1_000_000_000
+                clock = Mock(side_effect=(origin, origin + 12_999_999, origin + 25_000_000))
+                rebound = Mock(side_effect=AssertionError("a test-rebound clock must never be called"))
+                timing = SimpleNamespace(monotonic_ns=clock)
+
+                class ReportingStream(io.StringIO):
+                    def write(self, text):
+                        writes.append(("write", text))
+                        return super().write(text)
+
+                    def flush(self):
+                        writes.append(("flush",))
+                        return super().flush()
 
                 def documented(case):
                     """A documented inert case; never a product/native test."""
                     executed.append(case.id())
+                    started.append((runtime.stderr.getvalue(), tuple(writes)))
+                    timing.monotonic_ns = rebound
                     runtime.stderr.write(notice)
 
                 module_name, owner, method = identifier.rsplit(".", 2)
@@ -1601,9 +1868,11 @@ class NativeProfileCITests(unittest.TestCase):
                 self.assertEqual(case.id(), identifier)
                 suite = unittest.TestSuite([case])
                 runtime = SimpleNamespace(platform="darwin", modules={},
-                    executable=str(gate.ROOT.parent / "work/source-venv/bin/python"),
-                    stdout=io.StringIO(), stderr=io.StringIO())
-                metadata = {"phase": "source", "version": [3, 11, 1]}
+                    executable=str(gate.ROOT.parent / f"work/{phase}-venv/bin/python"),
+                    stdout=io.StringIO(), stderr=ReportingStream())
+                preamble = "SYNTHETIC_PREREQUISITE_TAIL"
+                runtime.stderr.write(preamble)
+                metadata = {"phase": phase, "version": [3, 11, 1]}
                 checks = SimpleNamespace(native_compatibility_ids=Mock(return_value=expected),
                                          native_partition_ids=Mock(return_value=expected))
                 loader = SimpleNamespace(exec_module=Mock())
@@ -1612,24 +1881,26 @@ class NativeProfileCITests(unittest.TestCase):
                 framework = SimpleNamespace(TestResult=unittest.TestResult, TextTestResult=unittest.TextTestResult,
                                              TextTestRunner=Mock(wraps=unittest.TextTestRunner))
                 process = SimpleNamespace(run=Mock(return_value=SimpleNamespace(returncode=0)), DEVNULL=subprocess.DEVNULL)
+                product = SimpleNamespace(__file__="/fixture/site-packages/mobile_release/_profile_process.py",
+                                          apple_roots=Mock())
                 # Every import, inventory, origin and command boundary is inert.
                 # The production entrypoint still constructs its real resultclass
                 # and TextTestRunner; do not manufacture a desired transcript.
                 with patch.dict(sys.modules, {module_name: module}), patch.multiple(gate,
-                        sys=runtime, subprocess=process, unittest=framework,
+                        sys=runtime, subprocess=process, unittest=framework, time=timing,
                         importlib=SimpleNamespace(import_module=Mock(return_value=SimpleNamespace()), util=inventory),
                         _isolated_compatibility_runtime=Mock(), _fixed_package=Mock(),
                         _compatibility_origins=Mock(return_value=metadata),
                         _expected_native_ids=Mock(return_value=expected), _selected_suite=Mock(return_value=suite),
                         _isolated_negative_origins=Mock(return_value=metadata),
                         _isolated_reporting_bindings=Mock(return_value=()),
-                        _product_modules=Mock(return_value=()), _ordinary_product_origins=Mock()):
+                        _product_modules=Mock(return_value=(product,)), _ordinary_product_origins=Mock()):
                     if entrypoint == "public":
-                        status = gate.run_compatibility(minor=11, phase="source", operation="public")
+                        status = gate.run_compatibility(minor=11, phase=phase, operation="public")
                     elif entrypoint == "isolated":
-                        status = gate.run_isolated_negative(partition=partition, phase="source")
+                        status = gate.run_isolated_negative(partition=partition, phase=phase)
                     else:
-                        status = gate.run(partition="ordinary")
+                        status = gate.run(partition="ordinary", installed_wheel=phase == "wheel")
                 self.assertEqual(status, 0)
                 self.assertEqual(executed, [identifier])
                 framework.TextTestRunner.assert_called_once()
@@ -1640,18 +1911,40 @@ class NativeProfileCITests(unittest.TestCase):
                 self.assertIs(options["descriptions"], False)
                 self.assertTrue(issubclass(options["resultclass"], unittest.TextTestResult))
                 self.assertEqual(process.run.call_count, 2 if entrypoint == "ordinary" else 0)
+                self.assertEqual(product.apple_roots.call_count, int(entrypoint == "ordinary" and phase == "wheel"))
+                self.assertEqual(clock.call_count, 3 if timed else 0)
+                rebound.assert_not_called()
                 text = runtime.stderr.getvalue()
                 self.assertNotIn(documented.__doc__, text)
+                start_timing = "MRK_NATIVE_ELAPSED_MS=12\n" if timed else ""
+                start = f"\n{start_timing}{method} ({identifier})\n"
+                self.assertEqual(started, [(preamble + start,
+                    (("write", preamble), ("write", start), ("flush",)))])
+                self.assertEqual(text.count(start), 1)
+                progress = controller.python_failure_progress(started[0][0].encode(),
+                                                               controller.python_progress_scope(expected))
+                self.assertEqual(progress["semantics"], "reported-unittest-lines-only")
+                self.assertEqual(progress["last_observed_start"], {"id": identifier, **({"elapsed_ms": 12} if timed else {})})
+                self.assertIsNone(progress["last_observed_outcome"])
                 completion = f"{method} ({identifier}) ... ok\n"
+                completion_timing = "MRK_NATIVE_ELAPSED_MS=25\n" if timed else ""
+                completion_write = "\n" + completion_timing + completion
                 self.assertEqual(text.count(completion), 1)
-                self.assertIn(notice + "\n" + completion, text)
+                self.assertIn(notice + completion_write, text)
+                self.assertEqual(writes.count(("write", completion_write)), 1)
+                completion_index = writes.index(("write", completion_write))
+                self.assertEqual(writes[completion_index + 1], ("flush",))
+                progress = controller.python_failure_progress(text.encode(), controller.python_progress_scope(expected))
+                self.assertEqual(progress["last_observed_start"], {"id": identifier, **({"elapsed_ms": 25} if timed else {})})
+                self.assertEqual(progress["last_observed_outcome"],
+                    {"id": identifier, "outcome": "ok", **({"elapsed_ms": 25} if timed else {})})
                 # Data-only original double: parsing this real formatter output
                 # does not assert hosted capture/finality or a native-test pass.
                 capture = SimpleNamespace(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
                     domain_finality=True, timed_out=False, cancelled=False, primary_error=None, cleanup_errors=(),
                     stdout=runtime.stdout.getvalue().encode(), stderr=text.encode(), duration=.01)
                 self.assertEqual(controller.parse_native_python_controls(capture, expected), [identifier])
-                step = controller.Step("native-profile-source", parser="native",
+                step = controller.Step(f"native-profile-{phase}", parser="native",
                     native_partition=partition if entrypoint == "isolated" else "ordinary")
                 parsed = controller.parse_capture(step, capture, paths, "macos", checks)
                 self.assertEqual(parsed.details["completed"], [identifier])
@@ -1669,7 +1962,7 @@ class NativeProfileCITests(unittest.TestCase):
                         "original-split": stock.getvalue(),
                         "missing": text.replace(completion, "", 1),
                         "duplicate": text.replace(completion, completion * 2, 1),
-                        "wrong-id": text.replace(f"({identifier})", f"({identifier}_foreign)", 1),
+                        "wrong-id": text.replace(completion, f"{method} ({identifier}_foreign) ... ok\n", 1),
                     }
                     for name, malformed in mutations.items():
                         changed = SimpleNamespace(**{**vars(capture), "stderr": malformed.encode()})

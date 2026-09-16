@@ -4,21 +4,26 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
-from contextlib import ExitStack, contextmanager, redirect_stdout
+from contextlib import ExitStack, contextmanager, nullcontext, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from mobile_release import cli, ios_artifacts
+from mobile_release import cli, ios_artifacts, stores
 from mobile_release.cli import _ci, _status, build_parser
+from mobile_release.cancellation import DefaultCancellation
 from mobile_release.config import load_config
+from mobile_release.credentials import artifact_validation_environment
 from mobile_release.errors import StoreOperationError, ValidationError
 from mobile_release.ios import SigningValidityInterval
 from mobile_release.inspection import MAX_INSPECTION_SECONDS
+from mobile_release.owned_process import ProcessError
 from mobile_release.reporting import Finding, Status
 from mobile_release.provenance import (
     copy_immutable_file,
@@ -31,6 +36,7 @@ from mobile_release.provenance import (
 from .evidence_helpers import android_precondition, build_lifecycle, git_identity, ios_precondition, raw_receipt, workflow_environment
 from .helpers import android_config, ios_config, write_project
 from .ios_artifact_helpers import native_image
+from .store_lane_model import StoreLaneModel
 from .ios_entitlement_helpers import NativeProfileSeam, binary_dictionary, modernize_ipa_fixture, rewrite_zip_members, signed_entitlements
 
 
@@ -41,16 +47,73 @@ def directory_snapshot(directory: Path) -> dict[Path, tuple[str, bytes | None]]:
     }
 
 
-class StoreWireFixture:
-    """Fake only Store transport; exercise real CLI/adapter/persistence validators.
+class CliCompletionTests(unittest.TestCase):
+    def test_completion_json_waits_for_outer_context_exit(self) -> None:
+        # Pure CLI routing seam: no signal installation, native owner, Store or
+        # application work. The real CLI, completion helper and CleanupScope run.
+        args = build_parser().parse_args([
+            "ci", "candidate", "--prepare-operation", "--output-dir", ".mobile-release/candidate",
+            "--confirm", "candidate:android:1.2.3:42",
+        ])
+        config = SimpleNamespace(root=Path("/synthetic/application"))
+        payload = {"operationIntent": "synthetic-intent.json", "reused": True}
+        for failure in (None, ValidationError("modeled late owner failure"), KeyboardInterrupt(), SystemExit(29)):
+            with self.subTest(failure=type(failure).__name__):
+                output, exits = io.StringIO(), []
+                guard = DefaultCancellation(ValidationError, "modeled cancellation failure")
 
-    These files are not signed AABs. The native artifact validator is stubbed at
-    the test boundary; release reconciliation itself is also covered against
-    the pinned Publisher/Spaceship clients by the Ruby lane tests.
+                @contextmanager
+                def outer(manager, *, expose_owner):
+                    self.assertTrue(expose_owner)
+                    with manager:
+                        yield manager, guard
+                    exits.append(output.getvalue())
+                    if failure is not None:
+                        raise failure
+
+                def close_resources(resources, _record, **_kwargs):
+                    resources.close()
+
+                def operation(_args, *, resources, lane_evidence, cancellation, **_kwargs):
+                    return cli._ci_complete(payload, resources=resources,
+                                            lane_evidence=lane_evidence, cancellation=cancellation)
+
+                with (
+                    patch.object(cli, "first_primary_context", side_effect=outer),
+                    patch.object(cli, "load_config", return_value=config),
+                    patch.object(cli, "_ci_request", return_value=object()),
+                    patch.object(cli, "new_store_lane_evidence", return_value=object()),
+                    patch.object(cli, "invocation_custody", return_value=nullcontext(object())),
+                    patch.object(cli, "close_store_operation_resources", side_effect=close_resources) as closing,
+                    patch.object(cli, "_ci_operation", side_effect=operation),
+                    patch.object(cli, "prepare_store_operation", side_effect=AssertionError("no Store preparation")) as prepare,
+                    patch.object(cli, "execute_store_operation", side_effect=AssertionError("no Store execution")) as execute,
+                    redirect_stdout(output),
+                ):
+                    if failure is None:
+                        self.assertEqual(_ci(args), 0)
+                    else:
+                        with self.assertRaises(type(failure)) as caught:
+                            _ci(args)
+                        self.assertIs(caught.exception, failure)
+                self.assertEqual(exits, [""])
+                self.assertEqual(output.getvalue(), json.dumps(payload) + "\n" if failure is None else "")
+                closing.assert_called()
+                prepare.assert_not_called()
+                execute.assert_not_called()
+
+
+class StoreWireFixture:
+    """Model transport; exercise actual caller, checked FS and persistence gates.
+
+    These files are not signed AABs. The native artifact validator and original
+    process result are explicitly modeled; this is not process/native evidence.
+    Release reconciliation is separately covered against pinned Ruby clients.
     """
 
-    def __init__(self, root: Path):
-        self.root = root
+    def __init__(self, fixture_root: Path):
+        self.fixture_root = fixture_root.resolve()
+        self.root = root = self.fixture_root / "application"
         self.config = load_config(write_project(root, android_config()))
         self.binary = root / "app.aab"
         with zipfile.ZipFile(self.binary, "w") as archive:
@@ -66,6 +129,9 @@ class StoreWireFixture:
         self.raise_after_mutation = False
         self.preconditions: list[Path] = []
         self.outputs = {stage: root / ".mobile-release" / stage for stage in ("candidate", "external-testing", "production-submit")}
+        self.adc = self.fixture_root / "synthetic-adc.json"
+        self.adc.write_bytes(b'{"type":"authorized_user","synthetic":true}'); self.adc.chmod(0o600)
+        self.model = StoreLaneModel(self.document)
 
     def command(self, stage: str, mode: str, *, output: Path | None = None, intent: Path | None = None) -> list[str]:
         argv = ["ci", stage, "--config", str(self.config.path), "--platform", "android", "--confirm", f"{stage}:android:1.2.3:42", "--output-dir", str(output or self.outputs[stage]), f"--{mode}"]
@@ -80,7 +146,9 @@ class StoreWireFixture:
         return argv
 
     def wire(self, command: list[str], **kwargs):
-        env = kwargs["env"]
+        return self.model(command, **kwargs)
+
+    def document(self, command, env):
         stage = {"android_internal_upload": "candidate", "android_external_promote": "external-testing", "android_production_draft": "production-submit"}[command[-1]]
         mode = env["MOBILE_RELEASE_STORE_MODE"]
         self.calls.append((stage, mode))
@@ -99,13 +167,16 @@ class StoreWireFixture:
                 self.mutations.append(stage)
                 self.store_complete.add(stage)
             if self.raise_after_mutation:
-                raise subprocess.TimeoutExpired(command, 3600)
+                # Modeled Store-request timeout, not uncertain native family
+                # finality: the actual settled-failure terminal is still needed.
+                return None, 75
             value = raw_receipt(intent, result=result, executed_by=json.loads(env["MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON"]))
-        path.write_text(json.dumps(value) + "\n")
-        return subprocess.CompletedProcess(command, 0)
+        return value, 0
 
     def invoke(self, stage: str, mode: str, *, attempt: int = 1, output: Path | None = None, intent: Path | None = None) -> int:
-        with patch.dict(os.environ, workflow_environment(stage, attempt=attempt), clear=True), redirect_stdout(io.StringIO()):
+        with patch.dict(os.environ, {**workflow_environment(stage, attempt=attempt),
+                "GOOGLE_APPLICATION_CREDENTIALS": str(self.adc), "TMPDIR": str(self.fixture_root)},
+                clear=True), redirect_stdout(io.StringIO()):
             return _ci(build_parser().parse_args(self.command(stage, mode, output=output, intent=intent)))
 
 
@@ -114,6 +185,7 @@ class OperationRecoveryTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.fixture = StoreWireFixture(Path(self.temporary.name))
+        self.addCleanup(self.fixture.model.close)
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch("mobile_release.cli.git_context", return_value=git_identity()))
@@ -128,7 +200,7 @@ class OperationRecoveryTests(unittest.TestCase):
         ))
         self.stack.enter_context(patch("mobile_release.stores._require_fastlane_bundle"))
         self.stack.enter_context(patch("mobile_release.stores.resolve_tooling_root", return_value=Path(__file__).resolve().parents[2]))
-        self.stack.enter_context(patch("mobile_release.stores.subprocess.run", side_effect=self.fixture.wire))
+        self.stack.enter_context(patch("mobile_release.stores.run_owned", side_effect=self.fixture.wire))
 
     def candidate(self) -> Path:
         self.fixture.invoke("candidate", "prepare-operation")
@@ -141,18 +213,29 @@ class OperationRecoveryTests(unittest.TestCase):
 
         state = {"warning": "", "calls": []}
         def command(argv, **kwargs):
-            if argv[0] in {"jarsigner", "keytool"}:
-                state["calls"].append(argv[0])
-                if argv[0] == "jarsigner":
-                    return subprocess.CompletedProcess(argv, 4, jarsigner_output(warning=state["warning"]), "")
-                return subprocess.CompletedProcess(argv, 0, "Signer #1:\n\nCertificate #1:\nSHA256: " + ":".join(["AA"] * 32) + "\n", "")
-            return self.fixture.wire(argv, **kwargs)
+            self.assertIn(argv[0], {"jarsigner", "keytool"})
+            self.assertEqual(set(kwargs), {"environ", "capture", "timeout", "cancellation"})
+            self.assertEqual(kwargs["environ"], artifact_validation_environment(os.environ))
+            self.assertIs(kwargs["capture"], True)
+            self.assertEqual(kwargs["timeout"], {"jarsigner": 120, "keytool": 30}[argv[0]])
+            # Preserve this caller's default argument rather than invent an owner.
+            self.assertIsNone(kwargs["cancellation"])
+            state["calls"].append(argv[0])
+            if argv[0] == "jarsigner":
+                self.assertEqual(argv, ["jarsigner", "-verify", "-strict", str(self.fixture.binary)])
+                return subprocess.CompletedProcess(argv, 4, jarsigner_output(warning=state["warning"]), "")
+            self.assertEqual(argv, ["keytool", "-printcert", "-jarfile", str(self.fixture.binary)])
+            return subprocess.CompletedProcess(argv, 0, "Signer #1:\n\nCertificate #1:\nSHA256: " + ":".join(["AA"] * 32) + "\n", "")
         self.stack.enter_context(patch("mobile_release.cli.validate_aab", new=validate_aab))
         self.stack.enter_context(patch("mobile_release.android._bundletool_manifest", return_value='<manifest package="com.example.reader" android:versionCode="42" android:versionName="1.2.3" />'))
-        self.stack.enter_context(patch("mobile_release.android.subprocess.run", side_effect=command))
+        self.stack.enter_context(patch(
+            "mobile_release._command_process.run_command",
+            side_effect=AssertionError("policy fixture must not acquire a native command owner"),
+        ))
+        self.stack.enter_context(patch("mobile_release.android.run_owned", side_effect=command))
         return state
 
-    def test_android_raw_completion_after_signer_warning_threshold_retains_original_evidence(self) -> None:
+    def test_android_raw_only_refuses_new_owner_but_protected_readback_recovery_keeps_original_signing(self) -> None:
         state = self.native_android_policy()
         self.fixture.invoke("candidate", "prepare-operation")
         with patch("mobile_release.cli.build_candidate_manifest", side_effect=RuntimeError("manifest persistence failed")), self.assertRaises(RuntimeError):
@@ -160,16 +243,18 @@ class OperationRecoveryTests(unittest.TestCase):
         output = self.fixture.outputs["candidate"]
         raw = (output / "raw-store-receipt.json").read_bytes()
         calls = list(self.fixture.calls)
-        # An initially eligible signer with 208 days left crosses JDK21's
-        # 180-day warning window 31 days later, within 90-day retention.
         state["warning"] = "This jar contains entries whose signer certificate will expire within six months. \n"
-        self.assertEqual(self.fixture.invoke("candidate", "execute-store", attempt=2), 0)
-        self.assertEqual(state["calls"], ["jarsigner", "keytool"])
+        with self.assertRaisesRegex(StoreOperationError, "original live composite"):
+            self.fixture.invoke("candidate", "execute-store", attempt=2)
         self.assertEqual(self.fixture.calls, calls)
+        fresh = output.with_name("candidate-protected-readback")
+        self.assertEqual(self.fixture.invoke("candidate", "execute-store", attempt=2,
+            output=fresh, intent=output / "candidate-operation-intent.json"), 0)
+        self.assertEqual(state["calls"], ["jarsigner", "keytool"])
+        self.assertEqual(self.fixture.calls, calls + [("candidate", "execute")])
         self.assertEqual(self.fixture.mutations, ["candidate"])
         self.assertEqual((output / "raw-store-receipt.json").read_bytes(), raw)
-        self.assertEqual(load_release_receipt(output / "candidate-receipt.json")["executedBy"]["attempt"], 1)
-        self.assertEqual(load_release_receipt(output / "candidate-receipt.json")["producedBy"]["attempt"], 2)
+        self.assertEqual(load_release_receipt(fresh / "candidate-receipt.json")["outcome"], "reconciled")
 
     def test_android_accepted_bundle_can_reconcile_after_warning_without_a_new_upload(self) -> None:
         state = self.native_android_policy()
@@ -231,44 +316,46 @@ class OperationRecoveryTests(unittest.TestCase):
         self.assertEqual(self.fixture.calls, [])
         self.authentication.assert_not_called()
 
-    def test_manifest_failure_after_store_success_reuses_original_raw_on_later_attempt(self) -> None:
+    def test_manifest_failure_requires_protected_readback_not_raw_owner_reconstruction(self) -> None:
         self.fixture.invoke("candidate", "prepare-operation")
         output = self.fixture.outputs["candidate"]
         with patch("mobile_release.cli.build_candidate_manifest", side_effect=RuntimeError("injected manifest failure")):
             with self.assertRaisesRegex(RuntimeError, "injected"):
                 self.fixture.invoke("candidate", "execute-store")
-        self.assertEqual(self.fixture.mutations, ["candidate"])
-        self.assertFalse((output / "candidate-manifest.json").exists())
-        self.assertFalse((output / "candidate-receipt.json").exists())
         original_raw = (output / "raw-store-receipt.json").read_bytes()
         calls = list(self.fixture.calls)
-        self.assertEqual(self.fixture.invoke("candidate", "execute-store", attempt=2), 0)
+        for attempt in (1, 2):
+            with self.subTest(attempt=attempt), self.assertRaisesRegex(StoreOperationError, "original live composite"):
+                self.fixture.invoke("candidate", "execute-store", attempt=attempt)
         self.assertEqual(self.fixture.calls, calls)
+        self.assertFalse((output / "candidate-manifest.json").exists())
+        self.assertFalse((output / "candidate-receipt.json").exists())
         self.assertEqual((output / "raw-store-receipt.json").read_bytes(), original_raw)
-        manifest = json.loads((output / "candidate-manifest.json").read_text())
-        receipt = load_release_receipt(output / "candidate-receipt.json")
-        self.assertEqual(manifest["authorizedBy"]["attempt"], 1)
-        self.assertEqual(manifest["executedBy"]["attempt"], 1)
-        self.assertEqual(manifest["producedBy"]["attempt"], 2)
-        validate_receipt_raw_binding(receipt, store_receipt=json.loads(original_raw), operation_intent=load_operation_intent(output / "candidate-operation-intent.json"), candidate_manifest=manifest)
+        fresh = output.with_name("candidate-protected-readback")
+        self.assertEqual(self.fixture.invoke("candidate", "execute-store", attempt=2,
+            output=fresh, intent=output / "candidate-operation-intent.json"), 0)
+        self.assertEqual(self.fixture.mutations, ["candidate"])
+        receipt = load_release_receipt(fresh / "candidate-receipt.json")
+        self.assertEqual(receipt["outcome"], "reconciled")
+        self.assertEqual(receipt["authorizedBy"]["attempt"], 1)
+        self.assertEqual(receipt["executedBy"]["attempt"], 2)
 
-    def test_partial_manifest_completes_only_with_same_producer_and_original_raw(self) -> None:
+    def test_partial_manifest_and_same_producer_do_not_recreate_original_lifetime(self) -> None:
         self.fixture.invoke("candidate", "prepare-operation")
         output = self.fixture.outputs["candidate"]
         original_write = write_evidence
-
-        def fail_receipt(path, value):
+        def fail_receipt(path, value, **context):
             if path.name == "candidate-receipt.json":
                 raise OSError("injected persistence failure")
-            return original_write(path, value)
-
-        with patch("mobile_release.cli.write_evidence", side_effect=fail_receipt):
-            with self.assertRaisesRegex(OSError, "injected"):
-                self.fixture.invoke("candidate", "execute-store")
+            return original_write(path, value, **context)
+        with patch("mobile_release.cli.write_evidence", side_effect=fail_receipt), self.assertRaisesRegex(OSError, "injected"):
+            self.fixture.invoke("candidate", "execute-store")
         original_manifest = (output / "candidate-manifest.json").read_bytes()
         calls = list(self.fixture.calls)
-        self.assertEqual(self.fixture.invoke("candidate", "execute-store"), 0)
+        with self.assertRaisesRegex(StoreOperationError, "original live composite"):
+            self.fixture.invoke("candidate", "execute-store")
         self.assertEqual((output / "candidate-manifest.json").read_bytes(), original_manifest)
+        self.assertFalse((output / "candidate-receipt.json").exists())
         self.assertEqual(self.fixture.calls, calls)
 
     def test_partial_manifest_from_previous_attempt_requires_fresh_staging_not_rebuild(self) -> None:
@@ -276,10 +363,10 @@ class OperationRecoveryTests(unittest.TestCase):
         output = self.fixture.outputs["candidate"]
         original_write = write_evidence
 
-        def fail_receipt(path, value):
+        def fail_receipt(path, value, **context):
             if path.name == "candidate-receipt.json":
                 raise OSError("injected persistence failure")
-            original_write(path, value)
+            original_write(path, value, **context)
 
         with patch("mobile_release.cli.write_evidence", side_effect=fail_receipt), self.assertRaises(OSError):
             self.fixture.invoke("candidate", "execute-store")
@@ -446,7 +533,7 @@ class OperationRecoveryTests(unittest.TestCase):
                 self.assertEqual(receipt["outcome"], "reconciled")
                 self.assertEqual(self.fixture.mutations.count(stage), 1)
 
-    def test_promotion_receipt_write_failure_reuses_original_raw_and_preserves_predecessors(self) -> None:
+    def test_promotion_write_failure_preserves_raw_and_predecessors_through_protected_readback(self) -> None:
         candidate_dir = self.candidate()
         candidate_bytes = (candidate_dir / "candidate-manifest.json").read_bytes()
         for stage in ("external-testing", "production-submit"):
@@ -457,9 +544,15 @@ class OperationRecoveryTests(unittest.TestCase):
                 output = self.fixture.outputs[stage]
                 raw_bytes = (output / "raw-store-receipt.json").read_bytes()
                 calls = list(self.fixture.calls)
-                self.assertEqual(self.fixture.invoke(stage, "execute-store", attempt=2), 0)
+                with self.assertRaisesRegex(StoreOperationError, "original live composite"):
+                    self.fixture.invoke(stage, "execute-store", attempt=2)
                 self.assertEqual(self.fixture.calls, calls)
+                fresh = output.with_name(stage + "-protected-readback")
+                self.assertEqual(self.fixture.invoke(stage, "execute-store", attempt=2,
+                    output=fresh, intent=output / (stage + "-operation-intent.json")), 0)
+                self.assertEqual(self.fixture.calls, calls + [(stage, "execute")])
                 self.assertEqual(raw_bytes, (output / "raw-store-receipt.json").read_bytes())
+                self.fixture.outputs[stage] = fresh
         self.assertEqual(candidate_bytes, (candidate_dir / "candidate-manifest.json").read_bytes())
 
     def test_complete_final_evidence_reuse_does_not_mutate_or_retimestamp(self) -> None:
@@ -479,6 +572,47 @@ class OperationRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "artifacts do not match"):
             self.fixture.invoke("candidate", "prepare-operation", attempt=2)
         self.assertEqual(self.fixture.calls, calls)
+
+    def test_prepare_completion_waits_for_original_outer_cleanup(self) -> None:
+        # Hosted regression: retain the real owner and full modeled Store caller,
+        # injecting only after its original cleanup returns, never instead of it.
+        self.fixture.invoke("candidate", "prepare-operation")
+        calls, mutations = list(self.fixture.calls), list(self.fixture.mutations)
+        directory = self.fixture.outputs["candidate"]
+        before = directory_snapshot(directory)
+        intent_path = directory / "candidate-operation-intent.json"
+        intent = load_operation_intent(intent_path)
+        expected = {"operationIntent": str(intent_path), "sha256": intent["integrity"]["sha256"], "reused": True}
+        original_owner = cli.first_primary_context
+        for failure in (None, ValidationError("late original owner failure"), KeyboardInterrupt(), SystemExit(29)):
+            with self.subTest(failure=type(failure).__name__):
+                output, exits = io.StringIO(), []
+
+                @contextmanager
+                def owner(manager, *, expose_owner):
+                    with original_owner(manager, expose_owner=expose_owner) as resources:
+                        yield resources
+                    exits.append(output.getvalue())
+                    if failure is not None:
+                        raise failure
+
+                environment = {**workflow_environment("candidate"),
+                    "GOOGLE_APPLICATION_CREDENTIALS": str(self.fixture.adc), "TMPDIR": str(self.fixture.fixture_root)}
+                with patch.dict(os.environ, environment, clear=True), patch.object(
+                    cli, "first_primary_context", side_effect=owner
+                ), redirect_stdout(output):
+                    args = build_parser().parse_args(self.fixture.command("candidate", "prepare-operation"))
+                    if failure is None:
+                        self.assertEqual(_ci(args), 0)
+                    else:
+                        with self.assertRaises(type(failure)) as caught:
+                            _ci(args)
+                        self.assertIs(caught.exception, failure)
+                self.assertEqual(exits, [""])
+                self.assertEqual(output.getvalue(), json.dumps(expected) + "\n" if failure is None else "")
+                self.assertEqual(self.fixture.calls, calls)
+                self.assertEqual(self.fixture.mutations, mutations)
+                self.assertEqual(directory_snapshot(directory), before)
 
     def test_external_source_must_be_the_exact_candidate_before_preparation_or_reuse(self) -> None:
         self.candidate()
@@ -504,22 +638,25 @@ class OperationRecoveryTests(unittest.TestCase):
         intent = load_operation_intent(self.fixture.outputs["external-testing"] / "external-testing-operation-intent.json")
         args = build_parser().parse_args(self.fixture.command("external-testing", "execute-store"))
         args.recovery_run_id = intent["authorizedBy"]["runId"]
-        env = workflow_environment("external-testing", run_id="900", head="e" * 40)
+        env = {**workflow_environment("external-testing", run_id="900", head="e" * 40),
+               "GOOGLE_APPLICATION_CREDENTIALS": str(self.fixture.adc), "TMPDIR": str(self.fixture.fixture_root)}
         with patch.dict(os.environ, env, clear=True), redirect_stdout(io.StringIO()):
             self.assertEqual(_ci(args), 0)
         receipt = load_release_receipt(self.fixture.outputs["external-testing"] / "external-testing-receipt.json")
         self.assertEqual(receipt["source"]["commit"], git_identity().commit)
         self.assertEqual(receipt["producedBy"]["headSha"], "e" * 40)
 
-    def test_unsealed_precondition_is_preserved_but_recaptured_after_intent_write_failure(self) -> None:
+    def test_unsealed_precondition_refuses_collision_and_requires_explicit_fresh_output(self) -> None:
         with patch("mobile_release.cli.write_evidence", side_effect=OSError("intent disk failure")), self.assertRaises(OSError):
             self.fixture.invoke("candidate", "prepare-operation")
         first = self.fixture.preconditions[0]
         original = first.read_bytes()
-        self.assertEqual(self.fixture.mutations, [])
-        self.assertEqual(self.fixture.invoke("candidate", "prepare-operation", attempt=2), 0)
+        with self.assertRaisesRegex(StoreOperationError, "already exists"):
+            self.fixture.invoke("candidate", "prepare-operation", attempt=2)
+        self.assertEqual(len(self.fixture.preconditions), 1)
+        fresh = self.fixture.outputs["candidate"].with_name("candidate-fresh-preparation")
+        self.assertEqual(self.fixture.invoke("candidate", "prepare-operation", attempt=2, output=fresh), 0)
         self.assertEqual(len(self.fixture.preconditions), 2)
-        self.assertNotEqual(first, self.fixture.preconditions[-1])
         self.assertEqual(first.read_bytes(), original)
         self.assertEqual(self.fixture.mutations, [])
 
@@ -596,10 +733,21 @@ class IosOperationRecoveryTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        if self._testMethodName in {
+            "test_shared_deadline_prevents_next_authorization_boundary_and_retains_snapshots",
+            "test_deadline_after_readback_preserves_precondition_and_retains_snapshot",
+        }:
+            # These exact controls run only in disposable singleton domains.
+            # Preserve the ENTIRE fixture after failed snapshot cleanup, not
+            # just its artifact tree. No finalizer may remove it before the
+            # enclosing domain's original producer finality and disposal.
+            self.root = Path(tempfile.mkdtemp(prefix="mrk-ios-retained-deadline-"))
+        else:
+            self.temporary = tempfile.TemporaryDirectory()
+            self.addCleanup(self.temporary.cleanup)
+            self.root = Path(self.temporary.name)
         self.config = load_config(write_project(self.root, ios_config(), platform="ios"))
+        (self.root / ".mobile-release").mkdir(mode=0o700)
         self.documents = build_lifecycle(self.config, platform="ios")
         self.output = self.root / ".mobile-release" / "candidate"
         self.intent_path = self.output / "candidate-operation-intent.json"
@@ -607,15 +755,74 @@ class IosOperationRecoveryTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         for name in ("mobile_release.cli.git_context", "mobile_release.discovery.git_context", "mobile_release.preflight.git_context"):
             self.stack.enter_context(patch(name, return_value=git_identity()))
+        self.stack.enter_context(patch("mobile_release.cli.complete_store_operation",
+            side_effect=lambda readback, **_kwargs: readback.provisional()))
         self.stack.enter_context(patch(
             "mobile_release.preflight._xcode_toolchain_finding",
             return_value=Finding("ios.xcode-toolchain", Status.PASS, "Synthetic toolchain seam, not an Xcode verification"),
         ))
 
-    def invoke(self, mode: str, *, attempt: int = 1) -> int:
-        argv = ["ci", "candidate", "--config", str(self.config.path), "--platform", "ios", "--confirm", "candidate:ios:1.2.3:42", "--output-dir", str(self.output), f"--{mode}", "--artifact", f"ios-ipa={self.root / 'app.ipa'}", "--artifact", f"validation-report={self.root / 'validation-report.json'}"]
+    def policy_readback(self, value, **kwargs):
+        # Only a policy-ordering seam, explicitly not lifetime evidence. No
+        # command is attempted; final composite acceptance is patched below.
+        record = kwargs["lane_evidence"]
+        return stores.StoreLaneReadback(record, Path(record._output),
+            json.dumps(value).encode("utf-8"), value)
+
+    def snapshot_state(self, snapshot):
+        root = snapshot.temporary
+        result = {}
+        for path in (root, *root.rglob("*")):
+            observed = path.lstat()
+            result[path.relative_to(root)] = (
+                observed.st_dev, observed.st_ino, observed.st_mode,
+                observed.st_uid, observed.st_gid,
+                None if path.is_dir() else path.read_bytes(),
+            )
+        return result
+
+    def assert_deadline_snapshot_retained(self, snapshot, original, before, error, *, dispatched):
+        owner, deadline, endpoint = original
+        self.assertIs(snapshot._owner, owner)
+        self.assertIs(type(owner), ios_artifacts._LaneSnapshotOwner)
+        self.assertIs(snapshot.deadline, deadline)
+        self.assertIs(owner.deadline, deadline)
+        self.assertEqual(endpoint, MAX_INSPECTION_SECONDS)
+        self.assertEqual(deadline.expires_at, endpoint)
+        self.assertTrue(error.fatal)
+        self.assertFalse(error.cleanup_complete)
+        self.assertIs(error.dispatched, dispatched)
+        self.assertTrue(owner.claimed)
+        self.assertFalse(owner.active)
+        self.assertTrue(owner._walks_closed)
+        self.assertFalse(owner._cleanup_complete)
+        self.assertTrue(owner.created)
+        self.assertEqual(self.snapshot_state(snapshot), before)
+        self.assertIsInstance(owner._cleanup_failures.first, ValidationError)
+        self.assertRegex(str(owner._cleanup_failures.first),
+                         "shared time bound|snapshot inspection authorization is closed")
+        # Observe original records only: do not retry cleanup, reopen their
+        # numeric descriptors, renew the deadline, or clear retained custody.
+        self.assertEqual(len(owner._leases), ios_artifacts.MAX_SNAPSHOT_FDS)
+        self.assertTrue(all(lease is None for lease in owner._leases))
+        self.assertGreater(owner._reserved, 0)
+        self.assertEqual(owner._reserved, owner._retired)
+        self.assertFalse(owner._accounting_pending)
+        self.assertFalse(owner._accounting_failed)
+        for slot in (owner.slot, *owner.parent.slots):
+            self.assertEqual(slot.close_state, "CLOSED")
+            self.assertIsNone(slot.number)
+        record = owner._lane_binding._record
+        self.assertIs(record._guard, snapshot.cancellation)
+        self.assertIs(record._attempted, dispatched)
+        self.assertTrue(record._failed)
+        self.assertFalse(record.verdict(cancellation=snapshot.cancellation).dependents_settled)
+
+    def invoke(self, mode: str, *, attempt: int = 1, output: Path | None = None) -> int:
+        argv = ["ci", "candidate", "--config", str(self.config.path), "--platform", "ios", "--confirm", "candidate:ios:1.2.3:42", "--output-dir", str(output or self.output), f"--{mode}", "--artifact", f"ios-ipa={self.root / 'app.ipa'}", "--artifact", f"validation-report={self.root / 'validation-report.json'}"]
         argv.extend(["--artifact", f"ios-archive={self.root / 'archive.zip'}", "--artifact", f"ios-dsyms={self.root / 'dsyms.zip'}"])
-        with patch.dict(os.environ, workflow_environment(attempt=attempt), clear=True), redirect_stdout(io.StringIO()):
+        with patch.dict(os.environ, {**workflow_environment(attempt=attempt), "TMPDIR": str(self.root)},
+                clear=True), redirect_stdout(io.StringIO()):
             return _ci(build_parser().parse_args(argv))
 
     def test_recovery_requires_actual_intent_authentication_before_using_historical_signing(self) -> None:
@@ -632,7 +839,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
         modernize_ipa_fixture(self.root / "app.ipa")
         native = NativeProfileSeam()
         native.claims["Reader.app"] = {**signed_entitlements(), "com.apple.developer.associated-domains": ["applinks:fictional.example"]}
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), native.profile_authentication(), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
+        with patch("mobile_release.ios.sys", SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.run_owned", side_effect=native), native.profile_authentication(), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
             with self.assertRaisesRegex(ValidationError, "final candidate artifact validation failed"):
                 self.invoke("prepare-operation")
         prepare.assert_not_called()
@@ -642,28 +849,47 @@ class IosOperationRecoveryTests(unittest.TestCase):
 
     def test_profile_issuer_rejection_stops_fresh_intent_before_any_store_access(self) -> None:
         native = NativeProfileSeam()
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), native.profile_authentication() as authentication, patch.object(native, "authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
+        with patch("mobile_release.ios.sys", SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.run_owned", side_effect=native), native.profile_authentication() as authentication, patch.object(native, "authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
             with self.assertRaisesRegex(ValidationError, "final candidate artifact validation failed"):
                 self.invoke("prepare-operation")
         authentication.assert_called_once(); prepare.assert_not_called(); mutate.assert_not_called()
         self.assertFalse(self.intent_path.exists())
 
     def test_profile_cleanup_uncertainty_stops_actual_fresh_validation_before_any_store_access(self) -> None:
+        from mobile_release import build_inputs, checked_files, ios, ios_profiles
         from mobile_release.owned_process import ProcessCleanupError, ProcessError
 
+        host_sys, host_platform = sys, sys.platform
+        original_ios_sys, original_profiles_sys = ios.sys, ios_profiles.sys
         for error in (ProcessError("fictional group uncertainty", dispatched=True, contained=False),
                       ProcessCleanupError("fictional cleanup uncertainty", dispatched=True)):
             native = NativeProfileSeam()
             with self.subTest(error=type(error).__name__), \
-                 patch("mobile_release.ios.sys.platform", "darwin"), \
+                 patch("mobile_release.ios.sys", SimpleNamespace(platform="darwin")), \
                  patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), \
                  native.profile_authentication() as authentication, \
                  patch.object(native, "authenticate_cms", side_effect=error), \
-                 patch("mobile_release.ios.subprocess.run", side_effect=AssertionError("later native inspection ran")), \
+                 patch("mobile_release.ios.run_owned", side_effect=AssertionError("later native inspection ran")), \
                  patch("mobile_release.cli.prepare_store_operation") as prepare, \
                  patch("mobile_release.cli.execute_store_operation") as mutate, \
                  self.assertRaises(ProcessError) as caught:
+                # Only the fictional app/profile boundaries see Darwin. Real
+                # filesystem custody must keep the actual host's alias policy.
+                self.assertIs(sys, host_sys)
+                self.assertEqual(sys.platform, host_platform)
+                self.assertIs(build_inputs.sys, host_sys)
+                self.assertIs(checked_files.sys, host_sys)
+                self.assertIsNot(ios.sys, host_sys)
+                self.assertIsNot(ios_profiles.sys, host_sys)
+                self.assertEqual(ios.sys.platform, "darwin")
+                self.assertEqual(ios_profiles.sys.platform, "darwin")
                 self.invoke("prepare-operation")
+            self.assertIs(ios.sys, original_ios_sys)
+            self.assertIs(ios_profiles.sys, original_profiles_sys)
+            self.assertIs(sys, host_sys)
+            self.assertEqual(sys.platform, host_platform)
+            self.assertIs(build_inputs.sys, host_sys)
+            self.assertIs(checked_files.sys, host_sys)
             # Caller scopes preserve dispatch/containment, not error identity.
             # The outer ExitStack's fatal unwind adds ledger cleanup uncertainty,
             # so the aggregate cleanup receipt is false for both failures.
@@ -695,22 +921,30 @@ class IosOperationRecoveryTests(unittest.TestCase):
             mutate.assert_not_called()
             self.assertFalse(self.intent_path.exists())
 
-    def test_authenticated_original_validation_allows_raw_completion_after_profile_expiry(self) -> None:
+    def test_authenticated_signing_does_not_turn_raw_bytes_into_new_original_lifetime(self) -> None:
         intent = self.documents["candidate_intent"]
         write_evidence(self.intent_path, intent)
-        original_raw = raw_receipt(intent)
         raw_path = self.output / "raw-store-receipt.json"
-        raw_path.write_text(json.dumps(original_raw))
+        raw_path.write_text(json.dumps(raw_receipt(intent)))
         original_bytes = raw_path.read_bytes()
-        with patch("mobile_release.cli.authenticate_operation_intent", return_value=intent) as authenticate, patch("mobile_release.cli.validate_ipa_current_signing", side_effect=AssertionError("raw completion must not reinterpret expired signing")), patch("mobile_release.ios.ipa_signing_evidence", side_effect=AssertionError("historical completion must not extract profiles")), patch("mobile_release.ios_profiles.authenticate_cms", side_effect=AssertionError("historical completion must not reauthenticate profiles")), patch("mobile_release.cli.ipa_signing_evidence", side_effect=AssertionError("raw completion must reuse original signer evidence")), patch("mobile_release.ios._utc_now", return_value=datetime(2030, 1, 1, tzinfo=timezone.utc)), patch("mobile_release.stores._run_store_lane", side_effect=AssertionError("raw completion must be Store-free")):
-            self.assertEqual(self.invoke("execute-store", attempt=2), 0)
+        with patch("mobile_release.cli.authenticate_operation_intent", return_value=intent) as authenticate, patch("mobile_release.cli.validate_ipa_current_signing", side_effect=AssertionError("history must not reinterpret expiry")), patch("mobile_release.cli.ipa_signing_evidence", side_effect=AssertionError("original signer evidence must be reused")), patch("mobile_release.stores._run_store_lane", side_effect=AssertionError("raw reuse cannot launch a Store lane")):
+            with self.assertRaisesRegex(StoreOperationError, "original live composite"):
+                self.invoke("execute-store", attempt=2)
         authenticate.assert_called_once()
-        manifest = json.loads((self.output / "candidate-manifest.json").read_text())
-        self.assertEqual(manifest["signing"], intent["signing"])
-        self.assertEqual(manifest["artifacts"], intent["artifacts"])
-        self.assertEqual(manifest["producedBy"]["attempt"], 2)
-        self.assertEqual(manifest["executedBy"]["attempt"], 1)
         self.assertEqual(raw_path.read_bytes(), original_bytes)
+        self.assertFalse((self.output / "candidate-manifest.json").exists())
+        self.assertFalse((self.output / "candidate-receipt.json").exists())
+
+    def test_authenticated_complete_ios_final_remains_reusable_without_new_lane(self) -> None:
+        intent = self.documents["candidate_intent"]
+        write_evidence(self.intent_path, intent)
+        write_evidence(self.output / "candidate-manifest.json", self.documents["candidate"])
+        write_evidence(self.output / "candidate-receipt.json", self.documents["candidate_receipt"])
+        (self.output / "raw-store-receipt.json").write_text(json.dumps(raw_receipt(intent)))
+        before = directory_snapshot(self.output)
+        with patch("mobile_release.cli.authenticate_operation_intent", return_value=intent), patch("mobile_release.cli.validate_ipa_current_signing", side_effect=AssertionError("historical final must not reinterpret expiry")), patch("mobile_release.cli.execute_store_operation", side_effect=AssertionError("complete final is not a new Store lane")):
+            self.assertEqual(self.invoke("execute-store", attempt=2), 0)
+        self.assertEqual(directory_snapshot(self.output), before)
 
     def test_authenticated_signing_proof_cannot_authorize_changed_original_bytes(self) -> None:
         intent = self.documents["candidate_intent"]
@@ -730,11 +964,11 @@ class IosOperationRecoveryTests(unittest.TestCase):
             with self.subTest(observation=observation):
                 precondition = ios_precondition(self.config)
                 precondition["snapshot"]["serverObservedAt"] = observation
-                with patch("mobile_release.cli.validate_ipa_current_signing", return_value=([], interval)), patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]), patch("mobile_release.cli.prepare_store_operation", return_value=precondition), patch("mobile_release.cli.execute_store_operation") as store, self.assertRaises(ValidationError):
+                with patch("mobile_release.cli.validate_ipa_current_signing", return_value=([], interval)), patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]), patch("mobile_release.cli.prepare_store_operation", side_effect=lambda **kwargs: self.policy_readback(precondition, **kwargs)), patch("mobile_release.cli.execute_store_operation") as store, self.assertRaises(ValidationError):
                     self.invoke("prepare-operation")
                 store.assert_not_called()
                 self.assertFalse(self.intent_path.exists())
-        with patch("mobile_release.cli.validate_ipa_current_signing", return_value=([], interval)), patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]), patch("mobile_release.cli.prepare_store_operation", return_value=ios_precondition(self.config)), patch("mobile_release.cli.authenticate_operation_intent", side_effect=AssertionError("fresh preparation does not consume historical validation")):
+        with patch("mobile_release.cli.validate_ipa_current_signing", return_value=([], interval)), patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]), patch("mobile_release.cli.prepare_store_operation", side_effect=lambda **kwargs: self.policy_readback(ios_precondition(self.config), **kwargs)), patch("mobile_release.cli.authenticate_operation_intent", side_effect=AssertionError("fresh preparation does not consume historical validation")):
             self.assertEqual(self.invoke("prepare-operation"), 0)
         self.assertEqual(load_operation_intent(self.intent_path)["storePrecondition"]["snapshot"]["serverObservedAt"], "2026-01-01T00:00:00Z")
 
@@ -784,7 +1018,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
             finally:
                 ipa.write_bytes(original)
 
-        with patch("mobile_release.cli.validate_ipa_current_signing", side_effect=native), patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]), patch("mobile_release.cli.prepare_store_operation", return_value=ios_precondition(self.config)) as store:
+        with patch("mobile_release.cli.validate_ipa_current_signing", side_effect=native), patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]), patch("mobile_release.cli.prepare_store_operation", side_effect=lambda **kwargs: self.policy_readback(ios_precondition(self.config), **kwargs)) as store:
             with self.assertRaisesRegex(ValidationError, "synthetic-signature-A"):
                 self.invoke("prepare-operation")
         self.assertEqual(observed, [original])
@@ -796,10 +1030,10 @@ class IosOperationRecoveryTests(unittest.TestCase):
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         interval = SigningValidityInterval(start, start + timedelta(days=1))
 
-        def prepare(**_kwargs):
+        def prepare(**kwargs):
             path = self.root / "archive.zip"
             path.write_bytes(path.read_bytes() + b"changed during Store read")
-            return ios_precondition(self.config)
+            return self.policy_readback(ios_precondition(self.config), **kwargs)
 
         with patch("mobile_release.cli.validate_ipa_current_signing", return_value=([], interval)), patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]), patch("mobile_release.cli.prepare_store_operation", side_effect=prepare), patch("mobile_release.cli.execute_store_operation") as execute:
             with self.assertRaisesRegex(ValidationError, "changed after snapshotting"):
@@ -807,22 +1041,24 @@ class IosOperationRecoveryTests(unittest.TestCase):
         self.assertFalse(self.intent_path.exists())
         execute.assert_not_called()
 
-    def test_shared_deadline_prevents_next_authorization_boundary_and_cleans_snapshots(self):
+    def test_shared_deadline_prevents_next_authorization_boundary_and_retains_snapshots(self):
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         interval = SigningValidityInterval(start, start + timedelta(days=1))
         originals = {path: path.read_bytes() for path in self.root.glob("*.zip")}
         originals[self.root / "app.ipa"] = (self.root / "app.ipa").read_bytes()
+        original_owners = []
         # Expire at actual work boundaries, not after a fragile count of clock reads.
         for phase in ("paired-inspection", "evidence-context", "intent-construction"):
-            snapshots = []
+            snapshots, origins, retained = [], [], []
 
             @contextmanager
-            def capture_snapshot(paths, *, cancellation=None):
+            def capture_snapshot(paths, *, cancellation=None, lane_evidence=None):
                 self.assertIsNotNone(cancellation)
                 cancellation.check()
-                with ios_artifacts.snapshot_ios_artifacts(paths, cancellation=cancellation) as snapshot:
+                with ios_artifacts.snapshot_ios_artifacts(paths, cancellation=cancellation, lane_evidence=lane_evidence) as snapshot:
                     self.assertIs(snapshot.cancellation, cancellation)
                     snapshots.append(snapshot)
+                    origins.append((snapshot._owner, snapshot.deadline, snapshot.deadline.expires_at))
                     yield snapshot
 
             with self.subTest(phase=phase), ExitStack() as stack:
@@ -830,7 +1066,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
                 stack.enter_context(patch("mobile_release.cli.snapshot_ios_artifacts", side_effect=capture_snapshot))
                 native = stack.enter_context(patch("mobile_release.cli.validate_ipa_current_signing", return_value=([], interval)))
                 stack.enter_context(patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]))
-                prepare = stack.enter_context(patch("mobile_release.cli.prepare_store_operation", return_value=ios_precondition(self.config)))
+                prepare = stack.enter_context(patch("mobile_release.cli.prepare_store_operation", side_effect=lambda **kwargs: self.policy_readback(ios_precondition(self.config), **kwargs)))
                 execute = stack.enter_context(patch("mobile_release.cli.execute_store_operation"))
                 publish = stack.enter_context(patch("mobile_release.cli.write_evidence", wraps=write_evidence))
                 seam, real = {
@@ -841,12 +1077,14 @@ class IosOperationRecoveryTests(unittest.TestCase):
 
                 def expire(*args, **kwargs):
                     result = real(*args, **kwargs)
+                    retained.append(self.snapshot_state(snapshots[0]))
                     clock.return_value = MAX_INSPECTION_SECONDS
                     return result
 
-                stack.enter_context(patch(seam, side_effect=expire))
-                with self.assertRaisesRegex(ValidationError, "shared time bound"):
+                boundary = stack.enter_context(patch(seam, side_effect=expire))
+                with self.assertRaises(ProcessError) as caught:
                     self.invoke("prepare-operation")
+                boundary.assert_called_once()
                 if phase == "paired-inspection":
                     native.assert_not_called()
                 else:
@@ -856,69 +1094,130 @@ class IosOperationRecoveryTests(unittest.TestCase):
                 publish.assert_not_called()
                 self.assertFalse(self.intent_path.exists())
                 self.assertEqual(len(snapshots), 1)
-                self.assertFalse(snapshots[0].temporary.exists())
+                self.assertEqual(len(retained), 1)
+                self.assertEqual(len(origins), 1)
+                self.assert_deadline_snapshot_retained(snapshots[0], origins[0], retained[0],
+                                                       caught.exception, dispatched=False)
+                original_owners.append((origins[0][0], origins[0][1], snapshots[0],
+                                        snapshots[0].cancellation,
+                                        snapshots[0]._owner._lane_binding._record))
                 self.assertEqual(originals, {path: path.read_bytes() for path in originals})
+        # Separate invocations, never a new budget on a failed original owner.
+        for index in range(5):
+            self.assertEqual(len({id(row[index]) for row in original_owners}), 3)
 
-    def test_deadline_after_readback_preserves_precondition_and_retry_recaptures_same_candidate(self):
+    def test_deadline_after_readback_preserves_precondition_and_retains_snapshot(self):
+        self.readback_after_intent_failure(expire=True)
+
+    def test_intent_failure_after_readback_preserves_precondition_and_retry_recaptures_same_candidate(self):
+        self.readback_after_intent_failure(expire=False)
+
+    def readback_after_intent_failure(self, *, expire):
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         interval = SigningValidityInterval(start, start + timedelta(days=3))
-        paths, modes, sent_artifacts, snapshots = [], [], [], []
+        paths, modes, sent_artifacts, snapshots, origins, retained, readbacks_before = [], [], [], [], [], [], []
         real_intent = cli.build_operation_intent
+        ordinary_failure = ValidationError("synthetic intent construction failure")
         before = {path: path.read_bytes() for path in self.root.glob("*.zip")}
         before[self.root / "app.ipa"] = (self.root / "app.ipa").read_bytes()
 
         @contextmanager
-        def capture_snapshot(inputs, *, cancellation=None):
+        def capture_snapshot(inputs, *, cancellation=None, lane_evidence=None):
             self.assertIsNotNone(cancellation)
             cancellation.check()
-            with ios_artifacts.snapshot_ios_artifacts(inputs, cancellation=cancellation) as snapshot:
+            with ios_artifacts.snapshot_ios_artifacts(inputs, cancellation=cancellation, lane_evidence=lane_evidence) as snapshot:
                 self.assertIs(snapshot.cancellation, cancellation)
                 snapshots.append(snapshot)
+                origins.append((snapshot._owner, snapshot.deadline, snapshot.deadline.expires_at))
                 yield snapshot
 
-        def wire(command, **kwargs):
-            environment = kwargs["env"]
+        def document(command, environment):
             modes.append(environment["MOBILE_RELEASE_STORE_MODE"])
             self.assertEqual(modes[-1], "prepare", "a retry must not mutate the Store")
             path = Path(environment["MOBILE_RELEASE_STORE_RECEIPT_PATH"])
             paths.append(path)
             precondition = ios_precondition(self.config)
             precondition["snapshot"]["serverObservedAt"] = f"2026-01-0{len(paths)}T00:00:00Z"
-            path.write_text(json.dumps(precondition))
-            return subprocess.CompletedProcess(command, 0)
+            return precondition, 0
 
+        model = StoreLaneModel(document)
+        self.addCleanup(model.close)
         with ExitStack() as stack:
-            clock = stack.enter_context(patch("mobile_release.inspection.time.monotonic", return_value=0))
+            clock = (stack.enter_context(patch("mobile_release.inspection.time.monotonic", return_value=0))
+                     if expire else None)
             stack.enter_context(patch("mobile_release.cli.snapshot_ios_artifacts", side_effect=capture_snapshot))
             stack.enter_context(patch("mobile_release.cli.validate_ipa_current_signing", return_value=([], interval)))
             stack.enter_context(patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]))
             stack.enter_context(patch("mobile_release.stores._require_fastlane_bundle"))
             stack.enter_context(patch("mobile_release.stores.resolve_tooling_root", return_value=Path(__file__).resolve().parents[2]))
-            stack.enter_context(patch("mobile_release.stores.subprocess.run", side_effect=wire))
+            stack.enter_context(patch("mobile_release.stores.run_owned", side_effect=model))
+            stack.enter_context(patch("mobile_release.credentials._validate_selected_p8", return_value=Finding(
+                "credential-material.apple-p8", Status.PASS, "Synthetic credential boundary only")))
+            # This policy test uses no actual key. The actual selected-byte
+            # owner still receives the fixture through its ordinary input API.
+            import base64
+            source_values = {"MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": base64.b64encode(b"synthetic-p8").decode("ascii")}
+            stack.enter_context(patch("mobile_release.stores.credential_values_from_environment", return_value=source_values))
+            execute = stack.enter_context(patch("mobile_release.cli.execute_store_operation"))
 
-            def expire_after_intent(**kwargs):
+            def fail_after_intent(**kwargs):
                 intent = real_intent(**kwargs)
                 sent_artifacts.append(intent["artifacts"])
+                observed = paths[0].lstat()
+                readbacks_before.append((observed.st_dev, observed.st_ino, observed.st_mode,
+                                         observed.st_uid, observed.st_gid, paths[0].read_bytes()))
+                if not expire:
+                    raise ordinary_failure
+                retained.append(self.snapshot_state(snapshots[0]))
                 clock.return_value = MAX_INSPECTION_SECONDS
                 return intent
 
-            with patch("mobile_release.cli.build_operation_intent", side_effect=expire_after_intent), self.assertRaisesRegex(ValidationError, "shared time bound"):
+            with patch("mobile_release.cli.build_operation_intent", side_effect=fail_after_intent) as boundary, \
+                    patch("mobile_release.cli.write_evidence", wraps=write_evidence) as publish, \
+                    self.assertRaises(ProcessError if expire else ValidationError) as caught:
                 self.invoke("prepare-operation")
+            boundary.assert_called_once()
+            publish.assert_not_called()
+            execute.assert_not_called()
             self.assertFalse(self.intent_path.exists())
             self.assertEqual(len(paths), 1)
+            self.assertEqual(len(sent_artifacts), 1)
             first_readback = paths[0].read_bytes()
-            # A new preparation owns a new budget but must read new Store state;
-            # surviving unsealed readback is diagnostic, never authorization.
-            self.assertEqual(self.invoke("prepare-operation", attempt=2), 0)
-        intent = load_operation_intent(self.intent_path)
+            self.assertEqual(len(readbacks_before), 1)
+            observed = paths[0].lstat()
+            self.assertEqual((observed.st_dev, observed.st_ino, observed.st_mode,
+                              observed.st_uid, observed.st_gid, first_readback), readbacks_before[0])
+            if expire:
+                self.assertEqual(len(snapshots), 1)
+                self.assertEqual(len(origins), 1)
+                self.assertEqual(len(retained), 1)
+                self.assertEqual(len(model.calls), 1)
+                self.assertEqual(modes, ["prepare"])
+                self.assertIs(model.records[0], snapshots[0]._owner._lane_binding._record)
+                self.assertIsNotNone(model.records[0]._terminal)
+                self.assert_deadline_snapshot_retained(snapshots[0], origins[0], retained[0],
+                                                       caught.exception, dispatched=True)
+                self.assertEqual(json.loads(first_readback)["snapshot"]["serverObservedAt"],
+                                 "2026-01-01T00:00:00Z")
+                self.assertEqual(paths[0].read_bytes(), first_readback)
+                self.assertEqual(before, {path: path.read_bytes() for path in before})
+                return  # Never retry the failed/retained owner or delete its fixture.
+            self.assertIs(caught.exception, ordinary_failure)
+            # A fresh budget does not authorize collision adoption or a hidden
+            # output rename. Explicit fresh staging recaptures Store state.
+            with self.assertRaisesRegex(StoreOperationError, "already exists"):
+                self.invoke("prepare-operation", attempt=2)
+            fresh = self.output.with_name("candidate-fresh-preparation")
+            self.assertEqual(self.invoke("prepare-operation", attempt=2, output=fresh), 0)
+        intent = load_operation_intent(fresh / "candidate-operation-intent.json")
         self.assertEqual(intent["artifacts"], sent_artifacts[0])
         self.assertEqual(intent["storePrecondition"]["snapshot"]["serverObservedAt"], "2026-01-02T00:00:00Z")
         self.assertEqual(modes, ["prepare", "prepare"])
         self.assertNotEqual(paths[0], paths[1])
         self.assertEqual(paths[0].read_bytes(), first_readback)
         self.assertEqual(before, {path: path.read_bytes() for path in before})
-        self.assertEqual(len(snapshots), 2)
-        self.assertIsNot(snapshots[0].deadline, snapshots[1].deadline)
+        self.assertEqual(len(snapshots), 3)
+        self.assertIsNot(snapshots[0].deadline, snapshots[-1].deadline)
         self.assertTrue(all(not snapshot.temporary.exists() for snapshot in snapshots))
 
     def test_accepted_signature_slack_cannot_change_after_authenticated_intent_sealing(self):

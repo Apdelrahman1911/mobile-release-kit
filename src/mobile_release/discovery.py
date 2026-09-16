@@ -47,15 +47,54 @@ class GitContext:
         }
 
 
+def _valid_git_object_id(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9A-Fa-f]{40}", value) is not None
+
+
+def valid_observed_source(git: GitContext) -> bool:
+    """Whether this fresh context contains complete, clean source observations.
+
+    ``git_context`` is the observation producer; an environment hint is never
+    source authority. This pure predicate performs no later checkout read and
+    does not reinterpret already-authenticated historical evidence.
+    """
+
+    return _valid_git_object_id(git.commit) and _valid_git_object_id(git.tree) and git.dirty is False
+
+
 def _run(root: Path, argv: list[str], *, execution_source=None, cancellation=None) -> str | None:
     # Local import keeps credentials' static project-selection dependency acyclic.
     from .credentials import scrub_credential_capabilities
 
+    environment = scrub_credential_capabilities(os.environ)
+    if argv and argv[0] == "git":
+        # cwd alone does not bind Git to this checkout when inherited GIT_DIR,
+        # worktree/index/object/config overrides can redirect its observations.
+        # Keep the admitted tool PATH, not ambient Git, home or cloud settings.
+        environment = {
+            "PATH": environment.get("PATH", os.defpath),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_ALLOW_PROTOCOL": "",
+            "GIT_PAGER": "cat",
+        }
+        argv = [
+            "git", "--no-pager", "--no-replace-objects",
+            "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.devnull,
+            "-c", "core.untrackedCache=false", "-c", "protocol.allow=never",
+            *argv[1:],
+        ]
     try:
         result = run_owned(
             argv,
             cwd=root,
-            environ=scrub_credential_capabilities(os.environ),
+            environ=environment,
             capture=True,
             output_limit=OUTPUT_LIMIT,
             timeout=10,
@@ -79,22 +118,32 @@ def git_context(root: Path, environ: dict[str, str] | None = None, *, execution_
         if remote:
             match = re.search(r"(?:github\.com[:/])([^/]+/[^/]+?)(?:\.git)?$", remote)
             repository = match.group(1) if match else None
-    # The checked-out object is authoritative. GITHUB_SHA is validated against
-    # it by the mutation guard; never let an environment value invent source
-    # provenance for a different local tree.
-    checked_out_commit = _run(root, ["git", "rev-parse", "HEAD"], execution_source=execution_source, cancellation=cancellation)
-    commit = checked_out_commit or env.get("GITHUB_SHA")
-    tree = _run(
-        root,
-        ["git", "rev-parse", f"{commit}^{{tree}}"]
-        if commit
-        else ["git", "rev-parse", "HEAD^{tree}"],
+    # GITHUB_SHA is a dispatch claim for the mutation guard, never a substitute
+    # for observing this checkout. Derive a tree only from a valid actual HEAD.
+    head = _run(root, ["git", "rev-parse", "--verify", "HEAD"], execution_source=execution_source, cancellation=cancellation)
+    commit = head if _valid_git_object_id(head) else None
+    tree = None
+    if commit is not None:
+        observed_tree = _run(
+            root, ["git", "rev-parse", "--verify", f"{commit}^{{tree}}"],
+            execution_source=execution_source, cancellation=cancellation,
+        )
+        if _valid_git_object_id(observed_tree):
+            tree = observed_tree
+    status = _run(root, ["git", "status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=none"], execution_source=execution_source, cancellation=cancellation)
+    dirty = None if status is None else bool(status)
+    ending_head = _run(
+        root, ["git", "rev-parse", "--verify", "HEAD"],
         execution_source=execution_source, cancellation=cancellation,
     )
+    if commit is None or not _valid_git_object_id(ending_head) or ending_head != commit:
+        commit = tree = None
+    # The bracket detects an intervening persistent checkout, not arbitrary
+    # same-user ABA or an atomic filesystem snapshot. The checkout remains a
+    # trusted, exclusively operated input. Ref names describe CI dispatch even
+    # when recovery observes a detached original-source checkout.
     branch = env.get("GITHUB_REF_NAME") or _run(root, ["git", "branch", "--show-current"], execution_source=execution_source, cancellation=cancellation)
     ref = env.get("GITHUB_REF") or (f"refs/heads/{branch}" if branch else None)
-    status = _run(root, ["git", "status", "--porcelain=v1", "--untracked-files=normal"], execution_source=execution_source, cancellation=cancellation)
-    dirty = None if status is None else bool(status)
     return GitContext(
         repository=repository,
         repository_id=env.get("GITHUB_REPOSITORY_ID"),
