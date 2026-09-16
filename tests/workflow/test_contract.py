@@ -245,8 +245,9 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("secrets.", text)
         self.assertNotRegex(text, r"(?m)^\s*environment\s*:")
         workflow = load_workflow(SHARED_CI)
-        for platform, job in (("linux", "test-linux"), ("macos", "test-native-profiles")):
-            self.assertEqual(workflow["jobs"][job]["steps"][-1]["run"], coordinator_shell(platform))
+        for platform, job, scope in (("linux", "test-linux", None), ("macos", "test-native-profiles", "native-python"),
+                                     ("macos", "test-native-support", "native-support")):
+            self.assertEqual(workflow["jobs"][job]["steps"][-1]["run"], coordinator_shell(platform, scope=scope))
         controller = controller_module()
         paths = fixture_paths(controller)
         catalog = controller.catalog(paths, "linux", deadline=12345.0)

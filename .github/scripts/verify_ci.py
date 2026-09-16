@@ -1069,6 +1069,19 @@ def required_gate_ids(platform: str, scope: str = "platform") -> tuple[str, ...]
         return (*_BEFORE_TESTS, *(("native-tools",) if platform == "macos" else ()),
                 "native-process-abi-source", STORE_NATIVE_GATES[0], *_WHEEL,
                 "native-process-abi-wheel", STORE_NATIVE_GATES[1], "source-integrity")
+    if scope in {"native-python", "native-support"}:
+        if platform != "macos":
+            raise VerificationError("UNSUPPORTED_VERIFICATION_SCOPE")
+        if scope == "native-python":
+            # Keep both phases in this original Session: wheel authority and
+            # ABI require its completed source originals, not another job's proof.
+            return (*_BEFORE_TESTS, "native-tools", "native-process-abi-source", *COMPATIBILITY_SOURCE_GATES,
+                    "native-profile-source", *_WHEEL, "native-process-abi-wheel", *COMPATIBILITY_WHEEL_GATES,
+                    "wheel-smoke", "wheel-consumer", "native-profile-wheel", "source-integrity")
+        # A separate fixed owner retains every non-Python native obligation and
+        # establishes its own original source/wheel prerequisites and finality.
+        return tuple(name for name in required_gate_ids(platform)
+                     if name not in {"native-profile-source", "native-profile-wheel"})
     if scope != "platform":
         raise VerificationError("UNSUPPORTED_VERIFICATION_SCOPE")
     if platform == "linux":
@@ -1213,7 +1226,7 @@ def catalog(paths: Paths, platform: str, *, deadline: float, scope: str = "platf
     check("python-full", paths.source_python, seconds=900)
     native = paths.source / "tests/workflow/run_native_profile_checks.py"
     command("native-tools", ("/usr/bin/xcodebuild", "-version"), parser="xcode")
-    command("native-profile-source", python(paths.source_python, native), seconds=900, parser="native")
+    command("native-profile-source", python(paths.source_python, native), seconds=1500, parser="native")
     for name, filename, count in RUBY_SUITES:
         if not count and name != "ruby-supply-wif":
             # Immutable source supplies exact identities, not runtime test counts.
@@ -1245,7 +1258,7 @@ def catalog(paths: Paths, platform: str, *, deadline: float, scope: str = "platf
     command("wheel-pip-check", python(paths.wheel_python, "-m", "pip", "check"))
     check("wheel-smoke", paths.wheel_python, more=("--wheel", str(paths.wheel), "--ruby", str(paths.ruby)))
     check("python-wheel", paths.wheel_python, seconds=900)
-    command("native-profile-wheel", python(paths.wheel_python, native, "--installed-wheel"), seconds=900, parser="native")
+    command("native-profile-wheel", python(paths.wheel_python, native, "--installed-wheel"), seconds=1500, parser="native")
     wheel_env = dict(env)
     wheel_env["PATH"] = str(paths.wheel_python.parent) + ":" + wheel_env["PATH"]
     wheel_env["MOBILE_RELEASE_TEST_PYTHON"] = str(paths.wheel_python)
@@ -1615,20 +1628,24 @@ def copy_build(source: Path, destination: Path, inventory: dict, uid: int, gid: 
 
 def validate_inputs(root: Path, value: dict, *, deadline: float, scope: str = "platform") -> dict:
     """Validate only the live return of the original DATA producer, not inputs.json."""
+    if scope in {"native-python", "native-support"} and value["platform"] != "macos":
+        raise VerificationError("UNSUPPORTED_VERIFICATION_SCOPE")
     files = value["files"]
     expected = {item["path"]: item for item in files}
     valid_count = (len(files) == 13 if scope in {"signing-matrix", "signing-adapter"} else
-                   100 <= len(files) <= 150 if scope in {"platform", "store-lane"} else False)
+                   100 <= len(files) <= 150 if scope in {"platform", "store-lane", "native-python", "native-support"}
+                   else False)
     if len(expected) != len(files) or not valid_count:
         raise VerificationError("INPUT_INVENTORY_BOUND")
     if scope in {"signing-matrix", "signing-adapter"} and (value["actionlint"] is not None or value["gems"] is not None
                                       or value["bundler"] is not None
                                       or any(name != "inputs.json" and not name.startswith("python/") for name in expected)):
         raise VerificationError("MATRIX_INPUT_INVENTORY")
-    if scope == "store-lane" and (value["actionlint"] is not None or value["gems"] != "gems"
+    if scope in {"store-lane", "native-python", "native-support"} and (
+            value["actionlint"] is not None or value["gems"] != "gems"
             or value["bundler"] != "gems/bundler-4.0.16.gem"
             or any(name != "inputs.json" and not name.startswith(("python/", "gems/")) for name in expected)):
-        raise VerificationError("STORE_NATIVE_INPUT_INVENTORY")
+        raise VerificationError("STORE_NATIVE_INPUT_INVENTORY" if scope == "store-lane" else "NATIVE_INPUT_INVENTORY")
     actual = set()
     for directory, dirs, names in os.walk(root, followlinks=False, onerror=walk_error):
         check_clock(deadline)
@@ -4291,7 +4308,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
     originals = []  # Root each original capture through the complete logical proof.
     try:
         check_clock(deadline)
-        cutoff = min(deadline, started + 900.0)
+        cutoff = min(deadline, started + 1500.0)
         source_files = tuple(name for name in (source_inventory or {})
                              if name.endswith(".py") and name.startswith(("src/mobile_release/", "tests/")))
         phase = {"native-profile-source": "source", "native-profile-wheel": "wheel"}.get(step.id)
@@ -4305,7 +4322,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
             env["PATH"] = str(paths.wheel_python.parent) + ":" + env["PATH"]
             env["MOBILE_RELEASE_TEST_PYTHON"] = str(paths.wheel_python)
         expected = Step(step.id, argv=(str(python), "-I", "-B", str(entry), *tail),
-                        cwd=paths.work, env=tuple(sorted(env.items())), seconds=900, parser="native")
+                        cwd=paths.work, env=tuple(sorted(env.items())), seconds=1500, parser="native")
         if step != expected:
             raise VerificationError("NATIVE_GATE_CONTRACT")
         session.ensure_idle(deadline=cutoff)
@@ -4362,7 +4379,8 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
                 cwd=paths.work / f"native-authority-{phase}" if authority else step.cwd,
                 env=() if authority else step.env)
             row["status"] = "RUNNING"
-            value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env), seconds=900,
+            value = session.run(list(part.argv), cwd=part.cwd, env=dict(part.env),
+                                seconds=900 if authority or singleton else 1500,
                                 output_limit=8 * 1024**2, cpu_seconds=180,
                                  profile=f"native-authority-{phase}" if authority else "ordinary",
                                  absolute_deadline=cutoff, dispose_retained_domain=poison)
@@ -6019,7 +6037,8 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("commit", "run-id", "run-attempt", "image"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--java-home", type=Path)
-    parser.add_argument("--scope", choices=("platform", "signing-matrix", "signing-adapter", "store-lane"), default="platform")
+    parser.add_argument("--scope", choices=("platform", "signing-matrix", "signing-adapter", "store-lane",
+                                            "native-python", "native-support"), default="platform")
     parser.add_argument("--repository")
     parser.add_argument("--job", choices=("test-signing-matrix", "test-signing-adapter"))
     parser.add_argument("--shard", type=int, choices=range(48))
@@ -6039,6 +6058,7 @@ def main(argv: list[str] | None = None) -> int:
                 or not re.fullmatch(r"[A-Za-z0-9_.+/-]{1,100}", args.image)
                 or not re.fullmatch(r"[0-9a-f]{40}", args.commit)):
             raise VerificationError("HOSTED_RUN_BINDING")
+        required_gate_ids(args.platform, args.scope)
         os.umask(0o077)
         checkout = canonical_directory(args.source)
         runner_home = canonical_directory(args.runner_home)

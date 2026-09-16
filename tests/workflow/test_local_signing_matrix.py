@@ -1160,8 +1160,10 @@ class MatrixContractTests(unittest.TestCase):
             self.assertNotIn("run_local_signing_matrix.py", command)
             self.assertNotIn("pip wheel", command)
             self.assertNotIn("Popen", command)
-        self.assertEqual(aggregate["needs"], ["test-linux", "test-native-profiles", "test-signing-matrix"])
+        self.assertEqual(aggregate["needs"], ["test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix"])
         self.assertIn('"$MATRIX_RESULT" == success', aggregate["steps"][0]["run"])
+        self.assertIn('"$NATIVE_RESULT" == success', aggregate["steps"][0]["run"])
+        self.assertIn('"$NATIVE_SUPPORT_RESULT" == success', aggregate["steps"][0]["run"])
         uploads = [step for step in job["steps"] if "local-signing-matrix-proof-" in step.get("with", {}).get("name", "")]
         self.assertEqual(len(uploads), 1)
         self.assertNotIn("if", uploads[0])

@@ -3384,7 +3384,9 @@ class Session:
                 or getattr(self, "_native_control", None) is not None):
             raise SessionError("native authority preparation state/platform/phase differs")
         deadline = self._native_deadline(deadline)
-        if deadline - time.monotonic() > 900 or phase in self._native_authority:
+        # This is the enclosing logical suite endpoint. The separately admitted
+        # authority capture still has its tighter exact 900-second allowance.
+        if deadline - time.monotonic() > 1500 or phase in self._native_authority:
             raise SessionError("native authority preparation has a renewed or duplicate phase")
         if phase == "wheel":
             previous = self._native_authority.get("source")

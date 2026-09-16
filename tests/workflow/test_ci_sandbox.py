@@ -5422,6 +5422,42 @@ class CISandboxPureTests(unittest.TestCase):
                 if case == "prior-failure":
                     self.assertEqual(session.failure, "original owner failure")
 
+        # Only the enclosing preparation endpoint grows. Stop at the first
+        # admitted idle boundary, before state, files or controls are acquired.
+        for endpoint in (900.0, 900.001, 1500.0, 1500.001):
+            with self.subTest(native_preparation_endpoint=endpoint):
+                session = session_double(self.module, "darwin")
+                session.deadline = 3300.0
+                rig = _Collection(self.module, session)
+                stopped = RuntimeError("synthetic stop before native preparation acquisition")
+                with rig.scope(), patch.object(self.module.time, "monotonic", return_value=0.0), \
+                     patch.object(session, "ensure_idle", side_effect=stopped) as idle, ExitStack() as stack:
+                    filesystem = [stack.enter_context(patch.object(Path, method,
+                        side_effect=AssertionError("endpoint check may not acquire or inspect paths")))
+                        for method in ("resolve", "stat", "lstat", "open", "mkdir", "chmod", "unlink", "rmdir",
+                                       "read_bytes", "read_text", "write_bytes", "iterdir")]
+                    private_file = stack.enter_context(patch.object(self.module, "_private_file",
+                        side_effect=AssertionError("endpoint check may not create a policy or receipt")))
+                    if endpoint <= 1500.0:
+                        with self.assertRaises(RuntimeError) as caught:
+                            session.prepare_native_authority("source", deadline=endpoint)
+                        self.assertIs(caught.exception, stopped)
+                        idle.assert_called_once_with(deadline=endpoint)
+                    else:
+                        with self.assertRaisesRegex(self.module.SessionError, "renewed or duplicate phase"):
+                            session.prepare_native_authority("source", deadline=endpoint)
+                        idle.assert_not_called()
+                    for operation in filesystem:
+                        operation.assert_not_called()
+                    private_file.assert_not_called()
+                    session._argv.assert_not_called()
+                self.assertEqual(session._native_authority, {})
+                self.assertIsNone(session._native_preparing)
+                self.assertEqual(session.admission_results, [])
+                self.assertEqual(rig.opened, [])
+                self.assertFalse(any(event[0] == "popen" for event in rig.events))
+                self.assertEqual(session.deadline, 3300.0)
+
     def test_native_authority_preparation_is_exclusive_once_only_and_keeps_six_fixed_control_routes(self):
         for case in ("source", "wheel", "read-creator-failure-source", "read-creator-failure-wheel", "input-failure", "cwd-collision", "mkdir-after-effect", "leaf-owner-after-effect",
                      "boundary-failure", "cleanup-errors", "late-preparation", "cancelled-preparation"):
@@ -6570,15 +6606,21 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual(len(clocks), 2)
 
     def test_native_authority_run_admits_only_exact_prepared_profiles_and_keeps_original_capture(self):
-        cases = ("source", "wheel", "unknown-profile", "public-control", "linux", "not-admitted", "admitting", "env", "cwd",
-                 "state-root", "state-policy", "state-phase", "argv", "python-flags", "cpu", "seconds", "limit",
-                 "no-cutoff", "changed-cutoff", "unlatched", "cancel-control", "unprepared", "started", "completed",
+        successes = ("source", "wheel", "source-expanded-cutoff", "wheel-expanded-cutoff")
+        cases = (*successes, "unknown-profile", "public-control", "linux", "not-admitted", "admitting", "env", "cwd",
+                 "state-root", "state-policy", "state-phase", "argv", "python-flags", "cpu", "seconds", "seconds-over-authority", "seconds-expanded", "limit",
+                 "no-cutoff", "changed-cutoff", "changed-expanded-cutoff", "unlatched", "cancel-control", "unprepared", "started", "completed",
                  "closed", "busy", "original-owned", "direct-pending", "unknown-domain", "ordinary-overlap")
         for case in cases:
             with self.subTest(native_profile_invocation=case):
                 session = session_double(self.module, "linux" if case == "linux" else "darwin")
-                phase = "wheel" if case == "wheel" else "source"
-                state = native_state_double(session, phase)
+                expanded = case in {"source-expanded-cutoff", "wheel-expanded-cutoff", "changed-expanded-cutoff",
+                                    "seconds-over-authority", "seconds-expanded"}
+                if expanded:
+                    session.deadline = 3300.0
+                cutoff = 1500.0 if expanded else 1.0
+                phase = "wheel" if case in {"wheel", "wheel-expanded-cutoff"} else "source"
+                state = native_state_double(session, phase, deadline=cutoff)
                 rig = _Collection(self.module, session)
                 rig.snapshot_rows = {(rig.child.pid, rig.child.pid): ((session.uid,) * 3, (session.gid,) * 3, 65536)}
                 session.admitted, session._admitting = case != "not-admitted", case == "admitting"
@@ -6600,12 +6642,13 @@ class CISandboxPureTests(unittest.TestCase):
                 elif case == "python-flags":
                     command[2] = "-s"  # Not -S: site/.pth must not be initialized.
                 kwargs = dict(cwd=state["cwd"], env={}, seconds=900, output_limit=8 * self.module.MiB,
-                    cpu_seconds=180, profile="native-authority-" + phase, absolute_deadline=1.0)
+                    cpu_seconds=180, profile="native-authority-" + phase, absolute_deadline=cutoff)
                 changes = {"unknown-profile": {"profile": "native-authority-arbitrary"}, "public-control": {"profile": "native-control"},
                     "ordinary-overlap": {"profile": "ordinary"}, "env": {"env": {"PYTHONSAFEPATH": "1"}},
                     "cwd": {"cwd": session.work}, "cpu": {"cpu_seconds": 179}, "seconds": {"seconds": 899},
+                    "seconds-over-authority": {"seconds": 901}, "seconds-expanded": {"seconds": 1500},
                     "limit": {"output_limit": self.module.MiB}, "no-cutoff": {"absolute_deadline": None},
-                    "changed-cutoff": {"absolute_deadline": 0.9}}
+                    "changed-cutoff": {"absolute_deadline": 0.9}, "changed-expanded-cutoff": {"absolute_deadline": 1499.9}}
                 kwargs.update(changes.get(case, {}))
                 input_states = []
 
@@ -6624,7 +6667,7 @@ class CISandboxPureTests(unittest.TestCase):
                      patch.object(Path, "stat", side_effect=AssertionError("profile test must use only closed fake metadata seams")), ExitStack() as stack:
                     if case == "unknown-domain":
                         stack.enter_context(patch.object(self.module, "_domain", side_effect=OSError("synthetic unknown native finality")))
-                    if case in {"source", "wheel"}:
+                    if case in successes:
                         result = session.run(command, **kwargs)
                         self.assertTrue(result.ok, result)
                         self.assertTrue(result.waited and result.stdout_eof and result.stderr_eof and result.finality)
@@ -6633,6 +6676,14 @@ class CISandboxPureTests(unittest.TestCase):
                         self.assertEqual(input_states, [False, True])
                         self.assertTrue(state["started"] and state["completed"] and state["closed"])
                         self.assertEqual(rig.domain_calls, 3)
+                        observed_cutoffs = [event[1] for event in rig.events if event[0] == "root-snapshot"]
+                        self.assertEqual(len(observed_cutoffs), 1)
+                        if expanded:
+                            self.assertGreaterEqual(observed_cutoffs[0], 900.0)
+                            self.assertLess(observed_cutoffs[0], 901.0)
+                            self.assertLess(observed_cutoffs[0], cutoff)
+                        else:
+                            self.assertEqual(observed_cutoffs, [cutoff])
                         argv_builder.assert_called_once_with(command, 180, profile="native-authority-" + phase)
                         inventory.assert_called_once_with(state)
                         call = next(event for event in rig.events if event[0] == "popen")
@@ -6655,7 +6706,8 @@ class CISandboxPureTests(unittest.TestCase):
                         inventory.assert_not_called()
                         self.assertEqual(rig.opened, [])
                         self.assertFalse(any(event[0] == "popen" for event in rig.events))
-                self.assertEqual(session.deadline, 100.0)
+                self.assertEqual(state["deadline"], cutoff)
+                self.assertEqual(session.deadline, 3300.0 if expanded else 100.0)
 
         # Exercise the real private collector -> native parser -> public row
         # bridge. Loading this helper only defines inert functions; every
@@ -8636,30 +8688,30 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertTrue(result.timed_out)
                     self.assertIsNotNone(session.failure)
 
-        # Two genuine in-memory captures share ONE old endpoint. The second
-        # enters after most preparation time has elapsed; it cannot renew900s.
+        # Successive in-memory captures share ONE logical gate endpoint, not
+        # source/wheel endpoints or a renewed per-capture allowance.
         session = session_double(self.module)
-        session.deadline = 1500.0
+        session.deadline = 3300.0
         first = _Collection(self.module, session, stdout=(b"first phase\n",))
         first.now, first.exit_at = 100.0, 100.08
-        first_result = first.collect(seconds=900, absolute_deadline=900.0)
+        first_result = first.collect(seconds=900, absolute_deadline=1500.0)
         self.assertTrue(first_result.ok, first_result)
         first_persisted = session.persisted_bytes
         second = _Collection(self.module, session, stdout=(b"second phase\n",))
-        second.now, second.exit_at = 899.8, 900.5
-        second_result = second.collect(seconds=900, absolute_deadline=900.0)
+        second.now, second.exit_at = 1499.8, 1500.5
+        second_result = second.collect(seconds=1500, absolute_deadline=1500.0)
         self.assertIsNot(first_result, second_result)
         self.assertFalse(second_result.ok)
         self.assertTrue(second_result.timed_out)
         self.assertLess(second_result.duration, 2.0)
-        self.assertEqual(session.deadline, 1500.0)
+        self.assertEqual(session.deadline, 3300.0)
         self.assertEqual(session._run_number, 2)
         self.assertEqual(session.persisted_bytes, first_persisted + len(b"second phase\n"))
-        self.assertTrue(all(e[1] <= 900.0 for e in second.events if e[0] == "cleanup-deadline"))
-        self.assertTrue(all(e[2] <= 900.0 for e in second.events if e[0] == "domain-deadline" and e[1] > 1))
+        self.assertTrue(all(e[1] <= 1500.0 for e in second.events if e[0] == "cleanup-deadline"))
+        self.assertTrue(all(e[2] <= 1500.0 for e in second.events if e[0] == "domain-deadline" and e[1] > 1))
         self.assertIsNotNone(session.failure)
         with self.assertRaises(self.module.SessionError):
-            _Collection(self.module, session).collect(seconds=900, absolute_deadline=900.0)
+            _Collection(self.module, session).collect(seconds=1500, absolute_deadline=1500.0)
 
     def test_expected_negative_subject_isolated_but_cannot_rehabilitate_real_failure(self):
         session = session_double(self.module)

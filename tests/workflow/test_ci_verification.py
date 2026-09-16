@@ -152,8 +152,9 @@ HOSTED_GUARD = '''set -euo pipefail
 [[ "$MOBILE_RELEASE_RUNNER_ENVIRONMENT" == github-hosted ]]
 '''
 LINUX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'linux') }}"
-NATIVE_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos' || inputs.verification_target == 'store-lane-macos') }}"
-STORE_NATIVE_SCOPE = "${{ github.event_name == 'workflow_dispatch' && inputs.verification_target == 'store-lane-macos' && 'store-lane' || 'platform' }}"
+NATIVE_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos') }}"
+NATIVE_SUPPORT_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos' || inputs.verification_target == 'store-lane-macos') }}"
+STORE_NATIVE_SCOPE = "${{ github.event_name == 'workflow_dispatch' && inputs.verification_target == 'store-lane-macos' && 'store-lane' || 'native-support' }}"
 MATRIX_TARGET_CONDITION = "${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}"
 MATRIX_SHARD_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[0]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47]') }}"
 MATRIX_INCLUDE_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-matrix-canary' && '[{\"os\":\"ubuntu-24.04\",\"shard\":20},{\"os\":\"ubuntu-24.04\",\"shard\":28},{\"os\":\"macos-26\",\"shard\":1},{\"os\":\"macos-26\",\"shard\":12},{\"os\":\"macos-26\",\"shard\":37}]' || '[]') }}"
@@ -161,7 +162,7 @@ ADAPTER_TARGET_CONDITION = "${{ github.event_name == 'workflow_dispatch' && (inp
 ADAPTER_OS_SELECTION = "${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-linux' && '[\"ubuntu-24.04\"]' || github.event_name == 'workflow_dispatch' && inputs.verification_target == 'signing-adapter-macos' && '[\"macos-26\"]' || '[\"ubuntu-24.04\",\"macos-26\"]') }}"
 VERIFICATION_CONCURRENCY = "release-kit-ci-${{ github.ref }}-${{ github.event_name }}-${{ inputs.verification_target || 'full' }}"
 AGGREGATE_GUARD = '''set -euo pipefail
-[[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success && "$MATRIX_RESULT" == success ]]
+[[ "$LINUX_RESULT" == success && "$NATIVE_RESULT" == success && "$NATIVE_SUPPORT_RESULT" == success && "$MATRIX_RESULT" == success ]]
 '''
 LINUX_TOOL_SETUP = '''set -euo pipefail
 if [[ ! -x /usr/bin/bwrap ]]; then
@@ -209,10 +210,17 @@ def fixture_paths(controller):
                                 for line in ("312", "313", "314")))
 
 
-def coordinator_shell(platform: str) -> str:
+def coordinator_shell(platform: str, *, scope: str | None = None) -> str:
     if platform not in {"linux", "macos"}:
         raise ValueError("unsupported CI platform")
-    java = '--java-home "$JAVA_HOME_21_X64" ' if platform == "linux" else '--scope "$MRK_SCOPE" '
+    if platform == "linux" and scope is None:
+        java = '--java-home "$JAVA_HOME_21_X64" '
+    elif platform == "macos" and scope in {None, "native-python"}:
+        java = '--scope native-python '
+    elif platform == "macos" and scope == "native-support":
+        java = '--scope "$MRK_SCOPE" '
+    else:
+        raise ValueError("unsupported CI scope")
     return '''set -euo pipefail
 ruby_executable="$(command -v ruby)"
 [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
@@ -245,18 +253,21 @@ class CIWorkflowIsolationTests(unittest.TestCase):
             }}},
         })
         self.assertEqual(workflow["concurrency"], {"group": VERIFICATION_CONCURRENCY, "cancel-in-progress": True})
-        self.assertEqual(set(workflow["jobs"]), {"test-linux", "test-native-profiles", "test-signing-matrix", "test-signing-adapter", "test"})
+        self.assertEqual(set(workflow["jobs"]), {"test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix", "test-signing-adapter", "test"})
         text = CI.read_text(encoding="utf-8")
         self.assertNotIn("secrets.", text)
         self.assertNotIn("id-token:", text)
         for platform, name, image in (("linux", "test-linux", "ubuntu-24.04"),
-                                      ("macos", "test-native-profiles", "macos-26")):
-            with self.subTest(platform=platform):
+                                      ("macos", "test-native-profiles", "macos-26"),
+                                      ("macos", "test-native-support", "macos-26")):
+            with self.subTest(job=name):
                 job = workflow["jobs"][name]
                 self.assertEqual(job["runs-on"], image)
                 self.assertEqual(job["timeout-minutes"], 60)
                 if platform == "linux":
                     self.assertEqual(job["if"], LINUX_TARGET_CONDITION)
+                elif name == "test-native-support":
+                    self.assertEqual(job["if"], NATIVE_SUPPORT_TARGET_CONDITION)
                 else:
                     self.assertEqual(job["if"], NATIVE_TARGET_CONDITION)
                 for forbidden in ("continue-on-error", "environment", "container", "services", "strategy", "defaults", "env"):
@@ -305,16 +316,25 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                     "MRK_PYTHON_312": "${{ steps.python312.outputs.python-path }}",
                     "MRK_PYTHON_313": "${{ steps.python313.outputs.python-path }}",
                     "MRK_PYTHON_314": "${{ steps.python314.outputs.python-path }}",
-                    **({"MRK_SCOPE": STORE_NATIVE_SCOPE} if platform == "macos" else {}),
+                    **({"MRK_SCOPE": STORE_NATIVE_SCOPE} if name == "test-native-support" else {}),
                 })
                 self.assertEqual(owner["shell"], "bash")
-                self.assertEqual(owner["run"], coordinator_shell(platform))
+                self.assertEqual(owner["run"], coordinator_shell(
+                    platform, scope="native-support" if name == "test-native-support" else None))
+        self.assertEqual(coordinator_shell("macos"), coordinator_shell("macos", scope="native-python"))
+        for platform, scope in (("unknown", None), ("linux", "native-python"),
+                                ("linux", "native-support"), ("linux", "platform"),
+                                ("macos", "platform"), ("macos", "store-lane"), ("macos", "unknown")):
+            with self.subTest(unsupported_coordinator=(platform, scope)), self.assertRaises(ValueError):
+                coordinator_shell(platform, scope=scope)
 
     def test_manual_native_candidate_routing_and_protected_aggregate_remain_fail_closed(self):
         workflow = load_workflow(CI)
-        linux, native, aggregate = (workflow["jobs"][name] for name in ("test-linux", "test-native-profiles", "test"))
+        linux, native, support, aggregate = (workflow["jobs"][name] for name in
+                                            ("test-linux", "test-native-profiles", "test-native-support", "test"))
         self.assertEqual(linux["if"], LINUX_TARGET_CONDITION)
         self.assertEqual(native["if"], NATIVE_TARGET_CONDITION)
+        self.assertEqual(support["if"], NATIVE_SUPPORT_TARGET_CONDITION)
         matrix = workflow["jobs"]["test-signing-matrix"]
         self.assertEqual(matrix["if"], MATRIX_TARGET_CONDITION)
         selection = matrix["strategy"]["matrix"]["shard"]
@@ -355,7 +375,8 @@ class CIWorkflowIsolationTests(unittest.TestCase):
                         context["inputs"] = {"verification_target": compared}
                     dispatch = event == "workflow_dispatch"
                     expected = {"test-linux": not dispatch or compared in {"full", "linux"},
-                                "test-native-profiles": not dispatch or compared in {"full", "macos", "store-lane-macos"},
+                                "test-native-profiles": not dispatch or compared in {"full", "macos"},
+                                "test-native-support": not dispatch or compared in {"full", "macos", "store-lane-macos"},
                                 "test-signing-matrix": not dispatch or compared in {"full", "signing-matrix-canary"},
                                 "test-signing-adapter": dispatch and compared in {"signing-adapter", "signing-adapter-linux", "signing-adapter-macos"}}
                     for name, enabled in expected.items():
@@ -386,11 +407,12 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         # This is the existing fixed job, not a synthesized cross-run status.
         # Pin every field before the harmless shell can be executed below.
         self.assertEqual({key: value for key, value in aggregate.items() if key != "steps"}, {
-            "needs": ["test-linux", "test-native-profiles", "test-signing-matrix"], "if": "${{ always() }}",
+            "needs": ["test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix"], "if": "${{ always() }}",
             "runs-on": "ubuntu-24.04", "timeout-minutes": 5, "permissions": {"contents": "read"},
         })
         self.assertEqual(aggregate["steps"][0], {"name": "Require every verification job to succeed", "env": {
             "LINUX_RESULT": "${{ needs.test-linux.result }}", "NATIVE_RESULT": "${{ needs.test-native-profiles.result }}",
+            "NATIVE_SUPPORT_RESULT": "${{ needs.test-native-support.result }}",
             "MATRIX_RESULT": "${{ needs.test-signing-matrix.result }}",
         }, "run": AGGREGATE_GUARD})
         self.assertEqual(len(aggregate["steps"]), 4)
@@ -398,23 +420,27 @@ class CIWorkflowIsolationTests(unittest.TestCase):
         self.assertEqual(workflow["jobs"]["test-signing-matrix"]["if"], MATRIX_TARGET_CONDITION)
         self.assertTrue(evaluate_condition(aggregate["if"], {}, success=False, cancelled=True))
         states = ["failure", "cancelled", "skipped", "queued", "unavailable", "", None]
-        triples = [("success", "success", "success")]
+        results = [("success", "success", "success", "success")]
         for state in states:
-            triples.extend(((state, "success", "success"), ("success", state, "success"),
-                            ("success", "success", state), (state, state, state)))
+            results.extend(((state, "success", "success", "success"), ("success", state, "success", "success"),
+                            ("success", "success", state, "success"), ("success", "success", "success", state),
+                            (state, state, state, state)))
         body = aggregate["steps"][0]["run"]
-        for linux_result, native_result, matrix_result in triples:
-            with self.subTest(protected_results=(linux_result, native_result, matrix_result)):
+        for linux_result, native_result, support_result, matrix_result in results:
+            with self.subTest(protected_results=(linux_result, native_result, support_result, matrix_result)):
                 env = {"PATH": "/usr/bin:/bin"}
                 if linux_result is not None:
                     env["LINUX_RESULT"] = linux_result
                 if native_result is not None:
                     env["NATIVE_RESULT"] = native_result
+                if support_result is not None:
+                    env["NATIVE_SUPPORT_RESULT"] = support_result
                 if matrix_result is not None:
                     env["MATRIX_RESULT"] = matrix_result
                 result = subprocess.run(["bash", "--noprofile", "--norc", "-c", body],
                                         env=env, capture_output=True, timeout=5)
-                self.assertEqual(result.returncode == 0, linux_result == native_result == matrix_result == "success")
+                self.assertEqual(result.returncode == 0,
+                                 linux_result == native_result == support_result == matrix_result == "success")
                 self.assertEqual(result.stdout, b"")
 
         group = workflow["concurrency"]["group"]
@@ -477,7 +503,7 @@ class CIWorkflowIsolationTests(unittest.TestCase):
 
     def test_actual_guard_rejects_non_hosted_or_missing_runner_identity(self):
         workflow = load_workflow(CI)
-        for name in ("test-linux", "test-native-profiles", "test-signing-matrix", "test-signing-adapter"):
+        for name in ("test-linux", "test-native-profiles", "test-native-support", "test-signing-matrix", "test-signing-adapter"):
             body = workflow["jobs"][name]["steps"][0]["run"]
             self.assertEqual(body, HOSTED_GUARD)  # Do not execute arbitrary workflow text.
             for identity in ("github-hosted", "self-hosted", "", "GitHub-hosted", None):
@@ -502,7 +528,7 @@ sudo() {
         env = {
             "PATH": "/usr/bin:/bin", "MRK_PYTHON": "/fixture/python/bin/python",
             "MRK_PYTHON_312": "/fixture/python312/bin/python", "MRK_PYTHON_313": "/fixture/python313/bin/python",
-            "MRK_PYTHON_314": "/fixture/python314/bin/python", "MRK_SCOPE": "platform",
+            "MRK_PYTHON_314": "/fixture/python314/bin/python",
             "FIXTURE_RUBY": "/fixture/ruby/bin/ruby", "GITHUB_WORKSPACE": "/fixture/source with spaces",
             "HOME": "/fixture/runner home", "RUNNER_TEMP": "/fixture/runner temp",
             "GITHUB_SHA": "1" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
@@ -510,9 +536,16 @@ sudo() {
             "JAVA_HOME_21_X64": "/fixture/jdk21", "GITHUB_STEP_SUMMARY": "/fixture/private summary",
         }
         workflow = load_workflow(CI)
-        for platform, job in (("linux", "test-linux"), ("macos", "test-native-profiles")):
+        for platform, job, scope in (("linux", "test-linux", None),
+                                     ("macos", "test-native-profiles", "native-python"),
+                                     ("macos", "test-native-support", "native-support"),
+                                     ("macos", "test-native-support", "store-lane")):
             body = workflow["jobs"][job]["steps"][-1]["run"]
-            self.assertEqual(body, coordinator_shell(platform))  # Only the inert, fixed shell may run.
+            self.assertEqual(body, coordinator_shell(
+                platform, scope="native-support" if job == "test-native-support" else None))
+            # Only support accepts the closed routing value from its fixed env;
+            # the profile owner must work without any MRK_SCOPE binding.
+            bound_env = {**env, **({"MRK_SCOPE": scope} if job == "test-native-support" else {})}
             expected = [
                 "-n", "env", "-i", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "PYTHONSAFEPATH=1",
                 env["MRK_PYTHON"], "-I", "-B", ".github/scripts/verify_ci.py", "--platform", platform,
@@ -526,26 +559,26 @@ sudo() {
             if platform == "linux":
                 expected += ["--java-home", env["JAVA_HOME_21_X64"]]
             else:
-                expected += ["--scope", env["MRK_SCOPE"]]
+                expected += ["--scope", scope]
             expected += ["--summary", env["GITHUB_STEP_SUMMARY"]]
             for status in (0, 1, 125):
-                with self.subTest(platform=platform, status=status):
+                with self.subTest(job=job, scope=scope, status=status):
                     result = subprocess.run(["bash", "--noprofile", "--norc", "-c", fixture + body],
-                                            env={**env, "FIXTURE_STATUS": str(status)},
+                                            env={**bound_env, "FIXTURE_STATUS": str(status)},
                                             capture_output=True, timeout=5)
                     self.assertEqual(result.returncode, status, result.stderr)
                     self.assertEqual(result.stdout.decode().split("\0"), [*expected, ""])
             for key in ("MRK_PYTHON", "FIXTURE_RUBY", "MRK_PYTHON_312", "MRK_PYTHON_313", "MRK_PYTHON_314"):
-                with self.subTest(platform=platform, relative_runtime=key):
+                with self.subTest(job=job, scope=scope, relative_runtime=key):
                     result = subprocess.run(["bash", "--noprofile", "--norc", "-c", fixture + body],
-                                            env={**env, "FIXTURE_STATUS": "0", key: "relative-runtime"},
+                                            env={**bound_env, "FIXTURE_STATUS": "0", key: "relative-runtime"},
                                             capture_output=True, timeout=5)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(result.stdout, b"")
 
     def test_failed_or_cancelled_setup_cannot_reach_the_controller(self):
         workflow = load_workflow(CI)
-        for name in ("test-linux", "test-native-profiles"):
+        for name in ("test-linux", "test-native-profiles", "test-native-support"):
             job = workflow["jobs"][name]
             owner = job["steps"][-1]
             for failed in job["steps"][:-1]:
@@ -573,7 +606,7 @@ class CIControllerContractTests(unittest.TestCase):
         step = controller.Step("native-profile-" + phase,
             argv=(str(python), "-I", "-B", str(ROOT / "tests/workflow/run_native_profile_checks.py"),
                   *(("--installed-wheel",) if phase == "wheel" else ())), cwd=paths.work,
-            env=tuple(sorted(controller.native_phase_environment(paths, "macos", phase).items())), seconds=900, parser="native")
+            env=tuple(sorted(controller.native_phase_environment(paths, "macos", phase).items())), seconds=1500, parser="native")
         rig = SimpleNamespace(controller=controller, paths=paths, step=step, now=100.0,
                               inventories=inventories, events=[], captures=[], changes={},
                               prepare_error=None, idle_error=None, run_error=None,
@@ -1060,7 +1093,7 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertEqual(vars(original), before)
 
     def test_native_gate_keeps_every_original_capture_record_and_one_source_wheel_cutoff(self):
-        for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):
+        for phase, original_deadline, cutoff in (("source", 2500.0, 1600.0), ("wheel", 800.0, 800.0)):
             with self.subTest(phase=phase):
                 rig = self._native_gate_fixture(phase)
                 parts = ("authority", "ordinary", *rig.controller.PYTHON_SINGLETON_PARTITIONS)
@@ -1104,7 +1137,7 @@ class CIControllerContractTests(unittest.TestCase):
                 for index, (_, _, options) in enumerate(calls):
                     self.assertIs(options["dispose_retained_domain"], parts[index] in dict(_PYTHON_POISON_FIXTURES))
                     self.assertEqual(options["absolute_deadline"], cutoff)
-                    self.assertEqual(options["seconds"], 900)
+                    self.assertEqual(options["seconds"], 1500 if parts[index] == "ordinary" else 900)
                     self.assertEqual(options["cpu_seconds"], 180)
                     self.assertEqual(options["output_limit"], 8 * 1024**2)
                     self.assertEqual(records[index]["capture"],
@@ -1205,10 +1238,10 @@ class CIControllerContractTests(unittest.TestCase):
                                  "partial or failed fixture persistence must remain charged")
                 events = rig.events
                 prepared = [event for event in events if event[0] == "fixture-prepare"]
-                self.assertEqual(prepared, [("fixture-prepare", "source", 1000.0)])
+                self.assertEqual(prepared, [("fixture-prepare", "source", 1600.0)])
                 rechecks = [i for i, event in enumerate(events) if event[0] == "fixture-reinspect"]
                 for index in rechecks:
-                    self.assertEqual(events[index - 1], ("idle", 1000.0))
+                    self.assertEqual(events[index - 1], ("idle", 1600.0))
                     self.assertTrue(any(event[0] == "run" for event in events[:index]))
                 # An original parser failure still gets independent reinspection
                 # if idle was genuinely established. Unknown idle never does.
@@ -1236,7 +1269,7 @@ class CIControllerContractTests(unittest.TestCase):
         controller = controller_module()
         rig = self._native_gate_fixture()
         for changes in ({"kind": "inspection"}, {"argv": (*rig.step.argv, "--authority")},
-                        {"env": ()}, {"cwd": rig.paths.source}, {"seconds": 901},
+                        {"env": ()}, {"cwd": rig.paths.source}, {"seconds": 900}, {"seconds": 901}, {"seconds": 1501},
                         {"parser": "exit"}, {"native_partition": "authority"}, {"expected_tests": 5}):
             with self.subTest(changes=changes):
                 result = self._perform_native_fixture(rig, step=dataclasses.replace(rig.step, **changes))
@@ -1386,23 +1419,23 @@ class CIControllerContractTests(unittest.TestCase):
 
                     def late_snapshot(*args, **kwargs):
                         value = original_snapshot(*args, **kwargs)
-                        rig.now = 1000.0
+                        rig.now = 1600.0
                         return value
 
                     rig.checks.native_capture_snapshot = late_snapshot
                 elif mode == "preparation":
-                    rig.prepare_advance = 900.0
+                    rig.prepare_advance = 1500.0
                 elif mode in parts:
                     # One original cutoff: preparation has already consumed
                     # 100s. Expire during this exact original, not a renewed one.
-                    rig.run_advance = 801.0 / (parts.index(mode) + 1)
+                    rig.run_advance = 1401.0 / (parts.index(mode) + 1)
                 reconciliations = []
 
                 def late_sorted(values, *args, **kwargs):
                     result = sorted(values, *args, **kwargs)
                     if len(rig.captures) == len(parts) and tuple(result) == rig.inventories["all"]:
                         reconciliations.append(True)
-                        rig.now = 1000.0
+                        rig.now = 1600.0
                     return result
 
                 with contextlib.ExitStack() as stack:
@@ -1783,7 +1816,7 @@ class CIControllerContractTests(unittest.TestCase):
                     # Complete success and complete next-entry lines are
                     # separate observations, never a receipt for the body.
                     raw = header(source_ids[0]) + b" ... ok\n" + header(source_ids[1]) + b"\n" + private + b"\n"
-                    rig.run_advance = 400.5  # Original1000s endpoint expires in ordinary.
+                    rig.run_advance = 700.5  # Original1600s endpoint expires in ordinary.
                     rig.idle_error = rig.controller.VerificationError("AGGREGATE_DEADLINE")
                     rig.idle_failure_after = 2
                     rig.changes["ordinary"] = dict(stderr=raw, persisted=(0, len(raw)))
@@ -1825,7 +1858,8 @@ class CIControllerContractTests(unittest.TestCase):
                     self.assertNotIn("completed", result.details)
                     runs = [event for event in rig.events if event[0] == "run"]
                     self.assertEqual(len(runs), 2)
-                    self.assertTrue(all(event[2]["absolute_deadline"] == 1000.0 for event in runs))
+                    cutoff = 1000.0 if mode == "outer-expired" else 1600.0
+                    self.assertTrue(all(event[2]["absolute_deadline"] == cutoff for event in runs))
                     final_run = max(index for index, event in enumerate(rig.events) if event[0] == "run")
                     self.assertTrue(all(event[0] == "idle" for event in rig.events[final_run + 1:]))
 
@@ -2550,34 +2584,139 @@ class CIControllerContractTests(unittest.TestCase):
                       *wheel, "native-process-abi-wheel", *compatibility_wheel,
                       "wheel-smoke", "wheel-consumer", "ruby-packaged-capture-wheel", "store-lane-native-wheel", "native-profile-wheel", "source-integrity"),
         }
-        for platform in expected:
-            steps = controller.catalog(fixture_paths(controller), platform, deadline=1000.0)
-            with self.subTest(platform=platform):
-                self.assertEqual(tuple(step.id for step in steps), expected[platform])
-                self.assertEqual(controller.required_gate_ids(platform), expected[platform])
-                self.assertEqual(len(steps), 58 if platform == "linux" else 41)
+        native_profiles = ("native-profile-source", "native-profile-wheel")
+        native_python = (*before, "native-tools", "native-process-abi-source", *compatibility_source,
+                         "native-profile-source", *wheel, "native-process-abi-wheel", *compatibility_wheel,
+                         "wheel-smoke", "wheel-consumer", "native-profile-wheel", "source-integrity")
+        native_support = tuple(name for name in expected["macos"] if name not in native_profiles)
+        self.assertEqual(set(native_python) | set(native_support), set(expected["macos"]))
+        self.assertEqual(set(expected["macos"]) - set(native_support), set(native_profiles))
+        self.assertEqual(set(native_python) - set(native_support), set(native_profiles))
+        catalogs = {}
+        for platform, scope, wanted, count in (("linux", "platform", expected["linux"], 58),
+                                               ("macos", "platform", expected["macos"], 41),
+                                               ("macos", "native-python", native_python, 31),
+                                               ("macos", "native-support", native_support, 39)):
+            steps = controller.catalog(fixture_paths(controller), platform, deadline=1000.0, scope=scope)
+            catalogs[platform, scope] = steps
+            with self.subTest(platform=platform, scope=scope):
+                ids = tuple(step.id for step in steps)
+                self.assertEqual(ids, wanted)
+                self.assertEqual(controller.required_gate_ids(platform, scope), wanted)
+                if scope == "platform":
+                    self.assertEqual(controller.required_gate_ids(platform), wanted)
+                self.assertEqual(len(steps), count)
+                self.assertEqual(len(set(ids)), count)
                 if platform == "macos":
-                    ids = tuple(step.id for step in steps)
-                    for prerequisite in ("native-tools", "native-process-abi-source", *compatibility_source):
-                        self.assertLess(ids.index(prerequisite), ids.index("native-profile-source"))
-                    self.assertLess(ids.index("native-profile-source"), ids.index("ruby-ios_upload_validation"))
-                    self.assertLess(ids.index("ruby-ios_upload_validation"), ids.index("ruby-native-spawn"))
-                    for gate in ("ruby-native-capture", "ruby-native-signal-observation",
-                                 "ruby-ios_upload_validation", "ruby-android_upload_validation"):
-                        self.assertLess(ids.index("native-tools"), ids.index(gate))
-                        self.assertLess(ids.index("native-profile-source"), ids.index(gate))
-                    self.assertLess(ids.index("native-profile-source"), ids.index("native-profile-wheel"))
+                    # Each fixed owner builds its own complete prerequisites;
+                    # no source/wheel ownership is supplied by the other job.
+                    self.assertEqual(tuple(name for name in ids if name in before), before)
+                    self.assertEqual(tuple(name for name in ids if name in wheel), wheel)
+                    self.assertLess(ids.index("native-tools"), ids.index("native-process-abi-source"))
+                    self.assertLess(ids.index("native-process-abi-source"), ids.index("wheel-copy"))
+                    self.assertLess(ids.index("wheel-pip-check"), ids.index("native-process-abi-wheel"))
+                    for prerequisite in compatibility_source:
+                        self.assertLess(ids.index("native-process-abi-source"), ids.index(prerequisite))
+                        self.assertLess(ids.index(prerequisite), ids.index("wheel-copy"))
+                    for prerequisite in compatibility_wheel:
+                        self.assertLess(ids.index("native-process-abi-wheel"), ids.index(prerequisite))
+                        self.assertLess(ids.index(prerequisite), ids.index("wheel-smoke"))
+                    if scope != "native-support":
+                        for prerequisite in ("native-tools", "native-process-abi-source", *compatibility_source):
+                            self.assertLess(ids.index(prerequisite), ids.index("native-profile-source"))
+                        self.assertLess(ids.index("native-profile-source"), ids.index("wheel-copy"))
+                        self.assertLess(ids.index("wheel-consumer"), ids.index("native-profile-wheel"))
+                        self.assertLess(ids.index("native-profile-source"), ids.index("native-profile-wheel"))
+                        self.assertEqual([step.seconds for step in steps if step.id in native_profiles], [1500, 1500])
+                    if scope != "native-python":
+                        self.assertLess(ids.index("ruby-ios_upload_validation"), ids.index("ruby-native-spawn"))
+                        for gate in ("ruby-native-capture", "ruby-native-signal-observation",
+                                     "ruby-ios_upload_validation", "ruby-android_upload_validation"):
+                            self.assertLess(ids.index("native-tools"), ids.index(gate))
+                            self.assertLess(ids.index("native-process-abi-source"), ids.index(gate))
+                            if scope == "platform":
+                                self.assertLess(ids.index("native-profile-source"), ids.index(gate))
             altered = [(), steps[:-1], (*steps, steps[-1]), (steps[1], steps[0], *steps[2:]),
                        (dataclasses.replace(steps[0], id="unknown-gate"), *steps[1:])]
             altered.extend((*steps[:index], *steps[index + 1:]) for index in range(len(steps)))
             for invalid in altered:
-                with self.subTest(platform=platform, ids=[step.id for step in invalid]):
+                with self.subTest(platform=platform, scope=scope, ids=[step.id for step in invalid]):
                     seen = []
                     with self.assertRaisesRegex(controller.VerificationError, "REQUIRED_GATE_INVENTORY"):
-                        controller.execute_pipeline(invalid, lambda step: seen.append(step.id), platform=platform)
+                        controller.execute_pipeline(invalid, lambda step: seen.append(step.id), platform=platform, scope=scope)
                     self.assertEqual(seen, [])
+        for scope in ("native-python", "native-support"):
+            scoped = catalogs["macos", scope]
+            self.assertEqual(scoped, tuple(step for step in catalogs["macos", "platform"]
+                                            if step.id in {row.id for row in scoped}))
+            for method in (controller.required_gate_ids, controller.catalog):
+                with self.subTest(linux_native_scope=scope, method=method.__name__), \
+                     self.assertRaisesRegex(controller.VerificationError, "UNSUPPORTED_VERIFICATION_SCOPE"):
+                    if method is controller.catalog:
+                        method(fixture_paths(controller), "linux", deadline=1000.0, scope=scope)
+                    else:
+                        method("linux", scope)
+        for scope in ("", "native", "native_python", "native_support", "native-python ", "native-support ",
+                      "NATIVE-PYTHON", "NATIVE-SUPPORT"):
+            for platform in ("linux", "macos"):
+                with self.subTest(platform=platform, unknown_scope=scope), \
+                     self.assertRaisesRegex(controller.VerificationError, "UNSUPPORTED_VERIFICATION_SCOPE"):
+                    controller.required_gate_ids(platform, scope)
         with self.assertRaisesRegex(controller.VerificationError, "UNSUPPORTED_PLATFORM"):
             controller.required_gate_ids("windows")
+
+        # Closed offline-input admission uses only synthetic bytes and fake
+        # metadata. No fixture directory, download, chmod or freeze can escape.
+        root = fixture_paths(controller).inputs
+        payload = b"synthetic offline native input\n"
+        names = ("inputs.json", "gems/bundler-4.0.16.gem", "gems/offline-fixture.gem",
+                 *(f"python/input-{index:03d}.whl" for index in range(148)))
+        files = [{"path": name, "bytes": len(payload), "sha256": hashlib.sha256(payload).hexdigest()} for name in names]
+        base = {"platform": "macos", "actionlint": None, "gems": "gems", "bundler": "gems/bundler-4.0.16.gem",
+                "manifest_sha256": "1" * 64, "lock_sha256": "2" * 64, "files": files[:100]}
+        for scope in ("native-python", "native-support"):
+            for count in (100, 150):
+                value = {**base, "files": files[:count]}
+                walk_rows = [(str(root), ["gems", "python"], ["inputs.json"]),
+                             (str(root / "gems"), [], ["bundler-4.0.16.gem", "offline-fixture.gem"]),
+                             (str(root / "python"), [], [Path(name).name for name in names[3:count]])]
+                with self.subTest(native_input_scope=scope, count=count), \
+                     patch.object(controller.time, "monotonic", return_value=0.0), \
+                     patch.object(controller.os, "walk", return_value=walk_rows) as walk_input, \
+                     patch.object(Path, "is_symlink", return_value=False), \
+                     patch.object(controller, "read_regular", return_value=payload) as reader, \
+                     patch.object(controller, "freeze_tree") as freeze, \
+                     patch.object(controller.os, "chmod", side_effect=AssertionError("native input may not chmod a tool")):
+                    result = controller.validate_inputs(root, value, deadline=1000.0, scope=scope)
+                    self.assertEqual(result, {"files": count, "bytes": count * len(payload),
+                        "tools_sha256": base["manifest_sha256"], "lock_sha256": base["lock_sha256"]})
+                    walk_input.assert_called_once_with(root, followlinks=False, onerror=controller.walk_error)
+                    self.assertEqual([call.args for call in reader.call_args_list], [(root / name,) for name in names[:count]])
+                    self.assertTrue(all(call.kwargs == {"deadline": 1000.0, "maximum": 16 * 1024**2}
+                                        for call in reader.call_args_list))
+                    freeze.assert_called_once_with(root, deadline=1000.0)
+            invalid_inputs = (
+                ({"platform": "linux"}, "UNSUPPORTED_VERIFICATION_SCOPE"),
+                ({"files": files[:13]}, "INPUT_INVENTORY_BOUND"),
+                ({"files": files[:99]}, "INPUT_INVENTORY_BOUND"),
+                ({"files": files}, "INPUT_INVENTORY_BOUND"),
+                ({"files": [*files[:99], files[0]]}, "INPUT_INVENTORY_BOUND"),
+                ({"actionlint": "actionlint"}, "NATIVE_INPUT_INVENTORY"),
+                ({"gems": None}, "NATIVE_INPUT_INVENTORY"),
+                ({"bundler": None}, "NATIVE_INPUT_INVENTORY"),
+                ({"files": [*files[:99], {**files[99], "path": "foreign/input.whl"}]}, "NATIVE_INPUT_INVENTORY"),
+            )
+            for index, (changes, error) in enumerate(invalid_inputs):
+                with self.subTest(native_input_scope=scope, invalid=index, error=error), contextlib.ExitStack() as stack:
+                    operations = [stack.enter_context(patch.object(owner, method,
+                        side_effect=AssertionError("refused native inventory may not inspect or freeze inputs")))
+                        for owner, method in ((controller.os, "walk"), (Path, "is_symlink"),
+                                              (controller, "read_regular"), (controller, "freeze_tree"),
+                                              (controller.os, "chmod"))]
+                    with self.assertRaisesRegex(controller.VerificationError, error):
+                        controller.validate_inputs(root, {**base, **changes}, deadline=1000.0, scope=scope)
+                    for operation in operations:
+                        operation.assert_not_called()
 
     def test_every_early_or_final_failure_is_latched_and_later_gates_are_unexecuted(self):
         controller = controller_module()
@@ -2690,13 +2829,15 @@ class CIControllerContractTests(unittest.TestCase):
     def test_one_original_deadline_and_headroom_limit_are_not_renewed(self):
         controller = controller_module()
         self.assertEqual(controller.AGGREGATE_SECONDS, 3300)
-        for platform in ("linux", "macos"):
-            for step in controller.catalog(fixture_paths(controller), platform, deadline=4321.5):
+        for platform, scope in (("linux", "platform"), ("macos", "platform"),
+                                 ("macos", "native-python"), ("macos", "native-support")):
+            for step in controller.catalog(fixture_paths(controller), platform, deadline=4321.5, scope=scope):
                 if "--deadline" in step.argv:
                     self.assertEqual(step.argv[step.argv.index("--deadline") + 1], "4321.5")
             for invalid in (float("nan"), float("inf"), -float("inf"), "4321.5", True):
-                with self.assertRaisesRegex(controller.VerificationError, "INVALID_DEADLINE"):
-                    controller.catalog(fixture_paths(controller), platform, deadline=invalid)
+                with self.subTest(platform=platform, scope=scope, invalid_deadline=invalid), \
+                     self.assertRaisesRegex(controller.VerificationError, "INVALID_DEADLINE"):
+                    controller.catalog(fixture_paths(controller), platform, deadline=invalid, scope=scope)
         with patch.object(controller.time, "monotonic", return_value=4321.499):
             controller.check_clock(4321.5)
         for now in (4321.5, 4322.0):

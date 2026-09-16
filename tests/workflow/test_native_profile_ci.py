@@ -545,22 +545,24 @@ class _DiagnosticSink(io.StringIO):
 class NativeProfileCITests(unittest.TestCase):
     def test_macos_upload_process_contracts_require_all_suites_and_pinned_ruby(self):
         workflow = load_workflow(Path(__file__).parents[2] / ".github/workflows/ci.yml")
-        native = workflow["jobs"]["test-native-profiles"]
         linux_ruby = next(step for step in workflow["jobs"]["test-linux"]["steps"]
                           if step.get("uses", "").startswith("ruby/setup-ruby@"))
-        ruby = next(step for step in native["steps"]
-                    if step.get("uses", "").startswith("ruby/setup-ruby@"))
-        self.assertEqual(ruby["uses"], linux_ruby["uses"])
-        self.assertEqual(ruby["with"], {"ruby-version": "3.3.12", "bundler": "none", "bundler-cache": False})
-        step = native["steps"][-1]
-        self.assertEqual(step["run"], coordinator_shell("macos"))
-        self.assertLess(native["steps"].index(ruby), native["steps"].index(step))
-        for required in (ruby, step):
-            self.assertNotIn("if", required)
-            self.assertNotIn("continue-on-error", required)
+        for name, scope in (("test-native-profiles", "native-python"), ("test-native-support", "native-support")):
+            with self.subTest(job=name):
+                native = workflow["jobs"][name]
+                ruby = next(step for step in native["steps"]
+                            if step.get("uses", "").startswith("ruby/setup-ruby@"))
+                self.assertEqual(ruby["uses"], linux_ruby["uses"])
+                self.assertEqual(ruby["with"], {"ruby-version": "3.3.12", "bundler": "none", "bundler-cache": False})
+                step = native["steps"][-1]
+                self.assertEqual(step["run"], coordinator_shell("macos", scope=scope))
+                self.assertLess(native["steps"].index(ruby), native["steps"].index(step))
+                for required in (ruby, step):
+                    self.assertNotIn("if", required)
+                    self.assertNotIn("continue-on-error", required)
         controller = controller_module()
         paths = fixture_paths(controller)
-        steps = controller.catalog(paths, "macos", deadline=12345.0)
+        steps = controller.catalog(paths, "macos", deadline=12345.0, scope="native-support")
         suites = {
             "ruby-ios_upload_validation": ("test_ios_upload_validation.rb", 32),
             "ruby-native-spawn": ("test_native_process_spawn.rb", 52),
@@ -588,7 +590,7 @@ class NativeProfileCITests(unittest.TestCase):
                     calls.append(item.id)
                     return controller.CheckResult(item.id != failed)
 
-                report = controller.execute_pipeline(steps, perform, platform="macos")
+                report = controller.execute_pipeline(steps, perform, platform="macos", scope="native-support")
                 self.assertEqual(report.ok, failed is None)
                 expected_calls = ids if failed is None else ids[:ids.index(failed) + 1]
                 self.assertEqual(calls, expected_calls)
@@ -596,23 +598,27 @@ class NativeProfileCITests(unittest.TestCase):
                     self.assertTrue(all(row["status"] == "UNEXECUTED" for row in report.rows[len(calls):]))
 
     def test_native_source_and_wheel_catalog_follow_the_protected_platform_route(self):
-        from .test_ci_verification import NATIVE_TARGET_CONDITION
+        from .test_ci_verification import NATIVE_TARGET_CONDITION, NATIVE_SUPPORT_TARGET_CONDITION
         workflow = load_workflow(Path(__file__).parents[2] / ".github/workflows/ci.yml")
         aggregate = workflow["jobs"]["test"]
-        # CIWorkflowIsolationTests executes the current three-result guard,
+        # CIWorkflowIsolationTests executes the current four-result guard,
         # including every unsuccessful predecessor; do not replay its old
         # two-result shell matrix here. Retain this distinct native gate binding.
         self.assertIn("test-native-profiles", aggregate["needs"])
-        native_job = workflow["jobs"]["test-native-profiles"]
-        self.assertEqual(native_job["runs-on"], "macos-26")
-        self.assertEqual(native_job["permissions"], {"contents": "read"})
-        self.assertEqual(native_job["if"], NATIVE_TARGET_CONDITION)
-        self.assertNotIn("continue-on-error", native_job)
-        self.assertNotIn("environment", native_job)
-        self.assertEqual(native_job["steps"][-1]["run"], coordinator_shell("macos"))
+        self.assertIn("test-native-support", aggregate["needs"])
+        for name, scope, condition in (("test-native-profiles", "native-python", NATIVE_TARGET_CONDITION),
+                                       ("test-native-support", "native-support", NATIVE_SUPPORT_TARGET_CONDITION)):
+            with self.subTest(job=name):
+                native_job = workflow["jobs"][name]
+                self.assertEqual(native_job["runs-on"], "macos-26")
+                self.assertEqual(native_job["permissions"], {"contents": "read"})
+                self.assertEqual(native_job["if"], condition)
+                self.assertNotIn("continue-on-error", native_job)
+                self.assertNotIn("environment", native_job)
+                self.assertEqual(native_job["steps"][-1]["run"], coordinator_shell("macos", scope=scope))
         controller = controller_module()
         paths = fixture_paths(controller)
-        catalog = controller.catalog(paths, "macos", deadline=12345.0)
+        catalog = controller.catalog(paths, "macos", deadline=12345.0, scope="native-python")
         checks = [item for item in catalog if item.id in {"native-profile-source", "native-profile-wheel"}]
         self.assertEqual([item.id for item in checks], ["native-profile-source", "native-profile-wheel"])
         gate = str(paths.source / "tests/workflow/run_native_profile_checks.py")

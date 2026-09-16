@@ -184,8 +184,14 @@ class AppleReleaseLanesTest < Minitest::Test
 
   class BridgeEndpoint
     attr_accessor :autoclose, :close_error, :prepared
-    attr_reader :close_calls
-    def initialize = @close_calls = 0
+    attr_reader :close_calls, :fileno
+    def initialize(fileno)
+      # Synthetic descriptor label only; never used by a real native API.
+      @fileno, @close_calls, @closed = fileno, 0, false
+    end
+    def pid = nil
+    def autoclose? = @autoclose
+    def closed? = @closed
     def close_on_exec=(value)
       @close_on_exec = value
       prepared&.call
@@ -193,6 +199,8 @@ class AppleReleaseLanesTest < Minitest::Test
     def close
       @close_calls += 1
       raise close_error if close_error
+      @closed = true
+      nil
     end
     def gets(*) = nil
   end
@@ -296,7 +304,7 @@ class AppleReleaseLanesTest < Minitest::Test
       session.define_singleton_method(:finality_confirmed?) { true }
       session
     end
-    endpoints = Array.new(4) { BridgeEndpoint.new }
+    endpoints = Array.new(4) { |index| BridgeEndpoint.new(81 + index) }
     endpoints.last.prepared = expire if cut == :pipe
     endpoints.first.close_error = IOError.new("synthetic no-send close uncertainty") if close_fails
     pipes, waits = 0, []
@@ -571,6 +579,8 @@ class AppleReleaseLanesTest < Minitest::Test
         assert_empty waits
         assert_equal(%i[package key].include?(cut) ? 0 : 1, calls.length)
         assert endpoints.all? { |endpoint| endpoint.close_calls == (%i[package key].include?(cut) ? 0 : 1) }
+        assert_equal [!%i[package key].include?(cut)] * 4, endpoints.map(&:closed?)
+        assert_equal [true] * 4, endpoints.map(&:autoclose?) unless %i[package key].include?(cut)
         assert_equal 1, @upload_validation_calls.length
         assert_equal File.join(@root, "candidate.ipa"), @upload_validation_calls.first.fetch("ipa")
         assert_equal original_bytes, File.binread(File.join(@root, "candidate.ipa"))
@@ -607,11 +617,14 @@ class AppleReleaseLanesTest < Minitest::Test
         assert_empty waits
         assert_empty @service.writes, "a foreign matching build must not turn no-send into reconciliation writes"
         assert endpoints.all? { |endpoint| endpoint.close_calls == 1 }
+        assert_equal [!close_fails, true, true, true], endpoints.map(&:closed?)
+        assert_equal [!close_fails, true, true, true], endpoints.map(&:autoclose?)
         assert_equal 1, @upload_validation_calls.length
         assert journal.fetch("history").any? { |entry| entry["phase"] == "mutation-dispatched" }
         refute journal.fetch("history").any? { |entry| entry["phase"] == "upload-response-ambiguous" }
         refute File.exist?(File.join(@root, "receipt.json"))
         assert_includes record.cleanup_errors, endpoints.first.close_error if close_fails
+        assert record.cleanup_errors.any? { |cleanup| cleanup.equal?(endpoints.first.close_error) } if close_fails
       end
     end
   end
@@ -634,6 +647,8 @@ class AppleReleaseLanesTest < Minitest::Test
         assert_equal 1, calls.length
         assert_equal [[4242, 0]], waits
         assert endpoints.all? { |endpoint| endpoint.close_calls == 1 }
+        assert_equal [true] * 4, endpoints.map(&:closed?)
+        assert_equal [true] * 4, endpoints.map(&:autoclose?)
         assert_equal 1, @upload_validation_calls.length
         expected = retrying ? "operator_authorized_retry" : (response_loss ? "reconciled" : "accepted")
         assert_equal expected, receipt.fetch("result")
