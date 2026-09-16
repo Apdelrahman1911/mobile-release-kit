@@ -65,6 +65,24 @@ class StoreLaneNativeTests(unittest.TestCase):
         self.assertTrue(Path(facts["retainedMarker"]).is_file())
         return facts["observation"]
 
+    def _nested_observation(self, observed, platform):
+        nested = observed["nested"]
+        self.assertEqual(nested["platform"], platform)
+        self.assertTrue(nested["sameOriginalInvocation"])
+        self.assertTrue(nested["sameOriginalSession"])
+        self.assertTrue(nested["sameOriginalResult"])
+        self.assertTrue(nested["resultFrozen"])
+        self.assertTrue(nested["retired"])
+        self.assertFalse(nested["fallbackUsed"])
+        capture = nested["capture"]
+        for field in ("finalized", "settled", "productionFinality", "originalWaitObserved", "tasksJoined", "leasesClosed", "allActualEOFObserved"):
+            self.assertTrue(capture[field], field)
+        self.assertFalse(capture["unknown"])
+        self.assertEqual(capture["observerErrors"], [])
+        self.assertEqual(capture["final"]["group"]["state"], "retired")
+        self.assertTrue(capture["final"]["group"]["absent"])
+        return nested
+
     def test_real_success_exit_and_original_fd_retirement(self):
         mode, facts = self._case()
         if mode == "ordinary-at-exit-control":
@@ -124,18 +142,8 @@ class StoreLaneNativeTests(unittest.TestCase):
         mode, facts = self._case()
         self.assertIn(mode, ("nested-ios-success", "nested-android-success", "nested-android-inherited-pipe"))
         observed = self._settled(facts, 0)
-        nested = observed["nested"]
-        self.assertEqual(nested["platform"], "ios" if mode == "nested-ios-success" else "android")
-        self.assertTrue(nested["sameOriginalSession"])
-        self.assertTrue(nested["retired"])
-        self.assertFalse(nested["fallbackUsed"])
+        nested = self._nested_observation(observed, "ios" if mode == "nested-ios-success" else "android")
         capture = nested["capture"]
-        for field in ("finalized", "settled", "productionFinality", "originalWaitObserved", "tasksJoined", "leasesClosed", "allActualEOFObserved"):
-            self.assertTrue(capture[field], field)
-        self.assertFalse(capture["unknown"])
-        self.assertEqual(capture["observerErrors"], [])
-        self.assertEqual(capture["final"]["group"]["state"], "retired")
-        self.assertTrue(capture["final"]["group"]["absent"])
         self.assertLess(observed["events"].index("same-original-nested-call-retired"),
                         observed["events"].index("original-document-closed-and-recorded"))
         if mode.endswith("inherited-pipe"):
@@ -149,8 +157,16 @@ class StoreLaneNativeTests(unittest.TestCase):
         mode, facts = self._case()
         self.assertIn(mode, ("bridge-success", "bridge-ordinary-error"))
         observed = self._settled(facts, 0 if mode == "bridge-success" else 75)
+        nested = self._nested_observation(observed, "ios")
+        self.assertEqual(nested["artifact"], observed["binding"]["artifact"])
+        self.assertIsNone(nested["descendant"])
+        events = observed["events"]
+        self.assertEqual(events.count("same-original-nested-call-retired"), 1)
+        self.assertEqual(events.count("original-bridge-executor-dispatch"), 1)
+        self.assertLess(events.index("same-original-nested-call-retired"), events.index("original-bridge-executor-dispatch"))
         bridge = observed["bridge"]
         self.assertTrue(bridge["syntheticExecutor"])
+        self.assertTrue(bridge["sameOriginalValidationAtDispatch"])
         self.assertEqual(bridge["fastlaneVersion"], "2.235.0")
         self.assertEqual(bridge["dispatches"], 1)
         self.assertEqual([item["placeholder"] for item in bridge["commands"]], [False, True])
@@ -163,6 +179,8 @@ class StoreLaneNativeTests(unittest.TestCase):
         self.assertEqual(len(observed["fastlane"]["files"]), 5)
         if mode == "bridge-success":
             self.assertIn("real-pilot-package-key-and-pipe-bodies-returned", observed["events"])
+            self.assertLess(events.index("original-bridge-executor-dispatch"), events.index("real-pilot-package-key-and-pipe-bodies-returned"))
+            self.assertLess(events.index("real-pilot-package-key-and-pipe-bodies-returned"), events.index("original-document-closed-and-recorded"))
             self.assertTrue(observed["pipe"]["retired"])
             self.assertTrue(observed["pipe"]["endpointsRetired"])
             self.assertTrue(observed["pipe"]["eof"])
@@ -172,6 +190,8 @@ class StoreLaneNativeTests(unittest.TestCase):
             self.assertTrue(observed["ordinaryPrimarySame"])
             self.assertEqual(observed["primaryClass"], "StoreLaneNativeFixture::OrdinaryFailure")
             self.assertIsNone(observed["pipe"])
+            self.assertNotIn("real-pilot-package-key-and-pipe-bodies-returned", events)
+            self.assertNotIn("original-document-closed-and-recorded", events)
 
     def test_native_shared_clock_labels_samples_and_expiry(self):
         mode, facts = self._case()

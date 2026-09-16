@@ -512,9 +512,10 @@ class Case:
 
     def _nested(self, request):
         mode = self.config.subcase
-        if not mode.startswith("nested-"):
+        bridge = mode in ("bridge-success", "bridge-ordinary-error")
+        if not mode.startswith("nested-") and not bridge:
             return
-        platform = "ios" if mode == "nested-ios-success" else "android"
+        platform = "ios" if mode == "nested-ios-success" or bridge else "android"
         directory = self.root / "nested"
         directory.mkdir(mode=0o700)
         app = directory / "app"
@@ -661,8 +662,17 @@ class Case:
         app = self.root / "app"
         app.mkdir(mode=0o700)
         output = app / "raw.json"
-        artifact = app / "candidate.ipa"
-        write_exclusive(artifact, b"synthetic-no-credential-ipa\n")
+        if self.config.subcase in ("bridge-success", "bridge-ordinary-error"):
+            nested = self.request["nested"]
+            artifact = self.root / "nested/app/candidate.ipa"
+            need(type(nested) is dict and nested.get("platform") == "ios" and
+                 nested.get("root") == str(self.root / "nested") and
+                 nested.get("app") == str(self.root / "nested/app") and
+                 nested.get("artifact") == str(artifact), "fixed original bridge validation artifact")
+            # Seal the once-created validator IPA, never a second same-content candidate.
+        else:
+            artifact = app / "candidate.ipa"
+            write_exclusive(artifact, b"synthetic-no-credential-ipa\n")
         lane = "android_internal_upload" if self.config.subcase.startswith("nested-android") else "ios_testflight_internal"
         guard = DefaultCancellation(ProcessCleanupError, "native Store fixture owner did not settle")
         record = StoreLaneCallEvidence(guard, lane=lane, output=output, nonce=os.urandom(16))

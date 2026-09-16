@@ -97,8 +97,9 @@ module StoreLaneNativeFixture
     need(Digest::SHA256.file(__FILE__).hexdigest == request.fetch("fixtureFiles").fetch("tests/workflow/store_lane_native_fixture.rb"), "launcher bytes")
     InstalledRubyCaptureFixture.verify_binding!(binding)
     info = request.fetch("nested")
-    if request.fetch("mode").start_with?("nested-")
-      platform = request.fetch("mode") == "nested-ios-success" ? "ios" : "android"
+    bridge = %w[bridge-success bridge-ordinary-error].include?(request.fetch("mode"))
+    if request.fetch("mode").start_with?("nested-") || bridge
+      platform = (request.fetch("mode") == "nested-ios-success" || bridge) ? "ios" : "android"
       directory = File.join(root, "nested")
       extension = platform == "ios" ? "ipa" : "aab"
       need(info.is_a?(Hash) && info.keys.sort == %w[app artifact platform root validator value] &&
@@ -505,6 +506,7 @@ module StoreLaneNativeFixture
   def nested(runtime, request)
     info = request.fetch("nested")
     need(info.is_a?(Hash) && %w[ios android].include?(info.fetch("platform")), "nested fixed platform")
+    invocation = runtime.invocation
     root, binding = info.fetch("root"), request.fetch("binding")
     require File.join(binding.fetch("toolingRoot"), "#{info.fetch('platform')}_upload_validation.rb")
     gate = info.fetch("platform") == "ios" ? MobileReleaseKit::IosUploadValidation : MobileReleaseKit::AndroidUploadValidation
@@ -519,21 +521,31 @@ module StoreLaneNativeFixture
     end
     capture = observation.snapshot
     need(InstalledRubyCaptureFixture.finalized_capture?(capture), "actual nested wait/EOF finality")
-    original = runtime.invocation.instance_variable_get(:@nested)
+    original = invocation.instance_variable_get(:@nested)
+    same_invocation = MobileReleaseKit::StoreLaneRuntime.current_runtime!.equal?(runtime) &&
+      runtime.invocation.equal?(invocation) && MobileReleaseKit::StoreLaneLifetime.current_invocation.equal?(invocation) &&
+      original && original.instance_variable_get(:@invocation).equal?(invocation)
     same_original = original && original.instance_variable_get(:@session).equal?(observation.session)
-    need(same_original && original.retired? && result == info.fetch("value") &&
+    same_result = original && original.instance_variable_get(:@result).equal?(result)
+    need(same_invocation && same_original && same_result && result.frozen? && original.retired? && result == info.fetch("value") &&
          !File.exist?(File.join(root, "fallback.json")), "original nested retirement before fallback")
     runtime.require_active!
-    observer.fact("nested", {"platform" => info.fetch("platform"), "capture" => capture,
+    observer.fact("nested", {"platform" => info.fetch("platform"), "artifact" => info.fetch("artifact"), "capture" => capture,
+      "sameOriginalInvocation" => same_invocation, "sameOriginalResult" => same_result, "resultFrozen" => result.frozen?,
       "retired" => original.retired?, "sameOriginalSession" => same_original, "fallbackUsed" => false,
       "descendant" => File.file?(File.join(root, "descendant.json")) ? InstalledRubyCaptureFixture.read_json(File.join(root, "descendant.json")) : nil,
       "adapterOrigin" => InstalledRubyCaptureFixture.method_origin(gate.method(:current!)),
       "helperOrigin" => InstalledRubyCaptureFixture.method_origin(MobileReleaseKit::NativeUploadProcess.method(:helper_argv))})
     observer.event("same-original-nested-call-retired")
+    [invocation, original, observation.session, result].freeze
   end
 
   def bridge(runtime, request)
     need(runtime.binding.fetch("lane") == "ios_testflight_internal", "bridge lane")
+    info, artifact = request.fetch("nested"), runtime.binding.fetch("artifact")
+    need(info.is_a?(Hash) && info.fetch("platform") == "ios" && info.fetch("artifact") == artifact,
+         "same original bridge validation artifact")
+    invocation, validation, session, result = nested(runtime, request)
     key = {key_id: runtime.binding.fetch("key_id"), key: "fictional-not-a-private-key", issuer_id: "fictional-issuer"}
     executor_class = runtime.binding.fetch("macos") ? FastlaneCore::AltoolTransporterExecutor : FastlaneCore::JavaTransporterExecutor
     executor = executor_class.allocate
@@ -547,13 +559,21 @@ module StoreLaneNativeFixture
     end
     executor.define_singleton_method(:execute) do |token, hide|
       StoreLaneNativeFixture.need(token == "STORE-NATIVE-INERT-EXECUTOR-TOKEN" && [true, false].include?(hide), "fixed executor dispatch seam")
+      same_validation = MobileReleaseKit::StoreLaneRuntime.current_runtime!.equal?(runtime) &&
+        runtime.invocation.equal?(invocation) && MobileReleaseKit::StoreLaneLifetime.current_invocation.equal?(invocation) &&
+        invocation.instance_variable_get(:@nested).equal?(validation) && validation.instance_variable_get(:@invocation).equal?(invocation) &&
+        validation.instance_variable_get(:@session).equal?(session) && validation.instance_variable_get(:@result).equal?(result) &&
+        result.frozen? && validation.retired? && runtime.binding.fetch("artifact") == artifact && info.fetch("artifact") == artifact
+      StoreLaneNativeFixture.need(same_validation, "same original current validation before executor")
       runtime.resources.require_ready_for_executor!
       entries = runtime.resources.instance_variable_get(:@entries)
       StoreLaneNativeFixture.need(entries.key?("key") && entries.key?("package-ipa") &&
         entries.values.all? { |entry| entry.fetch(:kind) == "directory" || entry.fetch(:slot).retired? }, "generated custody before dispatch")
+      StoreLaneNativeFixture.observer.event("original-bridge-executor-dispatch")
       dispatches << entries.keys.sort
       StoreLaneNativeFixture.observer.fact("bridge", {"macos" => runtime.binding.fetch("macos"), "rolesBeforeDispatch" => entries.keys.sort,
         "commands" => commands, "dispatches" => dispatches.length, "syntheticExecutor" => true,
+        "sameOriginalValidationAtDispatch" => same_validation,
         "fastlaneVersion" => Gem.loaded_specs.fetch("fastlane").version.to_s,
         "seams" => %w[executor.build_upload_command executor.execute pilot.start pilot.config pilot.check_for_changelog_or_whats_new!
                        pilot.fetch_app_id pilot.fetch_app_platform pilot.transporter_for_selected_team]})

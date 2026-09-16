@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -40,6 +42,57 @@ class SigningCatalogAdmissionTests(unittest.TestCase):
             with self.subTest(original_failure=(operating_system, shard)):
                 self.assertIn(identifier, catalog.shard_ids(operating_system, shard))
                 self.assertEqual(catalog.case(identifier, operating_system).name, name)
+
+        item = catalog.cases_for("ubuntu-24.04")[0]
+
+        def direct_identifier(value):
+            record = {"schema": catalog.SCHEMA, "kind": value.kind, "name": value.name,
+                      "specification": json.loads(value.specification)}
+            content = json.dumps(record, sort_keys=True, separators=(",", ":"),
+                                 ensure_ascii=True, allow_nan=False).encode("ascii")
+            return hashlib.sha256(content).hexdigest()
+
+        memo = catalog._cached_case_identifier
+        original_id = direct_identifier(item)
+        self.assertEqual(item.identifier, original_id)
+        before = memo.cache_info()
+        self.assertEqual(item.identifier, original_id)
+        self.assertEqual(memo.cache_info().hits, before.hits + 1)
+        self.assertEqual(memo.cache_parameters(), {"maxsize": 1024, "typed": True})
+        for changes in ({"kind": "semantic" if item.kind == "primitive" else "primitive"},
+                        {"name": item.name + "-memo-probe"},
+                        {"specification": '{"memoProbe":"changed specification"}'}):
+            with self.subTest(identifier_input=next(iter(changes))):
+                changed = replace(item, **changes)
+                changed_id = changed.identifier
+                self.assertEqual(changed_id, direct_identifier(changed))
+                self.assertNotEqual(changed_id, original_id)
+        with patch.object(catalog, "SCHEMA", catalog.SCHEMA + "-memo-probe"):
+            changed_id = item.identifier
+            self.assertEqual(changed_id, direct_identifier(item))
+            self.assertNotEqual(changed_id, original_id)
+        self.assertEqual(item.identifier, original_id)
+
+        for specification in (b'{"memoProbe":1}', bytearray(b'{"memoProbe":1}')):
+            with self.subTest(uncached_input=type(specification).__name__):
+                changed = replace(item, specification=specification)
+                before = memo.cache_info()
+                changed_id = changed.identifier
+                self.assertEqual(changed_id, direct_identifier(changed))
+                if type(specification) is bytearray:
+                    specification[:] = b'{"memoProbe":2}'
+                    self.assertEqual(changed.identifier, direct_identifier(changed))
+                    self.assertNotEqual(changed.identifier, changed_id)
+                self.assertEqual(memo.cache_info(), before)
+
+        record = item.record()
+        record["specification"]["memoProbe"] = "detached record"
+        self.assertEqual(item.identifier, original_id)
+        self.assertEqual(item.record()["specification"], json.loads(item.specification))
+        definition = catalog.definition("ubuntu-24.04")
+        definition_digest = contract.digest(definition)
+        definition["cases"][0]["specification"]["memoProbe"] = "detached definition"
+        self.assertEqual(contract.digest(catalog.definition("ubuntu-24.04")), definition_digest)
 
     def loaders(self):
         catalog = contract.layered_catalog()
