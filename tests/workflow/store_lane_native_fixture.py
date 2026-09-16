@@ -202,6 +202,21 @@ def json_bytes(value):
     return result
 
 
+def report_bytes(value):
+    """Detached success report; the native test keeps its full original facts."""
+    need(type(value) is dict and type(value.get("facts")) is dict, "native report facts shape")
+    facts = dict(value["facts"])
+    observed = facts.get("observation")
+    if observed is not None:
+        need(type(observed) is dict and type(observed.get("fastlane")) is dict,
+             "native report Fastlane observation shape")
+        # Preserve the entire origin object for the unchanged outer parser,
+        # not a digest or selected subset. Only already-tested inner detail is
+        # omitted; absent observation and intentional None remain distinct.
+        facts["observation"] = {"fastlane": observed["fastlane"]}
+    return json_bytes({**value, "facts": facts})
+
+
 class _InnerObserverUnavailable(Exception):
     """A finite diagnostic checkpoint, never settlement or retry authority."""
 
@@ -874,7 +889,7 @@ def main(arguments=None):
         _publish_failure("tests", state["records"])
         return 1
     need(case.observation is not None, "native callback without original case observations")
-    raw = json_bytes(case.observation)
+    raw = report_bytes(case.observation)
     # Ordinary bounded original stdout, read only after the enclosing Session's
     # separate wait/EOF/domain/idle proof. These bytes grant no cleanup authority.
     written = sys.stdout.write("MRK_STORE_NATIVE_RESULT=" + raw.decode("ascii"))

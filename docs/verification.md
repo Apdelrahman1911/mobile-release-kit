@@ -672,9 +672,9 @@ These splits add no logical gates, jobs, builds, permission profiles or observer
 
 On macOS the source native-profile gate runs immediately after native-tools,
 source ABI and compatibility prerequisites, then the fixed iOS adapter and other
-Ruby native gates retain their relative order. Linux runs its fixed 74 singleton
-Python partitions before the healthy source/wheel capture to expose small failures
-earlier. Name-based profiles, poison-only disposal, original finality and idle,
+Ruby native gates retain their relative order. Linux runs its fixed 76 singleton
+Python partitions (74 poison and 2 fresh) before the healthy source/wheel capture
+to expose small failures earlier. Name-based profiles, poison-only disposal, original finality and idle,
 all 58 Linux and 41 macOS gates, every partition and the original aggregate cutoffs
 remain mandatory. Earlier failure leaves later work explicitly unexecuted.
 

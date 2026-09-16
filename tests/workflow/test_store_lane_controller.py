@@ -104,7 +104,8 @@ class StoreLaneControllerTests(unittest.TestCase):
         rig = SimpleNamespace(c=c, checks=checks, paths=fixture_paths(c), clock=10.0, runs=[], outputs=[], removals=[],
                               originals=[], fails_at=None, output_error_at=None, advance=1.0, failed=False, inner_bytes=11,
                               platform=platform, environments=[], capture_calls=[], original_snapshots=[],
-                              failure_stderr=b"", failure_stdout=None)
+                              failure_stderr=b"", failure_stdout=None, case_stdout=b"fixed synthetic bytes\n",
+                              surviving_bytes=7)
         rig.boundary = session_double(sandbox_module(), "darwin" if platform == "macos" else "linux")
         rig.boundary.uid = rig.boundary.gid = 61001
         for name in ("source", "work", "inputs", "python", "ruby"):
@@ -148,7 +149,7 @@ class StoreLaneControllerTests(unittest.TestCase):
             rig.runs.append((tuple(argv), options))
             rig.clock += rig.advance
             failed = index == rig.fails_at
-            stdout = c.store_native_wire(rig.binding) if is_binding else b"fixed synthetic bytes\n"
+            stdout = c.store_native_wire(rig.binding) if is_binding else rig.case_stdout
             value = native_capture_fixture(stdout=rig.failure_stdout if failed and rig.failure_stdout is not None else stdout,
                 stderr=rig.failure_stderr if failed else b"",
                 ok=not failed, returncode=1 if failed else 0, primary_error="command exited 1" if failed else None)
@@ -163,8 +164,8 @@ class StoreLaneControllerTests(unittest.TestCase):
             rig.outputs.append(directory)
             if len(rig.runs) - 1 == rig.output_error_at:
                 raise c.VerificationError("FIXTURE_OUTPUT_FAILURE")
-            session.persisted_bytes += 7
-            return {"files": 1, "bytes": 7, "diagnostic_bytes": 7}
+            session.persisted_bytes += rig.surviving_bytes
+            return {"files": 1, "bytes": rig.surviving_bytes, "diagnostic_bytes": rig.surviving_bytes}
 
         rig.session = SimpleNamespace(uid=61001, gid=61001, persisted_bytes=0, ensure_idle=idle, run=run)
         rig.scan = outputs
@@ -455,6 +456,37 @@ class StoreLaneControllerTests(unittest.TestCase):
         self.assertEqual(result.error, "STORE_NATIVE_CASE_OUTPUT_BOUND")
         self.assertEqual(len(rig.runs), 2)
         self.assertEqual(len(rig.removals), 1)  # The row cannot pass or dispose after the combined bound fails.
+        for phase in ("source", "wheel"):
+            with self.subTest(diagnostic_aggregate=phase):
+                rig = self._rig()
+                if phase == "wheel":
+                    self.assertTrue(self._gate(rig).ok)
+                before = len(rig.runs)
+                # Each capture and surviving diagnostic remains under its own
+                # limit. Their unchanged phase sum, not either alone, refuses.
+                rig.case_stdout = b"x" * 60_000
+                rig.surviving_bytes = 60_000
+                result = self._gate(rig, phase)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error, "STORE_NATIVE_PHASE_DIAGNOSTIC_BOUND")
+                captured = sum(sum(original.persisted) for original in rig.originals[before:])
+                surviving = sum(row["surviving_outputs"]["diagnostic_bytes"] for row in result.details["captures"])
+                self.assertEqual(rig.c.STORE_NATIVE_DIAGNOSTIC_BYTES, 262_144)
+                self.assertEqual(surviving, 3 * rig.surviving_bytes)
+                self.assertLess(captured, rig.c.STORE_NATIVE_DIAGNOSTIC_BYTES)
+                self.assertLess(surviving, rig.c.STORE_NATIVE_DIAGNOSTIC_BYTES)
+                self.assertEqual(result.details["diagnostic_bytes"], captured + surviving)
+                self.assertGreater(captured + surviving, rig.c.STORE_NATIVE_DIAGNOSTIC_BYTES)
+                self.assertEqual(len(rig.runs), before + 3)  # Binding, one passing row, then refusal.
+                self.assertEqual(len(rig.outputs), before + 3)
+                self.assertEqual(len(rig.removals), before + 2)
+                self.assertEqual([row["status"] for row in result.details["captures"]], ["PASS", "PASS", "FAIL"])
+                rows = result.details["rows"]
+                self.assertEqual([row["status"] for row in rows], ["PASS", "FAIL"] + ["UNEXECUTED"] * (len(rows) - 2))
+                self.assertNotIn("inner_observed_bytes", rows[1])  # The failing row never reaches its parser.
+                self.assertEqual(set(rig.state.phases), set() if phase == "source" else {"source"})
+                self.assertEqual(vars(rig.originals[-1]), rig.original_snapshots[-1])
+                rig.c.require_original_finality(rig.originals[-1])  # A clean capture does not waive accounting.
         rig = self._rig()
         rig.advance = 20.0
         result = self._gate(rig)
@@ -550,7 +582,7 @@ class StoreLaneControllerTests(unittest.TestCase):
                 "facts": {"ordinaryHookObserved": True}, "fixtureRemoved": True}
         stderr = f"{identifier.rsplit('.', 1)[1]} ({identifier}) ... ok\n\nRan 1 test in 0.01s\n\nOK\n".encode()
         def captured(value, **kwargs):
-            return native_capture_fixture(b"bounded actual library log\nMRK_STORE_NATIVE_RESULT=" + c.store_native_wire(value), stderr, **kwargs)
+            return native_capture_fixture(b"bounded actual library log\nMRK_STORE_NATIVE_RESULT=" + native_fixture.report_bytes(value), stderr, **kwargs)
         def parse(value):
             return c.parse_store_native_case(value, paths, "linux", "source", subcase, identifier, directory,
                                              binding, outside, owner=(61001, 61001, 5), deadline=1000.0)
@@ -575,6 +607,125 @@ class StoreLaneControllerTests(unittest.TestCase):
             with self.assertRaisesRegex(c.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
                 parse(captured(data, domain_finality=False))
             read.assert_not_called()
+
+        # Use the actual success-report serializer and unchanged controller
+        # parser, not a parsed-result double. These are still inert DATA, never
+        # a native Case, Session receipt or source/wheel execution claim.
+        detail = "INNER_DETAIL_NOT_RETRANSMITTED_" + "x" * 16_384
+        for phase in ("source", "wheel"):
+            inventory = checks.store_lane_native_rows(ROOT, phase)
+            for platform in ("linux", "macos"):
+                binding = {"phase": phase, "wheelSha256": None if phase == "source" else "e" * 64}
+                fastlane_root = paths.work / "bundle/ruby/3.3.0/gems/fastlane-2.235.0"
+                fastlane_files = {name: {**file(name), "path": str(fastlane_root / name)}
+                                  for name in c.STORE_NATIVE_FASTLANE_FILES}
+                bridge = {**file("bridge"), "path": str(c.store_native_layout(paths, phase)[3] / "store_lane_fastlane_bridges.rb")}
+                fastlane = {"version": "2.235.0", "root": str(fastlane_root), "files": fastlane_files,
+                    "methods": {name: {"bridge": bridge, "original": fastlane_files[relative],
+                        "owner": "SyntheticOrigin", "parameters": [["req", "input"]]}
+                        for name, relative in zip(("pipe", "key", "transporter", "package", "pilot"), fastlane_files)},
+                    "macos": platform == "macos", "testMode": False,
+                    "additionalOrigin": {"roots": [str(paths.source), str(paths.work)], "retained": [True, None]}}
+                outside = {"fixtures": {"tests/workflow/store_lane_native_fixture.rb": {"sha256": "a" * 64}},
+                           "fastlane": fastlane_files}
+                for subcase in ("bridge-success", "system-exit0", "clock-brackets", "clock-wrong-label"):
+                    with self.subTest(report=(phase, platform, subcase)):
+                        ordinal = tuple(name for name, _ in inventory).index(subcase) + 1
+                        identifier = dict(inventory)[subcase]
+                        directory = paths.work / "store-lane" / phase / f"case-{ordinal:02d}"
+                        case = directory / "tmp/mrk-store-native-synthetic"
+                        retained = subcase == "system-exit0"
+                        observed = {"fastlane": fastlane, "events": [detail], "slots": [{"retired": True}],
+                                    "binding": {"root": str(case), "nonce": "fixed-inner-binding"}}
+                        if subcase == "clock-brackets":
+                            facts = {"pythonImplementation": "cpython", "platform": "darwin" if platform == "macos" else "linux",
+                                "pythonClock": "mach_absolute_time()" if platform == "macos" else "clock_gettime(CLOCK_MONOTONIC)",
+                                "clockSamples": [{"before": 1, "ruby": 2, "after": 3}] * 3}
+                        elif subcase == "clock-wrong-label":
+                            facts = {"runtimeOnly": True, "returncode": 76, "compositeSealShortened": False, "observation": None}
+                        else:
+                            facts = {"returncode": 76 if retained else 0, "commandFinality": True, "handlersRestored": True,
+                                "terminalBound": not retained, "receiptAcceptable": not retained, "observation": observed,
+                                "additionalFact": {"preserved": [1, True, None]}}
+                            if retained:
+                                facts.update(retainedProductRoot=str(case / "retained-product"),
+                                             retainedMarker=str(case / "retained-marker"), terminalNames=[])
+                            else:
+                                facts.update(productFilesDisposed=True, attemptRetired=True, inventoryRoles=["pilot-root", "key"])
+                        data = {"version": 1, "phase": phase, "subcase": subcase, "testId": identifier, "caseRoot": str(case),
+                            "productRetained": retained, "persistedBytes": 42, "launcher": file("launcher/fastlane/run_lane.rb"),
+                            "request": file("request.json"), "bindingSha256": hashlib.sha256(c.store_native_wire(binding)).hexdigest(),
+                            "facts": facts, "fixtureRemoved": not retained}
+                        before = native_fixture.json_bytes(data)
+                        raw = native_fixture.report_bytes(data)
+                        projected = native_fixture.decode(raw)
+                        self.assertEqual(native_fixture.json_bytes(data), before)
+                        self.assertEqual(set(projected), set(data))
+                        self.assertEqual(set(projected["facts"]), set(facts))
+                        self.assertEqual({key: value for key, value in projected.items() if key != "facts"},
+                                         {key: value for key, value in data.items() if key != "facts"})
+                        self.assertEqual({key: value for key, value in projected["facts"].items() if key != "observation"},
+                                         {key: value for key, value in facts.items() if key != "observation"})
+                        if subcase in {"clock-brackets", "clock-wrong-label"}:
+                            self.assertEqual(raw, before)
+                            if subcase == "clock-brackets":
+                                self.assertNotIn("observation", projected["facts"])
+                            else:
+                                self.assertIn("observation", projected["facts"])
+                                self.assertIsNone(projected["facts"]["observation"])
+                        else:
+                            self.assertEqual(projected["facts"]["observation"], {"fastlane": fastlane})
+                            self.assertEqual(native_fixture.json_bytes(projected["facts"]["observation"]["fastlane"]),
+                                             native_fixture.json_bytes(fastlane))
+                            self.assertNotIn(b"INNER_DETAIL_NOT_RETRANSMITTED", raw)
+                            self.assertGreater(len(before) - len(raw), 16_384)
+                            projected["facts"]["observation"]["fastlane"]["methods"]["pipe"]["parameters"].append(["opt", "changed"])
+                            self.assertEqual(native_fixture.json_bytes(data), before)  # Detached wire cannot rewrite the native test's facts.
+
+                        stderr = f"{identifier.rsplit('.', 1)[1]} ({identifier}) ... ok\n\nRan 1 test in 0.01s\n\nOK\n".encode()
+                        def capture_report(payload, callback=stderr, **changes):
+                            return native_capture_fixture(b"bounded library log\nMRK_STORE_NATIVE_RESULT=" + payload, callback, **changes)
+                        def parse_report(result):
+                            return c.parse_store_native_case(result, paths, platform, phase, subcase, identifier, directory,
+                                binding, outside, owner=(61001, 61001, 5), deadline=1000.0)
+                        with patch.object(c, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                                patch.object(Path, "lstat", side_effect=None if retained else FileNotFoundError,
+                                             return_value=SimpleNamespace(st_mode=stat.S_IFDIR | 0o700)):
+                            result = parse_report(capture_report(raw))
+                            self.assertEqual((result["subcase"], result["test_id"], result["product_retained"],
+                                              result["fixture_removed_by_inner_owner"], result["inner_observed_bytes"]),
+                                             (subcase, identifier, retained, not retained, 42))
+                            if subcase != "bridge-success":
+                                continue
+                            for invalid in (False, 0, "", [], {}, {"fastlane": None}, {"fastlane": []}, {"fastlane": "digest"}):
+                                malformed = {**data, "facts": {**facts, "observation": invalid}}
+                                unchanged = native_fixture.json_bytes(malformed)
+                                with self.assertRaisesRegex(AssertionError, "native report Fastlane observation shape"):
+                                    native_fixture.report_bytes(malformed)
+                                self.assertEqual(native_fixture.json_bytes(malformed), unchanged)
+                            for malformed in (None, [], {**data, "facts": None}, {**data, "facts": []}):
+                                with self.assertRaisesRegex(AssertionError, "native report facts shape"):
+                                    native_fixture.report_bytes(malformed)
+                            first = next(iter(fastlane_files))
+                            for invalid in ({}, {**fastlane, "version": "other"}, {**fastlane, "macos": platform != "macos"},
+                                            {**fastlane, "testMode": True}, {**fastlane, "files": {}},
+                                            {**fastlane, "files": {**fastlane_files, first: {**fastlane_files[first], "inode": 78}}}):
+                                malformed = {**data, "facts": {**facts, "observation": {**observed, "fastlane": invalid}}}
+                                with self.assertRaisesRegex(c.VerificationError, "STORE_NATIVE_FASTLANE_ORIGIN"):
+                                    parse_report(capture_report(native_fixture.report_bytes(malformed)))
+                            for callback in (stderr.replace(b"... ok", b"... skipped"),
+                                             stderr.replace(identifier.encode(), (identifier + "_other").encode()),
+                                             stderr + stderr, stderr + c.NATIVE_DIAGNOSTIC_PREFIX.encode() + b"{}\n"):
+                                with self.assertRaises(c.VerificationError):
+                                    parse_report(capture_report(raw, callback))
+                            with patch.object(Path, "lstat", side_effect=AssertionError("no access before finality")) as read:
+                                for field, value in (("ok", False), ("returncode", 1), ("waited", False), ("stdout_eof", False),
+                                                     ("stderr_eof", False), ("domain_finality", False), ("timed_out", True),
+                                                     ("cancelled", True), ("primary_error", "inert failure"), ("cleanup_errors", ("inert",))):
+                                    with self.subTest(finality=field), self.assertRaisesRegex(c.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                                        parse_report(capture_report(raw, **{field: value}))
+                                read.assert_not_called()
+                            self.assertEqual(native_fixture.json_bytes(data), before)
 
     def test_independent_survivor_accounting_counts_hardlinks_once_and_rejects_type_owner_and_bounds(self):
         c = controller_module()

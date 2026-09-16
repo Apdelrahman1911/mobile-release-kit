@@ -556,16 +556,95 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         )
 
     def test_online_preflight_returns_before_any_project_or_build_execution(self) -> None:
-        source = read(PREFLIGHT_SOURCE)
-        online_project_gate = source.index('if mode == "online":')
-        online_store_gate = source.index('if mode == "online":', online_project_gate + 1)
-        online_return = source.index("        return report", online_store_gate)
-        effective_identity = source.index("effective_identity_findings", online_return)
-        project_build_loop = source.index("if run_builds:", effective_identity)
-        self.assertIn("else:", source[online_project_gate:online_store_gate])
-        self.assertIn("run_project_checks", source[online_project_gate:online_store_gate])
-        self.assertLess(online_return, effective_identity)
-        self.assertLess(online_return, project_build_loop)
+        tree = ast.parse(read(PREFLIGHT_SOURCE))
+
+        def only(nodes, role):
+            self.assertEqual(1, len(nodes), role)
+            return nodes[0]
+
+        def is_call(node, name):
+            if not isinstance(node, ast.Call):
+                return False
+            target = node.func
+            return (isinstance(target, ast.Name) and target.id == name or
+                    isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and
+                    f"{target.value.id}.{target.attr}" == name)
+
+        def calls(node, name):
+            return [child for child in ast.walk(node) if is_call(child, name)]
+
+        online_test = ast.dump(ast.parse('mode == "online"', mode="eval").body)
+
+        def online_guard(node):
+            return isinstance(node, ast.If) and ast.dump(node.test) == online_test
+
+        functions = {
+            name: only([node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name], name)
+            for name in ("preflight", "_preflight")
+        }
+        wrapper, implementation = functions["preflight"], functions["_preflight"]
+        forbidden = ("run_project_checks", "effective_identity_findings", "validate_signing_material",
+                     "materialize_build_inputs", "run_android_build", "run_ios_build",
+                     "local_signing_lease", "invocation.project")
+
+        # Online delegates inside the original custody, before any project or
+        # signing admission. Inspect this public route as well as its callee.
+        custody = only([node for node in ast.walk(wrapper) if isinstance(node, ast.With) and
+                        any(is_call(item.context_expr, "invocation_custody") for item in node.items)],
+                       "public invocation custody")
+        custody_name = only([item.optional_vars for item in custody.items
+                             if is_call(item.context_expr, "invocation_custody")], "original invocation binding")
+        self.assertIsInstance(custody_name, ast.Name)
+        self.assertEqual("invocation", custody_name.id)
+        entry = only([node for node in custody.body if online_guard(node)], "public online branch")
+        delegation = only(entry.body, "unconditional public online delegation")
+        self.assertIsInstance(delegation, ast.Return)
+        self.assertTrue(is_call(delegation.value, "_preflight"))
+        original = only([item.value for item in delegation.value.keywords if item.arg == "invocation"],
+                        "delegated original invocation")
+        self.assertIsInstance(original, ast.Name)
+        self.assertEqual("invocation", original.id)
+        for name in forbidden:
+            admissions = calls(wrapper, name)
+            if name in ("invocation.project", "local_signing_lease"):
+                self.assertTrue(admissions, name)
+            for call in admissions:
+                owner = only([node for node in custody.body if call in ast.walk(node)], name)
+                self.assertLess(custody.body.index(entry), custody.body.index(owner), name)
+
+        guards = [node for node in implementation.body if online_guard(node)]
+        project_checks = [call for call in calls(implementation, "run_project_checks") if len(call.args) > 1 and
+                          isinstance(call.args[1], ast.Constant) and call.args[1].value == "preflight"]
+        self.assertTrue(project_checks, "actual preflight project checks")
+        project_gate = only([node for node in guards if any(call in ast.walk(statement)
+                             for statement in node.orelse for call in project_checks)], "online project-check bypass")
+        self.assertEqual(set(project_checks), {call for statement in project_gate.orelse
+                                              for call in calls(statement, "run_project_checks")})
+
+        # The prerequisite-only online branch has conditional returns too.
+        # Only the actual query branch's direct tail return blocks all fallthrough.
+        self.assertEqual(1, len(calls(implementation, "online_preflight_findings")))
+        query_gate = only([node for node in guards if calls(node, "online_preflight_findings")],
+                          "actual online query branch")
+        online_return = query_gate.body[-1]
+        self.assertIsInstance(online_return, ast.Return)
+        self.assertIsInstance(online_return.value, ast.Name)
+        self.assertEqual("report", online_return.value.id)
+        for guard in (entry, project_gate, query_gate):
+            for statement in guard.body:
+                for name in forbidden:
+                    self.assertFalse(calls(statement, name), name)
+
+        for name in ("effective_identity_findings", "run_android_build", "run_ios_build"):
+            downstream = calls(implementation, name)
+            self.assertTrue(downstream, name)
+            for call in downstream:
+                owner = only([node for node in implementation.body if call in ast.walk(node)], name)
+                self.assertLess(implementation.body.index(query_gate), implementation.body.index(owner), name)
+        build_gate = only([node for node in implementation.body if isinstance(node, ast.If) and
+                           isinstance(node.test, ast.Name) and node.test.id == "run_builds" and
+                           calls(node, "run_android_build") and calls(node, "run_ios_build")], "actual build loop")
+        self.assertLess(implementation.body.index(query_gate), implementation.body.index(build_gate))
 
     def test_candidate_handoff_is_fixed_checksum_bound_and_revalidated(self) -> None:
         for platform, primary in (("android", "app-release.aab"), ("ios", "app.ipa")):
