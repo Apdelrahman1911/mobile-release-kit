@@ -58,7 +58,12 @@ INNER_FAILURE_EXPECTED = {
     "bridge-success": 0,
     "bridge-ordinary-error": 75,
 }
-INNER_FAILURE_STAGES = frozenset({"before-terminal-link", "link-return-lost", "unknown-cleanup"})
+INNER_FAILURE_STAGES = frozenset({"before-terminal-link", "link-return-lost", "unknown-cleanup",
+                                  "unknown-exit76", "observer-preparation-failed"})
+INNER_FAILURE_UNAVAILABLE = frozenset({
+    "outcome-missing", "outcome-rejected", "outcome-error", "ledger-uncontained", "ledger-error",
+    "cutoff", "observer-missing", "observer-empty", "observer-rejected",
+})
 INNER_FAILURE_REASONS = {
     "store-runtime-error": frozenset((
         "app_id binding_missing bridge_reused bridges_not_admitted clock completion cwd deadline "
@@ -197,15 +202,25 @@ def json_bytes(value):
     return result
 
 
+class _InnerObserverUnavailable(Exception):
+    """A finite diagnostic checkpoint, never settlement or retry authority."""
+
+    def __init__(self, reason):
+        self.reason = reason
+
+
 def _read_inner_observer(path, original, deadline):
     """One bounded read of our precreated observer, never a settlement probe."""
     def check():
-        need(type(deadline) is float and math.isfinite(deadline) and time.monotonic() < deadline,
-             "original inner diagnostic cutoff")
+        if not (type(deadline) is float and math.isfinite(deadline) and time.monotonic() < deadline):
+            raise _InnerObserverUnavailable("cutoff")
 
-    def qualified(value):
+    def qualified(value, *, initial=False):
         need(stat.S_ISREG(value.st_mode) and value.st_nlink == 1 and identity(value) == original
-             and 1 <= value.st_size <= MAX_JSON, "original inner observer identity and bound")
+             and 0 <= value.st_size <= MAX_JSON, "original inner observer identity and bound")
+        if initial and value.st_size == 0:
+            raise _InnerObserverUnavailable("observer-empty")
+        need(value.st_size >= 1, "original inner observer nonempty bound")
 
     def revision(value):
         return (value.st_dev, value.st_ino, value.st_uid, value.st_gid, value.st_mode,
@@ -215,8 +230,11 @@ def _read_inner_observer(path, original, deadline):
     need(type(original) is dict and set(original) == {"device", "inode", "uid", "gid", "mode"}
          and all(type(value) is int for value in original.values()) and original["mode"] == 0o600,
          "original inner observer binding")
-    before = path.lstat()
-    qualified(before)
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        raise _InnerObserverUnavailable("observer-missing") from None
+    qualified(before, initial=True)
     check()
     number = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
@@ -249,24 +267,31 @@ def _inner_observer_fields(value, case):
          and value.get("phase") == case.config.phase and value.get("mode") == case.config.subcase
          and type(value.get("stage")) is str and value["stage"] in INNER_FAILURE_STAGES,
          "inner observer fixed case")
-    primary = value.get("primaryDiagnostic")
-    need(type(primary) is dict and set(primary) == {"category", "reason", "locations"}, "inner observer primary shape")
-    category, reason, locations = (primary[name] for name in ("category", "reason", "locations"))
-    need(type(category) is str and category in INNER_FAILURE_CATEGORIES
-         and (reason is None or type(reason) is str and reason in INNER_FAILURE_REASONS.get(category, ()))
-         and type(locations) is list and len(locations) <= 8 and (category != "none" or not locations),
-         "inner observer finite primary")
     files = {name for name in case.binding["files"] if name.startswith("fastlane/")
              and (name.endswith(".rb") or name == "fastlane/Fastfile")}
     files.update(case.request["fixtureFiles"])
-    selected = []
-    for item in locations:
-        need(type(item) is dict and set(item) == {"file", "line"} and type(item["file"]) is str
-             and item["file"] in files and type(item["line"]) is int and 1 <= item["line"] <= 999999,
-             "inner observer bound frame")
-        selected.append({"file": item["file"], "line": item["line"]})
-    return {"state": "available", "stage": value["stage"], "category": category,
-            "reason": reason, "locations": selected}
+
+    def project(primary, *, preparation=False):
+        need(type(primary) is dict and set(primary) == {"category", "reason", "locations"}, "inner observer primary shape")
+        category, reason, locations = (primary[name] for name in ("category", "reason", "locations"))
+        need(type(category) is str and category in INNER_FAILURE_CATEGORIES
+             and (reason is None or type(reason) is str and reason in INNER_FAILURE_REASONS.get(category, ()))
+             and type(locations) is list and len(locations) <= 8 and (category != "none" or not locations)
+             and (not preparation or category != "none"), "inner observer finite primary")
+        selected = []
+        for item in locations:
+            need(type(item) is dict and set(item) == {"file", "line"} and type(item["file"]) is str
+                 and item["file"] in files and type(item["line"]) is int and 1 <= item["line"] <= 999999,
+                 "inner observer bound frame")
+            selected.append({"file": item["file"], "line": item["line"]})
+        return {"category": category, "reason": reason, "locations": selected}
+
+    projected = {"state": "available", "stage": value["stage"], **project(value.get("primaryDiagnostic"))}
+    if value["stage"] == "observer-preparation-failed":
+        projected["preparation"] = project(value.get("preparationDiagnostic"), preparation=True)
+    else:
+        need("preparationDiagnostic" not in value, "unexpected preparation diagnostic")
+    return projected
 
 
 def _note_inner_failure(error, case, returncode, expected_code, record, guard):
@@ -277,17 +302,29 @@ def _note_inner_failure(error, case, returncode, expected_code, record, guard):
                 or case.config.phase not in {"source", "wheel"}
                 or INNER_FAILURE_EXPECTED.get(case.config.subcase) != expected_code):
             return
+        unavailable = {"state": "unavailable", "reason": "outcome-error"}
         note = {"version": 1, "phase": case.config.phase, "subcase": case.config.subcase,
                 "testId": PREFIX + dict(CASE_ROWS)[case.config.subcase], "returncode": returncode,
-                "expectedReturncode": expected_code, "observer": {"state": "unavailable"}}
+                "expectedReturncode": expected_code, "observer": unavailable}
         try:
             outcome = record._outcome()
+            unavailable["reason"] = "outcome-missing" if outcome is None else "outcome-rejected"
             if (outcome is not None and outcome.no_target is None and outcome.result_integrity == "complete"
                     and outcome.termination == "normal-exit" and type(outcome.returncode) is int
-                    and outcome.returncode == returncode and guard.lifetime_ledger.verdict().contained is True):
-                observed = _read_inner_observer(case.root / "observation.json", case.request["diagnosticIdentity"],
-                                                case.config.deadline)
-                note["observer"] = _inner_observer_fields(observed, case)
+                    and outcome.returncode == returncode):
+                unavailable["reason"] = "ledger-error"
+                if guard.lifetime_ledger.verdict().contained is True:
+                    unavailable["reason"] = "observer-rejected"
+                    try:
+                        observed = _read_inner_observer(case.root / "observation.json", case.request["diagnosticIdentity"],
+                                                       case.config.deadline)
+                    except _InnerObserverUnavailable as stopped:
+                        if stopped.reason in INNER_FAILURE_UNAVAILABLE:
+                            unavailable["reason"] = stopped.reason
+                    else:
+                        note["observer"] = _inner_observer_fields(observed, case)
+                else:
+                    unavailable["reason"] = "ledger-uncontained"
         except BaseException:
             pass  # Retain the finite original rc even if observation is unavailable.
         raw = json_bytes(note)

@@ -855,7 +855,12 @@ STORE_NATIVE_INNER_EXPECTED = {
     "bridge-success": 0,
     "bridge-ordinary-error": 75,
 }
-STORE_NATIVE_INNER_STAGES = frozenset({"before-terminal-link", "link-return-lost", "unknown-cleanup"})
+STORE_NATIVE_INNER_STAGES = frozenset({"before-terminal-link", "link-return-lost", "unknown-cleanup",
+                                     "unknown-exit76", "observer-preparation-failed"})
+STORE_NATIVE_INNER_UNAVAILABLE = frozenset({
+    "outcome-missing", "outcome-rejected", "outcome-error", "ledger-uncontained", "ledger-error",
+    "cutoff", "observer-missing", "observer-empty", "observer-rejected",
+})
 STORE_NATIVE_INNER_REASONS = {
     "store-runtime-error": frozenset((
         "app_id binding_missing bridge_reused bridges_not_admitted clock completion cwd deadline "
@@ -3098,18 +3103,14 @@ def store_native_inner_failure(raw: bytes, scope: StoreNativeDiagnostic, *, dead
             or type(value["expectedReturncode"]) is not int or value["expectedReturncode"] != expected
             or value["returncode"] == expected or type(value["observer"]) is not dict):
         return None
-    observer = value["observer"]
-    if observer == {"state": "unavailable"}:
-        projected = {"state": "unavailable"}
-    else:
-        if (set(observer) != {"state", "stage", "category", "reason", "locations"}
-                or observer["state"] != "available" or type(observer["stage"]) is not str
-                or observer["stage"] not in STORE_NATIVE_INNER_STAGES
-                or type(observer["category"]) is not str or observer["category"] not in STORE_NATIVE_INNER_CATEGORIES):
+    def project(primary, *, preparation=False):
+        if (type(primary) is not dict or set(primary) != {"category", "reason", "locations"}
+                or type(primary["category"]) is not str or primary["category"] not in STORE_NATIVE_INNER_CATEGORIES):
             return None
-        category, reason, locations = (observer[name] for name in ("category", "reason", "locations"))
+        category, reason, locations = (primary[name] for name in ("category", "reason", "locations"))
         if ((reason is not None and (type(reason) is not str or reason not in STORE_NATIVE_INNER_REASONS.get(category, ())))
-                or type(locations) is not list or len(locations) > 8 or category == "none" and locations):
+                or type(locations) is not list or len(locations) > 8 or category == "none" and locations
+                or preparation and category == "none"):
             return None
         selected = []
         for item in locations:
@@ -3119,8 +3120,31 @@ def store_native_inner_failure(raw: bytes, scope: StoreNativeDiagnostic, *, dead
                     or not 1 <= item["line"] <= 999999):
                 return None
             selected.append({"file": item["file"], "line": item["line"]})
-        projected = {"state": "available", "stage": observer["stage"], "category": category,
-                     "reason": reason, "locations": selected}
+        return {"category": category, "reason": reason, "locations": selected}
+
+    observer = value["observer"]
+    if observer.get("state") == "unavailable":
+        if (set(observer) != {"state", "reason"} or type(observer["reason"]) is not str
+                or observer["reason"] not in STORE_NATIVE_INNER_UNAVAILABLE):
+            return None
+        projected = {"state": "unavailable", "reason": observer["reason"]}
+    else:
+        if (observer.get("state") != "available" or type(observer.get("stage")) is not str
+                or observer["stage"] not in STORE_NATIVE_INNER_STAGES):
+            return None
+        preparation = observer["stage"] == "observer-preparation-failed"
+        fields = {"state", "stage", "category", "reason", "locations"}
+        if set(observer) != fields | ({"preparation"} if preparation else set()):
+            return None
+        primary = project({name: observer[name] for name in ("category", "reason", "locations")})
+        if primary is None:
+            return None
+        projected = {"state": "available", "stage": observer["stage"], **primary}
+        if preparation:
+            details = project(observer["preparation"], preparation=True)
+            if details is None:
+                return None
+            projected["preparation"] = details
     check_clock(deadline)
     return {"version": 1, "phase": scope.phase, "subcase": scope.subcase, "testId": scope.identifier,
             "returncode": value["returncode"], "expectedReturncode": expected, "observer": projected}

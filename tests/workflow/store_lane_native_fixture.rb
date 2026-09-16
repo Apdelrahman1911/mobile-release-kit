@@ -15,6 +15,8 @@ module StoreLaneNativeFixture
              terminal-close-return-loss terminal-link-return-loss
              nested-ios-success nested-android-success nested-android-inherited-pipe
              bridge-success bridge-ordinary-error clock-expired clock-wrong-label].freeze
+  EARLY_UNKNOWN_MODES = %w[success0 ordinary75 nested-ios-success nested-android-success
+                          nested-android-inherited-pipe bridge-success bridge-ordinary-error].freeze
   class Failure < StandardError; end
   class OrdinaryFailure < StandardError; end
   INNER_FAILURE_REASONS = {
@@ -214,6 +216,7 @@ module StoreLaneNativeFixture
 
     def observe_slot(slot, io, path)
       StoreLaneNativeFixture.need(!@flush_attempted && io.instance_of?(File) && @slots.length < 64, "slot observation")
+      io.singleton_class # Stabilize Method equality before the per-file wrapper.
       original = io.method(:close)
       StoreLaneNativeFixture.need(original.source_location.nil? && original.owner == IO, "original File close")
       row = {"path" => File.expand_path(path), "calls" => 0, "returns" => 0, "slot" => slot, "io" => io}
@@ -276,16 +279,47 @@ module StoreLaneNativeFixture
       return if @closed
       StoreLaneNativeFixture.need(!@flush_attempted, "observer publication repeated")
       @flush_attempted = true
-      restore_hooks!
+      # Bind the actual retained primary BEFORE optional restoration/facts can
+      # fail. A preparation error is separate data, not a replacement primary.
       runtime = MobileReleaseKit::StoreLaneRuntime.current_runtime!
+      primary = runtime.first_primary
+      begin
+        restore_hooks!
+        facts = stage == "unknown-exit76" ? minimal_facts(stage, primary) : full_facts(stage, runtime, primary)
+        raw = observation_bytes(facts)
+      rescue Exception => preparation # rubocop:disable Lint/RescueException
+        begin
+          # Still the SAME unused writer attempt. There is no restoration retry,
+          # and any fallback failure must leave this preparation exception first.
+          write_observation(observation_bytes(minimal_facts("observer-preparation-failed", primary, preparation)))
+        rescue Exception # rubocop:disable Lint/RescueException
+          nil
+        end
+        raise
+      end
+      # Writer custody starts here. Nothing below can select another payload,
+      # reopen the entry, repeat a close, or retry a failed observation at exit76.
+      write_observation(raw)
+    end
+
+    def minimal_facts(stage, primary, preparation = nil)
+      facts = {"version" => 1, "mode" => request.fetch("mode"), "phase" => request.fetch("phase"),
+               "stage" => stage, "primaryDiagnostic" => StoreLaneNativeFixture.first_primary_diagnostic(primary, request)}
+      if stage == "observer-preparation-failed"
+        facts["preparationDiagnostic"] = StoreLaneNativeFixture.first_primary_diagnostic(preparation, request)
+      end
+      facts
+    end
+
+    def full_facts(stage, runtime, primary)
       binding = runtime.binding
       root = File.lstat(binding.fetch("root"))
       cwd = File.stat(".")
       StoreLaneNativeFixture.need(root.directory? && !root.symlink? && cwd.directory?, "observed original root/cwd type")
       @facts.merge!("stage" => stage, "events" => @events,
-                    "binding" => binding, "ordinaryPrimarySame" => runtime.first_primary.equal?(@ordinary),
-                    "primaryClass" => runtime.first_primary&.class&.name,
-                    "primaryDiagnostic" => StoreLaneNativeFixture.first_primary_diagnostic(runtime.first_primary, request),
+                    "binding" => binding, "ordinaryPrimarySame" => primary.equal?(@ordinary),
+                    "primaryClass" => primary&.class&.name,
+                    "primaryDiagnostic" => StoreLaneNativeFixture.first_primary_diagnostic(primary, request),
                     "originalSlotsCovered" => original_slots_covered?, "originalSlotsCount" => original_slots.length,
                     "observerRestored" => @restored,
                     "rootIdentity" => StoreLaneNativeFixture.identity(root), "cwdIdentity" => StoreLaneNativeFixture.identity(cwd),
@@ -301,8 +335,15 @@ module StoreLaneNativeFixture
                                        "arity" => Dir.method(:fchdir).arity},
                     "productOrigins" => StoreLaneNativeFixture.product_origins(request),
                     "fastlane" => StoreLaneNativeFixture.fastlane_origins(request))
-      raw = JSON.generate(@facts)
+    end
+
+    def observation_bytes(facts)
+      raw = JSON.generate(facts)
       StoreLaneNativeFixture.need(raw.bytesize <= MAX_JSON, "observer output bound")
+      raw
+    end
+
+    def write_observation(raw)
       path = request.fetch("diagnostic")
       entry = File.lstat(path)
       StoreLaneNativeFixture.need(StoreLaneNativeFixture.identity(entry) == request.fetch("diagnosticIdentity") &&
@@ -349,6 +390,17 @@ module StoreLaneNativeFixture
     def unknown_tail
       runtime = MobileReleaseKit::StoreLaneRuntime.current_runtime!
       flush("unknown-cleanup") if runtime.instance_variable_get(:@state) == :unknown && !@flush_attempted
+    end
+
+    def unknown_exit76(boundary)
+      return if @flush_attempted || !EARLY_UNKNOWN_MODES.include?(request.fetch("mode"))
+      owner = MobileReleaseKit::StoreLaneRuntime
+      return unless owner.instance_variable_get(:@exit_boundary).equal?(boundary)
+      runtime = owner.current_runtime!
+      return unless runtime.instance_of?(owner::Runtime) &&
+                    runtime.instance_variable_get(:@exit_boundary).equal?(boundary) &&
+                    runtime.instance_variable_get(:@state) == :unknown
+      flush("unknown-exit76")
     end
   end
 
@@ -398,6 +450,17 @@ module StoreLaneNativeFixture
     @observer = observer
     hooks = UploadProcessFixture::CaptureObservation::Hooks.new
     observer.bind_hooks(hooks)
+    boundary = MobileReleaseKit::StoreLaneRuntime.instance_variable_get(:@exit_boundary)
+    hooks.wrap(MobileReleaseKit::StoreLaneRuntime.const_get(:ExitBoundary, false), :exit_status!) do |original, object, args, keywords, block|
+      begin
+        if args.length == 1 && args.first.equal?(76) && keywords.empty? && block.nil? && object.equal?(boundary)
+          observer.unknown_exit76(boundary)
+        end
+      rescue Exception # rubocop:disable Lint/RescueException
+        nil # Optional attribution cannot replace the original unknown exit.
+      end
+      original.call(*args, **keywords, &block) # Exactly once; forwarding errors are NOT observer errors.
+    end
     hooks.wrap(MobileReleaseKit::StoreLaneResources::FileSlot, :acquire) do |original, object, args, keywords, block|
       result = original.call(*args, **keywords, &block)
       observer.observe_slot(object, result, args.fetch(0))

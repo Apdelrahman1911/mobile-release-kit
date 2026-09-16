@@ -526,10 +526,6 @@ class MatrixContractTests(unittest.TestCase):
         self.package, self.definitions = contract.digest("production"), contract.digest("test definitions")
         self.catalog = contract.layered_catalog()
         self.expected = {system: list(self.catalog.expected_ids(system)) for system in contract.OPERATING_SYSTEMS}
-        self.original = {"events": [event(number) for number in range(1, 129)], "lines": ["production:1"]}
-        self.recovery = {"groups": {}}
-        self.legacy_cases = fixture.matrix_cases(self.original, self.recovery)
-        self.legacy_expected = list(self.legacy_cases)
 
     def candidates(self):
         result = []
@@ -609,6 +605,10 @@ class MatrixContractTests(unittest.TestCase):
                 value["evidenceSha256"] = contract.digest(complete)
 
     def test_legacy_algorithm_ids_stay_stable_without_becoming_active_catalog_authority(self):
+        self.original = {"events": [event(number) for number in range(1, 129)], "lines": ["production:1"]}
+        self.recovery = {"groups": {}}
+        self.legacy_cases = fixture.matrix_cases(self.original, self.recovery)
+        self.legacy_expected = list(self.legacy_cases)
         shuffled = copy.deepcopy(self.original)
         shuffled["events"].reverse()
         for index, item in enumerate(shuffled["events"], 9000):
@@ -671,13 +671,15 @@ class MatrixContractTests(unittest.TestCase):
             self.reduce(candidates)
 
     def test_missing_duplicate_extra_wrong_scope_and_invalid_later_proofs_never_fall_back(self):
+        baseline = self.candidates()
+        baseline_digest = contract.digest(baseline)
         for change in ("missing", "duplicate", "wrong-name", "repository", "commit", "runId", "job", "future-attempt",
                        "package", "definitions", "catalog", "proof-catalog", "coverage-kinds", "coverage-parts",
                        "omitted-source", "omitted-wheel", "duplicate-ID", "extra-ID", "wrong-shard", "empty",
                        "legacy-version", "legacy-inventory", "bool-version", "bool-attempt", "bool-shard", "unknown-field",
                        "cleanup", "paths"):
             with self.subTest(change=change):
-                candidates = self.candidates()
+                candidates = copy.deepcopy(baseline)
                 name, proof = candidates[0]
                 if change == "missing": candidates.pop()
                 elif change == "duplicate": candidates.append(copy.deepcopy(candidates[0]))
@@ -706,7 +708,7 @@ class MatrixContractTests(unittest.TestCase):
                 with self.assertRaises(ValueError): self.reduce(candidates)
         for invalid_attempt in (1, 3):
             with self.subTest(invalid_attempt=invalid_attempt):
-                candidates = self.candidates()
+                candidates = copy.deepcopy(baseline)
                 valid = candidates.pop(0)[1]
                 invalid = copy.deepcopy(valid)
                 valid["scope"]["attempt"] = 4 - invalid_attempt
@@ -718,6 +720,7 @@ class MatrixContractTests(unittest.TestCase):
                 candidates.append((contract.artifact_name(invalid["scope"], 0), invalid))
                 with self.assertRaisesRegex(ValueError, "omitted"):
                     self.reduce(candidates)
+        self.assertEqual(contract.digest(baseline), baseline_digest)
 
     def test_bounded_strict_json_and_unmerged_artifact_identity_are_required(self):
         with tempfile.TemporaryDirectory(prefix="mrk-matrix-proof-") as directory:

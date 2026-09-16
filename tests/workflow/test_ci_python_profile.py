@@ -106,6 +106,10 @@ class _Path:
         node = self.fixture.nodes.get(str(self))
         return node is not None and stat.S_ISDIR(node.st_mode)
 
+    def is_file(self):
+        node = self.fixture.nodes.get(str(self))
+        return node is not None and stat.S_ISREG(node.st_mode)
+
 
 class _Entries:
     def __init__(self, fixture, path, names):
@@ -628,6 +632,9 @@ class CIPythonProfileTests(unittest.TestCase):
 
     def test_actual_failfast_subtest_metadata_survives_main_and_controller_without_private_data(self):
         fixture, events = _Profile(), []
+        self.assertFalse((fixture.source / "tests/workflow/test_store_lane_native.py").is_file())
+        self.assertFalse(fixture.source.is_file())
+        self.assertTrue(fixture.path(_USERNS).is_file())
         suite, expected, complete = _inert_suite(events, self.module.PYTHON_SINGLETON_IDS)
         inventory = Mock(return_value=complete)
         loader = SimpleNamespace(errors=[], discover=Mock(return_value=suite))

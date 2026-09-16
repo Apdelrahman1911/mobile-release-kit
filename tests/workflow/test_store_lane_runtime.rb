@@ -10,6 +10,7 @@ require "fileutils"
 require_relative "../../fastlane/store_lane_runtime"
 require_relative "../../fastlane/ios_upload_validation"
 require_relative "store_lane_native_fixture"
+require_relative "upload_process_ownership"
 
 class StoreLaneRuntimeTest < Minitest::Test
   RuntimeModule = MobileReleaseKit::StoreLaneRuntime
@@ -39,7 +40,7 @@ class StoreLaneRuntimeTest < Minitest::Test
     FileUtils.remove_entry(@root) # Exclusive inert fixture, all owned FDs closed.
   end
 
-  def scenario(lane: "android_external_promote", mode: "prepare")
+  def scenario(lane: "android_external_promote", mode: "prepare", observer_model: false)
     @case_number += 1
     base = File.join(@root, "case-#{@case_number}")
     Dir.mkdir(base, 0o700)
@@ -66,7 +67,9 @@ class StoreLaneRuntimeTest < Minitest::Test
     Dir.chdir(File.join(@lane_root, "runner"))
     boundary = RuntimeModule.const_get(:ExitBoundary, false).new
     codes = @codes
-    boundary.define_singleton_method(:exit_status!) { |status| codes << status; throw :store_runtime_model_exit, status }
+    unless observer_model
+      boundary.define_singleton_method(:exit_status!) { |status| codes << status; throw :store_runtime_model_exit, status }
+    end
     @runtime = RuntimeModule::Runtime.new(boundary)
     RuntimeModule.instance_variable_set(:@runtime, @runtime)
     Lifetime.instance_variable_set(:@invocation, nil)
@@ -78,9 +81,10 @@ class StoreLaneRuntimeTest < Minitest::Test
     @runtime
   end
 
-  def observe_files(configure = nil)
+  def observe_files(configure = nil, before_open: nil)
     original = File.method(:open)
     wrapper = lambda do |path, *arguments, **keywords, &block|
+      before_open&.call(path, arguments, keywords, block)
       record_file = lambda do |file|
         @opened << file
         role = if path == "terminal.part"
@@ -359,6 +363,310 @@ class StoreLaneRuntimeTest < Minitest::Test
     assert_equal 76, observe_files(configure) { run_model {} }
     assert_equal "foreign root", File.binread(File.join(@lane_root, "sentinel"))
     refute File.exist?(File.join(@lane_root, "terminal.part"))
+  end
+
+  def test_native_observer_failure_attribution_is_single_attempt_and_prefinal
+    fixture = StoreLaneNativeFixture
+    assert_equal %w[success0 ordinary75 nested-ios-success nested-android-success
+                    nested-android-inherited-pipe bridge-success bridge-ordinary-error], fixture::EARLY_UNKNOWN_MODES
+    %i[before_binding before_resources].each do |cut|
+      with_native_observer_model do |observer, probe|
+        primary = RuntimeModule::Error.new(cut == :before_binding ? :clock : :resources_missing)
+        action = -> { run_model { flunk "early refused runtime entered its lane" } }
+        code = if cut == :before_binding
+                 Native.stub(:monotonic_domain, -> { raise primary }) { action.call }
+               else
+                 MobileReleaseKit::StoreLaneResources::Inventory.stub(:new, ->(**_arguments) { raise primary }) { action.call }
+               end
+        assert_equal 76, code
+        assert_same primary, @runtime.first_primary
+        assert_nil @runtime.instance_variable_get(:@resources)
+        assert_equal(cut == :before_binding, @runtime.instance_variable_get(:@binding).nil?)
+        assert_native_observer_minimal(observer, probe, "unknown-exit76", primary)
+        assert_equal ["unknown-exit76"], probe.fetch(:stages)
+        assert_equal [76], probe.fetch(:forwarded)
+      end
+    end
+
+    with_native_observer_model(mode: "clock-wrong-label") do |observer, probe|
+      ENV["MOBILE_RELEASE_STORE_LANE_CLOCK"] = "unsupported-peer-domain"
+      assert_equal 76, run_model { flunk "wrong clock entered lane" }
+      assert_equal :clock, @runtime.first_primary.reason
+      assert File.zero?(probe.fetch(:path))
+      refute observer.instance_variable_get(:@flush_attempted)
+      assert_empty probe.fetch(:stages)
+      assert_equal 0, probe.fetch(:counts).fetch(:open)
+    end
+
+    # One absent primary, one existing primary, then the three distinct ways
+    # fallback can itself fail. The restoration cut loses only its return: all
+    # original hooks have really been restored before the synthetic exception.
+    [[false, :restoration, nil], [true, :provenance, nil], [true, :provenance, :serialization],
+     [true, :provenance, :write], [true, :provenance, :close]].each do |ordinary, cut, fault|
+      preparation = IOError.new("fixed observer preparation failure")
+      with_native_observer_model(fault: fault, preparation: preparation, cut: cut) do |observer, probe|
+        first = ordinary ? observer.ordinary : nil
+        original = observer.method(:flush)
+        observed = []
+        flushing = lambda do |stage|
+          before = [@runtime.first_primary, @runtime.secondary_errors, @runtime.cleanup_errors]
+          begin
+            original.call(stage)
+          rescue Exception => error # rubocop:disable Lint/RescueException
+            observed << error
+            assert_same preparation, error
+            assert_equal before, [@runtime.first_primary, @runtime.secondary_errors, @runtime.cleanup_errors]
+            raise
+          end
+        end
+        code = observer.stub(:flush, flushing) do
+          run_model { |runtime| ordinary ? (raise first) : document(runtime) }
+        end
+        assert_equal 76, code
+        assert_equal [preparation], observed
+        assert_same(first || preparation, @runtime.first_primary)
+        assert_equal ["observer-preparation-failed"], probe.fetch(:stages)
+        assert_equal 1, probe.fetch(:restores)
+        assert_operator probe.fetch(:counts).fetch(:open), :<=, 1
+        assert_operator probe.fetch(:counts).fetch(:close), :<=, 1
+        refute File.exist?(File.join(@lane_root, "terminal.json"))
+        assert_native_observer_minimal(observer, probe, "observer-preparation-failed", first, preparation) if fault.nil? || fault == :close
+        assert File.zero?(probe.fetch(:path)) if %i[serialization write].include?(fault)
+        before = probe.fetch(:counts).dup
+        observer.unknown_exit76(probe.fetch(:boundary))
+        assert_equal before, probe.fetch(:counts)
+      end
+    end
+
+    # These faults happen only AFTER preparation. In particular no writer
+    # failure can select a minimal fallback, reopen, or repeat the original close.
+    %i[identity open write flush fsync close].each do |fault|
+      with_native_observer_model(mode: "ordinary75", fault: fault) do |observer, probe|
+        assert_equal 76, run_model { raise observer.ordinary }
+        assert_same observer.ordinary, @runtime.first_primary
+        assert_equal ["before-terminal-link"], probe.fetch(:stages)
+        assert_equal 1, probe.fetch(:restores)
+        counts = probe.fetch(:counts)
+        assert_equal 1, counts.fetch(:open)
+        assert_equal(fault == :open ? 0 : 1, counts.fetch(:close))
+        assert_equal(%i[identity open].include?(fault) ? 0 : 1, counts.fetch(:write))
+        assert_equal(%i[identity open write].include?(fault) ? 0 : 1, counts.fetch(:flush))
+        assert_equal(%i[identity open write flush].include?(fault) ? 0 : 1, counts.fetch(:fsync))
+        before = counts.dup
+        assert_raises(fixture::Failure) { observer.flush("unknown-cleanup") }
+        observer.unknown_exit76(probe.fetch(:boundary))
+        assert_equal before, counts
+        assert_equal [76], probe.fetch(:forwarded)
+      end
+    end
+
+    [false, true].each do |ordinary|
+      with_native_observer_model(mode: ordinary ? "ordinary75" : "success0") do |observer, probe|
+        original_link = observer.method(:terminal_link)
+        link = lambda do |original, arguments|
+          forwarding = lambda do |*values|
+            assert probe.fetch(:hooks_intact).call
+            assert observer.instance_variable_get(:@closed)
+            assert probe.fetch(:io).closed?
+            probe.fetch(:events) << :terminal_link
+            original.call(*values)
+          end
+          original_link.call(forwarding, arguments)
+        end
+        completion, assertions = @runtime.method(:require_completion!), self
+        @runtime.define_singleton_method(:require_completion!) do
+          assertions.assert probe.fetch(:hooks_intact).call
+          assertions.assert probe.fetch(:io).closed?
+          probe.fetch(:events) << :final_check
+          completion.call
+        end
+        code = observer.stub(:terminal_link, link) do
+          run_model { |runtime| ordinary ? (raise observer.ordinary) : document(runtime) }
+        end
+        assert_equal(ordinary ? 75 : 0, code)
+        assert_equal %i[open write flush fsync close terminal_link final_check exit], probe.fetch(:events)
+        assert probe.fetch(:hooks_intact).call
+        value = JSON.parse(File.binread(probe.fetch(:path)))
+        assert_equal "before-terminal-link", value.fetch("stage")
+        assert value.fetch("observerRestored") && value.fetch("originalSlotsCovered")
+        assert value.fetch("slots").all? { |row| row.fetch("calls") == 1 && row.fetch("returns") == 1 && row.fetch("retired") && row.fetch("closed") }
+        refute value.key?("preparationDiagnostic")
+      end
+    end
+
+    with_native_observer_model do |observer, probe|
+      # Prime the real runtime's unknown state, suppressing only this first
+      # optional observation. Every boundary call still uses the same local
+      # captured throw; the real exit_status! body and class hook are exercised.
+      observer.stub(:unknown_exit76, ->(_boundary) {}) do
+        Native.stub(:monotonic_domain, -> { raise RuntimeModule::Error.new(:clock) }) do
+          assert_equal 76, run_model { flunk "priming failure entered lane" }
+        end
+      end
+      boundary = probe.fetch(:boundary)
+      [0, 75].each { |status| assert_equal status, catch(:store_runtime_model_exit) { boundary.exit_status!(status) } }
+      assert_equal :exit_status, assert_raises(RuntimeModule::Error) { boundary.exit_status!(76.0) }.reason
+      assert_equal 76, catch(:store_runtime_model_exit) { boundary.exit_status!(76) { flunk "unexpected boundary block" } }
+      observer.unknown_exit76(Object.new) # Not the captured original boundary.
+      foreign = Object.new
+      foreign.define_singleton_method(:origin!) { true }
+      begin
+        RuntimeModule.instance_variable_set(:@runtime, foreign)
+        assert_equal 76, catch(:store_runtime_model_exit) { boundary.exit_status!(76) }
+      ensure
+        RuntimeModule.instance_variable_set(:@runtime, @runtime)
+      end
+      assert File.zero?(probe.fetch(:path))
+      assert_empty probe.fetch(:stages)
+      assert_equal 76, catch(:store_runtime_model_exit) { boundary.exit_status!(76) }
+      assert_native_observer_minimal(observer, probe, "unknown-exit76", @runtime.first_primary)
+      before = probe.fetch(:counts).dup
+      assert_equal 76, catch(:store_runtime_model_exit) { boundary.exit_status!(76) }
+      observer.unknown_exit76(boundary)
+      observer.flush("unknown-cleanup") # A positively closed observation is inert.
+      assert_equal before, probe.fetch(:counts)
+      assert_equal [76, 0, 75, 76, 76, 76, 76], probe.fetch(:forwarded)
+    end
+  end
+
+  def with_native_observer_model(mode: "success0", fault: nil, preparation: nil, cut: :provenance)
+    fixture = StoreLaneNativeFixture
+    previous = [[RuntimeModule, :@runtime], [RuntimeModule, :@exit_boundary], [Lifetime, :@invocation], [fixture, :@observer]].map do |owner, name|
+      [owner, name, owner.instance_variable_defined?(name), owner.instance_variable_get(name)]
+    end
+    environment, cwd, previous_runtime = ENV.to_h, Dir.pwd, @runtime
+    targets = [[RuntimeModule.const_get(:ExitBoundary, false), :exit_status!],
+      [MobileReleaseKit::StoreLaneResources::FileSlot, :acquire], [Publication.const_get(:Handle, false), :acquire],
+      [MobileReleaseKit::StoreLaneResources::Inventory, :close_independent!], [File.singleton_class, :link]]
+    originals = targets.map { |target, name| [target, name, target.instance_method(name)] }
+    probe = {counts: %i[open write flush fsync close].to_h { |name| [name, 0] }, stages: [], events: [], forwarded: [], restores: 0,
+      error: IOError.new("fixed observer writer failure"), hooks_intact: -> { originals.all? { |target, name, original| target.instance_method(name) == original } }}
+    scenario(observer_model: true)
+    model_runtime = @runtime
+    boundary = @runtime.instance_variable_get(:@exit_boundary)
+    original_exit = boundary.instance_variable_get(:@exit)
+    codes = @codes
+    boundary.instance_variable_set(:@exit, lambda do |status|
+      probe.fetch(:forwarded) << status
+      probe.fetch(:events) << :exit
+      codes << status
+      throw :store_runtime_model_exit, status
+    end)
+    RuntimeModule.instance_variable_set(:@exit_boundary, boundary)
+    probe[:boundary] = boundary
+    path = probe[:path] = File.join(File.dirname(@output), "observation.json")
+    File.open(path, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW | File::NONBLOCK, 0o600) { |file| @opened << file }
+    source = File.expand_path("../..", __dir__)
+    request = {"mode" => mode, "phase" => "source", "root" => File.dirname(@output), "sourceRoot" => source,
+      "diagnostic" => path, "diagnosticIdentity" => fixture.identity(File.lstat(path)),
+      "binding" => {"files" => {"fastlane/store_lane_runtime.rb" => {"path" => File.join(source, "fastlane/store_lane_runtime.rb")}}},
+      "fixtureFiles" => {"tests/workflow/store_lane_native_fixture.rb" => "model-only-no-source-import"}}
+    observer = fixture::Observation.new(request)
+    configure = lambda do |_role, file|
+      next unless file.path == path
+      probe[:io] = file
+      file.singleton_class # Stabilize Method equality before per-file wrappers.
+      probe[:io_originals] = %i[stat write flush fsync close].to_h { |name| [name, file.method(name)] }
+      if fault == :identity
+        stat = file.stat
+        different = stat.dup
+        different.define_singleton_method(:ino) { stat.ino + 1 }
+        file.define_singleton_method(:stat) { different }
+      end
+      %i[write flush fsync close].each do |name|
+        original = file.method(name)
+        file.define_singleton_method(name) do |*arguments|
+          probe.fetch(:counts)[name] += 1
+          probe.fetch(:events) << name
+          raise probe.fetch(:error) if fault == name && name != :close
+          value = original.call(*arguments)
+          raise probe.fetch(:error) if fault == name # Close return loss, never an unclosed real FD.
+          value
+        end
+      end
+    end
+    opening = lambda do |entry, arguments, keywords, block|
+      next unless entry == path
+      assert_equal [File::WRONLY | File::NOFOLLOW | File::NONBLOCK], arguments
+      assert keywords.empty? && block.nil?
+      probe.fetch(:counts)[:open] += 1
+      probe.fetch(:events) << :open
+      raise probe.fetch(:error) if fault == :open
+    end
+    actual_generate, actual_restore = JSON.method(:generate), observer.method(:restore_hooks!)
+    generating = lambda do |value, *arguments, **keywords|
+      if value.instance_of?(Hash) && value.key?("stage")
+        probe.fetch(:stages) << value.fetch("stage")
+        raise probe.fetch(:error) if fault == :serialization && value.fetch("stage") == "observer-preparation-failed"
+      end
+      actual_generate.call(value, *arguments, **keywords)
+    end
+    restoring = lambda do
+      probe[:restores] += 1
+      answer = actual_restore.call
+      raise preparation if preparation && cut == :restoration
+      answer
+    end
+    provenance = ->(_request) { raise preparation if preparation && cut == :provenance; {} }
+    fixture.stub(:product_origins, provenance) do
+      fixture.stub(:fastlane_origins, ->(_request) { {} }) do
+        observer.stub(:restore_hooks!, restoring) do
+          JSON.stub(:generate, generating) do
+            observe_files(configure, before_open: opening) do
+              fixture.install_observer(observer)
+              yield observer, probe
+            end
+          end
+        end
+      end
+    end
+  ensure
+    begin
+      observer.restore_hooks! if observer && !observer.instance_variable_get(:@restore_attempted)
+      assert probe.fetch(:hooks_intact).call if probe
+      assert @opened.all?(&:closed?)
+    ensure
+      begin
+        if probe && probe[:io]
+          file = probe.fetch(:io)
+          probe.fetch(:io_originals).each_key do |name|
+            file.singleton_class.send(:remove_method, name) if file.singleton_methods(false).include?(name)
+          end
+          assert probe.fetch(:io_originals).all? { |name, original| file.method(name) == original }
+        end
+        if model_runtime && model_runtime.singleton_methods(false).include?(:require_completion!)
+          model_runtime.singleton_class.send(:remove_method, :require_completion!)
+        end
+      ensure
+        boundary.instance_variable_set(:@exit, original_exit) if boundary && original_exit
+        previous&.each do |owner, name, present, value|
+          present ? owner.instance_variable_set(name, value) : (owner.remove_instance_variable(name) if owner.instance_variable_defined?(name))
+        end
+        @runtime = previous_runtime
+        Dir.chdir(cwd) if cwd
+        ENV.replace(environment) if environment
+      end
+    end
+  end
+
+  def assert_native_observer_minimal(observer, probe, stage, primary, preparation = nil)
+    value = JSON.parse(File.binread(probe.fetch(:path)))
+    keys = %w[version mode phase stage primaryDiagnostic]
+    keys << "preparationDiagnostic" if preparation
+    assert_equal keys.sort, value.keys.sort
+    assert_equal stage, value.fetch("stage")
+    assert_equal StoreLaneNativeFixture.first_primary_diagnostic(primary, observer.request), value.fetch("primaryDiagnostic")
+    category = primary.nil? ? "none" : (primary.instance_of?(RuntimeModule::Error) ? "store-runtime-error" : "ordinary-fixture-error")
+    assert_equal category, value.fetch("primaryDiagnostic").fetch("category")
+    assert_equal primary.reason.to_s, value.fetch("primaryDiagnostic").fetch("reason") if primary.instance_of?(RuntimeModule::Error)
+    if preparation
+      assert_equal StoreLaneNativeFixture.first_primary_diagnostic(preparation, observer.request), value.fetch("preparationDiagnostic")
+      assert_equal "io-error", value.fetch("preparationDiagnostic").fetch("category")
+    end
+    assert_equal 1, probe.fetch(:counts).fetch(:open)
+    assert_equal 1, probe.fetch(:counts).fetch(:close)
+    assert probe.fetch(:io).closed?
+    refute_includes File.binread(probe.fetch(:path)), @root
   end
 
   def test_shared_clock_uses_only_fixed_platform_domain_and_no_relative_fallback

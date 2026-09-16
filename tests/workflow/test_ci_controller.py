@@ -1950,7 +1950,7 @@ class CICoordinatorResultTests(unittest.TestCase):
             "ruby-store_lane_lifetime": ("test_store_lane_lifetime.rb", {"StoreLaneLifetimeTest"}, 19),
             "ruby-store_lane_nested_validation": ("test_store_lane_nested_validation.rb", {"StoreLaneNestedValidationTest"}, 13),
             "ruby-store_lane_resources": ("test_store_lane_resources.rb", {"StoreLaneResourcesTest"}, 9),
-            "ruby-store_lane_runtime": ("test_store_lane_runtime.rb", {"StoreLaneRuntimeTest"}, 11),
+            "ruby-store_lane_runtime": ("test_store_lane_runtime.rb", {"StoreLaneRuntimeTest"}, 12),
             "ruby-native-spawn": ("test_native_process_spawn.rb", {"NativeProcessSpawnTests"}, 52),
             "ruby-native-owner": ("test_native_upload_process.rb",
                                   {"NativeUploadProtocolTest", "NativeUploadTaskSlotTest", "NativeUploadRoleTest"}, 52),

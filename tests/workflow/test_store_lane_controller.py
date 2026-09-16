@@ -334,7 +334,7 @@ class StoreLaneControllerTests(unittest.TestCase):
                         "locations": [{"file": "fastlane/store_lane_runtime.rb", "line": 211},
                                       {"file": "tests/workflow/store_lane_native_fixture.rb", "line": 212}]}}
                     if fault == "inner-unavailable":
-                        inner_data["observer"] = {"state": "unavailable"}
+                        inner_data["observer"] = {"state": "unavailable", "reason": "observer-empty"}
                     elif fault == "inner-foreign":
                         inner_data["phase"] = "wheel"
                     elif fault == "inner-unknown":
@@ -470,6 +470,9 @@ class StoreLaneControllerTests(unittest.TestCase):
                     "reason": "clock", "locations": [{"file": "fastlane/store_lane_runtime.rb", "line": 17}]}
         base = {"version": 1, "phase": scope.phase, "subcase": scope.subcase, "testId": scope.identifier,
                 "returncode": 76, "expectedReturncode": 0, "observer": observer}
+        preparation = {"category": "fixture-error", "reason": None,
+                       "locations": [{"file": "tests/workflow/store_lane_native_fixture.rb", "line": 29}]}
+        preparing = {**observer, "stage": "observer-preparation-failed", "preparation": preparation}
         marker = c.STORE_NATIVE_INNER_PREFIX.encode()
         def note(value):
             return marker + c.store_native_wire(value)
@@ -480,7 +483,15 @@ class StoreLaneControllerTests(unittest.TestCase):
             {**base, "phase": "source"}, {**base, "subcase": "ordinary75"}, {**base, "testId": private},
             *({**base, "returncode": value} for value in (True, 0, 256, -256, 76.0, private)),
             *({**base, "expectedReturncode": value} for value in (False, 75, 0.0)),
+            {**base, "observer": {"state": "unavailable"}},
             {**base, "observer": {"state": "unavailable", "message": private}},
+            *({**base, "observer": {"state": "unavailable", "reason": value}} for value in (None, True, private)),
+            {**base, "observer": {**observer, "preparation": preparation}},
+            {**base, "observer": {**observer, "stage": "observer-preparation-failed"}},
+            *({**base, "observer": {**preparing, "preparation": value}} for value in (
+                None, {**preparation, "message": private}, {**preparation, "category": "none", "locations": []},
+                {**preparation, "reason": "clock"},
+                {**preparation, "locations": [{"file": "/private/" + private, "line": 29}]})),
             *({**base, "observer": {**observer, key: value}} for key, value in (
                 ("state", "unknown"), ("stage", private), ("category", private), ("reason", private),
                 ("locations", observer["locations"] * 9), ("message", private))),
@@ -511,7 +522,10 @@ class StoreLaneControllerTests(unittest.TestCase):
                         note(base).replace(b'"returncode":76', b'"returncode":NaN')):
                 with self.assertRaises((ValueError, c.VerificationError)):
                     inspect(raw)
-            for observed in ({"state": "unavailable"}, {**observer, "locations": observer["locations"] * 8},
+            for observed in (*({"state": "unavailable", "reason": reason} for reason in sorted(c.STORE_NATIVE_INNER_UNAVAILABLE)),
+                             {**observer, "stage": "unknown-exit76"}, preparing,
+                             {**preparing, "category": "none", "reason": None, "locations": []},
+                             {**observer, "locations": observer["locations"] * 8},
                              {**observer, "category": "none", "reason": None, "locations": []},
                              {**observer, "category": "unclassified", "reason": None}):
                 value = {**base, "observer": observed}
@@ -756,7 +770,7 @@ class StoreLaneControllerTests(unittest.TestCase):
 
     def _python_inner_observer_contracts(self):
         fixture, c = native_fixture, controller_module()
-        for suffix in ("PREFIX", "BYTES", "EXPECTED", "STAGES", "CATEGORIES", "REASONS"):
+        for suffix in ("PREFIX", "BYTES", "EXPECTED", "STAGES", "CATEGORIES", "REASONS", "UNAVAILABLE"):
             self.assertEqual(getattr(fixture, "INNER_FAILURE_" + suffix), getattr(c, "STORE_NATIVE_INNER_" + suffix))
         private = "PRIVATE_INNER_OBSERVER_CANARY"
         root = Path("/fixture/session/work/store-lane/source/case-02/tmp/mrk-store-native-original")
@@ -771,8 +785,12 @@ class StoreLaneControllerTests(unittest.TestCase):
                       "read-zero", "read-nonbytes", "read-overrun", "read-expiry", "read-close-error",
                       "final-fstat", "final-path", "removed-path", "close-error", "close-interrupt", "close-expiry")
         content_faults = ("malformed-json", "duplicate-json", "private-primary", "unknown-primary", "unknown-reason",
-                          "unbound-frame", "too-many-frames", "wrong-mode", "wrong-phase", "wrong-stage", "none-with-frames")
-        faults = ("valid", "short-read", "none-primary", "unclassified-primary",
+                          "unbound-frame", "too-many-frames", "wrong-mode", "wrong-phase", "wrong-stage", "none-with-frames",
+                          "unexpected-preparation", "preparation-missing", "preparation-private", "preparation-none",
+                          "preparation-unbound")
+        available = {"valid", "short-read", "none-primary", "unclassified-primary", "early-unknown",
+                     "preparation", "preparation-none-primary"}
+        faults = (*sorted(available),
                   *sorted(gate_faults | ledger_faults | before_open), "open-error", *after_open, *content_faults,
                   "note-error", "note-interrupt")
         for fault in faults:
@@ -783,6 +801,24 @@ class StoreLaneControllerTests(unittest.TestCase):
                 raw_value = {"version": 1, "phase": "source", "mode": "success0", "stage": "unknown-cleanup",
                              "primaryDiagnostic": primary, "primaryClass": private, "cwd": "/private/" + private,
                              "binding": {"root": "/private/" + private}, "unused": private * 160}
+                preparation = {"category": "fixture-error", "reason": None,
+                               "locations": [{"file": launcher, "line": 29}]}
+                if fault == "early-unknown":
+                    raw_value["stage"] = "unknown-exit76"
+                elif fault.startswith("preparation"):
+                    raw_value.update(stage="observer-preparation-failed", preparationDiagnostic=preparation)
+                    if fault == "preparation-none-primary":
+                        primary.update(category="none", reason=None, locations=[])
+                    elif fault == "preparation-missing":
+                        raw_value.pop("preparationDiagnostic")
+                    elif fault == "preparation-private":
+                        preparation["message"] = private
+                    elif fault == "preparation-none":
+                        preparation.update(category="none", locations=[])
+                    elif fault == "preparation-unbound":
+                        preparation["locations"][0]["file"] = "/private/" + private
+                elif fault == "unexpected-preparation":
+                    raw_value["preparationDiagnostic"] = preparation
                 if fault == "private-primary":
                     primary["message"] = private
                 elif fault == "unknown-primary":
@@ -975,13 +1011,24 @@ class StoreLaneControllerTests(unittest.TestCase):
                 self.assertEqual({key: value for key, value in data.items() if key != "observer"},
                     {"version": 1, "phase": "source", "subcase": "success0",
                      "testId": fixture.PREFIX + dict(fixture.CASE_ROWS)["success0"], "returncode": 76, "expectedReturncode": 0})
-                if fault in {"valid", "short-read", "none-primary", "unclassified-primary"}:
-                    self.assertEqual(data["observer"], {"state": "available", "stage": "unknown-cleanup", **primary})
+                if fault in available:
+                    expected = {"state": "available", "stage": raw_value["stage"], **primary}
+                    if raw_value["stage"] == "observer-preparation-failed":
+                        expected["preparation"] = preparation
+                    self.assertEqual(data["observer"], expected)
                     self.assertEqual(clock.offset, len(raw))
                     self.assertEqual(clock.stats, 2)
                     self.assertEqual(clock.paths, 2)
                 else:
-                    self.assertEqual(data["observer"], {"state": "unavailable"})
+                    reason = ("outcome-missing" if fault == "absent-outcome" else
+                              "outcome-error" if fault in {"outcome-error", "outcome-interrupt"} else
+                              "outcome-rejected" if fault in gate_faults else
+                              "ledger-uncontained" if fault in {"unknown-ledger", "bool-ledger"} else
+                              "ledger-error" if fault in ledger_faults else
+                              "cutoff" if fault in {"expired-before", "expired-lstat", "expired-open", "read-expiry", "close-expiry"} else
+                              "observer-missing" if fault == "missing" else
+                              "observer-empty" if fault == "empty" else "observer-rejected")
+                    self.assertEqual(data["observer"], {"state": "unavailable", "reason": reason})
                 for hidden in (private, str(root), "/private/", "primaryClass", "binding", "unused"):
                     self.assertNotIn(hidden, notes[0])
         # Finite rc/expected-code admission does not consult observers or try
@@ -998,7 +1045,7 @@ class StoreLaneControllerTests(unittest.TestCase):
                 data = fixture.decode(first.__notes__[0][len(fixture.INNER_FAILURE_PREFIX):].encode("ascii"))
                 self.assertEqual((data["subcase"], data["testId"], data["returncode"], data["expectedReturncode"]),
                     (subcase, fixture.PREFIX + dict(fixture.CASE_ROWS)[subcase], actual, expected))
-                self.assertEqual(data["observer"], {"state": "unavailable"})
+                self.assertEqual(data["observer"], {"state": "unavailable", "reason": "outcome-missing"})
             case.config.subcase = "success0"
             for actual, expected in ((True, 0), (256, 0), (-256, 0), ("76", 0), (0, 0), (76, False), (76, 75)):
                 record._outcome.reset_mock()
