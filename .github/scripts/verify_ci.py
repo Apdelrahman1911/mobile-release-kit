@@ -658,6 +658,8 @@ PYTHON_POISON_PARTITIONS = (
     "poison-signing-foreign-mixed-handlers",
     "poison-profile-authenticator-publication",
     "poison-recovery-profile-cleanup",
+    "poison-recovery-inspection-deadline",
+    "poison-recovery-readback-deadline",
     "poison-profile-authentication-order",
     "poison-profile-setup-unlink",
     "poison-profile-collision",

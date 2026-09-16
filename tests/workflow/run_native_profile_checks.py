@@ -22,7 +22,7 @@ PATTERNS = ("test_ios_profile_authority.py", "test_ios_profile_trust.py", "test_
             "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
             "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py",
             "test_build_inputs.py", "test_checked_files.py", "test_source_observation.py",
-            "test_credentials_metadata.py", "test_cli_and_build.py")
+            "test_credentials_metadata.py", "test_cli_and_build.py", "test_app_private.py")
 PREREQUISITES = (
     ("openssl-version", ("/usr/bin/openssl", "version")),
     ("clang-discovery", ("/usr/bin/xcrun", "--find", "clang")),
@@ -93,6 +93,8 @@ POISON_PARTITIONS = (
     ("poison-signing-foreign-mixed-handlers", "unit.test_local_signing_composition.SigningCompositionTests.test_foreign_and_mixed_signal_owners_are_never_silently_overwritten_or_borrowed"),
     ("poison-profile-authenticator-publication", "unit.test_ios_entitlements.SignedEntitlementInventoryTests.test_mocked_authenticator_without_owner_publication_remains_fatal"),
     ("poison-recovery-profile-cleanup", "unit.test_operation_recovery.IosOperationRecoveryTests.test_profile_cleanup_uncertainty_stops_actual_fresh_validation_before_any_store_access"),
+    ("poison-recovery-inspection-deadline", "unit.test_operation_recovery.IosOperationRecoveryTests.test_shared_deadline_prevents_next_authorization_boundary_and_retains_snapshots"),
+    ("poison-recovery-readback-deadline", "unit.test_operation_recovery.IosOperationRecoveryTests.test_deadline_after_readback_preserves_precondition_and_retains_snapshot"),
     ("poison-profile-authentication-order", "unit.test_ios_profile_authority.CMSFramingTests.test_profile_requires_both_authentications_in_order_then_complete_correlation"),
     ("poison-profile-setup-unlink", "unit.test_ios_profile_installation.ProfileInstallationTests.test_ambiguous_setup_stage_unlink_is_not_implicitly_retried_or_resolved"),
     ("poison-profile-collision", "unit.test_ios_profile_installation.ProfileInstallationTests.test_collision_symlink_fifo_and_invalid_input_never_overwrite_existing_state"),

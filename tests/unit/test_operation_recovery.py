@@ -23,6 +23,7 @@ from mobile_release.credentials import artifact_validation_environment
 from mobile_release.errors import StoreOperationError, ValidationError
 from mobile_release.ios import SigningValidityInterval
 from mobile_release.inspection import MAX_INSPECTION_SECONDS
+from mobile_release.owned_process import ProcessError
 from mobile_release.reporting import Finding, Status
 from mobile_release.provenance import (
     copy_immutable_file,
@@ -732,9 +733,19 @@ class IosOperationRecoveryTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        if self._testMethodName in {
+            "test_shared_deadline_prevents_next_authorization_boundary_and_retains_snapshots",
+            "test_deadline_after_readback_preserves_precondition_and_retains_snapshot",
+        }:
+            # These exact controls run only in disposable singleton domains.
+            # Preserve the ENTIRE fixture after failed snapshot cleanup, not
+            # just its artifact tree. No finalizer may remove it before the
+            # enclosing domain's original producer finality and disposal.
+            self.root = Path(tempfile.mkdtemp(prefix="mrk-ios-retained-deadline-"))
+        else:
+            self.temporary = tempfile.TemporaryDirectory()
+            self.addCleanup(self.temporary.cleanup)
+            self.root = Path(self.temporary.name)
         self.config = load_config(write_project(self.root, ios_config(), platform="ios"))
         (self.root / ".mobile-release").mkdir(mode=0o700)
         self.documents = build_lifecycle(self.config, platform="ios")
@@ -757,6 +768,55 @@ class IosOperationRecoveryTests(unittest.TestCase):
         record = kwargs["lane_evidence"]
         return stores.StoreLaneReadback(record, Path(record._output),
             json.dumps(value).encode("utf-8"), value)
+
+    def snapshot_state(self, snapshot):
+        root = snapshot.temporary
+        result = {}
+        for path in (root, *root.rglob("*")):
+            observed = path.lstat()
+            result[path.relative_to(root)] = (
+                observed.st_dev, observed.st_ino, observed.st_mode,
+                observed.st_uid, observed.st_gid,
+                None if path.is_dir() else path.read_bytes(),
+            )
+        return result
+
+    def assert_deadline_snapshot_retained(self, snapshot, original, before, error, *, dispatched):
+        owner, deadline, endpoint = original
+        self.assertIs(snapshot._owner, owner)
+        self.assertIs(type(owner), ios_artifacts._LaneSnapshotOwner)
+        self.assertIs(snapshot.deadline, deadline)
+        self.assertIs(owner.deadline, deadline)
+        self.assertEqual(endpoint, MAX_INSPECTION_SECONDS)
+        self.assertEqual(deadline.expires_at, endpoint)
+        self.assertTrue(error.fatal)
+        self.assertFalse(error.cleanup_complete)
+        self.assertIs(error.dispatched, dispatched)
+        self.assertTrue(owner.claimed)
+        self.assertFalse(owner.active)
+        self.assertTrue(owner._walks_closed)
+        self.assertFalse(owner._cleanup_complete)
+        self.assertTrue(owner.created)
+        self.assertEqual(self.snapshot_state(snapshot), before)
+        self.assertIsInstance(owner._cleanup_failures.first, ValidationError)
+        self.assertRegex(str(owner._cleanup_failures.first),
+                         "shared time bound|snapshot inspection authorization is closed")
+        # Observe original records only: do not retry cleanup, reopen their
+        # numeric descriptors, renew the deadline, or clear retained custody.
+        self.assertEqual(len(owner._leases), ios_artifacts.MAX_SNAPSHOT_FDS)
+        self.assertTrue(all(lease is None for lease in owner._leases))
+        self.assertGreater(owner._reserved, 0)
+        self.assertEqual(owner._reserved, owner._retired)
+        self.assertFalse(owner._accounting_pending)
+        self.assertFalse(owner._accounting_failed)
+        for slot in (owner.slot, *owner.parent.slots):
+            self.assertEqual(slot.close_state, "CLOSED")
+            self.assertIsNone(slot.number)
+        record = owner._lane_binding._record
+        self.assertIs(record._guard, snapshot.cancellation)
+        self.assertIs(record._attempted, dispatched)
+        self.assertTrue(record._failed)
+        self.assertFalse(record.verdict(cancellation=snapshot.cancellation).dependents_settled)
 
     def invoke(self, mode: str, *, attempt: int = 1, output: Path | None = None) -> int:
         argv = ["ci", "candidate", "--config", str(self.config.path), "--platform", "ios", "--confirm", "candidate:ios:1.2.3:42", "--output-dir", str(output or self.output), f"--{mode}", "--artifact", f"ios-ipa={self.root / 'app.ipa'}", "--artifact", f"validation-report={self.root / 'validation-report.json'}"]
@@ -981,14 +1041,15 @@ class IosOperationRecoveryTests(unittest.TestCase):
         self.assertFalse(self.intent_path.exists())
         execute.assert_not_called()
 
-    def test_shared_deadline_prevents_next_authorization_boundary_and_cleans_snapshots(self):
+    def test_shared_deadline_prevents_next_authorization_boundary_and_retains_snapshots(self):
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         interval = SigningValidityInterval(start, start + timedelta(days=1))
         originals = {path: path.read_bytes() for path in self.root.glob("*.zip")}
         originals[self.root / "app.ipa"] = (self.root / "app.ipa").read_bytes()
+        original_owners = []
         # Expire at actual work boundaries, not after a fragile count of clock reads.
         for phase in ("paired-inspection", "evidence-context", "intent-construction"):
-            snapshots = []
+            snapshots, origins, retained = [], [], []
 
             @contextmanager
             def capture_snapshot(paths, *, cancellation=None, lane_evidence=None):
@@ -997,6 +1058,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
                 with ios_artifacts.snapshot_ios_artifacts(paths, cancellation=cancellation, lane_evidence=lane_evidence) as snapshot:
                     self.assertIs(snapshot.cancellation, cancellation)
                     snapshots.append(snapshot)
+                    origins.append((snapshot._owner, snapshot.deadline, snapshot.deadline.expires_at))
                     yield snapshot
 
             with self.subTest(phase=phase), ExitStack() as stack:
@@ -1015,12 +1077,14 @@ class IosOperationRecoveryTests(unittest.TestCase):
 
                 def expire(*args, **kwargs):
                     result = real(*args, **kwargs)
+                    retained.append(self.snapshot_state(snapshots[0]))
                     clock.return_value = MAX_INSPECTION_SECONDS
                     return result
 
-                stack.enter_context(patch(seam, side_effect=expire))
-                with self.assertRaisesRegex(ValidationError, "shared time bound"):
+                boundary = stack.enter_context(patch(seam, side_effect=expire))
+                with self.assertRaises(ProcessError) as caught:
                     self.invoke("prepare-operation")
+                boundary.assert_called_once()
                 if phase == "paired-inspection":
                     native.assert_not_called()
                 else:
@@ -1030,14 +1094,30 @@ class IosOperationRecoveryTests(unittest.TestCase):
                 publish.assert_not_called()
                 self.assertFalse(self.intent_path.exists())
                 self.assertEqual(len(snapshots), 1)
-                self.assertFalse(snapshots[0].temporary.exists())
+                self.assertEqual(len(retained), 1)
+                self.assertEqual(len(origins), 1)
+                self.assert_deadline_snapshot_retained(snapshots[0], origins[0], retained[0],
+                                                       caught.exception, dispatched=False)
+                original_owners.append((origins[0][0], origins[0][1], snapshots[0],
+                                        snapshots[0].cancellation,
+                                        snapshots[0]._owner._lane_binding._record))
                 self.assertEqual(originals, {path: path.read_bytes() for path in originals})
+        # Separate invocations, never a new budget on a failed original owner.
+        for index in range(5):
+            self.assertEqual(len({id(row[index]) for row in original_owners}), 3)
 
-    def test_deadline_after_readback_preserves_precondition_and_retry_recaptures_same_candidate(self):
+    def test_deadline_after_readback_preserves_precondition_and_retains_snapshot(self):
+        self.readback_after_intent_failure(expire=True)
+
+    def test_intent_failure_after_readback_preserves_precondition_and_retry_recaptures_same_candidate(self):
+        self.readback_after_intent_failure(expire=False)
+
+    def readback_after_intent_failure(self, *, expire):
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         interval = SigningValidityInterval(start, start + timedelta(days=3))
-        paths, modes, sent_artifacts, snapshots = [], [], [], []
+        paths, modes, sent_artifacts, snapshots, origins, retained, readbacks_before = [], [], [], [], [], [], []
         real_intent = cli.build_operation_intent
+        ordinary_failure = ValidationError("synthetic intent construction failure")
         before = {path: path.read_bytes() for path in self.root.glob("*.zip")}
         before[self.root / "app.ipa"] = (self.root / "app.ipa").read_bytes()
 
@@ -1048,6 +1128,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
             with ios_artifacts.snapshot_ios_artifacts(inputs, cancellation=cancellation, lane_evidence=lane_evidence) as snapshot:
                 self.assertIs(snapshot.cancellation, cancellation)
                 snapshots.append(snapshot)
+                origins.append((snapshot._owner, snapshot.deadline, snapshot.deadline.expires_at))
                 yield snapshot
 
         def document(command, environment):
@@ -1062,7 +1143,8 @@ class IosOperationRecoveryTests(unittest.TestCase):
         model = StoreLaneModel(document)
         self.addCleanup(model.close)
         with ExitStack() as stack:
-            clock = stack.enter_context(patch("mobile_release.inspection.time.monotonic", return_value=0))
+            clock = (stack.enter_context(patch("mobile_release.inspection.time.monotonic", return_value=0))
+                     if expire else None)
             stack.enter_context(patch("mobile_release.cli.snapshot_ios_artifacts", side_effect=capture_snapshot))
             stack.enter_context(patch("mobile_release.cli.validate_ipa_current_signing", return_value=([], interval)))
             stack.enter_context(patch("mobile_release.cli.ipa_signing_evidence", return_value=self.documents["signing"]))
@@ -1076,18 +1158,51 @@ class IosOperationRecoveryTests(unittest.TestCase):
             import base64
             source_values = {"MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": base64.b64encode(b"synthetic-p8").decode("ascii")}
             stack.enter_context(patch("mobile_release.stores.credential_values_from_environment", return_value=source_values))
+            execute = stack.enter_context(patch("mobile_release.cli.execute_store_operation"))
 
-            def expire_after_intent(**kwargs):
+            def fail_after_intent(**kwargs):
                 intent = real_intent(**kwargs)
                 sent_artifacts.append(intent["artifacts"])
+                observed = paths[0].lstat()
+                readbacks_before.append((observed.st_dev, observed.st_ino, observed.st_mode,
+                                         observed.st_uid, observed.st_gid, paths[0].read_bytes()))
+                if not expire:
+                    raise ordinary_failure
+                retained.append(self.snapshot_state(snapshots[0]))
                 clock.return_value = MAX_INSPECTION_SECONDS
                 return intent
 
-            with patch("mobile_release.cli.build_operation_intent", side_effect=expire_after_intent), self.assertRaisesRegex(ValidationError, "shared time bound"):
+            with patch("mobile_release.cli.build_operation_intent", side_effect=fail_after_intent) as boundary, \
+                    patch("mobile_release.cli.write_evidence", wraps=write_evidence) as publish, \
+                    self.assertRaises(ProcessError if expire else ValidationError) as caught:
                 self.invoke("prepare-operation")
+            boundary.assert_called_once()
+            publish.assert_not_called()
+            execute.assert_not_called()
             self.assertFalse(self.intent_path.exists())
             self.assertEqual(len(paths), 1)
+            self.assertEqual(len(sent_artifacts), 1)
             first_readback = paths[0].read_bytes()
+            self.assertEqual(len(readbacks_before), 1)
+            observed = paths[0].lstat()
+            self.assertEqual((observed.st_dev, observed.st_ino, observed.st_mode,
+                              observed.st_uid, observed.st_gid, first_readback), readbacks_before[0])
+            if expire:
+                self.assertEqual(len(snapshots), 1)
+                self.assertEqual(len(origins), 1)
+                self.assertEqual(len(retained), 1)
+                self.assertEqual(len(model.calls), 1)
+                self.assertEqual(modes, ["prepare"])
+                self.assertIs(model.records[0], snapshots[0]._owner._lane_binding._record)
+                self.assertIsNotNone(model.records[0]._terminal)
+                self.assert_deadline_snapshot_retained(snapshots[0], origins[0], retained[0],
+                                                       caught.exception, dispatched=True)
+                self.assertEqual(json.loads(first_readback)["snapshot"]["serverObservedAt"],
+                                 "2026-01-01T00:00:00Z")
+                self.assertEqual(paths[0].read_bytes(), first_readback)
+                self.assertEqual(before, {path: path.read_bytes() for path in before})
+                return  # Never retry the failed/retained owner or delete its fixture.
+            self.assertIs(caught.exception, ordinary_failure)
             # A fresh budget does not authorize collision adoption or a hidden
             # output rename. Explicit fresh staging recaptures Store state.
             with self.assertRaisesRegex(StoreOperationError, "already exists"):

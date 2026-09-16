@@ -60,6 +60,7 @@ _NATIVE_PATTERN_FIXTURES = (
     "test_source_observation.py",
     "test_credentials_metadata.py",
     "test_cli_and_build.py",
+    "test_app_private.py",
 )
 _FIXTURE_MODULE = "unit.native_diagnostic_fixture"
 _FIXTURE_METHODS = ("test_01_before", "test_02_subject", "test_03_after",
@@ -72,7 +73,7 @@ _FIXTURE_METHODS = ("test_01_before", "test_02_subject", "test_03_after",
                     "test_22_support", "test_23_support", "test_24_support",
                     "test_25_support", "test_26_support", "test_27_support",
                     "test_28_support", "test_29_support", "test_30_support",
-                    "test_31_support", "test_32_support")
+                    "test_31_support", "test_32_support", "test_33_support")
 _FIXTURE_IDS = tuple(f"{_FIXTURE_MODULE}.Fixture.{name}" for name in _FIXTURE_METHODS)
 _PROFILE_PRODUCT_FIXTURES = frozenset({
     "mobile_release", "mobile_release._native_process", "mobile_release._profile_process",
@@ -387,6 +388,9 @@ def _inert_native_suites(outcome="success", *, subtests=3, unknown_id=False):
             pass
 
         def test_32_support(self):
+            pass
+
+        def test_33_support(self):
             pass
 
     Fixture.__module__, Fixture.__qualname__ = _FIXTURE_MODULE, "Fixture"
