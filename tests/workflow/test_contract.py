@@ -12,7 +12,7 @@ from pathlib import Path
 
 from mobile_release.stores import _play_state_journal_path
 
-from .workflow_harness import load_workflow, step_by_id
+from .workflow_harness import evaluate_condition, load_workflow, step_by_id
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -184,8 +184,14 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(2, text.count("build_flag=--run-builds"))
         self.assertEqual(2, text.count("build_flag=--skip-builds"))
-        self.assertIn("build-validation-deferred-android.json", text)
-        self.assertIn("build-validation-deferred-ios.json", text)
+        for platform in ("android", "ios"):
+            job = load_workflow(REUSABLE["preflight"])["jobs"][platform]
+            run = next(step["run"] for step in job["steps"] if step["name"].startswith("Run credential-free"))
+            self.assertIn(f"python -P -m mobile_release.workflow write-deferred-report --app-root . --platform {platform}", run)
+            self.assertNotIn("mkdir", run)
+            self.assertNotIn("jq -n", run)
+            self.assertLess(run.index("build_flag=--skip-builds"), run.index("write-deferred-report"))
+            self.assertLess(run.index("write-deferred-report"), run.index("python -P -m mobile_release preflight"))
         self.assertEqual(2, text.count("credentialed build validation will run"))
 
     def test_mutations_share_non_cancelling_concurrency(self) -> None:
@@ -258,6 +264,8 @@ class ReusableWorkflowContractTests(unittest.TestCase):
             "test_native_upload_validation.rb", "test_native_signal_observation.rb",
             "test_native_process_spawn.rb", "test_native_upload_process.rb", "test_installed_ruby_capture.rb",
             "test_workflow_yaml.rb", "test_supply_wif.rb",
+            "test_store_document.rb", "test_store_lane_lifetime.rb", "test_store_lane_nested_validation.rb",
+            "test_store_lane_resources.rb", "test_store_lane_runtime.rb",
         })
         self.assertEqual(gates["fastfile"].argv, (*paths.bundle, "exec", str(paths.ruby),
                                               str(ROOT / "fastlane/run_lane.rb"), "--validate"))
@@ -290,6 +298,9 @@ class ReusableWorkflowContractTests(unittest.TestCase):
             "fastlane/apple_production.rb", "fastlane/apple_asset_upload.rb", "fastlane/apple_create_retry.rb",
             "fastlane/ios_upload_validation.rb", "fastlane/android_upload_validation.rb", "fastlane/native_upload_validation.rb",
             "fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb",
+            "fastlane/store_document.rb", "fastlane/store_lane_lifetime.rb",
+            "fastlane/store_lane_resources.rb", "fastlane/store_lane_runtime.rb",
+            "fastlane/store_lane_fastlane_bridges.rb",
             "fastlane/release_support.rb", "fastlane/run_lane.rb", "schemas/project.schema.json", "schemas/candidate.schema.json",
             "schemas/receipt.schema.json", "schemas/store-operation-intent.schema.json", "templates/mobile-release.json",
             "templates/workflows/mobile-preflight.yml", "templates/workflows/mobile-candidate.yml",
@@ -557,7 +568,6 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertLess(online_return, project_build_loop)
 
     def test_candidate_handoff_is_fixed_checksum_bound_and_revalidated(self) -> None:
-        candidate = read(REUSABLE["candidate"])
         for platform, primary in (("android", "app-release.aab"), ("ios", "app.ipa")):
             build = load_workflow(REUSABLE["candidate"])["jobs"][f"{platform}_build"]
             store = load_workflow(REUSABLE["candidate"])["jobs"][f"{platform}_store"]
@@ -570,7 +580,14 @@ class ReusableWorkflowContractTests(unittest.TestCase):
                 self.assertEqual("${{ needs." + platform + "_build.outputs.handoff_digest }}", resolve["env"]["MOBILE_RELEASE_HANDOFF_DIGEST"])
                 self.assertIn("--handoff-digest", resolve["run"])
                 self.assertIn('[[ "$MOBILE_RELEASE_HANDOFF_DIGEST" =~ ^[0-9a-f]{64}$ ]]', resolve["run"])
-                self.assertIn("SHA256SUMS", job_block(candidate, f"{platform}_build"))
+                normalize = next(step for step in build["steps"] if step["name"].startswith("Normalize and checksum"))
+                self.assertEqual("app", normalize["working-directory"])
+                self.assertEqual("set -euo pipefail\n" +
+                                 f"python -P -m mobile_release.workflow normalize-handoff --app-root . --platform {platform}",
+                                 normalize["run"].strip())
+                self.assertLess(build["steps"].index(normalize), build["steps"].index(handoff))
+                signed = next(step for step in build["steps"] if step["name"].startswith("Build, sign, and validate"))
+                self.assertLess(build["steps"].index(signed), build["steps"].index(normalize))
                 self.assertIn(primary, step_by_id(store, "prepare")["run"])
                 self.assertIn("--execute-store", step_by_id(store, "execute")["run"])
 
@@ -678,17 +695,65 @@ class ReusableWorkflowContractTests(unittest.TestCase):
         self.assertEqual(2, preflight.count("if-no-files-found: warn"))
 
     def test_every_app_writing_job_establishes_a_non_symlink_private_root(self) -> None:
-        for name, path in REUSABLE.items():
-            text = read(path)
-            with self.subTest(workflow=name):
-                app_checkouts = len(re.findall(r"(?m)^\s+path: app\s*$", text))
-                self.assertGreaterEqual(app_checkouts, 2)
-                self.assertEqual(
-                    app_checkouts,
-                    text.count("Establish safe private workflow output directory"),
-                )
-                self.assertEqual(app_checkouts, text.count('[[ -d "$output" && ! -L "$output" ]]'))
-                self.assertEqual(app_checkouts, text.count('find "$output" -mindepth 1 -print -quit'))
+        expected = {
+            "preflight": {"android", "ios"},
+            "candidate": {"android_online", "android_build", "android_store",
+                          "ios_online", "ios_build", "ios_store"},
+            "external-testing": {"android", "ios"},
+            "production-submit": {"android", "ios"},
+        }
+        condition = "success() && (steps.resolve.outputs.mode == 'prepare' || steps.resolve.outputs.mode == 'resume')"
+        script = "\n".join((
+            "set -euo pipefail",
+            'workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"',
+            'app_root="$(cd app && pwd -P)"',
+            '[[ ! -L app && "$app_root" == "$workspace_root/app" ]]',
+            'python -P -m mobile_release.workflow prepare-app-private --app-root "$app_root" --role empty-root',
+        ))
+        for workflow, names in expected.items():
+            jobs = load_workflow(REUSABLE[workflow])["jobs"]
+            app_jobs = {key for key, job in jobs.items()
+                        if any(step.get("with", {}).get("path") == "app" for step in job["steps"])}
+            self.assertEqual(names, app_jobs)
+            for key in sorted(names):
+                with self.subTest(workflow=workflow, job=key):
+                    steps = jobs[key]["steps"]
+                    roots = [step for step in steps if step["name"] == "Establish safe private workflow output directory"]
+                    self.assertEqual(1, len(roots))
+                    root = roots[0]
+                    self.assertEqual(script, root["run"].strip())
+                    self.assertNotIn("working-directory", root)
+                    root_index = steps.index(root)
+                    checkout = next(step for step in steps if step.get("with", {}).get("path") == "app")
+                    tooling = next(step for step in steps if step.get("with", {}).get("path") == "tooling")
+                    python = next(step for step in steps if step["name"] == "Set up Python")
+                    self.assertEqual("${{ job.workflow_sha }}", tooling["with"]["ref"])
+                    self.assertEqual("${{ job.workflow_repository }}", tooling["with"]["repository"])
+                    for prerequisite in (checkout, tooling, python):
+                        self.assertLess(steps.index(prerequisite), root_index)
+                    verified = [index for index, step in enumerate(steps[:root_index])
+                                if '[[ "$(git -C tooling rev-parse HEAD)" == "$MOBILE_RELEASE_TOOLING_SHA" ]]' in step.get("run", "")]
+                    self.assertTrue(verified, "private setup must run only from the verified tooling checkout")
+                    self.assertLess(steps.index(tooling), verified[-1])
+                    staging = workflow in PROMOTION_ONLY or key.endswith("_store")
+                    if staging:
+                        self.assertEqual(condition, root["if"])
+                        self.assertEqual(condition, checkout["if"])
+                        stage = next(step for step in steps if "mobile_release.workflow stage" in step.get("run", ""))
+                        self.assertEqual(condition, stage["if"])
+                        self.assertLess(steps.index(step_by_id(jobs[key], "resolve")), steps.index(checkout))
+                        self.assertLess(root_index, steps.index(stage))
+                        for mode in ("fresh", "prepare", "resume", "complete"):
+                            context = {"steps": {"resolve": {"outputs": {"mode": mode}}}}
+                            self.assertEqual(mode in {"prepare", "resume"}, evaluate_condition(root["if"], context, success=True, cancelled=False))
+                            self.assertFalse(evaluate_condition(root["if"], context, success=False, cancelled=False))
+                    else:
+                        self.assertNotIn("if", root)
+                    for index, step in enumerate(steps):
+                        run = step.get("run", "")
+                        if (step.get("uses", "").startswith("google-github-actions/auth@") or
+                                any(command in run for command in ("mobile_release doctor", "mobile_release preflight", "mobile_release ci"))):
+                            self.assertLess(root_index, index)
 
     def test_candidate_retains_exact_manifest_bound_metadata_and_validation_report(self) -> None:
         for platform in ("android", "ios"):

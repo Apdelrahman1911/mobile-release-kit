@@ -26,7 +26,7 @@ module InstalledRubyCaptureFixture
     --internal-encoding=UTF-8
   ].freeze
   RUBY_FILES = %w[
-    release_support.rb native_process_spawn.rb native_upload_process.rb
+    release_support.rb native_process_spawn.rb native_upload_process.rb store_lane_lifetime.rb
     native_upload_validation.rb ios_upload_validation.rb android_upload_validation.rb
   ].freeze
   PYTHON_FILES = %w[
@@ -34,6 +34,28 @@ module InstalledRubyCaptureFixture
     mobile_release/android_upload_validation.py mobile_release/_native_process.py
     mobile_release/_profile_process.py
   ].freeze
+  # Separate closed Store-native profile. Default packaged-capture acceptance
+  # remains the original inventory/selectors; callers cannot supply file lists.
+  STORE_RUBY_FILES = (RUBY_FILES + %w[
+    Fastfile run_lane.rb store_document.rb store_lane_runtime.rb
+    store_lane_resources.rb store_lane_fastlane_bridges.rb
+  ]).freeze
+  STORE_PYTHON_FILES = (PYTHON_FILES + %w[
+    mobile_release/_command_process.py mobile_release/_store_lane_contract.py
+    mobile_release/_store_lane_evidence.py mobile_release/_store_lane_files.py
+    mobile_release/owned_process.py mobile_release/cancellation.py
+    mobile_release/_lifetime_evidence.py mobile_release/errors.py
+    mobile_release/inspection.py
+  ]).freeze
+
+  def self.profile_files(profile)
+    case profile
+    when :capture then [RUBY_FILES, PYTHON_FILES]
+    when :store_native then [STORE_RUBY_FILES, STORE_PYTHON_FILES]
+    else raise Failure, "unknown closed runtime binding profile"
+    end
+  end
+
   MISSING_HELPERS = %w[native_upload_process.rb native_process_spawn.rb].freeze
   CAPTURE_LEASE_ROLES = %w[
     control_read control_write status_read status_write stdin_read stdin_write
@@ -48,7 +70,7 @@ module InstalledRubyCaptureFixture
   module_function
 
   def clock
-    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    UploadProcessFixture.clock
   end
 
   def check(condition, message)
@@ -94,14 +116,16 @@ module InstalledRubyCaptureFixture
       "device" => stat.dev, "inode" => stat.ino, "mode" => stat.mode, "uid" => stat.uid, "gid" => stat.gid }
   end
 
-  def source_hashes(root)
-    RUBY_FILES.to_h { |name| ["fastlane/#{name}", file_binding(File.join(root, "fastlane", name)).fetch("sha256")] }
-      .merge(PYTHON_FILES.to_h { |name| ["src/#{name}", file_binding(File.join(root, "src", name)).fetch("sha256")] })
+  def source_hashes(root, profile: :capture)
+    ruby_files, python_files = profile_files(profile)
+    ruby_files.to_h { |name| ["fastlane/#{name}", file_binding(File.join(root, "fastlane", name)).fetch("sha256")] }
+      .merge(python_files.to_h { |name| ["src/#{name}", file_binding(File.join(root, "src", name)).fetch("sha256")] })
   end
 
   # RECORD is read from the actual pip installation. Neither a copied Python
   # layout nor a module imported from the checkout establishes this binding.
-  def installed_layout(prefix, source, wheel: nil, wheel_sha256: nil)
+  def installed_layout(prefix, source, wheel: nil, wheel_sha256: nil, profile: :capture)
+    ruby_files, python_files = profile_files(profile)
     candidates = Dir.glob(File.join(prefix, "lib", "python[0-9]*", "site-packages", "mobile_release_kit-*.dist-info", "RECORD"))
     check(candidates.length == 1, "actual installed distribution RECORD is missing or ambiguous")
     record = canonical(candidates.fetch(0))
@@ -116,9 +140,9 @@ module InstalledRubyCaptureFixture
     check(entries.length == rows.length && entries.keys.all? { |path| inside?(path, prefix) },
           "installed RECORD has an ambiguous or outside-prefix entry")
     tooling = canonical(File.join(prefix, "share/mobile-release-kit/fastlane"), directory: true)
-    expected = source_hashes(source)
-    bindings = RUBY_FILES.to_h { |name| ["fastlane/#{name}", file_binding(File.join(tooling, name))] }
-      .merge(PYTHON_FILES.to_h { |name| ["src/#{name}", file_binding(File.join(modules, name))] })
+    expected = source_hashes(source, profile: profile)
+    bindings = ruby_files.to_h { |name| ["fastlane/#{name}", file_binding(File.join(tooling, name))] }
+      .merge(python_files.to_h { |name| ["src/#{name}", file_binding(File.join(modules, name))] })
     bindings.each do |name, item|
       check(inside?(item.fetch("path"), prefix) && item.fetch("sha256") == expected.fetch(name),
             "installed runtime bytes differ from the checked source")
@@ -145,12 +169,13 @@ module InstalledRubyCaptureFixture
       "directUrlPath" => direct_url, "wheelSha256" => wheel_sha256 }
   end
 
-  def source_layout(prefix, source)
+  def source_layout(prefix, source, profile: :capture)
+    ruby_files, python_files = profile_files(profile)
     tooling = canonical(File.join(prefix, "fastlane"), directory: true)
     modules = canonical(File.join(prefix, "src"), directory: true)
-    expected = source_hashes(source)
-    bindings = RUBY_FILES.to_h { |name| ["fastlane/#{name}", file_binding(File.join(tooling, name))] }
-      .merge(PYTHON_FILES.to_h { |name| ["src/#{name}", file_binding(File.join(modules, name))] })
+    expected = source_hashes(source, profile: profile)
+    bindings = ruby_files.to_h { |name| ["fastlane/#{name}", file_binding(File.join(tooling, name))] }
+      .merge(python_files.to_h { |name| ["src/#{name}", file_binding(File.join(modules, name))] })
     check(bindings.all? { |name, item| item.fetch("sha256") == expected.fetch(name) }, "selected source runtime differs from the checked source")
     { "prefix" => prefix, "toolingRoot" => tooling, "moduleRoot" => modules,
       "sourceRoot" => source, "files" => bindings, "recordPath" => nil,

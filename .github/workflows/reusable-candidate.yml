@@ -181,19 +181,6 @@ jobs:
         fetch-depth: 0
         path: app
         persist-credentials: false
-    - name: Establish safe private workflow output directory
-      run: |
-        set -euo pipefail
-        workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
-        app_root="$(cd app && pwd -P)"
-        [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
-        output=app/.mobile-release
-        if [[ -e "$output" || -L "$output" ]]; then
-          [[ -d "$output" && ! -L "$output" ]]
-          [[ -z "$(find "$output" -mindepth 1 -print -quit)" ]]
-        fi
-        mkdir -p -- "$output"
-        [[ ! -L "$output" && "$(cd "$output" && pwd -P)" == "$app_root/.mobile-release" ]]
     - name: Check out pinned release tooling
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
@@ -213,6 +200,13 @@ jobs:
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
       with:
         python-version: '3.11'
+    - name: Establish safe private workflow output directory
+      run: |
+        set -euo pipefail
+        workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+        app_root="$(cd app && pwd -P)"
+        [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
+        python -P -m mobile_release.workflow prepare-app-private --app-root "$app_root" --role empty-root
     - name: Set up pinned Ruby dependencies
       uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
       with:
@@ -326,19 +320,6 @@ jobs:
         fetch-depth: 0
         path: app
         persist-credentials: false
-    - name: Establish safe private workflow output directory
-      run: |
-        set -euo pipefail
-        workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
-        app_root="$(cd app && pwd -P)"
-        [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
-        output=app/.mobile-release
-        if [[ -e "$output" || -L "$output" ]]; then
-          [[ -d "$output" && ! -L "$output" ]]
-          [[ -z "$(find "$output" -mindepth 1 -print -quit)" ]]
-        fi
-        mkdir -p -- "$output"
-        [[ ! -L "$output" && "$(cd "$output" && pwd -P)" == "$app_root/.mobile-release" ]]
     - name: Check out pinned release tooling
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
@@ -359,6 +340,13 @@ jobs:
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
       with:
         python-version: '3.11'
+    - name: Establish safe private workflow output directory
+      run: |
+        set -euo pipefail
+        workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+        app_root="$(cd app && pwd -P)"
+        [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
+        python -P -m mobile_release.workflow prepare-app-private --app-root "$app_root" --role empty-root
     - name: Diagnose Android configuration
       working-directory: app
       run: python -P -m mobile_release doctor --config release/mobile-release.json --platform android --format json --output .mobile-release/reports/doctor-android.json
@@ -397,27 +385,7 @@ jobs:
       working-directory: app
       run: |
         set -euo pipefail
-        source_dir=.mobile-release/build/android
-        target_dir=.mobile-release/handoff/android
-        [[ -f "$source_dir/app-release.aab" && ! -L "$source_dir/app-release.aab" ]]
-        output_root="$(cd .mobile-release && pwd -P)"
-        [[ ! -e .mobile-release/handoff && ! -L .mobile-release/handoff ]]
-        mkdir .mobile-release/handoff "$target_dir"
-        [[ ! -L "$target_dir" && "$(cd "$target_dir" && pwd -P)" == "$output_root/handoff/android" ]]
-        cp "$source_dir/app-release.aab" "$target_dir/app-release.aab"
-        files=(app-release.aab validation-report.json)
-        if [[ -f "$source_dir/mapping.txt" && ! -L "$source_dir/mapping.txt" ]]; then
-          cp "$source_dir/mapping.txt" "$target_dir/mapping.txt"
-          files+=(mapping.txt)
-        fi
-        if [[ -f "$source_dir/native-symbols.zip" && ! -L "$source_dir/native-symbols.zip" ]]; then
-          cp "$source_dir/native-symbols.zip" "$target_dir/native-symbols.zip"
-          files+=(native-symbols.zip)
-        fi
-        cp .mobile-release/reports/signing-android.json "$target_dir/validation-report.json"
-        (cd "$target_dir" && sha256sum "${files[@]}") > "$target_dir/SHA256SUMS"
-        (cd "$target_dir" && sha256sum --check --strict --status SHA256SUMS)
-        [[ -z "$(find "$target_dir" -mindepth 1 ! -type f -print -quit)" ]]
+        python -P -m mobile_release.workflow normalize-handoff --app-root . --platform android
     - name: Upload immutable same-run Android handoff
       id: upload_handoff
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -515,13 +483,7 @@ jobs:
         workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
         app_root="$(cd app && pwd -P)"
         [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
-        output=app/.mobile-release
-        if [[ -e "$output" || -L "$output" ]]; then
-          [[ -d "$output" && ! -L "$output" ]]
-          [[ -z "$(find "$output" -mindepth 1 -print -quit)" ]]
-        fi
-        mkdir -p -- "$output"
-        [[ ! -L "$output" && "$(cd "$output" && pwd -P)" == "$app_root/.mobile-release" ]]
+        python -P -m mobile_release.workflow prepare-app-private --app-root "$app_root" --role empty-root
       if: success() && (steps.resolve.outputs.mode == 'prepare' || steps.resolve.outputs.mode == 'resume')
     - name: Verify original source tree and stage authenticated inputs
       if: success() && (steps.resolve.outputs.mode == 'prepare' || steps.resolve.outputs.mode == 'resume')
@@ -926,19 +888,6 @@ jobs:
         fetch-depth: 0
         path: app
         persist-credentials: false
-    - name: Establish safe private workflow output directory
-      run: |
-        set -euo pipefail
-        workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
-        app_root="$(cd app && pwd -P)"
-        [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
-        output=app/.mobile-release
-        if [[ -e "$output" || -L "$output" ]]; then
-          [[ -d "$output" && ! -L "$output" ]]
-          [[ -z "$(find "$output" -mindepth 1 -print -quit)" ]]
-        fi
-        mkdir -p -- "$output"
-        [[ ! -L "$output" && "$(cd "$output" && pwd -P)" == "$app_root/.mobile-release" ]]
     - name: Check out pinned release tooling
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
@@ -958,6 +907,13 @@ jobs:
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
       with:
         python-version: '3.11'
+    - name: Establish safe private workflow output directory
+      run: |
+        set -euo pipefail
+        workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+        app_root="$(cd app && pwd -P)"
+        [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
+        python -P -m mobile_release.workflow prepare-app-private --app-root "$app_root" --role empty-root
     - name: Set up pinned Ruby dependencies
       uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
       with:
@@ -1047,19 +1003,6 @@ jobs:
         fetch-depth: 0
         path: app
         persist-credentials: false
-    - name: Establish safe private workflow output directory
-      run: |
-        set -euo pipefail
-        workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
-        app_root="$(cd app && pwd -P)"
-        [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
-        output=app/.mobile-release
-        if [[ -e "$output" || -L "$output" ]]; then
-          [[ -d "$output" && ! -L "$output" ]]
-          [[ -z "$(find "$output" -mindepth 1 -print -quit)" ]]
-        fi
-        mkdir -p -- "$output"
-        [[ ! -L "$output" && "$(cd "$output" && pwd -P)" == "$app_root/.mobile-release" ]]
     - name: Check out pinned release tooling
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
@@ -1080,6 +1023,13 @@ jobs:
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
       with:
         python-version: '3.11'
+    - name: Establish safe private workflow output directory
+      run: |
+        set -euo pipefail
+        workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
+        app_root="$(cd app && pwd -P)"
+        [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
+        python -P -m mobile_release.workflow prepare-app-private --app-root "$app_root" --role empty-root
     - name: Diagnose iOS configuration
       working-directory: app
       run: python -P -m mobile_release doctor --config release/mobile-release.json --platform ios --format json --output .mobile-release/reports/doctor-ios.json
@@ -1117,25 +1067,7 @@ jobs:
       working-directory: app
       run: |
         set -euo pipefail
-        source_dir=.mobile-release/build/ios
-        target_dir=.mobile-release/handoff/ios
-        [[ -f "$source_dir/app.ipa" && ! -L "$source_dir/app.ipa" ]]
-        [[ -d "$source_dir/archive.xcarchive" && ! -L "$source_dir/archive.xcarchive" ]]
-        output_root="$(cd .mobile-release && pwd -P)"
-        [[ ! -e .mobile-release/handoff && ! -L .mobile-release/handoff ]]
-        mkdir .mobile-release/handoff "$target_dir"
-        [[ ! -L "$target_dir" && "$(cd "$target_dir" && pwd -P)" == "$output_root/handoff/ios" ]]
-        cp "$source_dir/app.ipa" "$target_dir/app.ipa"
-        ditto -c -k --norsrc --noextattr --noqtn --keepParent "$source_dir/archive.xcarchive" "$target_dir/archive.zip"
-        files=(app.ipa archive.zip validation-report.json)
-        if [[ -d "$source_dir/dsyms" && ! -L "$source_dir/dsyms" ]]; then
-          ditto -c -k --norsrc --noextattr --noqtn --keepParent "$source_dir/dsyms" "$target_dir/dsyms.zip"
-          files+=(dsyms.zip)
-        fi
-        cp .mobile-release/reports/signing-ios.json "$target_dir/validation-report.json"
-        (cd "$target_dir" && shasum -a 256 "${files[@]}") > "$target_dir/SHA256SUMS"
-        (cd "$target_dir" && shasum -a 256 --check --status SHA256SUMS)
-        [[ -z "$(find "$target_dir" -mindepth 1 ! -type f -print -quit)" ]]
+        python -P -m mobile_release.workflow normalize-handoff --app-root . --platform ios
     - name: Upload immutable same-run iOS handoff
       id: upload_handoff
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -1235,13 +1167,7 @@ jobs:
         workspace_root="$(cd "$GITHUB_WORKSPACE" && pwd -P)"
         app_root="$(cd app && pwd -P)"
         [[ ! -L app && "$app_root" == "$workspace_root/app" ]]
-        output=app/.mobile-release
-        if [[ -e "$output" || -L "$output" ]]; then
-          [[ -d "$output" && ! -L "$output" ]]
-          [[ -z "$(find "$output" -mindepth 1 -print -quit)" ]]
-        fi
-        mkdir -p -- "$output"
-        [[ ! -L "$output" && "$(cd "$output" && pwd -P)" == "$app_root/.mobile-release" ]]
+        python -P -m mobile_release.workflow prepare-app-private --app-root "$app_root" --role empty-root
       if: success() && (steps.resolve.outputs.mode == 'prepare' || steps.resolve.outputs.mode == 'resume')
     - name: Verify original source tree and stage authenticated inputs
       if: success() && (steps.resolve.outputs.mode == 'prepare' || steps.resolve.outputs.mode == 'resume')

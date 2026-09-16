@@ -4735,6 +4735,293 @@ class CISandboxPureTests(unittest.TestCase):
                 self.assertNotIn("native_abort_diagnostic", row)
                 self.assertEqual(row["persisted"], [0, 0])
 
+    @contextmanager
+    def _checked_fixture_model(self):
+        """In-memory finite tree; every filesystem operation stays in this model."""
+        session = session_double(self.module, "darwin")
+        session._checked_files = None
+        rig = SimpleNamespace(session=session, nodes={}, fds={}, data={}, positions={}, links={}, events=[],
+            next_inode=100, next_fd=700, closed=[], write_calls=0, partial_write=False,
+            fail_close=None, fail_initial_stat=False, fail_file_stat=False, now=0.0)
+
+        def add(path, mode, *, uid=0, gid=0, data=None):
+            if path in rig.nodes:
+                raise FileExistsError("synthetic collision")
+            rig.next_inode += 1
+            rig.nodes[path] = SimpleNamespace(st_dev=5, st_ino=rig.next_inode, st_mode=mode,
+                st_uid=uid, st_gid=gid, st_nlink=1, st_size=len(data or b""), st_mtime_ns=1, st_ctime_ns=1)
+            if data is not None:
+                rig.data[path] = bytearray(data)
+            return path
+
+        roots = session._checked_paths()
+        for path in (Path("/"), Path("/private"), Path("/private/var"), Path("/private/var/folders"),
+                     Path("/private/tmp"), session.root, session.fixture_controls):
+            add(path, stat.S_IFDIR | (0o1777 if path == Path("/private/tmp") else 0o755))
+        for path, target in ((Path("/tmp"), "private/tmp"), (Path("/var"), "private/var")):
+            add(path, stat.S_IFLNK | 0o777, data=target.encode())
+            rig.links[path] = target
+        rig.roots, rig.add = roots, add
+
+        def path_at(name, dir_fd=None):
+            return Path(name) if dir_fd is None else rig.fds[dir_fd] / name
+
+        def named(name, *, dir_fd=None, follow_symlinks=False):
+            self.assertIs(follow_symlinks, False)
+            path = path_at(name, dir_fd)
+            if path not in rig.nodes:
+                raise FileNotFoundError("synthetic absent entry")
+            return rig.nodes[path]
+
+        def opened(name, flags, mode=0o777, *, dir_fd=None):
+            path = path_at(name, dir_fd)
+            self.assertTrue(flags & os.O_NOFOLLOW and flags & os.O_CLOEXEC)
+            if flags & os.O_CREAT:
+                self.assertTrue(flags & os.O_EXCL)
+                add(path, stat.S_IFREG | mode, data=b"")
+            elif path not in rig.nodes:
+                raise FileNotFoundError("synthetic absent open")
+            rig.next_fd += 1
+            rig.fds[rig.next_fd] = path
+            rig.positions[rig.next_fd] = 0
+            rig.events.append(("open", rig.next_fd, path))
+            return rig.next_fd
+
+        def held(fd):
+            self.assertNotIn(fd, rig.closed)
+            if rig.fail_initial_stat:
+                raise OSError("synthetic first fstat failed")
+            if rig.fail_file_stat and rig.write_calls and stat.S_ISREG(rig.nodes[rig.fds[fd]].st_mode):
+                raise OSError("synthetic persisted file extent unavailable")
+            return rig.nodes[rig.fds[fd]]
+
+        def closed(fd):
+            self.assertNotIn(fd, rig.closed, "ambiguous close was retried")
+            rig.closed.append(fd)
+            rig.events.append(("close", fd))
+            if fd == rig.fail_close:
+                raise OSError("synthetic owned close failed")
+
+        def mkdir(name, mode, *, dir_fd):
+            path = path_at(name, dir_fd)
+            rig.events.append(("mkdir", path))
+            add(path, stat.S_IFDIR | mode)
+
+        def write(fd, value):
+            rig.write_calls += 1
+            if rig.partial_write and rig.write_calls == 2:
+                raise OSError("synthetic second write failed")
+            raw = bytes(value[:7] if rig.partial_write else value)
+            path = rig.fds[fd]
+            rig.data[path].extend(raw)
+            rig.nodes[path].st_size = len(rig.data[path])
+            return len(raw)
+
+        def chown(fd, uid, gid):
+            info = held(fd)
+            info.st_uid, info.st_gid = uid, gid
+
+        def chmod(fd, mode):
+            info = held(fd)
+            info.st_mode = stat.S_IFMT(info.st_mode) | mode
+
+        def symlink(target, name, *, dir_fd):
+            path = path_at(name, dir_fd)
+            add(path, stat.S_IFLNK | 0o777, data=target.encode())
+            rig.links[path] = target
+
+        def readlink(name, *, dir_fd=None):
+            return rig.links[path_at(name, dir_fd)]
+
+        def seek(fd, position, whence):
+            self.assertEqual((position, whence), (0, os.SEEK_SET))
+            rig.positions[fd] = 0
+            return 0
+
+        def read(fd, maximum):
+            path, start = rig.fds[fd], rig.positions[fd]
+            raw = bytes(rig.data[path][start:start + maximum])
+            rig.positions[fd] += len(raw)
+            return raw
+
+        class Entries:
+            def __init__(inner, fd):
+                inner.names = [SimpleNamespace(name=path.name) for path in rig.nodes
+                               if path.parent == rig.fds[fd] and path != path.parent]
+            def __enter__(inner):
+                return iter(inner.names)
+            def __exit__(inner, *_):
+                return False
+
+        def unlink(name, *, dir_fd):
+            path = path_at(name, dir_fd)
+            self.assertIn(path, rig.nodes)
+            self.assertFalse(stat.S_ISDIR(rig.nodes[path].st_mode))
+            rig.events.append(("unlink", path))
+            del rig.nodes[path]
+
+        def rmdir(name, *, dir_fd):
+            path = path_at(name, dir_fd)
+            self.assertTrue(stat.S_ISDIR(rig.nodes[path].st_mode))
+            self.assertFalse(any(other.parent == path for other in rig.nodes))
+            rig.events.append(("rmdir", path))
+            del rig.nodes[path]
+
+        def idle(*, deadline):
+            self.assertLessEqual(deadline, session.deadline)
+            rig.events.append(("idle", deadline))
+            session.domain_finality = True
+
+        constants = {name: getattr(os, name) for name in ("O_RDONLY", "O_RDWR", "O_CREAT", "O_EXCL", "O_DIRECTORY",
+                     "O_NOFOLLOW", "O_CLOEXEC", "SEEK_SET")}
+        fake_os = SimpleNamespace(**constants, open=opened, close=closed, fstat=held, stat=named,
+            get_inheritable=lambda fd: False, mkdir=mkdir, write=write, fchown=chown, fchmod=chmod,
+            fsync=lambda fd: held(fd), symlink=symlink, readlink=readlink, lseek=seek, read=read,
+            scandir=Entries, unlink=unlink, rmdir=rmdir)
+        with patch.multiple(self.module, os=fake_os, time=SimpleNamespace(monotonic=lambda: rig.now),
+                _canonical=Path, subprocess=SimpleNamespace(), signal=SimpleNamespace(), socket=SimpleNamespace()), \
+             patch.object(Path, "lstat", lambda path: named(path)), \
+             patch.object(session, "ensure_idle", side_effect=idle):
+            yield rig
+
+    def test_checked_file_fixture_binding_is_fixed_disjoint_and_has_no_environment_authority(self):
+        session = session_double(self.module, "darwin")
+        roots = session._checked_paths()
+        self.assertEqual(roots, (session.root / "fixture-controls/checked-files",
+                                Path("/private/var/folders/mrk-pure-fixture-checked-files")))
+        for name, value in (("platform", "linux"), ("root", Path("/private/tmp/has.dot")),
+                            ("fixture_controls", session.work / "fixture-controls"),
+                            ("runner_temp", roots[1]), ("runner_home", roots[0].parent),
+                            ("tool_prefixes", (roots[0] / "runtime",))):
+            with self.subTest(checked_binding=name), patch.object(session, name, value), \
+                 self.assertRaises(self.module.SessionError):
+                session._checked_paths()
+        with self._checked_fixture_model() as rig:
+            rig.session.prepare_checked_files("source", deadline=50.0)
+            state = rig.session._checked_files
+            for change in ("session", "roots", "closed"):
+                original = state[change]
+                state[change] = object() if change == "session" else (Path("/foreign"),) if change == "roots" else True
+                with self.subTest(original_state_binding=change), self.assertRaises(self.module.SessionError):
+                    rig.session._checked_binding(state)
+                state[change] = original
+            rig.session.fail("synthetic fixture finished")
+            rig.session._close_checked_files()
+
+    def test_checked_file_originals_survive_both_phases_and_are_disposed_only_at_terminal_finality(self):
+        with self._checked_fixture_model() as rig:
+            session = rig.session
+            session.prepare_checked_files("source", deadline=50.0)
+            state = session._checked_files
+            original = {path: vars(info).copy() for path, info in rig.nodes.items()}
+            session.verify_checked_files("source", deadline=50.0)
+            session.verify_checked_files("source", deadline=50.0)
+            session.prepare_checked_files("wheel", deadline=75.0)
+            session.verify_checked_files("wheel", deadline=75.0)
+            self.assertEqual({path: vars(info).copy() for path, info in rig.nodes.items()}, original)
+            self.assertEqual((session.persisted_bytes, state["note"]["persisted_bytes"]), (96, 96))
+            self.assertEqual(state["note"]["postcaptures"], {"source": 2, "wheel": 1})
+            self.assertFalse(state["note"]["ok"] or state["note"]["roots_removed"])
+            self.assertFalse(any(event[0] in {"unlink", "rmdir"} for event in rig.events))
+            def domain(*_, **__):
+                rig.events.append(("terminal-domain",))
+                return []
+            with patch.object(self.module, "_domain", side_effect=domain), \
+                 patch.object(session, "_close_home_boundary", return_value=[]), \
+                 patch.object(session, "_close_userns_boundary", return_value=[]):
+                session.close(keep_timer=True)
+            self.assertTrue(session.closed and session.domain_finality)
+            self.assertTrue(state["closed"] and state["note"]["ok"] and state["note"]["roots_removed"])
+            self.assertFalse(any(path == root or root in path.parents for path in rig.nodes for root in rig.roots))
+            self.assertIn(Path("/private/var/folders"), rig.nodes)
+            self.assertIn(session.fixture_controls, rig.nodes)
+            self.assertEqual(len(rig.closed), len(rig.fds))
+            self.assertEqual(len(set(rig.closed)), len(rig.closed))
+            self.assertLess(rig.events.index(("terminal-domain",)), next(i for i, event in enumerate(rig.events) if event[0] == "unlink"))
+            self.assertEqual(session.persisted_bytes, 96, "disposal must not refund persisted bytes")
+            self.assertEqual(session._close_checked_files(), [])
+
+    def test_checked_file_mutation_or_unknown_finality_retains_originals_and_retires_each_handle(self):
+        for case in ("identity", "bytes", "growth", "unavailable-extent", "extra-entry", "alias", "deadline", "unknown-finality", "active-producer", "missing-wheel", "prior-failure"):
+            with self.subTest(checked_fixture_failure=case), self._checked_fixture_model() as rig:
+                session = rig.session
+                session.prepare_checked_files("source", deadline=50.0)
+                state = session._checked_files
+                if case == "identity":
+                    rig.nodes[rig.roots[0] / "external/material"].st_ino += 100
+                elif case == "bytes":
+                    rig.data[rig.roots[0] / "external/material"][0] = ord("X")
+                elif case == "growth":
+                    path = rig.roots[0] / "external/material"
+                    rig.data[path].extend(b"extra")
+                    rig.nodes[path].st_size += 5
+                elif case == "unavailable-extent":
+                    rig.fail_file_stat = True
+                elif case == "extra-entry":
+                    rig.add(rig.roots[1] / "unexpected", stat.S_IFREG | 0o600, data=b"foreign")
+                elif case == "alias":
+                    rig.links[Path("/tmp")] = "private/var"
+                elif case == "unknown-finality":
+                    session.domain_finality = False
+                elif case == "active-producer":
+                    session._busy = True
+                elif case == "prior-failure":
+                    session.fail("synthetic earlier original failure")
+                if case in {"identity", "bytes", "growth", "unavailable-extent", "extra-entry", "alias", "deadline"}:
+                    error = BaseExceptionGroup if case in {"identity", "growth", "unavailable-extent"} else self.module.SessionError
+                    with self.assertRaises(error):
+                        session.verify_checked_files("source", deadline=51.0 if case == "deadline" else 50.0)
+                rig.fail_close = next(iter(rig.fds))
+                errors = session._close_checked_files()
+                self.assertTrue(errors)
+                self.assertFalse(state["note"]["ok"] or state["note"]["roots_removed"])
+                self.assertTrue(all(root in rig.nodes for root in rig.roots))
+                self.assertFalse(any(event[0] in {"unlink", "rmdir"} for event in rig.events))
+                self.assertEqual(len(rig.closed), len(rig.fds))
+                self.assertEqual(session._close_checked_files(), [])
+                self.assertEqual(session.persisted_bytes, 101 if case == "growth" else 96)
+                self.assertEqual(state["note"]["persisted_bytes"], session.persisted_bytes)
+                self.assertEqual(state["note"]["persisted_bytes_known"], case not in {"identity", "unavailable-extent"})
+
+    def test_checked_file_collision_partial_write_and_first_observation_failure_keep_known_accounting(self):
+        for case in ("collision", "partial-write", "first-observation", "unmeasured", "wheel-unmeasured"):
+            with self.subTest(checked_fixture_preparation=case), self._checked_fixture_model() as rig:
+                if case == "collision":
+                    rig.add(rig.roots[0], stat.S_IFDIR | 0o700, uid=42)
+                elif case == "partial-write":
+                    rig.partial_write = True
+                elif case == "first-observation":
+                    rig.fail_initial_stat = True
+                else:
+                    if case == "wheel-unmeasured":
+                        rig.session.prepare_checked_files("source", deadline=50.0)
+                        rig.session.verify_checked_files("source", deadline=50.0)
+                    rig.fail_file_stat = True
+                error = FileExistsError if case == "collision" else OSError if case == "first-observation" else BaseExceptionGroup
+                with self.assertRaises(error):
+                    rig.session.prepare_checked_files("wheel" if case == "wheel-unmeasured" else "source",
+                                                       deadline=75.0 if case == "wheel-unmeasured" else 50.0)
+                state = rig.session._checked_files
+                self.assertIsNotNone(rig.session.failure)
+                self.assertTrue(state["closed"])
+                self.assertEqual(len(rig.closed), len(rig.fds))
+                self.assertEqual(len(set(rig.closed)), len(rig.closed))
+                self.assertFalse(any(event[0] in {"unlink", "rmdir"} for event in rig.events))
+                self.assertFalse(state["note"]["ok"] or state["note"]["roots_removed"])
+                self.assertEqual(rig.session.persisted_bytes, 7 if case == "partial-write" else 96 if case == "wheel-unmeasured" else 0)
+                self.assertEqual(state["note"]["persisted_bytes_known"], case not in {"unmeasured", "wheel-unmeasured"})
+                if case == "wheel-unmeasured":
+                    self.assertEqual((len(state["files"]), len(state["links"])), (4, 2))
+                    self.assertTrue(all(row["accounted"] for row in [*state["files"], *state["links"]]),
+                                    "historical creation measurements must not clear a later unknown extent")
+                if case == "collision":
+                    self.assertEqual(rig.nodes[rig.roots[0]].st_uid, 42)
+                elif case == "partial-write":
+                    self.assertEqual(bytes(rig.data[rig.roots[0] / "external/material"]), b"selecte")
+                elif case == "unmeasured":
+                    self.assertEqual(bytes(rig.data[rig.roots[0] / "external/material"]), b"selected private bytes")
+                self.assertEqual(rig.session._close_checked_files(), [])
+
     def test_native_input_reads_and_rechecks_keep_original_custody_bytes_and_close_errors(self):
         path, raw = Path("/synthetic/native/input.py"), b"immutable native input\n"
         for case in ("valid", "alias", "subject-owner", "root-uid-nonzero-group", "world-write", "multiple-links", "inherited", "renamed", "grew",

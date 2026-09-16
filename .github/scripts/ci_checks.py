@@ -69,6 +69,8 @@ WHEEL_PATTERNS = (
     "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
     "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
     "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py",
+    "test_build_inputs.py", "test_build_inputs_cli.py", "test_checked_files.py", "test_source_observation.py",
+    "test_ios_correspondence.py", "test_credentials_metadata.py", "test_cli_and_build.py",
 )
 NATIVE_PATTERNS = (
     "test_ios_profile_authority.py", "test_ios_profile_trust.py",
@@ -80,6 +82,8 @@ NATIVE_PATTERNS = (
     "test_owned_process_failures.py", "test_local_signing_failures.py", "test_local_signing_profile_identity.py",
     "test_local_signing_persistent.py", "test_local_signing_matrix.py", "test_local_signing_owner_loss.py",
     "test_command_loader_loss.py", "test_command_fence_failure.py", "test_local_signing_attempts.py", "test_command_account_lifecycle.py",
+    "test_build_inputs.py", "test_checked_files.py", "test_source_observation.py",
+    "test_credentials_metadata.py", "test_cli_and_build.py",
 )
 # Only this source-known class may run with the fixed native trust-service role.
 # A newly added method must not silently enlarge that role's callset.
@@ -103,6 +107,36 @@ NATIVE_COMPATIBILITY_IDS = tuple(sorted(
 ))
 NATIVE_PUBLIC_API_IDS = (
     "unit.test_native_process.NativeProcessCompatibilityTests.test_native_public_api_atomic_duplication",
+)
+# Native Store cases have their own original Python domain for EVERY row. They
+# are not healthy/default discovery tests or profile-authority test methods.
+STORE_NATIVE_PREFIX = "workflow.test_store_lane_native.StoreLaneNativeTests."
+STORE_NATIVE_ROWS = (
+    ("ordinary-at-exit-control", "test_real_success_exit_and_original_fd_retirement"),
+    ("success0", "test_real_success_exit_and_original_fd_retirement"),
+    ("ordinary75", "test_real_ordinary_failure_is_settled75_without_receipt"),
+    ("system-exit0", "test_arbitrary_system_exit_is_unknown76"),
+    ("system-exit75", "test_arbitrary_system_exit_is_unknown76"),
+    ("terminal-close-return-loss", "test_real_close_and_link_return_loss_refuse_binding"),
+    ("terminal-link-return-loss", "test_real_close_and_link_return_loss_refuse_binding"),
+    ("nested-ios-success", "test_real_nested_family_settles_before_composite_disposal"),
+    ("nested-android-success", "test_real_nested_family_settles_before_composite_disposal"),
+    ("nested-android-inherited-pipe", "test_real_nested_family_settles_before_composite_disposal"),
+    ("bridge-success", "test_pinned_fastlane_bridges_own_generated_entries_before_dispatch"),
+    ("bridge-ordinary-error", "test_pinned_fastlane_bridges_own_generated_entries_before_dispatch"),
+    ("clock-brackets", "test_native_shared_clock_labels_samples_and_expiry"),
+    ("clock-expired", "test_native_shared_clock_labels_samples_and_expiry"),
+    ("clock-wrong-label", "test_native_shared_clock_labels_samples_and_expiry"),
+)
+STORE_NATIVE_PRODUCTS = (
+    *("fastlane/" + name for name in (
+        "release_support.rb", "native_process_spawn.rb", "native_upload_process.rb", "store_lane_lifetime.rb",
+        "native_upload_validation.rb", "ios_upload_validation.rb", "android_upload_validation.rb", "Fastfile",
+        "run_lane.rb", "store_document.rb", "store_lane_runtime.rb", "store_lane_resources.rb", "store_lane_fastlane_bridges.rb")),
+    *("src/mobile_release/" + name for name in (
+        "__init__.py", "ios_upload_validation.py", "android_upload_validation.py", "_native_process.py", "_profile_process.py",
+        "_command_process.py", "_store_lane_contract.py", "_store_lane_evidence.py", "_store_lane_files.py", "owned_process.py",
+        "cancellation.py", "_lifetime_evidence.py", "errors.py", "inspection.py")),
 )
 # These literal real negative proofs deliberately retain UNKNOWN custody. Each must
 # be the sole test in its own original ordinary Session capture, never skipped
@@ -196,6 +230,7 @@ PYTHON_SINGLETON_PARTITIONS = PYTHON_POISON_PARTITIONS + PYTHON_FRESH_PARTITIONS
 PYTHON_SINGLETON_IDS = PYTHON_POISON_IDS + PYTHON_FRESH_IDS
 # Exact method identities, not a count, file-wide exemption or skip-message match.
 LINUX_MACOS_SKIPS = frozenset({
+    "unit.test_checked_files.NativeCheckedFilesTests.test_actual_tmp_var_folders_and_physical_spellings_select_identical_private_bytes",
     "unit.test_local_signing_native.SigningDarwinABITests.test_real_header_layout_and_local_volume_match_ctypes_without_private_state",
     "unit.test_local_signing_composition.SigningCompositionTests.test_full_preflight_shares_one_guard_through_early_authentication_signing_build_and_late_authentication",
     "unit.test_local_signing_composition.SigningCompositionTests.test_real_early_and_late_profile_cleanup_signals_under_full_preflight_never_return_cancelled_content",
@@ -223,6 +258,9 @@ TOOLING_FILES = (
     "fastlane/apple_create_retry.rb", "fastlane/ios_upload_validation.rb",
     "fastlane/android_upload_validation.rb", "fastlane/native_upload_validation.rb",
     "fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb",
+    "fastlane/store_document.rb", "fastlane/store_lane_lifetime.rb",
+    "fastlane/store_lane_resources.rb", "fastlane/store_lane_runtime.rb",
+    "fastlane/store_lane_fastlane_bridges.rb",
     "fastlane/release_support.rb", "fastlane/run_lane.rb", "schemas/candidate.schema.json",
     "schemas/project.schema.json", "schemas/receipt.schema.json",
     "schemas/store-operation-intent.schema.json", "templates/mobile-release.json",
@@ -860,6 +898,40 @@ def linux_allowed_skips() -> frozenset[str]:
     return LINUX_MACOS_SKIPS
 
 
+def store_lane_native_rows(source_root: Path, phase: str, *, deadline: float | None = None) -> tuple[tuple[str, str], ...]:
+    """Independent static catalog: exactly 15 source/14 wheel originals, seven IDs.
+
+    The fixture's literal table is checked against this outside authority, not
+    imported/executed or accepted from its eventual diagnostic stdout.
+    """
+    _require(type(phase) is str and phase in {"source", "wheel"}, "STORE_NATIVE_PHASE")
+    directory = Path(source_root) / "tests/workflow"
+    fixture = directory / "store_lane_native_fixture.py"
+    parsed = ast.parse(_read_regular(fixture, deadline=deadline), filename=str(fixture))
+    tables = [node.value for node in parsed.body if isinstance(node, ast.Assign)
+              and any(isinstance(target, ast.Name) and target.id == "CASE_ROWS" for target in node.targets)]
+    _require(len(tables) == 1, "STORE_NATIVE_ROW_TABLE")
+    _require(ast.literal_eval(tables[0]) == STORE_NATIVE_ROWS, "STORE_NATIVE_ROW_TABLE")
+    tests = directory / "test_store_lane_native.py"
+    parsed = ast.parse(_read_regular(tests, deadline=deadline), filename=str(tests))
+    methods = []
+    for node in parsed.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        names = [item.name for item in node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and item.name.startswith("test")]
+        if names:
+            _require(node.name == "StoreLaneNativeTests" and len(node.bases) == 1
+                     and isinstance(node.bases[0], ast.Attribute) and node.bases[0].attr == "TestCase"
+                     and isinstance(node.bases[0].value, ast.Name) and node.bases[0].value.id == "unittest",
+                     "STORE_NATIVE_TEST_CLASS")
+            methods.extend(names)
+    _require(len(methods) == len(set(methods)) == 7
+             and set(methods) == {name for _, name in STORE_NATIVE_ROWS}, "STORE_NATIVE_METHOD_INVENTORY")
+    rows = STORE_NATIVE_ROWS if phase == "source" else STORE_NATIVE_ROWS[1:]
+    return tuple((subcase, STORE_NATIVE_PREFIX + method) for subcase, method in rows)
+
+
 def expected_python_ids(source_root: Path, selection: str = "full", *, deadline: float | None = None) -> tuple[str, ...]:
     """Statically derive the exact methods; never import or execute a test file.
 
@@ -875,6 +947,12 @@ def expected_python_ids(source_root: Path, selection: str = "full", *, deadline:
         _require(sorted(path.name for path in paths) == sorted(patterns), "TEST_PATTERN_INVENTORY")
     result = []
     for path in paths:
+        if selection == "full" and path == tests / "workflow/test_store_lane_native.py":
+            # These exact methods are REQUIRED by the two separate Store gates.
+            # Validate their closed inventory here before excluding their raw
+            # discovery bodies; they never borrow the healthy Python domain.
+            store_lane_native_rows(source_root, "source", deadline=deadline)
+            continue
         module = ".".join(path.relative_to(tests).with_suffix("").parts)
         parsed = ast.parse(_read_regular(path, deadline=deadline), filename=str(path))
         classes = set()
@@ -897,7 +975,7 @@ def expected_python_ids(source_root: Path, selection: str = "full", *, deadline:
         result.extend(module_ids)
     _require(bool(result) and len(result) == len(set(result)), "TEST_EMPTY_OR_DUPLICATE_INVENTORY")
     if selection == "full":
-        _require(len(LINUX_MACOS_SKIPS) == 20 and LINUX_MACOS_SKIPS <= set(result), "TEST_NATIVE_INVENTORY_DRIFT")
+        _require(len(LINUX_MACOS_SKIPS) == 21 and LINUX_MACOS_SKIPS <= set(result), "TEST_NATIVE_INVENTORY_DRIFT")
     return tuple(sorted(result))
 
 
@@ -1189,9 +1267,13 @@ def run_python_tests(source_root: Path, selection: str, deadline: float, observa
                 _require(not loader.errors, "TEST_DISCOVERY_ERROR")
             loaded = tuple(flatten(suite))
             actual = tuple(test.id() for test in loaded)
-            _require(len(actual) == len(set(actual)) and tuple(sorted(actual)) == complete, "TEST_LOADED_INVENTORY")
+            native_store = (tuple(sorted({identifier for _, identifier in
+                            store_lane_native_rows(source_root, "source", deadline=deadline)}))
+                            if selection == "full" and (source_root / "tests/workflow/test_store_lane_native.py").is_file() else ())
+            _require(len(actual) == len(set(actual)) and tuple(sorted(actual)) == tuple(sorted((*complete, *native_store))),
+                     "TEST_LOADED_INVENTORY")
             # Discovery still proves the complete source inventory. Only the
-            # source-fixed poison/G methods are withheld for their actual owners.
+            # source-fixed poison/G/Store methods are withheld for their actual owners.
             suite = unittest.TestSuite(test for test in loaded if test.id() in expected)
             _require(tuple(sorted(test.id() for test in flatten(suite))) == expected, "TEST_HEALTHY_INVENTORY")
             result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True, resultclass=Result).run(suite)

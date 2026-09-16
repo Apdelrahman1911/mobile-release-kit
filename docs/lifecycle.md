@@ -1,5 +1,9 @@
 # Release lifecycle
 
+Production use is **NOT READY until** remediation verification and a new comprehensive
+production-readiness audit pass;
+see [preparation status](../README.md#preparation-status).
+
 Cheap checks precede expensive builds; authority increases only at protected boundaries:
 
 ```text
@@ -18,6 +22,24 @@ closed; there is no automatic rollback or cross-Store transaction.
 Later asynchronous progress requires a separate non-publishing Console or API check. A new
 external-testing dispatch can record later TestFlight availability; a completed receipt itself
 never changes. Local checksum/schema validation is not GitHub attestation authentication.
+
+## Local preflight custody
+
+One invocation reserves the process environment before credential snapshots. Applicable signed
+iOS builds then acquire one account lease, followed by continuous project-directory admission.
+Every offline/signing invocation holds the project, including `--skip-builds` because configured
+checks still run. Online reserves the environment but owns neither project nor signing state.
+Busy admission stops before private/application work; an explicitly supplied account is borrowed.
+
+Sequential materializations share that exact guard and project. All service-file targets are
+inspected before publication; original objects/modes are retained and only unchanged owned
+replacements may be retired. Inner signing/consumer settlement precedes target and finite-scratch
+cleanup. Foreign edits or unknown consumers are preserved; failed prerequisites, builds or cleanup
+stop later platforms. Completed output is not validated merely because it remains on disk.
+Environment frames restore unchanged installed values in owner-bound LIFO order, not by blindly
+overwriting later changes. See [project-input recovery](build-inputs-recovery.md) for exact-root
+status, original-session recovery and terminal metadata-only retirement. It is separate from
+account recovery and Store-operation recovery; none can manufacture another owner's finality.
 
 ## Authorization, execution, and final evidence
 
@@ -104,10 +126,15 @@ Every iOS candidate requires the retained archive, irrespective of symbol policy
 authorization, the IPA/archive's complete native/resource inventories and every present dSYM are
 correlated on private snapshots. Execution binds the exact archive and supplied detached symbols,
 not just the IPA. See [iOS artifact correspondence](ios-artifacts.md) for supported exports and
-the distinction between present-symbol consistency and complete nested coverage.
+complete installed-slice coverage.
 
-For `ios.symbols.policy: retain`, primary symbols are required and every present symbol is checked/retained without a third-party uploader.
-`required` remains a fail-closed activation sentinel, not an implemented upload integration.
+Under `ios.symbols.policy: retain` or `required`, each unique installed CPU/subtype/UUID needs one
+retained dSYM slice, including nested apps/extensions, frameworks, dylibs and suffixless helpers.
+Identical installed copies may share symbols; duplicate DWARF identities still fail. No vendor or
+installed-Swift exemption applies. `disabled` permits omissions, but every present slice must still
+be valid, known and unique. Detached symbols must exactly equal the archive's dSYM inventory and
+cannot repair a missing archive slice. `required` also remains a fail-closed upload sentinel: its
+configured upload command is never executed; no third-party uploader is implemented.
 
 ## Android external testing
 
@@ -171,6 +198,11 @@ the entire authorized target, including notes, before a receipt can report succe
 Play supplies the bundle SHA-256, but no mapping-file digest readback. Candidate recovery may replay
 only the same original mapping for the same version code and requires an acknowledged edit commit;
 this is documented scoped idempotency, not independent proof of the mapping's Store bytes.
+Candidate and mapping-only recovery sends retain an intent-hash-verified anonymous
+read-only File through the synchronous SDK call and unwind. Changing the original
+mapping pathname cannot change those sent bytes. A mapping request is one-use,
+bound to its original edit/version/type, and refused in an SDK batch context;
+uncertain cleanup cannot produce a successful receipt.
 
 A draft is not served. An owner later chooses the public release/rollout in Play Console.
 
@@ -192,6 +224,14 @@ assets; uncertain missing creates never silently repeat a POST.
 Apple approval does not release publicly. An owner releases manually in App Store Connect.
 
 ## Source acceptance and recovery
+
+Fresh source authority comes only from successful full actual HEAD/tree observations and a
+successful clean status read. The tree is derived from that observed HEAD, then another successful
+equal HEAD brackets the observation. Failed/malformed identity, failed status or detected drift
+cannot authorize evidence or a Store operation. Git observation removes inherited routing/config
+overrides and disables hooks, fsmonitor and replacements; linked/detached worktrees remain valid.
+`GITHUB_SHA` is a separate dispatch claim, never a substitute for unavailable Git output. The
+bracket is not an atomic snapshot or a defense against hostile same-user ABA changes.
 
 External testing requires the exact candidate source commit/tree. A production operation source
 may have the candidate as an ancestor, or have common history and an identical complete Git tree.

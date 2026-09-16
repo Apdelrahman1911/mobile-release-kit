@@ -16,15 +16,16 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from .config import ReleaseConfig, ReleaseVersion
+from .cancellation import DefaultCancellation
 from .credentials import artifact_validation_environment
 from .discovery import discover_project, selected_ios_container, selected_ios_scheme
-from .owned_process import ProcessError
+from .owned_process import ProcessError, fatal_lifetime_error
 from ._lifetime_evidence import ProfileCallEvidence
 from ._profile_callers import consume_profile_evidence, first_primary_context
 from .errors import ValidationError
 from .inspection import InspectionDeadline
 from .reporting import FAILING_STATUSES, Finding, Status
-from .tooling import recreate_private_build_directory
+from .tooling import private_build_directory
 
 if TYPE_CHECKING:
     from .local_signing import SigningSession
@@ -1002,6 +1003,7 @@ def validate_xcarchive(
     release: ReleaseVersion,
     symbols_policy: str,
     require_tools: bool = False,
+    cancellation=None,
 ) -> list[Finding]:
     """Validate a private archive snapshot; a signed candidate also needs pairing.
 
@@ -1009,17 +1011,21 @@ def validate_xcarchive(
     ``require_tools`` remains compatible with archive-only preflight callers;
     signature authenticity is checked on the final IPA, not inferred here.
     """
-    from .ios_artifacts import inspect_archive_symbols, snapshot_ios_artifacts
+    from .ios_artifacts import _require_symbols_policy, inspect_archive_symbols, snapshot_ios_artifacts
 
     try:
-        with snapshot_ios_artifacts({"ios-archive": archive}) as snapshot:
+        _require_symbols_policy(symbols_policy)
+        with snapshot_ios_artifacts({"ios-archive": archive}, cancellation=cancellation) as snapshot:
             symbols = inspect_archive_symbols(
                 snapshot.unpack("ios-archive"), expected_bundle_id=expected_bundle_id,
-                release=release, require_main=symbols_policy in {"retain", "required"},
+                release=release, symbols_policy=symbols_policy,
                 deadline=snapshot.deadline,
             )
             snapshot.assert_unchanged()
     except (ValidationError, OSError) as error:
+        fatal = fatal_lifetime_error(error, "archive resource cleanup is unconfirmed; end this invocation")
+        if fatal is not None:
+            raise fatal from None
         message = str(error) if isinstance(error, ValidationError) else "Archive required layout is missing or unreadable."
         return [Finding("ios.archive.structure", Status.FAIL, message, category="ios-artifact")]
     return [
@@ -1027,7 +1033,9 @@ def validate_xcarchive(
                 "Archived application identity and committed version match; IPA correspondence is a separate paired check.",
                 category="ios-artifact"),
         Finding("ios.archive.dsym", Status.PASS if symbols else Status.NOT_APPLICABLE,
-                "Every present retained dSYM slice matches an archived native identity; this is not complete nested symbol coverage."
+                ("Retained dSYM slices cover the complete archived native inventory."
+                 if symbols_policy in {"retain", "required"} else
+                 "Every present retained dSYM slice matches an archived native identity.")
                 if symbols else "No dSYMs retained under disabled symbol policy.", category="ios-artifact"),
     ]
 
@@ -1040,6 +1048,7 @@ def _run_checked(
     environment_overrides: dict[str, str] | None = None,
     signing_session: SigningSession | None = None,
     execution_source=None,
+    cancellation: DefaultCancellation | None = None,
 ) -> None:
     from .owned_process import run_owned
 
@@ -1047,21 +1056,29 @@ def _run_checked(
     environment.update(environment_overrides or {})
     if signing_session is None:
         result = run_owned(argv, cwd=root, environ=environment, capture=False, timeout=timeout,
+                           cancellation=cancellation,
                            execution_scope=None if execution_source is None else execution_source.new_scope())
     else:
+        if cancellation is not None and signing_session.cancellation is not cancellation:
+            raise ValidationError("iOS build cancellation differs from its signing owner")
         result = signing_session.run(argv, kind="build", cwd=root, environ=environment, capture=False, timeout=timeout)
     if result.returncode:
         raise ValidationError(f"command failed with exit {result.returncode}: {argv[0]}")
 
 
 def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: SigningSession | None = None,
-                  execution_source=None) -> dict[str, Path]:
+                  execution_source=None, cancellation: DefaultCancellation | None = None) -> dict[str, Path]:
     if sys.platform != "darwin":
         raise ValidationError("iOS archive/export requires a macOS host")
-    if signed:
-        if signing_session is None:
-            raise ValidationError("signed iOS builds require an active account signing session")
+    if signed and signing_session is None:
+        raise ValidationError("signed iOS builds require an active account signing session")
+    if signing_session is not None:
         signing_session.assert_owner()
+        if cancellation is not None and signing_session.cancellation is not cancellation:
+            raise ValidationError("iOS build cancellation differs from its signing owner")
+        # The supported signing_session-only call must borrow its ORIGINAL
+        # guard before any new private output or preparation command is used.
+        cancellation = signing_session.cancellation
     discovered = discover_project(config.root, include_git=False)
     container = selected_ios_container(config, discovered)
     scheme = selected_ios_scheme(config, discovered)
@@ -1073,7 +1090,7 @@ def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: Signi
     release = config.release_version()
     if prepare := ios.get("prepareCommand"):
         _run_checked(list(prepare), config.root, 10 * 60, signing_session=signing_session,
-                     execution_source=execution_source)
+                     execution_source=execution_source, cancellation=cancellation)
         discovered = discover_project(config.root, include_git=False)
         container = selected_ios_container(config, discovered)
         if not container:
@@ -1082,115 +1099,126 @@ def run_ios_build(config: ReleaseConfig, *, signed: bool, signing_session: Signi
     if not container_path.is_dir() or container_path.is_symlink():
         raise ValidationError("Configured Xcode project/workspace is missing or unsafe after preparation")
 
-    build_root = recreate_private_build_directory(config, "ios")
-    archive = build_root / "archive.xcarchive"
-    container_flag = "-workspace" if container[0] == "workspace" else "-project"
-    command = [
-        "xcodebuild",
-        container_flag,
-        str(container_path),
-        "-scheme",
-        scheme,
-        "-configuration",
-        ios.get("archiveConfiguration", "Release"),
-        "-destination",
-        "generic/platform=iOS",
-        "-archivePath",
-        str(archive),
-        "archive",
-        f"MARKETING_VERSION={release.name}",
-        f"CURRENT_PROJECT_VERSION={release.build}",
-    ]
-    if signed:
-        profile = os.environ.get("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER")
-        if not profile:
-            raise ValidationError("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER is required for signed export")
-        command.extend(
-            [
-                "MOBILE_RELEASE_IOS_CODE_SIGN_STYLE=Manual",
-                f"MOBILE_RELEASE_IOS_DEVELOPMENT_TEAM={ios.get('teamId', '')}",
-                f"MOBILE_RELEASE_IOS_PROVISIONING_PROFILE_SPECIFIER={profile}",
-                "MOBILE_RELEASE_IOS_CODE_SIGN_IDENTITY=Apple Distribution",
-            ]
-        )
-    else:
-        command.extend(["CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"])
-    build_environment = {
-        "MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS": "1",
-        "MOBILE_RELEASE_VERSION_NAME": release.name,
-        "MOBILE_RELEASE_BUILD_NUMBER": str(release.build),
-    }
-    _run_checked(
-        command,
-        config.root,
-        60 * 60,
-        environment_overrides=build_environment,
-        signing_session=signing_session,
-        execution_source=execution_source,
-    )
-    archive = config.project_path(str(archive))
-    _validate_generated_tree(archive, label="generated xcarchive")
-    result_paths: dict[str, Path] = {"ios-archive": archive}
-    dsym_source = archive / "dSYMs"
-    dsym_destination = build_root / "dsyms"
-    if dsym_source.is_dir():
-        dsym_source = config.project_path(str(dsym_source))
-        _validate_generated_tree(
-            dsym_source,
-            label="generated dSYMs",
-            maximum_files=20_000,
-            maximum_bytes=4 * 1024 * 1024 * 1024,
-        )
-        shutil.copytree(dsym_source, dsym_destination)
-        result_paths["ios-dsyms"] = dsym_destination
-    if not signed:
-        return result_paths
-
-    import plistlib
-
-    export_options = {
-        "method": "app-store-connect",
-        "destination": "export",
-        "signingStyle": "manual",
-        "teamID": ios.get("teamId"),
-        "signingCertificate": "Apple Distribution",
-        "provisioningProfiles": {ios.get("bundleId"): os.environ["MOBILE_RELEASE_IOS_PROFILE_SPECIFIER"]},
-        "stripSwiftSymbols": False,
-        "thinning": "<none>",
-        "uploadSymbols": False,
-    }
-    export_plist = build_root / "ExportOptions.plist"
-    with export_plist.open("wb") as handle:
-        plistlib.dump(export_options, handle, sort_keys=True)
-    export_dir = build_root / "export"
-    _run_checked(
-        [
+    with private_build_directory(config, "ios", cancellation=cancellation) as build_directory:
+        build_root = build_directory.path
+        cancellation = build_directory.cancellation
+        archive = build_root / "archive.xcarchive"
+        container_flag = "-workspace" if container[0] == "workspace" else "-project"
+        command = [
             "xcodebuild",
-            "-exportArchive",
+            container_flag,
+            str(container_path),
+            "-scheme",
+            scheme,
+            "-configuration",
+            ios.get("archiveConfiguration", "Release"),
+            "-destination",
+            "generic/platform=iOS",
             "-archivePath",
             str(archive),
-            "-exportPath",
-            str(export_dir),
-            "-exportOptionsPlist",
-            str(export_plist),
-        ],
-        config.root,
-        30 * 60,
-        environment_overrides=build_environment,
-        signing_session=signing_session,
-        execution_source=execution_source,
-    )
-    export_dir = config.project_path(str(export_dir))
-    _validate_generated_tree(export_dir, label="iOS export directory")
-    ipas = list(export_dir.glob("*.ipa"))
-    if len(ipas) != 1:
-        raise ValidationError(f"expected one exported IPA, found {len(ipas)}")
-    ipa_source = config.project_path(str(ipas[0]))
-    if ipa_source.is_symlink() or not ipa_source.is_file():
-        raise ValidationError("exported IPA must be a regular non-symlink file")
-    ipa = build_root / "app.ipa"
-    if ipa.is_symlink():
-        raise ValidationError("normalized IPA destination must not be a symlink")
-    shutil.copy2(ipa_source, ipa)
-    result_paths["ios-ipa"] = ipa
-    return result_paths
+            "archive",
+            f"MARKETING_VERSION={release.name}",
+            f"CURRENT_PROJECT_VERSION={release.build}",
+        ]
+        if signed:
+            profile = os.environ.get("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER")
+            if not profile:
+                raise ValidationError("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER is required for signed export")
+            command.extend(
+                [
+                    "MOBILE_RELEASE_IOS_CODE_SIGN_STYLE=Manual",
+                    f"MOBILE_RELEASE_IOS_DEVELOPMENT_TEAM={ios.get('teamId', '')}",
+                    f"MOBILE_RELEASE_IOS_PROVISIONING_PROFILE_SPECIFIER={profile}",
+                    "MOBILE_RELEASE_IOS_CODE_SIGN_IDENTITY=Apple Distribution",
+                ]
+            )
+        else:
+            command.extend(["CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO"])
+        build_environment = {
+            "MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS": "1",
+            "MOBILE_RELEASE_VERSION_NAME": release.name,
+            "MOBILE_RELEASE_BUILD_NUMBER": str(release.build),
+        }
+        _run_checked(
+            command,
+            config.root,
+            60 * 60,
+            environment_overrides=build_environment,
+            signing_session=signing_session,
+            execution_source=execution_source,
+            cancellation=cancellation,
+        )
+        build_directory.check()
+        archive = config.project_path(str(archive))
+        _validate_generated_tree(archive, label="generated xcarchive")
+        result_paths: dict[str, Path] = {"ios-archive": archive}
+        dsym_source = archive / "dSYMs"
+        dsym_destination = build_root / "dsyms"
+        if dsym_source.is_dir():
+            dsym_source = config.project_path(str(dsym_source))
+            _validate_generated_tree(
+                dsym_source,
+                label="generated dSYMs",
+                maximum_files=20_000,
+                maximum_bytes=4 * 1024 * 1024 * 1024,
+            )
+            build_directory.check()
+            shutil.copytree(dsym_source, dsym_destination)
+            build_directory.check()
+            result_paths["ios-dsyms"] = dsym_destination
+        if not signed:
+            return result_paths
+
+        import plistlib
+
+        export_options = {
+            "method": "app-store-connect",
+            "destination": "export",
+            "signingStyle": "manual",
+            "teamID": ios.get("teamId"),
+            "signingCertificate": "Apple Distribution",
+            "provisioningProfiles": {ios.get("bundleId"): os.environ["MOBILE_RELEASE_IOS_PROFILE_SPECIFIER"]},
+            "stripSwiftSymbols": False,
+            "thinning": "<none>",
+            "uploadSymbols": False,
+        }
+        export_plist = build_root / "ExportOptions.plist"
+        build_directory.check()
+        with export_plist.open("wb") as handle:
+            plistlib.dump(export_options, handle, sort_keys=True)
+        export_dir = build_root / "export"
+        _run_checked(
+            [
+                "xcodebuild",
+                "-exportArchive",
+                "-archivePath",
+                str(archive),
+                "-exportPath",
+                str(export_dir),
+                "-exportOptionsPlist",
+                str(export_plist),
+            ],
+            config.root,
+            30 * 60,
+            environment_overrides=build_environment,
+            signing_session=signing_session,
+            execution_source=execution_source,
+            cancellation=cancellation,
+        )
+        build_directory.check()
+        export_dir = config.project_path(str(export_dir))
+        _validate_generated_tree(export_dir, label="iOS export directory")
+        ipas = list(export_dir.glob("*.ipa"))
+        if len(ipas) != 1:
+            raise ValidationError(f"expected one exported IPA, found {len(ipas)}")
+        ipa_source = config.project_path(str(ipas[0]))
+        if ipa_source.is_symlink() or not ipa_source.is_file():
+            raise ValidationError("exported IPA must be a regular non-symlink file")
+        ipa = build_root / "app.ipa"
+        if ipa.is_symlink():
+            raise ValidationError("normalized IPA destination must not be a symlink")
+        build_directory.check()
+        shutil.copy2(ipa_source, ipa)
+        build_directory.check()
+        result_paths["ios-ipa"] = ipa
+        return result_paths

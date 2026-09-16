@@ -12,6 +12,7 @@ the @actions/attest 3.2 provenance emitted by the pinned attest action.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -26,11 +27,28 @@ import tempfile
 import threading
 import time
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
+from .build_inputs import (
+    _FD,
+    _app_private_directory,
+    _directory,
+    _direct_refusal,
+    _exact_reserved_names,
+    _fd_cleanup,
+    _file,
+    _private_file_writer,
+    _publish_private_file,
+    app_private_namespace,
+    app_private_role,
+)
+from .cancellation import CleanupScope, DefaultCancellation, cancellation_owner
+from ._profile_callers import fatal_cancellation_error
+from .owned_process import ProcessCleanupError
 from .errors import MobileReleaseError, ValidationError
 from .provenance import (
     WORKFLOW_PATHS,
@@ -141,11 +159,22 @@ def _read_json(path: Path, maximum: int = MAX_JSON) -> dict[str, Any]:
     return value
 
 
-def _write_json(path: Path, value: Mapping[str, Any]) -> None:
+def _write_json(path: Path, value: Mapping[str, Any], *, app_root: Path | None = None,
+                cancellation: DefaultCancellation | None = None) -> None:
     path = _safe_path(path)
+    if app_root is not None:
+        app_root = _safe_path(app_root)
+        _require(path != app_root / ".mobile-release", "application-private root cannot be a workflow JSON file")
+    data = canonical_json_bytes(value) + b"\n"
+    with _app_private_directory(path.parent, app_root=app_root, cancellation=cancellation) as owner:
+        if owner is not None:
+            _publish_private_file(owner, path.name, iter((data,)))
+            owner.check()
+            return
+    # Standalone runner resolutions and explicitly nonprivate packages retain
+    # their original generic destination contract; spelling is not authority.
     _require(not path.exists(), "immutable workflow output already exists")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    data = canonical_json_bytes(value) + b"\n"
     descriptor, name = tempfile.mkstemp(prefix=".mrk-", dir=path.parent)
     try:
         with os.fdopen(descriptor, "wb") as output:
@@ -159,8 +188,16 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
         os.unlink(name)
 
 
-def _new_directory(path: Path) -> Path:
+def _new_directory(path: Path, *, app_root: Path | None = None,
+                   cancellation: DefaultCancellation | None = None) -> Path:
+    """Create a destination, not enduring write authority for a returned Path."""
     path = _safe_path(path)
+    app_root = _safe_path(app_root) if app_root is not None else None
+    with _app_private_directory(path, app_root=app_root, cancellation=cancellation,
+                                exclusive=True) as owner:
+        if owner is not None:
+            owner.check()
+            return owner.path
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         path.mkdir(mode=0o700)
@@ -252,101 +289,634 @@ def _inventory_shape(value: object, *, roles: bool) -> None:
             _require(isinstance(record["role"], str), "workflow inventory role is invalid")
 
 
-def _copy_tree(source: Path, destination: Path) -> None:
-    files = _files(source, maximum=MAX_HANDOFF)
-    destination = _safe_path(destination)
-    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for name in sorted(files):
-        copy_immutable_file(files[name], destination / name)
+def _copy_tree(source: Path, destination: Path, *, app_root: Path | None = None,
+               cancellation: DefaultCancellation | None = None) -> None:
+    source, destination = _safe_path(source), _safe_path(destination)
+    app_root = _safe_path(app_root) if app_root is not None else None
+    with _app_private_directory(source, app_root=app_root, cancellation=cancellation,
+                                create=False) as original:
+        guard = original.cancellation if original is not None else cancellation
+        with _app_private_directory(destination, app_root=app_root, cancellation=guard) as owner:
+            guard = owner.cancellation if owner is not None else guard
+            files = _files(source, maximum=MAX_HANDOFF)
+            if owner is None:
+                destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+            for name in sorted(files):
+                if original is not None:
+                    original.check()
+                if owner is not None:
+                    owner.check()
+                with _app_private_directory(files[name].parent, app_root=app_root,
+                                            cancellation=guard, create=False) as entry:
+                    copy_immutable_file(files[name], destination / name, app_root=app_root,
+                                        cancellation=guard)
+                    if entry is not None:
+                        entry.check()
+            if original is not None:
+                original.check()
+            if owner is not None:
+                owner.check()
+
+
+def prepare_app_private(app_root: Path, *, role: str = "empty-root",
+                        cancellation: DefaultCancellation | None = None) -> None:
+    """Point-in-time setup only; subsequent producers acquire their own custody."""
+    _require(role == "empty-root", "workflow setup only permits the fixed empty application root")
+    with app_private_role(_safe_path(app_root), role=role, cancellation=cancellation) as owner:
+        owner.require_empty()
+        owner.check()
+
+
+def write_deferred_report(app_root: Path, platform: str, *,
+                          cancellation: DefaultCancellation | None = None) -> None:
+    _require(platform in PLATFORMS, "invalid deferred-report platform")
+    value = {
+        "schemaVersion": 1,
+        "platform": platform,
+        "status": "deferred",
+        "reason": "source.projectReadTokenRequired is true",
+        "nextValidation": "Protected candidate preflight or a local preflight with credentials",
+    }
+    with app_private_role(_safe_path(app_root), role="reports", cancellation=cancellation) as owner:
+        _publish_private_file(owner, f"build-validation-deferred-{platform}.json",
+                              iter((canonical_json_bytes(value) + b"\n",)), replace=True)
+        owner.check()
+
+
+@contextmanager
+def _handoff_source(parent: int, name: str, owner: Any, *, directory: bool = False) -> Iterator[int]:
+    """Borrow one original no-follow input FD, under the live fixed-role owner."""
+    owner.cancellation.check()
+    owner.check()
+    observed = os.stat(name, dir_fd=parent, follow_symlinks=False)
+
+    def identity(value: os.stat_result) -> object:
+        if directory:
+            return _directory(value), value.st_mtime_ns, value.st_ctime_ns, value.st_nlink
+        return _file(value)
+
+    binding = identity(observed)
+    _require(observed.st_dev == os.fstat(parent).st_dev, "handoff input changed application filesystem")
+    if not directory:
+        _require(observed.st_size <= MAX_FILE, "handoff input exceeds its file size limit")
+    slot = _FD(owner.cancellation)
+    with _fd_cleanup(slot):
+        number = slot.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
+                           (os.O_DIRECTORY if directory else 0), dir_fd=parent)
+        _require(identity(os.fstat(number)) == binding, "handoff input changed during acquisition")
+        yield number
+        _require(identity(os.fstat(number)) == binding and
+                 identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == binding,
+                 "handoff input changed during normalization")
+        owner.check()
+        owner.cancellation.check()
+
+
+def _handoff_blocks(number: int, owner: Any, deadline: Any) -> Iterator[bytes]:
+    size, copied = os.fstat(number).st_size, 0
+    while True:
+        owner.cancellation.check()
+        owner.check()
+        deadline.check()
+        block = os.read(number, 1024 * 1024)
+        if not block:
+            break
+        copied += len(block)
+        _require(copied <= size, "handoff input grew during normalization")
+        yield block
+    _require(copied == size, "handoff input was truncated during normalization")
+
+
+class _HandoffZipSink:
+    """Nonseekable ZIP adapter, never an owner/closer of the borrowed write FD."""
+
+    def __init__(self, number: int, owner: Any) -> None:
+        self.number, self.owner, self.position = number, owner, 0
+
+    def tell(self) -> int:
+        return self.position
+
+    def write(self, data: bytes) -> int:
+        self.owner.cancellation.check()
+        self.owner.check()
+        _require(self.position + len(data) <= MAX_FILE, "normalized handoff file exceeds its size limit")
+        remaining = memoryview(data)
+        while remaining:
+            self.owner.cancellation.check()
+            written = os.write(self.number, remaining)
+            _require(written > 0, "normalized handoff file could not be written")
+            remaining = remaining[written:]
+        self.position += len(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self.owner.check()  # The original private-file writer alone owns fsync/close.
+
+
+def _copy_handoff_file(source: Any, name: str, destination: Any, output_name: str,
+                       deadline: Any) -> None:
+    with _private_file_writer(destination, output_name) as output:
+        with _handoff_source(source.fd, name, source) as original:
+            sink = _HandoffZipSink(output, destination)
+            for block in _handoff_blocks(original, source, deadline):
+                sink.write(block)
+
+
+def _zip_handoff_tree(source: Any, name: str, destination: Any, output_name: str,
+                      deadline: Any) -> None:
+    # Reuse the artifact inspector's actual path, entry and expansion bounds.
+    # Nested payload directories need not be0700; the fixed build parent does.
+    from .ios_artifacts import MAX_FILE_BYTES, _Budget, _Paths
+
+    paths, budget = _Paths(), _Budget(deadline)
+
+    def member(name: str, value: os.stat_result, directory: bool) -> zipfile.ZipInfo:
+        paths.add(name, directory)
+        info = zipfile.ZipInfo(name + ("/" if directory else ""))
+        info.create_system = 3
+        info.external_attr = (stat.S_IFDIR if directory else stat.S_IFREG) << 16
+        info.external_attr |= (stat.S_IMODE(value.st_mode) & 0o777) << 16
+        if directory:
+            info.external_attr |= 0x10
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.file_size = 0 if directory else value.st_size
+        return info
+
+    def walk(number: int, relative: str, archive: zipfile.ZipFile) -> None:
+        budget.tick()
+        archive.writestr(member(relative, os.fstat(number), True), b"")
+        names = []
+        with os.scandir(number) as entries:
+            for entry in entries:
+                budget.tick(entry=True)
+                names.append(entry.name)
+        for child in sorted(names):
+            value = os.stat(child, dir_fd=number, follow_symlinks=False)
+            is_directory = stat.S_ISDIR(value.st_mode)
+            _require(is_directory or stat.S_ISREG(value.st_mode), "handoff archive contains a symbolic link or special file")
+            relative_name = relative + "/" + child
+            paths.add(relative_name, is_directory)
+            with _handoff_source(number, child, source, directory=is_directory) as original:
+                if is_directory:
+                    walk(original, relative_name, archive)
+                else:
+                    current = os.fstat(original)
+                    _require(current.st_size <= MAX_FILE_BYTES, "handoff archive member exceeds its size limit")
+                    with archive.open(member(relative_name, current, False), "w", force_zip64=True) as target:
+                        for block in _handoff_blocks(original, source, deadline):
+                            budget.tick(len(block))
+                            target.write(block)
+        budget.tick()
+
+    with _private_file_writer(destination, output_name) as output:
+        with _handoff_source(source.fd, name, source, directory=True) as original:
+            with zipfile.ZipFile(_HandoffZipSink(output, destination), "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                # Equivalent keepParent layout, with no resource fork, xattr,
+                # quarantine metadata, temporary pathname or external command.
+                walk(original, name, archive)
+
+
+def normalize_handoff(app_root: Path, platform: str, *,
+                       cancellation: DefaultCancellation | None = None) -> None:
+    """Normalize fixed signed outputs and checksum them within live custody."""
+    from .inspection import InspectionDeadline
+
+    _require(platform in PLATFORMS, "invalid normalized-handoff platform")
+    app_root = _safe_path(app_root)
+    private = app_root / ".mobile-release"
+    deadline = InspectionDeadline()
+    with _app_private_directory(private / "build" / platform, app_root=app_root,
+                                cancellation=cancellation, create=False) as source:
+        assert source is not None
+        with _app_private_directory(private / "reports", app_root=app_root,
+                                    cancellation=source.cancellation, create=False) as reports:
+            assert reports is not None
+            primary = "app-release.aab" if platform == "android" else "app.ipa"
+            report = f"signing-{platform}.json"
+            build_names = _exact_reserved_names(source.fd, {primary, "mapping.txt", "native-symbols.zip"}
+                                                if platform == "android" else {primary, "archive.xcarchive", "dsyms"})
+            _exact_reserved_names(reports.fd, {report})
+            # Refuse missing/unsafe required inputs before reserving the exclusive
+            # handoff parent. No previously created handoff may be adopted.
+            with _handoff_source(source.fd, primary, source), _handoff_source(reports.fd, report, reports):
+                pass
+            optional = []
+            for name, directory in (("mapping.txt", False), ("native-symbols.zip", False)) if platform == "android" else (("dsyms", True),):
+                if name in build_names:
+                    with _handoff_source(source.fd, name, source, directory=directory):
+                        pass
+                    optional.append(name)
+            if platform == "ios":
+                with _handoff_source(source.fd, "archive.xcarchive", source, directory=True):
+                    pass
+            with app_private_role(app_root, role=f"{platform}-handoff",
+                                  cancellation=source.cancellation) as owner:
+                _copy_handoff_file(source, primary, owner, primary, deadline)
+                files = [primary]
+                if platform == "ios":
+                    _zip_handoff_tree(source, "archive.xcarchive", owner, "archive.zip", deadline)
+                    files.append("archive.zip")
+                _copy_handoff_file(reports, report, owner, "validation-report.json", deadline)
+                files.append("validation-report.json")
+                for name in optional:
+                    if name == "dsyms":
+                        _zip_handoff_tree(source, name, owner, "dsyms.zip", deadline)
+                        files.append("dsyms.zip")
+                    else:
+                        _copy_handoff_file(source, name, owner, name, deadline)
+                        files.append(name)
+                checksums = []
+                for name in files:
+                    with _handoff_source(owner.fd, name, owner) as original:
+                        _require(stat.S_IMODE(os.fstat(original).st_mode) == 0o600,
+                                 "normalized handoff file requires private0600 publication")
+                        digest = hashlib.sha256()
+                        for block in _handoff_blocks(original, owner, deadline):
+                            digest.update(block)
+                        checksums.append(f"{digest.hexdigest()}  {name}\n")
+                _publish_private_file(owner, "SHA256SUMS", iter(("".join(checksums).encode("ascii"),)))
+                _validate_handoff(owner.path, platform)
+                source.check()
+                reports.check()
+                owner.check()
+
+
+# Strong, bounded original records suppress Popen's delayed destructor reaping
+# when a wait/close return is UNKNOWN. This registry grants no numeric authority.
+_TRANSPORT_OWNERS: dict[int, _TransportProcess] = {}
+_TRANSPORT_OWNER_LIMIT = 16
+_TRANSPORT_CLEANUP_SECONDS = 5.0
+_TRANSPORT_KILLPG = os.killpg
+
+
+def _transport_no_cleanup() -> None:
+    pass
+
+
+class _TransportProcess:
+    """One gh spawn and its fixed local cleanup, sharing the caller's guard."""
+
+    def __init__(self, guard: DefaultCancellation) -> None:
+        self.guard = guard
+        self.output = _FD(guard)
+        self.process = self.stdout = self.selector = None
+        self.child_pid: int | None = None
+        self.spawn_state = "NEW"
+        self.wait_state = "NEW"
+        self.signal_state = "NEW"
+        self.stdout_state = self.selector_state = "NEW"
+        self.returncode: int | None = None
+        self.registration: int | None = None
+        self.cleanup_entered = self.unsettled = self.fork_relinquished = False
+        self.first_cleanup_error: BaseException | None = None
+        self.diagnostic_failed = False
+        # No post-claim list/callback construction before independent cleanup.
+        self.stop_callback = self._stop_original
+        self.wait_callback = self._wait_cleanup
+        self.selector_callback = self._close_selector
+        self.stdout_callback = self._close_stdout
+        self.output_callback = self.output.close
+
+    def reserve(self) -> None:
+        self.guard.check()
+        _require(not any(owner.unsettled for owner in tuple(_TRANSPORT_OWNERS.values())),
+                 "GitHub transport ownership is unresolved; end this process before retrying")
+        for index in range(_TRANSPORT_OWNER_LIMIT):
+            self.registration = index
+            # A fixed-key atomic insertion bounds concurrent healthy calls too.
+            # If its return is interrupted, cleanup can still see this original.
+            if _TRANSPORT_OWNERS.setdefault(index, self) is self:
+                return
+        self.registration = None
+        raise WorkflowError("GitHub transport ownership capacity is exhausted")
+
+    def _remember(self, error: BaseException) -> None:
+        if self.first_cleanup_error is None:
+            self.first_cleanup_error = error
+        self.unsettled = True
+        try:
+            self.guard._abort(error)
+        except BaseException:
+            self.diagnostic_failed = True
+
+    def _attempt(self, action) -> None:
+        try:
+            action()
+        except BaseException as error:
+            self._remember(error)
+
+    def spawn(self, arguments: Sequence[str], env: Mapping[str, str]) -> None:
+        self.guard.check()
+        with self.guard.deferred(check_on_exit=False):
+            self.spawn_state = "ATTEMPTED"
+            try:
+                self.process = subprocess.Popen(list(arguments), stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, start_new_session=True)
+                self.child_pid = self.process.pid
+                self.stdout = self.process.stdout
+                self.stdout_state = "OPEN" if self.stdout is not None else "UNKNOWN"
+                _require(type(self.child_pid) is int and self.child_pid > 0 and self.stdout is not None,
+                         "GitHub child handle publication is incomplete")
+                self.spawn_state = "PUBLISHED"
+                self.wait_state = "OPEN"
+                self.stdout_state = "OPEN"
+            except BaseException as error:
+                self.spawn_state = "UNKNOWN"
+                self._remember(error)
+                raise
+        self.guard.check()  # The original process/pipe are already in cleanup custody.
+
+    def open_selector(self) -> None:
+        self.guard.check()
+        with self.guard.deferred(check_on_exit=False):
+            self.selector_state = "ATTEMPTED"
+            try:
+                self.selector = selectors.DefaultSelector()
+                self.selector_state = "OPEN"
+            except BaseException as error:
+                self.selector_state = "UNKNOWN"
+                self._remember(error)
+                raise
+        self.guard.check()
+        self.selector.register(self.stdout, selectors.EVENT_READ)
+
+    def wait_once(self) -> int | None:
+        """Only a genuine (0,0) wait receipt preserves the original no-reap route."""
+        self.guard._check_owner()
+        _require(self.spawn_state == "PUBLISHED" and self.wait_state == "OPEN",
+                 "GitHub original child wait cannot be repeated or reconstructed")
+        with self.guard.deferred(check_on_exit=False):
+            # Disable signalling BEFORE the destructive syscall. Neither an
+            # exception nor process.returncode is permission to restore it.
+            self.wait_state = "ATTEMPTED"
+            try:
+                _require(self.process.pid == self.child_pid and self.process.returncode is None,
+                         "GitHub child was reaped or changed outside its original transport")
+                returned = os.waitpid(self.child_pid, os.WNOHANG)
+                _require(type(returned) is tuple and len(returned) == 2 and
+                         all(type(value) is int for value in returned),
+                         "GitHub child wait receipt is unavailable")
+                pid, status = returned
+                if pid == 0:
+                    _require(status == 0, "GitHub idle child wait receipt is invalid")
+                    self.wait_state = "OPEN"  # Positive documented no-effect, not a retry after UNKNOWN.
+                    return None
+                _require(pid == self.child_pid and (os.WIFEXITED(status) or os.WIFSIGNALED(status)),
+                         "GitHub child wait receipt is not an original terminal result")
+                self.wait_state = "CONSUMED"
+                code = os.waitstatus_to_exitcode(status)
+                _require(type(code) is int and -signal.NSIG < code <= 255,
+                         "GitHub child exit status is invalid")
+                self.process.returncode = self.returncode = code
+                self.wait_state = "REAPED"
+                return code
+            except BaseException as error:
+                self.wait_state = "UNKNOWN"
+                self._remember(error)
+                raise
+
+    def wait(self, deadline: float, *, cleanup: bool = False) -> int:
+        while True:
+            if not cleanup:
+                self.guard.check()
+            _require(time.monotonic() < deadline,
+                     "GitHub cleanup wait timed out" if cleanup else
+                     "GitHub verification timed out; retained evidence was not replaced")
+            code = self.wait_once()
+            if not cleanup:
+                self.guard.check()
+            if code is not None:
+                return code
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    def _stop_original(self) -> None:
+        if self.spawn_state == "NEW" or self.wait_state == "REAPED":
+            return
+        _require(self.spawn_state == "PUBLISHED" and self.wait_state == "OPEN" and
+                 self.signal_state == "NEW", "GitHub original group signal is unavailable")
+        if self.process.pid != self.child_pid or self.process.returncode is not None:
+            self.wait_state = "UNKNOWN"
+            raise WorkflowError("GitHub child was reaped or changed outside its original transport")
+        operation = os.killpg
+        self.signal_state = "ATTEMPTED"  # One original route; never poll or signal after a reap.
+        try:
+            returned = operation(self.child_pid, signal.SIGKILL)
+            _require(returned is None, "GitHub group signal receipt is unavailable")
+            self.signal_state = "RETURNED"
+        except BaseException as error:
+            if _direct_refusal(error, operation, _TRANSPORT_KILLPG,
+                               _TransportProcess._stop_original.__code__, {errno.ESRCH}):
+                self.signal_state = "NO_EFFECT"
+            else:
+                self.signal_state = "UNKNOWN"
+                raise
+
+    def _wait_cleanup(self) -> None:
+        if self.spawn_state == "NEW" or self.wait_state == "REAPED":
+            return
+        _require(self.spawn_state == "PUBLISHED" and self.wait_state == "OPEN",
+                 "GitHub original child wait is unresolved")
+        self.wait(time.monotonic() + _TRANSPORT_CLEANUP_SECONDS, cleanup=True)
+
+    def _close_selector(self) -> None:
+        if self.selector_state == "NEW":
+            self.selector_state = "CLOSED"
+            return
+        _require(self.selector_state == "OPEN" and self.selector is not None,
+                 "GitHub selector close is unresolved")
+        self.selector_state = "ATTEMPTED"
+        try:
+            self.selector.close()
+            self.selector_state = "CLOSED"
+        except BaseException:
+            self.selector_state = "UNKNOWN"
+            raise
+
+    def _close_stdout(self) -> None:
+        if self.stdout_state == "NEW" and self.spawn_state == "NEW":
+            self.stdout_state = "CLOSED"
+            return
+        _require(self.stdout_state == "OPEN" and self.stdout is not None,
+                 "GitHub stdout close is unresolved")
+        self.stdout_state = "ATTEMPTED"
+        try:
+            self.stdout.close()
+            self.stdout_state = "CLOSED"
+        except BaseException:
+            self.stdout_state = "UNKNOWN"
+            raise
+
+    def settled(self) -> bool:
+        return ((self.spawn_state == "NEW" or self.spawn_state == "PUBLISHED" and self.wait_state == "REAPED")
+                and self.signal_state in {"NEW", "RETURNED", "NO_EFFECT"}
+                and self.stdout_state == self.selector_state == "CLOSED"
+                and self.output.close_state == "CLOSED")
+
+    def cleanup(self) -> None:
+        self.guard._check_owner()
+        if self.cleanup_entered:
+            return
+        self.cleanup_entered = True
+        try:
+            try:
+                self._attempt(self.stop_callback)
+            finally:
+                self._attempt(self.wait_callback)
+        finally:
+            try:
+                self._attempt(self.selector_callback)
+            finally:
+                try:
+                    self._attempt(self.stdout_callback)
+                finally:
+                    self._attempt(self.output_callback)
+        if not self.settled() and self.first_cleanup_error is None:
+            self._remember(ProcessCleanupError("GitHub original child or descriptors did not settle"))
+        if self.first_cleanup_error is not None:
+            raise self.first_cleanup_error
+        _require(not self.diagnostic_failed, "GitHub transport cleanup diagnostics are unavailable")
+
+    def release_settled(self) -> None:
+        self.guard._check_owner()
+        if not self.settled():
+            self.unsettled = True
+            return  # Strong original Popen custody prevents a GC/active-list wait retry.
+        with self.guard.deferred(check_on_exit=False):
+            if self.registration is not None and _TRANSPORT_OWNERS.get(self.registration) is self:
+                del _TRANSPORT_OWNERS[self.registration]
+            self.registration = None
+            self.stop_callback = self.wait_callback = self.selector_callback = None
+            self.stdout_callback = self.output_callback = None
+
+    def fork_close(self) -> None:
+        # No parent wait/signal route, and no second close after an unknown
+        # child-copy cleanup. Retain Popen; never invoke its finalizer as cleanup.
+        if self.fork_relinquished:
+            return
+        self.fork_relinquished = self.unsettled = True
+        first = None
+        for original in (self.selector, self.stdout):
+            if original is not None:
+                try:
+                    original.close()
+                except BaseException as error:
+                    if first is None:
+                        first = error
+        try:
+            self.output.after_fork_child()
+        except BaseException as error:
+            if first is None:
+                first = error
+        if first is not None:
+            raise first
+
+
+class _TransportScope(CleanupScope):
+    """B1-R2-style cleanup-entry rescue, before the outer handler restoration."""
+
+    def __init__(self, owner: _TransportProcess) -> None:
+        self.owner = owner
+        super().__init__(owner.guard, owner.cleanup, owns_cancellation=False,
+                         fork_cleanup=owner.fork_close, first_primary=True)
+
+    def _exit_owned(self, exception_type, error, traceback) -> bool:
+        try:
+            try:
+                if not self.claimed:
+                    self._first_error = error
+                result = super()._exit_owned(exception_type, error, traceback)
+            finally:
+                # The base __exit__ frame still defers signals when entering
+                # deferred() failed AFTER scope.claimed but BEFORE cleanup.
+                if not self.owner.cleanup_entered:
+                    try:
+                        self.cleanup()
+                    except BaseException as cleanup_error:
+                        self._record_failure(cleanup_error)
+        except BaseException as late_error:
+            primary = self._first_error if self._first_error is not None else error
+            raise (primary if primary is not None else late_error) from None
+        if self._first_error is not None and self._first_error is not error:
+            raise self._first_error from None
+        return result
 
 
 class Transport:
-    """The only external-command boundary. Output and elapsed time are bounded."""
+    """The only gh boundary: bounded bytes/time, original child and guard custody."""
 
-    def run(self, arguments: Sequence[str], *, maximum: int = MAX_JSON, timeout: int = 120, output: Path | None = None) -> bytes:
+    def run(self, arguments: Sequence[str], *, maximum: int = MAX_JSON, timeout: int = 120,
+            output: Path | None = None, cancellation: DefaultCancellation | None = None) -> bytes:
         _require(arguments and arguments[0] == "gh", "workflow transport only permits the GitHub CLI")
         env = {name: os.environ[name] for name in ("PATH", "HOME", "GH_TOKEN", "GH_CONFIG_DIR", "XDG_CONFIG_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR", "SYSTEMROOT") if os.environ.get(name)}
         env.update({"GH_HOST": "github.com", "GH_PROMPT_DISABLED": "1", "GH_PAGER": "cat", "GH_NO_UPDATE_NOTIFIER": "1", "GH_NO_EXTENSION_UPDATE_NOTIFIER": "1", "NO_COLOR": "1"})
-        handle = None
-        process = None
-        result = bytearray()
-        total = 0
+        guard, owns = cancellation_owner(cancellation, ProcessCleanupError,
+                                         "GitHub transport cancellation ownership did not settle")
+        owner = _TransportProcess(guard)
+        scope = _TransportScope(owner)
+        restoration = CleanupScope(guard, _transport_no_cleanup, owns_cancellation=owns, first_primary=True)
+        result, total = bytearray(), 0
         deadline = time.monotonic() + timeout
-        succeeded = False
-        cancelled = False
-        cleaning_up = False
-        previous_handlers: dict[int, Any] = {}
-
-        def interrupt(signum: int, frame: Any) -> None:
-            nonlocal cancelled
-            cancelled = True
-            # Do not interrupt Popen before its process handle is assigned: a
-            # child in a new session would otherwise escape the finally block.
-            # The pending interruption is raised immediately after spawning.
-            if process is not None and not cleaning_up:
-                raise KeyboardInterrupt
-
-        # Only a CLI's default main-thread handlers are ours to translate.
-        # Respect a library host's custom/ignored handlers and worker threads,
-        # and restore the originals even if spawning or cleanup fails.
-        if threading.current_thread() is threading.main_thread():
-            for signum, default in ((signal.SIGTERM, signal.SIG_DFL), (signal.SIGINT, signal.default_int_handler)):
-                previous = signal.getsignal(signum)
-                if previous == default:
-                    previous_handlers[signum] = previous
-                    signal.signal(signum, interrupt)
         try:
-            if output is not None:
-                descriptor = os.open(_safe_path(output), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                handle = os.fdopen(descriptor, "wb")
-            if cancelled:
-                raise KeyboardInterrupt
-            process = subprocess.Popen(list(arguments), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, start_new_session=True)
-            if cancelled:
-                raise KeyboardInterrupt
-            assert process.stdout is not None
-            with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout, selectors.EVENT_READ)
-                while selector.get_map():
-                    _require(time.monotonic() < deadline, "GitHub verification timed out; retained evidence was not replaced")
-                    for key, _ in selector.select(min(0.25, max(0.0, deadline - time.monotonic()))):
-                        data = os.read(key.fd, 64 * 1024)
-                        if not data:
-                            selector.unregister(key.fileobj)
-                            continue
-                        total += len(data)
-                        _require(total <= maximum, "GitHub response exceeded its size limit")
-                        if handle:
-                            handle.write(data)
-                        else:
-                            result.extend(data)
-            _require(process.wait(timeout=max(0.01, deadline - time.monotonic())) == 0, "GitHub retrieval or attestation verification failed; no fallback is permitted")
-            if handle:
-                handle.flush()
-                os.fsync(handle.fileno())
-            succeeded = True
-            return bytes(result)
-        except (OSError, subprocess.SubprocessError):
-            raise WorkflowError("GitHub command could not complete; verify gh availability and read permissions") from None
-        finally:
-            cleaning_up = True
             try:
-                if process is not None:
-                    if not succeeded or process.poll() is None:
+                with restoration:
+                    try:
+                        with scope:
+                            if owns:
+                                guard.install()
+                                guard.activate()
+                            owner.reserve()  # Before descriptor acquisition or Popen.
+                            if output is not None:
+                                owner.output.open(_safe_path(output), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                            owner.spawn(arguments, env)
+                            owner.open_selector()
+                            while owner.selector.get_map():
+                                guard.check()
+                                _require(time.monotonic() < deadline, "GitHub verification timed out; retained evidence was not replaced")
+                                for key, _ in owner.selector.select(min(0.25, max(0.0, deadline - time.monotonic()))):
+                                    guard.check()
+                                    data = os.read(key.fd, 64 * 1024)
+                                    if not data:
+                                        owner.selector.unregister(key.fileobj)
+                                        continue
+                                    total += len(data)
+                                    _require(total <= maximum, "GitHub response exceeded its size limit")
+                                    if output is None:
+                                        result.extend(data)
+                                    else:
+                                        remaining = memoryview(data)
+                                        while remaining:
+                                            guard.check()
+                                            written = os.write(owner.output.number, remaining)
+                                            _require(written > 0, "GitHub download could not be written")
+                                            remaining = remaining[written:]
+                            _require(owner.wait(deadline) == 0, "GitHub retrieval or attestation verification failed; no fallback is permitted")
+                            if output is not None:
+                                os.fsync(owner.output.number)
+                            guard.check()
+                    finally:
                         try:
-                            os.killpg(process.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        process.wait()
-                    if process.stdout is not None:
-                        process.stdout.close()
-                if handle:
-                    handle.close()
+                            scope.__exit__(*sys.exc_info())
+                        finally:
+                            try:
+                                owner.release_settled()
+                            except BaseException as release_error:
+                                try:
+                                    scope._record_failure(release_error)
+                                finally:
+                                    raise (scope._first_error if scope._first_error is not None else release_error) from None
             finally:
-                for signum, previous in previous_handlers.items():
-                    signal.signal(signum, previous)
-            if cancelled:
-                raise KeyboardInterrupt
+                restoration.__exit__(*sys.exc_info())
+            guard.check()  # Borrowed cleanup does not restore/check its parent.
+            _require(owner.settled(), "GitHub transport cannot return with unresolved original resources")
+            return bytes(result)
+        except BaseException as error:
+            fatal = fatal_cancellation_error(error, guard,
+                                             "GitHub transport cleanup is unconfirmed; end this process before retrying")
+            if fatal is not None:
+                raise fatal from None
+            if isinstance(error, (OSError, subprocess.SubprocessError)):
+                raise WorkflowError("GitHub command could not complete; verify gh availability and read permissions") from None
+            raise
 
 
 @dataclass(frozen=True)
@@ -375,19 +945,38 @@ class Context:
 
 
 class GitHub:
-    def __init__(self, context: Context, transport: Transport | None = None):
+    def __init__(self, context: Context, transport: Transport | None = None, *,
+                 cancellation: DefaultCancellation | None = None):
         self.context = context
         self.transport = transport or Transport()
+        self._cancellation = cancellation
         self._attempts: dict[tuple[str, int], dict[str, Any]] = {}
         self._artifacts: dict[str, list[dict[str, Any]]] = {}
         self._trees: dict[str, str] = {}
         self._comparisons: dict[tuple[str, str], dict[str, Any]] = {}
 
+    @property
+    def cancellation(self) -> DefaultCancellation | None:
+        return self._cancellation
+
+    def with_cancellation(self, cancellation: DefaultCancellation) -> GitHub:
+        """A new scoped view; never overwrite/restore another client's binding."""
+        _require(self.cancellation is None or self.cancellation is cancellation,
+                 "GitHub client is bound to a different cancellation owner")
+        guard, owns = cancellation_owner(cancellation, ProcessCleanupError,
+                                         "GitHub cancellation owner cannot be borrowed")
+        _require(not owns and guard is cancellation, "GitHub needs the original live cancellation owner")
+        guard.check()
+        view = GitHub(self.context, self.transport, cancellation=guard)
+        view._attempts, view._artifacts, view._trees, view._comparisons = (
+            self._attempts, self._artifacts, self._trees, self._comparisons)
+        return view
+
     def json(self, endpoint: str) -> Any:
         prefix = f"repos/{self.context.repository['fullName']}/"
         compare = bool(re.fullmatch(re.escape(prefix) + r"compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}", endpoint))
         _require(endpoint.startswith(prefix) and (".." not in endpoint or compare) and "#" not in endpoint and "\\" not in endpoint, "GitHub endpoint is outside the application repository")
-        data = self.transport.run(["gh", "api", "--hostname", "github.com", "--method", "GET", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28", endpoint])
+        data = self.transport.run(["gh", "api", "--hostname", "github.com", "--method", "GET", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28", endpoint], cancellation=self.cancellation)
         try:
             return json.loads(data, object_pairs_hook=_reject_duplicate_pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
         except (ValueError, UnicodeError, RecursionError):
@@ -529,7 +1118,7 @@ class GitHub:
         destination = _new_directory(destination)
         with tempfile.TemporaryDirectory(prefix=".mrk-zip-", dir=destination.parent) as temporary:
             archive = Path(temporary) / "payload.zip"
-            self.transport.run(["gh", "api", "--hostname", "github.com", "--method", "GET", self._path(f"actions/artifacts/{artifact['id']}/zip")], output=archive, maximum=limit, timeout=900 if handoff else 120)
+            self.transport.run(["gh", "api", "--hostname", "github.com", "--method", "GET", self._path(f"actions/artifacts/{artifact['id']}/zip")], output=archive, maximum=limit, timeout=900 if handoff else 120, cancellation=self.cancellation)
             _require(archive.stat().st_size == artifact["size_in_bytes"] and "sha256:" + sha256_file(archive) == artifact["digest"], "downloaded artifact differs from its immutable service receipt")
             _extract_zip(archive, destination, limit)
         return destination
@@ -538,7 +1127,7 @@ class GitHub:
         authority = proof["producer"]
         repo = self.context.repository["fullName"]
         reusable = f"{authority['reusableRepository']}/{authority['reusablePath']}"
-        result = self.transport.run(["gh", "attestation", "verify", str(path), "--hostname", "github.com", "--repo", repo, "--signer-workflow", reusable, "--signer-digest", authority["reusableCommit"], "--source-digest", authority["headSha"], "--source-ref", authority["ref"], "--deny-self-hosted-runners", "--predicate-type", "https://slsa.dev/provenance/v1", "--format", "json", "--limit", "100"])
+        result = self.transport.run(["gh", "attestation", "verify", str(path), "--hostname", "github.com", "--repo", repo, "--signer-workflow", reusable, "--signer-digest", authority["reusableCommit"], "--source-digest", authority["headSha"], "--source-ref", authority["ref"], "--deny-self-hosted-runners", "--predicate-type", "https://slsa.dev/provenance/v1", "--format", "json", "--limit", "100"], cancellation=self.cancellation)
         try:
             values = json.loads(result, object_pairs_hook=_reject_duplicate_pairs)
         except (ValueError, UnicodeError, RecursionError):
@@ -699,53 +1288,75 @@ def _validate_zip_directory(archive: Path) -> int:
         return count
 
 
-def _extract_zip(archive: Path, destination: Path, maximum: int) -> None:
-    try:
-        count = _validate_zip_directory(archive)
-        with zipfile.ZipFile(archive) as stream:
-            members = stream.infolist()
-            _require(len(members) == count, "artifact ZIP member count differs from its bounded directory")
-            seen: set[str] = set()
-            spellings: dict[str, str] = {}
-            regular: set[str] = set()
-            total = 0
-            deadline = time.monotonic() + (900 if maximum > MAX_EVIDENCE else 120)
-            for member in members:
-                name = member.filename
-                clean = name[:-1] if member.is_dir() else name
-                path = PurePosixPath(clean)
-                _require(member.orig_filename == name and bool(clean) and len(clean) <= 512 and not path.is_absolute() and str(path) == clean and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", part) and part not in {".", ".."} for part in path.parts), "artifact ZIP contains an unsafe path")
-                _require(clean.casefold() not in seen and not member.flag_bits & 1, "artifact ZIP contains duplicate/colliding or encrypted members")
-                seen.add(clean.casefold())
-                for index in range(1, len(path.parts) + 1):
-                    prefix = "/".join(path.parts[:index])
-                    previous = spellings.setdefault(prefix.casefold(), prefix)
-                    _require(previous == prefix, "artifact ZIP has case-colliding directory components")
-                if not member.is_dir():
-                    regular.add(clean.casefold())
-                mode = member.external_attr >> 16
-                _require(stat.S_IFMT(mode) in {0, stat.S_IFREG, stat.S_IFDIR} and (not stat.S_ISDIR(mode) or member.is_dir()), "artifact ZIP contains a symbolic link or special file")
-                _require(member.compress_type in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}, "artifact ZIP compression method is unsupported")
-                total += member.file_size
-                _require(0 <= member.file_size <= MAX_FILE and total <= maximum, "artifact ZIP exceeds the expanded size limit")
-            _require(all(not any(str(parent).casefold() in regular for parent in PurePosixPath(path).parents) for path in seen), "artifact ZIP uses a regular file as a directory")
-            for member in members:
-                path = _safe_path(destination / member.filename)
-                if member.is_dir():
-                    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    continue
-                path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                with stream.open(member) as source, path.open("xb") as target:
-                    os.chmod(path, 0o600)
-                    copied = 0
-                    while block := source.read(1024 * 1024):
-                        _require(time.monotonic() < deadline, "artifact ZIP extraction exceeded its bounded time limit")
-                        copied += len(block)
-                        _require(copied <= member.file_size, "artifact ZIP member expands past its declared size")
-                        target.write(block)
-                    _require(copied == member.file_size, "artifact ZIP member is truncated")
-    except (zipfile.BadZipFile, RuntimeError, OSError, NotImplementedError, EOFError, UnicodeError, struct.error):
-        raise WorkflowError("artifact ZIP could not be safely extracted") from None
+def _extract_zip(archive: Path, destination: Path, maximum: int, *,
+                 app_root: Path | None = None, cancellation: DefaultCancellation | None = None) -> None:
+    destination = _safe_path(destination)
+    app_root = _safe_path(app_root) if app_root is not None else None
+    with _app_private_directory(destination, app_root=app_root, cancellation=cancellation) as owner:
+        guard = owner.cancellation if owner is not None else cancellation
+        try:
+            count = _validate_zip_directory(archive)
+            with zipfile.ZipFile(archive) as stream:
+                members = stream.infolist()
+                _require(len(members) == count, "artifact ZIP member count differs from its bounded directory")
+                seen: set[str] = set()
+                spellings: dict[str, str] = {}
+                regular: set[str] = set()
+                total = 0
+                deadline = time.monotonic() + (900 if maximum > MAX_EVIDENCE else 120)
+                for member in members:
+                    name = member.filename
+                    clean = name[:-1] if member.is_dir() else name
+                    path = PurePosixPath(clean)
+                    _require(member.orig_filename == name and bool(clean) and len(clean) <= 512 and not path.is_absolute() and str(path) == clean and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", part) and part not in {".", ".."} for part in path.parts), "artifact ZIP contains an unsafe path")
+                    _require(clean.casefold() not in seen and not member.flag_bits & 1, "artifact ZIP contains duplicate/colliding or encrypted members")
+                    seen.add(clean.casefold())
+                    for index in range(1, len(path.parts) + 1):
+                        prefix = "/".join(path.parts[:index])
+                        previous = spellings.setdefault(prefix.casefold(), prefix)
+                        _require(previous == prefix, "artifact ZIP has case-colliding directory components")
+                    if not member.is_dir():
+                        regular.add(clean.casefold())
+                    mode = member.external_attr >> 16
+                    _require(stat.S_IFMT(mode) in {0, stat.S_IFREG, stat.S_IFDIR} and (not stat.S_ISDIR(mode) or member.is_dir()), "artifact ZIP contains a symbolic link or special file")
+                    _require(member.compress_type in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}, "artifact ZIP compression method is unsupported")
+                    total += member.file_size
+                    _require(0 <= member.file_size <= MAX_FILE and total <= maximum, "artifact ZIP exceeds the expanded size limit")
+                _require(all(not any(str(parent).casefold() in regular for parent in PurePosixPath(path).parents) for path in seen), "artifact ZIP uses a regular file as a directory")
+                for member in members:
+                    path = _safe_path(destination / member.filename)
+                    directory = path if member.is_dir() else path.parent
+                    with _app_private_directory(directory, app_root=app_root, cancellation=guard) as parent:
+                        if parent is None:
+                            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                        if member.is_dir():
+                            if parent is not None:
+                                parent.check()
+                            continue
+                        with stream.open(member) as source:
+                            def blocks() -> Iterator[bytes]:
+                                copied = 0
+                                while block := source.read(1024 * 1024):
+                                    if guard is not None:
+                                        guard.check()
+                                    _require(time.monotonic() < deadline, "artifact ZIP extraction exceeded its bounded time limit")
+                                    copied += len(block)
+                                    _require(copied <= member.file_size, "artifact ZIP member expands past its declared size")
+                                    yield block
+                                _require(copied == member.file_size, "artifact ZIP member is truncated")
+                            if parent is not None:
+                                _publish_private_file(parent, path.name, blocks())
+                                parent.check()
+                            else:
+                                with path.open("xb") as target:
+                                    os.chmod(path, 0o600)
+                                    for block in blocks():
+                                        target.write(block)
+        except (zipfile.BadZipFile, RuntimeError, OSError, NotImplementedError, EOFError, UnicodeError, struct.error):
+            raise WorkflowError("artifact ZIP could not be safely extracted") from None
+
+        if owner is not None:
+            owner.check()
 
 
 class Verifier:
@@ -856,13 +1467,14 @@ def _tree_digests(root: Path) -> dict[str, str]:
     return {name: sha256_file(path) for name, path in _files(root).items()}
 
 
-def _create_proof(root: Path, context: Context, phase: str, github: GitHub) -> None:
+def _create_proof(root: Path, context: Context, phase: str, github: GitHub, *,
+                  app_root: Path | None = None, cancellation: DefaultCancellation | None = None) -> None:
     key = job_key(context.stage, context.platform)
     _require(context.current_job == key, "only the fixed protected Store job may seal workflow evidence")
     job = github.job(context.authority, context.stage, key, constructing=True)
     filename = "intent-provenance.json" if phase == "intent" else "workflow-provenance.json"
     proof = {"documentType": PROOF_TYPE, "schemaVersion": PROOF_VERSION, "phase": phase, "stage": context.stage, "platform": context.platform, "artifactName": artifact_name(context.stage, context.platform, "intent" if phase == "intent" else "evidence"), "repository": dict(context.repository), "producer": dict(context.authority), "jobKey": key, "jobId": str(job["id"]), "createdAt": _now(), "files": _inventory(root, _layout(context.stage, phase), omitted=filename)}
-    _write_json(root / filename, proof)
+    _write_json(root / filename, proof, app_root=app_root, cancellation=cancellation)
 
 
 def _validate_handoff(root: Path, platform: str, intent: Mapping[str, Any] | None = None) -> None:
@@ -1126,7 +1738,8 @@ class Resolver:
         return result
 
 
-def stage_resolution(resolution: Path, app_root: Path, context: Context) -> None:
+def stage_resolution(resolution: Path, app_root: Path, context: Context, *,
+                      cancellation: DefaultCancellation | None = None) -> None:
     resolution = _safe_path(resolution)
     _require(resolution.is_dir() and resolution.stat().st_uid == os.getuid() and not resolution.stat().st_mode & 0o077, "resolution must be a private runner-owned directory")
     result = verify_sealed(_read_json(resolution / "resolution.json"))
@@ -1151,12 +1764,19 @@ def stage_resolution(resolution: Path, app_root: Path, context: Context) -> None
         _validate_handoff(resolution / "artifacts" / context.platform, context.platform)
     _require(set(files) == expected, "local resolution layout is invalid")
     _verify_checkout(app_root, result["source"])
-    output = _safe_path(app_root / ".mobile-release")
-    output.mkdir(parents=True, mode=0o700, exist_ok=True)
-    _require(not any(output.iterdir()), "application workflow output must be empty before staging authenticated inputs")
-    for name, path in sorted(files.items()):
-        copy_immutable_file(path, output / name)
-    (output / "operation").mkdir(mode=0o700, exist_ok=True)
+    app_root = _safe_path(app_root)
+    with app_private_role(app_root, role="empty-root", cancellation=cancellation) as owner:
+        output = owner.path
+        owner.require_empty()
+        for name, path in sorted(files.items()):
+            owner.check()
+            copy_immutable_file(path, output / name, app_root=app_root,
+                                cancellation=owner.cancellation)
+        with _app_private_directory(output / "operation", app_root=app_root,
+                                    cancellation=owner.cancellation) as operation:
+            assert operation is not None
+            operation.check()
+        owner.check()
 
 
 def _verify_checkout(app_root: Path, source: object) -> None:
@@ -1200,49 +1820,103 @@ def authenticate_operation_intent(intent_path: Path, *, stage: str, platform: st
         return verified
 
 
-def seal_intent(app_root: Path, context: Context, github: GitHub | None = None) -> None:
+def seal_intent(app_root: Path, context: Context, github: GitHub | None = None, *,
+                cancellation: DefaultCancellation | None = None) -> None:
     github = github or GitHub(context)
-    output = _safe_path(app_root / ".mobile-release")
-    operation = output / "operation"
-    intent = load_operation_intent(operation / f"{context.stage}-operation-intent.json")
-    _require(intent["authorizedBy"] == context.authority and intent["repository"] == context.repository and intent["stage"] == context.stage and intent["platform"] == context.platform, "new intent is not authorized by this exact protected job")
-    verifier = Verifier(github)
-    if context.stage != "candidate":
-        verifier.final(output / "input" / "candidate", "candidate")
-        _copy_tree(output / "input" / "candidate", operation / "candidate")
-    if context.stage == "production-submit":
-        verifier.final(output / "input" / "external", "external-testing")
-        _copy_tree(output / "input" / "external", operation / "external")
-        _require(_tree_digests(operation / "candidate") == _tree_digests(operation / "external" / "operation" / "candidate"), "prepared production predecessors disagree")
-    verifier._chain(operation, context.stage, own_intent=intent)
-    if context.stage == "candidate":
-        _validate_handoff(output / "artifacts" / context.platform, context.platform, intent)
-        metadata = output / "staging" / "candidate" / context.platform / "store-metadata.zip"
-        _metadata_binding(metadata, intent)
-        copy_immutable_file(metadata, operation / "store-metadata.zip")
-    _require(github.tree(intent["operationSource"]["commit"]) == intent["operationSource"]["tree"], "intent operation source tree differs from GitHub")
-    github.source_policy(context.stage, intent["candidateSource"], intent["operationSource"])
-    _create_proof(operation, context, "intent", github)
+    app_root = _safe_path(app_root)
+    with app_private_namespace(app_root, cancellation=cancellation) as owner:
+        github = github.with_cancellation(owner.cancellation)
+        output = owner.path
+        operation = output / "operation"
+        with _app_private_directory(operation, app_root=app_root,
+                                    cancellation=owner.cancellation, create=False) as original:
+            assert original is not None
+            intent = load_operation_intent(operation / f"{context.stage}-operation-intent.json")
+            _require(intent["authorizedBy"] == context.authority and intent["repository"] == context.repository and intent["stage"] == context.stage and intent["platform"] == context.platform, "new intent is not authorized by this exact protected job")
+            verifier = Verifier(github)
+            if context.stage != "candidate":
+                with _app_private_directory(output / "input" / "candidate", app_root=app_root,
+                                            cancellation=owner.cancellation, create=False) as candidate:
+                    assert candidate is not None
+                    verifier.final(candidate.path, "candidate")
+                    _copy_tree(candidate.path, operation / "candidate", app_root=app_root,
+                               cancellation=owner.cancellation)
+                    candidate.check()
+            if context.stage == "production-submit":
+                with _app_private_directory(output / "input" / "external", app_root=app_root,
+                                            cancellation=owner.cancellation, create=False) as external:
+                    assert external is not None
+                    verifier.final(external.path, "external-testing")
+                    _copy_tree(external.path, operation / "external", app_root=app_root,
+                               cancellation=owner.cancellation)
+                    external.check()
+                _require(_tree_digests(operation / "candidate") == _tree_digests(operation / "external" / "operation" / "candidate"), "prepared production predecessors disagree")
+            verifier._chain(operation, context.stage, own_intent=intent)
+            if context.stage == "candidate":
+                with _app_private_directory(output / "artifacts" / context.platform, app_root=app_root,
+                                            cancellation=owner.cancellation, create=False) as artifacts:
+                    assert artifacts is not None
+                    _validate_handoff(artifacts.path, context.platform, intent)
+                    artifacts.check()
+                metadata = output / "staging" / "candidate" / context.platform / "store-metadata.zip"
+                with _app_private_directory(metadata.parent, app_root=app_root,
+                                            cancellation=owner.cancellation, create=False) as staging:
+                    assert staging is not None
+                    _metadata_binding(metadata, intent)
+                    copy_immutable_file(metadata, operation / "store-metadata.zip", app_root=app_root,
+                                        cancellation=owner.cancellation)
+                    staging.check()
+            _require(github.tree(intent["operationSource"]["commit"]) == intent["operationSource"]["tree"], "intent operation source tree differs from GitHub")
+            github.source_policy(context.stage, intent["candidateSource"], intent["operationSource"])
+            _create_proof(operation, context, "intent", github, app_root=app_root,
+                          cancellation=owner.cancellation)
+            original.check()
+        owner.check()
 
 
-def package_final(app_root: Path, evidence_dir: Path, raw_receipt: Path, destination: Path, context: Context, github: GitHub | None = None) -> None:
+def package_final(app_root: Path, evidence_dir: Path, raw_receipt: Path, destination: Path, context: Context,
+                  github: GitHub | None = None, *, cancellation: DefaultCancellation | None = None) -> None:
     github = github or GitHub(context)
+    app_root = _safe_path(app_root)
     operation = _safe_path(app_root / ".mobile-release" / "operation")
-    verifier = Verifier(github, allow_current=True)
-    intent = verifier.intent(operation, context.stage)
-    evidence_dir = _safe_path(evidence_dir)
-    receipt = load_release_receipt(evidence_dir / f"{context.stage}-receipt.json")
-    _require(receipt["producedBy"] == context.authority, "final documents must retain their actual producer; do not reissue an immutable complete final")
-    destination = _new_directory(destination)
-    _copy_tree(operation, destination / "operation")
-    copy_immutable_file(evidence_dir / f"{context.stage}-receipt.json", destination / f"{context.stage}-receipt.json")
-    copy_immutable_file(_safe_path(raw_receipt), destination / "store-receipt.json")
-    if context.stage == "candidate":
-        copy_immutable_file(evidence_dir / "candidate-manifest.json", destination / "candidate-manifest.json")
-    candidate_root = destination if context.stage == "candidate" else operation / "candidate"
-    validate_receipt_raw_binding(receipt, store_receipt=load_store_receipt(destination / "store-receipt.json"), operation_intent=intent, candidate_manifest=load_candidate_manifest(candidate_root / "candidate-manifest.json"))
-    verifier._chain(operation, context.stage, own_intent=intent, own_final=destination)
-    _create_proof(destination, context, "final", github)
+    evidence_dir, raw_receipt = _safe_path(evidence_dir), _safe_path(raw_receipt)
+    destination = _safe_path(destination)
+    with _app_private_directory(operation, app_root=app_root, cancellation=cancellation,
+                                create=False) as original:
+        assert original is not None
+        guard = original.cancellation
+        github = github.with_cancellation(guard)
+        with _app_private_directory(evidence_dir, app_root=app_root, cancellation=guard, create=False) as evidence, \
+                _app_private_directory(raw_receipt.parent, app_root=app_root, cancellation=guard, create=False) as readback:
+            verifier = Verifier(github, allow_current=True)
+            intent = verifier.intent(operation, context.stage)
+            receipt = load_release_receipt(evidence_dir / f"{context.stage}-receipt.json")
+            _require(receipt["producedBy"] == context.authority, "final documents must retain their actual producer; do not reissue an immutable complete final")
+            # Keep exclusive creation AND actual packaging in the same scope.
+            # A returned Path from _new_directory would not retain this custody.
+            with _app_private_directory(destination, app_root=app_root, cancellation=guard,
+                                        exclusive=True) as package:
+                destination = package.path if package is not None else _new_directory(destination, app_root=app_root,
+                                                                                      cancellation=guard)
+                _copy_tree(operation, destination / "operation", app_root=app_root, cancellation=guard)
+                copy_immutable_file(evidence_dir / f"{context.stage}-receipt.json", destination / f"{context.stage}-receipt.json",
+                                    app_root=app_root, cancellation=guard)
+                copy_immutable_file(raw_receipt, destination / "store-receipt.json", app_root=app_root,
+                                    cancellation=guard)
+                if context.stage == "candidate":
+                    copy_immutable_file(evidence_dir / "candidate-manifest.json", destination / "candidate-manifest.json",
+                                        app_root=app_root, cancellation=guard)
+                candidate_root = destination if context.stage == "candidate" else operation / "candidate"
+                validate_receipt_raw_binding(receipt, store_receipt=load_store_receipt(destination / "store-receipt.json"), operation_intent=intent, candidate_manifest=load_candidate_manifest(candidate_root / "candidate-manifest.json"))
+                verifier._chain(operation, context.stage, own_intent=intent, own_final=destination)
+                _create_proof(destination, context, "final", github, app_root=app_root, cancellation=guard)
+                if package is not None:
+                    package.check()
+            if evidence is not None:
+                evidence.check()
+            if readback is not None:
+                readback.check()
+        original.check()
 
 
 def _outputs(result: Mapping[str, Any]) -> None:
@@ -1264,6 +1938,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     stage = commands.add_parser("stage", help="copy a private authenticated resolution into a clean application checkout")
     seal_parser = commands.add_parser("seal-intent", help="create the protected job's complete intent inventory; does not sign or upload")
     final = commands.add_parser("package-final", help="validate and package final evidence; does not sign, upload, or call Stores")
+    private = commands.add_parser("prepare-app-private", help="locally admit only the fixed empty application-private root")
+    deferred = commands.add_parser("write-deferred-report", help="locally publish the fixed private dependency-build deferral report")
+    handoff = commands.add_parser("normalize-handoff", help="locally normalize and checksum the fixed signed platform outputs")
+    for command in (private, deferred, handoff):
+        command.add_argument("--app-root", type=Path, required=True)
+    private.add_argument("--role", required=True, choices=("empty-root",))
+    for command in (deferred, handoff):
+        command.add_argument("--platform", required=True, choices=PLATFORMS)
     for command in (resolve, seal_parser, final):
         command.add_argument("--stage", required=True, choices=STAGES)
         command.add_argument("--platform", required=True, choices=PLATFORMS)
@@ -1280,6 +1962,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     final.add_argument("--destination", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
+        # These finite local operations run from verified pinned tooling but do
+        # not parse release authority or construct a GitHub/Store client. Setup
+        # success is not authority for any later publisher to reopen a path.
+        if args.command == "prepare-app-private":
+            prepare_app_private(args.app_root, role=args.role)
+            return 0
+        if args.command == "write-deferred-report":
+            write_deferred_report(args.app_root, args.platform)
+            return 0
+        if args.command == "normalize-handoff":
+            normalize_handoff(args.app_root, args.platform)
+            return 0
         if args.command == "stage":
             result = _read_json(args.resolution / "resolution.json")
             selected_stage = args.stage or result.get("stage")

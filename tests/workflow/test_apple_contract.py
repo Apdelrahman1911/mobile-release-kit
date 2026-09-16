@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from mobile_release import stores as stores_module
 from mobile_release.errors import StoreOperationError, ValidationError
 from mobile_release.provenance import (
     validate_create_retry_inventory,
@@ -250,11 +251,11 @@ class AppleContractTests(unittest.TestCase):
             "BUNDLE_GEMFILE": str(ROOT / "Gemfile"), "BUNDLE_FROZEN": "true",
             "FASTLANE_SKIP_UPDATE_CHECK": "true", "FASTLANE_OPT_OUT_USAGE": "true",
         })
-        trace = _RuntimeAdmissionTrace(subprocess.run)
+        trace = _RuntimeAdmissionTrace(stores_module.run_owned)
         try:
             # Admission and export must use the same narrow bundle context;
             # ambient deployment/without settings cannot select another bundle.
-            with patch.dict(os.environ, env, clear=True), patch("mobile_release.stores.subprocess.run", new=trace):
+            with patch.dict(os.environ, env, clear=True), patch("mobile_release.stores.run_owned", new=trace):
                 _require_fastlane_bundle(ROOT)
         except StoreOperationError as error:
             if required:
@@ -329,37 +330,36 @@ class RuntimeAdmissionAttributionTests(unittest.TestCase):
             self.assertEqual(set(kwargs), set(previous_kwargs))
             for name in kwargs:
                 self.assertIs(kwargs[name], previous_kwargs[name])
-            self.assertEqual(kwargs["env"], previous_environment)
-            self.assertEqual(set(kwargs), {"cwd", "env", "text", "stdout", "stderr", "timeout", "check"})
-            self.assertEqual({name: value for name, value in kwargs.items() if name != "env"}, {
-                "cwd": tooling, "text": True, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
-                "timeout": 60, "check": False,
+            self.assertEqual(kwargs["environ"], previous_environment)
+            self.assertEqual(set(kwargs), {"cwd", "environ", "capture", "timeout", "cancellation"})
+            self.assertEqual({name: value for name, value in kwargs.items() if name != "environ"}, {
+                "cwd": tooling, "capture": True, "timeout": 60, "cancellation": None,
             })
             if calls:
-                self.assertIs(kwargs["env"], calls[0][1])
+                self.assertIs(kwargs["environ"], calls[0][1])
             self.assertLess(len(calls), 5)
-            calls.append((list(args[0]), kwargs["env"]))
+            calls.append((list(args[0]), kwargs["environ"]))
             return replies[len(calls) - 1]
 
         trace = _RuntimeAdmissionTrace(original)
 
         def forwarded(*args, **kwargs):
             previous_argv = list(args[0])
-            incoming.append((args, kwargs, dict(kwargs["env"])))
+            incoming.append((args, kwargs, dict(kwargs["environ"])))
             result = trace(*args, **kwargs)
             self.assertIs(result, replies[len(calls) - 1])
             self.assertEqual(args[0], previous_argv)
-            self.assertEqual(kwargs["env"], incoming[-1][2])
+            self.assertEqual(kwargs["environ"], incoming[-1][2])
             return result
 
-        original_run = subprocess.run
+        original_run = stores_module.run_owned
         with patch.dict(os.environ, {"PATH": "/fictional/bin", "BUNDLE_PATH": "/fictional/bundle"}, clear=True), \
                 patch.object(shutil, "which", return_value="/fictional/ruby"), \
                 patch.object(subprocess, "Popen", side_effect=deny) as popen, \
                 patch.object(tempfile, "TemporaryDirectory", side_effect=deny) as temporary, \
-                patch.object(subprocess, "run", new=forwarded):
+                patch.object(stores_module, "run_owned", new=forwarded):
             _require_fastlane_bundle(tooling)
-        self.assertIs(subprocess.run, original_run)
+        self.assertIs(stores_module.run_owned, original_run)
         popen.assert_not_called()
         temporary.assert_not_called()
         primitive = str(tooling / "fastlane/native_process_spawn.rb")
@@ -424,19 +424,19 @@ class RuntimeAdmissionAttributionTests(unittest.TestCase):
                     self.assertIs(result, bad)
                 return result
 
-            original_run = subprocess.run
+            original_run = stores_module.run_owned
             with patch.dict(os.environ, {"PATH": "/fictional/bin"}, clear=True), \
                     patch.object(shutil, "which", return_value="/fictional/ruby"), \
                     patch.object(subprocess, "Popen", side_effect=deny) as popen, \
                     patch.object(tempfile, "TemporaryDirectory", side_effect=deny) as temporary, \
-                    patch.object(subprocess, "run", new=forwarded):
+                    patch.object(stores_module, "run_owned", new=forwarded):
                 try:
                     _require_fastlane_bundle(Path("/fictional/pinned-contract"))
                 except BaseException as error:
                     caught = error
                 else:
                     self.fail("original runtime admission unexpectedly accepted the failure")
-            self.assertIs(subprocess.run, original_run)
+            self.assertIs(stores_module.run_owned, original_run)
             self.assertEqual(calls, list(range(failed + 1)))
             self.assertEqual(observed_exceptions, [True] if isinstance(bad, BaseException) else [])
             self.assertNotIn(private, repr(trace.rows))
@@ -525,23 +525,23 @@ class RuntimeAdmissionAttributionTests(unittest.TestCase):
             original_report = case.fail if required else case.skipTest
 
             def report(message):
-                self.assertIs(subprocess.run, original)
+                self.assertIs(stores_module.run_owned, original)
                 self.assertTrue(dict(os.environ) == ambient, "admission environment was not restored")
                 self.assertNotIn(private, message)
                 reports.append(message)
                 original_report(message)
 
-            original_run = subprocess.run
+            original_run = stores_module.run_owned
             with patch.dict(os.environ, ambient, clear=True), \
                     patch.object(shutil, "which", side_effect=["/fictional/ruby", "/fictional/bundle", None]
                                  if missing else lambda *_args, **_kwargs: "/fictional/tool"), \
                     patch.object(subprocess, "Popen", side_effect=deny) as popen, \
                     patch.object(tempfile, "TemporaryDirectory", side_effect=deny) as temporary, \
-                    patch.object(subprocess, "run", new=original), \
+                    patch.object(stores_module, "run_owned", new=original), \
                     patch.object(case, "fail" if required else "skipTest", new=report):
                 with self.assertRaises(AssertionError if required else unittest.SkipTest) as raised:
                     case.test_real_lane_export_is_deterministic_and_matches_checked_in_contract()
-            self.assertIs(subprocess.run, original_run)
+            self.assertIs(stores_module.run_owned, original_run)
             self.assertEqual(len(calls), 0 if missing else 1)
             self.assertEqual(len(reports), 1)
             if required:

@@ -4,6 +4,15 @@ Mobile Release Kit is a small, versioned release layer for Gradle Android and Xc
 
 It does **not** make an application public. Android automation stops at a non-served production draft. Apple automation stops after submitting an exact build for review with automatic release disabled. The application owner makes the final release decision in Google Play Console or App Store Connect.
 
+## Preparation status
+
+**NOT READY for production use until the requirements below are satisfied.** This revision includes the QA-004/QA-005/MRK-008/MRK-009
+remediation implementation. Delivery requires independent review, complete applicable source and
+installed-wheel verification, protected pull-request acceptance and actual-main CI. A new
+comprehensive production-readiness audit must then pass before a READY verdict. Implementation,
+focused tests and CI alone are not consumer-signing, physical-device or live Store evidence.
+No public release or live Store mutation is part of remediation verification.
+
 ## What lives here
 
 - `mobile-release`, a Python CLI for discovery, configuration, credential inventory, preflight, artifact validation, metadata validation, and evidence.
@@ -39,6 +48,10 @@ The non-negotiable rules are:
 6. Production is a separate manual, protected, single-platform operation.
 7. No workflow turns a release public automatically.
 8. Legal, privacy, content-rating, agreement, pricing, availability, tester-membership, and launch decisions remain human responsibilities.
+
+Fresh source authority requires successfully observed full Git HEAD/tree identities and a clean
+worktree; an environment SHA cannot replace a failed observation. Dispatch identity and original
+recovery source remain separate. See [source acceptance](docs/lifecycle.md#source-acceptance-and-recovery).
 
 ## Supported projects
 
@@ -174,10 +187,18 @@ The authoritative schema is [`schemas/project.schema.json`](schemas/project.sche
 | `mobile-release preflight --online` | Store API credentials | Run a non-publishing access/uniqueness/destination check. Google uses a temporary edit that is always deleted without commit; Apple performs reads only. |
 | `mobile-release local-signing status` | none | Inspect sanitized account-local signing ownership; no native preference query or Store access. |
 | `mobile-release local-signing recover` | explicit account-idle confirmation | Reconcile original owned signing resources without rebuilding or Store mutation; see [local recovery](docs/local-signing.md). |
+| `mobile-release build-inputs status --root <project>` | original local private state only | Inspect project-input ownership without discovery, configured credentials, application commands or Store access. |
+| `mobile-release build-inputs recover --root <project>` | original private state and exact session/confirmation | Conditionally restore owned inputs or retire terminal metadata; see [project-input recovery](docs/build-inputs-recovery.md). |
 | `mobile-release status` | none | Validate and summarize recorded evidence; it does not query either Store. |
 | `mobile-release explain` | none | Explain a finding or list the contract for a capability/stage. |
 
 Commands produce a concise human report and can emit machine-readable JSON. Secret values, private tester identities, review contacts, and signed binaries are excluded from reports.
+
+Preflight reserves its process environment before credential snapshots. Offline/signing modes,
+including `--skip-builds`, hold the project throughout application/private work; applicable signed
+iOS builds first acquire the account lease. Online mode reserves the environment but acquires
+neither project nor signing ownership. A failed build or unresolved cleanup stops later platforms;
+completed outputs are not thereby validated. See [local custody](docs/lifecycle.md#local-preflight-custody).
 
 Metadata preflight checks required locale files, UTF-8/JSON structure, known text limits,
 credential-free HTTPS URL syntax, placeholders/secret patterns, bounded safe paths/files, and valid
@@ -225,9 +246,11 @@ artifacts, not source files or public release assets.
 
 iOS candidates require the retained archive under every symbol policy. Private-snapshot checks
 correlate every IPA/archive native image, bundle/resource inventory and present dSYM before
-authorization; exact artifact hashes remain authoritative during recovery. Export permits
-re-signing but not stripping/thinning. See [iOS artifact correspondence](docs/ios-artifacts.md),
-including the separate outstanding nested-symbol completeness requirement and native rehearsal.
+authorization. Under `retain` or `required`, every unique installed native slice, including nested
+code, needs matching retained symbols; `disabled` permits omissions, not invalid present symbols.
+Exact artifact hashes remain authoritative during recovery. Export permits re-signing but not
+stripping/thinning. See [iOS artifact correspondence](docs/ios-artifacts.md) for limits and the
+still-required native/consumer verification.
 
 All iOS signed entitlements are compared with their own bundle's modern DER profile
 grants across every native architecture; profileless code cannot borrow a parent's
@@ -237,8 +260,10 @@ verified with pinned public roots in isolated credential-free workers. See
 [profile authority](docs/ios-profile-authority.md) for the supported native policy,
 offline scope, recovery and required consumer rehearsal. Local signed iOS builds
 use an [account-wide lease and recoverable ownership](docs/local-signing.md).
-QA-004 outer materialization/restoration remains a separate open blocker; these
-checks alone do not establish overall production readiness.
+The prepared outer [build-input owner](docs/build-inputs-recovery.md) preserves admitted original
+client files and cleans only its finite, identity-bound resources after safe consumer settlement.
+Foreign edits or uncertain ownership remain conflicts, not permission to overwrite or delete.
+These source changes do not establish production readiness.
 
 Each candidate hashes a deterministic platform-scoped metadata archive: Android includes only
 `android/**`; iOS includes `ios/**`, `review/**`, and `testflight/**`. An unrelated platform's
@@ -310,6 +335,7 @@ No shared-repository test uses a consumer credential or a real application/accou
 - [Release lifecycle](docs/lifecycle.md)
 - [Recovery and resumability](docs/recovery.md)
 - [Local signing ownership and recovery](docs/local-signing.md)
+- [Project build-input recovery](docs/build-inputs-recovery.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Upgrading pinned consumers](docs/upgrading.md)
 - [Repository verification](docs/verification.md)

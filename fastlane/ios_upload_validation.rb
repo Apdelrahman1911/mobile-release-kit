@@ -52,20 +52,47 @@ module MobileReleaseKit
       ]
       clean = environment.to_h.select { |name, value| ENVIRONMENT_NAMES.include?(name) && !value.to_s.empty? }
       clean.merge!("LANG" => "C", "LC_ALL" => "C")
-      output = capture_validator(clean, argv, tooling_directory)
+      binding = StoreLaneLifetime.reserve_current_validation!(role: "current-ios", adapter: self,
+        environment: clean, argv: argv, tooling_directory: tooling_directory,
+        intent_sha256: intent_sha256, artifact: ipa)
+      output = capture_validator(clean, argv, tooling_directory, store_binding: binding)
+      value = binding ? binding.accept_result!(adapter: self, output: output) :
+        validated_result(output, intent_sha256: intent_sha256, artifact: ipa)
+      # Lifetime settles from a valid bound result BEFORE a freshness-only
+      # rejection. Expiry cannot revive consumers whose cleanup was confirmed.
+      require_current!(value)
+      value
+    rescue Exception => error # rubocop:disable Lint/RescueException
+      binding&.fail_unless_retired!(error)
+      raise
+    ensure
+      binding&.finish_call!
+    end
+
+    def validated_result(output, intent_sha256:, artifact:)
       value = MobileReleaseKit.strict_json(output, label: "current IPA validation result")
       unless value.is_a?(Hash) && value.keys.sort == RESULT_KEYS.sort && value["documentType"] == "ios-current-upload-validation" &&
-             value["schemaVersion"] == 1 && value["operationIntentSha256"] == intent_sha256 &&
-             value["ipaSize"].is_a?(Integer) && value["ipaSize"].positive? && value["ipaSize"] == File.size(ipa) &&
+             value["schemaVersion"].instance_of?(Integer) && value["schemaVersion"] == 1 && value["operationIntentSha256"] == intent_sha256 &&
+             value["ipaSize"].is_a?(Integer) && value["ipaSize"].positive? && value["ipaSize"] == File.size(artifact) &&
              value["ipaSha256"].is_a?(String) && value["ipaSha256"].match?(/\A[0-9a-f]{64}\z/) &&
-             value["ipaSha256"] == Digest::SHA256.file(ipa).hexdigest
+             value["ipaSha256"] == Digest::SHA256.file(artifact).hexdigest
         raise ContractError, "Current IPA validation returned incomplete or mismatched evidence"
       end
-      require_current!(value)
+      signing_interval(value)
+      value.each_value(&:freeze)
       value.freeze
     end
 
     def require_current!(value)
+      before, after = signing_interval(value)
+      now = Time.now.utc
+      unless before <= now && now < after
+        raise ContractError, "IPA signing/profile eligibility expired before upload; preserve the original candidate and reconcile accepted Store state instead of re-signing"
+      end
+      true
+    end
+
+    def signing_interval(value)
       before, after = %w[notBefore notAfter].map do |name|
         date = value.fetch(name)
         unless date.is_a?(String) && date.match?(/\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z\z/)
@@ -79,21 +106,21 @@ module MobileReleaseKit
         end
         time
       end
-      now = Time.now.utc
-      unless before < after && before <= now && now < after
-        raise ContractError, "IPA signing/profile eligibility expired before upload; preserve the original candidate and reconcile accepted Store state instead of re-signing"
-      end
-      true
+      raise ContractError, "Current IPA validation returned an invalid UTC signing interval" unless before < after
+      [before, after]
     rescue KeyError, ArgumentError
       raise ContractError, "Current IPA validation returned an invalid UTC signing interval"
     end
 
-    def capture_validator(environment, argv, tooling_directory)
+    def capture_validator(environment, argv, tooling_directory, store_binding: nil)
       NativeUploadValidation.capture(
         environment, argv, tooling_directory,
         max_seconds: MAX_SECONDS, max_output_bytes: MAX_OUTPUT_BYTES, label: "Current IPA",
         failure_message: "Current IPA signing/profile validation failed; no new upload is authorized (inspect the original IPA with credential-free preflight)",
+        store_binding: store_binding,
       )
     end
+
+    private_class_method :validated_result, :signing_interval
   end
 end

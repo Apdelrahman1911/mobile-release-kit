@@ -1,5 +1,9 @@
 # Upgrading Mobile Release Kit
 
+Production use is **NOT READY until** remediation verification and a new comprehensive
+production-readiness audit pass;
+see [preparation status](../README.md#preparation-status). Do not repin production consumers before qualified acceptance.
+
 Consumers deliberately pin a known-good full commit SHA. Updating a tag or `main` must never change an application release pipeline automatically.
 
 ## Version policy
@@ -115,8 +119,13 @@ Before creating a new candidate, upgrade the toolkit pin and confirm your protec
 archive/export produces a corresponding pair with Swift-symbol stripping and thinning disabled.
 The archive is now required under every symbol policy; candidate v2 and intent v1 wire versions
 are unchanged, but creation and all consumers reject missing archives. All native/resource
-counterparts and every present dSYM are checked; this is not yet complete missing-nested symbol
-coverage. See [supported layouts and limits](ios-artifacts.md).
+counterparts and every present dSYM are checked. The prepared `retain`/`required` policy also
+requires symbols for every unique installed native slice, including nested code and every
+architecture; vendor/installed-Swift omissions are unsupported under those policies. Identical
+installed copies may share symbols, but duplicate DWARF identities fail. `disabled` allows
+omissions, not invalid present symbols. Detached symbols cannot repair the retained archive.
+`required` still blocks third-party upload activation; its command is never executed.
+See [supported layouts and limits](ios-artifacts.md).
 
 Do not repin or reseal an existing independently validated candidate into this stronger contract.
 Resolve an in-flight operation using its original pin and retained bytes/owner review. Never
@@ -140,7 +149,30 @@ home with one account-wide signing lease. Overlap fails before private/applicati
 work; pending original ownership requires `local-signing status` and explicit
 [owner recovery](local-signing.md). Do not migrate/delete the private journal or
 change toolkit versions during a pending session. No release schema changes.
-QA-004 outer materialization cleanup remains a separate readiness blocker.
+
+### Prepared build-input, external-file and source changes
+
+The outer build-input owner reserves the environment before credential snapshots, then the
+applicable account and project. Offline/signing skip-builds still holds the project. Service-file
+replacement retains admitted original inode/bytes/exact mode, uses same-filesystem no-replace
+operations, and refuses conflicting restoration. Supported local Linux/macOS semantics and an
+explicitly ignored private `.mobile-release/` namespace are required; there is no unsafe fallback.
+Resolve pending account state first when necessary, then the original project/session through
+[build-input recovery](build-inputs-recovery.md). Do not migrate/delete old controls or change the
+toolkit during recovery. Terminal project recovery touches residual metadata only, never later
+legitimate client-file edits.
+
+Private external inputs remain absolute and outside the project. Only Darwin's exact protected
+root `/tmp` and `/var` aliases are admitted; lower/leaf links and `..` are not. Consumers now use
+the checked selected bytes/snapshot through validation and use, rather than reopening the original
+filename. Review [credential limits and custody](credentials.md#local-credential-file).
+
+Fresh evidence/Store authority requires actual successful clean HEAD/tree/status observation,
+bracketed by equal HEAD reads; inherited Git routing and `GITHUB_SHA` cannot supply a missing
+observation. Linked/detached worktrees remain supported. Original operation source and current
+protected recovery dispatch stay separate. There is no release-schema relabeling or retrospective
+reissue of authenticated complete finals. These changes still require the verification and
+delivered-source rebind in the preparation status above.
 
 ## Rollback
 

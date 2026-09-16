@@ -89,9 +89,11 @@ def _cleanup(primary, actions):
 def main(root: Path, mode: str, deadline: float):
     assert _remaining(deadline) <= worker_timeout('account-native-flow'), 'fixture cutoff exceeds original budget'
     home = root/'home'; home.mkdir(mode=0o700)
+    project = root/'project'; project.mkdir(mode=0o700)
     private = root/'private'; private.mkdir(mode=0o700)
     profile_input = private/'profile'; profile_input.write_bytes(b'fictional-profile')
     p12 = private/'identity.p12'; p12.write_bytes(b'fictional-p12')
+    profile_input.chmod(0o600); p12.chmod(0o600)
     parent = os.getpid()
     children = []
     model = NativeSigningModel(home)
@@ -111,7 +113,8 @@ def main(root: Path, mode: str, deadline: float):
         with ExitStack() as mocks:
             mocks.enter_context(patch.object(credentials, '_run_private', side_effect=model))
             mocks.enter_context(patch.object(credentials, '_authenticated_signing_profile', new=fictional_signing_profile))
-            owners['signing'] = credentials._temporary_apple_signing_environment(p12=p12,password='fictional',profile=profile_input,directory=private,lease=lease)
+            owners['signing'] = credentials._temporary_apple_signing_environment(
+                p12=p12,password='fictional',profile=profile_input,directory=private,lease=lease,project_root=project)
             owners['signing'].__enter__()
             destination = home/'Library/MobileDevice/Provisioning Profiles'/(profile()['UUID']+'.mobileprovision')
             db_identity = model.keychain.stat().st_ino

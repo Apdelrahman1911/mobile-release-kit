@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import sysconfig
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Mapping
 
@@ -23,6 +25,11 @@ REQUIRED_TOOLING_FILES = (
     "fastlane/native_upload_validation.rb",
     "fastlane/native_process_spawn.rb",
     "fastlane/native_upload_process.rb",
+    "fastlane/store_document.rb",
+    "fastlane/store_lane_lifetime.rb",
+    "fastlane/store_lane_resources.rb",
+    "fastlane/store_lane_runtime.rb",
+    "fastlane/store_lane_fastlane_bridges.rb",
     "fastlane/release_support.rb",
     "fastlane/run_lane.rb",
     "schemas/candidate.schema.json",
@@ -37,28 +44,23 @@ REQUIRED_TOOLING_FILES = (
 )
 
 
-def canonical_external_path(path: Path, *, label: str) -> Path:
-    """Resolve an external path while rejecting user-controlled symlink traversal.
+def canonical_external_path(path: Path, *, label: str, cancellation=None) -> Path:
+    """Observe a safe public-tool path for diagnostics, NEVER to authorize reuse.
 
-    macOS exposes ``/var`` and ``/tmp`` as root-owned aliases into ``/private``.
-    Those two exact aliases are safe and unavoidable for paths returned by the
-    platform temporary-directory APIs. Any lower symlink component remains a
-    hard failure.
+    Consumers must use checked bytes or a live selected snapshot instead of
+    reopening this returned path. The shared reader implements the same exact
+    system-alias policy for public tools and explicitly private input kinds.
     """
+    from .checked_files import inspect_external_path
+    from .owned_process import ProcessError
 
-    absolute = Path(os.path.abspath(path.expanduser()))
-    permitted_system_aliases = {
-        candidate
-        for candidate in (Path("/var"), Path("/tmp"))
-        if candidate.is_symlink()
-        and candidate.resolve() in {Path("/private/var"), Path("/private/tmp")}
-    }
-    lexical = Path(absolute.anchor)
-    for part in absolute.parts[1:]:
-        lexical /= part
-        if lexical.is_symlink() and lexical not in permitted_system_aliases:
-            raise ValidationError(f"{label} must not traverse a symbolic link")
-    return absolute.resolve(strict=True)
+    try:
+        return inspect_external_path(path, kind="public-tool", project_root=None,
+                                     cancellation=cancellation)
+    except ProcessError:
+        raise  # Descriptor/handler uncertainty is never an ordinary path error.
+    except ValidationError:
+        raise ValidationError(f"{label} must be a regular file without unsafe symbolic-link components") from None
 
 
 def _complete_tooling_root(path: Path) -> bool:
@@ -114,29 +116,67 @@ def resolve_tooling_root(
     return None
 
 
-def recreate_private_build_directory(config: ReleaseConfig, platform: str) -> Path:
-    """Recreate only one tool-owned build directory after rejecting symlink traversal."""
+@contextmanager
+def private_build_directory(config: ReleaseConfig, platform: str, *, cancellation=None):
+    """Reset one admitted original build target and retain custody across use.
+
+    Keep the original target inode. Removing/reopening the top-level pathname
+    would make an intervening replacement look like the output we admitted.
+    Old tool-owned contents are cleared relative to the retained target fd;
+    namespace admission itself grants no deletion rights to any other caller.
+    """
+    from .build_inputs import _app_private_directory, _directory, _file, _names
 
     if platform not in {"android", "ios"}:
         raise ValidationError(f"unsupported private build platform: {platform}")
     relative = f".mobile-release/build/{platform}"
     try:
-        target = config.project_path(relative)
+        config.project_path(relative)
     except ConfigurationError as error:
         raise ValidationError(
             f"private build directory must not traverse a symbolic link: {relative}"
         ) from error
-    root = config.root.resolve()
-    lexical = root
-    for part in Path(relative).parts:
-        lexical = lexical / part
-        if lexical.is_symlink():
-            raise ValidationError(
-                f"private build directory must not traverse a symbolic link: {relative}"
-            )
-        if lexical.exists() and not lexical.is_dir():
-            raise ValidationError(f"private build path is not a directory: {relative}")
-    if target.exists():
-        shutil.rmtree(target)
-    target.mkdir(parents=True, exist_ok=False)
-    return target
+    root = config.root
+    with _app_private_directory(root / relative, app_root=root, cancellation=cancellation) as namespace:
+        assert namespace is not None
+        parent = namespace.fd
+        # Inspect every direct old child before the first destructive effect.
+        # Nested generated archive directories are not required to be0700;
+        # their private enclosing original target is the fixed rebuild scope.
+        original = {}
+        for name in _names(parent):
+            observed = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if not (stat.S_ISDIR(observed.st_mode) or stat.S_ISREG(observed.st_mode)):
+                raise ValidationError("private build output contains an unsafe direct entry; preserve it")
+            original[name] = observed
+        namespace.check()
+        if not shutil.rmtree.avoids_symlink_attacks:
+            raise ValidationError("private build reset requires descriptor-relative directory removal")
+        for name, before in original.items():
+            namespace.cancellation.check()
+            namespace.check()
+            current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            observe = _directory if stat.S_ISDIR(before.st_mode) else _file
+            if observe(current) != observe(before):
+                raise ValidationError("private build output changed before reset; preserve it")
+            if stat.S_ISDIR(before.st_mode):
+                shutil.rmtree(name, dir_fd=parent)
+            else:
+                os.unlink(name, dir_fd=parent)
+        if _names(parent):
+            raise ValidationError("private build output changed during reset; preserve it")
+        os.fsync(parent)
+        namespace.check()
+        namespace.cancellation.check()
+        yield namespace
+        namespace.check()
+
+
+def recreate_private_build_directory(config: ReleaseConfig, platform: str, *, cancellation=None) -> Path:
+    """Compatibility point-in-time reset; returned location is NOT live custody.
+
+    Actual library builds use private_build_directory over reset, command and
+    normalization. Other callers must independently reacquire before any use.
+    """
+    with private_build_directory(config, platform, cancellation=cancellation) as namespace:
+        return namespace.path

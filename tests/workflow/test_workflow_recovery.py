@@ -67,9 +67,46 @@ from unit.evidence_helpers import build_lifecycle, raw_receipt, workflow_environ
 from unit.helpers import android_config, ios_config, write_project
 
 
-def json_file(path: Path, value: object) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(canonical_json_bytes(value) + b"\n")
+def private_fixture_directory(app_root: Path, directory: Path) -> None:
+    """Create genuine private fixture components, never repair/adopt old modes."""
+    parts = directory.relative_to(app_root).parts
+    assert parts and parts[0] == ".mobile-release" and ".." not in parts
+    app_root.mkdir(parents=True, exist_ok=True)
+    current = app_root
+    for part in parts:
+        current /= part
+        current.mkdir(mode=0o700, exist_ok=True)
+        assert not current.is_symlink() and stat.S_IMODE(current.stat().st_mode) == 0o700
+
+
+def private_fixture_copy_file(source: Path, destination: Path, *, app_root: Path) -> None:
+    private_fixture_directory(app_root, destination.parent)
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as target, source.open("rb") as original:
+        shutil.copyfileobj(original, target)
+
+
+def private_fixture_copy_tree(source: Path, destination: Path, *, app_root: Path) -> None:
+    if destination.exists():
+        raise FileExistsError(destination)
+    private_fixture_directory(app_root, destination)
+    for path in sorted(source.rglob("*")):
+        output = destination / path.relative_to(source)
+        if path.is_dir():
+            private_fixture_directory(app_root, output)
+        else:
+            private_fixture_copy_file(path, output, app_root=app_root)
+
+
+def json_file(path: Path, value: object, *, app_root: Path | None = None) -> None:
+    if app_root is None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(canonical_json_bytes(value) + b"\n")
+    else:
+        private_fixture_directory(app_root, path.parent)
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "wb") as target:
+            target.write(canonical_json_bytes(value) + b"\n")
 
 
 def utc(delta: int = 0) -> str:
@@ -151,7 +188,7 @@ class FakeGitHub(Transport):
         self.artifacts.setdefault(selected.authority["runId"], []).append(artifact)
         return artifact
 
-    def run(self, arguments, *, maximum=16 * 1024 * 1024, timeout=120, output=None):
+    def run(self, arguments, *, maximum=16 * 1024 * 1024, timeout=120, output=None, cancellation=None):
         self.requests.append(list(arguments))
         if self.fail and self.fail in " ".join(arguments):
             raise WorkflowError("injected GitHub read/verification failure")
@@ -244,7 +281,9 @@ class Lifecycle:
         self.api.register(selected, active=True)
         app = self.root / (stage + "-app")
         operation = app / ".mobile-release" / "operation"
-        operation.mkdir(parents=True)
+        if operation.exists():
+            raise FileExistsError(operation)
+        private_fixture_directory(app, operation)
         source_key = {"candidate": "candidate_intent", "external-testing": "external_intent", "production-submit": "production_intent"}[stage]
         intent = verify_sealed(self.documents[source_key])
         intent["authorizedBy"] = dict(selected.authority)
@@ -252,18 +291,17 @@ class Lifecycle:
         if stage != "candidate":
             assert self.candidate is not None
             intent["predecessors"] = {"candidateManifestSha256": self.candidate["integrity"]["sha256"], "candidateReceiptSha256": self.receipts["candidate"]["integrity"]["sha256"]}
-            shutil.copytree(self.packages["candidate"], app / ".mobile-release" / "input" / "candidate")
+            private_fixture_copy_tree(self.packages["candidate"], app / ".mobile-release" / "input" / "candidate", app_root=app)
         if stage == "production-submit":
             intent["predecessors"]["externalReceiptSha256"] = self.receipts["external-testing"]["integrity"]["sha256"]
-            shutil.copytree(self.packages["external-testing"], app / ".mobile-release" / "input" / "external")
+            private_fixture_copy_tree(self.packages["external-testing"], app / ".mobile-release" / "input" / "external", app_root=app)
         intent = seal(intent)
-        json_file(operation / f"{stage}-operation-intent.json", intent)
+        json_file(operation / f"{stage}-operation-intent.json", intent, app_root=app)
         self.intents[stage] = intent
         if stage == "candidate":
-            shutil.copytree(self.handoff, app / ".mobile-release" / "artifacts" / self.platform)
+            private_fixture_copy_tree(self.handoff, app / ".mobile-release" / "artifacts" / self.platform, app_root=app)
             metadata = app / ".mobile-release" / "staging" / "candidate" / self.platform / "store-metadata.zip"
-            metadata.parent.mkdir(parents=True)
-            shutil.copyfile(self.config.root / "store-metadata.zip", metadata)
+            private_fixture_copy_file(self.config.root / "store-metadata.zip", metadata, app_root=app)
         seal_intent(app, selected, self.api.client(selected))
         proof = json.loads((operation / "intent-provenance.json").read_bytes())
         self.api.sign(operation / "intent-provenance.json")
@@ -272,24 +310,24 @@ class Lifecycle:
         self.api.upload(selected, operation, "intent")
         return selected, app, intent
 
-    def finish(self, stage: str, selected: Context, app: Path, intent: dict, *, conclusion: str = "success", executor: dict | None = None, result: str = "accepted") -> Path:
+    def finish(self, stage: str, selected: Context, app: Path, intent: dict, *, conclusion: str = "success", executor: dict | None = None, result: str = "accepted", destination: Path | None = None) -> Path:
         raw = raw_receipt(intent, executed_by=executor, result=result)
         evidence = app / ".mobile-release" / "staging" / stage / self.platform
-        evidence.mkdir(parents=True, exist_ok=True)
+        private_fixture_directory(app, evidence)
         if stage == "candidate":
             candidate = verify_sealed(self.documents["candidate"])
             candidate.update(artifacts=copy.deepcopy(self.records), operationIntentSha256=intent["integrity"]["sha256"], authorizedBy=intent["authorizedBy"], executedBy=raw["executedBy"], producedBy=dict(selected.authority))
             self.candidate = seal(candidate)
             validate_evidence_document(self.candidate)
-            json_file(evidence / "candidate-manifest.json", self.candidate)
+            json_file(evidence / "candidate-manifest.json", self.candidate, app_root=app)
         assert self.candidate is not None
         env = workflow_environment(stage, run_id=selected.authority["runId"], attempt=selected.authority["attempt"], head=selected.authority["headSha"])
         with patch.dict(os.environ, env):
             receipt = build_receipt(stage=stage, platform=self.platform, candidate_manifest=self.candidate, store_receipt=raw, operation_intent=intent, previous_receipt=self.receipts.get("candidate" if stage == "external-testing" else "external-testing"))
         self.receipts[stage] = receipt
-        json_file(evidence / f"{stage}-receipt.json", receipt)
-        json_file(app / ".mobile-release" / "store" / "readback.json", raw)
-        package = self.root / (stage + "-final")
+        json_file(evidence / f"{stage}-receipt.json", receipt, app_root=app)
+        json_file(app / ".mobile-release" / "store" / "readback.json", raw, app_root=app)
+        package = destination if destination is not None else self.root / (stage + "-final")
         package_final(app, evidence, app / ".mobile-release" / "store" / "readback.json", package, selected, self.api.client(selected))
         self.api.sign(package / "workflow-provenance.json")
         self.api.upload(selected, package, "evidence")
@@ -746,7 +784,7 @@ class WorkflowRecoveryTests(unittest.TestCase):
                     with self.assertRaisesRegex(WorkflowError, "original authenticated operation intent is missing"):
                         self.resolve(reuse, label + "-incomplete-alias", recovery_run_id=recovery_id)
                     recovered_app = self.root / (label + "-recovered-app")
-                    shutil.copytree(self.root / (label + "-resume") / "operation", recovered_app / ".mobile-release" / "operation")
+                    private_fixture_copy_tree(self.root / (label + "-resume") / "operation", recovered_app / ".mobile-release" / "operation", app_root=recovered_app)
                     self.api.register(recovery, active=True)
                     outcome = "operator_authorized_reconciliation" if platform == "ios" and stage == "candidate" else "reconciled"
                     package = lifecycle.finish(stage, recovery, recovered_app, intent, executor=dict(recovery.authority), result=outcome)

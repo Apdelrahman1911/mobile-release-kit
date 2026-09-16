@@ -15,7 +15,7 @@ from typing import Any, Iterable, Mapping
 
 from . import __version__
 from .config import ReleaseConfig, ReleaseVersion
-from .discovery import GitContext
+from .discovery import GitContext, valid_observed_source
 from .errors import ValidationError
 from .metadata import android_release_notes, validate_android_release_note
 
@@ -185,7 +185,28 @@ def validate_evidence_output_path(path: Path) -> Path:
     return destination
 
 
-def write_evidence(path: Path, value: dict[str, Any]) -> None:
+def write_evidence(path: Path, value: dict[str, Any], *, app_root: Path | None = None,
+                   cancellation=None) -> None:
+    # Lazy low-level import: config/discovery/reporting also consume evidence.
+    from .build_inputs import _app_private_directory, _publish_private_file
+
+    validate_evidence_document(value)
+    path = path.expanduser().absolute()
+    if app_root is not None and path == Path(app_root).expanduser() / ".mobile-release":
+        raise ValidationError("the application-private root cannot be an evidence file")
+    with _app_private_directory(path.parent, app_root=app_root, cancellation=cancellation) as namespace:
+        if namespace is None:
+            _write_evidence_generic(path, value)
+            return
+        path = validate_evidence_output_path(path)
+        payload = (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+        try:
+            _publish_private_file(namespace, path.name, iter((payload,)))
+        except FileExistsError as error:
+            raise ValidationError("immutable release evidence output already exists") from error
+
+
+def _write_evidence_generic(path: Path, value: dict[str, Any]) -> None:
     validate_evidence_document(value)
     path = validate_evidence_output_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -232,7 +253,7 @@ def validate_immutable_copy(source: Path, destination: Path) -> None:
         validate_evidence_output_path(destination)
 
 
-def copy_immutable_file(source: Path, destination: Path) -> None:
+def _copy_immutable_file_generic(source: Path, destination: Path) -> None:
     """Publish exact bytes atomically, or verify an existing immutable copy.
 
     In particular, an interrupted metadata/intent copy must never leave a
@@ -264,6 +285,63 @@ def copy_immutable_file(source: Path, destination: Path) -> None:
             raise ValidationError("immutable file could not be published atomically") from error
     finally:
         os.unlink(temporary)
+
+
+def copy_immutable_file(source: Path, destination: Path, *, app_root: Path | None = None,
+                        cancellation=None) -> None:
+    """Preserve generic copies; bind private publication AND exact-retry reads.
+
+    Only an explicit caller-bound root selects private policy. Matching bytes
+    in an incompatible existing namespace do not bypass that admission.
+    """
+    from .build_inputs import (
+        _app_private_directory, _exact_reserved_names, _file, _publish_private_file, _read_file,
+    )
+
+    source, destination = source.expanduser().absolute(), destination.expanduser().absolute()
+    if app_root is not None and destination == Path(app_root).expanduser() / ".mobile-release":
+        raise ValidationError("the application-private root cannot be an immutable file")
+    if _evidence_path_has_symlink(source) or not source.is_file():
+        raise ValidationError("immutable copy source must be a regular non-symlink file")
+    with _app_private_directory(destination.parent, app_root=app_root,
+                               cancellation=cancellation) as namespace:
+        if namespace is None:
+            _copy_immutable_file_generic(source, destination)
+            return
+        if _evidence_path_has_symlink(destination):
+            raise ValidationError("immutable copy destination must not traverse a symbolic link")
+        original = _file(source.stat())
+
+        def matches_existing() -> bool:
+            parent = namespace.fd
+            _exact_reserved_names(parent, {destination.name})
+            found = _read_file(parent, destination.name, namespace.cancellation,
+                               original["size"], private=True, binding_only=True)
+            if found is None:
+                return False
+            if (found[0]["size"] != original["size"] or found[0]["sha256"] != sha256_file(source)
+                    or _file(source.stat()) != original):
+                raise ValidationError("existing immutable file conflicts with the original bytes")
+            namespace.check()
+            return True
+
+        # Admission is still LIVE for this early return and its original exit.
+        if matches_existing():
+            return
+
+        def blocks():
+            with source.open("rb") as handle:
+                if _file(os.fstat(handle.fileno())) != original:
+                    raise ValidationError("immutable copy source changed before publication")
+                while block := handle.read(1024 * 1024):
+                    yield block
+                if _file(os.fstat(handle.fileno())) != original or _file(source.stat()) != original:
+                    raise ValidationError("immutable copy source changed during publication")
+
+        # Only the pre-attempt read above authorizes exact-copy reuse. A failed
+        # publication may have lost its link return; later matching bytes cannot
+        # convert that original unknown result into successful completion.
+        _publish_private_file(namespace, destination.name, blocks())
 
 
 def load_evidence(path: Path) -> dict[str, Any]:
@@ -2940,14 +3018,8 @@ def _repository(git: GitContext) -> dict[str, str]:
 
 
 def _source(git: GitContext, *, include_ref: bool) -> dict[str, str]:
-    object_id = r"[0-9A-Fa-f]{40}"
-    if (
-        not git.commit
-        or not re.fullmatch(object_id, git.commit)
-        or not git.tree
-        or not re.fullmatch(object_id, git.tree)
-    ):
-        raise ValidationError("candidate evidence requires immutable source commit and tree")
+    if not valid_observed_source(git):
+        raise ValidationError("candidate evidence requires observed immutable source commit/tree and a provably clean worktree")
     result = {"commit": git.commit, "tree": git.tree}
     if include_ref:
         if not git.ref or len(git.ref) > 512:
