@@ -267,7 +267,7 @@ class ObservedSourceGitTests(unittest.TestCase):
                        "build_operation_intent", "build_candidate_manifest", "build_receipt",
                        "write_evidence", "copy_immutable_file")),
                 (credentials, ("credential_values_from_environment",)),
-                (stores, ("credential_values_from_environment", "credential_values_for_purpose")),
+                (stores, ("credential_values_from_environment", "_selected_store_material")),
             ):
                 for name in names:
                     forbidden.append(boundary.enter_context(patch.object(
