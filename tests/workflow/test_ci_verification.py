@@ -1627,6 +1627,60 @@ class CIControllerContractTests(unittest.TestCase):
                     run_index = max(index for index, event in enumerate(rig.events) if event[0] == "run")
                     self.assertTrue(all(event[0] == "idle" for event in rig.events[run_index + 1:]))
 
+        for phase in ("source", "wheel"):
+            for mode in ("progress", "projection-error", "outer-expired", "late-success"):
+                with self.subTest(native_progress=(phase, mode)):
+                    rig = self._native_gate_fixture(phase)
+                    source_ids = rig.inventories["ordinary"]
+                    # Native currently reports a whole line only on success.
+                    # Do not invent an in-flight method's start observation.
+                    raw = header(source_ids[0]) + b" ... ok\n" + private + b"\n"
+                    rig.run_advance = 400.5  # Original1000s endpoint expires in ordinary.
+                    rig.idle_error = rig.controller.VerificationError("AGGREGATE_DEADLINE")
+                    rig.idle_failure_after = 2
+                    rig.changes["ordinary"] = dict(stderr=raw, persisted=(0, len(raw)))
+                    if mode != "late-success":
+                        rig.changes["ordinary"].update(ok=False, returncode=None, waited=False,
+                            stdout_eof=False, stderr_eof=False, domain_finality=False, timed_out=True,
+                            primary_error="command/original aggregate deadline expired",
+                            cleanup_errors=("original child wait TimeoutError",))
+                    original_ids = rig.checks.native_partition_ids
+
+                    def identities(*args, **kwargs):
+                        self.assertLess(len(rig.captures), 2, "late failed-capture inventory read")
+                        return original_ids(*args, **kwargs)
+
+                    with patch.object(rig.checks, "native_partition_ids", side_effect=identities), \
+                            patch.object(rig.controller, "python_failure_progress",
+                                side_effect=RuntimeError(private.decode()) if mode == "projection-error" else None,
+                                wraps=rig.controller.python_failure_progress) as progress:
+                        result = self._perform_native_fixture(rig,
+                            deadline=1000.0 if mode == "outer-expired" else 2500.0)
+                    self.assertFalse(result.ok)
+                    self.assertEqual(result.error, "AGGREGATE_DEADLINE" if mode == "late-success"
+                                     else "COMMAND_EXIT_OR_FINALITY")
+                    rows = result.details["partitions"]
+                    self.assertEqual([row["status"] for row in rows],
+                                     ["PASS", "FAIL"] + ["UNEXECUTED"] * len(controller.PYTHON_SINGLETON_PARTITIONS))
+                    ordinary = rows[1]
+                    if mode == "progress":
+                        self.assertEqual(ordinary["python_progress"]["last_observed_start"], {"id": source_ids[0]})
+                        self.assertEqual(ordinary["python_progress"]["last_observed_outcome"],
+                                         {"id": source_ids[0], "outcome": "ok"})
+                    else:
+                        self.assertNotIn("python_progress", ordinary)
+                    self.assertEqual(progress.call_count, int(mode in ("progress", "projection-error")))
+                    self.assertEqual("python_progress_error" in ordinary, mode in ("projection-error", "outer-expired"))
+                    for key, observed in controller.capture_observations(rig.captures[-1]).items():
+                        self.assertEqual(ordinary["capture"][key], observed)
+                    self.assertNotIn(private.decode(), json.dumps(result.details))
+                    self.assertNotIn("completed", result.details)
+                    runs = [event for event in rig.events if event[0] == "run"]
+                    self.assertEqual(len(runs), 2)
+                    self.assertTrue(all(event[2]["absolute_deadline"] == 1000.0 for event in runs))
+                    final_run = max(index for index, event in enumerate(rig.events) if event[0] == "run")
+                    self.assertTrue(all(event[0] == "idle" for event in rig.events[final_run + 1:]))
+
         rig = self._python_gate_fixture()
         with patch.object(rig.checks, "python_capture_ids", side_effect=AssertionError("parser rescan")), \
                 patch.object(rig.checks, "native_partition_ids", side_effect=AssertionError("parser native rescan")):

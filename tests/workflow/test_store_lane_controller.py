@@ -198,9 +198,11 @@ class StoreLaneControllerTests(unittest.TestCase):
         for platform in ("linux", "macos"):
             with self.subTest(platform=platform):
                 rig = self._rig(platform)
-                with patch.object(rig.c, "native_failure_diagnostic") as diagnostic:
+                with patch.object(rig.c, "native_failure_diagnostic") as diagnostic, \
+                        patch.object(rig.c, "store_native_inner_failure") as inner:
                     source = self._gate(rig)
                 diagnostic.assert_not_called()
+                inner.assert_not_called()
                 self.assertTrue(source.ok, source.details)
                 self.assertEqual(len(rig.runs), 16)  # Binding plus all15 source rows.
                 self.assertEqual(len(rig.outputs), 16)
@@ -210,7 +212,8 @@ class StoreLaneControllerTests(unittest.TestCase):
                 self.assertTrue(all(row["conservative_accounted_bytes"] == 18 + sum(original.persisted)
                                     for row, original in zip(source.details["rows"], rig.originals[1:])))
                 commands = rig.runs[1:]
-                self.assertEqual({argv[argv.index("--deadline") + 1] for argv, _ in commands}, {"310.0"})
+                self.assertEqual([argv[argv.index("--deadline") + 1] for argv, _ in commands],
+                                 [repr(options["absolute_deadline"]) for _, options in commands])
                 self.assertEqual([argv[argv.index("--subcase") + 1] for argv, _ in commands],
                                  [case for case, _ in rig.checks.store_lane_native_rows(ROOT, "source")])
                 for index, (argv, options) in enumerate(rig.runs):
@@ -220,9 +223,11 @@ class StoreLaneControllerTests(unittest.TestCase):
                     self.assertEqual(options["absolute_deadline"], min(310.0, 30.0 + index))
                     if index:
                         self.assertEqual(argv[1:4], ("-I", "-S", "-B"))
-                with patch.object(rig.c, "native_failure_diagnostic") as diagnostic:
+                with patch.object(rig.c, "native_failure_diagnostic") as diagnostic, \
+                        patch.object(rig.c, "store_native_inner_failure") as inner:
                     wheel = self._gate(rig, "wheel")
                 diagnostic.assert_not_called()
+                inner.assert_not_called()
                 self.assertTrue(wheel.ok, wheel.details)
                 self.assertEqual(len(rig.runs), 31)
                 self.assertEqual(len(rig.environments), 31)
@@ -241,18 +246,28 @@ class StoreLaneControllerTests(unittest.TestCase):
                                       for name in rig.checks.STORE_NATIVE_PRODUCTS if name.endswith(".py")}
                     expected_files.update({str(rig.paths.source / name): name
                                            for name in rig.c.STORE_NATIVE_FIXTURES if name.endswith(".py")})
+                    expected_ruby = tuple(sorted(name for name in (*rig.checks.STORE_NATIVE_PRODUCTS, *rig.c.STORE_NATIVE_FIXTURES)
+                                                 if name.endswith(".rb") or name == "fastlane/Fastfile"))
                     for call, (subcase, identifier) in zip(calls, rig.checks.store_lane_native_rows(ROOT, phase)):
                         scope = call.kwargs["store_native_diagnostic"]
                         self.assertEqual((scope.phase, scope.subcase, scope.identifier), (phase, subcase, identifier))
                         self.assertEqual(dict(scope.filenames), expected_files)
+                        self.assertEqual(scope.ruby_files, expected_ruby)
+                        self.assertIs(type(scope.ruby_files), tuple)
+                        arguments = call.args[1]
+                        self.assertEqual(arguments[arguments.index("--deadline") + 1], repr(call.kwargs["deadline"]))
                         with self.assertRaises(AttributeError):
                             scope.identifier = "foreign"
+                        with self.assertRaises(AttributeError):
+                            scope.ruby_files = ("fastlane/foreign.rb",)
                         with self.assertRaises(TypeError):
                             scope.filenames["/private/foreign.py"] = "tests/foreign.py"
                 # A later mutation of the test's binding dictionary cannot
                 # rewrite the already-frozen per-original diagnostic scope.
                 rig.binding["files"]["src/mobile_release/_command_process.py"]["path"] = "/private/foreign.py"
                 self.assertEqual(dict(scope.filenames), expected_files)
+                rig.binding["files"].pop("fastlane/store_lane_runtime.rb")
+                self.assertEqual(scope.ruby_files, expected_ruby)
         rig = self._rig()
         self.assertFalse(self._gate(rig, "wheel").ok)
         self.assertEqual(rig.runs, [])
@@ -263,8 +278,11 @@ class StoreLaneControllerTests(unittest.TestCase):
         faults = ("bound", "unbound", "foreign", "duplicate", "malformed", "private-field", "prerequisite",
                   "class-record", "stdout-marker", "ruby-binding", "parser-exception", "parser-interrupt",
                   "parser-expiry", "scan-exception", "scan-expiry")
+        inner_faults = ("inner-foreign", "inner-duplicate", "inner-unknown", "inner-unbound", "inner-no-callback",
+                        "inner-skip-callback", "inner-stdout", "inner-parser-exception", "inner-parser-interrupt",
+                        "inner-parser-expiry")
         for phase in ("source", "wheel"):
-            for fault in faults:
+            for fault in (*faults, "inner-unavailable", *(inner_faults if phase == "source" else ())):
                 with self.subTest(phase=phase, fault=fault):
                     rig = self._rig()
                     c = rig.c
@@ -298,6 +316,8 @@ class StoreLaneControllerTests(unittest.TestCase):
                         diagnostic_phase, callback["id"] = "prerequisite", "system-code"
                     elif fault == "class-record":
                         callback["id"] = "setUpClass (workflow.test_store_lane_native.StoreLaneNativeTests)"
+                    elif fault == "inner-skip-callback":
+                        callback.update(outcome="skip", category="none", errno=None)
                     diagnostic = {"schema": 1, "phase": diagnostic_phase, "records": [callback]}
                     marker = c.NATIVE_DIAGNOSTIC_PREFIX.encode() + c.store_native_wire(diagnostic)
                     if fault == "duplicate":
@@ -306,9 +326,30 @@ class StoreLaneControllerTests(unittest.TestCase):
                         marker = c.NATIVE_DIAGNOSTIC_PREFIX.encode() + b"not-json\n"
                     elif fault == "stdout-marker":
                         rig.failure_stdout, marker = marker, b""
+                    elif fault == "inner-no-callback":
+                        marker = b""
+                    inner_data = {"version": 1, "phase": phase, "subcase": "success0", "testId": identifier,
+                        "returncode": 76, "expectedReturncode": 0, "observer": {"state": "available",
+                        "stage": "unknown-cleanup", "category": "store-runtime-error", "reason": "clock",
+                        "locations": [{"file": "fastlane/store_lane_runtime.rb", "line": 211},
+                                      {"file": "tests/workflow/store_lane_native_fixture.rb", "line": 212}]}}
+                    if fault == "inner-unavailable":
+                        inner_data["observer"] = {"state": "unavailable"}
+                    elif fault == "inner-foreign":
+                        inner_data["phase"] = "wheel"
+                    elif fault == "inner-unknown":
+                        inner_data["observer"]["category"] = private
+                    elif fault == "inner-unbound":
+                        inner_data["observer"]["locations"][0]["file"] = "/private/" + private
+                    inner_marker = c.STORE_NATIVE_INNER_PREFIX.encode() + c.store_native_wire(inner_data)
+                    if fault == "inner-duplicate":
+                        inner_marker *= 2
+                    elif fault == "inner-stdout":
+                        rig.failure_stdout, inner_marker = inner_marker, b""
                     rig.failure_stderr = (rejected + (b"" if fault == "unbound" else headers)
-                        + f"    private_source('{private}')\nFileNotFoundError: /private/{private}\n".encode() + marker)
+                        + f"    private_source('{private}')\nFileNotFoundError: /private/{private}\n".encode() + inner_marker + marker)
                     native_parser, native_scan = c.native_failure_diagnostic, c._native_bound_failure_locations
+                    inner_parser = c.store_native_inner_failure
 
                     def parse(text, expected, *, deadline):
                         if fault == "parser-exception":
@@ -326,8 +367,18 @@ class StoreLaneControllerTests(unittest.TestCase):
                             rig.clock = deadline
                         return native_scan(text, filenames, deadline=deadline)
 
+                    def parse_inner(raw, scope, *, deadline):
+                        if fault == "inner-parser-exception":
+                            raise ValueError(private)
+                        if fault == "inner-parser-interrupt":
+                            raise KeyboardInterrupt(private)
+                        if fault == "inner-parser-expiry":
+                            rig.clock = deadline
+                        return inner_parser(raw, scope, deadline=deadline)
+
                     with patch.object(c, "native_failure_diagnostic", side_effect=parse) as parsed, \
                             patch.object(c, "_native_bound_failure_locations", side_effect=scan) as projected, \
+                            patch.object(c, "store_native_inner_failure", side_effect=parse_inner) as inner_parsed, \
                             patch.object(c, "read_regular", side_effect=AssertionError(private)) as read:
                         result = self._gate(rig, phase)
                     read.assert_not_called()
@@ -354,26 +405,42 @@ class StoreLaneControllerTests(unittest.TestCase):
                     else:
                         parsed.assert_called_once_with(rig.failure_stderr.decode("utf-8", "replace"), (identifier,),
                                                        deadline=rig.runs[-1][1]["absolute_deadline"])
-                    if fault in {"bound", "unbound"}:
+                    native_published = fault in {"bound", "unbound", "inner-unavailable", "inner-foreign",
+                        "inner-duplicate", "inner-unknown", "inner-unbound", "inner-skip-callback", "inner-stdout"}
+                    if native_published:
                         self.assertEqual(failed["native_diagnostic"], diagnostic)
-                        projected.assert_called_once_with(rig.failure_stderr.decode("utf-8", "replace"),
-                            rig.capture_calls[-1].kwargs["store_native_diagnostic"].filenames,
-                            deadline=rig.runs[-1][1]["absolute_deadline"])
-                        if fault == "bound":
+                        if fault == "inner-skip-callback":
+                            projected.assert_not_called()
+                        else:
+                            projected.assert_called_once_with(rig.failure_stderr.decode("utf-8", "replace"),
+                                rig.capture_calls[-1].kwargs["store_native_diagnostic"].filenames,
+                                deadline=rig.runs[-1][1]["absolute_deadline"])
+                        if fault not in {"unbound", "inner-skip-callback"}:
                             self.assertEqual(failed["native_test_locations"], expected_locations)
                         else:
                             self.assertNotIn("native_test_locations", failed)
                     else:
                         self.assertNotIn("native_diagnostic", failed)
                         self.assertNotIn("native_test_locations", failed)
-                        if not fault.startswith("scan-"):
+                        if not fault.startswith(("scan-", "inner-parser-")):
                             projected.assert_not_called()
-                    if fault.startswith(("parser-", "scan-")):
+                    if (native_published and fault != "inner-skip-callback") or fault.startswith("inner-parser-"):
+                        inner_parsed.assert_called_once_with(rig.failure_stderr,
+                            rig.capture_calls[-1].kwargs["store_native_diagnostic"],
+                            deadline=rig.runs[-1][1]["absolute_deadline"])
+                    else:
+                        inner_parsed.assert_not_called()
+                    if fault in {"bound", "unbound", "inner-unavailable"}:
+                        self.assertEqual(failed["store_inner_failure"], inner_data)
+                    else:
+                        self.assertNotIn("store_inner_failure", failed)
+                    if fault.startswith(("parser-", "scan-", "inner-parser-")):
                         self.assertEqual(failed["store_native_diagnostic_error"],
                                          {"error": "STORE_NATIVE_DIAGNOSTIC_UNAVAILABLE"})
                     public = c.store_native_wire(result.details).decode()
                     for hidden in (private, str(rig.paths.source), str(modules), "/private/", "private_source"):
                         self.assertNotIn(hidden, public)
+        self._inner_note_parser_contracts(rig)
         rig = self._rig()
         rig.output_error_at = 1
         result = self._gate(rig)
@@ -394,6 +461,64 @@ class StoreLaneControllerTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(len(rig.runs), 1)
         self.assertEqual(rig.removals, [])
+
+    def _inner_note_parser_contracts(self, rig):
+        c = rig.c
+        scope = rig.capture_calls[-1].kwargs["store_native_diagnostic"]
+        private = "PRIVATE_INNER_NOTE_CANARY"
+        observer = {"state": "available", "stage": "unknown-cleanup", "category": "store-runtime-error",
+                    "reason": "clock", "locations": [{"file": "fastlane/store_lane_runtime.rb", "line": 17}]}
+        base = {"version": 1, "phase": scope.phase, "subcase": scope.subcase, "testId": scope.identifier,
+                "returncode": 76, "expectedReturncode": 0, "observer": observer}
+        marker = c.STORE_NATIVE_INNER_PREFIX.encode()
+        def note(value):
+            return marker + c.store_native_wire(value)
+        def inspect(raw, selected=scope):
+            return c.store_native_inner_failure(raw, selected, deadline=100.0)
+        rejected = (
+            {**base, "version": True}, {**base, "version": 1.0}, {**base, "message": private},
+            {**base, "phase": "source"}, {**base, "subcase": "ordinary75"}, {**base, "testId": private},
+            *({**base, "returncode": value} for value in (True, 0, 256, -256, 76.0, private)),
+            *({**base, "expectedReturncode": value} for value in (False, 75, 0.0)),
+            {**base, "observer": {"state": "unavailable", "message": private}},
+            *({**base, "observer": {**observer, key: value}} for key, value in (
+                ("state", "unknown"), ("stage", private), ("category", private), ("reason", private),
+                ("locations", observer["locations"] * 9), ("message", private))),
+            *({**base, "observer": {**observer, "locations": [location]}} for location in (
+                {"file": "/private/" + private, "line": 17},
+                {"file": "fastlane/foreign.rb", "line": 17},
+                {"file": "tests/workflow/test_store_lane_native.py", "line": 17},
+                {"file": "fastlane/store_lane_runtime.rb", "line": True},
+                {"file": "fastlane/store_lane_runtime.rb", "line": 0},
+                {"file": "fastlane/store_lane_runtime.rb", "line": 1_000_000},
+                {"file": "fastlane/store_lane_runtime.rb", "line": 17, "method": private})),
+            {**base, "observer": {**observer, "category": "none", "reason": None}},
+            {**base, "observer": {**observer, "category": "io-error", "reason": "clock"}},
+        )
+        with patch.object(c, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
+                patch.object(c, "read_regular", side_effect=AssertionError("no diagnostic source read")) as read, \
+                patch.object(Path, "lstat", side_effect=AssertionError("no diagnostic path inspection")) as metadata:
+            self.assertEqual(inspect(note(base)), base)
+            for index, value in enumerate(rejected):
+                with self.subTest(inner_schema=index):
+                    self.assertIsNone(inspect(note(value)))
+            for raw in (note(base) * 2, b"not-a-note\n", b"  " + note(base),
+                        note(base).rstrip(b"\n") + b" " * c.STORE_NATIVE_INNER_BYTES + b"\n",
+                        note(base) + b"x" * c.STORE_NATIVE_JSON_BYTES):
+                self.assertIsNone(inspect(raw))
+            for raw in (marker + b"not-json\n",
+                        note(base).replace(b'"version":1', b'"version":1,"version":1'),
+                        note(base).replace(b'"returncode":76', b'"returncode":NaN')):
+                with self.assertRaises((ValueError, c.VerificationError)):
+                    inspect(raw)
+            for observed in ({"state": "unavailable"}, {**observer, "locations": observer["locations"] * 8},
+                             {**observer, "category": "none", "reason": None, "locations": []},
+                             {**observer, "category": "unclassified", "reason": None}):
+                value = {**base, "observer": observed}
+                self.assertEqual(inspect(note(value)), value)
+            self.assertIsNone(inspect(note(base), replace(scope, subcase="clock-expired")))
+            read.assert_not_called()
+            metadata.assert_not_called()
 
     def test_semantic_row_requires_original_finality_exact_callback_and_bound_marker_not_log_text(self):
         c, checks = controller_module(), ci_module("ci_checks")
@@ -501,6 +626,7 @@ class StoreLaneControllerTests(unittest.TestCase):
             remover.assert_not_called()
             close.assert_called_once_with(23)
         self._python_case_handoff_contracts()
+        self._python_inner_observer_contracts()
 
     def _python_case_handoff_contracts(self):
         fixture = native_fixture
@@ -626,6 +752,262 @@ class StoreLaneControllerTests(unittest.TestCase):
                                             fixture.main(arguments)
                                     self.assertIs(caught.exception, stopped)
                             fallback.assert_not_called()
+
+
+    def _python_inner_observer_contracts(self):
+        fixture, c = native_fixture, controller_module()
+        for suffix in ("PREFIX", "BYTES", "EXPECTED", "STAGES", "CATEGORIES", "REASONS"):
+            self.assertEqual(getattr(fixture, "INNER_FAILURE_" + suffix), getattr(c, "STORE_NATIVE_INNER_" + suffix))
+        private = "PRIVATE_INNER_OBSERVER_CANARY"
+        root = Path("/fixture/session/work/store-lane/source/case-02/tmp/mrk-store-native-original")
+        path = root / "observation.json"
+        product, launcher = "fastlane/store_lane_runtime.rb", "tests/workflow/store_lane_native_fixture.rb"
+        gate_faults = {"absent-outcome", "outcome-error", "outcome-interrupt", "outcome-shape", "no-target",
+                       "incomplete", "non-normal", "mismatch-code", "bool-code"}
+        ledger_faults = {"unknown-ledger", "bool-ledger", "ledger-error", "ledger-interrupt"}
+        before_open = {"expired-before", "binding-shape", "binding-type", "missing", "empty", "oversized",
+                       "identity", "owner", "mode", "nlink", "type", "expired-lstat"}
+        after_open = ("expired-open", "fstat-error", "open-identity", "open-revision", "read-error", "read-interrupt",
+                      "read-zero", "read-nonbytes", "read-overrun", "read-expiry", "read-close-error",
+                      "final-fstat", "final-path", "removed-path", "close-error", "close-interrupt", "close-expiry")
+        content_faults = ("malformed-json", "duplicate-json", "private-primary", "unknown-primary", "unknown-reason",
+                          "unbound-frame", "too-many-frames", "wrong-mode", "wrong-phase", "wrong-stage", "none-with-frames")
+        faults = ("valid", "short-read", "none-primary", "unclassified-primary",
+                  *sorted(gate_faults | ledger_faults | before_open), "open-error", *after_open, *content_faults,
+                  "note-error", "note-interrupt")
+        for fault in faults:
+            with self.subTest(inner_observer=fault):
+                events, clock = [], SimpleNamespace(now=10.0, offset=0, stats=0, paths=0)
+                primary = {"category": "store-runtime-error", "reason": "clock",
+                           "locations": [{"file": product, "line": 17}, {"file": launcher, "line": 23}]}
+                raw_value = {"version": 1, "phase": "source", "mode": "success0", "stage": "unknown-cleanup",
+                             "primaryDiagnostic": primary, "primaryClass": private, "cwd": "/private/" + private,
+                             "binding": {"root": "/private/" + private}, "unused": private * 160}
+                if fault == "private-primary":
+                    primary["message"] = private
+                elif fault == "unknown-primary":
+                    primary["category"] = private
+                elif fault == "unknown-reason":
+                    primary["reason"] = private
+                elif fault == "unbound-frame":
+                    primary["locations"][0]["file"] = "/private/" + private
+                elif fault == "too-many-frames":
+                    primary["locations"] = [{"file": product, "line": 17}] * 9
+                elif fault in {"none-primary", "none-with-frames", "unclassified-primary"}:
+                    primary.update(category="unclassified" if fault == "unclassified-primary" else "none", reason=None)
+                    if fault == "none-primary":
+                        primary["locations"] = []
+                elif fault in {"wrong-mode", "wrong-phase", "wrong-stage"}:
+                    raw_value[{"wrong-mode": "mode", "wrong-phase": "phase", "wrong-stage": "stage"}[fault]] = private
+                raw = fixture.json_bytes(raw_value)
+                if fault == "malformed-json":
+                    raw = b"not-json\n"
+                elif fault == "duplicate-json":
+                    raw = raw.replace(b'"version":1', b'"version":1,"version":1')
+                fields = dict(st_dev=5, st_ino=7, st_uid=61001, st_gid=61001, st_mode=stat.S_IFREG | 0o600,
+                              st_nlink=1, st_size=len(raw), st_mtime_ns=11, st_ctime_ns=13)
+                original = {"device": 5, "inode": 7, "uid": 61001, "gid": 61001, "mode": 0o600}
+                if fault == "binding-shape":
+                    original["unexpected"] = private
+                elif fault == "binding-type":
+                    original["inode"] = True
+                changes = {"empty": {"st_size": 0}, "oversized": {"st_size": fixture.MAX_JSON + 1},
+                           "identity": {"st_ino": 8}, "owner": {"st_uid": 61002},
+                           "mode": {"st_mode": stat.S_IFREG | 0o644}, "nlink": {"st_nlink": 2},
+                           "type": {"st_mode": stat.S_IFLNK | 0o600}}
+                nodes = {path: SimpleNamespace(**{**fields, **changes.get(fault, {})})}
+                outcome = SimpleNamespace(no_target=None, result_integrity="complete", termination="normal-exit", returncode=76)
+                if fault == "no-target":
+                    outcome.no_target = False
+                elif fault == "incomplete":
+                    outcome.result_integrity = "incomplete"
+                elif fault == "non-normal":
+                    outcome.termination = "signal"
+                elif fault == "mismatch-code":
+                    outcome.returncode = 75
+                elif fault == "bool-code":
+                    outcome.returncode = True
+                original_outcome = vars(outcome).copy()
+
+                def settled():
+                    events.append("outcome")
+                    if fault == "outcome-error":
+                        raise RuntimeError(private)
+                    if fault == "outcome-interrupt":
+                        raise KeyboardInterrupt(private)
+                    return None if fault == "absent-outcome" else SimpleNamespace() if fault == "outcome-shape" else outcome
+
+                def contained():
+                    events.append("ledger")
+                    if fault == "ledger-error":
+                        raise RuntimeError(private)
+                    if fault == "ledger-interrupt":
+                        raise KeyboardInterrupt(private)
+                    return SimpleNamespace(contained=False if fault == "unknown-ledger" else 1 if fault == "bool-ledger" else True)
+
+                def metadata(current):
+                    self.assertIn(current, nodes, "only the precreated original observer may be read")
+                    events.append("lstat")
+                    clock.paths += 1
+                    if fault == "missing" or fault == "removed-path" and clock.paths == 2:
+                        raise FileNotFoundError(private)
+                    if fault == "expired-lstat":
+                        clock.now = 100.0
+                    if fault == "final-path" and clock.paths == 2:
+                        return SimpleNamespace(**{**fields, "st_ino": 8})
+                    return nodes[current]
+
+                def opening(current, flags):
+                    self.assertEqual(current, path)
+                    self.assertEqual(flags, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                    events.append("open")
+                    if fault == "open-error":
+                        raise OSError(private)
+                    if fault == "expired-open":
+                        clock.now = 100.0
+                    return 239  # Inert token only; no actual descriptor exists.
+
+                def descriptor(number):
+                    self.assertEqual(number, 239)
+                    events.append("fstat")
+                    clock.stats += 1
+                    if fault == "fstat-error":
+                        raise OSError(private)
+                    changed = ({"st_ino": 8} if fault == "open-identity" and clock.stats == 1 else
+                               {"st_mtime_ns": 12} if fault == "open-revision" and clock.stats == 1 else
+                               {"st_ctime_ns": 14} if fault == "final-fstat" and clock.stats == 2 else {})
+                    return SimpleNamespace(**{**fields, **changed})
+
+                def reading(number, count):
+                    self.assertEqual(number, 239)
+                    self.assertTrue(0 < count <= 4096)
+                    self.assertLessEqual(count, len(raw) - clock.offset)
+                    events.append("read")
+                    if fault in {"read-error", "read-close-error"}:
+                        raise OSError(private)
+                    if fault == "read-interrupt":
+                        raise KeyboardInterrupt(private)
+                    if fault == "read-zero":
+                        return b""
+                    if fault == "read-nonbytes":
+                        return private
+                    if fault == "read-overrun":
+                        return b"x" * (count + 1)
+                    if fault == "read-expiry":
+                        clock.now = 100.0
+                    block = raw[clock.offset:clock.offset + (min(count, 257) if fault == "short-read" else count)]
+                    clock.offset += len(block)
+                    return block
+
+                def closing(number):
+                    self.assertEqual(number, 239)
+                    events.append("close")
+                    if fault in {"close-error", "read-close-error"}:
+                        raise OSError(private)
+                    if fault == "close-interrupt":
+                        raise KeyboardInterrupt(private)
+                    if fault == "close-expiry":
+                        clock.now = 100.0
+
+                filesystem = SimpleNamespace(**{name: getattr(os, name) for name in ("O_RDONLY", "O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")},
+                    open=Mock(side_effect=opening), fstat=Mock(side_effect=descriptor),
+                    read=Mock(side_effect=reading), close=Mock(side_effect=closing))
+                record = SimpleNamespace(_outcome=Mock(side_effect=settled), finish=Mock(side_effect=AssertionError("no settlement")))
+                guard = SimpleNamespace(lifetime_ledger=SimpleNamespace(verdict=Mock(side_effect=contained)))
+                case = SimpleNamespace(root=root, config=SimpleNamespace(phase="source", subcase="success0", deadline=100.0),
+                    request={"diagnosticIdentity": original, "fixtureFiles": {launcher: "a" * 64}},
+                    binding={"files": {product: {"path": "/bound/" + product}}})
+                first = AssertionError("Store native fixture: fixed native row exit status")
+                add_note = first.add_note
+                first.add_note = Mock(wraps=add_note)
+                if fault in {"note-error", "note-interrupt"}:
+                    first.add_note.side_effect = RuntimeError(private) if fault == "note-error" else KeyboardInterrupt(private)
+                if fault == "expired-before":
+                    clock.now = 100.0
+                with patch.object(fixture, "os", filesystem), \
+                        patch.object(fixture, "time", SimpleNamespace(monotonic=lambda: clock.now)), \
+                        patch.object(Path, "lstat", autospec=True, side_effect=metadata) as inspect, \
+                        patch.object(fixture, "_read_inner_observer", wraps=fixture._read_inner_observer) as read:
+                    with self.assertRaises(AssertionError) as caught:
+                        try:
+                            raise first
+                        except AssertionError as error:
+                            fixture._note_inner_failure(error, case, 76, 0, record, guard)
+                            raise
+                self.assertIs(caught.exception, first)
+                self.assertEqual(first.args, ("Store native fixture: fixed native row exit status",))
+                record._outcome.assert_called_once_with()
+                record.finish.assert_not_called()
+                self.assertEqual(vars(outcome), original_outcome)
+                if fault in gate_faults:
+                    guard.lifetime_ledger.verdict.assert_not_called()
+                else:
+                    guard.lifetime_ledger.verdict.assert_called_once_with()
+                if fault in gate_faults | ledger_faults:
+                    read.assert_not_called()
+                else:
+                    read.assert_called_once_with(path, original, 100.0)
+                if fault in gate_faults | ledger_faults | {"expired-before", "binding-shape", "binding-type"}:
+                    inspect.assert_not_called()
+                if inspect.called:
+                    self.assertEqual(events[:2], ["outcome", "ledger"])
+                if fault in gate_faults | ledger_faults | before_open:
+                    filesystem.open.assert_not_called()
+                else:
+                    filesystem.open.assert_called_once()
+                if not filesystem.open.called or fault == "open-error":
+                    filesystem.close.assert_not_called()
+                    filesystem.read.assert_not_called()
+                else:
+                    filesystem.close.assert_called_once_with(239)
+                    self.assertEqual(events[-1], "close")
+                if fault in {"read-error", "read-interrupt", "read-zero", "read-nonbytes", "read-overrun", "read-expiry", "read-close-error"}:
+                    filesystem.read.assert_called_once()
+                first.add_note.assert_called_once()
+                notes = getattr(first, "__notes__", [])
+                if fault in {"note-error", "note-interrupt"}:
+                    self.assertEqual(notes, [])
+                    continue
+                self.assertEqual(len(notes), 1)
+                self.assertTrue(notes[0].startswith(fixture.INNER_FAILURE_PREFIX))
+                self.assertLessEqual(len(notes[0]) - len(fixture.INNER_FAILURE_PREFIX), fixture.INNER_FAILURE_BYTES)
+                data = fixture.decode(notes[0][len(fixture.INNER_FAILURE_PREFIX):].encode("ascii"))
+                self.assertEqual({key: value for key, value in data.items() if key != "observer"},
+                    {"version": 1, "phase": "source", "subcase": "success0",
+                     "testId": fixture.PREFIX + dict(fixture.CASE_ROWS)["success0"], "returncode": 76, "expectedReturncode": 0})
+                if fault in {"valid", "short-read", "none-primary", "unclassified-primary"}:
+                    self.assertEqual(data["observer"], {"state": "available", "stage": "unknown-cleanup", **primary})
+                    self.assertEqual(clock.offset, len(raw))
+                    self.assertEqual(clock.stats, 2)
+                    self.assertEqual(clock.paths, 2)
+                else:
+                    self.assertEqual(data["observer"], {"state": "unavailable"})
+                for hidden in (private, str(root), "/private/", "primaryClass", "binding", "unused"):
+                    self.assertNotIn(hidden, notes[0])
+        # Finite rc/expected-code admission does not consult observers or try
+        # to finish an original record merely to obtain diagnostic access.
+        record = SimpleNamespace(_outcome=Mock(return_value=None), finish=Mock())
+        case = SimpleNamespace(config=SimpleNamespace(phase="source", subcase="success0"))
+        with patch.object(fixture, "os", SimpleNamespace()), \
+                patch.object(fixture, "_read_inner_observer", side_effect=AssertionError("not settled")) as read:
+            for subcase, expected in fixture.INNER_FAILURE_EXPECTED.items():
+                case.config.subcase = subcase
+                actual = 76 if expected == 0 else 0
+                first = AssertionError("original")
+                fixture._note_inner_failure(first, case, actual, expected, record, SimpleNamespace())
+                data = fixture.decode(first.__notes__[0][len(fixture.INNER_FAILURE_PREFIX):].encode("ascii"))
+                self.assertEqual((data["subcase"], data["testId"], data["returncode"], data["expectedReturncode"]),
+                    (subcase, fixture.PREFIX + dict(fixture.CASE_ROWS)[subcase], actual, expected))
+                self.assertEqual(data["observer"], {"state": "unavailable"})
+            case.config.subcase = "success0"
+            for actual, expected in ((True, 0), (256, 0), (-256, 0), ("76", 0), (0, 0), (76, False), (76, 75)):
+                record._outcome.reset_mock()
+                first = AssertionError("original")
+                fixture._note_inner_failure(first, case, actual, expected, record, SimpleNamespace())
+                self.assertFalse(hasattr(first, "__notes__"))
+                record._outcome.assert_not_called()
+            record.finish.assert_not_called()
+            read.assert_not_called()
 
 
 if __name__ == "__main__":

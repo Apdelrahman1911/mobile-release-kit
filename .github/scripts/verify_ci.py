@@ -840,6 +840,69 @@ STORE_NATIVE_UNKNOWN_CASES = frozenset({
 })
 
 
+STORE_NATIVE_INNER_PREFIX = "MRK_STORE_NATIVE_INNER_FAILURE="
+STORE_NATIVE_INNER_BYTES = 8192
+STORE_NATIVE_INNER_EXPECTED = {
+    "success0": 0,
+    "ordinary75": 75,
+    "system-exit0": 76,
+    "system-exit75": 76,
+    "terminal-close-return-loss": 76,
+    "terminal-link-return-loss": 76,
+    "nested-ios-success": 0,
+    "nested-android-success": 0,
+    "nested-android-inherited-pipe": 0,
+    "bridge-success": 0,
+    "bridge-ordinary-error": 75,
+}
+STORE_NATIVE_INNER_STAGES = frozenset({"before-terminal-link", "link-return-lost", "unknown-cleanup"})
+STORE_NATIVE_INNER_REASONS = {
+    "store-runtime-error": frozenset((
+        "app_id binding_missing bridge_reused bridges_not_admitted clock completion cwd deadline "
+        "directory_api directory_return document_missing environment environment_changed exit_api "
+        "exit_not_captured exit_owner exit_returned exit_status foreign_origin inactive_runtime integer "
+        "invocation_missing key_id lane nonce nonlocal_completion output_scope path resources_missing "
+        "root_identity runtime_api runtime_missing runtime_reused temporary_scope terminal_entry_changed "
+        "terminal_link_return terminal_nonlocal terminal_reused terminal_root_changed "
+        "terminal_root_identity terminal_size terminal_unretired terminal_write_progress "
+        "terminal_writer_changed terminal_writer_identity unregistered_runtime unsettled_lane "
+        "api_key_route fastlane_interface fastlane_platform fastlane_source_path fastlane_version "
+        "package_route pilot_platform_changed pilot_route transporter_route"
+    ).split()),
+    "store-resource-error": frozenset((
+        "admission_reused artifact_route asset_platform close_unconfirmed created_directory_identity "
+        "created_file_identity creation_role deadline duplicate_parent duplicate_role entry_changed "
+        "entry_name file_api file_contents finish_missing finish_reused foreign_origin "
+        "inventory_unavailable key_identity mkdir_return open_return_missing package_file_route "
+        "package_platform parent_changed parent_closed parent_identity parent_route read_progress "
+        "resource_busy resource_return_missing resources_not_admitted root_ancestry_changed "
+        "root_identity shell_home_not_admitted shell_home_route slot_reused source_admission_closed "
+        "source_growth source_identity source_pin source_revision source_role unowned_removal_request "
+        "unretired_resource unretired_writer uuid write_progress written_revision written_size"
+    ).split()),
+    "store-document-error": frozenset((
+        "acquisition_return_missing already_attempted close_not_confirmed destination_exists "
+        "foreign_origin incomplete_publication initial_stage_unknown invalid_path "
+        "no_successful_publication nonlocal_completion parent_changed parent_custody_missing "
+        "parent_not_directory required_filesystem_api_missing stage_bytes_changed stage_changed "
+        "stage_custody_missing stage_reappeared stage_revision_changed stage_unlink_unconfirmed "
+        "write_progress_missing written_stage_custody_missing"
+    ).split()),
+    "native-process-error": frozenset((
+        "abi runtime origin symbol spec launch deadline state io fd busy native waitability spawn wait "
+        "join close unknown"
+    ).split()),
+}
+STORE_NATIVE_INNER_CATEGORIES = frozenset((
+    "none unclassified system-exit interrupt io-error eof-error argument-error type-error name-error "
+    "no-method-error load-error not-implemented-error runtime-error syntax-error security-error "
+    "standard-error exception errno-enoent errno-eacces errno-eperm errno-ebadf errno-eio "
+    "errno-eexist errno-enospc fixture-error ordinary-fixture-error store-lifetime-error "
+    "store-command-exit-error native-upload-error native-upload-protocol-error "
+    "native-upload-lifecycle-error"
+).split()) | frozenset(STORE_NATIVE_INNER_REASONS)
+
+
 class VerificationError(RuntimeError):
     def __init__(self, code: str):
         self.code = code if re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", code) else "VERIFICATION_FAILURE"
@@ -931,11 +994,12 @@ class StoreLaneNativeState:
 
 @dataclasses.dataclass(frozen=True)
 class StoreNativeDiagnostic:
-    """One source-selected Python row and its already-bound frame-name map."""
+    """One source-selected row with separate prebound Python/Ruby frame names."""
     phase: str
     subcase: str
     identifier: str
     filenames: MappingProxyType
+    ruby_files: tuple[str, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3010,6 +3074,58 @@ def require_original_finality(result) -> None:
         raise VerificationError("COMMAND_EXIT_OR_FINALITY")
 
 
+def store_native_inner_failure(raw: bytes, scope: StoreNativeDiagnostic, *, deadline: float) -> dict | None:
+    """Project one bounded wrong-code note from original stderr, never a verdict."""
+    check_clock(deadline)
+    if type(raw) is not bytes or len(raw) > STORE_NATIVE_JSON_BYTES:
+        return None
+    expected = STORE_NATIVE_INNER_EXPECTED.get(scope.subcase)
+    if expected is None:
+        return None  # Not an original composite wrong-code assertion.
+    marker = STORE_NATIVE_INNER_PREFIX.encode("ascii")
+    if raw.count(marker) != 1:
+        return None
+    lines = [line[len(marker):] for line in raw.splitlines() if line.startswith(marker)]
+    if len(lines) != 1 or not 0 < len(lines[0]) <= STORE_NATIVE_INNER_BYTES:
+        return None
+    value = strict_json(lines[0].decode("ascii"))
+    check_clock(deadline)
+    if (type(value) is not dict or set(value) != {"version", "phase", "subcase", "testId",
+                                               "returncode", "expectedReturncode", "observer"}
+            or type(value["version"]) is not int or value["version"] != 1
+            or value["phase"] != scope.phase or value["subcase"] != scope.subcase or value["testId"] != scope.identifier
+            or type(value["returncode"]) is not int or not -255 <= value["returncode"] <= 255
+            or type(value["expectedReturncode"]) is not int or value["expectedReturncode"] != expected
+            or value["returncode"] == expected or type(value["observer"]) is not dict):
+        return None
+    observer = value["observer"]
+    if observer == {"state": "unavailable"}:
+        projected = {"state": "unavailable"}
+    else:
+        if (set(observer) != {"state", "stage", "category", "reason", "locations"}
+                or observer["state"] != "available" or type(observer["stage"]) is not str
+                or observer["stage"] not in STORE_NATIVE_INNER_STAGES
+                or type(observer["category"]) is not str or observer["category"] not in STORE_NATIVE_INNER_CATEGORIES):
+            return None
+        category, reason, locations = (observer[name] for name in ("category", "reason", "locations"))
+        if ((reason is not None and (type(reason) is not str or reason not in STORE_NATIVE_INNER_REASONS.get(category, ())))
+                or type(locations) is not list or len(locations) > 8 or category == "none" and locations):
+            return None
+        selected = []
+        for item in locations:
+            check_clock(deadline)
+            if (type(item) is not dict or set(item) != {"file", "line"} or type(item["file"]) is not str
+                    or item["file"] not in scope.ruby_files or type(item["line"]) is not int
+                    or not 1 <= item["line"] <= 999999):
+                return None
+            selected.append({"file": item["file"], "line": item["line"]})
+        projected = {"state": "available", "stage": observer["stage"], "category": category,
+                     "reason": reason, "locations": selected}
+    check_clock(deadline)
+    return {"version": 1, "phase": scope.phase, "subcase": scope.subcase, "testId": scope.identifier,
+            "returncode": value["returncode"], "expectedReturncode": expected, "observer": projected}
+
+
 def original_native_capture(session, argv, paths: Paths, rows: list[dict], name: str, *,
                             deadline: float, seconds: int, env: dict, output_limit: int = 65536,
                             cpu_seconds: int = 180, signing_adapter_diagnostic: SigningAdapterDiagnostic | None = None,
@@ -3033,6 +3149,10 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
                 or scope.subcase != name or type(scope.identifier) is not str
                 or not re.fullmatch(r"workflow\.test_store_lane_native\.StoreLaneNativeTests\.test_[A-Za-z0-9_]+", scope.identifier)
                 or type(scope.filenames) is not MappingProxyType or not 0 < len(scope.filenames) <= 512
+                or type(scope.ruby_files) is not tuple or not 0 < len(scope.ruby_files) <= 64
+                or any(type(item) is not str or not re.fullmatch(
+                    r"(?:fastlane/(?:[A-Za-z_][A-Za-z0-9_]*\.rb|Fastfile)|tests/workflow/[A-Za-z_][A-Za-z0-9_]*\.rb)", item)
+                    for item in scope.ruby_files) or len(set(scope.ruby_files)) != len(scope.ruby_files)
                 or signing_adapter_diagnostic is not None or signing_matrix_diagnostic is not None
                 or arguments.count(str(paths.source / "tests/workflow/store_lane_native_fixture.py")) != 1):
             raise VerificationError("STORE_NATIVE_DIAGNOSTIC_SCOPE")
@@ -3098,6 +3218,9 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
                         locations = _native_bound_failure_locations(stderr, scope.filenames, deadline=deadline)
                         if locations:
                             projected["native_test_locations"] = locations
+                        inner = store_native_inner_failure(result.stderr, scope, deadline=deadline)
+                        if inner is not None:
+                            projected["store_inner_failure"] = inner
                     check_clock(deadline)
                     row.update(projected)
             except BaseException:
@@ -4131,6 +4254,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
                 or any(inventories[name] != (identifier,) for name, identifier in checks.PYTHON_SINGLETON_CASES)
                 or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
             raise VerificationError("NATIVE_PARTITION_UNION")
+        progress_scope = python_progress_scope(inventories["ordinary"])
         details["stage"] = "package"
         package = (paths.work / "source-build/src/mobile_release" if phase == "source"
                    else paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
@@ -4169,8 +4293,10 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
             originals.append(value)
             row["capture"] = capture_observations(value)
             primary = None
+            capture_failed = True
             try:
                 require_original_finality(value)
+                capture_failed = False
                 parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff)
                 if singleton:
                     row["runtime"] = native_python_observation(value.stdout, paths, minor=11, phase=phase,
@@ -4196,6 +4322,17 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
                 else:
                     row["idle_error"] = error_details(exc)
             if primary is not None:
+                if partition == "ordinary" and capture_failed:
+                    try:
+                        # Returned text only, under the original enclosing
+                        # endpoint. This neither renews native work nor proves
+                        # that a reported test entered, completed or hung.
+                        check_clock(deadline)
+                        progress = python_failure_progress(value.stderr, progress_scope)
+                        check_clock(deadline)
+                        row["python_progress"] = progress
+                    except BaseException as exc:
+                        row["python_progress_error"] = error_details(exc)
                 try:
                     row["capture"] = failure_details(value, part, paths, checks=checks,
                                                      deadline=cutoff, platform=platform, _source_files=source_files)
@@ -5008,10 +5145,17 @@ def perform_store_lane_gate(step: Step, paths: Paths, session, checks, platform:
         # Freeze diagnostic names from the SAME checked bindings before any
         # capture. Store source runs source/src, not ordinary source-build/src;
         # installed-wheel names must come from their actual bound origins.
-        filenames = {}
+        filenames, ruby_files = {}, []
         for bindings in (binding["files"], outside["fixtures"]):
             for relative, item in bindings.items():
                 check_clock(cutoff)
+                if relative.endswith(".rb") or relative == "fastlane/Fastfile":
+                    if (not re.fullmatch(
+                            r"(?:fastlane/(?:[A-Za-z_][A-Za-z0-9_]*\.rb|Fastfile)|tests/workflow/[A-Za-z_][A-Za-z0-9_]*\.rb)", relative)
+                            or type(item["path"]) is not str or not Path(item["path"]).is_absolute()
+                            or relative in ruby_files):
+                        raise VerificationError("STORE_NATIVE_DIAGNOSTIC_SCOPE")
+                    ruby_files.append(relative)
                 if not relative.endswith(".py"):
                     continue
                 actual = item["path"]
@@ -5019,10 +5163,11 @@ def perform_store_lane_gate(step: Step, paths: Paths, session, checks, platform:
                         or type(actual) is not str or not Path(actual).is_absolute() or actual in filenames):
                     raise VerificationError("STORE_NATIVE_DIAGNOSTIC_SCOPE")
                 filenames[actual] = relative
-        if not 0 < len(filenames) <= 512:
+        if not 0 < len(filenames) <= 512 or not 0 < len(ruby_files) <= 64:
             raise VerificationError("STORE_NATIVE_DIAGNOSTIC_SCOPE")
         filenames = MappingProxyType(filenames)
-        diagnostics = tuple(StoreNativeDiagnostic(phase, subcase, identifier, filenames)
+        ruby_files = tuple(sorted(ruby_files))
+        diagnostics = tuple(StoreNativeDiagnostic(phase, subcase, identifier, filenames, ruby_files)
                             for subcase, identifier in inventory)
         control_bindings = {name: outside[name] for name in ("fixtures", "ruby", "bundler", "fastlane")}
         if phase == "wheel":
@@ -5108,7 +5253,7 @@ def perform_store_lane_gate(step: Step, paths: Paths, session, checks, platform:
             active_directory = phase_root / f"case-{index + 1:02d}"
             active_identity = store_native_directory(active_directory, session, deadline=active_cutoff)
             argv = store_native_case_argv(paths, phase, subcase, binding_file, active_directory,
-                                          deadline=cutoff, wheel_sha256=binding["wheelSha256"])
+                                          deadline=active_cutoff, wheel_sha256=binding["wheelSha256"])
             value = capture(argv, subcase, diagnostics[index])
             row.update(parse_store_native_case(value, paths, platform, phase, subcase, identifier,
                                                active_directory, binding, outside,

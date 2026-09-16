@@ -17,6 +17,35 @@ module StoreLaneNativeFixture
              bridge-success bridge-ordinary-error clock-expired clock-wrong-label].freeze
   class Failure < StandardError; end
   class OrdinaryFailure < StandardError; end
+  INNER_FAILURE_REASONS = {
+    "store-runtime-error" => %w[app_id binding_missing bridge_reused bridges_not_admitted clock completion cwd deadline
+      directory_api directory_return document_missing environment environment_changed exit_api
+      exit_not_captured exit_owner exit_returned exit_status foreign_origin inactive_runtime integer
+      invocation_missing key_id lane nonce nonlocal_completion output_scope path resources_missing
+      root_identity runtime_api runtime_missing runtime_reused temporary_scope terminal_entry_changed
+      terminal_link_return terminal_nonlocal terminal_reused terminal_root_changed terminal_root_identity
+      terminal_size terminal_unretired terminal_write_progress terminal_writer_changed
+      terminal_writer_identity unregistered_runtime unsettled_lane api_key_route fastlane_interface
+      fastlane_platform fastlane_source_path fastlane_version package_route pilot_platform_changed
+      pilot_route transporter_route].freeze,
+    "store-resource-error" => %w[admission_reused artifact_route asset_platform close_unconfirmed created_directory_identity
+      created_file_identity creation_role deadline duplicate_parent duplicate_role entry_changed
+      entry_name file_api file_contents finish_missing finish_reused foreign_origin inventory_unavailable
+      key_identity mkdir_return open_return_missing package_file_route package_platform parent_changed
+      parent_closed parent_identity parent_route read_progress resource_busy resource_return_missing
+      resources_not_admitted root_ancestry_changed root_identity shell_home_not_admitted shell_home_route
+      slot_reused source_admission_closed source_growth source_identity source_pin source_revision
+      source_role unowned_removal_request unretired_resource unretired_writer uuid write_progress
+      written_revision written_size].freeze,
+    "store-document-error" => %w[acquisition_return_missing already_attempted close_not_confirmed destination_exists foreign_origin
+      incomplete_publication initial_stage_unknown invalid_path no_successful_publication
+      nonlocal_completion parent_changed parent_custody_missing parent_not_directory
+      required_filesystem_api_missing stage_bytes_changed stage_changed stage_custody_missing
+      stage_reappeared stage_revision_changed stage_unlink_unconfirmed write_progress_missing
+      written_stage_custody_missing].freeze,
+    "native-process-error" => %w[abi runtime origin symbol spec launch deadline state io fd busy native waitability spawn wait join
+      close unknown].freeze,
+  }.freeze
 
   module_function
 
@@ -92,6 +121,68 @@ module StoreLaneNativeFixture
   def identity(stat)
     {"device" => stat.dev, "inode" => stat.ino, "uid" => stat.uid, "gid" => stat.gid,
      "mode" => stat.mode & 0o7777}
+  end
+
+  def first_primary_diagnostic(error, request)
+    empty = {"category" => "unclassified", "reason" => nil, "locations" => []}
+    return empty.merge("category" => "none") if error.nil?
+    # Exact known classes only. Neither messages nor arbitrary class/reason
+    # string conversions are diagnostic data.
+    classes = {
+      SystemExit => "system-exit", Interrupt => "interrupt", IOError => "io-error", EOFError => "eof-error",
+      ArgumentError => "argument-error", TypeError => "type-error", NameError => "name-error",
+      NoMethodError => "no-method-error", LoadError => "load-error", NotImplementedError => "not-implemented-error",
+      RuntimeError => "runtime-error", SyntaxError => "syntax-error", SecurityError => "security-error",
+      StandardError => "standard-error", Exception => "exception",
+      Errno::ENOENT => "errno-enoent", Errno::EACCES => "errno-eacces", Errno::EPERM => "errno-eperm",
+      Errno::EBADF => "errno-ebadf", Errno::EIO => "errno-eio", Errno::EEXIST => "errno-eexist",
+      Errno::ENOSPC => "errno-enospc", Failure => "fixture-error", OrdinaryFailure => "ordinary-fixture-error",
+      MobileReleaseKit::StoreLaneRuntime::Error => "store-runtime-error",
+      MobileReleaseKit::StoreLaneResources::Error => "store-resource-error",
+      MobileReleaseKit::StoreDocument::Error => "store-document-error",
+      MobileReleaseKit::NativeProcessSpawn::Error => "native-process-error",
+      MobileReleaseKit::StoreLaneLifetime::LifetimeError => "store-lifetime-error",
+      MobileReleaseKit::StoreLaneLifetime::CommandExitError => "store-command-exit-error",
+      MobileReleaseKit::NativeUploadProcess::Error => "native-upload-error",
+      MobileReleaseKit::NativeUploadProcess::ProtocolError => "native-upload-protocol-error",
+      MobileReleaseKit::NativeUploadProcess::LifecycleError => "native-upload-lifecycle-error"
+    }
+    original_class = Object.instance_method(:class)
+    category = classes.fetch(original_class.bind_call(error), "unclassified")
+    reason = nil
+    if INNER_FAILURE_REASONS.key?(category)
+      field = category == "native-process-error" ? :@code : :@reason
+      raw = Object.instance_method(:instance_variable_get).bind_call(error, field)
+      kind = original_class.bind_call(raw)
+      reason = INNER_FAILURE_REASONS.fetch(category).find do |allowed|
+        (kind.equal?(Symbol) && allowed.to_sym.equal?(raw)) || (kind.equal?(String) && allowed == raw)
+      end
+    end
+    # These paths were already checked by read_request. Projection does not
+    # inspect/resolve any source path or walk an exception's reported path.
+    filenames = {}
+    request.fetch("binding").fetch("files").each do |relative, binding|
+      next unless relative.start_with?("fastlane/") && (relative.end_with?(".rb") || relative == "fastlane/Fastfile")
+      filenames[binding.fetch("path")] = relative
+    end
+    request.fetch("fixtureFiles").each_key do |relative|
+      filenames[request.fetch("sourceRoot") + "/" + relative] = relative
+    end
+    filenames[request.fetch("root") + "/launcher/fastlane/run_lane.rb"] = "tests/workflow/store_lane_native_fixture.rb"
+    locations = []
+    backtrace = Exception.instance_method(:backtrace_locations).bind_call(error)
+    # Ruby starts with the cause. Keep the FIRST relevant source-bound frames.
+    Array(backtrace).first(128).each do |location|
+      next unless location.instance_of?(Thread::Backtrace::Location)
+      relative = filenames[location.absolute_path]
+      line = location.lineno
+      next unless relative && line.instance_of?(Integer) && line.between?(1, 999_999)
+      locations << {"file" => relative, "line" => line}
+      break if locations.length == 8
+    end
+    {"category" => category, "reason" => reason, "locations" => locations}
+  rescue Exception # rubocop:disable Lint/RescueException
+    empty # Optional projection cannot alter the first primary or observer flush.
   end
 
   class Observation
@@ -194,6 +285,7 @@ module StoreLaneNativeFixture
       @facts.merge!("stage" => stage, "events" => @events,
                     "binding" => binding, "ordinaryPrimarySame" => runtime.first_primary.equal?(@ordinary),
                     "primaryClass" => runtime.first_primary&.class&.name,
+                    "primaryDiagnostic" => StoreLaneNativeFixture.first_primary_diagnostic(runtime.first_primary, request),
                     "originalSlotsCovered" => original_slots_covered?, "originalSlotsCount" => original_slots.length,
                     "observerRestored" => @restored,
                     "rootIdentity" => StoreLaneNativeFixture.identity(root), "cwdIdentity" => StoreLaneNativeFixture.identity(cwd),

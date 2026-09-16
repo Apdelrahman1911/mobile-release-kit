@@ -259,6 +259,8 @@ class ObservedSourceGitTests(unittest.TestCase):
         retained.chmod(0o640)
         before = self.snapshot(output)
         original_read, original_policy = discovery._run, cli._require_ci_policy
+        policy_scope = None
+        policy_calls, genuine_policy_calls = [], []
         with ExitStack() as boundary:
             forbidden = []
             for module, names in (
@@ -276,12 +278,26 @@ class ObservedSourceGitTests(unittest.TestCase):
                 for mode in ("prepare-operation", "validate-operation-intent", "execute-store"):
                     armed, injected, delegated = [], [], []
 
-                    def policy(*args, **kwargs):
-                        # The actual policy/doctor also observes Git. Keep those
-                        # reads real; fail only the later authority observation.
-                        result = original_policy(*args, **kwargs)
+                    def policy(config, platform, requested_stage):
+                        nonlocal policy_scope
+                        self.assertEqual((config.path, config.root, platform),
+                                         (root / "release/mobile-release.json", root, "android"))
+                        self.assertEqual(requested_stage, stage)
+                        policy_calls.append((requested_stage, mode))
+                        scope = (config.path, config.root, platform,
+                                 json.dumps(config.data, sort_keys=True, separators=(",", ":"),
+                                            ensure_ascii=True, allow_nan=False))
+                        # This unchanged checkout/config is shared by only these
+                        # nine rows; policy discards stage. Keep the first real
+                        # doctor/Git check inside _ci, then reuse only its pass.
+                        if policy_scope is None:
+                            result = original_policy(config, platform, requested_stage)
+                            self.assertIsNone(result)
+                            policy_scope = scope  # Never cache a failed policy.
+                            genuine_policy_calls.append((requested_stage, mode))
+                        else:
+                            self.assertEqual(scope, policy_scope)
                         armed.append(True)
-                        return result
 
                     def unavailable_once(path, argv, **kwargs):
                         if armed:
@@ -304,6 +320,11 @@ class ObservedSourceGitTests(unittest.TestCase):
                     self.assertTrue(any(read[:2] == ("git", "status") for read in delegated))
                     self.assertFalse(any(read[-1].endswith("^{tree}") for read in delegated))
                     self.assertEqual(self.snapshot(output), before)
+            self.assertEqual(policy_calls, [
+                (stage, mode) for stage in ("candidate", "external-testing", "production-submit")
+                for mode in ("prepare-operation", "validate-operation-intent", "execute-store")
+            ])
+            self.assertEqual(genuine_policy_calls, [("candidate", "prepare-operation")])
             for forbidden_call in forbidden:
                 forbidden_call.assert_not_called()
 

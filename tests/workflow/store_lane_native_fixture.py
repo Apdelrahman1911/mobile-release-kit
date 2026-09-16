@@ -43,6 +43,67 @@ MAX_FILE = 1024 * 1024
 MAX_JSON = 65_536
 MAX_CASE = 8 * 1024 * 1024
 MAX_ENTRIES = 128
+INNER_FAILURE_PREFIX = "MRK_STORE_NATIVE_INNER_FAILURE="
+INNER_FAILURE_BYTES = 8192
+INNER_FAILURE_EXPECTED = {
+    "success0": 0,
+    "ordinary75": 75,
+    "system-exit0": 76,
+    "system-exit75": 76,
+    "terminal-close-return-loss": 76,
+    "terminal-link-return-loss": 76,
+    "nested-ios-success": 0,
+    "nested-android-success": 0,
+    "nested-android-inherited-pipe": 0,
+    "bridge-success": 0,
+    "bridge-ordinary-error": 75,
+}
+INNER_FAILURE_STAGES = frozenset({"before-terminal-link", "link-return-lost", "unknown-cleanup"})
+INNER_FAILURE_REASONS = {
+    "store-runtime-error": frozenset((
+        "app_id binding_missing bridge_reused bridges_not_admitted clock completion cwd deadline "
+        "directory_api directory_return document_missing environment environment_changed exit_api "
+        "exit_not_captured exit_owner exit_returned exit_status foreign_origin inactive_runtime integer "
+        "invocation_missing key_id lane nonce nonlocal_completion output_scope path resources_missing "
+        "root_identity runtime_api runtime_missing runtime_reused temporary_scope terminal_entry_changed "
+        "terminal_link_return terminal_nonlocal terminal_reused terminal_root_changed "
+        "terminal_root_identity terminal_size terminal_unretired terminal_write_progress "
+        "terminal_writer_changed terminal_writer_identity unregistered_runtime unsettled_lane "
+        "api_key_route fastlane_interface fastlane_platform fastlane_source_path fastlane_version "
+        "package_route pilot_platform_changed pilot_route transporter_route"
+    ).split()),
+    "store-resource-error": frozenset((
+        "admission_reused artifact_route asset_platform close_unconfirmed created_directory_identity "
+        "created_file_identity creation_role deadline duplicate_parent duplicate_role entry_changed "
+        "entry_name file_api file_contents finish_missing finish_reused foreign_origin "
+        "inventory_unavailable key_identity mkdir_return open_return_missing package_file_route "
+        "package_platform parent_changed parent_closed parent_identity parent_route read_progress "
+        "resource_busy resource_return_missing resources_not_admitted root_ancestry_changed "
+        "root_identity shell_home_not_admitted shell_home_route slot_reused source_admission_closed "
+        "source_growth source_identity source_pin source_revision source_role unowned_removal_request "
+        "unretired_resource unretired_writer uuid write_progress written_revision written_size"
+    ).split()),
+    "store-document-error": frozenset((
+        "acquisition_return_missing already_attempted close_not_confirmed destination_exists "
+        "foreign_origin incomplete_publication initial_stage_unknown invalid_path "
+        "no_successful_publication nonlocal_completion parent_changed parent_custody_missing "
+        "parent_not_directory required_filesystem_api_missing stage_bytes_changed stage_changed "
+        "stage_custody_missing stage_reappeared stage_revision_changed stage_unlink_unconfirmed "
+        "write_progress_missing written_stage_custody_missing"
+    ).split()),
+    "native-process-error": frozenset((
+        "abi runtime origin symbol spec launch deadline state io fd busy native waitability spawn wait "
+        "join close unknown"
+    ).split()),
+}
+INNER_FAILURE_CATEGORIES = frozenset((
+    "none unclassified system-exit interrupt io-error eof-error argument-error type-error name-error "
+    "no-method-error load-error not-implemented-error runtime-error syntax-error security-error "
+    "standard-error exception errno-enoent errno-eacces errno-eperm errno-ebadf errno-eio "
+    "errno-eexist errno-enospc fixture-error ordinary-fixture-error store-lifetime-error "
+    "store-command-exit-error native-upload-error native-upload-protocol-error "
+    "native-upload-lifecycle-error"
+).split()) | frozenset(INNER_FAILURE_REASONS)
 STORE_FILES = frozenset({
     *("fastlane/" + name for name in (
         "release_support.rb", "native_process_spawn.rb", "native_upload_process.rb", "store_lane_lifetime.rb",
@@ -134,6 +195,106 @@ def json_bytes(value):
     result = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
     need(len(result) <= MAX_JSON, "fixture JSON bound")
     return result
+
+
+def _read_inner_observer(path, original, deadline):
+    """One bounded read of our precreated observer, never a settlement probe."""
+    def check():
+        need(type(deadline) is float and math.isfinite(deadline) and time.monotonic() < deadline,
+             "original inner diagnostic cutoff")
+
+    def qualified(value):
+        need(stat.S_ISREG(value.st_mode) and value.st_nlink == 1 and identity(value) == original
+             and 1 <= value.st_size <= MAX_JSON, "original inner observer identity and bound")
+
+    def revision(value):
+        return (value.st_dev, value.st_ino, value.st_uid, value.st_gid, value.st_mode,
+                value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+    check()
+    need(type(original) is dict and set(original) == {"device", "inode", "uid", "gid", "mode"}
+         and all(type(value) is int for value in original.values()) and original["mode"] == 0o600,
+         "original inner observer binding")
+    before = path.lstat()
+    qualified(before)
+    check()
+    number = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        check()
+        opened = os.fstat(number)
+        qualified(opened)
+        need(revision(opened) == revision(before), "inner observer open revision")
+        raw = bytearray()
+        while len(raw) < before.st_size:
+            check()
+            count = min(4096, before.st_size - len(raw))
+            block = os.read(number, count)
+            need(type(block) is bytes and 0 < len(block) <= count, "inner observer read progress")
+            raw.extend(block)
+        check()
+        after = os.fstat(number)
+        retained = path.lstat()
+        need(revision(before) == revision(after) == revision(retained), "inner observer final revision")
+    finally:
+        os.close(number)  # One attempt; failure makes the observer unavailable.
+    check()
+    value = decode(bytes(raw))
+    check()
+    return value
+
+
+def _inner_observer_fields(value, case):
+    """Discard private observer facts; accept only fixed stage/class/reason/frames."""
+    need(type(value) is dict and type(value.get("version")) is int and value["version"] == 1
+         and value.get("phase") == case.config.phase and value.get("mode") == case.config.subcase
+         and type(value.get("stage")) is str and value["stage"] in INNER_FAILURE_STAGES,
+         "inner observer fixed case")
+    primary = value.get("primaryDiagnostic")
+    need(type(primary) is dict and set(primary) == {"category", "reason", "locations"}, "inner observer primary shape")
+    category, reason, locations = (primary[name] for name in ("category", "reason", "locations"))
+    need(type(category) is str and category in INNER_FAILURE_CATEGORIES
+         and (reason is None or type(reason) is str and reason in INNER_FAILURE_REASONS.get(category, ()))
+         and type(locations) is list and len(locations) <= 8 and (category != "none" or not locations),
+         "inner observer finite primary")
+    files = {name for name in case.binding["files"] if name.startswith("fastlane/")
+             and (name.endswith(".rb") or name == "fastlane/Fastfile")}
+    files.update(case.request["fixtureFiles"])
+    selected = []
+    for item in locations:
+        need(type(item) is dict and set(item) == {"file", "line"} and type(item["file"]) is str
+             and item["file"] in files and type(item["line"]) is int and 1 <= item["line"] <= 999999,
+             "inner observer bound frame")
+        selected.append({"file": item["file"], "line": item["line"]})
+    return {"state": "available", "stage": value["stage"], "category": category,
+            "reason": reason, "locations": selected}
+
+
+def _note_inner_failure(error, case, returncode, expected_code, record, guard):
+    """Best-effort DATA on the first wrong-code assertion; never replace it."""
+    try:
+        if (type(error) is not AssertionError or type(returncode) is not int or not -255 <= returncode <= 255
+                or type(expected_code) is not int or returncode == expected_code
+                or case.config.phase not in {"source", "wheel"}
+                or INNER_FAILURE_EXPECTED.get(case.config.subcase) != expected_code):
+            return
+        note = {"version": 1, "phase": case.config.phase, "subcase": case.config.subcase,
+                "testId": PREFIX + dict(CASE_ROWS)[case.config.subcase], "returncode": returncode,
+                "expectedReturncode": expected_code, "observer": {"state": "unavailable"}}
+        try:
+            outcome = record._outcome()
+            if (outcome is not None and outcome.no_target is None and outcome.result_integrity == "complete"
+                    and outcome.termination == "normal-exit" and type(outcome.returncode) is int
+                    and outcome.returncode == returncode and guard.lifetime_ledger.verdict().contained is True):
+                observed = _read_inner_observer(case.root / "observation.json", case.request["diagnosticIdentity"],
+                                                case.config.deadline)
+                note["observer"] = _inner_observer_fields(observed, case)
+        except BaseException:
+            pass  # Retain the finite original rc even if observation is unavailable.
+        raw = json_bytes(note)
+        if len(raw) <= INNER_FAILURE_BYTES:
+            error.add_note(INNER_FAILURE_PREFIX + raw.decode("ascii").removesuffix("\n"))
+    except BaseException:
+        pass  # No diagnostic error or interruption may replace the original assertion.
 
 
 def case_inventory(phase):
@@ -506,7 +667,11 @@ class Case:
                     expected_code = (76 if self.config.subcase in ("system-exit0", "system-exit75",
                         "terminal-close-return-loss", "terminal-link-return-loss") else
                         75 if self.config.subcase in ("ordinary75", "bridge-ordinary-error") else 0)
-                    need(result.returncode == expected_code, "fixed native row exit status")
+                    try:
+                        need(result.returncode == expected_code, "fixed native row exit status")
+                    except AssertionError as error:
+                        _note_inner_failure(error, self, result.returncode, expected_code, record, guard)
+                        raise
                     need(files.timing is timing and command._lane_timing is timing and command._timing_consumed is True,
                          "same original3600s timing consumed")
                     outcome = record._outcome()
