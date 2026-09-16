@@ -59,9 +59,9 @@ module MobileReleaseKit
                   collect_cleanup { Thread.handle_interrupt(Exception => :immediate) { remove_original_stage } }
                 ensure
                   begin
-                    collect_cleanup { @stage.close_once }
+                    collect_cleanup(@stage) { @stage.close_once }
                   ensure
-                    collect_cleanup { @parent.close_once }
+                    collect_cleanup(@parent) { @parent.close_once }
                   end
                 end
               end
@@ -143,6 +143,7 @@ module MobileReleaseKit
 
         def initialize
           @state = :reserved
+          @close_errors = []
         end
 
         def acquire(path, flags, mode = nil)
@@ -168,20 +169,67 @@ module MobileReleaseKit
           @state == :reserved || @state == :closed
         end
 
+        def close_errors
+          @close_errors.dup.freeze
+        end
+
         def close_once
           return if @state == :reserved || @close_attempted
-          @close_attempted = true
-          unless @io
-            @state = :unknown
-            raise Error.new(:acquisition_return_missing)
+          begin
+            Thread.handle_interrupt(Exception => :never) do
+              @close_attempted, @state = true, :closing
+              begin
+                raise Error.new(:acquisition_return_missing) unless @io
+                fd = @io.fileno
+                raise Error.new(:close_not_confirmed) unless fd.instance_of?(Integer) && fd >= 3 && @io.pid.nil?
+                @io.autoclose = true
+                raise Error.new(:close_not_confirmed) unless @io.autoclose? == true
+                returned = Thread.handle_interrupt(Exception => :immediate) { @io.close }
+                raise Error.new(:close_not_confirmed) unless returned.nil? && @io.closed? == true
+                @state = :closed
+              rescue Exception => error # rubocop:disable Lint/RescueException
+                retain_close_error(error)
+              ensure
+                unconfirmed_close! unless @state == :closed
+              end
+            end
+          rescue Exception => error # rubocop:disable Lint/RescueException
+            Thread.handle_interrupt(Exception => :never) do
+              @close_attempted = true
+              retain_close_error(error)
+              unconfirmed_close!
+            end
           end
-          @state = :closing
-          Thread.handle_interrupt(Exception => :immediate) { @io.close }
-          raise Error.new(:close_not_confirmed) unless @io.closed?
-          @state = :closed
-        rescue Exception # rubocop:disable Lint/RescueException
+        end
+
+        private
+
+        def retain_close_error(error)
           @state = :unknown
-          raise
+          @first_close_error ||= error
+          if @close_errors.length < 4 && !@close_errors.any? { |item| item.equal?(error) }
+            @close_errors << error
+          end
+        end
+
+        def unconfirmed_close!
+          retain_close_error(Error.new(:close_not_confirmed)) unless @first_close_error
+          unless @disarm_attempted
+            @disarm_attempted = true
+            returned, raised = false, false
+            begin
+              raise Error.new(:acquisition_return_missing) unless @io
+              @io.autoclose = false
+              returned = true
+            rescue Exception => error # rubocop:disable Lint/RescueException
+              raised = true
+              retain_close_error(error)
+            ensure
+              retain_close_error(Error.new(:close_not_confirmed)) unless returned || raised
+              raise @first_close_error, cause: @first_close_error.cause
+            end
+          end
+          raise @first_close_error, cause: @first_close_error.cause
         end
       end
       private_constant :Handle
@@ -209,12 +257,18 @@ module MobileReleaseKit
         raise @first_primary, cause: @first_primary.cause
       end
 
-      def collect_cleanup
+      def collect_cleanup(handle = nil)
         # Keep independent-close entry masked. Each Handle records its one
         # close attempt before making the actual call immediately cancellable.
-        yield
-      rescue Exception => error # rubocop:disable Lint/RescueException
-        retain_error(error, cleanup: true)
+        failure = nil
+        begin
+          yield
+        rescue Exception => error # rubocop:disable Lint/RescueException
+          failure = error
+        ensure
+          handle&.close_errors&.each { |error| retain_error(error, cleanup: true) }
+          retain_error(failure, cleanup: true) if failure
+        end
       end
 
       def identity(value)

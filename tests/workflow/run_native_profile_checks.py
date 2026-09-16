@@ -851,11 +851,20 @@ def _result_class(expected, state):
             if state["failed"]:
                 self.stop()
                 raise AssertionError("a native adverse callback prohibits a later test")
-            # TextTestResult writes a partial header here. Native stderr during
-            # the body could split it from the later success token, so retain
-            # only the documented bookkeeping until the final callback.
+            # Never leave TextTestResult's partial header open across native
+            # stderr. This complete, expected-ID-only line is a start report,
+            # not a body-entry or completion receipt.
             try:
                 unittest.TestResult.startTest(self, test)
+                identifier = test.id()
+                if type(identifier) is not str or identifier not in expected_ids or len(identifier) > 512:
+                    raise AssertionError("native start differs from the exact expected test IDs")
+                method = identifier.rsplit(".", 1)[-1]
+                line = f"\n{method} ({identifier})\n"
+                written = self.stream.write(line)
+                if type(written) is not int or written != len(line):
+                    raise OSError("native start write was incomplete")
+                self.stream.flush()
             except BaseException:
                 state["failed"] = True
                 self.stop()

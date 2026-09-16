@@ -1748,10 +1748,32 @@ def _python_prebound_expectations(step: Step, platform: str, checks, expected: t
     return expected
 
 
+def _native_prebound_expectations(step: Step, platform: str, checks, expected: tuple[str, ...]) -> tuple[str, ...]:
+    """Only the closed macOS gate may reuse its own immutable source snapshot."""
+    if (platform != "macos" or step.id not in {"native-profile-source", "native-profile-wheel"}
+            or step.parser != "native" or type(expected) is not tuple or not expected
+            or any(type(value) is not str for value in expected) or tuple(sorted(set(expected))) != expected):
+        raise VerificationError("NATIVE_PREBOUND_EXPECTATIONS")
+    partition = step.native_partition
+    if (type(partition) is not str or partition not in {"authority", "ordinary", *PYTHON_SINGLETON_PARTITIONS}
+            or partition == "authority" and expected != checks.NATIVE_AUTHORITY_IDS
+            or partition in PYTHON_SINGLETON_PARTITIONS and
+            (len(expected) != 1 or (partition, expected[0]) not in checks.PYTHON_SINGLETON_CASES)
+            or partition == "ordinary" and set(expected) &
+            (set(checks.NATIVE_AUTHORITY_IDS) | {identifier for _name, identifier in checks.PYTHON_SINGLETON_CASES})):
+        raise VerificationError("NATIVE_PREBOUND_EXPECTATIONS")
+    return expected
+
+
 def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, deadline: float | None = None,
-                  _python_expected: tuple[str, ...] | None = None) -> CheckResult:
+                  _python_expected: tuple[str, ...] | None = None,
+                  _native_expected: tuple[str, ...] | None = None) -> CheckResult:
     if deadline is not None:
         check_clock(deadline)
+    if _native_expected is not None:
+        if _python_expected is not None:
+            raise VerificationError("NATIVE_PREBOUND_EXPECTATIONS")
+        _native_prebound_expectations(step, platform, checks, _native_expected)
     if _python_expected is not None:
         _python_prebound_expectations(step, platform, checks, _python_expected)
     if (not result.ok or type(result.returncode) is not int or result.returncode != 0
@@ -1781,7 +1803,8 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
     elif step.parser == "native":
         if any(line.startswith(NATIVE_DIAGNOSTIC_PREFIX) for line in (stdout + "\n" + stderr).splitlines()):
             raise VerificationError("NATIVE_FAILURE_DIAGNOSTIC_ON_SUCCESS")
-        expected = (_python_expected if _python_expected is not None else
+        expected = (_native_expected if _native_expected is not None else
+                    _python_expected if _python_expected is not None else
                     checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline))
         footers = re.findall(r"(?m)^Ran (\d+) tests? in [0-9.]+s\s*$", stderr)
         if footers != [str(len(expected))] or not re.search(r"(?m)^OK\s*$", stderr) or "skipped" in stderr:
@@ -3459,8 +3482,13 @@ def _native_bound_failure_locations(text: str, filenames, *, deadline: float | N
 def failure_details(result, step: Step | None = None, paths: Paths | None = None,
                     *, checks=None, deadline: float | None = None, platform: str | None = None,
                     _python_expected: tuple[str, ...] | None = None,
+                    _native_expected: tuple[str, ...] | None = None,
                     _source_files: tuple[str, ...] = ()) -> dict:
     """Public-safe observations only; never forward raw child diagnostics."""
+    if _native_expected is not None:
+        if step is None or checks is None or _python_expected is not None:
+            raise VerificationError("NATIVE_PREBOUND_EXPECTATIONS")
+        _native_prebound_expectations(step, platform, checks, _native_expected)
     if _python_expected is not None:
         if step is None or checks is None:
             raise VerificationError("PYTHON_PREBOUND_EXPECTATIONS")
@@ -3663,7 +3691,8 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
         try:
             if deadline is not None:
                 check_clock(deadline)
-            expected = checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline)
+            expected = (_native_expected if _native_expected is not None else
+                        checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline))
             diagnostic = native_failure_diagnostic(result.stdout.decode("utf-8", "replace") + "\n" + stderr,
                                                    expected, deadline=deadline)
             if diagnostic is not None:
@@ -4266,14 +4295,21 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
         session.ensure_idle(deadline=cutoff)
         check_capacity(paths.work, 64 * 1024**2)
         details["stage"] = "inventory"
-        inventories = {name: checks.native_partition_ids(paths.source, name, deadline=cutoff)
-                       for name in ("all", "delegated", "authority", "ordinary", *PYTHON_SINGLETON_PARTITIONS)}
+        snapshot = checks.native_capture_snapshot(paths.source, deadline=cutoff)
+        check_clock(cutoff)
+        if type(snapshot) is not tuple or len(snapshot) != 2:
+            raise VerificationError("NATIVE_PARTITION_UNION")
+        inventories, metadata = snapshot
+        if (type(inventories) is not MappingProxyType or type(metadata) is not tuple or len(metadata) != 2
+                or any(type(name) is not str for name in inventories)
+                or set(inventories) != {"all", "delegated", "authority", "ordinary", *PYTHON_SINGLETON_PARTITIONS}
+                or any(type(ids) is not tuple or not ids or any(type(value) is not str for value in ids)
+                       or tuple(sorted(set(ids))) != ids for ids in inventories.values())):
+            raise VerificationError("NATIVE_PARTITION_UNION")
         delegated = pending_signing_delegation(checks, paths.source, "macos-26", inventories, details,
-                                               "NATIVE_PARTITION_UNION", deadline=cutoff)
+                                               "NATIVE_PARTITION_UNION", deadline=cutoff, _metadata=metadata)
         joined = tuple(identifier for row in details["partitions"] for identifier in inventories[row["partition"]]) + delegated
-        if (any(type(ids) is not tuple or not ids or tuple(sorted(set(ids))) != ids
-                for ids in inventories.values())
-                or len(inventories["authority"]) != 5
+        if (inventories["authority"] != checks.NATIVE_AUTHORITY_IDS
                 or tuple(name for name, _identifier in checks.PYTHON_SINGLETON_CASES) != PYTHON_SINGLETON_PARTITIONS
                 or any(inventories[name] != (identifier,) for name, identifier in checks.PYTHON_SINGLETON_CASES)
                 or len(joined) != len(set(joined)) or tuple(sorted(joined)) != inventories["all"]):
@@ -4321,7 +4357,8 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
             try:
                 require_original_finality(value)
                 capture_failed = False
-                parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff)
+                parsed = parse_capture(part, value, paths, platform, checks, deadline=cutoff,
+                                       _native_expected=inventories[partition])
                 if singleton:
                     row["runtime"] = native_python_observation(value.stdout, paths, minor=11, phase=phase,
                         executable=python, prefix=paths.python.parent.parent)
@@ -4359,7 +4396,8 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
                         row["python_progress_error"] = error_details(exc)
                 try:
                     row["capture"] = failure_details(value, part, paths, checks=checks,
-                                                     deadline=cutoff, platform=platform, _source_files=source_files)
+                        deadline=cutoff, platform=platform, _native_expected=inventories[partition],
+                        _source_files=source_files)
                 except BaseException as exc:
                     # Original wait/EOF/persisted counts and first failure stay
                     # available even if the diagnostic parser is interrupted.

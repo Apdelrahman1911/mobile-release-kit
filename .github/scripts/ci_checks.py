@@ -1090,21 +1090,40 @@ def python_capture_snapshot(source_root: Path, selection: str, *, deadline: floa
     return MappingProxyType(partitions), metadata
 
 
+def _native_capture_partitions(complete: tuple[str, ...], delegated: tuple[str, ...]) -> dict[str, tuple[str, ...]]:
+    """Pure projection of one complete native inventory; no execution receipts."""
+    prefix = "unit.test_ios_profile_authority.NativeProfileAuthorityTests."
+    authority = tuple(identifier for identifier in complete if identifier.startswith(prefix))
+    _require(authority == NATIVE_AUTHORITY_IDS, "NATIVE_AUTHORITY_INVENTORY")
+    ordinary_complete = tuple(identifier for identifier in complete if identifier not in authority)
+    ordinary = _python_capture_partition(ordinary_complete, "healthy", delegated)
+    poison = {name: _python_capture_partition(ordinary_complete, name, delegated) for name in PYTHON_SINGLETON_PARTITIONS}
+    joined = authority + ordinary + delegated + tuple(identifier for ids in poison.values() for identifier in ids)
+    _require(len(joined) == len(set(joined)) and tuple(sorted(joined)) == complete, "NATIVE_PARTITION_UNION")
+    return {"all": complete, "ordinary": ordinary, "authority": authority, "delegated": delegated, **poison}
+
+
 def native_partition_ids(source_root: Path, partition: str = "all", *, deadline: float | None = None) -> tuple[str, ...]:
     """macOS authority5/ordinary/singletons, plus data-only pending G obligations."""
     _require(type(partition) is str and partition in {"all", "ordinary", "authority", "delegated", *PYTHON_SINGLETON_PARTITIONS},
              "NATIVE_PARTITION")
     complete = expected_python_ids(source_root, "native", deadline=deadline)
-    prefix = "unit.test_ios_profile_authority.NativeProfileAuthorityTests."
-    authority = tuple(identifier for identifier in complete if identifier.startswith(prefix))
-    _require(authority == NATIVE_AUTHORITY_IDS, "NATIVE_AUTHORITY_INVENTORY")
-    ordinary_complete = tuple(identifier for identifier in complete if identifier not in authority)
     delegated, _required = signing_regression_metadata(source_root, "macos-26", deadline=deadline)
-    ordinary = _python_capture_partition(ordinary_complete, "healthy", delegated)
-    poison = {name: _python_capture_partition(ordinary_complete, name, delegated) for name in PYTHON_SINGLETON_PARTITIONS}
-    joined = authority + ordinary + delegated + tuple(identifier for ids in poison.values() for identifier in ids)
-    _require(len(joined) == len(set(joined)) and tuple(sorted(joined)) == complete, "NATIVE_PARTITION_UNION")
-    return {"all": complete, "ordinary": ordinary, "authority": authority, "delegated": delegated, **poison}[partition]
+    return _native_capture_partitions(complete, delegated)[partition]
+
+
+def native_capture_snapshot(source_root: Path, *, deadline: float
+                            ) -> tuple[MappingProxyType, tuple[tuple[str, ...], MappingProxyType]]:
+    """One outside-owner native inventory per gate; subject discovery stays fresh."""
+    _remaining(deadline, 3300)
+    complete = expected_python_ids(source_root, "native", deadline=deadline)
+    _remaining(deadline, 3300)
+    metadata = signing_regression_metadata(source_root, "macos-26", deadline=deadline)
+    _remaining(deadline, 3300)
+    delegated, _requirements = metadata
+    partitions = _native_capture_partitions(complete, delegated)
+    _remaining(deadline, 3300)
+    return MappingProxyType(partitions), metadata
 
 
 def native_compatibility_ids(source_root: Path, *, public_only: bool = False,

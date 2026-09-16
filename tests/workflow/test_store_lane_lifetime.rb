@@ -22,19 +22,68 @@ class StoreLaneLifetimeTest < Minitest::Test
   end
 
   class ModeledEndpoint
-    attr_accessor :autoclose, :close_on_exec, :close_error, :read_error
-    attr_reader :close_calls, :reads
+    attr_accessor :close_on_exec, :close_error, :read_error, :writer, :fileno_value,
+                  :pid_value, :arm_error, :arm_nonlocal, :arm_confirmed,
+                  :disarm_error, :disarm_nonlocal, :close_nonlocal,
+                  :close_after_effect, :close_return, :closed_report
+    attr_reader :autoclose, :close_calls, :reads, :flag_calls, :close_flags,
+                :descriptor_retired, :wrapper_closed
 
     def initialize(role, events, lines = [])
       @role, @events, @lines = role, events, lines.dup
       @close_calls, @reads = 0, 0
+      @fileno_value = {stdin_read: 81, stdin_write: 82, stdout_read: 83, stdout_write: 84}.fetch(role)
+      @autoclose, @arm_confirmed, @closed_report = true, true, true
+      @flag_calls, @close_flags = [], []
+      @wrapper_closed = @descriptor_retired = false
+    end
+
+    def fileno
+      @fileno_value # Inert label only; never passed to an FD-taking API.
+    end
+
+    def pid
+      @pid_value
+    end
+
+    def autoclose=(value)
+      @flag_calls << value
+      @events << [:autoclose, @role, value]
+      raise IOError, "synthetic closed-wrapper disarm" if @wrapper_closed
+      if value
+        @autoclose = true
+        raise @arm_error, cause: @arm_error.cause if @arm_error
+        throw :store_close_nonlocal, :escaped_arm if @arm_nonlocal
+      else
+        # The first false is acquisition, not an unconfirmed-close disarm.
+        if @prepared
+          raise @disarm_error, cause: @disarm_error.cause if @disarm_error
+          throw :store_close_nonlocal, :escaped_disarm if @disarm_nonlocal
+        end
+        @prepared, @autoclose = true, false
+      end
+      value
+    end
+
+    def autoclose?
+      @autoclose && @arm_confirmed
+    end
+
+    def closed?
+      @wrapper_closed && @closed_report
     end
 
     def close
       @close_calls += 1
+      @close_flags << @autoclose
       @events << [:close, @role]
-      raise @close_error if @close_error
-      nil
+      raise @close_error, cause: @close_error.cause if @close_error && !@close_after_effect
+      throw :store_close_nonlocal, :escaped_close if @close_nonlocal
+      # Pinned MRI may close a non-owning wrapper WITHOUT retiring its FD.
+      @wrapper_closed = true
+      @descriptor_retired = @autoclose == true && @fileno_value.instance_of?(Integer) && @fileno_value >= 3 && @pid_value.nil?
+      raise @close_error, cause: @close_error.cause if @close_error
+      @close_return
     end
 
     def gets(separator, limit)
@@ -42,6 +91,7 @@ class StoreLaneLifetimeTest < Minitest::Test
       @reads += 1
       raise @read_error if @read_error
       line = @lines.shift
+      raise IOError, "synthetic EOF still has an original writer" if line.nil? && @writer && !@writer.descriptor_retired
       @events << [line.nil? ? :eof : :line, @role]
       line
     end
@@ -56,6 +106,7 @@ class StoreLaneLifetimeTest < Minitest::Test
       @events, @spawn_calls, @wait_calls = [], [], []
       @endpoints = [ModeledEndpoint.new(:stdin_read, @events), ModeledEndpoint.new(:stdin_write, @events),
                     ModeledEndpoint.new(:stdout_read, @events, lines), ModeledEndpoint.new(:stdout_write, @events)]
+      @endpoints[2].writer = @endpoints[3]
       @status = ModeledStatus.new(4141, signal.nil? ? code : nil, signal)
       @pipe_calls = 0
     end
@@ -139,7 +190,48 @@ class StoreLaneLifetimeTest < Minitest::Test
     end
   end
 
+  def original_error(type = IOError)
+    cause = ArgumentError.new("synthetic original cause")
+    primary = type == SystemExit ? SystemExit.new(19, "synthetic close exit") : type.new("synthetic close failure")
+    begin
+      raise primary, cause: cause
+    rescue Exception => observed # rubocop:disable Lint/RescueException
+      assert_same primary, observed
+    end
+    primary
+  end
+
+  def pending_close_delivery(error)
+    # Synchronous original-method seam, not Thread#raise or asynchronous
+    # delivery. Only the first direct close boundary loses its return/unwind.
+    original, depth, delivered = Thread.method(:handle_interrupt), 0, false
+    wrapper = lambda do |policy, &body|
+      outer = depth.zero?
+      depth += 1
+      begin
+        original.call(policy, &body)
+      ensure
+        depth -= 1
+        if outer && !delivered
+          delivered = true
+          raise error, cause: error.cause
+        end
+      end
+    end
+    Thread.stub(:handle_interrupt, wrapper) { yield }
+    assert delivered
+  end
+
   def test_inherited_group_wiring_bounded_view_eof_close_then_original_wait
+    nonowning = ModeledEndpoint.new(:stdout_write, [])
+    nonowning.autoclose = false
+    assert_nil nonowning.close
+    assert nonowning.closed?
+    refute nonowning.descriptor_retired, "wrapper closure is not descriptor retirement"
+    reader = ModeledEndpoint.new(:stdout_read, [])
+    reader.writer = nonowning
+    assert_raises(IOError) { reader.gets("\n", 65_537) }
+
     record = invocation
     lines = ["stdout\n", "stderr\n", "\xff\x00tail".b]
     model = Model.new(lines: lines)
@@ -160,7 +252,11 @@ class StoreLaneLifetimeTest < Minitest::Test
     assert_equal "synthetic-command", command
     assert command.frozen?
     assert_equal({in: model.endpoints[0], out: model.endpoints[3], err: model.endpoints[3], close_others: true}, options)
-    assert model.endpoints.all? { |endpoint| endpoint.close_calls == 1 && endpoint.autoclose == false && endpoint.close_on_exec }
+    model.endpoints.each do |endpoint|
+      assert_equal [false, true], endpoint.flag_calls
+      assert_equal [true], endpoint.close_flags
+      assert endpoint.close_calls == 1 && endpoint.descriptor_retired && endpoint.closed? && endpoint.close_on_exec
+    end
     assert_operator model.events.index([:eof, :stdout_read]), :<, model.events.index([:wait, 0])
     assert_operator model.events.index([:close, :stdout_read]), :<, model.events.index([:wait, 0])
     assert_equal [[4141, 0]], model.wait_calls
@@ -216,18 +312,27 @@ class StoreLaneLifetimeTest < Minitest::Test
   end
 
   def test_original_interrupt_or_system_exit_outlives_later_cleanup_failure
-    [Interrupt.new("synthetic interruption"), SystemExit.new(19, "synthetic exit")].each do |primary|
+    [original_error(Interrupt), original_error(SystemExit)].each do |primary|
       model, record = Model.new, invocation
+      cause = primary.cause
       cleanup = IOError.new("synthetic close failure")
       model.endpoints[2].close_error = cleanup
+      disarm = IOError.new("synthetic disarm failure")
+      model.endpoints[2].disarm_error = disarm
       observed = modeled(model) do
         assert_raises(primary.class) { record.spawn_with_pipes("synthetic-command") { raise primary } }
       end
       assert_same primary, observed
       assert_same primary, record.first_primary
+      assert_same cause, primary.cause
       assert_includes record.cleanup_errors, cleanup
+      assert_includes record.cleanup_errors, disarm
       assert_includes record.secondary_errors, cleanup
+      assert_includes record.secondary_errors, disarm
       assert model.endpoints.all? { |endpoint| endpoint.close_calls == 1 }
+      assert model.endpoints[2].autoclose, "failed disarm retains the original armed model"
+      adapter = record.instance_variable_get(:@adapters).fetch(0)
+      assert_same model.endpoints[2], adapter.instance_variable_get(:@stdout_read).io
       assert_same primary, assert_raises(primary.class) { record.require_adapter_continuation! }
       assert_equal 19, primary.status if primary.is_a?(SystemExit)
     end
@@ -246,19 +351,106 @@ class StoreLaneLifetimeTest < Minitest::Test
   end
 
   def test_one_close_failure_does_not_skip_other_original_endpoints_or_enter_callback
-    model, record = Model.new, invocation
-    primary = IOError.new("synthetic close failure")
-    model.endpoints[0].close_error = primary
-    called = false
-    error = modeled(model) do
-      assert_raises(Lifetime::LifetimeError) { record.spawn_with_pipes("synthetic-command") { called = true } }
+    cuts = %i[before after interrupt system_exit arm arm_nonlocal arm_unconfirmed
+              close_nonlocal disarm_error disarm_nonlocal nonnil closed_unconfirmed]
+    cuts.each do |cut|
+      model, record = Model.new, invocation
+      io = model.endpoints.first
+      primary = original_error(cut == :interrupt ? Interrupt : cut == :system_exit ? SystemExit : IOError)
+      cause = primary.cause
+      secondary = IOError.new("synthetic independent disarm error")
+      case cut
+      when :before, :interrupt, :system_exit then io.close_error = primary
+      when :after then io.close_error, io.close_after_effect = primary, true
+      when :arm then io.arm_error = primary
+      when :arm_nonlocal then io.arm_nonlocal = true
+      when :arm_unconfirmed then io.arm_confirmed = false
+      when :close_nonlocal then io.close_nonlocal = true
+      when :disarm_error then io.close_error, io.disarm_error = primary, secondary
+      when :disarm_nonlocal then io.close_error, io.disarm_nonlocal = primary, true
+      when :nonnil then io.close_return = false
+      when :closed_unconfirmed then io.closed_report = false
+      end
+      called = false
+      error = catch(:store_close_nonlocal) do
+        modeled(model) do
+          assert_raises(%i[interrupt system_exit].include?(cut) ? primary.class : Lifetime::LifetimeError) do
+            record.spawn_with_pipes("synthetic-command") { called = true }
+          end
+        end
+      end
+      assert_kind_of Exception, error, "#{cut} escaped independent cleanup"
+      refute called
+      if %i[before after interrupt system_exit arm disarm_error disarm_nonlocal].include?(cut)
+        assert_same primary, record.first_primary
+        assert_same cause, primary.cause
+      else
+        assert_instance_of Lifetime::LifetimeError, record.first_primary
+      end
+      assert record.unknown?
+      assert_equal(%i[arm arm_nonlocal arm_unconfirmed].include?(cut) ? 0 : 1, io.close_calls)
+      assert_equal [false, true, false], io.flag_calls
+      assert model.endpoints.drop(1).all? { |endpoint| endpoint.close_calls == 1 && endpoint.descriptor_retired }
+      assert_equal [[4141, Process::WNOHANG]], model.wait_calls
+      assert_includes record.cleanup_errors, record.first_primary
+      assert_includes record.cleanup_errors, secondary if cut == :disarm_error
+      assert_operator record.cleanup_errors.length, :>=, 2 if %i[after disarm_nonlocal nonnil closed_unconfirmed].include?(cut)
+      assert_equal record.cleanup_errors.map(&:object_id).uniq, record.cleanup_errors.map(&:object_id)
+      assert record.cleanup_errors.frozen?
+      refute_same record.cleanup_errors, record.cleanup_errors
+      adapters = record.instance_variable_get(:@adapters)
+      endpoint = adapters.fetch(0).instance_variable_get(:@stdin_read)
+      assert_same io, endpoint.io
+      assert_equal :unknown, endpoint.state
+      before = [io.close_calls, io.flag_calls.dup, record.cleanup_errors]
+      endpoint.close_once
+      assert_equal before, [io.close_calls, io.flag_calls, record.cleanup_errors]
+      refute endpoint.retired?
+      refute record.adapters_sealed_and_retired?
+      assert io.autoclose if %i[disarm_error disarm_nonlocal].include?(cut)
     end
-    refute called
-    assert_same primary, error.primary
-    assert_includes record.cleanup_errors, primary
-    assert model.endpoints.all? { |endpoint| endpoint.close_calls == 1 }
-    assert_equal [[4141, Process::WNOHANG]], model.wait_calls
-    refute record.adapters_sealed_and_retired?
+
+    [[0, nil], [1, nil], [2, nil], [-1, nil], ["81", nil], [81.0, nil], [81, 4141]].each do |fd, pid|
+      model, record = Model.new, invocation
+      io = model.endpoints.first
+      io.fileno_value, io.pid_value = fd, pid
+      modeled(model) do
+        assert_raises(Lifetime::LifetimeError) { record.spawn_with_pipes("synthetic-command") { flunk "invalid original FD entered callback" } }
+      end
+      assert_equal 0, io.close_calls
+      assert_equal [false, false], io.flag_calls
+      refute io.descriptor_retired
+      assert model.endpoints.drop(1).all?(&:descriptor_retired)
+      assert record.unknown?
+    end
+
+    [false, true].each do |earlier_failure|
+      record, io = invocation, ModeledEndpoint.new(:stdin_read, [])
+      endpoint = Lifetime.const_get(:Endpoint, false).new(record)
+      endpoint.bind(io)
+      endpoint.prepare
+      primary, pending = original_error, original_error(Interrupt)
+      cause, pending_cause = primary.cause, pending.cause
+      secondary = IOError.new("synthetic independent disarm failure before pending delivery")
+      io.close_error = primary if earlier_failure
+      io.disarm_error = secondary if earlier_failure
+      pending_close_delivery(pending) { endpoint.close_once }
+      assert_same(earlier_failure ? primary : pending, record.first_primary)
+      assert_same cause, primary.cause
+      assert_same pending_cause, pending.cause
+      assert_includes record.cleanup_errors, pending
+      assert_includes record.cleanup_errors, secondary if earlier_failure
+      assert_equal 3, record.cleanup_errors.length if earlier_failure
+      assert_equal 1, io.close_calls
+      assert_equal [false, true, false], io.flag_calls
+      assert_equal !earlier_failure, io.descriptor_retired
+      assert_equal :unknown, endpoint.state
+      assert_same io, endpoint.io
+      before = [io.close_calls, io.flag_calls.dup, record.cleanup_errors]
+      endpoint.close_once
+      assert_equal before, [io.close_calls, io.flag_calls, record.cleanup_errors]
+      refute endpoint.retired?
+    end
   end
 
   def test_creation_failure_or_lost_return_never_adopts_or_waits_a_guessed_pid

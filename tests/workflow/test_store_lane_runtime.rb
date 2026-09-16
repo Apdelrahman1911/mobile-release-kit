@@ -81,12 +81,23 @@ class StoreLaneRuntimeTest < Minitest::Test
     @runtime
   end
 
-  def observe_files(configure = nil, before_open: nil)
-    original = File.method(:open)
+  def observe_files(configure = nil, before_open: nil, owning_closes: false)
+    original, assertions = File.method(:open), self
     wrapper = lambda do |path, *arguments, **keywords, &block|
       before_open&.call(path, arguments, keywords, block)
       record_file = lambda do |file|
         @opened << file
+        if owning_closes
+          close, calls = file.method(:close), 0
+          file.define_singleton_method(:close) do
+            calls += 1
+            assertions.assert_equal 1, calls, "original close was retried"
+            assertions.assert_equal true, autoclose?, "original File close was not armed"
+            returned = close.call
+            assertions.assert_nil returned, "original close did not return nil"
+            returned
+          end
+        end
         role = if path == "terminal.part"
                  :terminal_writer
                elsif path == @lane_root && @runtime.instance_variable_get(:@publisher)
@@ -170,7 +181,7 @@ class StoreLaneRuntimeTest < Minitest::Test
       links << [source, destination]
       actual.call(source, destination)
     end
-    observe_files do
+    observe_files(owning_closes: true) do
       File.stub(:link, wrapper) { assert_equal 0, run_model { |runtime| owner = document(runtime) } }
     end
     assert_equal ["terminal.part", "terminal.json"], links.last
@@ -209,7 +220,7 @@ class StoreLaneRuntimeTest < Minitest::Test
       clock = Time.utc(2026, 9, 16, 12)
       cleanup = IOError.new("synthetic resource close after no-send")
       code = Time.stub(:now, -> { clock }) do
-        observe_files do
+        observe_files(owning_closes: true) do
           run_model do |runtime|
             validation = bind_runtime_ios_validation(runtime.invocation, clock + 1)
             assert_equal expected_digest, validation.fetch("ipaSha256")
@@ -271,6 +282,12 @@ class StoreLaneRuntimeTest < Minitest::Test
     %i[terminal_writer terminal_root].each do |fault_role|
       scenario
       primary, closes = IOError.new("returned close failure"), []
+      begin
+        raise primary, cause: ArgumentError.new("synthetic original cause")
+      rescue IOError => error
+        assert_same primary, error
+      end
+      cause = primary.cause
       configure = lambda do |role, file|
         next unless %i[terminal_writer terminal_root].include?(role)
         actual = file.method(:close)
@@ -280,10 +297,25 @@ class StoreLaneRuntimeTest < Minitest::Test
           raise primary if role == fault_role
         end
       end
-      assert_equal 76, observe_files(configure) { run_model { |runtime| document(runtime) } }
+      assert_equal 76, observe_files(configure, owning_closes: true) { run_model { |runtime| document(runtime) } }
       assert_equal %i[terminal_writer terminal_root], closes
       assert_same primary, @runtime.first_primary
+      assert_same cause, primary.cause
       assert_includes @runtime.invocation.cleanup_errors, primary
+      publisher = @runtime.instance_variable_get(:@publisher)
+      failed = publisher.instance_variable_get(fault_role == :terminal_writer ? :@writer : :@root)
+      assert_equal 2, failed.close_errors.length
+      assert_same primary, failed.close_errors.first
+      assert_instance_of IOError, failed.close_errors.last
+      failed.close_errors.each { |error| assert_includes @runtime.invocation.cleanup_errors, error }
+      assert_includes @opened, failed.io
+      refute failed.retired?
+      refute publisher.completed?
+      snapshot = @runtime.invocation.cleanup_errors
+      publisher.close_independent!
+      assert_equal %i[terminal_writer terminal_root], closes
+      assert_equal snapshot, @runtime.invocation.cleanup_errors
+      assert_same publisher, @runtime.instance_variable_get(:@publisher)
       refute File.exist?(File.join(@lane_root, "terminal.json"))
       assert File.exist?(File.join(@lane_root, "terminal.part"))
     end
@@ -562,6 +594,7 @@ class StoreLaneRuntimeTest < Minitest::Test
       "binding" => {"files" => {"fastlane/store_lane_runtime.rb" => {"path" => File.join(source, "fastlane/store_lane_runtime.rb")}}},
       "fixtureFiles" => {"tests/workflow/store_lane_native_fixture.rb" => "model-only-no-source-import"}}
     observer = fixture::Observation.new(request)
+    assertions = self
     configure = lambda do |_role, file|
       next unless file.path == path
       probe[:io] = file
@@ -579,7 +612,9 @@ class StoreLaneRuntimeTest < Minitest::Test
           probe.fetch(:counts)[name] += 1
           probe.fetch(:events) << name
           raise probe.fetch(:error) if fault == name && name != :close
+          assertions.assert_equal true, autoclose? if name == :close
           value = original.call(*arguments)
+          assertions.assert_nil value if name == :close
           raise probe.fetch(:error) if fault == name # Close return loss, never an unclosed real FD.
           value
         end

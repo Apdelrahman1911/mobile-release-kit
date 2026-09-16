@@ -65,29 +65,120 @@ class StoreLaneResourcesTest < Minitest::Test
     result
   end
 
+  def observe_original_closes(configure = nil)
+    original, assertions = File.method(:open), self
+    wrapper = lambda do |path, *arguments, **keywords|
+      file = original.call(path, *arguments, **keywords)
+      close, calls = file.method(:close), 0
+      file.define_singleton_method(:close) do
+        calls += 1
+        assertions.assert_equal 1, calls, "original close was retried"
+        assertions.assert_equal true, autoclose?, "original File close was not armed"
+        returned = close.call
+        assertions.assert_nil returned, "original close did not return nil"
+        returned
+      end
+      configure&.call(path, file)
+      file
+    end
+    File.stub(:open, wrapper) { yield }
+  end
+
+  def inert_close_slot(fd: 91, pid: nil, arm: nil, close: nil, after: nil, disarm: nil,
+                       armed: true, returned: nil, closed: true)
+    # Retained state injection tests only the close operation. No File.open,
+    # wrapper adoption, numeric-FD operation or native disposal is involved.
+    state = {autoclose: false, wrapper: false, descriptor: false, flags: [], closes: 0, close_flags: []}
+    io = Object.new
+    io.define_singleton_method(:fileno) { fd }
+    io.define_singleton_method(:pid) { pid }
+    io.define_singleton_method(:autoclose?) { state.fetch(:autoclose) && armed }
+    io.define_singleton_method(:autoclose=) do |value|
+      state.fetch(:flags) << value
+      raise IOError, "synthetic closed-wrapper disarm" if state.fetch(:wrapper)
+      if value
+        state[:autoclose] = true
+        arm&.call
+      else
+        disarm&.call
+        state[:autoclose] = false
+      end
+      value
+    end
+    io.define_singleton_method(:closed?) { state.fetch(:wrapper) && closed }
+    io.define_singleton_method(:close) do
+      state[:closes] += 1
+      state.fetch(:close_flags) << state.fetch(:autoclose)
+      close&.call
+      state[:wrapper] = true
+      state[:descriptor] = state.fetch(:autoclose) == true && fd.instance_of?(Integer) && fd >= 3 && pid.nil?
+      after&.call
+      returned
+    end
+    slot = Resources::FileSlot.new
+    slot.instance_variable_set(:@io, io)
+    slot.instance_variable_set(:@state, :open)
+    [slot, io, state]
+  end
+
+  def close_error(type = IOError)
+    error = type == SystemExit ? SystemExit.new(19) : type.new("synthetic original close failure")
+    begin
+      raise error, cause: ArgumentError.new("synthetic original cause")
+    rescue Exception => observed # rubocop:disable Lint/RescueException
+      assert_same error, observed
+    end
+    error
+  end
+
+  def pending_close_delivery(error)
+    original, depth, delivered = Thread.method(:handle_interrupt), 0, false
+    wrapper = lambda do |policy, &body|
+      outer = depth.zero?
+      depth += 1
+      begin
+        original.call(policy, &body)
+      ensure
+        depth -= 1
+        if outer && !delivered
+          delivered = true
+          raise error, cause: error.cause
+        end
+      end
+    end
+    Thread.stub(:handle_interrupt, wrapper) { yield }
+    assert delivered # Finite synchronous cut, never Thread#raise or a worker.
+  end
+
+  def nonlocal_close_return
+    yield proc { return :escaped_close_return }
+  end
+
   def test_nonmac_original_generated_inventory_is_exclusive_closed_and_never_deletes_source_or_package
-    scenario
-    source = File.binread(@artifact)
-    pilot = @resources.create_pilot_root!
-    ipa = @resources.copy_package_ipa!(ipa_path: @artifact, package_path: pilot)
-    info = File.join(@base, "AppStoreInfo.plist")
-    File.binwrite(info, "synthetic plist")
-    copied_info = @resources.copy_appstore_info!(source: info, pilot_path: pilot)
-    key_dir = @resources.write_api_key!(key_id: "KEY123", contents: "synthetic non-credential key", shell: false)
-    @resources.require_upload_inputs!(package_path: pilot, asset_path: @artifact)
-    assert @resources.require_ready_for_executor!
-    @resources.defer_removal!(pilot)
-    @resources.defer_removal!(key_dir)
-    rows = completed_inventory
-    assert_equal %w[pilot-root package-ipa package-appstore-info key-dir key], rows.map { |row| row.fetch("role") }
-    assert_equal Digest::SHA256.hexdigest(source) + ".ipa", File.basename(ipa)
-    assert_equal source, File.binread(@artifact)
-    assert_equal source, File.binread(ipa)
-    assert_equal "synthetic plist", File.binread(copied_info)
-    assert File.file?(File.join(key_dir, "AuthKey_KEY123.p8"))
-    rows.each { |row| assert_equal(row.fetch("kind") == "directory" ? 0o700 : 0o600, row.fetch("mode")) }
-    assert rows.frozen? && rows.all?(&:frozen?)
-    assert_raises(Resources::Error) { @resources.create_pilot_root! }
+    observe_original_closes do
+      scenario
+      source = File.binread(@artifact)
+      pilot = @resources.create_pilot_root!
+      ipa = @resources.copy_package_ipa!(ipa_path: @artifact, package_path: pilot)
+      info = File.join(@base, "AppStoreInfo.plist")
+      File.binwrite(info, "synthetic plist")
+      copied_info = @resources.copy_appstore_info!(source: info, pilot_path: pilot)
+      key_dir = @resources.write_api_key!(key_id: "KEY123", contents: "synthetic non-credential key", shell: false)
+      @resources.require_upload_inputs!(package_path: pilot, asset_path: @artifact)
+      assert @resources.require_ready_for_executor!
+      @resources.defer_removal!(pilot)
+      @resources.defer_removal!(key_dir)
+      rows = completed_inventory
+      assert_equal %w[pilot-root package-ipa package-appstore-info key-dir key], rows.map { |row| row.fetch("role") }
+      assert_equal Digest::SHA256.hexdigest(source) + ".ipa", File.basename(ipa)
+      assert_equal source, File.binread(@artifact)
+      assert_equal source, File.binread(ipa)
+      assert_equal "synthetic plist", File.binread(copied_info)
+      assert File.file?(File.join(key_dir, "AuthKey_KEY123.p8"))
+      rows.each { |row| assert_equal(row.fetch("kind") == "directory" ? 0o700 : 0o600, row.fetch("mode")) }
+      assert rows.frozen? && rows.all?(&:frozen?)
+      assert_raises(Resources::Error) { @resources.create_pilot_root! }
+    end
   end
 
   def test_mac_structural_package_metadata_asset_and_private_shell_key_roles_are_bound_before_dispatch
@@ -150,30 +241,143 @@ class StoreLaneResourcesTest < Minitest::Test
   end
 
   def test_lost_generated_writer_close_latches_original_error_and_closes_other_original_handles_once
-    scenario
-    pilot = @resources.create_pilot_root!
-    actual = File.method(:open)
-    primary, writer, close_calls = IOError.new("synthetic close-after-effect"), nil, 0
-    wrapper = lambda do |path, *arguments, **keywords|
-      file = actual.call(path, *arguments, **keywords)
+    primary, writer, close_calls, pilot = close_error, nil, 0, nil
+    cause = primary.cause
+    configure = lambda do |path, file|
       if File.dirname(path) == pilot
         writer = file
         close = file.method(:close)
-        file.define_singleton_method(:close) { close_calls += 1; close.call; raise primary }
+        # The inner original-close observer requires armedtrue and nil
+        # BEFORE this after-effect failure. Never retry an uncertain FD.
+        file.define_singleton_method(:close) { close_calls += 1; close.call; raise primary, cause: primary.cause }
       end
-      file
     end
-    File.stub(:open, wrapper) do
+    observe_original_closes(configure) do
+      scenario
+      pilot = @resources.create_pilot_root!
       assert_same primary, assert_raises(IOError) { @resources.copy_package_ipa!(ipa_path: @artifact, package_path: pilot) }
+      assert writer.closed?
+      assert_equal 1, close_calls
+      assert_same cause, primary.cause
+      assert_same primary, @invocation.first_primary
+      slot = @resources.instance_variable_get(:@handles).find { |item| item.io.equal?(writer) }
+      assert_same writer, slot.io
+      refute slot.retired?
+      assert_equal 2, slot.close_errors.length
+      assert_same primary, slot.close_errors.first
+      assert_instance_of IOError, slot.close_errors.last
+      slot.close_errors.each { |error| assert_includes @invocation.cleanup_errors, error }
+      assert_raises(Lifetime::LifetimeError) { @resources.require_ready_for_executor! }
+      @resources.close_independent!
+      assert_equal 1, close_calls
+      assert @resources.instance_variable_get(:@handles).all? { |item| item.io.nil? || item.io.closed? }
+      assert File.file?(@artifact)
     end
-    assert writer.closed?
-    assert_equal 1, close_calls
-    assert_same primary, @invocation.first_primary
-    assert_raises(Lifetime::LifetimeError) { @resources.require_ready_for_executor! }
-    @resources.close_independent!
-    assert_equal 1, close_calls
-    assert @resources.instance_variable_get(:@handles).all? { |slot| slot.io.nil? || slot.io.closed? }
-    assert File.file?(@artifact)
+
+    cuts = %i[before after interrupt system_exit arm arm_throw arm_return arm_unconfirmed
+              close_throw close_return disarm_error disarm_throw disarm_return duplicate nonnil closed_unconfirmed
+              fd0 fd1 fd2 fd_negative fd_string fd_float popen missing pending pending_after_error]
+    cuts.each do |cut|
+      primary = close_error(cut == :interrupt ? Interrupt : cut == :system_exit ? SystemExit : IOError)
+      pending, secondary, cause = close_error(Interrupt), IOError.new("synthetic independent disarm failure"), primary.cause
+      pending_cause = pending.cause
+      options = {}
+      fail_first = -> { raise primary, cause: primary.cause }
+      escape = -> { throw :store_resource_close_nonlocal, :escaped_close }
+      observed = nonlocal_close_return do |returning|
+        case cut
+        when :before, :interrupt, :system_exit, :pending_after_error then options[:close] = fail_first
+        when :after then options[:after] = fail_first
+        when :arm then options[:arm] = fail_first
+        when :arm_throw then options[:arm] = escape
+        when :arm_return then options[:arm] = returning
+        when :arm_unconfirmed then options[:armed] = false
+        when :close_throw then options[:close] = escape
+        when :close_return then options[:close] = returning
+        when :disarm_error then options[:close], options[:disarm] = fail_first, -> { raise secondary }
+        when :disarm_throw then options[:close], options[:disarm] = fail_first, escape
+        when :disarm_return then options[:close], options[:disarm] = fail_first, returning
+        when :duplicate then options[:close], options[:disarm] = fail_first, fail_first
+        when :nonnil then options[:returned] = false
+        when :closed_unconfirmed then options[:closed] = false
+        when :fd0 then options[:fd] = 0
+        when :fd1 then options[:fd] = 1
+        when :fd2 then options[:fd] = 2
+        when :fd_negative then options[:fd] = -1
+        when :fd_string then options[:fd] = "91"
+        when :fd_float then options[:fd] = 91.0
+        when :popen then options[:pid] = 4141
+        end
+        options[:disarm] = -> { raise secondary } if cut == :pending_after_error
+        slot, io, state = inert_close_slot(**options)
+        slot.instance_variable_set(:@io, nil) if cut == :missing
+        other, other_io, other_state = inert_close_slot(fd: 92)
+        record = Lifetime::Invocation.new(lane: "ios_testflight_internal", nonce: "n" * 16, output: "/model/resources.json")
+        inventory = Resources::Inventory.new(invocation: record, binding: {}.freeze)
+        inventory.instance_variable_set(:@handles, [other, slot])
+        record.bind_resources!(inventory)
+        retained = [inventory, slot, io, other, other_io] # No real descriptor/finalizer exists.
+        failure = catch(:store_resource_close_nonlocal) do
+          assert_raises(Exception) do
+            if %i[pending pending_after_error].include?(cut)
+              pending_close_delivery(pending) { slot.close_once }
+            else
+              slot.close_once
+            end
+          end
+        end
+        assert_kind_of Exception, failure, "#{cut} escaped the close operation"
+        first_is_actual = %i[before after interrupt system_exit arm disarm_error disarm_throw disarm_return duplicate pending_after_error].include?(cut)
+        expected = first_is_actual ? primary : cut == :pending ? pending : nil
+        expected ? assert_same(expected, failure) : assert_instance_of(Resources::Error, failure)
+        assert_same cause, primary.cause
+        assert_same pending_cause, pending.cause
+        assert_same(cut == :missing ? nil : io, slot.io)
+        refute slot.retired?
+        refute slot.open?
+        errors = slot.close_errors
+        assert errors.frozen?
+        refute_same errors, slot.close_errors
+        assert_same failure, errors.first
+        assert_operator errors.length, :<=, 4
+        assert_equal errors.map(&:object_id).uniq, errors.map(&:object_id)
+        assert_includes errors, secondary if %i[disarm_error pending_after_error].include?(cut)
+        assert_includes errors, pending if %i[pending pending_after_error].include?(cut)
+        assert_equal 3, errors.length if cut == :pending_after_error
+        assert_equal 1, errors.length if cut == :duplicate
+        assert_operator errors.length, :>=, 2 if %i[after disarm_throw disarm_return nonnil closed_unconfirmed missing pending pending_after_error].include?(cut)
+        no_close = %i[arm arm_throw arm_return arm_unconfirmed fd0 fd1 fd2 fd_negative fd_string fd_float popen missing].include?(cut)
+        assert_equal(no_close ? 0 : 1, state.fetch(:closes))
+        assert_equal [true], state.fetch(:close_flags) unless no_close
+        expected_flags = if cut == :missing then []
+                         elsif %i[fd0 fd1 fd2 fd_negative fd_string fd_float popen].include?(cut) then [false]
+                         else [true, false]
+                         end
+        assert_equal expected_flags, state.fetch(:flags)
+        effected = %i[after nonnil closed_unconfirmed pending].include?(cut)
+        assert_equal effected, state.fetch(:wrapper)
+        assert_equal effected, state.fetch(:descriptor)
+        snapshot = [state.fetch(:closes), state.fetch(:flags).dup, state.fetch(:close_flags).dup,
+                    state.fetch(:autoclose), state.fetch(:wrapper), state.fetch(:descriptor), errors]
+        # Repeat guard must still fold the saved disarm errors through the
+        # original collector, and cannot skip the other original close.
+        assert_nil slot.close_once
+        inventory.close_independent!
+        assert_equal snapshot, [state.fetch(:closes), state.fetch(:flags), state.fetch(:close_flags),
+                                state.fetch(:autoclose), state.fetch(:wrapper), state.fetch(:descriptor), slot.close_errors]
+        assert_same failure, record.first_primary
+        errors.each { |error| assert_includes record.cleanup_errors, error }
+        assert record.unknown?
+        assert_equal 1, other_state.fetch(:closes)
+        assert other_state.fetch(:descriptor) && other.retired?
+        assert_same other_io, other.io
+        assert_same inventory, retained.first
+        assert_same inventory, record.instance_variable_get(:@resources)
+        assert state.fetch(:autoclose) if %i[disarm_error disarm_throw disarm_return duplicate pending_after_error].include?(cut)
+        :completed
+      end
+      assert_equal :completed, observed, "#{cut} nonlocal return escaped independent cleanup"
+    end
   end
 
   def test_pin_reads_missing_document_owner_and_foreign_origin_cannot_supply_success

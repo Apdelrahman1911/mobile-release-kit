@@ -24,6 +24,7 @@ module MobileReleaseKit
       attr_reader :io, :path
       def initialize
         @pid, @thread, @state = Process.pid, Thread.current, :reserved
+        @close_errors = []
       end
       def acquire(path, flags, mode = nil)
         origin!
@@ -46,23 +47,69 @@ module MobileReleaseKit
         origin!
         @state == :reserved || @state == :closed
       end
+      def close_errors
+        origin!
+        @close_errors.dup.freeze
+      end
       def close_once
         origin!
         return if @state == :reserved || @close_attempted
         begin
           Thread.handle_interrupt(Exception => :never) do
             @close_attempted, @state = true, :closing
-            raise Error.new(:open_return_missing) unless @io
-            Thread.handle_interrupt(Exception => :immediate) { @io.close }
-            raise Error.new(:close_unconfirmed) unless @io.closed?
-            @state = :closed
+            begin
+              raise Error.new(:open_return_missing) unless @io
+              fd = @io.fileno
+              raise Error.new(:file_api) unless fd.instance_of?(Integer) && fd >= 3 && @io.pid.nil?
+              @io.autoclose = true
+              raise Error.new(:file_api) unless @io.autoclose? == true
+              returned = Thread.handle_interrupt(Exception => :immediate) { @io.close }
+              raise Error.new(:close_unconfirmed) unless returned.nil? && @io.closed? == true
+              @state = :closed
+            rescue Exception => error # rubocop:disable Lint/RescueException
+              retain_close_error(error)
+            ensure
+              unconfirmed_close! unless @state == :closed
+            end
           end
-        rescue Exception # rubocop:disable Lint/RescueException
-          @state = :unknown
-          raise
+        rescue Exception => error # rubocop:disable Lint/RescueException
+          Thread.handle_interrupt(Exception => :never) do
+            @close_attempted = true
+            retain_close_error(error) # Including a late mask-exit delivery.
+            unconfirmed_close!
+          end
         end
       end
       private
+
+      def retain_close_error(error)
+        @state = :unknown
+        @first_close_error ||= error
+        if @close_errors.length < 4 && !@close_errors.any? { |item| item.equal?(error) }
+          @close_errors << error
+        end
+      end
+
+      def unconfirmed_close!
+        retain_close_error(Error.new(:close_unconfirmed)) unless @first_close_error
+        unless @disarm_attempted
+          @disarm_attempted = true
+          returned, raised = false, false
+          begin
+            raise Error.new(:open_return_missing) unless @io
+            @io.autoclose = false
+            returned = true
+          rescue Exception => error # rubocop:disable Lint/RescueException
+            raised = true
+            retain_close_error(error)
+          ensure
+            retain_close_error(Error.new(:close_unconfirmed)) unless returned || raised
+            raise @first_close_error, cause: @first_close_error.cause
+          end
+        end
+        raise @first_close_error, cause: @first_close_error.cause
+      end
+
       def origin!
         raise Error.new(:foreign_origin) unless @pid == Process.pid && @thread.equal?(Thread.current)
       end
@@ -283,10 +330,16 @@ module MobileReleaseKit
         @invocation.origin!
         Thread.handle_interrupt(Exception => :never) do
           @handles.reverse_each do |slot|
+            failure = nil
             begin
               slot.close_once
             rescue Exception => error # rubocop:disable Lint/RescueException
-              unknown!(error, cleanup: true)
+              failure = error
+            ensure
+              # Early writer/source closes have already retired their attempt;
+              # their saved disarm errors still belong to this original cleanup.
+              slot.close_errors.each { |error| unknown!(error, cleanup: true) }
+              unknown!(failure, cleanup: true) if failure
             end
           end
         end
@@ -368,6 +421,18 @@ module MobileReleaseKit
         value = FileSlot.new
         @handles << value # Original slot is rooted before File.open can run.
         value
+      end
+
+      def close_slot!(value)
+        Thread.handle_interrupt(Exception => :never) do
+          begin
+            value.close_once
+          ensure
+            # Publish an early close's original error before this enclosing
+            # mask can deliver a later interruption to the resource operation.
+            value.close_errors.each { |error| unknown!(error, cleanup: true) }
+          end
+        end
       end
 
       def bind_parent(role, path, parent_role)
@@ -504,7 +569,7 @@ module MobileReleaseKit
           raise Error.new(:written_revision)
         end
         verify_entry!(entry)
-        Thread.handle_interrupt(Exception => :never) { entry.fetch(:slot).close_once }
+        close_slot!(entry.fetch(:slot))
         entry.fetch(:path)
       end
 
@@ -554,7 +619,7 @@ module MobileReleaseKit
                (!sha_name || name == "#{digest.hexdigest}.ipa")
           raise Error.new(:source_revision)
         end
-        Thread.handle_interrupt(Exception => :never) { input.close_once }
+        close_slot!(input)
         finish_file(entry, count, digest.hexdigest)
       end
 
@@ -597,7 +662,7 @@ module MobileReleaseKit
                StoreLaneResources.revision(named) == StoreLaneResources.revision(before)
           raise Error.new(:source_revision)
         end
-        input.close_once
+        close_slot!(input)
         count
       end
     end

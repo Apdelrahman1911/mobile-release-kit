@@ -226,7 +226,9 @@ module StoreLaneNativeFixture
       io.define_singleton_method(:close) do
         StoreLaneNativeFixture.need(row.fetch("calls").zero?, "original close repeated")
         row["calls"] += 1
+        StoreLaneNativeFixture.need(autoclose? == true, "original File close was not armed")
         answer = original.call
+        StoreLaneNativeFixture.need(answer.nil?, "original File close did not return nil")
         row["returns"] += 1
         if observer.request.fetch("mode") == "terminal-close-return-loss" && File.basename(row.fetch("path")) == "terminal.part"
           raise IOError, "fixed terminal close return loss"

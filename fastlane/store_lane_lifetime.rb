@@ -547,18 +547,72 @@ module MobileReleaseKit
       def close_once
         return if @state == :reserved || @state == :closed || @close_attempted
 
-        @close_attempted, @state = true, :closing
         begin
-          Thread.handle_interrupt(Exception => :immediate) { @io.close }
-          @state = :closed # Only the original close's actual return settles it.
+          Thread.handle_interrupt(Exception => :never) do
+            @close_attempted, @state = true, :closing
+            begin
+              # MRI autoclose:false also suppresses the descriptor close in
+              # IO#close. Arm only this retained original, never an FD wrapper.
+              fd = @io.fileno
+              raise LifetimeError unless fd.instance_of?(Integer) && fd >= 3 && @io.pid.nil?
+              @io.autoclose = true
+              raise LifetimeError unless @io.autoclose? == true
+              returned = Thread.handle_interrupt(Exception => :immediate) { @io.close }
+              raise LifetimeError unless returned.nil? && @io.closed? == true
+              @state = :closed
+            rescue Exception => error # rubocop:disable Lint/RescueException
+              retain_close_error(error)
+            ensure
+              unconfirmed_close! unless @state == :closed
+            end
+          end
         rescue Exception => error # rubocop:disable Lint/RescueException
-          @state = :unknown
-          @invocation.mark_unknown!(error, cleanup: true)
+          # Includes delivery at the mask exit after an otherwise returned
+          # close. Earlier close/disarm errors already own their precedence.
+          Thread.handle_interrupt(Exception => :never) do
+            @close_attempted = true
+            retain_close_error(error)
+            begin
+              unconfirmed_close!
+            rescue Exception => failure # rubocop:disable Lint/RescueException
+              retain_close_error(failure)
+            end
+          end
         end
       end
 
       def retired?
         @state == :closed || @state == :reserved
+      end
+
+      private
+
+      def retain_close_error(error)
+        @state = :unknown
+        @first_close_error ||= error
+        @invocation.mark_unknown!(@first_close_error, cleanup: true)
+        @invocation.mark_unknown!(error, cleanup: true) unless error.equal?(@first_close_error)
+      end
+
+      def unconfirmed_close!
+        retain_close_error(LifetimeError.new) unless @first_close_error
+        unless @disarm_attempted
+          @disarm_attempted = true
+          returned, raised = false, false
+          begin
+            @io.autoclose = false
+            returned = true
+          rescue Exception => error # rubocop:disable Lint/RescueException
+            raised = true
+            retain_close_error(error)
+          ensure
+            retain_close_error(LifetimeError.new) unless returned || raised
+            # Also intercept close/disarm throw/return here, not in the lane
+            # body: later independent original endpoints must still be closed.
+            raise @first_close_error, cause: @first_close_error.cause
+          end
+        end
+        raise @first_close_error, cause: @first_close_error.cause
       end
     end
     private_constant :Endpoint

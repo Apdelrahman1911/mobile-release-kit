@@ -595,6 +595,12 @@ class CIControllerContractTests(unittest.TestCase):
             rig.events.append(("delegation", operating_system, deadline))
             return rig.metadata
 
+        def snapshot(source, *, deadline):
+            self.assertEqual(source, ROOT)
+            rig.events.append(("snapshot", "native", deadline))
+            captured_metadata = rig.checks.signing_regression_metadata(source, "macos-26", deadline=deadline)
+            return MappingProxyType(dict(rig.inventories)), captured_metadata
+
         def idle(*, deadline):
             rig.events.append(("idle", deadline))
             if (rig.idle_error is not None and rig.captures
@@ -645,7 +651,8 @@ class CIControllerContractTests(unittest.TestCase):
             return capture
 
         rig.checks = SimpleNamespace(native_partition_ids=identities, inspect_native_package=package,
-                                     signing_regression_metadata=metadata,
+                                     signing_regression_metadata=metadata, native_capture_snapshot=snapshot,
+                                     NATIVE_AUTHORITY_IDS=checks.NATIVE_AUTHORITY_IDS,
                                      PYTHON_SINGLETON_CASES=_PYTHON_SINGLETON_FIXTURES)
         def prepare_files(selected, *, deadline):
             rig.events.append(("fixture-prepare", selected, deadline))
@@ -1057,7 +1064,8 @@ class CIControllerContractTests(unittest.TestCase):
             with self.subTest(phase=phase):
                 rig = self._native_gate_fixture(phase)
                 parts = ("authority", "ordinary", *rig.controller.PYTHON_SINGLETON_PARTITIONS)
-                result = self._perform_native_fixture(rig, deadline=original_deadline)
+                with patch.object(rig.checks, "native_partition_ids", side_effect=AssertionError("same-gate inventory rescan")):
+                    result = self._perform_native_fixture(rig, deadline=original_deadline)
                 self.assertTrue(result.ok, result)
                 self.assertEqual(result.details["stage"], "complete")
                 actual = sorted(set(rig.inventories["all"]) - set(rig.inventories["delegated"]))
@@ -1073,6 +1081,8 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertEqual([row["status"] for row in records], ["PASS"] * len(parts))
                 calls = [event for event in rig.events if event[0] == "run"]
                 self.assertEqual(len(calls), len(parts))
+                self.assertEqual([event for event in rig.events if event[0] == "snapshot"], [("snapshot", "native", cutoff)])
+                self.assertEqual([event for event in rig.events if event[0] == "inventory"], [])
                 self.assertEqual([event for event in rig.events if event[0] == "delegation"], [("delegation", "macos-26", cutoff)])
                 python = rig.paths.source_python if phase == "source" else rig.paths.wheel_python
                 entry = str(ROOT / "tests/workflow/run_native_profile_checks.py")
@@ -1106,6 +1116,69 @@ class CIControllerContractTests(unittest.TestCase):
                            else rig.paths.work / "wheel-venv/lib/python3.11/site-packages/mobile_release")
                 self.assertIn(("package", package, cutoff), rig.events)
                 self.assertTrue(all(event[-1] == cutoff for event in rig.events if event[0] != "run"))
+
+    def test_native_prebound_inventory_is_closed_to_its_original_gate_roles(self):
+        for phase in ("source", "wheel"):
+            rig = self._native_gate_fixture(phase)
+            controller = rig.controller
+            ordinary = rig.inventories["ordinary"]
+            singleton = controller.PYTHON_SINGLETON_PARTITIONS[0]
+            original = SimpleNamespace(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
+                domain_finality=True, primary_error=None, cleanup_errors=(), stdout=b"", stderr=b"",
+                duration=0.01, timed_out=False, cancelled=False, persisted=(0, 0))
+            with patch.object(rig.checks, "native_partition_ids", side_effect=AssertionError("prebound parser rescan")) as reader:
+                for partition in ("authority", "ordinary", singleton):
+                    expected = rig.inventories[partition]
+                    step = dataclasses.replace(rig.step, native_partition=partition)
+                    original.stderr = ("".join(f"{name.rsplit('.', 1)[1]} ({name}) ... ok\n" for name in expected)
+                                       + f"\nRan {len(expected)} tests in 0.01s\n\nOK\n").encode()
+                    parsed = controller.parse_capture(step, original, rig.paths, "macos", rig.checks,
+                                                      _native_expected=expected)
+                    self.assertEqual(parsed.details["completed"], list(expected))
+                    callback = {"id": expected[0], "outcome": "error", "category": "os-error", "errno": 5,
+                                "returncode": None}
+                    failed = SimpleNamespace(**{**vars(original), "ok": False, "returncode": 1,
+                        "primary_error": "command exited 1", "stderr": b"",
+                        "stdout": (controller.NATIVE_DIAGNOSTIC_PREFIX + json.dumps({
+                            "schema": 1, "phase": "tests", "records": [callback]}) + "\n").encode()})
+                    value = controller.failure_details(failed, step, rig.paths, checks=rig.checks,
+                                                       platform="macos", _native_expected=expected)
+                    self.assertEqual(value["native_diagnostic"]["records"], [callback])
+                    self.assertEqual(value["returncode"], 1)
+                    with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                        controller.parse_capture(step, failed, rig.paths, "macos", rig.checks,
+                                                 _native_expected=expected)
+                reader.assert_not_called()
+
+            step = dataclasses.replace(rig.step, native_partition="ordinary")
+            cases = (({}, "linux", ordinary), ({"id": "python-full"}, "macos", ordinary),
+                ({"id": "foreign"}, "macos", ordinary), ({"parser": "check"}, "macos", ordinary),
+                ({"native_partition": "all"}, "macos", ordinary),
+                ({"native_partition": "delegated"}, "macos", rig.inventories["delegated"]),
+                ({"native_partition": "foreign"}, "macos", ordinary),
+                ({}, "macos", list(ordinary)), ({}, "macos", ()), ({}, "macos", (False,)),
+                ({}, "macos", tuple(reversed(ordinary))), ({}, "macos", ordinary + ordinary[:1]),
+                ({"native_partition": "authority"}, "macos", ordinary),
+                ({"native_partition": singleton}, "macos", ordinary[:1]),
+                ({"native_partition": singleton}, "macos", rig.inventories[controller.PYTHON_SINGLETON_PARTITIONS[1]]),
+                ({}, "macos", rig.inventories["authority"]), ({}, "macos", rig.inventories[singleton]))
+            for changes, platform, expected in cases:
+                with self.subTest(phase=phase, invalid_role=(changes, platform, expected)):
+                    selected = dataclasses.replace(step, **changes)
+                    with self.assertRaisesRegex(controller.VerificationError, "NATIVE_PREBOUND_EXPECTATIONS"):
+                        controller.parse_capture(selected, original, rig.paths, platform, rig.checks,
+                                                 _native_expected=expected)
+                    with self.assertRaisesRegex(controller.VerificationError, "NATIVE_PREBOUND_EXPECTATIONS"):
+                        controller.failure_details(original, selected, rig.paths, checks=rig.checks,
+                                                   platform=platform, _native_expected=expected)
+            with self.assertRaisesRegex(controller.VerificationError, "NATIVE_PREBOUND_EXPECTATIONS"):
+                controller.parse_capture(step, original, rig.paths, "macos", rig.checks,
+                                         _python_expected=ordinary, _native_expected=ordinary)
+            with self.assertRaisesRegex(controller.VerificationError, "NATIVE_PREBOUND_EXPECTATIONS"):
+                controller.failure_details(original, step, rig.paths, checks=rig.checks, platform="macos",
+                                           _python_expected=ordinary, _native_expected=ordinary)
+            with self.assertRaisesRegex(controller.VerificationError, "NATIVE_PREBOUND_EXPECTATIONS"):
+                controller.failure_details(original, _native_expected=ordinary)
 
     def test_native_checked_file_fixtures_use_original_idle_capture_and_existing_accounting(self):
         for case in ("success", "prepare-failed", "parser-failed", "idle-failed", "reinspect-failed", "byte-bound", "failed-reinspection-byte-bound"):
@@ -1173,7 +1246,9 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertEqual(rig.events, [])
         for mutation in ("missing", "duplicate", "overlap", "expanded-authority", "pooled-poison", "missing-poison", "pooled-fresh", "missing-fresh", "swapped-fresh",
                          "delegated-missing", "delegated-foreign", "delegated-duplicate", "delegated-overlap",
-                         "delegated-poison", "delegated-wrong-os", "obligation-missing", "obligation-empty", "obligation-foreign"):
+                         "delegated-poison", "delegated-wrong-os", "obligation-missing", "obligation-empty", "obligation-foreign",
+                         "snapshot-mutable", "snapshot-extra", "snapshot-missing", "snapshot-list", "snapshot-metadata",
+                         "snapshot-shape", "snapshot-string", "snapshot-key-subclass", "same-size-foreign-authority"):
             with self.subTest(mutation=mutation):
                 rig = self._native_gate_fixture()
                 if mutation == "missing":
@@ -1184,6 +1259,32 @@ class CIControllerContractTests(unittest.TestCase):
                     rig.inventories["ordinary"] += rig.inventories["authority"][:1]
                 elif mutation == "expanded-authority":
                     rig.inventories["authority"] += rig.inventories["ordinary"][:1]
+                elif mutation == "same-size-foreign-authority":
+                    original = rig.inventories["authority"][0]
+                    foreign = "unit.synthetic.AuthorityTests.test_foreign"
+                    rig.inventories["authority"] = tuple(sorted((foreign, *rig.inventories["authority"][1:])))
+                    rig.inventories["all"] = tuple(sorted(foreign if name == original else name for name in rig.inventories["all"]))
+                elif mutation.startswith("snapshot-"):
+                    if mutation == "snapshot-extra":
+                        rig.inventories["foreign"] = ("unit.synthetic.Contracts.test_foreign",)
+                    elif mutation == "snapshot-missing":
+                        del rig.inventories["all"]
+                    elif mutation == "snapshot-list":
+                        rig.inventories["ordinary"] = list(rig.inventories["ordinary"])
+                    elif mutation == "snapshot-string":
+                        rig.inventories["ordinary"] = (False,)
+                    elif mutation == "snapshot-key-subclass":
+                        class Name(str):
+                            pass
+
+                        ids = rig.inventories.pop("ordinary")
+                        rig.inventories[Name("ordinary")] = ids
+                    elif mutation == "snapshot-metadata":
+                        rig.metadata = None
+                    elif mutation == "snapshot-shape":
+                        rig.checks.native_capture_snapshot = lambda *args, **kwargs: [MappingProxyType(rig.inventories), rig.metadata]
+                    else:
+                        rig.checks.native_capture_snapshot = lambda *args, **kwargs: (dict(rig.inventories), rig.metadata)
                 elif mutation == "pooled-poison":
                     rig.inventories["poison-wait-loss"] += rig.inventories["poison-startup-error"]
                 elif mutation == "missing-poison":
@@ -1277,10 +1378,19 @@ class CIControllerContractTests(unittest.TestCase):
 
     def test_native_gate_deadline_covers_preparation_every_original_and_final_reconciliation(self):
         parts = ("authority", "ordinary", *controller_module().PYTHON_SINGLETON_PARTITIONS)
-        for mode in ("preparation", *parts, "union"):
+        for mode in ("snapshot", "preparation", *parts, "union"):
             with self.subTest(mode=mode):
                 rig = self._native_gate_fixture()
-                if mode == "preparation":
+                if mode == "snapshot":
+                    original_snapshot = rig.checks.native_capture_snapshot
+
+                    def late_snapshot(*args, **kwargs):
+                        value = original_snapshot(*args, **kwargs)
+                        rig.now = 1000.0
+                        return value
+
+                    rig.checks.native_capture_snapshot = late_snapshot
+                elif mode == "preparation":
                     rig.prepare_advance = 900.0
                 elif mode in parts:
                     # One original cutoff: preparation has already consumed
@@ -1301,11 +1411,13 @@ class CIControllerContractTests(unittest.TestCase):
                     result = self._perform_native_fixture(rig)
                 self.assertFalse(result.ok)
                 self.assertEqual(result.error, "AGGREGATE_DEADLINE")
-                self.assertEqual(len(rig.captures), 0 if mode == "preparation" else len(parts) if mode == "union"
+                self.assertEqual(len(rig.captures), 0 if mode in {"snapshot", "preparation"} else len(parts) if mode == "union"
                                  else parts.index(mode) + 1)
                 records = result.details["partitions"]
-                if mode == "preparation":
+                if mode in {"snapshot", "preparation"}:
                     self.assertEqual([row["status"] for row in records], ["UNEXECUTED"] * len(parts))
+                    if mode == "snapshot":
+                        self.assertFalse(any(event[0] in {"package", "prepare", "run"} for event in rig.events))
                 elif mode == "authority":
                     self.assertEqual(records[1]["status"], "UNEXECUTED")
                 elif mode == "union":
@@ -1632,9 +1744,9 @@ class CIControllerContractTests(unittest.TestCase):
                 with self.subTest(native_progress=(phase, mode)):
                     rig = self._native_gate_fixture(phase)
                     source_ids = rig.inventories["ordinary"]
-                    # Native currently reports a whole line only on success.
-                    # Do not invent an in-flight method's start observation.
-                    raw = header(source_ids[0]) + b" ... ok\n" + private + b"\n"
+                    # Complete success and complete next-entry lines are
+                    # separate observations, never a receipt for the body.
+                    raw = header(source_ids[0]) + b" ... ok\n" + header(source_ids[1]) + b"\n" + private + b"\n"
                     rig.run_advance = 400.5  # Original1000s endpoint expires in ordinary.
                     rig.idle_error = rig.controller.VerificationError("AGGREGATE_DEADLINE")
                     rig.idle_failure_after = 2
@@ -1664,7 +1776,7 @@ class CIControllerContractTests(unittest.TestCase):
                                      ["PASS", "FAIL"] + ["UNEXECUTED"] * len(controller.PYTHON_SINGLETON_PARTITIONS))
                     ordinary = rows[1]
                     if mode == "progress":
-                        self.assertEqual(ordinary["python_progress"]["last_observed_start"], {"id": source_ids[0]})
+                        self.assertEqual(ordinary["python_progress"]["last_observed_start"], {"id": source_ids[1]})
                         self.assertEqual(ordinary["python_progress"]["last_observed_outcome"],
                                          {"id": source_ids[0], "outcome": "ok"})
                     else:
@@ -5414,69 +5526,80 @@ class CIProductEvidenceContractTests(unittest.TestCase):
     def test_python_capture_snapshot_reads_inventory_and_delegation_once_per_invocation(self):
         checks = ci_module("ci_checks")
         healthy = ("unit.synthetic.SnapshotTests.test_first", "unit.synthetic.SnapshotTests.test_second")
-        metadata = _g_metadata_fixture("ubuntu-24.04")
-        delegated = metadata[0]
-        complete = tuple(sorted(healthy + checks.PYTHON_SINGLETON_IDS + delegated))
-        parts = ("all", "delegated", "healthy", *checks.PYTHON_SINGLETON_PARTITIONS)
-        self.assertEqual(len(parts), 3 + len(_PYTHON_SINGLETON_FIXTURES))
-        for selection in ("full", "wheel"):
+        for selection in ("full", "wheel", "native"):
+            native = selection == "native"
+            operating_system = "macos-26" if native else "ubuntu-24.04"
+            metadata = _g_metadata_fixture(operating_system)
+            delegated = metadata[0]
+            authority = checks.NATIVE_AUTHORITY_IDS if native else ()
+            complete = tuple(sorted(healthy + authority + checks.PYTHON_SINGLETON_IDS + delegated))
+            parts = (("all", "ordinary", "authority", "delegated", *checks.PYTHON_SINGLETON_PARTITIONS) if native else
+                     ("all", "delegated", "healthy", *checks.PYTHON_SINGLETON_PARTITIONS))
+            active = "ordinary" if native else "healthy"
+
+            def acquire():
+                return (checks.native_capture_snapshot(ROOT, deadline=42.0) if native else
+                        checks.python_capture_snapshot(ROOT, selection, deadline=42.0))
+
             with self.subTest(selection=selection), \
                     patch.object(checks, "time", SimpleNamespace(monotonic=lambda: 10.0)), \
                     patch.object(checks, "expected_python_ids", return_value=complete) as source, \
                     patch.object(checks, "signing_regression_metadata", return_value=metadata) as catalog:
-                snapshot = checks.python_capture_snapshot(ROOT, selection, deadline=42.0)
+                snapshot = acquire()
                 self.assertIs(type(snapshot), tuple)
                 inventories, captured_metadata = snapshot
                 self.assertIs(type(inventories), MappingProxyType)
                 self.assertIs(captured_metadata, metadata)
                 self.assertEqual(tuple(inventories), parts)
                 self.assertEqual(inventories["all"], complete)
-                self.assertEqual(inventories["healthy"], healthy)
+                self.assertEqual(inventories[active], healthy)
+                if native:
+                    self.assertEqual(inventories["authority"], authority)
                 self.assertEqual(inventories["delegated"], delegated)
                 self.assertEqual(tuple(inventories[name] for name in checks.PYTHON_SINGLETON_PARTITIONS),
                                  tuple((identifier,) for identifier in checks.PYTHON_SINGLETON_IDS))
                 self.assertTrue(all(type(ids) is tuple and ids and tuple(sorted(set(ids))) == ids
                                     for ids in inventories.values()))
-                joined = tuple(identifier for part in ("healthy", *checks.PYTHON_SINGLETON_PARTITIONS, "delegated")
+                joined = authority + tuple(identifier for part in (active, *checks.PYTHON_SINGLETON_PARTITIONS, "delegated")
                                for identifier in inventories[part])
                 self.assertEqual(tuple(sorted(joined)), complete)
                 self.assertEqual(len(joined), len(set(joined)))
                 source.assert_called_once_with(ROOT, selection, deadline=42.0)
-                catalog.assert_called_once_with(ROOT, "ubuntu-24.04", deadline=42.0)
-                for mapping, key in ((inventories, "healthy"), (captured_metadata[1], delegated[0])):
+                catalog.assert_called_once_with(ROOT, operating_system, deadline=42.0)
+                for mapping, key in ((inventories, active), (captured_metadata[1], delegated[0])):
                     with self.assertRaises(TypeError):
                         mapping[key] = ()
                 fresh = "unit.synthetic.SnapshotTests.test_third"
                 source.return_value = tuple(sorted(complete + (fresh,)))
-                second, second_metadata = checks.python_capture_snapshot(ROOT, selection, deadline=42.0)
+                second, second_metadata = acquire()
                 self.assertIsNot(second, inventories)
                 self.assertIs(second_metadata, metadata)
-                self.assertEqual(second["healthy"], healthy + (fresh,))
-                self.assertEqual(inventories["healthy"], healthy)
+                self.assertEqual(second[active], healthy + (fresh,))
+                self.assertEqual(inventories[active], healthy)
                 self.assertEqual(source.call_count, 2)
                 self.assertEqual(catalog.call_count, 2)
 
-        for expired_at, expected_calls in (("before", (0, 0)), ("inventory", (1, 0)), ("metadata", (1, 1))):
-            clock = [42.0 if expired_at == "before" else 10.0]
+            for expired_at, expected_calls in (("before", (0, 0)), ("inventory", (1, 0)), ("metadata", (1, 1))):
+                clock = [42.0 if expired_at == "before" else 10.0]
 
-            def acquire_source(*args, **kwargs):
-                if expired_at == "inventory":
-                    clock[0] = 42.0
-                return complete
+                def acquire_source(*args, **kwargs):
+                    if expired_at == "inventory":
+                        clock[0] = 42.0
+                    return complete
 
-            def acquire_metadata(*args, **kwargs):
-                if expired_at == "metadata":
-                    clock[0] = 42.0
-                return metadata
+                def acquire_metadata(*args, **kwargs):
+                    if expired_at == "metadata":
+                        clock[0] = 42.0
+                    return metadata
 
-            with self.subTest(expired_at=expired_at), \
-                    patch.object(checks, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
-                    patch.object(checks, "expected_python_ids", side_effect=acquire_source) as source, \
-                    patch.object(checks, "signing_regression_metadata", side_effect=acquire_metadata) as catalog, \
-                    patch.object(checks, "_python_capture_partition", side_effect=AssertionError("partition after acquisition expiry")):
-                with self.assertRaisesRegex(checks.CheckError, "DEADLINE_EXPIRED"):
-                    checks.python_capture_snapshot(ROOT, "full", deadline=42.0)
-                self.assertEqual((source.call_count, catalog.call_count), expected_calls)
+                with self.subTest(selection=selection, expired_at=expired_at), \
+                        patch.object(checks, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
+                        patch.object(checks, "expected_python_ids", side_effect=acquire_source) as source, \
+                        patch.object(checks, "signing_regression_metadata", side_effect=acquire_metadata) as catalog, \
+                        patch.object(checks, "_python_capture_partition", side_effect=AssertionError("partition after acquisition expiry")):
+                    with self.assertRaisesRegex(checks.CheckError, "DEADLINE_EXPIRED"):
+                        acquire()
+                    self.assertEqual((source.call_count, catalog.call_count), expected_calls)
         for selection in ("native", "healthy", "all", None, True, []):
             with self.subTest(invalid_selection=selection), \
                     patch.object(checks, "expected_python_ids", side_effect=AssertionError("invalid acquisition")), \
@@ -5571,11 +5694,18 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         checks = ci_module("ci_checks")
         poison = checks.PYTHON_SINGLETON_IDS
         delegated, requirements = _g_metadata_fixture("ubuntu-24.04")
+        store_rows = tuple((subcase, checks.STORE_NATIVE_PREFIX + method)
+                           for subcase, method in checks.STORE_NATIVE_ROWS)
+        store_ids = tuple(sorted({identifier for _, identifier in store_rows}))
+        self.assertEqual((len(store_rows), len(store_ids)), (15, 7))
         healthy = tuple(f"unit.synthetic.HealthyContracts.test_{name}" for name in ("first", "subject", "third"))
         complete = tuple(sorted(healthy + poison + delegated))
         for selection in ("full", "wheel"):
-            for outcome in ("success", "allowed-skip", "error", "failure", "skip", "subtest", "expected-failure", "unexpected-success",
-                            "missing-poison", "missing-delegated", "duplicate-discovery"):
+            native_store = store_ids if selection == "full" else ()
+            outcomes = ("success", "allowed-skip", "error", "failure", "skip", "subtest", "expected-failure", "unexpected-success",
+                        "missing-poison", "missing-delegated", "duplicate-discovery")
+            outcomes += ("missing-store", "duplicate-store") if selection == "full" else ("unexpected-store",)
+            for outcome in outcomes:
                 with self.subTest(selection=selection, outcome=outcome):
                     events, observations, retained = [], [], []
 
@@ -5589,8 +5719,8 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
                         def runTest(self):
                             events.append(self.identifier)
-                            if self.identifier in poison + delegated:
-                                raise AssertionError("a poison/delegated fixture must never execute in the healthy capture")
+                            if self.identifier in poison + delegated + store_ids:
+                                raise AssertionError("a poison/delegated/Store fixture must never execute in the healthy capture")
                             if self.identifier != healthy[1]:
                                 return
                             if outcome in {"error", "expected-failure"}:
@@ -5617,20 +5747,30 @@ class CIProductEvidenceContractTests(unittest.TestCase):
 
                     loaded = [Fixture(healthy[0]),
                               (ExpectedFixture if outcome in {"expected-failure", "unexpected-success"} else Fixture)(healthy[1]),
-                              Fixture(healthy[2]), *(Fixture(identifier) for identifier in poison + delegated)]
+                              Fixture(healthy[2]), *(Fixture(identifier) for identifier in poison + delegated + native_store)]
                     if outcome == "missing-poison":
                         loaded = [test for test in loaded if test.id() != poison[0]]
                     elif outcome == "missing-delegated":
-                        loaded.pop()
+                        loaded = [test for test in loaded if test.id() != delegated[-1]]
                     elif outcome == "duplicate-discovery":
                         loaded.append(Fixture(poison[0]))
+                    elif outcome == "missing-store":
+                        loaded = [test for test in loaded if test.id() != store_ids[0]]
+                    elif outcome in {"duplicate-store", "unexpected-store"}:
+                        loaded.append(Fixture(store_ids[0]))
                     suite = unittest.TestSuite(loaded)
                     framework = SimpleNamespace(TestSuite=unittest.TestSuite, TextTestResult=unittest.TextTestResult,
                         TextTestRunner=RetainingRunner,
                         TestLoader=lambda: SimpleNamespace(errors=[], discover=lambda *_args, **_kwargs: suite))
+
+                    def store_catalog(source_root, phase, *, deadline):
+                        self.assertEqual((source_root, phase, deadline), (ROOT, "source", 1000.0))
+                        return store_rows  # Fixed DATA only; no Store test/helper is imported or executed.
+
                     with patch.object(checks, "unittest", framework), \
                             patch.object(checks, "expected_python_ids", return_value=complete), \
                             patch.object(checks, "signing_regression_metadata", return_value=(delegated, requirements)), \
+                            patch.object(checks, "store_lane_native_rows", side_effect=store_catalog) as observed_store, \
                             patch.object(checks, "WHEEL_PATTERNS", ("test_fixed_fixture.py",)), \
                             patch.object(checks, "LINUX_MACOS_SKIPS", frozenset({healthy[1]}) if outcome == "allowed-skip" else frozenset()), \
                             patch.object(checks, "_remaining", return_value=10.0), \
@@ -5648,7 +5788,8 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                         else:
                             with self.assertRaises(checks.CheckError) as raised:
                                 checks.run_python_tests(ROOT, selection, 1000.0, observations, work_root=Path("/fixture/checks"))
-                            if outcome in {"missing-poison", "missing-delegated", "duplicate-discovery"}:
+                            if outcome in {"missing-poison", "missing-delegated", "duplicate-discovery",
+                                           "missing-store", "duplicate-store", "unexpected-store"}:
                                 self.assertEqual(events, [])
                                 self.assertEqual(str(raised.exception), "TEST_LOADED_INVENTORY")
                             else:
@@ -5662,8 +5803,14 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                                 with self.assertRaisesRegex(checks.CheckError, "TEST_CONTINUED_AFTER_FAILURE"):
                                     retained[0].startTest(Fixture(healthy[2]))
                                 self.assertTrue(retained[0].shouldStop)
+                    if selection == "full":
+                        observed_store.assert_called_once_with(ROOT, "source", deadline=1000.0)
+                    else:
+                        observed_store.assert_not_called()
                     self.assertFalse(set(events) & set(poison + delegated))
                     self.assertFalse({row["id"] for row in observations} & set(poison + delegated))
+                    self.assertFalse(set(events) & set(store_ids))
+                    self.assertFalse({row["id"] for row in observations} & set(store_ids))
 
     def test_native_partition_authority_is_exact_and_cannot_silently_expand(self):
         checks = ci_module("ci_checks")

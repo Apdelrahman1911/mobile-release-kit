@@ -36,11 +36,20 @@ class StoreDocumentPublicationTest < Minitest::Test
   end
 
   def observe_files(configure = nil)
-    original = File.method(:open)
+    original, assertions = File.method(:open), self
     wrapper = lambda do |path, *arguments, **keywords|
       file = original.call(path, *arguments, **keywords)
       role = path == @parent ? :parent : :stage
       @opened << [role, file]
+      close, calls = file.method(:close), 0
+      file.define_singleton_method(:close) do
+        calls += 1
+        assertions.assert_equal 1, calls, "original close was retried"
+        assertions.assert_equal true, autoclose?, "original File close was not armed"
+        returned = close.call
+        assertions.assert_nil returned, "original close did not return nil"
+        returned
+      end
       configure&.call(role, file)
       file
     end
@@ -64,6 +73,75 @@ class StoreDocumentPublicationTest < Minitest::Test
     assert_same primary, owner.first_primary if primary
     assert_raises(Failure) { owner.result }
     assert @opened.all? { |_, file| file.closed? }
+  end
+
+  def inert_close_handle(fd: 101, pid: nil, arm: nil, close: nil, after: nil, disarm: nil,
+                         armed: true, returned: nil, closed: true)
+    # Pure retained state injection, not an acquired File or numeric FD owner.
+    state = {autoclose: false, wrapper: false, descriptor: false, flags: [], closes: 0, close_flags: []}
+    io = Object.new
+    io.define_singleton_method(:fileno) { fd }
+    io.define_singleton_method(:pid) { pid }
+    io.define_singleton_method(:autoclose?) { state.fetch(:autoclose) && armed }
+    io.define_singleton_method(:autoclose=) do |value|
+      state.fetch(:flags) << value
+      raise IOError, "synthetic closed-wrapper disarm" if state.fetch(:wrapper)
+      if value
+        state[:autoclose] = true
+        arm&.call
+      else
+        disarm&.call
+        state[:autoclose] = false
+      end
+      value
+    end
+    io.define_singleton_method(:closed?) { state.fetch(:wrapper) && closed }
+    io.define_singleton_method(:close) do
+      state[:closes] += 1
+      state.fetch(:close_flags) << state.fetch(:autoclose)
+      close&.call
+      state[:wrapper] = true
+      state[:descriptor] = state.fetch(:autoclose) == true && fd.instance_of?(Integer) && fd >= 3 && pid.nil?
+      after&.call
+      returned
+    end
+    handle = Publication.const_get(:Handle, false).new
+    handle.instance_variable_set(:@io, io)
+    handle.instance_variable_set(:@state, :open)
+    [handle, io, state]
+  end
+
+  def close_error(type = IOError)
+    error = type == SystemExit ? SystemExit.new(75) : type.new("synthetic original close failure")
+    begin
+      raise error, cause: ArgumentError.new("synthetic original cause")
+    rescue Exception => observed # rubocop:disable Lint/RescueException
+      assert_same error, observed
+    end
+    error
+  end
+
+  def pending_close_delivery(error)
+    original, depth, delivered = Thread.method(:handle_interrupt), 0, false
+    wrapper = lambda do |policy, &body|
+      outer = depth.zero?
+      depth += 1
+      begin
+        original.call(policy, &body)
+      ensure
+        depth -= 1
+        if outer && !delivered
+          delivered = true
+          raise error, cause: error.cause
+        end
+      end
+    end
+    Thread.stub(:handle_interrupt, wrapper) { yield }
+    assert delivered # Synchronous seam only; no Thread#raise or asynchronous worker.
+  end
+
+  def nonlocal_close_return
+    yield proc { return :escaped_close_return }
   end
 
   def test_healthy_exact_exclusive_publication_exposes_only_immutable_original_success
@@ -247,7 +325,7 @@ class StoreDocumentPublicationTest < Minitest::Test
   end
 
   def test_original_interrupt_and_system_exit_keep_identity_and_cause_despite_independent_close_failures
-    [Interrupt.new("synthetic interruption"), SystemExit.new(75), IOError.new("synthetic primary")].each_with_index do |primary, index|
+    [close_error(Interrupt), close_error(SystemExit), close_error].each_with_index do |primary, index|
       owner = publication("primary-#{index}.json")
       original_cause = primary.cause
       closes, cleanup = [], {}
@@ -269,6 +347,17 @@ class StoreDocumentPublicationTest < Minitest::Test
       assert_same original_cause, primary.cause
       assert_equal %i[stage parent], closes
       cleanup.each_value { |error| assert_includes owner.cleanup_errors, error }
+      %i[stage parent].each do |role|
+        handle = owner.instance_variable_get("@#{role}")
+        assert_equal 2, handle.close_errors.length
+        assert_same cleanup.fetch(role), handle.close_errors.first
+        assert_instance_of IOError, handle.close_errors.last
+        handle.close_errors.each { |error| assert_includes owner.cleanup_errors, error }
+        refute handle.retired?
+        assert_same @opened.last(2).find { |name, _| name == role }.last, handle.io
+      end
+      assert_equal 4, owner.cleanup_errors.length
+      assert_equal owner.cleanup_errors.map(&:object_id).uniq, owner.cleanup_errors.map(&:object_id)
       assert @opened.last(2).all? { |_, file| file.closed? }
       assert_raises(Failure) { owner.publish! }
       assert_equal %i[stage parent], closes, "failed closes must not be retried"
@@ -286,6 +375,112 @@ class StoreDocumentPublicationTest < Minitest::Test
       refute File.exist?(@stage)
       assert_equal 1, File.stat(@path).nlink
       assert @opened.last(2).all? { |_, file| file.closed? }
+    end
+
+    cuts = %i[before after interrupt system_exit arm arm_throw arm_return arm_unconfirmed
+              close_throw close_return disarm_error disarm_throw disarm_return duplicate nonnil closed_unconfirmed
+              fd0 fd1 fd2 fd_negative fd_string fd_float popen missing pending pending_after_error]
+    cuts.each do |cut|
+      primary = close_error(cut == :interrupt ? Interrupt : cut == :system_exit ? SystemExit : IOError)
+      pending, secondary, cause = close_error(Interrupt), IOError.new("synthetic independent disarm failure"), primary.cause
+      pending_cause = pending.cause
+      options = {}
+      fail_first = -> { raise primary, cause: primary.cause }
+      escape = -> { throw :store_document_close_nonlocal, :escaped_close }
+      observed = nonlocal_close_return do |returning|
+        case cut
+        when :before, :interrupt, :system_exit, :pending_after_error then options[:close] = fail_first
+        when :after then options[:after] = fail_first
+        when :arm then options[:arm] = fail_first
+        when :arm_throw then options[:arm] = escape
+        when :arm_return then options[:arm] = returning
+        when :arm_unconfirmed then options[:armed] = false
+        when :close_throw then options[:close] = escape
+        when :close_return then options[:close] = returning
+        when :disarm_error then options[:close], options[:disarm] = fail_first, -> { raise secondary }
+        when :disarm_throw then options[:close], options[:disarm] = fail_first, escape
+        when :disarm_return then options[:close], options[:disarm] = fail_first, returning
+        when :duplicate then options[:close], options[:disarm] = fail_first, fail_first
+        when :nonnil then options[:returned] = false
+        when :closed_unconfirmed then options[:closed] = false
+        when :fd0 then options[:fd] = 0
+        when :fd1 then options[:fd] = 1
+        when :fd2 then options[:fd] = 2
+        when :fd_negative then options[:fd] = -1
+        when :fd_string then options[:fd] = "101"
+        when :fd_float then options[:fd] = 101.0
+        when :popen then options[:pid] = 4141
+        end
+        options[:disarm] = -> { raise secondary } if cut == :pending_after_error
+        stage, io, state = inert_close_handle(**options)
+        stage.instance_variable_set(:@io, nil) if cut == :missing
+        parent, parent_io, parent_state = inert_close_handle(fd: 102)
+        owner = publication("inert-#{cut}.json")
+        owner.instance_variable_set(:@stage, stage)
+        owner.instance_variable_set(:@parent, parent)
+        # Exercise the real independent cleanup/failure collection without
+        # entering publication filesystem effects or manufacturing success.
+        owner.define_singleton_method(:publish_body) { @body_returned = true }
+        owner.define_singleton_method(:remove_original_stage) { nil }
+        original = stage.method(:close_once)
+        action = lambda do
+          catch(:store_document_close_nonlocal) { assert_raises(Exception) { owner.publish! } }
+        end
+        failure = if %i[pending pending_after_error].include?(cut)
+                    stage.stub(:close_once, -> { pending_close_delivery(pending) { original.call } }) { action.call }
+                  else
+                    action.call
+                  end
+        assert_kind_of Exception, failure, "#{cut} escaped original independent cleanup"
+        first_is_actual = %i[before after interrupt system_exit arm disarm_error disarm_throw disarm_return duplicate pending_after_error].include?(cut)
+        expected = first_is_actual ? primary : cut == :pending ? pending : nil
+        expected ? assert_same(expected, failure) : assert_instance_of(Failure, failure)
+        assert_same cause, primary.cause
+        assert_same pending_cause, pending.cause
+        assert_same failure, owner.first_primary
+        refute owner.successful?
+        refute File.exist?(@path)
+        assert_same(cut == :missing ? nil : io, stage.io)
+        assert_same stage, owner.instance_variable_get(:@stage)
+        refute stage.retired?
+        refute stage.open?
+        errors = stage.close_errors
+        assert errors.frozen?
+        refute_same errors, stage.close_errors
+        assert_same failure, errors.first
+        assert_operator errors.length, :<=, 4
+        assert_equal errors.map(&:object_id).uniq, errors.map(&:object_id)
+        assert_includes errors, secondary if %i[disarm_error pending_after_error].include?(cut)
+        assert_includes errors, pending if %i[pending pending_after_error].include?(cut)
+        assert_equal 3, errors.length if cut == :pending_after_error
+        assert_equal 1, errors.length if cut == :duplicate
+        assert_operator errors.length, :>=, 2 if %i[after disarm_throw disarm_return nonnil closed_unconfirmed missing pending pending_after_error].include?(cut)
+        errors.each { |error| assert_includes owner.cleanup_errors, error }
+        no_close = %i[arm arm_throw arm_return arm_unconfirmed fd0 fd1 fd2 fd_negative fd_string fd_float popen missing].include?(cut)
+        assert_equal(no_close ? 0 : 1, state.fetch(:closes))
+        assert_equal [true], state.fetch(:close_flags) unless no_close
+        expected_flags = if cut == :missing then []
+                         elsif %i[fd0 fd1 fd2 fd_negative fd_string fd_float popen].include?(cut) then [false]
+                         else [true, false]
+                         end
+        assert_equal expected_flags, state.fetch(:flags)
+        effected = %i[after nonnil closed_unconfirmed pending].include?(cut)
+        assert_equal effected, state.fetch(:wrapper)
+        assert_equal effected, state.fetch(:descriptor)
+        assert_equal 1, parent_state.fetch(:closes)
+        assert parent.retired? && parent_state.fetch(:descriptor)
+        assert_same parent_io, parent.io
+        snapshot = [state.fetch(:closes), state.fetch(:flags).dup, state.fetch(:close_flags).dup,
+                    state.fetch(:autoclose), state.fetch(:wrapper), state.fetch(:descriptor), errors, owner.cleanup_errors]
+        assert_nil stage.close_once
+        owner.send(:collect_cleanup, stage) { stage.close_once }
+        owner.send(:collect_cleanup, parent) { parent.close_once }
+        assert_equal snapshot, [state.fetch(:closes), state.fetch(:flags), state.fetch(:close_flags),
+                                state.fetch(:autoclose), state.fetch(:wrapper), state.fetch(:descriptor), stage.close_errors, owner.cleanup_errors]
+        assert state.fetch(:autoclose) if %i[disarm_error disarm_throw disarm_return duplicate pending_after_error].include?(cut)
+        :completed
+      end
+      assert_equal :completed, observed, "#{cut} nonlocal return escaped independent cleanup"
     end
   end
 

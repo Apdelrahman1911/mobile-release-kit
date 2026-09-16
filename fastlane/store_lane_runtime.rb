@@ -440,9 +440,15 @@ module MobileReleaseKit
       private
 
       def close_one!(slot)
-        slot.close_once
-      rescue Exception => error # rubocop:disable Lint/RescueException
-        fail!(error, cleanup: true)
+        failure = nil
+        begin
+          slot.close_once
+        rescue Exception => error # rubocop:disable Lint/RescueException
+          failure = error
+        ensure
+          slot.close_errors.each { |error| fail!(error, cleanup: true) }
+          fail!(failure, cleanup: true) if failure
+        end
       end
 
       def fail!(error, cleanup: false)
