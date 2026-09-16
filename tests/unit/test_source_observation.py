@@ -314,6 +314,7 @@ class ObservedSourceGitTests(unittest.TestCase):
 
         self.git(root, "checkout", "--detach", first)
         recovery_env = workflow_environment(run_id="9000000000", head=second)
+        recovery_env["TMPDIR"] = str(root.parent)
         source = discovery.git_context(root, recovery_env)
         self.assertEqual((source.commit, source.tree, source.branch), (first, first_tree, ""))
         self.assertTrue(discovery.valid_observed_source(source))

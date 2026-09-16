@@ -240,11 +240,16 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                     copied = config.root / ".mobile-release/build/android/app-release.aab"
                     keystore = root / "fictional-keystore"
                     keystore.write_bytes(b"fictional-keystore")
+                    keystore.chmod(0o600)
+                    original_key = keystore.stat()
+                    original_keystore = (original_key.st_dev, original_key.st_ino,
+                                         original_key.st_mode, keystore.read_bytes())
                     signing_values = {"MOBILE_RELEASE_ANDROID_KEYSTORE_PATH": str(keystore),
                                       "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": "fixture-password",
                                       "MOBILE_RELEASE_ANDROID_KEY_ALIAS": "fixture-alias",
                                       "MOBILE_RELEASE_ANDROID_KEY_PASSWORD": "fixture-key-password"}
-                    environment = {"PATH": str(binary) + ":/usr/bin:/bin", "HOME": str(root), "LC_ALL": "C",
+                    environment = {"PATH": str(binary) + ":/usr/bin:/bin", "HOME": str(root),
+                                   "TMPDIR": str(root), "LC_ALL": "C",
                                    "MOBILE_RELEASE_VERSION_NAME": "9.9.9", "MOBILE_RELEASE_BUILD_NUMBER": "999", **signing_values}
                     wrapper = config.root / "gradlew"
                     if caller == "gradle":
@@ -258,7 +263,15 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                         wrapper.chmod(0o700)
                         before = (f"assert Path(sys.argv[-2])==Path({str(copied)!r})\n"
                                   f"assert Path({str(copied)!r}).read_bytes()==Path({str(source)!r}).read_bytes()\n"
-                                  "assert sys.argv[1:3]==['-keystore'," + repr(str(keystore)) + "]\n"
+                                  "assert sys.argv[1]=='-keystore'\n"
+                                  "selected=Path(sys.argv[2])\n"
+                                  f"assert selected!=Path({str(keystore)!r})\n"
+                                  f"assert selected.parent.parent==Path({str(root)!r})\n"
+                                  "assert selected.name=='android-keystore'\n"
+                                  "assert selected.is_file() and not selected.is_symlink()\n"
+                                  "assert selected.stat().st_mode & 0o777 == 0o600\n"
+                                  "assert selected.parent.stat().st_mode & 0o777 == 0o700\n"
+                                  f"assert selected.read_bytes()==Path({str(keystore)!r}).read_bytes()==b'fictional-keystore'\n"
                                   "assert '-storepass:env' in sys.argv and '-keypass:env' in sys.argv\n"
                                   "assert 'MOBILE_RELEASE_APPLE_API_KEY_P8_BASE64' not in os.environ\n"
                                   "assert 'ACTIONS_ID_TOKEN_REQUEST_TOKEN' not in os.environ\n"
@@ -287,10 +300,16 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                                     android.run_android_build(config, signed=caller == "signer")
                         self.observed_absent(ready, heartbeat, outcomes)
                         self.assertEqual(source.read_bytes(), b"fictional-unsigned-bundle")
+                        current_key = keystore.stat()
+                        self.assertEqual((current_key.st_dev, current_key.st_ino, current_key.st_mode,
+                                          keystore.read_bytes()), original_keystore)
                         self.assertEqual(len(calls), 1 if caller == "gradle" else 2)
                         self.assertFalse(calls[0][2])
                         if caller == "signer":
                             self.assertTrue(calls[-1][2])
+                            selected = Path(calls[-1][0][2])
+                            self.assertFalse(os.path.lexists(selected))
+                            self.assertFalse(os.path.lexists(selected.parent))
                     finally:
                         self.finish(root, stop, outcomes)
 
