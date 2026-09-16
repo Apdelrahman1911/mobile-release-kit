@@ -359,7 +359,10 @@ class NativeProfileSeam:
     @contextmanager
     def profile_authentication(self):
         first = len(self.cms_captures)
-        with patch("mobile_release.ios_profiles._capture_profile", side_effect=self.capture_profile) as capture:
+        with (
+            patch("mobile_release.ios_profiles.sys", types.SimpleNamespace(platform="darwin")),
+            patch("mobile_release.ios_profiles._capture_profile", side_effect=self.capture_profile) as capture,
+        ):
             try:
                 yield capture
             finally:

@@ -679,7 +679,7 @@ class CliBuildTests(unittest.TestCase):
                 if archive_index:
                     Path(argv[archive_index]).mkdir(parents=True, exist_ok=True)
 
-            with patch("mobile_release.ios.sys.platform", "darwin"), patch(
+            with patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")), patch(
                 "mobile_release.ios._run_checked", side_effect=fake_run
             ):
                 run_ios_build(config, signed=False)
@@ -845,7 +845,7 @@ class CliBuildTests(unittest.TestCase):
                 {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": "PROFILE-UUID"},
                 clear=False,
             ), patch.dict(sys.modules, {"plistlib": fake_plist}), patch(
-                "mobile_release.ios.sys.platform", "darwin"
+                "mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")
             ), patch("mobile_release.ios._run_checked", side_effect=fake_run):
                 run_ios_build(config, signed=True, signing_session=session)
             self.assertIs(export_options["stripSwiftSymbols"], False)
@@ -1181,11 +1181,11 @@ class CliBuildTests(unittest.TestCase):
         mismatch = subprocess.CompletedProcess(
             [], 0, stdout="Xcode 26.2\nBuild version 17B99\n", stderr=""
         )
-        with patch("mobile_release.preflight.sys.platform", "darwin"), patch(
+        with patch("mobile_release.preflight.sys", types.SimpleNamespace(platform="darwin")), patch(
             "mobile_release.preflight.shutil.which", return_value="/usr/bin/xcodebuild"
         ), patch("mobile_release.preflight.run_owned", return_value=exact):
             self.assertEqual(_xcode_toolchain_finding().status, Status.PASS)
-        with patch("mobile_release.preflight.sys.platform", "darwin"), patch(
+        with patch("mobile_release.preflight.sys", types.SimpleNamespace(platform="darwin")), patch(
             "mobile_release.preflight.shutil.which", return_value="/usr/bin/xcodebuild"
         ), patch("mobile_release.preflight.run_owned", return_value=mismatch):
             self.assertEqual(_xcode_toolchain_finding().status, Status.FAIL)

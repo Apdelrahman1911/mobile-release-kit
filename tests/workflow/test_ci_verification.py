@@ -706,7 +706,7 @@ class CIControllerContractTests(unittest.TestCase):
         with patch.object(rig.controller.time, "monotonic", side_effect=lambda: rig.now), \
                 patch.object(rig.controller, "check_capacity"), patch.object(rig.controller, "parse_capture", side_effect=parse):
             return rig.controller.perform_step(step or rig.step, rig.paths, rig.session, rig.checks,
-                                               {}, platform, deadline=deadline)
+                                               getattr(rig, "source_inventory", {}), platform, deadline=deadline)
 
     def test_original_capture_reason_codes_are_finite_bounded_and_never_authorize_finality(self):
         controller = controller_module()
@@ -914,6 +914,141 @@ class CIControllerContractTests(unittest.TestCase):
                 self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
             controller.failure_details(original, step, paths, deadline=1000.0)
         self.assertEqual(vars(original), before)
+
+    def test_native_test_frame_diagnostics_are_inventory_bound_private_and_never_finality(self):
+        controller = controller_module()
+        paths = fixture_paths(controller)
+        private = "PRIVATE_NATIVE_TEST_FRAME_CANARY"
+        native_id = ("unit.test_checked_files.NativeCheckedFilesTests."
+                     "test_actual_tmp_var_folders_and_physical_spellings_select_identical_private_bytes")
+        linux_id = ("unit.test_operation_recovery.IosOperationRecoveryTests."
+                    "test_profile_cleanup_uncertainty_stops_actual_fresh_validation_before_any_store_access")
+        source_files = ("src/mobile_release/build_inputs.py", "src/mobile_release/checked_files.py",
+                        "tests/unit/test_checked_files.py", "tests/unit/test_operation_recovery.py")
+        frame = lambda path, line: f'  File "{path}", line {line}, in {private}\n'
+
+        for phase in ("source", "wheel"):
+            package = paths.work / ("source-build/src/mobile_release" if phase == "source" else
+                                    "wheel-venv/lib/python3.11/site-packages/mobile_release")
+            opposite = paths.work / ("source-build/src/mobile_release" if phase == "wheel" else
+                                     "wheel-venv/lib/python3.11/site-packages/mobile_release")
+            for gate, partition, identifier, relative, module in (
+                    ("native-profile-" + phase, "ordinary", native_id, source_files[2], "checked_files.py"),
+                    ("python-full" if phase == "source" else "python-wheel", "poison-recovery-profile-cleanup",
+                     linux_id, source_files[3], "build_inputs.py")):
+                with self.subTest(phase=phase, gate=gate):
+                    step = controller.Step(gate, parser="native", native_partition=partition)
+                    checks = SimpleNamespace(native_partition_ids=lambda *_args, **_kwargs: (identifier,))
+                    test_path = paths.source / relative
+                    rejected = (frame("/other/" + relative, 81), frame(relative, 82),
+                        frame(package / "unknown.py", 83), frame(opposite / module, 84),
+                        frame(paths.source / "src/mobile_release" / module, 85),
+                        frame(test_path, 0), frame(test_path, -1), frame(test_path, "01"),
+                        frame(test_path, 1_000_000), frame(test_path, 2).lstrip(),
+                        frame(test_path, 3).replace("\n", " trailing\n"),
+                        frame(test_path, 4).replace(private, "not a function"))
+                    headers = frame(test_path, 810) + frame(package / module, 413).replace("\n", "\r\n")
+                    stderr = ("".join(rejected) + headers + "    private_source('" + private + "')\n"
+                              + "FileNotFoundError: " + private + " /private/signing\n").encode()
+                    callback = {"id": identifier, "outcome": "error", "category": "os-error",
+                                "errno": 2, "returncode": None}
+
+                    def capture(rows, *, ok=False, diagnostic_phase="tests"):
+                        stdout = (controller.NATIVE_DIAGNOSTIC_PREFIX + json.dumps({
+                            "schema": 1, "phase": diagnostic_phase, "records": rows}) + "\n").encode()
+                        return SimpleNamespace(ok=ok, returncode=1, waited=True, stdout_eof=True, stderr_eof=True,
+                            domain_finality=True, timed_out=False, cancelled=False, primary_error="command exited 1",
+                            cleanup_errors=(), stdout=stdout, stderr=stderr, persisted=(len(stdout), len(stderr)), duration=0.01)
+
+                    original = capture([callback])
+                    before = dict(vars(original))
+                    reported = controller.failure_details(original, step, paths, checks=checks, _source_files=source_files)
+                    expected = [{"file": relative, "line": 810}, {"file": "src/mobile_release/" + module, "line": 413}]
+                    self.assertEqual(reported["native_test_locations"], expected)
+                    for key, value in controller.capture_observations(original).items():
+                        self.assertEqual(reported[key], value)
+                    for hidden in (private, str(paths.source), str(package), "/private/signing", "private_source"):
+                        self.assertNotIn(hidden, json.dumps(reported))
+                    self.assertEqual(vars(original), before)
+                    with self.assertRaisesRegex(controller.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                        controller.require_original_finality(original)
+                    reported["native_test_locations"].clear()
+                    self.assertEqual(vars(original), before)
+                    self.assertEqual(controller._native_test_failure_locations(
+                        "".join(rejected), paths, phase, source_files), [])
+                    self.assertEqual(controller._native_test_failure_locations(
+                        "".join(frame(test_path, line) for line in range(1, 13)), paths, phase, source_files),
+                        [{"file": relative, "line": line} for line in range(5, 13)])
+
+                    excluded = (capture([callback], ok=True), capture([]),
+                        capture([{**callback, "id": "unit.foreign.Other.test_case"}]),
+                        capture([{**callback, "outcome": "expected-failure"}]),
+                        *(capture([{**callback, "outcome": outcome, "category": "none", "errno": None}])
+                          for outcome in ("skip", "unexpected-success")),
+                        capture([{**callback, "id": "openssl-version"}], diagnostic_phase="prerequisite"))
+                    for omitted in excluded:
+                        with patch.object(controller, "_native_test_failure_locations") as projection:
+                            self.assertNotIn("native_test_locations", controller.failure_details(
+                                omitted, step, paths, checks=checks, _source_files=source_files))
+                            projection.assert_not_called()
+        for names in (list(source_files), source_files + (source_files[0],), source_files * 129,
+                      ("src/mobile_release/../private.py",), ("tests/foreign-name.py",), (False,)):
+            with self.subTest(invalid_scope=repr(names)[:100]), \
+                    self.assertRaisesRegex(controller.VerificationError, "NATIVE_DIAGNOSTIC_SCOPE"):
+                controller._native_test_failure_locations("", paths, "source", names)
+
+    def test_native_test_frame_diagnostics_flow_through_both_gates_and_keep_cutoff(self):
+        for platform in ("macos", "linux"):
+            for phase in ("source", "wheel"):
+                with self.subTest(platform=platform, phase=phase):
+                    rig = self._native_gate_fixture(phase) if platform == "macos" else self._python_gate_fixture(phase)
+                    controller = rig.controller
+                    partition = "ordinary" if platform == "macos" else "poison-recovery-profile-cleanup"
+                    identifier = rig.inventories[partition][0]
+                    relative = "tests/" + identifier.rsplit(".", 2)[0].replace(".", "/") + ".py"
+                    rig.source_inventory = {relative: {}, "src/mobile_release/build_inputs.py": {},
+                                            "README.md": {}}
+                    package = rig.paths.work / ("source-build/src/mobile_release" if phase == "source" else
+                                               "wheel-venv/lib/python3.11/site-packages/mobile_release")
+                    stderr = (f'  File "{rig.paths.source / relative}", line 815, in test_case\n'
+                              f'  File "{package / "build_inputs.py"}", line 413, in _physical_role\n').encode()
+                    callback = {"id": identifier, "outcome": "error", "category": "os-error",
+                                "errno": 2, "returncode": None}
+                    stdout = (controller.NATIVE_DIAGNOSTIC_PREFIX + json.dumps({
+                        "schema": 1, "phase": "tests", "records": [callback]}) + "\n").encode()
+                    rig.changes[partition] = dict(ok=False, returncode=1, primary_error="command exited 1",
+                        stdout=stdout, stderr=stderr, persisted=(len(stdout), len(stderr)))
+                    result = self._perform_native_fixture(rig, platform=platform)
+                    self.assertFalse(result.ok)
+                    self.assertEqual(result.error, "COMMAND_EXIT_OR_FINALITY")
+                    failed, = (row for row in result.details["partitions"] if row["status"] == "FAIL")
+                    self.assertEqual(failed["capture"]["native_test_locations"], [
+                        {"file": relative, "line": 815}, {"file": "src/mobile_release/build_inputs.py", "line": 413}])
+                    self.assertEqual(failed["capture"]["returncode"], 1)
+                    original = rig.captures[-1]
+                    before = dict(vars(original))
+                    part = dataclasses.replace(rig.step, parser="native", native_partition=partition)
+                    for now in (999.0, 1000.0):
+                        with patch.object(controller.time, "monotonic", return_value=now), \
+                                patch.object(controller, "_native_test_failure_locations", side_effect=ValueError("PRIVATE")):
+                            if now < 1000.0:
+                                reported = controller.failure_details(original, part, rig.paths,
+                                    checks=rig.checks, deadline=1000.0, _source_files=tuple(rig.source_inventory)[:2])
+                                self.assertEqual(reported["returncode"], 1)
+                                self.assertNotIn("native_test_locations", reported)
+                                self.assertNotIn("PRIVATE", json.dumps(reported))
+                            else:
+                                with self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                                    controller.failure_details(original, part, rig.paths,
+                                        checks=rig.checks, deadline=1000.0, _source_files=tuple(rig.source_inventory)[:2])
+                    for ticks in ((1000.0,), (999.0, 1000.0), (999.0, 999.0, 1000.0),
+                                  (999.0, 999.0, 999.0, 999.0, 1000.0)):
+                        clock = iter(ticks)
+                        with patch.object(controller.time, "monotonic", side_effect=lambda: next(clock, 1000.0)), \
+                                self.assertRaisesRegex(controller.VerificationError, "AGGREGATE_DEADLINE"):
+                            controller._native_test_failure_locations(stderr.decode(), rig.paths, phase,
+                                tuple(rig.source_inventory)[:2], deadline=1000.0)
+                    self.assertEqual(vars(original), before)
 
     def test_native_gate_keeps_every_original_capture_record_and_one_source_wheel_cutoff(self):
         for phase, original_deadline, cutoff in (("source", 2500.0, 1000.0), ("wheel", 800.0, 800.0)):

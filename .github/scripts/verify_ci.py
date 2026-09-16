@@ -3224,9 +3224,46 @@ def _native_entry_failure_locations(text: str, entry: Path, *, deadline: float |
     return locations
 
 
+def _native_test_failure_locations(text: str, paths: Paths, phase: str, source_files: tuple[str, ...],
+                                   *, deadline: float | None = None) -> list:
+    """Project only original-inventory frame names, never private diagnostic text."""
+    if deadline is not None:
+        check_clock(deadline)
+    if (phase not in {"source", "wheel"} or type(source_files) is not tuple
+            or len(source_files) > 512 or not paths.source.is_absolute() or not paths.work.is_absolute()):
+        raise VerificationError("NATIVE_DIAGNOSTIC_SCOPE")
+    package = paths.work / ("source-build/src/mobile_release" if phase == "source" else
+                            "wheel-venv/lib/python3.11/site-packages/mobile_release")
+    filenames = {}
+    for name in source_files:
+        if deadline is not None:
+            check_clock(deadline)
+        if (type(name) is not str or not re.fullmatch(
+                r"(?:src/mobile_release|tests(?:/[A-Za-z_][A-Za-z0-9_]*)*)/[A-Za-z_][A-Za-z0-9_]*\.py", name)):
+            raise VerificationError("NATIVE_DIAGNOSTIC_SCOPE")
+        actual = package / name.removeprefix("src/mobile_release/") if name.startswith("src/") else paths.source / name
+        if str(actual) in filenames:
+            raise VerificationError("NATIVE_DIAGNOSTIC_SCOPE")
+        filenames[str(actual)] = name
+    locations = []
+    # One bounded scan, not one full-log search per inventoried source file.
+    pattern = (r'(?m)^  File "([^"\r\n]{1,4096})", line ([1-9][0-9]{0,5}), '
+               r'in (?:<module>|[A-Za-z_][A-Za-z0-9_]*)\r?$')
+    for match in re.finditer(pattern, text):
+        if deadline is not None:
+            check_clock(deadline)
+        if match[1] in filenames:
+            locations.append({"file": filenames[match[1]], "line": int(match[2])})
+            del locations[:-8]
+    if deadline is not None:
+        check_clock(deadline)
+    return locations
+
+
 def failure_details(result, step: Step | None = None, paths: Paths | None = None,
                     *, checks=None, deadline: float | None = None, platform: str | None = None,
-                    _python_expected: tuple[str, ...] | None = None) -> dict:
+                    _python_expected: tuple[str, ...] | None = None,
+                    _source_files: tuple[str, ...] = ()) -> dict:
     """Public-safe observations only; never forward raw child diagnostics."""
     if _python_expected is not None:
         if step is None or checks is None:
@@ -3440,6 +3477,12 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
                     if profile is not None:
                         value["profile_fixture_failure"] = profile
                     if result.ok is False:
+                        if any(row["outcome"] in {"error", "failure"} for row in diagnostic["records"]):
+                            locations = _native_test_failure_locations(stderr, paths,
+                                "source" if step.id in {"python-full", "native-profile-source"} else "wheel",
+                                _source_files, deadline=deadline)
+                            if locations:
+                                value["native_test_locations"] = locations
                         account = _command_account_failure_for_callbacks(result.stderr, diagnostic["records"], deadline=deadline)
                         if account is not None:
                             value["command_account_failure"] = account
@@ -3991,7 +4034,7 @@ def pending_signing_delegation(checks, source: Path, operating_system: str, inve
 
 
 def perform_native_gate(step: Step, paths: Paths, session, checks,
-                        platform: str, *, deadline: float) -> CheckResult:
+                        platform: str, *, deadline: float, source_inventory: dict | None = None) -> CheckResult:
     """Authority, healthy and literal singleton originals share one logical cutoff.
 
     The catalog retains its representative command. Only these two fixed gate
@@ -4008,6 +4051,8 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
     try:
         check_clock(deadline)
         cutoff = min(deadline, started + 900.0)
+        source_files = tuple(name for name in (source_inventory or {})
+                             if name.endswith(".py") and name.startswith(("src/mobile_release/", "tests/")))
         phase = {"native-profile-source": "source", "native-profile-wheel": "wheel"}.get(step.id)
         if platform != "macos" or phase is None:
             raise VerificationError("NATIVE_GATE_CONTRACT")
@@ -4104,7 +4149,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
             if primary is not None:
                 try:
                     row["capture"] = failure_details(value, part, paths, checks=checks,
-                                                     deadline=cutoff, platform=platform)
+                                                     deadline=cutoff, platform=platform, _source_files=source_files)
                 except BaseException as exc:
                     # Original wait/EOF/persisted counts and first failure stay
                     # available even if the diagnostic parser is interrupted.
@@ -4132,7 +4177,7 @@ def perform_native_gate(step: Step, paths: Paths, session, checks,
 
 
 def perform_python_gate(step: Step, paths: Paths, session, checks,
-                        platform: str, *, deadline: float) -> CheckResult:
+                        platform: str, *, deadline: float, source_inventory: dict | None = None) -> CheckResult:
     """Fixed original Linux singleton domains, then healthy full/wheel discovery.
 
     The full healthy capture keeps its exact admitted aggregate-deadline argv
@@ -4148,6 +4193,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
     try:
         check_clock(deadline)
         cutoff = min(deadline, started + 900.0)
+        source_files = tuple(name for name in (source_inventory or {})
+                             if name.endswith(".py") and name.startswith(("src/mobile_release/", "tests/")))
         phase = {"python-full": "source", "python-wheel": "wheel"}.get(step.id)
         if platform != "linux" or phase is None:
             raise VerificationError("PYTHON_GATE_CONTRACT")
@@ -4228,7 +4275,8 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
                         row["python_progress_error"] = error_details(exc)
                 try:
                     row["capture"] = failure_details(value, part, paths, checks=checks,
-                        deadline=cutoff, platform=platform, _python_expected=inventories[partition])
+                        deadline=cutoff, platform=platform, _python_expected=inventories[partition],
+                        _source_files=source_files)
                 except BaseException as exc:
                     row["diagnostic_error"] = error_details(exc)
                 raise primary
@@ -5419,9 +5467,9 @@ def perform_step(step: Step, paths: Paths, session, checks, inventory: dict,
     if step.id in {"native-profile-source", "native-profile-wheel"}:
         # Compute the native gate's absolute endpoint before any preparation,
         # census, capacity check or package inspection can consume its budget.
-        return perform_native_gate(step, paths, session, checks, platform, deadline=deadline)
+        return perform_native_gate(step, paths, session, checks, platform, deadline=deadline, source_inventory=inventory)
     if step.id in {"python-full", "python-wheel"}:
-        return perform_python_gate(step, paths, session, checks, platform, deadline=deadline)
+        return perform_python_gate(step, paths, session, checks, platform, deadline=deadline, source_inventory=inventory)
     if step.id in PARTITIONED_RUBY_GATES:
         return perform_partitioned_ruby_gate(step, paths, session, checks, platform, native_abi, deadline=deadline)
     check_clock(deadline)

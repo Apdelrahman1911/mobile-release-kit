@@ -260,7 +260,7 @@ class InspectionBudgetTests(unittest.TestCase):
     def test_native_expiry_stops_next_child_and_preserves_per_child_timeout(self):
         paths = artifact_set(self.root)
         app = paths["ios-archive"] / "Products/Applications/Reader.app"
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.inspection.time.monotonic", return_value=0) as clock:
+        with patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.inspection.time.monotonic", return_value=0) as clock:
             deadline = InspectionDeadline()
 
             def child(argv, **kwargs):

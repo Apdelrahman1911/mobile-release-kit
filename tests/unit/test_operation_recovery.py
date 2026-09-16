@@ -4,6 +4,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -777,7 +778,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
         modernize_ipa_fixture(self.root / "app.ipa")
         native = NativeProfileSeam()
         native.claims["Reader.app"] = {**signed_entitlements(), "com.apple.developer.associated-domains": ["applinks:fictional.example"]}
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.run_owned", side_effect=native), native.profile_authentication(), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
+        with patch("mobile_release.ios.sys", SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.run_owned", side_effect=native), native.profile_authentication(), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
             with self.assertRaisesRegex(ValidationError, "final candidate artifact validation failed"):
                 self.invoke("prepare-operation")
         prepare.assert_not_called()
@@ -787,20 +788,23 @@ class IosOperationRecoveryTests(unittest.TestCase):
 
     def test_profile_issuer_rejection_stops_fresh_intent_before_any_store_access(self) -> None:
         native = NativeProfileSeam()
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.run_owned", side_effect=native), native.profile_authentication() as authentication, patch.object(native, "authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
+        with patch("mobile_release.ios.sys", SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.run_owned", side_effect=native), native.profile_authentication() as authentication, patch.object(native, "authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
             with self.assertRaisesRegex(ValidationError, "final candidate artifact validation failed"):
                 self.invoke("prepare-operation")
         authentication.assert_called_once(); prepare.assert_not_called(); mutate.assert_not_called()
         self.assertFalse(self.intent_path.exists())
 
     def test_profile_cleanup_uncertainty_stops_actual_fresh_validation_before_any_store_access(self) -> None:
+        from mobile_release import build_inputs, checked_files, ios, ios_profiles
         from mobile_release.owned_process import ProcessCleanupError, ProcessError
 
+        host_sys, host_platform = sys, sys.platform
+        original_ios_sys, original_profiles_sys = ios.sys, ios_profiles.sys
         for error in (ProcessError("fictional group uncertainty", dispatched=True, contained=False),
                       ProcessCleanupError("fictional cleanup uncertainty", dispatched=True)):
             native = NativeProfileSeam()
             with self.subTest(error=type(error).__name__), \
-                 patch("mobile_release.ios.sys.platform", "darwin"), \
+                 patch("mobile_release.ios.sys", SimpleNamespace(platform="darwin")), \
                  patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), \
                  native.profile_authentication() as authentication, \
                  patch.object(native, "authenticate_cms", side_effect=error), \
@@ -808,7 +812,23 @@ class IosOperationRecoveryTests(unittest.TestCase):
                  patch("mobile_release.cli.prepare_store_operation") as prepare, \
                  patch("mobile_release.cli.execute_store_operation") as mutate, \
                  self.assertRaises(ProcessError) as caught:
+                # Only the fictional app/profile boundaries see Darwin. Real
+                # filesystem custody must keep the actual host's alias policy.
+                self.assertIs(sys, host_sys)
+                self.assertEqual(sys.platform, host_platform)
+                self.assertIs(build_inputs.sys, host_sys)
+                self.assertIs(checked_files.sys, host_sys)
+                self.assertIsNot(ios.sys, host_sys)
+                self.assertIsNot(ios_profiles.sys, host_sys)
+                self.assertEqual(ios.sys.platform, "darwin")
+                self.assertEqual(ios_profiles.sys.platform, "darwin")
                 self.invoke("prepare-operation")
+            self.assertIs(ios.sys, original_ios_sys)
+            self.assertIs(ios_profiles.sys, original_profiles_sys)
+            self.assertIs(sys, host_sys)
+            self.assertEqual(sys.platform, host_platform)
+            self.assertIs(build_inputs.sys, host_sys)
+            self.assertIs(checked_files.sys, host_sys)
             # Caller scopes preserve dispatch/containment, not error identity.
             # The outer ExitStack's fatal unwind adds ledger cleanup uncertainty,
             # so the aggregate cleanup receipt is false for both failures.

@@ -388,7 +388,7 @@ class SignedEntitlementInventoryTests(unittest.TestCase):
         self.exported = self.root / "export/Payload/Reader.app"
         self.native = NativeProfileSeam()
         self.stack = ExitStack(); self.addCleanup(self.stack.close)
-        self.stack.enter_context(patch("mobile_release.ios.sys.platform", "darwin"))
+        self.stack.enter_context(patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")))
         self.stack.enter_context(patch("mobile_release.ios.shutil.which", return_value="/fictional/native/tool"))
         self.stack.enter_context(patch("mobile_release.ios.run_owned", side_effect=self.native))
         self.stack.enter_context(self.native.profile_authentication())

@@ -516,7 +516,7 @@ class AppPrivateProducerTests(unittest.TestCase):
                 output.mkdir()
                 (output / "synthetic.ipa").write_bytes(b"synthetic not signed IPA")
 
-        with patch.object(ios.sys, "platform", "darwin"), patch.object(ios, "_run_checked", run), patch.dict(
+        with patch.object(ios, "sys", SimpleNamespace(platform="darwin")), patch.object(ios, "_run_checked", run), patch.dict(
                 os.environ, {"MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": "SYNTHETIC-PROFILE"}):
             result = ios.run_ios_build(config, signed=True, signing_session=session)
             self.assertEqual(result["ios-ipa"].read_bytes(), b"synthetic not signed IPA")

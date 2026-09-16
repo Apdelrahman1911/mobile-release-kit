@@ -10,6 +10,7 @@ import zipfile
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from mobile_release.config import load_config
@@ -104,7 +105,7 @@ class IosCurrentUploadTests(unittest.TestCase):
         self.native.side_effect = validate_ipa_current_signing
         native = NativeProfileSeam()
         native.claims["Reader.app"] = {**signed_entitlements(), "com.apple.developer.associated-domains": ["applinks:fictional.example"]}
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.run_owned", side_effect=native), native.profile_authentication():
+        with patch("mobile_release.ios.sys", SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.run_owned", side_effect=native), native.profile_authentication():
             with self.assertRaisesRegex(ValidationError, "new IPA upload is ineligible.*not authorized"):
                 self.validate()
         self.signer.assert_not_called()
@@ -114,7 +115,7 @@ class IosCurrentUploadTests(unittest.TestCase):
     def test_issuer_authentication_failure_never_authorizes_a_new_transporter_send(self) -> None:
         self.native.side_effect = validate_ipa_current_signing
         native = NativeProfileSeam()
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.run_owned", side_effect=native), native.profile_authentication(), patch.object(native, "authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")):
+        with patch("mobile_release.ios.sys", SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.run_owned", side_effect=native), native.profile_authentication(), patch.object(native, "authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")):
             with self.assertRaisesRegex(ValidationError, "new IPA upload is ineligible.*Apple issuer rejection"):
                 self.validate()
         self.signer.assert_not_called()

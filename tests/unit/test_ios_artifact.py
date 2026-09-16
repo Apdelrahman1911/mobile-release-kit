@@ -214,7 +214,7 @@ class IosArtifactTests(unittest.TestCase):
                     "Completed", (), {"returncode": 0, "stdout": b"", "stderr": b""}
                 )()
 
-            with patch("mobile_release.ios.sys.platform", "darwin"), patch(
+            with patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")), patch(
                 "mobile_release.ios.shutil.which", return_value="/usr/bin/tool"
             ), patch("mobile_release.ios.run_owned", side_effect=fake_codesign), patch(
                 "mobile_release.ios._codesign_leaf_fingerprint", return_value="a" * 64
@@ -292,7 +292,7 @@ class IosArtifactTests(unittest.TestCase):
             ("Sep  6 12:00:00 2026 GMT", "Sep  5 12:00:00 2026 GMT"),
         ):
             calls = []
-            with self.subTest(before=before, after=after), tempfile.TemporaryDirectory() as temporary, patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios._utc_now", return_value=now), patch("mobile_release.ios.run_owned", side_effect=self._fake_native_certificate(before=before, after=after, calls=calls)):
+            with self.subTest(before=before, after=after), tempfile.TemporaryDirectory() as temporary, patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios._utc_now", return_value=now), patch("mobile_release.ios.run_owned", side_effect=self._fake_native_certificate(before=before, after=after, calls=calls)):
                 with self.assertRaises(ValidationError):
                     code = Path(temporary) / "Reader"
                     code.write_bytes(native_image())
@@ -305,7 +305,7 @@ class IosArtifactTests(unittest.TestCase):
     def test_extracted_leaf_interval_is_returned_with_current_lower_boundary_inclusive(self) -> None:
         now = datetime(2026, 9, 5, 12, tzinfo=timezone.utc)
         calls, intervals = [], []
-        with tempfile.TemporaryDirectory() as temporary, patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios._utc_now", return_value=now), patch("mobile_release.ios.run_owned", side_effect=self._fake_native_certificate(before="Sep  5 12:00:00 2026 GMT", after="Sep  6 12:00:00 2026 GMT", calls=calls)):
+        with tempfile.TemporaryDirectory() as temporary, patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios._utc_now", return_value=now), patch("mobile_release.ios.run_owned", side_effect=self._fake_native_certificate(before="Sep  5 12:00:00 2026 GMT", after="Sep  6 12:00:00 2026 GMT", calls=calls)):
             code = Path(temporary) / "Reader"
             code.write_bytes(native_image())
             self.assertEqual(_codesign_fingerprint(code, Path(temporary), _validity_intervals=intervals), "aa" * 32)
@@ -341,7 +341,7 @@ class IosArtifactTests(unittest.TestCase):
         def run(argv, **kwargs):
             calls.append(argv)
             return types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"certificate expired and resources may be corrupt")
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios.run_owned", side_effect=run):
+        with patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")), patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"), patch("mobile_release.ios.run_owned", side_effect=run):
             with self.assertRaisesRegex(ValidationError, "codesign rejected"):
                 _codesign_fingerprint(Path("Reader.app"), Path("temporary"))
         self.assertEqual(len(calls), 1)
@@ -489,7 +489,7 @@ class IosArtifactTests(unittest.TestCase):
                     return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
                 stack.enter_context(patch.dict(os.environ, {key: "fictional-sensitive-value" for key in secret_names}))
-                stack.enter_context(patch("mobile_release.ios.sys.platform", "darwin"))
+                stack.enter_context(patch("mobile_release.ios.sys", types.SimpleNamespace(platform="darwin")))
                 stack.enter_context(patch("mobile_release.ios.shutil.which", return_value="/usr/bin/tool"))
                 stack.enter_context(patch("mobile_release.ios._utc_now", return_value=now))
                 stack.enter_context(patch("mobile_release.ios.run_owned", side_effect=native))
