@@ -936,14 +936,16 @@ class NativeProfileCITests(unittest.TestCase):
                 retained.append(result)
                 return result
 
-        for reporting_phase, fault in itertools.product(("start", "success"),
+        for timed, reporting_phase, fault in itertools.product((False, True), ("start", "success"),
                 ("short", "bool", "integer-subclass", "write", "flush", "interrupt")):
-            with self.subTest(reporting_phase=reporting_phase, fault=fault):
+            with self.subTest(timed=timed, reporting_phase=reporting_phase, fault=fault):
                 original = (KeyboardInterrupt("PRIVATE_REPORTING_INTERRUPT") if fault == "interrupt"
                             else OSError(errno.EDQUOT, "PRIVATE_REPORTING_FAILURE"))
                 state, retained = {"failed": False, "records": []}, []
                 suffix = " ... ok" if reporting_phase == "success" else ""
-                line = f"\n{_FIXTURE_METHODS[0]} ({_FIXTURE_IDS[0]}){suffix}\n"
+                prefix = "MRK_NATIVE_ELAPSED_MS=0\n" if timed else ""
+                line = f"\n{prefix}{_FIXTURE_METHODS[0]} ({_FIXTURE_IDS[0]}){suffix}\n"
+                clock = Mock(return_value=1_000_000)
 
                 class ReportingSink(io.StringIO):
                     attempts = 0
@@ -973,10 +975,11 @@ class NativeProfileCITests(unittest.TestCase):
 
                 suites, module, executed = _inert_native_suites()
                 output = ReportingSink()
-                runner = RetainingReportingRunner(stream=output, verbosity=2, descriptions=False, failfast=True,
-                                                   resultclass=gate._result_class(_FIXTURE_IDS, state))
-                with self.assertRaises(type(original)) as raised:
-                    runner.run(unittest.TestSuite(suites))
+                with patch.object(gate, "time", SimpleNamespace(monotonic_ns=clock)):
+                    runner = RetainingReportingRunner(stream=output, verbosity=2, descriptions=False, failfast=True,
+                        resultclass=gate._result_class(_FIXTURE_IDS, state, **({"progress_timing": True} if timed else {})))
+                    with self.assertRaises(type(original)) as raised:
+                        runner.run(unittest.TestSuite(suites))
                 if fault in {"write", "flush", "interrupt"}:
                     self.assertIs(raised.exception, original)
                 else:
@@ -1006,6 +1009,127 @@ class NativeProfileCITests(unittest.TestCase):
                     self.assertTrue(result.shouldStop)
                     self.assertEqual(output.getvalue(), saved)
                     self.assertEqual(output.attempts, 1)
+                self.assertEqual(clock.call_count, (2 if reporting_phase == "start" else 3) if timed else 0)
+
+        # Disabled reporters must not even inspect a clock. Explicit False and
+        # the historical default retain exactly the same complete writes.
+        class ForbiddenClock:
+            @property
+            def monotonic_ns(self):
+                raise AssertionError("a disabled reporter must not inspect the clock")
+
+        class TimingStream(io.StringIO):
+            def __init__(self):
+                super().__init__()
+                self.writes = []
+                self.flushes = 0
+
+            def write(self, text):
+                self.writes.append(text)
+                return super().write(text)
+
+            def flush(self):
+                self.flushes += 1
+                return super().flush()
+
+        for options in ({}, {"progress_timing": False}):
+            with self.subTest(timing_options=options), patch.object(gate, "time", ForbiddenClock()):
+                output, state = TimingStream(), {"failed": False, "records": []}
+                result = gate._result_class(_FIXTURE_IDS, state, **options)(output, False, 2)
+                case = SimpleNamespace(id=lambda: _FIXTURE_IDS[0])
+                result.startTest(case)
+                result.addSuccess(case)
+                self.assertEqual(output.writes, [f"\n{_FIXTURE_METHODS[0]} ({_FIXTURE_IDS[0]}){suffix}\n"
+                                                 for suffix in ("", " ... ok")])
+                self.assertEqual(output.flushes, 2)
+                self.assertFalse(state["failed"])
+                self.assertFalse(result.shouldStop)
+        for invalid in (None, 0, 1, 0.0, "ordinary", IntegerSubclass(1)):
+            with self.subTest(invalid_timing_flag=invalid), patch.object(gate, "time", ForbiddenClock()):
+                state = {"failed": False, "records": []}
+                with self.assertRaisesRegex(AssertionError, "native progress timing requires an exact boolean"):
+                    gate._result_class(_FIXTURE_IDS, state, progress_timing=invalid)
+                self.assertTrue(state["failed"])
+                self.assertEqual(state["records"], [])
+
+        # Equal samples, sub-millisecond movement and the inclusive bounded
+        # millisecond are valid; no rounded value can hide a raw decrease.
+        for origin, samples, elapsed in (
+                (0, (0, 0), (0, 0)),
+                (1_000_000, (1_000_001, 1_999_999), (0, 0)),
+                (0, (3_600_000_000_000, 3_600_000_999_999), (3_600_000, 3_600_000))):
+            with self.subTest(origin=origin, samples=samples):
+                clock = Mock(side_effect=(origin, *samples))
+                output, state = TimingStream(), {"failed": False, "records": []}
+                with patch.object(gate, "time", SimpleNamespace(monotonic_ns=clock)):
+                    result = gate._result_class(_FIXTURE_IDS, state, progress_timing=True)(output, False, 2)
+                    case = SimpleNamespace(id=lambda: _FIXTURE_IDS[0])
+                    result.startTest(case)
+                    result.addSuccess(case)
+                self.assertEqual(output.writes, [
+                    f"\nMRK_NATIVE_ELAPSED_MS={milliseconds}\n{_FIXTURE_METHODS[0]} ({_FIXTURE_IDS[0]}){suffix}\n"
+                    for milliseconds, suffix in zip(elapsed, ("", " ... ok"))])
+                self.assertEqual(output.flushes, 2)
+                self.assertEqual(clock.call_count, 3)
+                self.assertFalse(state["failed"])
+                self.assertFalse(result.shouldStop)
+
+        clock_ns = 1_000_000
+        clock_failures = []
+        for phase, preceding in (("origin", ()), ("start", (clock_ns,)), ("success", (clock_ns, clock_ns))):
+            for label, invalid in (("bool", True), ("float", 1.0), ("integer-subclass", IntegerSubclass(clock_ns))):
+                clock_failures.append((phase, label, (*preceding, invalid), None,
+                                       "native progress clock " + ("origin" if phase == "origin" else "sample") + " is invalid"))
+            for exception in (OSError, KeyboardInterrupt, SystemExit):
+                original = exception("PRIVATE_CLOCK_FAILURE")
+                clock_failures.append((phase, exception.__name__, (*preceding, original), original, None))
+        clock_failures.extend((
+            ("origin", "negative-origin", (-1,), None, "native progress clock origin is invalid"),
+            ("start", "negative-delta", (clock_ns, clock_ns - 1), None, "native progress clock sample is invalid"),
+            ("success", "same-millisecond-regression", (clock_ns, clock_ns + 999_999, clock_ns + 999_998),
+             None, "native progress clock sample is invalid"),
+        ))
+        for phase, preceding in (("start", (clock_ns,)), ("success", (clock_ns, clock_ns))):
+            for label, invalid in (("oversized", clock_ns + 3_600_001_000_000), ("huge", 1 << 32768)):
+                clock_failures.append((phase, label, (*preceding, invalid), None,
+                                       "native progress elapsed time exceeds its diagnostic range"))
+        for phase, label, samples, original, message in clock_failures:
+            with self.subTest(clock_phase=phase, clock_fault=label):
+                state, retained = {"failed": False, "records": []}, []
+                suites, module, executed = _inert_native_suites()
+                output, clock = TimingStream(), Mock(side_effect=samples)
+                construction = Mock(wraps=RetainingReportingRunner)
+                with patch.object(gate, "time", SimpleNamespace(monotonic_ns=clock)), \
+                        self.assertRaises(type(original) if original is not None else AssertionError) as raised:
+                    construction(stream=output, verbosity=2, descriptions=False, failfast=True,
+                        resultclass=gate._result_class(_FIXTURE_IDS, state, progress_timing=True)).run(unittest.TestSuite(suites))
+                if original is not None:
+                    self.assertIs(raised.exception, original)
+                else:
+                    # In particular, huge integers fail before decimal formatting.
+                    self.assertEqual(str(raised.exception), message)
+                self.assertTrue(state["failed"])
+                self.assertEqual(state["records"], [])
+                self.assertEqual(executed, ["before"] if phase == "success" else [])
+                expected_writes = [f"\nMRK_NATIVE_ELAPSED_MS=0\n{_FIXTURE_METHODS[0]} ({_FIXTURE_IDS[0]})\n"] if phase == "success" else []
+                self.assertEqual(output.writes, expected_writes)
+                self.assertEqual(output.flushes, len(expected_writes))
+                self.assertEqual(output.getvalue(), "".join(expected_writes))
+                if phase == "origin":
+                    construction.assert_not_called()
+                    self.assertEqual(retained, [])
+                else:
+                    construction.assert_called_once()
+                    result, = retained
+                    self.assertTrue(result.shouldStop)
+                    self.assertEqual(result.testsRun, 1)
+                    for callback in (result.startTest, result.addSuccess):
+                        result.shouldStop = False
+                        with self.assertRaisesRegex(AssertionError, "prohibits"):
+                            callback(module.Fixture("test_03_after"))
+                        self.assertTrue(result.shouldStop)
+                        self.assertEqual(output.writes, expected_writes)
+                self.assertEqual(clock.call_count, len(samples))
 
         # Preserve the immediate unknown-ID fixture: its private identity must
         # be refused before the subject body, not mistaken for an adverse body.
@@ -1701,10 +1825,16 @@ class NativeProfileCITests(unittest.TestCase):
         entries = (("public", None, public_id), ("ordinary", None, public_id),
                    *(("isolated", partition, identifier)
                      for partition, identifier in (_PYTHON_POISON_FIXTURES[0], *_PYTHON_FRESH_FIXTURES)))
-        for (entrypoint, partition, identifier), notice in itertools.product(entries,
+        for (entrypoint, partition, identifier), phase, notice in itertools.product(entries, ("source", "wheel"),
                 ("SYNTHETIC_NATIVE_NOTICE\n", "SYNTHETIC_NATIVE_NOTICE")):
-            with self.subTest(entrypoint=entrypoint, partition=partition, terminated_notice=notice.endswith("\n")):
+            with self.subTest(entrypoint=entrypoint, partition=partition, phase=phase,
+                              terminated_notice=notice.endswith("\n")):
                 expected, executed, started, writes = (identifier,), [], [], []
+                timed = entrypoint == "ordinary"
+                origin = 1_000_000_000
+                clock = Mock(side_effect=(origin, origin + 12_999_999, origin + 25_000_000))
+                rebound = Mock(side_effect=AssertionError("a test-rebound clock must never be called"))
+                timing = SimpleNamespace(monotonic_ns=clock)
 
                 class ReportingStream(io.StringIO):
                     def write(self, text):
@@ -1719,6 +1849,7 @@ class NativeProfileCITests(unittest.TestCase):
                     """A documented inert case; never a product/native test."""
                     executed.append(case.id())
                     started.append((runtime.stderr.getvalue(), tuple(writes)))
+                    timing.monotonic_ns = rebound
                     runtime.stderr.write(notice)
 
                 module_name, owner, method = identifier.rsplit(".", 2)
@@ -1731,11 +1862,11 @@ class NativeProfileCITests(unittest.TestCase):
                 self.assertEqual(case.id(), identifier)
                 suite = unittest.TestSuite([case])
                 runtime = SimpleNamespace(platform="darwin", modules={},
-                    executable=str(gate.ROOT.parent / "work/source-venv/bin/python"),
+                    executable=str(gate.ROOT.parent / f"work/{phase}-venv/bin/python"),
                     stdout=io.StringIO(), stderr=ReportingStream())
                 preamble = "SYNTHETIC_PREREQUISITE_TAIL"
                 runtime.stderr.write(preamble)
-                metadata = {"phase": "source", "version": [3, 11, 1]}
+                metadata = {"phase": phase, "version": [3, 11, 1]}
                 checks = SimpleNamespace(native_compatibility_ids=Mock(return_value=expected),
                                          native_partition_ids=Mock(return_value=expected))
                 loader = SimpleNamespace(exec_module=Mock())
@@ -1744,24 +1875,26 @@ class NativeProfileCITests(unittest.TestCase):
                 framework = SimpleNamespace(TestResult=unittest.TestResult, TextTestResult=unittest.TextTestResult,
                                              TextTestRunner=Mock(wraps=unittest.TextTestRunner))
                 process = SimpleNamespace(run=Mock(return_value=SimpleNamespace(returncode=0)), DEVNULL=subprocess.DEVNULL)
+                product = SimpleNamespace(__file__="/fixture/site-packages/mobile_release/_profile_process.py",
+                                          apple_roots=Mock())
                 # Every import, inventory, origin and command boundary is inert.
                 # The production entrypoint still constructs its real resultclass
                 # and TextTestRunner; do not manufacture a desired transcript.
                 with patch.dict(sys.modules, {module_name: module}), patch.multiple(gate,
-                        sys=runtime, subprocess=process, unittest=framework,
+                        sys=runtime, subprocess=process, unittest=framework, time=timing,
                         importlib=SimpleNamespace(import_module=Mock(return_value=SimpleNamespace()), util=inventory),
                         _isolated_compatibility_runtime=Mock(), _fixed_package=Mock(),
                         _compatibility_origins=Mock(return_value=metadata),
                         _expected_native_ids=Mock(return_value=expected), _selected_suite=Mock(return_value=suite),
                         _isolated_negative_origins=Mock(return_value=metadata),
                         _isolated_reporting_bindings=Mock(return_value=()),
-                        _product_modules=Mock(return_value=()), _ordinary_product_origins=Mock()):
+                        _product_modules=Mock(return_value=(product,)), _ordinary_product_origins=Mock()):
                     if entrypoint == "public":
-                        status = gate.run_compatibility(minor=11, phase="source", operation="public")
+                        status = gate.run_compatibility(minor=11, phase=phase, operation="public")
                     elif entrypoint == "isolated":
-                        status = gate.run_isolated_negative(partition=partition, phase="source")
+                        status = gate.run_isolated_negative(partition=partition, phase=phase)
                     else:
-                        status = gate.run(partition="ordinary")
+                        status = gate.run(partition="ordinary", installed_wheel=phase == "wheel")
                 self.assertEqual(status, 0)
                 self.assertEqual(executed, [identifier])
                 framework.TextTestRunner.assert_called_once()
@@ -1772,27 +1905,40 @@ class NativeProfileCITests(unittest.TestCase):
                 self.assertIs(options["descriptions"], False)
                 self.assertTrue(issubclass(options["resultclass"], unittest.TextTestResult))
                 self.assertEqual(process.run.call_count, 2 if entrypoint == "ordinary" else 0)
+                self.assertEqual(product.apple_roots.call_count, int(entrypoint == "ordinary" and phase == "wheel"))
+                self.assertEqual(clock.call_count, 3 if timed else 0)
+                rebound.assert_not_called()
                 text = runtime.stderr.getvalue()
                 self.assertNotIn(documented.__doc__, text)
-                start = f"\n{method} ({identifier})\n"
+                start_timing = "MRK_NATIVE_ELAPSED_MS=12\n" if timed else ""
+                start = f"\n{start_timing}{method} ({identifier})\n"
                 self.assertEqual(started, [(preamble + start,
                     (("write", preamble), ("write", start), ("flush",)))])
                 self.assertEqual(text.count(start), 1)
                 progress = controller.python_failure_progress(started[0][0].encode(),
                                                                controller.python_progress_scope(expected))
                 self.assertEqual(progress["semantics"], "reported-unittest-lines-only")
-                self.assertEqual(progress["last_observed_start"], {"id": identifier})
+                self.assertEqual(progress["last_observed_start"], {"id": identifier, **({"elapsed_ms": 12} if timed else {})})
                 self.assertIsNone(progress["last_observed_outcome"])
                 completion = f"{method} ({identifier}) ... ok\n"
+                completion_timing = "MRK_NATIVE_ELAPSED_MS=25\n" if timed else ""
+                completion_write = "\n" + completion_timing + completion
                 self.assertEqual(text.count(completion), 1)
-                self.assertIn(notice + "\n" + completion, text)
+                self.assertIn(notice + completion_write, text)
+                self.assertEqual(writes.count(("write", completion_write)), 1)
+                completion_index = writes.index(("write", completion_write))
+                self.assertEqual(writes[completion_index + 1], ("flush",))
+                progress = controller.python_failure_progress(text.encode(), controller.python_progress_scope(expected))
+                self.assertEqual(progress["last_observed_start"], {"id": identifier, **({"elapsed_ms": 25} if timed else {})})
+                self.assertEqual(progress["last_observed_outcome"],
+                    {"id": identifier, "outcome": "ok", **({"elapsed_ms": 25} if timed else {})})
                 # Data-only original double: parsing this real formatter output
                 # does not assert hosted capture/finality or a native-test pass.
                 capture = SimpleNamespace(ok=True, returncode=0, waited=True, stdout_eof=True, stderr_eof=True,
                     domain_finality=True, timed_out=False, cancelled=False, primary_error=None, cleanup_errors=(),
                     stdout=runtime.stdout.getvalue().encode(), stderr=text.encode(), duration=.01)
                 self.assertEqual(controller.parse_native_python_controls(capture, expected), [identifier])
-                step = controller.Step("native-profile-source", parser="native",
+                step = controller.Step(f"native-profile-{phase}", parser="native",
                     native_partition=partition if entrypoint == "isolated" else "ordinary")
                 parsed = controller.parse_capture(step, capture, paths, "macos", checks)
                 self.assertEqual(parsed.details["completed"], [identifier])

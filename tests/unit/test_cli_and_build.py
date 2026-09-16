@@ -180,7 +180,12 @@ class CliBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = load_config(write_project(root, android_config()))
-            discovered = discover_project(root)
+            with patch(
+                "mobile_release.discovery.run_owned",
+                side_effect=AssertionError("Android discovery fixture must not execute processes"),
+            ) as discovery_process:
+                discovered = discover_project(root, include_git=False)
+            discovery_process.assert_not_called()
 
             def run_gradle(command, **_kwargs):
                 self.assertIn("--no-configuration-cache", command)
@@ -703,7 +708,12 @@ class CliBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             config = load_config(write_project(root, android_config()))
-            discovered = discover_project(root)
+            with patch(
+                "mobile_release.discovery.run_owned",
+                side_effect=AssertionError("Android discovery fixture must not execute processes"),
+            ) as discovery_process:
+                discovered = discover_project(root, include_git=False)
+            discovery_process.assert_not_called()
             captured_environment: dict[str, str] = {}
             stale = root / ".mobile-release/build/android/mapping.txt"
             with app_private_namespace(config.root) as namespace:
@@ -749,7 +759,12 @@ class CliBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "application"
             config = load_config(write_project(root, android_config()))
-            discovered = discover_project(root)
+            with patch(
+                "mobile_release.discovery.run_owned",
+                side_effect=AssertionError("Android discovery fixture must not execute processes"),
+            ) as discovery_process:
+                discovered = discover_project(root, include_git=False)
+            discovery_process.assert_not_called()
             keystore = Path(temporary) / "upload.jks"
             keystore.write_bytes(b"fixture")
             keystore.chmod(0o600)

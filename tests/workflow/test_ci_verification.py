@@ -1695,6 +1695,42 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertTrue(value["byte_truncated"] and value["dropped_partial_line"])
         self.assertIsNone(value["last_observed_start"])
 
+        # Relative native callback timing is optional lexical information,
+        # never a new pass/finality source or a replacement clock endpoint.
+        timing = b"MRK_NATIVE_ELAPSED_MS="
+        for milliseconds in (0, 1, 879_999, 3_600_000):
+            with self.subTest(elapsed_ms=milliseconds):
+                raw = (timing + str(milliseconds).encode() + b"\n" + header(first) + b" ... ok\n"
+                       + timing + str(milliseconds).encode() + b"\r\n" + header(second) + b"\r\n")
+                value = observation(raw)
+                self.assertEqual(value["last_observed_start"], {"id": second, "elapsed_ms": milliseconds})
+                self.assertEqual(value["last_observed_outcome"],
+                                 {"id": first, "outcome": "ok", "elapsed_ms": milliseconds})
+        for scalar in (b"", b"-1", b"+1", b"00", b"01", b"1.0", b"True", b"3600001",
+                       b"9999999", b"1" * 1025, private):
+            with self.subTest(invalid_elapsed=scalar[:16]):
+                value = observation(timing + scalar + b"\n" + header(first) + b" ... ok\n")
+                self.assertEqual(value["last_observed_start"], {"id": first})
+                self.assertEqual(value["last_observed_outcome"], {"id": first, "outcome": "ok"})
+                self.assertNotIn(private.decode(), json.dumps(value))
+        marker = timing + b"9\n"
+        for intervening in (b"\n", private + b"\n", b"x" * 1025 + b"\n",
+                            b"test_foreign (unit.foreign.Private.test_foreign)\n"):
+            value = observation(marker + intervening + header(first) + b"\n")
+            self.assertEqual(value["last_observed_start"], {"id": first})
+            self.assertNotIn(private.decode(), json.dumps(value))
+        self.assertEqual(observation(marker + header(first))["last_observed_start"], {"id": first})
+        self.assertIsNone(observation(timing + b"9" + header(first) + b"\n")["last_observed_start"])
+        self.assertIsNone(observation(marker + b"test_foreign (unit.foreign.Private.test_foreign)\n")
+                          ["last_observed_start"])
+        headline = header(first) + b"\n"
+        value = observation(marker + headline + b"x\n" * 2047)
+        self.assertTrue(value["lines_truncated"])
+        self.assertEqual(value["last_observed_start"], {"id": first})  # Preceding line fell outside the window.
+        value = observation(marker + headline + b"x" * (256 * 1024 - len(marker) - len(headline)) + b"\n")
+        self.assertTrue(value["byte_truncated"] and value["dropped_partial_line"])
+        self.assertEqual(value["last_observed_start"], {"id": first})  # Partial marker was discarded, not adopted.
+
         for phase in ("source", "wheel"):
             for diagnostic_error in (False, True):
                 with self.subTest(phase=phase, optional_diagnostic_error=diagnostic_error):

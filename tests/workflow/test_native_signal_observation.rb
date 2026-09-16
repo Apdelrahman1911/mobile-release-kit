@@ -18,6 +18,7 @@ class NativeSignalObservationTest < Minitest::Test
     fastlane/native_process_spawn.rb
     fastlane/native_upload_process.rb
     fastlane/release_support.rb
+    fastlane/store_lane_lifetime.rb
   ].freeze
   EXPECTED_MODES = %w[native-setup-interrupt native-setup-system-exit native-setup-io-error
                       native-setup-post-reap-cancel].freeze

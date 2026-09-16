@@ -1961,9 +1961,25 @@ def python_failure_progress(raw: bytes, scope: MappingProxyType) -> dict | None:
             identifier = scope.get(header)
             outcome = outcomes.get(token) if closed else None
         if identifier is not None:
-            value["last_observed_start"] = {"id": identifier}
+            observed = {"id": identifier}
+            # Optional ordinary-native stopwatch data belongs only to this
+            # complete header's immediately preceding physical line. Never
+            # carry it across body text or a truncated window. It describes a
+            # reported callback, not entry, completion, finality or a deadline.
+            if closed and index:
+                preceding = lines[index - 1]
+                if preceding.endswith(b"\r"):
+                    preceding = preceding[:-1]
+                prefix = b"MRK_NATIVE_ELAPSED_MS="
+                if preceding.startswith(prefix):
+                    scalar = preceding[len(prefix):]
+                    if re.fullmatch(rb"(?:0|[1-9][0-9]{0,6})", scalar):
+                        elapsed = int(scalar)
+                        if elapsed <= 3_600_000:
+                            observed["elapsed_ms"] = elapsed
+            value["last_observed_start"] = observed
             if outcome is not None:
-                value["last_observed_outcome"] = {"id": identifier, "outcome": outcome}
+                value["last_observed_outcome"] = {**observed, "outcome": outcome}
     return value
 
 

@@ -1010,6 +1010,12 @@ filters the schema/identities and requires an empty callback list on success.
 Only genuinely completed fixed storage controls may appear as profile observations;
 they never replace original wait/EOF/domain finality or successful test outcomes.
 
+Ordinary native start/success headers also carry an optional bounded elapsed
+millisecond observation from one original monotonic clock. Failure diagnostics
+associate it only with the immediately following complete, source-known header.
+This reports callback timing, not body entry, completion, or a new deadline;
+other native roles retain their original untimed output.
+
 Ruby completion parsing binds each source-known verbose method prefix to exactly
 one timed successful terminal before the next method or footer. Ordinary multiline
 body logging is allowed; a later method's terminal cannot complete a missing

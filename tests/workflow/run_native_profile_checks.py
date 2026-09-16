@@ -6,6 +6,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import time
 import unittest
 import zipimport
 from pathlib import Path
@@ -842,9 +843,36 @@ def _publish_failure(phase: str, records: list[dict], original: BaseException | 
                 pass  # Never replace the original prerequisite/interruption.
 
 
-def _result_class(expected, state):
+def _result_class(expected, state, *, progress_timing=False):
     expected_ids = frozenset(expected)
     allowed = _diagnostic_ids(expected)
+    try:
+        if type(progress_timing) is not bool:
+            raise AssertionError("native progress timing requires an exact boolean")
+        if progress_timing:
+            # Only the ordinary result lifetime is observed, never the outer
+            # gate deadline. Retain this callable before any test can rebind it.
+            monotonic_ns = time.monotonic_ns
+            origin_ns = monotonic_ns()
+            if type(origin_ns) is not int or origin_ns < 0:
+                raise AssertionError("native progress clock origin is invalid")
+            previous_ns = origin_ns
+    except BaseException:
+        state["failed"] = True
+        raise
+
+    def elapsed_prefix():
+        nonlocal previous_ns
+        if not progress_timing:
+            return ""  # All other entrypoints remain clock-free and byte-identical.
+        sample_ns = monotonic_ns()
+        if type(sample_ns) is not int or sample_ns < previous_ns:
+            raise AssertionError("native progress clock sample is invalid")
+        elapsed_ms = (sample_ns - origin_ns) // 1_000_000
+        if not 0 <= elapsed_ms <= 3_600_000:
+            raise AssertionError("native progress elapsed time exceeds its diagnostic range")
+        previous_ns = sample_ns
+        return f"MRK_NATIVE_ELAPSED_MS={elapsed_ms}\n"
 
     class Result(unittest.TextTestResult):
         def startTest(self, test):
@@ -860,7 +888,7 @@ def _result_class(expected, state):
                 if type(identifier) is not str or identifier not in expected_ids or len(identifier) > 512:
                     raise AssertionError("native start differs from the exact expected test IDs")
                 method = identifier.rsplit(".", 1)[-1]
-                line = f"\n{method} ({identifier})\n"
+                line = f"\n{elapsed_prefix()}{method} ({identifier})\n"
                 written = self.stream.write(line)
                 if type(written) is not int or written != len(line):
                     raise OSError("native start write was incomplete")
@@ -879,7 +907,7 @@ def _result_class(expected, state):
                 if type(identifier) is not str or identifier not in expected_ids or len(identifier) > 512:
                     raise AssertionError("native success differs from the exact expected test IDs")
                 method = identifier.rsplit(".", 1)[-1]
-                line = f"\n{method} ({identifier}) ... ok\n"
+                line = f"\n{elapsed_prefix()}{method} ({identifier}) ... ok\n"
                 written = self.stream.write(line)
                 if type(written) is not int or written != len(line):
                     raise OSError("native success write was incomplete")
@@ -1016,7 +1044,8 @@ def run(*, installed_wheel=False, partition="all") -> int:
     state = {"failed": False, "records": []}
     try:
         result = unittest.TextTestRunner(stream=sys.stderr, verbosity=2, failfast=True, descriptions=False,
-                                         resultclass=_result_class(expected, state)).run(suite)
+                                         resultclass=_result_class(expected, state,
+                                                                   progress_timing=partition == "ordinary")).run(suite)
         if result.skipped:
             print("FAIL: required native verification must not contain skipped tests", file=sys.stderr)
         success = result.wasSuccessful() and not result.skipped and not state["failed"] and result.testsRun == len(expected)
