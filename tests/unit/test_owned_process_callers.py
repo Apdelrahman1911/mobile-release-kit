@@ -185,7 +185,7 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
             self.fail(f"original command finality unconfirmed; preserving fictional fixture {root}")
         shutil.rmtree(root)
 
-    def test_real_git_fsmonitor_descendants_finish_before_discovery_returns_or_cancels(self):
+    def test_real_git_discovery_suppresses_hooks_and_explicit_commands_reap_descendants(self):
         for mode in ("success", "failure", "timeout", "cancel"):
             with self.subTest(mode=mode):
                 root = Path(tempfile.mkdtemp(prefix="mrk-owned-git-")).resolve()
@@ -201,15 +201,41 @@ class BuildDiscoveryCallerTests(unittest.TestCase):
                     with patch.dict(os.environ, environment, clear=True), \
                          bounded_commands(mode, heartbeat) as outcomes:
                         for args in (("init", "-q"), ("add", "."),
-                                     ("-c", "user.name=Fictional", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Fixture"),
-                                     ("config", "core.fsmonitor", str(hook))):
+                                     ("-c", "user.name=Fictional", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "Fixture")):
                             self.assertEqual(run_owned(["git", *args], cwd=project, environ=environment, timeout=15).returncode, 0)
+                        baseline = run_owned(["git", "rev-parse", "HEAD", "HEAD^{tree}"],
+                                             cwd=project, environ=environment, capture=True, timeout=15)
+                        self.assertEqual(baseline.returncode, 0)
+                        head, tree = baseline.stdout.splitlines()
+                        self.assertEqual(run_owned(["git", "config", "core.fsmonitor", str(hook)],
+                                                   cwd=project, environ=environment, timeout=15).returncode, 0)
+                        # Source discovery must suppress even a genuine executable
+                        # repository hook, not merely contain it after execution.
+                        result = discovery.discover_project(config.root)
+                        self.assertEqual((result["git"]["commit"], result["git"]["tree"]), (head, tree))
+                        self.assertIs(result["git"]["dirty"], False)
+                        self.assertFalse(os.path.lexists(ready))
+                        self.assertFalse(os.path.lexists(heartbeat))
+
+                        # Deliberately opt only this fixture command into the
+                        # hook to retain real Git descendant-lifecycle coverage.
+                        argv = ["git", "--no-pager", "-c", "core.fsmonitor=" + str(hook),
+                                "-c", "core.fsmonitorHookVersion=2", "status", "--porcelain=v1"]
                         if mode == "cancel":
                             with self.assertRaises(KeyboardInterrupt):
-                                discovery.discover_project(config.root)
+                                run_owned(argv, cwd=project, environ=environment, timeout=15)
+                        elif mode == "timeout":
+                            with self.assertRaises(ProcessError) as caught:
+                                run_owned(argv, cwd=project, environ=environment, timeout=15)
+                            self.assertTrue(caught.exception.dispatched)
+                            self.assertTrue(caught.exception.contained)
+                            self.assertTrue(caught.exception.cleanup_complete)
+                            self.assertFalse(caught.exception.fatal)
                         else:
-                            result = discovery.discover_project(config.root)
-                            self.assertIn("git", result)
+                            # Git can fall back successfully when its fsmonitor
+                            # hook exits7; that is not a Git command exit7.
+                            command_result = run_owned(argv, cwd=project, environ=environment, timeout=15)
+                            self.assertEqual(command_result.returncode, 0)
                     self.observed_absent(ready, heartbeat, outcomes)
                 finally:
                     self.finish(root, stop, outcomes)
