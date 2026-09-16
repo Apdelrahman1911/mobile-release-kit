@@ -112,6 +112,58 @@ class CommandContractTests(unittest.TestCase):
         self.assertIs(run.call_args.kwargs["execution_scope"], source)
         self.assertIs(run.call_args.kwargs["journal_binding"], binding)
         self.assertIs(run.call_args.kwargs["cancellation"], guard)
+        self.assertIs(run.call_args.kwargs["text"], True)
+
+    def test_capture_encoding_admission_precedes_owner_and_fixed_evidence_stays_text_only(self):
+        with patch.object(command, "cancellation_owner") as owner, patch.object(command, "_Outer") as outer:
+            for value in (None, 0, 1, "false", b"", object()):
+                with self.subTest(value=type(value).__name__), self.assertRaises(owned.ProcessError):
+                    owned.run_owned(["fictional"], text=value)
+            owner.assert_not_called()
+            outer.assert_not_called()
+            guard = DefaultCancellation(owned.ProcessCleanupError, "fixture")
+            evidence = command.CommandCallEvidence(guard)
+            refused = ValueError("fixed evidence admission seam")
+            with patch.object(evidence, "_attempt", side_effect=refused) as attempt:
+                with self.assertRaises(ValueError) as caught:
+                    owned.run_owned(["fictional"], text=False, cancellation=guard, _evidence=evidence)
+            self.assertIs(caught.exception, refused)
+            self.assertIs(attempt.call_args.kwargs["ordinary"], False)
+            owner.assert_not_called()
+            outer.assert_not_called()
+
+    def test_conversion_failure_publishes_incomplete_original_no_creation_outcome(self):
+        # No native acquisition or constructed native receipt: the actual
+        # original owner positively knows that it never created a helper.
+        for text in (True, False):
+            for failure in (MemoryError("capture allocation"), KeyboardInterrupt("capture interruption")):
+                for first in (None, ValueError("earlier failure")):
+                    with self.subTest(text=text, failure=type(failure).__name__, earlier=first is not None):
+                        class FailedConversion(bytearray):
+                            def decode(self, *_args, **_kwargs):
+                                raise failure
+
+                            def __bytes__(self):
+                                raise failure
+
+                        guard = DefaultCancellation(owned.ProcessCleanupError, "fixture")
+                        engine = command._Outer(guard, True, 30, None, None,
+                                                suppress_cancel=False, text=text)
+                        engine.handlers_complete = engine.local_cleanup_complete = True
+                        engine.create_route.retire(); engine.run_route.retire()
+                        engine.outputs[1] = FailedConversion()
+                        if first is not None:
+                            engine.ctx.record(first)
+                        outcome = engine.publish()
+                        self.assertIs(engine.slot.read(), outcome)
+                        self.assertEqual(outcome.no_target.kind, "NO_W_CREATION")
+                        self.assertIsNotNone(outcome.original_finality)
+                        self.assertEqual(outcome.result_integrity, "incomplete")
+                        self.assertIsNone(engine.decoded)
+                        self.assertIs(engine.ctx.primary, failure if first is None else first)
+                        if isinstance(failure, KeyboardInterrupt):
+                            self.assertIs(engine.ctx.first_interruption, failure)
+                        self.assertTrue(guard.lifetime_ledger.verdict().contained)
 
     def test_native_record_roundtrip_preserves_bytes_and_original_path_components(self):
         env = {"PATH": ":relative:relative:/bin", "EMPTY": "", "LARGE": "x" * 9000}
@@ -1536,8 +1588,23 @@ class OwnedProcessTests(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout, result.stderr), (7, "fictional\n", "fixture-error\n"))
         result = owned.run_owned(self.command('print("not captured")'), cwd=self.root, capture=False)
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        binary = self.command('import os; os.write(1,b"\\x00\\xffnative"); os.write(2,b"\\xfe\\x00diagnostic")')
+        result = owned.run_owned(binary, cwd=self.root, text=False)
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (0, b"\x00\xffnative", b"\xfe\x00diagnostic"))
+        self.assertIs(type(result.stdout), bytes)
+        self.assertIs(type(result.stderr), bytes)
+        self.assertEqual(self.outcomes[-1].result_integrity, "complete")
         with self.assertRaises(owned.ProcessError) as raised:
-            owned.run_owned(self.command('import os; os.write(1,b"private-canary"*1000)'), cwd=self.root, output_limit=256)
+            owned.run_owned(binary, cwd=self.root)
+        self.assertTrue(raised.exception.contained and raised.exception.cleanup_complete)
+        self.assertEqual(self.outcomes[-1].result_integrity, "incomplete")
+        result = owned.run_owned(self.command('print("not captured")'), cwd=self.root,
+                                 capture=False, text=False)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"", b""))
+        with self.assertRaises(owned.ProcessError) as raised:
+            owned.run_owned(self.command('import os; os.write(1,b"private-canary"*1000)'),
+                            cwd=self.root, output_limit=256, text=False)
         self.assertTrue(raised.exception.dispatched and raised.exception.contained)
         self.assertNotIn("private-canary", str(raised.exception))
 
@@ -1558,6 +1625,8 @@ class OwnedProcessTests(unittest.TestCase):
         self.assertEqual(result.returncode, -signal.SIGTERM)
 
     def test_owned_descendants_settle_before_success_timeout_or_failure_returns(self):
+        from mobile_release.ios import _run_native
+
         for mode in ("success", "failure", "timeout"):
             with self.subTest(mode=mode):
                 ready, heartbeat, stop = (self.root / (mode + "-" + name) for name in ("ready", "heartbeat", "stop"))
@@ -1572,11 +1641,13 @@ class OwnedProcessTests(unittest.TestCase):
                 try:
                     if mode == "timeout":
                         with self.assertRaises(owned.ProcessError) as raised:
-                            owned.run_owned(self.command(code), timeout=3)
+                            _run_native(self.command(code), timeout=3)
                         self.assertTrue(raised.exception.dispatched and raised.exception.contained)
                     else:
-                        result = owned.run_owned(self.command(code), timeout=8)
+                        result = _run_native(self.command(code), timeout=8)
                         self.assertEqual(result.returncode, 7 if mode == "failure" else 0)
+                        self.assertIs(type(result.stdout), bytes)
+                        self.assertIs(type(result.stderr), bytes)
                     self.assertTrue(heartbeat.is_file(), "real descendant never acknowledged")
                     observed = heartbeat.read_text(); time.sleep(.03)
                     self.assertEqual(heartbeat.read_text(), observed)

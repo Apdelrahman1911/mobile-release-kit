@@ -49,6 +49,7 @@ from mobile_release.metadata import build_metadata_archive
 from mobile_release.preflight import (
     _effective_android_identity_finding,
     _xcode_toolchain_finding,
+    effective_identity_findings,
     preflight,
 )
 from mobile_release.provenance import sha256_file, write_evidence
@@ -201,6 +202,92 @@ class CliBuildTests(unittest.TestCase):
 
             self.assertEqual(finding.status, Status.PASS)
             self.assertEqual(finding.details, {"verifiedVariants": ["demoDebug"]})
+
+    def test_identity_query_boundaries_use_only_explicit_policy_enabled_dependency_token(self) -> None:
+        capabilities = {
+            "MOBILE_RELEASE_PROJECT_READ_TOKEN": "ambient-project-token",
+            "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": "ambient-store-key",
+            "GOOGLE_APPLICATION_CREDENTIALS": "/fictional/ambient-adc.json",
+            "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": "ambient-signing-password",
+            "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": "ambient-p12-password",
+            "MOBILE_RELEASE_IOS_PROFILE_SPECIFIER": "ambient-profile",
+            "GITHUB_TOKEN": "ambient-github-token",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "ambient-oidc-token",
+            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.invalid",
+            "AWS_SECRET_ACCESS_KEY": "ambient-cloud-secret",
+        }
+        cases = (
+            (True, {"project_read_token": "selected-project-token"}, "selected-project-token"),
+            (True, {}, None),
+            (True, {"project_read_token": ""}, None),
+            (False, {"project_read_token": "selected-project-token"}, None),
+        )
+        for platform in ("android", "ios"):
+            with tempfile.TemporaryDirectory() as temporary:
+                value = android_config() if platform == "android" else ios_config()
+                if platform == "ios":
+                    value["ios"].update(prepareCommand=["prepare-private-dependencies"],
+                                        archiveConfiguration="StoreRelease")
+                config = load_config(write_project(Path(temporary), value, platform=platform))
+                for required, arguments, expected_token in cases:
+                    with self.subTest(platform=platform, required=required, arguments=arguments):
+                        config.data["source"]["projectReadTokenRequired"] = required
+                        calls, scopes = [], []
+                        # Forwarding sentinels only: no owner installation or native execution.
+                        cancellation = DefaultCancellation(ProcessCleanupError, "fixture cancellation")
+
+                        def new_scope():
+                            scopes.append(object())
+                            return scopes[-1]
+
+                        def native(command, *, environ, **kwargs):
+                            self.assertEqual({name: environ[name] for name in capabilities if name in environ},
+                                             {"MOBILE_RELEASE_PROJECT_READ_TOKEN": expected_token}
+                                             if expected_token else {})
+                            self.assertEqual(environ["LANG"], "C")
+                            self.assertIs(kwargs["cancellation"], cancellation)
+                            self.assertIs(kwargs["execution_scope"], scopes[-1])
+                            self.assertEqual(kwargs["cwd"], config.root)
+                            if "--init-script" in command:
+                                calls.append("android")
+                                self.assertEqual(environ["MOBILE_RELEASE_VERSION_NAME"], "1.2.3")
+                                self.assertEqual(environ["MOBILE_RELEASE_BUILD_NUMBER"], "42")
+                                output = "MOBILE_RELEASE_EFFECTIVE_ANDROID_ID|demoDebug|com.example.reader.debug\n"
+                            elif command == ["prepare-private-dependencies"]:
+                                calls.append("prepare")
+                                self.assertEqual(environ["MOBILE_RELEASE_VERSION_NAME"], "1.2.3")
+                                self.assertEqual(environ["MOBILE_RELEASE_BUILD_NUMBER"], "42")
+                                self.assertEqual(environ["MOBILE_RELEASE_DEFER_EXTERNAL_UPLOADS"], "1")
+                                output = ""
+                            else:
+                                self.assertEqual(command[0], "xcodebuild")
+                                self.assertIn("-showBuildSettings", command)
+                                configuration = command[command.index("-configuration") + 1]
+                                calls.append(configuration)
+                                identity = "com.example.reader.debug" if configuration == "Debug" else "com.example.reader"
+                                output = json.dumps([{"buildSettings": {
+                                    "PRODUCT_TYPE": "com.apple.product-type.application",
+                                    "PRODUCT_BUNDLE_IDENTIFIER": identity,
+                                }}])
+                            return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+                        with (
+                            patch.dict(os.environ, {**capabilities, "LANG": "C"}),
+                            patch("mobile_release.preflight.sys", types.SimpleNamespace(platform="darwin")),
+                            patch("mobile_release.preflight.shutil.which", return_value="/fictional/xcodebuild"),
+                            patch("mobile_release.preflight.run_owned", side_effect=native),
+                            patch("mobile_release.discovery.run_owned", side_effect=AssertionError("unexpected Git query")),
+                            patch.object(subprocess, "Popen", side_effect=AssertionError("unexpected native process")),
+                        ):
+                            original = dict(os.environ)
+                            findings = effective_identity_findings(
+                                config, (platform,), **arguments, cancellation=cancellation,
+                                execution_source=types.SimpleNamespace(new_scope=new_scope),
+                            )
+                            self.assertEqual(dict(os.environ), original)
+                        self.assertEqual([item.status for item in findings], [Status.PASS])
+                        self.assertEqual(calls, ["android"] if platform == "android" else ["prepare", "Debug", "StoreRelease"])
+                        self.assertEqual(len(scopes), len(calls))
 
     def test_distribution_declares_and_resolves_single_source_tooling_assets(self) -> None:
         repository = Path(__file__).resolve().parents[2]
@@ -1544,6 +1631,168 @@ class CliBuildTests(unittest.TestCase):
             self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", captured_environment)
             self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_URL", captured_environment)
             self.assertNotIn("AWS_SECRET_ACCESS_KEY", captured_environment)
+
+    def test_buildful_preflight_selects_dependency_token_through_actual_identity_and_build_seam(self) -> None:
+        # Hosted-only: real invocation/project/environment and cancellation custody.
+        # Native commands/build output are synthetic; real artifact validation must reject it.
+        token_name = "MOBILE_RELEASE_PROJECT_READ_TOKEN"
+        capabilities = {
+            token_name: "environment-project-token",
+            "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": "environment-store-key",
+            "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": "environment-signing-password",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "environment-oidc-token",
+            "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.invalid",
+            "AWS_SECRET_ACCESS_KEY": "environment-cloud-secret",
+        }
+        cases = (
+            ("file-precedence", True, True, True, True, "file-project-token"),
+            ("file-only", True, True, False, True, "file-project-token"),
+            ("explicit-environment", True, False, True, True, "environment-project-token"),
+            ("ambient-not-selected", True, False, False, True, None),
+            ("missing-in-explicit-environment", True, False, True, False, None),
+            ("policy-disabled", False, True, True, True, None),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            private_root = Path(temporary).resolve()
+            value = android_config()
+            value["projectChecks"]["preflight"] = [["verify-private-dependency"]]
+            value["projectChecks"]["androidArtifact"] = [["verify-artifact"]]
+            config = load_config(write_project(private_root / "app", value))
+            credential_file = private_root / "mobile-release.env"
+            credential_file.write_text(
+                f"{token_name}=file-project-token\n"
+                "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64=file-store-key\n"
+                "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD=file-signing-password\n",
+                encoding="utf-8",
+            )
+            credential_file.chmod(0o600)
+            invalid_aab = config.root / "synthetic-invalid.aab"
+            for label, required, use_file, from_env, has_ambient_token, expected_token in cases:
+                with self.subTest(case=label):
+                    config.data["source"]["projectReadTokenRequired"] = required
+                    environment = {**scrub_credential_capabilities(os.environ), **capabilities}
+                    if not has_ambient_token:
+                        environment.pop(token_name)
+                    calls, guards = [], []
+
+                    def check_environment(environ, expected):
+                        self.assertEqual({name: environ[name] for name in capabilities if name in environ},
+                                         {token_name: expected} if expected else {})
+
+                    def check_guard(cancellation):
+                        self.assertIsNotNone(cancellation)
+                        cancellation.check()
+                        if guards:
+                            self.assertIs(cancellation, guards[0])
+                        guards.append(cancellation)
+
+                    def native(command, *, environ, cancellation, execution_scope, **_kwargs):
+                        check_guard(cancellation)
+                        self.assertIsNone(execution_scope)
+                        if command == ["verify-private-dependency"]:
+                            calls.append("preflight")
+                            check_environment(environ, expected_token)
+                            output = ""
+                        elif command == ["verify-artifact"]:
+                            calls.append("artifact")
+                            check_environment(environ, None)
+                            self.assertEqual(environ["MOBILE_RELEASE_AAB_PATH"], str(invalid_aab))
+                            output = ""
+                        else:
+                            self.assertIn("--init-script", command)
+                            calls.append("identity")
+                            check_environment(environ, expected_token)
+                            check_environment(os.environ, expected_token)
+                            output = "MOBILE_RELEASE_EFFECTIVE_ANDROID_ID|demoDebug|com.example.reader.debug\n"
+                        return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+                    def build(selected_config, *, signed, cancellation, execution_source, build_inputs):
+                        self.assertIs(selected_config, config)
+                        self.assertFalse(signed)
+                        self.assertIsNone(execution_source)
+                        self.assertIsNone(build_inputs)
+                        check_guard(cancellation)
+                        check_environment(os.environ, expected_token)
+                        calls.append("build")
+                        invalid_aab.write_bytes(b"synthetic unvalidated build output, not an AAB")
+                        return {"android-aab": invalid_aab}
+
+                    with (
+                        patch.dict(os.environ, environment, clear=True),
+                        patch("mobile_release.discovery.run_owned", return_value=subprocess.CompletedProcess([], 1, "", "")),
+                        patch("mobile_release.preflight.run_owned", side_effect=native),
+                        patch("mobile_release.preflight.run_android_build", side_effect=build) as builder,
+                        patch("mobile_release.android.run_owned", side_effect=AssertionError("invalid artifact reached native tools")),
+                        patch.object(subprocess, "Popen", side_effect=AssertionError("unexpected native process")),
+                    ):
+                        original = dict(os.environ)
+                        report = preflight(config, mode="offline", platforms=("android",), run_builds=True,
+                                           credentials_file=credential_file if use_file else None,
+                                           credentials_from_env=from_env)
+                        self.assertEqual(dict(os.environ), original)
+                    blocked = required and expected_token is None
+                    self.assertEqual(calls, ["preflight"] if blocked else ["preflight", "identity", "build", "artifact"])
+                    self.assertEqual(builder.call_count, 0 if blocked else 1)
+                    self.assertEqual([(item.code, item.status) for item in report.findings if item.status in FAILING_STATUSES],
+                                     [("build.project-read-token", Status.MISSING)] if blocked
+                                     else [("android.aab.structure", Status.FAIL)])
+                    if not blocked:
+                        identity = next(item for item in report.findings if item.code == "android.debug-identity.effective")
+                        self.assertEqual(identity.status, Status.PASS)
+                    self.assertTrue(guards)
+                    self.assertEqual(guards[0].handler_state, "RESTORED")
+
+    def test_buildful_preflight_dependency_query_failure_or_cancellation_restores_environment(self) -> None:
+        # Hosted-only: exercise the original environment frame and cancellation cleanup.
+        with tempfile.TemporaryDirectory() as temporary:
+            private_root = Path(temporary).resolve()
+            value = android_config()
+            value["source"]["projectReadTokenRequired"] = True
+            config = load_config(write_project(private_root / "app", value))
+            credential_file = private_root / "mobile-release.env"
+            credential_file.write_text("MOBILE_RELEASE_PROJECT_READ_TOKEN=selected-project-token\n", encoding="utf-8")
+            credential_file.chmod(0o600)
+            for outcome in ("failed-query", "cancelled-query"):
+                with self.subTest(outcome=outcome):
+                    guards = []
+
+                    def native(command, *, environ, cancellation, **_kwargs):
+                        self.assertIn("--init-script", command)
+                        self.assertEqual(environ["MOBILE_RELEASE_PROJECT_READ_TOKEN"], "selected-project-token")
+                        self.assertEqual(os.environ["MOBILE_RELEASE_PROJECT_READ_TOKEN"], "selected-project-token")
+                        self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", environ)
+                        guards.append(cancellation)
+                        if outcome == "cancelled-query":
+                            cancellation.cancelled = True
+                            cancellation.check()
+                            self.fail("cancelled identity query continued")
+                        return subprocess.CompletedProcess(command, 7, "", "")
+
+                    with (
+                        patch.dict(os.environ, {"MOBILE_RELEASE_PROJECT_READ_TOKEN": "original-ambient-token",
+                                                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "original-ambient-oidc"}),
+                        patch("mobile_release.discovery.run_owned", return_value=subprocess.CompletedProcess([], 1, "", "")),
+                        patch("mobile_release.preflight.run_owned", side_effect=native) as query,
+                        patch("mobile_release.preflight.run_android_build") as build,
+                        patch("mobile_release.preflight.validate_aab") as validation,
+                        patch.object(subprocess, "Popen", side_effect=AssertionError("unexpected native process")),
+                    ):
+                        original = dict(os.environ)
+                        arguments = dict(mode="offline", platforms=("android",), run_builds=True,
+                                         credentials_file=credential_file)
+                        if outcome == "cancelled-query":
+                            with self.assertRaises(KeyboardInterrupt):
+                                preflight(config, **arguments)
+                        else:
+                            report = preflight(config, **arguments)
+                            identity = next(item for item in report.findings if item.code == "android.debug-identity.effective")
+                            self.assertEqual(identity.status, Status.BLOCKED)
+                        self.assertEqual(dict(os.environ), original)
+                        query.assert_called_once()
+                        build.assert_not_called()
+                        validation.assert_not_called()
+                    self.assertEqual(len(guards), 1)
+                    self.assertEqual(guards[0].handler_state, "RESTORED")
 
     def test_closed_play_online_preflight_requires_nonempty_group_proof(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

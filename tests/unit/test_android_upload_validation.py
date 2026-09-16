@@ -68,9 +68,20 @@ class AndroidCurrentUploadTests(unittest.TestCase):
             "mobile_release.android._bundletool_manifest",
             return_value='<manifest package="com.example.reader" android:versionCode="42" android:versionName="1.2.3" />',
         ))
-        self.native = self.stack.enter_context(patch("mobile_release.android.subprocess.run", side_effect=self.native_command))
+        self.stack.enter_context(patch(
+            "mobile_release._command_process.run_command",
+            side_effect=AssertionError("policy fixture must not acquire a native command owner"),
+        ))
+        self.native = self.stack.enter_context(patch("mobile_release.android.run_owned", side_effect=self.native_command))
 
     def native_command(self, argv, **kwargs):
+        self.assertIn(argv[0], {"jarsigner", "keytool"})
+        self.assertEqual(set(kwargs), {"environ", "capture", "timeout", "cancellation"})
+        self.assertEqual(kwargs["environ"], artifact_validation_environment(os.environ))
+        self.assertIs(kwargs["capture"], True)
+        self.assertEqual(kwargs["timeout"], {"jarsigner": 120, "keytool": 30}[argv[0]])
+        # The current-upload helper supplies the original default owner argument.
+        self.assertIsNone(kwargs["cancellation"])
         self.native_calls.append((list(argv), kwargs))
         if argv[0] == self.missing_tool:
             raise FileNotFoundError("synthetic unavailable tool")
@@ -96,10 +107,10 @@ class AndroidCurrentUploadTests(unittest.TestCase):
             "operationIntentSha256": self.intent["integrity"]["sha256"],
             "aabSha256": sha256_file(self.aab), "aabSize": self.aab.stat().st_size,
         })
-        self.manifest.assert_called_once_with(self.aab)
+        self.manifest.assert_called_once_with(self.aab, cancellation=None)
         self.assertEqual([argv[0] for argv, _ in self.native_calls], ["jarsigner", "keytool"])
         for _, kwargs in self.native_calls:
-            self.assertEqual(kwargs["env"], artifact_validation_environment(os.environ))
+            self.assertEqual(kwargs["environ"], artifact_validation_environment(os.environ))
 
     def test_current_warning_expiry_wrong_signer_and_missing_tools_never_allow_new_upload(self) -> None:
         for warning in (

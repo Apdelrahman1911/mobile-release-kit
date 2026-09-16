@@ -7,21 +7,23 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import unicodedata
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from sys import exc_info
 from typing import TYPE_CHECKING, Any
 
 from .config import ReleaseConfig, ReleaseVersion
-from .cancellation import DefaultCancellation
+from .cancellation import CleanupScope, DefaultCancellation, OwnedTemporaryDirectory, cancellation_owner
+from .build_inputs import _consumer_idle
 from .credentials import artifact_validation_environment
 from .discovery import discover_project, selected_ios_container, selected_ios_scheme
-from .owned_process import ProcessError, fatal_lifetime_error
+from .owned_process import ProcessCleanupError, ProcessError, fatal_lifetime_error, run_owned
 from ._lifetime_evidence import ProfileCallEvidence
-from ._profile_callers import consume_profile_evidence, first_primary_context
+from ._profile_callers import consume_profile_evidence, fatal_cancellation_error, first_primary_context
 from .errors import ValidationError
 from .inspection import InspectionDeadline
 from .reporting import FAILING_STATUSES, Finding, Status
@@ -57,6 +59,9 @@ PROFILE_UUID_RE = re.compile(
 )
 MAX_GENERATED_FILES = 100_000
 MAX_GENERATED_BYTES = 8 * 1024 * 1024 * 1024
+NATIVE_OUTPUT_LIMIT = 8 * 1024 * 1024
+# Keep uncertain paths/owners observable; no GC or later call retries removal.
+_RETAINED_NATIVE_SCRATCH: list[tuple[OwnedTemporaryDirectory, DefaultCancellation, dict[str, bool]]] = []
 
 
 @dataclass(frozen=True)
@@ -126,16 +131,92 @@ def _validation_environment() -> dict[str, str]:
     return artifact_validation_environment(os.environ)
 
 
-def _run_native(argv: list[str], *, deadline: InspectionDeadline | None = None, **kwargs: Any) -> subprocess.CompletedProcess:
+def _run_native(
+    argv: list[str], *, timeout: int, text: bool = False,
+    deadline: InspectionDeadline | None = None, cancellation: DefaultCancellation | None = None,
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     # Never start another child after the shared inspection budget expires.
-    # Already-running tools keep their explicit subprocess timeout, not a new
+    # Already-running tools keep their explicit owned timeout, not a new
     # inspection clock. This is cooperative bounding, not syscall preemption.
     if deadline is not None:
         deadline.check()
-    result = subprocess.run(argv, **kwargs)
+    result = run_owned(argv, environ=_validation_environment(), capture=True, text=text,
+                       timeout=timeout, output_limit=NATIVE_OUTPUT_LIMIT, cancellation=cancellation)
     if deadline is not None:
         deadline.check()
     return result
+
+
+@contextmanager
+def _native_scratch(*, prefix: str, directory: Path | None = None,
+                    cancellation: DefaultCancellation | None = None):
+    """Private IPA inputs survive until their original consumers are settled."""
+    guard, owns = cancellation_owner(
+        cancellation, ProcessCleanupError, "IPA native workspace cleanup is unconfirmed",
+    )
+    temporary = OwnedTemporaryDirectory(prefix=prefix, dir=directory)
+    temporary.finalizer.detach()  # Before acquisition, including failed handoff.
+    state = {"attempted": False, "acquired": False, "removed": False}
+    record = (temporary, guard, state)
+    _RETAINED_NATIVE_SCRATCH.append(record)
+
+    def cleanup() -> None:
+        if not state["attempted"]:
+            _RETAINED_NATIVE_SCRATCH.remove(record)
+            return
+        earlier = fatal_lifetime_error(scope._first_error, "IPA native consumer is uncontained")
+        idle = _consumer_idle(guard)
+        facts = guard.lifetime_ledger.verdict()
+        # A settled consumer does not discharge an inner workspace's uncertain
+        # cleanup. Preserve the parent too, including when the exact original
+        # interruption carries no exception link to that inner cleanup failure.
+        if earlier is not None or guard.lifetime_ledger.fatal or not idle:
+            raise ProcessCleanupError(
+                "IPA native consumer or workspace cleanup is unconfirmed; preserving workspace",
+                dispatched=(facts.profile_dispatched is not False or facts.command_dispatched is not False
+                            or earlier is not None and earlier.dispatched),
+                contained=idle and (earlier is None or earlier.contained),
+            )
+        # A missing name/root is not evidence that an originally acquired tree
+        # was removed. Never let the generic owner's absent-path no-op discharge
+        # ambiguous acquisition or a renamed input namespace.
+        name = temporary.name
+        os.lstat(name)
+        identity = temporary.state["identity"]
+        temporary.cleanup()  # Original PID, UID/mode and root-inode checks.
+        try:
+            os.lstat(name)
+        except FileNotFoundError:
+            state["removed"] = True
+        else:
+            raise ProcessCleanupError("IPA native workspace remains after cleanup")
+        if not state["acquired"] or identity is None:
+            raise ProcessCleanupError("IPA native workspace acquisition was not confirmed")
+        _RETAINED_NATIVE_SCRATCH.remove(record)
+
+    scope = CleanupScope(guard, cleanup, owns_cancellation=owns,
+                         fork_cleanup=temporary.after_fork_child, first_primary=True)
+    try:
+        try:
+            with scope:
+                if owns:
+                    guard.install()
+                    guard.activate()
+                with guard.deferred():
+                    state["attempted"] = True
+                    temporary.acquire()
+                    state["acquired"] = True
+                yield Path(temporary.name), guard
+        finally:
+            scope.__exit__(*exc_info())
+        guard.check()
+    except BaseException as primary:
+        fatal = fatal_cancellation_error(
+            primary, guard, "IPA native workspace cleanup is unconfirmed; end this process before retrying",
+        )
+        if fatal is not None:
+            raise fatal from None
+        raise
 
 
 def _validated_ipa_entries(path: Path, *, deadline: InspectionDeadline | None = None) -> tuple[zipfile.ZipFile, list[zipfile.ZipInfo]]:
@@ -275,22 +356,19 @@ def _codesign_fingerprint(
     *,
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
+    cancellation: DefaultCancellation | None = None,
 ) -> str | None:
     if sys.platform != "darwin" or not shutil.which("codesign") or not shutil.which("openssl"):
         return None
     verify = _run_native(
         ["codesign", "--verify", "--all-architectures", "--deep", "--strict", "--verbose=2", str(app_path)],
-        deadline=deadline,
-        env=_validation_environment(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=60,
-        check=False,
+        deadline=deadline, cancellation=cancellation, timeout=60,
     )
     if verify.returncode:
         raise ValidationError("codesign rejected the exported application or nested code")
     return _codesign_leaf_fingerprint(
         app_path, temporary / "signer", _validity_intervals=_validity_intervals, deadline=deadline,
+        cancellation=cancellation,
     )
 
 
@@ -321,16 +399,18 @@ def _codesign_leaf_fingerprint(
     *,
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
+    cancellation: DefaultCancellation | None = None,
 ) -> str:
     deadline = deadline if deadline is not None else InspectionDeadline()
     fingerprints = []
     # Fresh private names for every object AND slice: successful extraction
     # without a leaf cannot reuse a stale certificate from another invocation.
-    with tempfile.TemporaryDirectory(prefix="mobile-release-leaf-", dir=prefix.parent) as directory:
+    with _native_scratch(prefix="mobile-release-leaf-", directory=prefix.parent,
+                         cancellation=cancellation) as (directory, guard):
         for index, architecture in enumerate(_code_architectures(code_path, deadline=deadline)):
             fingerprints.append(_codesign_slice_fingerprint(
                 code_path, Path(directory) / f"slice-{index}-", architecture=architecture,
-                _validity_intervals=_validity_intervals, deadline=deadline,
+                _validity_intervals=_validity_intervals, deadline=deadline, cancellation=guard,
             ))
     if len(set(fingerprints)) != 1:
         raise ValidationError("signed code architectures do not share the same leaf signer")
@@ -341,15 +421,11 @@ def _codesign_slice_fingerprint(
     code_path: Path, prefix: Path, *, architecture: str | None,
     _validity_intervals: list[SigningValidityInterval] | None,
     deadline: InspectionDeadline,
+    cancellation: DefaultCancellation | None = None,
 ) -> str:
     extract = _run_native(
         ["codesign", "-d", *_architecture_options(architecture), "--extract-certificates", str(prefix), str(code_path)],
-        deadline=deadline,
-        env=_validation_environment(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=30,
-        check=False,
+        deadline=deadline, cancellation=cancellation, timeout=30,
     )
     certificate = prefix.parent / f"{prefix.name}0"
     if (extract.returncode or certificate.is_symlink() or not certificate.is_file()
@@ -368,13 +444,7 @@ def _codesign_slice_fingerprint(
             "-sha256",
             "-dates",
         ],
-        deadline=deadline,
-        env=_validation_environment(),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=30,
-        check=False,
+        deadline=deadline, cancellation=cancellation, text=True, timeout=30,
     )
     if fingerprint.returncode:
         raise ValidationError("openssl could not inspect the leaf signing certificate")
@@ -456,12 +526,7 @@ def _nested_codesign_identities(
                 "=designated",
                 str(code_path),
             ],
-            deadline=deadline,
-            env=_validation_environment(),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-            check=False,
+            deadline=deadline, cancellation=cancellation, timeout=30,
         )
         if requirement.returncode:
             raise ValidationError(
@@ -471,8 +536,7 @@ def _nested_codesign_identities(
         for architecture in _code_architectures(code_path, deadline=deadline):
             details = _run_native(
                 ["codesign", "-d", *_architecture_options(architecture), "--verbose=4", str(code_path)],
-                deadline=deadline, env=_validation_environment(), text=True,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
+                deadline=deadline, cancellation=cancellation, text=True, timeout=30,
             )
             if details.returncode:
                 raise ValidationError("codesign could not inspect a nested code architecture")
@@ -485,10 +549,10 @@ def _nested_codesign_identities(
         team = teams[0]
         fingerprint = _codesign_leaf_fingerprint(
             code_path, temporary / f"nested-signer-{index}-",
-            _validity_intervals=_validity_intervals, deadline=deadline,
+            _validity_intervals=_validity_intervals, deadline=deadline, cancellation=cancellation,
         )
         if code_path.is_dir() and code_path.suffix.lower() in {".app", ".appex"}:
-            entitlements = _codesign_entitlements(code_path, deadline=deadline)
+            entitlements = _codesign_entitlements(code_path, deadline=deadline, cancellation=cancellation)
             if entitlements is None:
                 raise ValidationError(
                     f"nested application entitlements could not be inspected: {code_path.name}"
@@ -503,7 +567,7 @@ def _nested_codesign_identities(
                 cancellation=cancellation,
             )
         elif code_path not in profiled_executables:
-            entitlements = _codesign_entitlements(code_path, deadline=deadline)
+            entitlements = _codesign_entitlements(code_path, deadline=deadline, cancellation=cancellation)
             if entitlements is None or entitlements:
                 raise ValidationError(
                     "profileless nested code has signed entitlement claims; frameworks, libraries, "
@@ -513,7 +577,8 @@ def _nested_codesign_identities(
     return result
 
 
-def _codesign_entitlements(app_path: Path, *, deadline: InspectionDeadline | None = None) -> dict[str, Any] | None:
+def _codesign_entitlements(app_path: Path, *, deadline: InspectionDeadline | None = None,
+                           cancellation: DefaultCancellation | None = None) -> dict[str, Any] | None:
     if sys.platform != "darwin" or not shutil.which("codesign"):
         return None
     from .ios_der import decode_der_dictionary
@@ -526,8 +591,7 @@ def _codesign_entitlements(app_path: Path, *, deadline: InspectionDeadline | Non
         for encoding, decode in (("--der", decode_der_dictionary), ("--xml", load_plist_dictionary)):
             result = _run_native(
                 ["codesign", "-d", *_architecture_options(architecture), "--entitlements", "-", encoding, str(app_path)],
-                deadline=deadline, env=_validation_environment(), stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, timeout=30, check=False,
+                deadline=deadline, cancellation=cancellation, timeout=30,
             )
             if result.returncode:
                 raise ValidationError("codesign could not inspect a signed entitlement architecture")
@@ -730,8 +794,7 @@ def _validate_ipa(
                 )
             )
 
-            with first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-ipa-"), cancellation=cancellation) as temporary_string:
-                temporary = Path(temporary_string)
+            with _native_scratch(prefix="mobile-release-ipa-", cancellation=cancellation) as (temporary, cancellation):
                 archive.extractall(temporary)
                 deadline.check()
                 app_path = temporary / app_prefix.rstrip("/")
@@ -776,7 +839,7 @@ def _validate_ipa(
                         )
                     )
 
-                entitlements = _codesign_entitlements(app_path, deadline=deadline)
+                entitlements = _codesign_entitlements(app_path, deadline=deadline, cancellation=cancellation)
                 if entitlements is None:
                     findings.append(
                         Finding(
@@ -812,6 +875,7 @@ def _validate_ipa(
 
                 fingerprint = _codesign_fingerprint(
                     app_path, temporary, _validity_intervals=_validity_intervals, deadline=deadline,
+                    cancellation=cancellation,
                 )
                 if fingerprint is None:
                     findings.append(
@@ -949,15 +1013,14 @@ def ipa_signing_evidence(path: Path, *, deadline: InspectionDeadline | None = No
         if len(plist_entries) != 1:
             raise ValidationError("IPA must contain exactly one application")
         app_prefix = plist_entries[0].filename.removesuffix("Info.plist")
-        with first_primary_context(tempfile.TemporaryDirectory(prefix="mobile-release-profile-"), cancellation=cancellation) as temporary_string:
-            temporary = Path(temporary_string)
+        with _native_scratch(prefix="mobile-release-profile-", cancellation=cancellation) as (temporary, cancellation):
             archive.extractall(temporary)
             deadline.check()
             app_path = temporary / app_prefix.rstrip("/")
             profile_path = app_path / "embedded.mobileprovision"
             profile_path.write_bytes(archive.read(profile_entries[0]))
             profile = _profile_details(profile_path, deadline=deadline, cancellation=cancellation)
-            signer_fingerprint = _codesign_fingerprint(app_path, temporary, deadline=deadline)
+            signer_fingerprint = _codesign_fingerprint(app_path, temporary, deadline=deadline, cancellation=cancellation)
         if profile is None:
             raise ValidationError("iOS signing evidence extraction requires macOS security tooling")
         if signer_fingerprint is None:

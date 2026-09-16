@@ -8,6 +8,7 @@ require "minitest/mock"
 require "tmpdir"
 require "fileutils"
 require_relative "../../fastlane/store_lane_runtime"
+require_relative "../../fastlane/ios_upload_validation"
 require_relative "store_lane_native_fixture"
 
 class StoreLaneRuntimeTest < Minitest::Test
@@ -38,7 +39,7 @@ class StoreLaneRuntimeTest < Minitest::Test
     FileUtils.remove_entry(@root) # Exclusive inert fixture, all owned FDs closed.
   end
 
-  def scenario
+  def scenario(lane: "android_external_promote", mode: "prepare")
     @case_number += 1
     base = File.join(@root, "case-#{@case_number}")
     Dir.mkdir(base, 0o700)
@@ -47,7 +48,7 @@ class StoreLaneRuntimeTest < Minitest::Test
     root_stat = File.stat(@lane_root)
     @deadline = Native.monotonic_ns + 3_600_000_000_000
     ENV.keys.grep(/\AMOBILE_RELEASE_STORE_LANE_/).each { |key| ENV.delete(key) }
-    ENV.update("MOBILE_RELEASE_OPERATION" => "android_external_promote", "MOBILE_RELEASE_STORE_MODE" => "prepare",
+    ENV.update("MOBILE_RELEASE_OPERATION" => lane, "MOBILE_RELEASE_STORE_MODE" => mode,
       "MOBILE_RELEASE_STORE_RECEIPT_PATH" => @output, "MOBILE_RELEASE_STORE_LANE_NONCE" => "a" * 32,
       "MOBILE_RELEASE_STORE_LANE_ROOT" => @lane_root,
       "MOBILE_RELEASE_STORE_LANE_ROOT_ID" => "#{root_stat.dev}:#{root_stat.ino}",
@@ -56,6 +57,12 @@ class StoreLaneRuntimeTest < Minitest::Test
       "MOBILE_RELEASE_STORE_LANE_HARD_DEADLINE_NS" => (@deadline + 3_000_000_000).to_s,
       "TMPDIR" => File.join(@lane_root, "tmp"), "TMP" => File.join(@lane_root, "tmp"), "TEMP" => File.join(@lane_root, "tmp"))
     ENV.delete("MOBILE_RELEASE_IOS_IPA_PATH")
+    if lane == "ios_testflight_internal"
+      @artifact = File.join(base, "original.ipa")
+      File.binwrite(@artifact, "inert original IPA bytes\x00\xff".b)
+      ENV.update("MOBILE_RELEASE_IOS_IPA_PATH" => @artifact, "MOBILE_RELEASE_ASC_APP_ID" => "12345",
+        "MOBILE_RELEASE_ASC_KEY_ID" => "KEY123")
+    end
     Dir.chdir(File.join(@lane_root, "runner"))
     boundary = RuntimeModule.const_get(:ExitBoundary, false).new
     codes = @codes
@@ -73,25 +80,31 @@ class StoreLaneRuntimeTest < Minitest::Test
 
   def observe_files(configure = nil)
     original = File.method(:open)
-    wrapper = lambda do |path, *arguments, **keywords|
-      file = original.call(path, *arguments, **keywords)
-      @opened << file
-      role = if path == "terminal.part"
-               :terminal_writer
-             elsif path == @lane_root && @runtime.instance_variable_get(:@publisher)
-               :terminal_root
-             else
-               :other
-             end
-      configure&.call(role, file)
-      file
+    wrapper = lambda do |path, *arguments, **keywords, &block|
+      record_file = lambda do |file|
+        @opened << file
+        role = if path == "terminal.part"
+                 :terminal_writer
+               elsif path == @lane_root && @runtime.instance_variable_get(:@publisher)
+                 :terminal_root
+               else
+                 :other
+               end
+        configure&.call(role, file)
+        file
+      end
+      if block
+        original.call(path, *arguments, **keywords) { |file| block.call(record_file.call(file)) }
+      else
+        record_file.call(original.call(path, *arguments, **keywords))
+      end
     end
     File.stub(:open, wrapper) { yield }
   end
 
   def run_model(&body)
     catch(:store_runtime_model_exit) do
-      @runtime.run!("android_external_promote") do |runtime|
+      @runtime.run!(ENV.fetch("MOBILE_RELEASE_OPERATION")) do |runtime|
         runtime.install_fastlane_bridges!
         body.call(runtime)
       end
@@ -109,6 +122,34 @@ class StoreLaneRuntimeTest < Minitest::Test
 
   def frame
     JSON.parse(File.binread(File.join(@lane_root, "terminal.json")))
+  end
+
+  def bind_runtime_ios_validation(record, expires)
+    adapter, native = MobileReleaseKit::IosUploadValidation, MobileReleaseKit::NativeUploadValidation
+    type = native.const_get(:CaptureSession, false)
+    base = File.dirname(@output)
+    config, intent = %w[config.json intent.json].map { |name| File.join(base, name) }
+    [config, intent].each { |path| File.write(path, "{}") }
+    output = JSON.generate("documentType" => "ios-current-upload-validation", "schemaVersion" => 1,
+      "operationIntentSha256" => "a" * 64, "ipaSha256" => Digest::SHA256.file(@artifact).hexdigest,
+      "ipaSize" => File.size(@artifact), "notBefore" => "2020-01-01T00:00:00Z", "notAfter" => expires.iso8601).freeze
+    constructor = lambda do |**request|
+      session = type.allocate
+      session.instance_variable_set(:@store_binding, request.fetch(:store_binding))
+      session.instance_variable_set(:@stdout, output)
+      session.instance_variable_set(:@phase, :accepted)
+      session.define_singleton_method(:execute) { output }
+      session.define_singleton_method(:successful_offer?) { true }
+      session.define_singleton_method(:finality_confirmed?) { true }
+      session
+    end
+    Lifetime.stub(:current_invocation, record) do
+      type.stub(:new, constructor) do
+        adapter.current!(python: RbConfig.ruby, module_root: File.expand_path("../../src", __dir__),
+          app_root: base, config_path: config, intent_path: intent, ipa_path: @artifact,
+          intent_sha256: "a" * 64, environment: {}, tooling_directory: File.expand_path("../../fastlane", __dir__))
+      end
+    end
   end
 
   def test_completed_success_binds_original_document_after_all_original_closes_before_link
@@ -154,6 +195,46 @@ class StoreLaneRuntimeTest < Minitest::Test
       assert @runtime.invocation.uploads_sealed_and_retired?
       assert @runtime.resources.sealed_and_retired?
       refute File.exist?(@output)
+    end
+  end
+
+  def test_original_ios_no_send_refusal_is_settled75_but_ambiguous_resource_close_is76
+    [false, true].each do |close_fails|
+      scenario(lane: "ios_testflight_internal", mode: "execute")
+      expected_digest = Digest::SHA256.hexdigest(File.binread(@artifact))
+      clock = Time.utc(2026, 9, 16, 12)
+      cleanup = IOError.new("synthetic resource close after no-send")
+      code = Time.stub(:now, -> { clock }) do
+        observe_files do
+          run_model do |runtime|
+            validation = bind_runtime_ios_validation(runtime.invocation, clock + 1)
+            assert_equal expected_digest, validation.fetch("ipaSha256")
+            if close_fails
+              file = runtime.resources.instance_variable_get(:@handles).first.io
+              original = file.method(:close)
+              file.define_singleton_method(:close) { original.call; raise cleanup }
+            end
+            clock += 1
+            runtime.invocation.begin_ios_transporter_dispatch!(command: "never-executed", artifact: @artifact)
+            flunk "expired original interval passed dispatch admission"
+          end
+        end
+      end
+      assert_equal(close_fails ? 76 : 75, code)
+      assert_instance_of Lifetime::IosDispatchRefused, @runtime.first_primary
+      assert_same @runtime.first_primary, @runtime.invocation.first_primary
+      refute File.exist?(@output)
+      if close_fails
+        assert @runtime.invocation.unknown?
+        assert_includes @runtime.invocation.cleanup_errors, cleanup
+        refute File.exist?(File.join(@lane_root, "terminal.json"))
+      else
+        assert_equal "failed", frame.fetch("outcome")
+        assert_nil frame.fetch("receipt")
+        assert @runtime.invocation.uploads_sealed_and_retired?
+        assert @runtime.resources.sealed_and_retired?
+        refute @runtime.invocation.unknown?
+      end
     end
   end
 

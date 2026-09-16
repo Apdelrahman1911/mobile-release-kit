@@ -4349,7 +4349,7 @@ class CISandboxPureTests(unittest.TestCase):
 
         for case in ("valid", "five-second-cap", "no-record", "malformed", "record-limit", "reader-error", "readonly-close-error", "stat-error",
                      "identity-drift", "expired-before", "expired-binding", "expired-return", "cancelled-before", "cancelled-return",
-                     "collector-error", "successful-observation-but-raised", "collector-interrupt"):
+                     "stat-sigint", "stat-sigterm", "collector-error", "successful-observation-but-raised", "collector-interrupt"):
             with self.subTest(native_abort_root_collector=case):
                 session = session_double(self.module, "darwin")
                 session.domain_finality = True
@@ -4390,6 +4390,8 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual((path, follow_symlinks), (tool, False))
                     if case == "stat-error":
                         raise OSError(errno.EIO, "PRIVATE-DIAGNOSTIC-CANARY")
+                    if case in {"stat-sigint", "stat-sigterm"}:
+                        session._interrupted(2 if case == "stat-sigint" else 15, None)
                     return SimpleNamespace(**(vars(node) | ({"st_ino": 92} if case == "identity-drift" else {})))
 
                 def collect(argv, *, seconds, deadline):
@@ -4410,7 +4412,8 @@ class CISandboxPureTests(unittest.TestCase):
 
                 collector, reader, domain = Mock(side_effect=collect), Mock(side_effect=read), Mock(return_value={})
                 with patch.multiple(self.module, os=SimpleNamespace(stat=named), subprocess=SimpleNamespace(),
-                        socket=SimpleNamespace(), signal=SimpleNamespace(), resource=SimpleNamespace(), _small_command=collector,
+                        socket=SimpleNamespace(), signal=SimpleNamespace(SIGALRM=14, SIGINT=2, SIGTERM=15),
+                        resource=SimpleNamespace(), _small_command=collector,
                         _domain=domain, time=SimpleNamespace(monotonic=lambda: clock.now)), \
                      patch.object(session, "_native_abort_read", reader), \
                      patch.object(Path, "open", side_effect=AssertionError("collector fixture cannot open host files")), \
@@ -4421,13 +4424,20 @@ class CISandboxPureTests(unittest.TestCase):
                     expected_status = "collector-error" if pending else {
                         "valid": "matched-denial", "five-second-cap": "matched-denial", "no-record": "no-record", "malformed": "malformed", "record-limit": "limit",
                         "expired-before": "deadline", "expired-binding": "deadline", "expired-return": "deadline",
-                        "cancelled-before": "cancelled", "cancelled-return": "cancelled"}.get(case, "unavailable")
+                        "cancelled-before": "cancelled", "cancelled-return": "cancelled",
+                        "stat-sigint": "cancelled", "stat-sigterm": "cancelled"}.get(case, "unavailable")
                     self.assertEqual(result["log_status"], expected_status)
                     self.assertEqual(collector.call_count, int(invoked))
                     self.assertEqual((session._direct_producer_pending, session.domain_finality), (pending, not invoked))
                     self.assertEqual(result.get("log_sha256"), hashlib.sha256(raw).hexdigest() if invoked and not pending else None)
                     if case in {"valid", "five-second-cap"}:
                         self.assertEqual(result["denials"], [{"operation": "file-read-data", "resource_role": "stdio-device", "public_path": "/dev/null"}])
+                    if case in {"stat-sigint", "stat-sigterm"}:
+                        self.assertTrue(session.cancelled)
+                        self.assertTrue(abort["log_attempted"])
+                        self.assertEqual(result, {"log_status": "cancelled"})
+                        self.assertEqual(session.cleanup_errors, [])
+                        self.assertEqual(abort["diagnostic_error"], {"code": "CANCELLED", "producer_pending": False})
                     reads_before, calls_before = reader.call_count, collector.call_count
                     self.assertEqual(session._native_abort_log(abort), {"log_status": "unavailable"})
                     self.assertEqual((reader.call_count, collector.call_count), (reads_before, calls_before))
@@ -8429,6 +8439,65 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertGreaterEqual(result.duration, 1.0)
                 with self.assertRaises(self.module.SessionError):
                     rig.collect()
+
+    def test_all_capture_preparation_boundaries_refuse_cancelled_or_failed_launches(self):
+        for platform in ("linux", "darwin"):
+            for boundary in ("capture-open", "last-observation"):
+                for reason in ("sigint", "sigterm", "failure"):
+                    with self.subTest(platform=platform, boundary=boundary, reason=reason):
+                        session = session_double(self.module, platform)
+                        rig = _Collection(self.module, session)
+                        original_open = rig.open
+
+                        def refuse():
+                            if reason == "failure":
+                                session.fail("preparation predicate failed")
+                            else:
+                                session._interrupted(2 if reason == "sigint" else 15, None)
+
+                        def opened(*args):
+                            fd = original_open(*args)
+                            if boundary == "capture-open" and len(rig.opened) == 2:
+                                refuse()
+                            return fd
+
+                        def observed(abort, name):
+                            self.assertIsNone(abort)
+                            self.assertEqual(name, "wall_before")
+                            if boundary == "last-observation":
+                                refuse()
+
+                        # A refusal does not excuse independent capture-close
+                        # failures or permit any action against a nonexistent child.
+                        close_failure = boundary == "capture-open" and reason == "sigterm"
+                        if close_failure:
+                            rig.fsync_errors, rig.fd_close_errors = {0}, {1}
+                        with rig.scope(), \
+                             patch.object(self.module, "signal", SimpleNamespace(SIGALRM=14)), \
+                             patch.object(self.module.os, "open", side_effect=opened), \
+                             patch.object(session, "_native_abort_stamp", side_effect=observed):
+                            result = session.run([str(session.python), "--synthetic"],
+                                cwd=session.work, env={}, seconds=900, output_limit=64,
+                                absolute_deadline=0.5)
+                        self.assertFalse(result.ok or result.waited or result.stdout_eof or result.stderr_eof
+                                         or result.finality or result.timed_out)
+                        self.assertEqual(result.cancelled, reason != "failure")
+                        self.assertEqual(session.failure, "preparation predicate failed" if reason == "failure"
+                                         else "controller cancellation")
+                        self.assertEqual(result.primary_error, session.failure)
+                        self.assertIsNone(session._active)
+                        self.assertFalse(session._busy)
+                        self.assertEqual(session.deadline, 100.0)
+                        self.assertEqual((result.persisted, session.persisted_bytes), ((0, 0), 0))
+                        self.assertFalse(any(e[0] in {"popen", "read", "root-snapshot", "wait-original",
+                            "terminate-original", "kill-original", "cleanup"} for e in rig.events))
+                        self.assertEqual([e for e in rig.events if e[0] == "capture-close"],
+                                         [("capture-close", 100), ("capture-close", 101)])
+                        self.assertEqual(rig.events.count(("selector-close",)), 1)
+                        if close_failure:
+                            self.assertIn("capture fsync OSError", result.cleanup_errors)
+                            self.assertIn("capture close OSError", result.cleanup_errors)
+                        self.assertEqual(session.cleanup_errors, list(result.cleanup_errors))
 
     def test_absolute_deadline_validation_and_preparation_expiry_precede_any_capture(self):
         for endpoint in (True, False, 0, -1.0, float("nan"), float("inf"), -float("inf"),

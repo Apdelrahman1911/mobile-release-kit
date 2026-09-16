@@ -2173,7 +2173,7 @@ class CIControllerContractTests(unittest.TestCase):
 
             result = controller.parse_capture(rig.step, capture(summary["tests"]), rig.paths, "linux", rig.checks)
             self.assertTrue(result.ok)
-            self.assertEqual(sum(row["outcome"] == "skip" for row in summary["tests"]), 20 if phase == "source" else 8)
+            self.assertEqual(sum(row["outcome"] == "skip" for row in summary["tests"]), 21 if phase == "source" else 9)
             for platform in ("macos", "darwin"):
                 with self.subTest(phase=phase, platform=platform), \
                         self.assertRaisesRegex(controller.VerificationError, "PYTHON_UNEXPECTED_SKIP_OR_FAILURE"):
@@ -5950,6 +5950,125 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                     else:
                         with self.assertRaises(checks.CheckError):
                             checks.inspect_wheel_consumer(root, ROOT, deadline=deadline)
+
+    def test_jdk_policy_transport_reaches_owned_callers_and_restores_original_binding(self):
+        """Actual Android policy callers, inert transport; no native/owner proof."""
+        from mobile_release import android, owned_process
+
+        checks = ci_module("ci_checks")
+        original, original_module, original_run = android.run_owned, android.subprocess, subprocess.run
+        scenarios = ("outside-warning-window", "inside-warning-window", "expired", "not-yet-valid")
+        warnings_by_case = (
+            "", "This jar contains entries whose signer certificate will expire within six months.\n",
+            "This jar contains entries whose signer certificate has expired.\n",
+            "This jar contains entries whose signer certificate is not yet valid.\n",
+        )
+        options = ["-Xms32m", "-Xmx256m", "-XX:MaxMetaspaceSize=256m",
+                   "-XX:CompressedClassSpaceSize=128m", "-XX:ReservedCodeCacheSize=128m"]
+
+        def deny_original(*_args, **_kwargs):
+            self.fail("the policy fixture must never invoke the native command owner")
+
+        for variant in ("success", "transport-failure", "custody-drift"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory(prefix="mrk-jdk-policy-contract-") as temporary:
+                root = Path(temporary).resolve()
+                home, work = root / "jdk", root / "work"
+                (home / "bin").mkdir(parents=True)
+                work.mkdir()
+                tools = {name: str(home / "bin" / name) for name in ("java", "keytool", "jarsigner")}
+                for path in tools.values():
+                    Path(path).write_bytes(b"Non-executable tool-location fixture.\n")
+                environment = {"JAVA_HOME": str(home), "PATH": str(home / "bin"), "LANG": "ambient", "LC_ALL": "ambient",
+                               "JAVA_TOOL_OPTIONS": "inert excluded setting", "MOBILE_RELEASE_DEPENDENCY_TOKEN": "synthetic-only"}
+                inspection = {name: environment[name] for name in ("JAVA_HOME", "PATH")}
+                inspection.update(LANG="C", LC_ALL="C")
+                deadline, calls, product_calls = time.monotonic() + 30.0, [], []
+                failure = checks.CheckError("JDK_INERT_TRANSPORT_FAILURE")
+
+                def child(argv, **kwargs):
+                    # Every possible process boundary is replaced before entry.
+                    self.assertIs(android.subprocess, original_module)
+                    self.assertIs(subprocess.run, original_run)
+                    self.assertEqual(set(kwargs), {"cwd", "deadline", "seconds", "environment", "status", "echo"})
+                    self.assertEqual(kwargs["deadline"], deadline)
+                    name = Path(argv[0]).name
+                    self.assertEqual(argv[0], tools[name])
+                    flags = options if name == "java" else ["-J" + option for option in options]
+                    self.assertEqual(argv[1:1 + len(flags)], flags)
+                    arguments = argv[1 + len(flags):]
+                    if not calls:
+                        self.assertEqual((name, arguments), ("java", ["-version"]))
+                        self.assertEqual(kwargs, {"cwd": work / "jdk-signers", "deadline": deadline,
+                            "seconds": 30, "environment": inspection, "status": 0, "echo": True})
+                        calls.append((name, arguments))
+                        return subprocess.CompletedProcess(argv, 0, b"", b'openjdk version "21.0.9"\n')
+                    index, step = divmod(len(calls) - 1, 6)
+                    scenario = scenarios[index]
+                    self.assertEqual(kwargs["cwd"], work / "jdk-signers" / scenario)
+                    self.assertEqual(name, ("keytool", "jarsigner", "jarsigner", "keytool", "jarsigner", "keytool")[step])
+                    self.assertEqual(arguments[0], ("-genkeypair", "-keystore", "-verify", "-exportcert", "-verify", "-printcert")[step])
+                    expected_env = dict(inspection)
+                    if step in {0, 1, 3}:
+                        expected_env["MRK_SYNTHETIC_PASSWORD"] = "disposable-test-password"
+                    self.assertEqual(kwargs["environment"], expected_env)
+                    self.assertEqual(kwargs["seconds"], 30 if step == 5 else 120)
+                    self.assertEqual(kwargs["status"], 4 if step in {2, 4} else 0)
+                    self.assertIs(kwargs["echo"], step != 3)
+                    calls.append((name, arguments))
+                    if step >= 4:
+                        self.assertIsNot(android.run_owned, deny_original)
+                        self.assertIs(owned_process.run_owned, deny_original)
+                        product_calls.append(name)
+                        expected_args = (["-verify", "-strict"] if step == 4 else ["-printcert", "-jarfile"])
+                        self.assertEqual(arguments, [*expected_args, str(kwargs["cwd"] / "synthetic.jar")])
+                    else:
+                        self.assertIs(android.run_owned, deny_original)
+                    if step == 5 and variant == "transport-failure":
+                        raise failure
+                    if step == 5 and variant == "custody-drift":
+                        android.run_owned = object()
+                    certificate = b"\x30synthetic-policy-contract:" + scenario.encode("ascii")
+                    stdout, stderr = b"", b""
+                    if step in {2, 4}:
+                        stdout = b"jar verified, with signer errors.\n"
+                        stderr = (
+                            "This jar contains entries whose certificate chain is invalid. Reason: "
+                            "PKIX path building failed: synthetic: unable to find valid certification path to requested target\n"
+                            "This jar contains entries whose signer certificate is self-signed.\n" + warnings_by_case[index]
+                        ).encode("ascii")
+                    elif step == 3:
+                        stdout = certificate
+                    elif step == 5:
+                        stdout = ("Signer #1:\n\nCertificate #1:\n SHA256: "
+                                  + hashlib.sha256(certificate).hexdigest() + "\n").encode("ascii")
+                    return subprocess.CompletedProcess(argv, kwargs["status"], stdout, stderr)
+
+                with patch.object(checks, "sys", SimpleNamespace(platform="linux", flags=SimpleNamespace(isolated=1, dont_write_bytecode=1))), \
+                        patch.object(checks, "os", SimpleNamespace(**{**vars(os), "getuid": lambda: 1000, "environ": environment})), \
+                        patch.object(checks, "shutil", SimpleNamespace(which=tools.get)), \
+                        patch.object(android, "os", SimpleNamespace(environ=environment)), \
+                        patch.object(owned_process, "run_owned", deny_original), \
+                        patch.object(android, "run_owned", deny_original), patch.object(checks, "_run_child", child):
+                    if variant == "success":
+                        result = checks.jdk_signers(ROOT, work, deadline)
+                        self.assertEqual(result["version"], "21.0.9")
+                        self.assertEqual(len(result["native_calls"]), 25)
+                        self.assertEqual([row["id"] for row in result["cases"]], list(scenarios))
+                        self.assertEqual([row["accepted"] for row in result["cases"]], [True, False, False, False])
+                        self.assertEqual(len({row["fingerprint"] for row in result["cases"]}), 4)
+                    else:
+                        expected = "JDK_INERT_TRANSPORT_FAILURE" if variant == "transport-failure" else "JDK_BINDING_CUSTODY"
+                        with self.assertRaisesRegex(checks.CheckError, "^" + expected + "$") as caught:
+                            checks.jdk_signers(ROOT, work, deadline)
+                        if variant == "transport-failure":
+                            self.assertIs(caught.exception, failure)
+                    self.assertIs(android.run_owned, deny_original)
+                    self.assertIs(owned_process.run_owned, deny_original)
+                self.assertEqual(len(calls), 25 if variant == "success" else 7)
+                self.assertEqual(product_calls, ["jarsigner", "keytool"] * (4 if variant == "success" else 1))
+                self.assertIs(android.run_owned, original)
+                self.assertIs(android.subprocess, original_module)
+                self.assertIs(subprocess.run, original_run)
 
     def test_jdk_diagnostic_classification_is_exact_but_is_not_native_evidence(self):
         checks = ci_module("ci_checks")

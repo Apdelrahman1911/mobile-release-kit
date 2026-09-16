@@ -208,6 +208,69 @@ class StoreLaneNestedValidationTest < Minitest::Test
     end
   end
 
+  def test_ios_dispatch_uses_only_original_settled_result_and_original_artifact
+    record = invocation
+    result = modeled_capture(JSON.generate(value("ios"))) { validate("ios", record) }
+    command = record.begin_ios_transporter_dispatch!(command: "inert-upload", artifact: @artifact)
+    assert_equal "inert-upload", command
+    assert command.frozen?
+    assert_same result, record.instance_variable_get(:@nested).instance_variable_get(:@result)
+    record.end_ios_transporter_dispatch!
+    assert_raises(Lifetime::LifetimeError) do
+      record.begin_ios_transporter_dispatch!(command: command, artifact: @artifact)
+    end
+    assert record.unknown?
+
+    [invocation, invocation("android"), invocation(mode: "prepare"), invocation.tap(&:seal_uploads!)].each do |missing|
+      assert_raises(Lifetime::LifetimeError) do
+        missing.begin_ios_transporter_dispatch!(command: "inert-upload", artifact: @artifact)
+      end
+    end
+    record = invocation
+    modeled_capture(JSON.generate(value("ios"))) { validate("ios", record) }
+    assert_raises(Lifetime::LifetimeError) do
+      record.begin_ios_transporter_dispatch!(command: "inert-upload", artifact: @artifact + ".replacement")
+    end
+    assert record.unknown?
+
+    record = invocation
+    modeled_capture("", failure: IOError.new("before creator"), no_creator: true) do
+      assert_raises(MobileReleaseKit::ContractError) { validate("ios", record) }
+    end
+    assert record.require_upload_continuation!
+    assert_raises(Lifetime::LifetimeError) do
+      record.begin_ios_transporter_dispatch!(command: "inert-upload", artifact: @artifact)
+    end
+  end
+
+  def test_expiry_of_original_result_is_settled_no_send_and_cannot_be_refreshed
+    clock = Time.utc(2026, 9, 16, 12)
+    record = invocation
+    expected = value("ios").merge("notAfter" => (clock + 1).iso8601)
+    Time.stub(:now, -> { clock }) do
+      result = modeled_capture(JSON.generate(expected)) { validate("ios", record) }
+      clock += 1
+      error = assert_raises(Lifetime::IosDispatchRefused) do
+        record.begin_ios_transporter_dispatch!(command: "inert-upload", artifact: @artifact)
+      end
+      assert_same error, record.first_primary
+      assert_instance_of MobileReleaseKit::ContractError, error.primary
+      assert_same result, record.instance_variable_get(:@nested).instance_variable_get(:@result)
+      assert_equal 1, @sessions.length
+      refute record.unknown?
+      assert record.require_upload_continuation!
+      record.end_ios_transporter_dispatch!
+      assert_same error, assert_raises(Lifetime::IosDispatchRefused) { record.require_ios_dispatch_not_refused! }
+      repeated = assert_raises(Lifetime::IosDispatchRefused) do
+        record.begin_ios_transporter_dispatch!(command: "replacement-upload", artifact: @artifact)
+      end
+      assert_same error, repeated
+      assert record.seal_uploads!
+      assert record.uploads_sealed_and_retired?
+      assert_equal 1, @sessions.length
+    end
+  end
+
   def test_missing_binding_wrong_platform_prepare_and_sealed_routes_refuse_before_constructor
     record = invocation
     Lifetime.stub(:current_invocation, record) do

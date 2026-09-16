@@ -2024,10 +2024,12 @@ lane :ios_testflight_internal do
       raise
     rescue StandardError => e
       MobileReleaseKit::StoreLaneLifetime.require_upload_continuation!
+      MobileReleaseKit::StoreLaneLifetime.require_ios_dispatch_not_refused!
       upload_error = e
       write_apple_state_journal("upload-response-ambiguous", "failureClass" => e.class.name)
     else
       MobileReleaseKit::StoreLaneLifetime.require_upload_continuation!
+      MobileReleaseKit::StoreLaneLifetime.require_ios_dispatch_not_refused!
     end
     begin
       build = poll_exact_ios_build(app, timeout: upload_error ? 600 : 3_600)

@@ -393,7 +393,8 @@ class NativeProfileSeam:
         key = (path.name, arch)
         operation = next((item for item in ("--entitlements", "--extract-certificates", "--verbose=4") if item in argv), argv[0])
         if (operation, *key) in self.failures:
-            return types.SimpleNamespace(returncode=1, stdout=b"private-native-canary", stderr=b"private-native-canary")
+            output = "private-native-canary" if kwargs.get("text", False) else b"private-native-canary"
+            return types.SimpleNamespace(returncode=1, stdout=output, stderr=output)
         if argv[0] == "security":
             raise AssertionError("CMS decoding must not replace authenticated profile authority")
         if "--entitlements" in argv:

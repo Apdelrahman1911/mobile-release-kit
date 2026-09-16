@@ -7,6 +7,7 @@
 require "minitest/autorun"
 require "minitest/mock"
 require_relative "../../fastlane/store_lane_lifetime"
+require_relative "../../fastlane/ios_upload_validation"
 
 class StoreLaneLifetimeTest < Minitest::Test
   Lifetime = MobileReleaseKit::StoreLaneLifetime
@@ -82,9 +83,45 @@ class StoreLaneLifetimeTest < Minitest::Test
     end
   end
 
-  def invocation
+  def invocation(upload: false)
     Lifetime::Invocation.new(lane: "ios_testflight_internal", nonce: "n" * 16,
-                             output: "/model/store-receipt.json")
+      output: "/model/store-receipt.json", mode: upload ? "execute" : nil,
+      run_deadline_ns: upload ? MobileReleaseKit::NativeUploadProcess.monotonic_ns + 60_000_000_000 : nil)
+  end
+
+  def bound_ios_dispatch(record, expires:)
+    # The real capture/observation and strict result acceptance are used. Only
+    # native execution and the inert artifact's size/digest are modeled.
+    native, adapter = MobileReleaseKit::NativeUploadValidation, MobileReleaseKit::IosUploadValidation
+    type = native.const_get(:CaptureSession, false)
+    artifact, digest = "/model/original.ipa", "b" * 64
+    output = JSON.generate("documentType" => "ios-current-upload-validation", "schemaVersion" => 1,
+      "operationIntentSha256" => "a" * 64, "ipaSha256" => digest, "ipaSize" => 1,
+      "notBefore" => "2020-01-01T00:00:00Z", "notAfter" => expires.iso8601).freeze
+    binding = record.reserve_current_validation!(role: "current-ios", adapter: adapter,
+      environment: {}, argv: ["inert-validator"], tooling_directory: "/model", intent_sha256: "a" * 64, artifact: artifact)
+    constructor = lambda do |**request|
+      session = type.allocate
+      session.instance_variable_set(:@store_binding, request.fetch(:store_binding))
+      session.instance_variable_set(:@stdout, output)
+      session.instance_variable_set(:@phase, :accepted)
+      session.define_singleton_method(:execute) { output }
+      session.define_singleton_method(:successful_offer?) { true }
+      session.define_singleton_method(:finality_confirmed?) { true }
+      session
+    end
+    Lifetime.stub(:current_invocation, record) do
+      type.stub(:new, constructor) do
+        returned = native.capture({}, ["inert-validator"], "/model", max_seconds: 1,
+          max_output_bytes: 1024, label: "inert", failure_message: "inert", store_binding: binding)
+        File.stub(:size, 1) do
+          Digest::SHA256.stub(:file, Struct.new(:hexdigest).new(digest)) do
+            binding.accept_result!(adapter: adapter, output: returned)
+          end
+        end
+      end
+    end
+    record.begin_ios_transporter_dispatch!(command: "inert-upload", artifact: artifact)
   end
 
   def modeled(model)
@@ -341,5 +378,106 @@ class StoreLaneLifetimeTest < Minitest::Test
     assert_raises(Lifetime::LifetimeError) { retained_view.each {} }
     assert_equal reads, model.endpoints[2].reads
     assert record.unknown?
+  end
+
+  def test_original_dispatch_expiry_after_final_pipe_configuration_has_no_native_attempt
+    [0, 1].each do |past_expiry|
+      model, record = Model.new, invocation(upload: true)
+      clock = Time.utc(2026, 9, 16, 12)
+      expiry = clock + 1
+      Time.stub(:now, -> { clock }) do
+        command = bound_ios_dispatch(record, expires: expiry)
+        original = model.endpoints.last.method(:close_on_exec=)
+        model.endpoints.last.define_singleton_method(:close_on_exec=) do |value|
+          original.call(value)
+          clock = expiry + past_expiry
+        end
+        error = modeled(model) do
+          assert_raises(Lifetime::IosDispatchRefused) do
+            record.spawn_with_pipes(command) { flunk "expired send reached callback" }
+          end
+        end
+        assert_same error, record.first_primary
+        refute record.unknown?
+        assert record.require_upload_continuation!
+        assert record.instance_variable_get(:@adapters).all?(&:retired?)
+        assert model.endpoints.all? { |endpoint| endpoint.close_calls == 1 }
+        assert_empty model.spawn_calls
+        assert_empty model.wait_calls
+        assert model.endpoints.all? { |endpoint| endpoint.reads.zero? }
+        record.end_ios_transporter_dispatch!
+        modeled(model) do
+          assert_same error, assert_raises(Lifetime::IosDispatchRefused) { record.spawn_with_pipes(command) {} }
+        end
+        assert_equal 2, model.pipe_calls
+        assert record.seal_uploads!
+        assert record.uploads_sealed_and_retired?
+      end
+    end
+  end
+
+  def test_original_no_send_refusal_is_primary_when_an_independent_pipe_close_fails
+    model, record = Model.new, invocation(upload: true)
+    clock = Time.utc(2026, 9, 16, 12)
+    Time.stub(:now, -> { clock }) do
+      command = bound_ios_dispatch(record, expires: clock + 1)
+      clock += 1
+      cleanup = IOError.new("original no-send close uncertainty")
+      model.endpoints.first.close_error = cleanup
+      error = modeled(model) do
+        assert_raises(Lifetime::LifetimeError) { record.spawn_with_pipes(command) {} }
+      end
+      assert_instance_of Lifetime::IosDispatchRefused, record.first_primary
+      assert_same record.first_primary, error.primary
+      assert_includes record.cleanup_errors, cleanup
+      assert record.unknown?
+      assert model.endpoints.all? { |endpoint| endpoint.close_calls == 1 }
+      assert_empty model.spawn_calls
+      assert_empty model.wait_calls
+      refute record.uploads_sealed_and_retired?
+    end
+  end
+
+  def test_scoped_transporter_command_cannot_be_replaced_or_dispatched_twice
+    [false, true].each do |second_send|
+      model, record = Model.new, invocation(upload: true)
+      command = bound_ios_dispatch(record, expires: Time.now.utc + 60)
+      modeled(model) do
+        record.spawn_with_pipes(command) { |stdout| stdout.each {} } if second_send
+        assert_raises(Lifetime::LifetimeError) do
+          record.spawn_with_pipes(second_send ? command : command.dup) {}
+        end
+      end
+      assert_equal(second_send ? 1 : 0, model.spawn_calls.length)
+      assert_equal(second_send ? 2 : 0, model.pipe_calls)
+      assert record.unknown?
+    end
+  end
+
+  def test_only_original_gate_can_retire_no_send_and_valid_dispatch_can_finish_after_expiry
+    model, record = Model.new, invocation
+    forged = Lifetime::IosDispatchRefused.new(StandardError.new("not issued by original gate"))
+    model.second_pipe_error = forged
+    modeled(model) do
+      assert_same forged, assert_raises(Lifetime::LifetimeError) { record.spawn_with_pipes("inert-upload") {} }.primary
+    end
+    assert record.unknown?
+    refute record.adapters_sealed_and_retired?
+
+    model, record = Model.new, invocation(upload: true)
+    clock = Time.utc(2026, 9, 16, 12)
+    Time.stub(:now, -> { clock }) do
+      command = bound_ios_dispatch(record, expires: clock + 1)
+      modeled(model) do
+        assert_equal 0, record.spawn_with_pipes(command) { |stdout| clock += 2; stdout.each {} }
+      end
+      record.end_ios_transporter_dispatch!
+      assert_equal 1, model.spawn_calls.length
+      assert record.require_ios_dispatch_not_refused!
+      assert record.require_upload_continuation!
+      assert record.seal_uploads!
+      assert record.uploads_sealed_and_retired?
+      refute record.unknown?
+    end
   end
 end

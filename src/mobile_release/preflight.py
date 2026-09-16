@@ -102,7 +102,18 @@ def _xcode_toolchain_finding(*, execution_source=None, cancellation: DefaultCanc
     )
 
 
-def _effective_android_identity_finding(config: ReleaseConfig, *, execution_source=None,
+def _identity_query_environment(config: ReleaseConfig, *, project_read_token: str | None) -> dict[str, str]:
+    environment = scrub_credential_capabilities(os.environ)
+    # This generated signing-routing hint is not a generic credential, but
+    # identity queries must not borrow it from an unrelated signing context.
+    environment.pop("MOBILE_RELEASE_IOS_PROFILE_SPECIFIER", None)
+    if config.section("source").get("projectReadTokenRequired") and project_read_token:
+        environment["MOBILE_RELEASE_PROJECT_READ_TOKEN"] = project_read_token
+    return environment
+
+
+def _effective_android_identity_finding(config: ReleaseConfig, *, project_read_token: str | None = None,
+                                       execution_source=None,
                                        cancellation: DefaultCancellation | None = None) -> Finding:
     discovered = discover_project(config.root, include_git=False, cancellation=cancellation,
                                   execution_source=execution_source)
@@ -149,7 +160,7 @@ gradle.projectsEvaluated {
 }
 """.replace("__MODULE__", module)
     release = config.release_version()
-    environment = scrub_credential_capabilities(os.environ)
+    environment = _identity_query_environment(config, project_read_token=project_read_token)
     environment.update(
         {
             "MOBILE_RELEASE_VERSION_NAME": release.name,
@@ -222,7 +233,7 @@ gradle.projectsEvaluated {
 
 
 def _xcode_application_identities(
-    config: ReleaseConfig, *, configuration: str, execution_source=None,
+    config: ReleaseConfig, *, configuration: str, project_read_token: str | None = None, execution_source=None,
     cancellation: DefaultCancellation | None = None,
 ) -> tuple[set[str], str | None]:
     discovered = discover_project(config.root, include_git=False, cancellation=cancellation,
@@ -249,7 +260,7 @@ def _xcode_application_identities(
                 "-json",
             ],
             cwd=config.root,
-            environ=scrub_credential_capabilities(os.environ),
+            environ=_identity_query_environment(config, project_read_token=project_read_token),
             capture=True,
             output_limit=OUTPUT_LIMIT,
             timeout=5 * 60,
@@ -283,7 +294,8 @@ def _xcode_application_identities(
     return identities, None
 
 
-def _effective_ios_identity_finding(config: ReleaseConfig, *, execution_source=None,
+def _effective_ios_identity_finding(config: ReleaseConfig, *, project_read_token: str | None = None,
+                                  execution_source=None,
                                   cancellation: DefaultCancellation | None = None) -> Finding:
     if sys.platform != "darwin" or not shutil.which("xcodebuild"):
         return Finding(
@@ -295,7 +307,7 @@ def _effective_ios_identity_finding(config: ReleaseConfig, *, execution_source=N
     ios = config.section("ios")
     if prepare := ios.get("prepareCommand"):
         release = config.release_version()
-        environment = scrub_credential_capabilities(os.environ)
+        environment = _identity_query_environment(config, project_read_token=project_read_token)
         environment.update(
             {
                 "MOBILE_RELEASE_VERSION_NAME": release.name,
@@ -327,11 +339,13 @@ def _effective_ios_identity_finding(config: ReleaseConfig, *, execution_source=N
                 category="identity",
             )
     debug_ids, debug_error = _xcode_application_identities(config, configuration="Debug",
-                                execution_source=execution_source, cancellation=cancellation)
+                                project_read_token=project_read_token, execution_source=execution_source,
+                                cancellation=cancellation)
     archive_ids, archive_error = (set(), "Debug identity proof failed")
     if not debug_error and len(debug_ids) == 1:
         archive_ids, archive_error = _xcode_application_identities(
-            config, configuration=ios.get("archiveConfiguration", "Release"), execution_source=execution_source,
+            config, configuration=ios.get("archiveConfiguration", "Release"),
+            project_read_token=project_read_token, execution_source=execution_source,
             cancellation=cancellation,
         )
     store_identity = ios.get("bundleId")
@@ -362,17 +376,17 @@ def _effective_ios_identity_finding(config: ReleaseConfig, *, execution_source=N
 
 
 def effective_identity_findings(
-    config: ReleaseConfig, platforms: Iterable[str], *, execution_source=None,
+    config: ReleaseConfig, platforms: Iterable[str], *, project_read_token: str | None = None, execution_source=None,
     cancellation: DefaultCancellation | None = None,
 ) -> list[Finding]:
     findings: list[Finding] = []
     for platform in platforms:
         if platform == "android" and config.platform_enabled("android"):
-            findings.append(_effective_android_identity_finding(config, execution_source=execution_source,
-                                                                 cancellation=cancellation))
+            findings.append(_effective_android_identity_finding(config, project_read_token=project_read_token,
+                                                                 execution_source=execution_source, cancellation=cancellation))
         elif platform == "ios" and config.platform_enabled("ios"):
-            findings.append(_effective_ios_identity_finding(config, execution_source=execution_source,
-                                                             cancellation=cancellation))
+            findings.append(_effective_ios_identity_finding(config, project_read_token=project_read_token,
+                                                             execution_source=execution_source, cancellation=cancellation))
         if findings and findings[-1].status in FAILING_STATUSES:
             break
     return findings
@@ -1095,13 +1109,12 @@ def _preflight(
             report.add("store.online.materialization", Status.FAIL, str(error), category="store-access")
         return report
     if report.ok and run_builds:
-        identity_values = {
-            name: value
-            for name, value in build_credential_values.items()
-            if name == "MOBILE_RELEASE_PROJECT_READ_TOKEN"
-        }
+        project_read_token = (build_credential_values.get("MOBILE_RELEASE_PROJECT_READ_TOKEN")
+                             if config.section("source").get("projectReadTokenRequired") else None)
+        identity_values = ({"MOBILE_RELEASE_PROJECT_READ_TOKEN": project_read_token} if project_read_token else {})
         with _credential_environment(identity_values, invocation=invocation):
-            report.extend(effective_identity_findings(config, selected, execution_source=execution_source,
+            report.extend(effective_identity_findings(config, selected, project_read_token=project_read_token,
+                                                      execution_source=execution_source,
                                                       cancellation=cancellation))
     if not report.ok:
         report.add(

@@ -8,6 +8,7 @@ require "tmpdir"
 require "fileutils"
 require_relative "../../fastlane/store_lane_runtime"
 require_relative "../../fastlane/store_lane_fastlane_bridges"
+require_relative "../../fastlane/ios_upload_validation"
 
 class StoreLaneResourcesTest < Minitest::Test
   Resources = MobileReleaseKit::StoreLaneResources
@@ -189,7 +190,34 @@ class StoreLaneResourcesTest < Minitest::Test
     assert slot.retired?, "foreign-origin rejection must not mutate original slot state"
   end
 
-  def with_bridge_models
+  def bind_original_ios_validation(expires)
+    adapter, native = MobileReleaseKit::IosUploadValidation, MobileReleaseKit::NativeUploadValidation
+    type = native.const_get(:CaptureSession, false)
+    config, intent = %w[config.json intent.json].map { |name| File.join(@base, name) }
+    [config, intent].each { |path| File.write(path, "{}") }
+    output = JSON.generate("documentType" => "ios-current-upload-validation", "schemaVersion" => 1,
+      "operationIntentSha256" => "a" * 64, "ipaSha256" => Digest::SHA256.file(@artifact).hexdigest,
+      "ipaSize" => File.size(@artifact), "notBefore" => "2020-01-01T00:00:00Z", "notAfter" => expires).freeze
+    constructor = lambda do |**request|
+      session = type.allocate
+      session.instance_variable_set(:@store_binding, request.fetch(:store_binding))
+      session.instance_variable_set(:@stdout, output)
+      session.instance_variable_set(:@phase, :accepted)
+      session.define_singleton_method(:execute) { output }
+      session.define_singleton_method(:successful_offer?) { true }
+      session.define_singleton_method(:finality_confirmed?) { true }
+      session
+    end
+    Lifetime.stub(:current_invocation, @invocation) do
+      type.stub(:new, constructor) do
+        adapter.current!(python: RbConfig.ruby, module_root: File.expand_path("../../src", __dir__),
+          app_root: @base, config_path: config, intent_path: intent, ipa_path: @artifact,
+          intent_sha256: "a" * 64, environment: {}, tooling_directory: File.expand_path("../../fastlane", __dir__))
+      end
+    end
+  end
+
+  def with_bridge_models(expires: "2099-01-01T00:00:00Z", force_package: false)
     # Dependencies are inert local types; do not import Fastlane or invoke a
     # transport command. Restore any prior module after this single model.
     previous = Object.const_get(:FastlaneCore, false) if Object.const_defined?(:FastlaneCore, false)
@@ -203,7 +231,7 @@ class StoreLaneResourcesTest < Minitest::Test
     globals.define_singleton_method(:verbose?) { false }
     core.const_set(:Globals, globals)
     environment = Module.new
-    environment.define_singleton_method(:truthy?) { |*| false }
+    environment.define_singleton_method(:truthy?) { |*| force_package }
     core.const_set(:Env, environment)
     bridge = MobileReleaseKit::StoreLaneFastlaneBridges
     executor = Class.new do
@@ -244,6 +272,7 @@ class StoreLaneResourcesTest < Minitest::Test
     runtime.define_singleton_method(:xml_template) { '<package><%= @data[:ipa_path] %></package>' }
     runtime.define_singleton_method(:require_active!) { invocation.require_upload_continuation! }
     runtime.define_singleton_method(:mark_unknown!) { |error, cleanup: false| invocation.mark_unknown!(error, cleanup: cleanup) }
+    bind_original_ios_validation(expires)
     bridge.stub(:runtime!, runtime) { yield executor.new, transporter, builder.new }
   ensure
     Object.send(:remove_const, :FastlaneCore) if defined?(core) && Object.const_defined?(:FastlaneCore, false) && Object.const_get(:FastlaneCore, false).equal?(core)
@@ -300,6 +329,49 @@ class StoreLaneResourcesTest < Minitest::Test
           refute @invocation.unknown?
         end
         assert File.file?(@artifact) && File.directory?(pilot)
+      end
+    end
+  end
+
+  def test_expiry_during_real_package_asset_key_or_final_preparation_never_enters_executor
+    [false, true].each do |force_package|
+      delays = %i[copy_package_ipa! write_metadata! write_api_key! require_ready_for_executor!]
+      delays << :copy_upload_asset! unless force_package
+      delays.each do |boundary|
+        scenario(macos: true)
+        original_bytes = File.binread(@artifact)
+        clock = Time.utc(2026, 9, 16, 12)
+        expiry = clock + 1
+        Time.stub(:now, -> { clock }) do
+          with_bridge_models(expires: expiry.iso8601, force_package: force_package) do |executor, transporter, builder|
+            executor.behavior = -> { flunk "expired real preparation entered executor" }
+            actual = @resources.method(boundary)
+            delayed = lambda do |*args, **keywords|
+              result = actual.call(*args, **keywords)
+              clock = expiry
+              result
+            end
+            error = @resources.stub(boundary, delayed) do
+              pilot = @resources.create_pilot_root!
+              package = builder.generate(app_id: "12345", ipa_path: @artifact, package_path: pilot,
+                platform: "ios", app_identifier: "fixture.app", short_version: "1.0.0", bundle_version: "1")
+              assert_raises(Lifetime::IosDispatchRefused) do
+                transporter.new(executor).upload(package_path: package, asset_path: @artifact, platform: "ios")
+              end
+            end
+            assert_same error, @invocation.first_primary
+            refute @invocation.unknown?
+            assert @invocation.require_upload_continuation!
+            assert_equal original_bytes, File.binread(@artifact)
+            entries = @resources.instance_variable_get(:@entries)
+            assert_equal original_bytes, File.binread(entries.fetch("package-ipa").fetch(:path))
+            key_dir = File.dirname(entries.fetch("key").fetch(:path))
+            assert_includes @resources.instance_variable_get(:@requested), key_dir
+            rows = completed_inventory
+            assert rows.any? { |row| row.fetch("role") == "package-metadata" }
+            assert_empty @invocation.instance_variable_get(:@adapters)
+          end
+        end
       end
     end
   end

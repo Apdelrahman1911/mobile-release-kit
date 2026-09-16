@@ -1675,7 +1675,7 @@ def jdk_signers(source_root: Path, work_root: Path, deadline: float) -> dict:
     _remaining(deadline, 3300)
     _require(sys.platform == "linux" and os.getuid() != 0
              and sys.flags.isolated == 1 and sys.flags.dont_write_bytecode == 1, "JDK_PLATFORM")
-    from mobile_release import android
+    from mobile_release import android, owned_process
     _require(_read_regular(Path(android.__file__), deadline=deadline)
              == _read_regular(source_root / "src/mobile_release/android.py", deadline=deadline), "JDK_PRODUCT_BYTES")
     home = Path(os.environ.get("JAVA_HOME", ""))
@@ -1733,9 +1733,7 @@ def jdk_signers(source_root: Path, work_root: Path, deadline: float) -> dict:
         _require(0 < len(certificate) <= 64 * 1024 and certificate.startswith(b"\x30"), "JDK_DER_EXPORT")
 
         class ProductRunner:
-            """Module-local transport only; all native bytes remain genuine."""
-            PIPE = subprocess.PIPE
-            TimeoutExpired = subprocess.TimeoutExpired
+            """Policy transport only; the separate owner matrix proves custody."""
 
             def __init__(self):
                 self.results = []
@@ -1744,17 +1742,18 @@ def jdk_signers(source_root: Path, work_root: Path, deadline: float) -> dict:
                 index = len(self.results)
                 _require(index < 2, "JDK_EXTRA_PRODUCT_CALL")
                 expected_argv = ["jarsigner", "-verify", "-strict", str(jar)] if index == 0 else ["keytool", "-printcert", "-jarfile", str(jar)]
-                _require(argv == expected_argv and kwargs == {"env": environment, "text": True, "stdout": subprocess.PIPE,
-                         "stderr": subprocess.PIPE, "timeout": 120 if index == 0 else 30, "check": False}, "JDK_PRODUCT_CALL")
+                _require(argv == expected_argv and kwargs == {"environ": environment, "capture": True,
+                         "timeout": 120 if index == 0 else 30, "cancellation": None}, "JDK_PRODUCT_CALL")
                 value = call(argv[0], argv[1:], directory, status=4 if index == 0 else 0, seconds=120 if index == 0 else 30)
                 self.results.append(value)
                 return subprocess.CompletedProcess(argv, value.returncode, value.stdout.decode("utf-8", "strict"), value.stderr.decode("utf-8", "strict"))
 
         facade = ProductRunner()
-        original, original_run = android.subprocess, subprocess.run
-        _require(original is subprocess, "JDK_PRODUCT_BINDING")
+        transport = facade.run  # Retain this exact bound method for custody.
+        original, original_subprocess, original_run = android.run_owned, android.subprocess, subprocess.run
+        _require(original is owned_process.run_owned and original_subprocess is subprocess, "JDK_PRODUCT_BINDING")
         try:
-            android.subprocess = facade
+            android.run_owned = transport
             rejected = False
             try:
                 accepted = android._verify_jar_signature(jar)
@@ -1768,8 +1767,12 @@ def jdk_signers(source_root: Path, work_root: Path, deadline: float) -> dict:
             fingerprint = android._signer_fingerprint(jar)
             _require(len(facade.results) == 2 and fingerprint == hashlib.sha256(certificate).hexdigest(), "JDK_PRODUCT_FINGERPRINT")
         finally:
-            _require(android.subprocess is facade and subprocess.run is original_run, "JDK_BINDING_CUSTODY")
-            android.subprocess = original
+            try:
+                _require(android.run_owned is transport and owned_process.run_owned is original
+                         and android.subprocess is original_subprocess and subprocess.run is original_run,
+                         "JDK_BINDING_CUSTODY")
+            finally:
+                android.run_owned = original
         _require(fingerprint not in {item["fingerprint"] for item in cases}, "JDK_REUSED_CERTIFICATE")
         cases.append({"id": scenario, "accepted": accepted, "strict_status": 4, "fingerprint": fingerprint})
     _require(len(calls) == 25 and len(cases) == 4, "JDK_CALL_INVENTORY")

@@ -269,10 +269,10 @@ class InspectionBudgetTests(unittest.TestCase):
                 clock.return_value = MAX_INSPECTION_SECONDS
                 return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-            with patch("mobile_release.ios.subprocess.run", side_effect=child) as run, self.assertRaisesRegex(ValidationError, "shared time bound"):
+            with patch("mobile_release.ios.run_owned", side_effect=child) as run, self.assertRaisesRegex(ValidationError, "shared time bound"):
                 ios._nested_codesign_identities(app, self.root, deadline=deadline)
             self.assertEqual(run.call_count, 1)
-            with patch("mobile_release.ios.subprocess.run") as run:
+            with patch("mobile_release.ios.run_owned") as run:
                 for operation in (lambda: ios._profile_details(app / "embedded.mobileprovision", deadline=deadline),
                                   lambda: ios._codesign_entitlements(app, deadline=deadline),
                                   lambda: ios._codesign_fingerprint(app, self.root, deadline=deadline)):

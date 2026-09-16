@@ -126,13 +126,24 @@ module MobileReleaseKit
         runtime.resources.require_ready_for_executor!
         primary = nil
         begin
-          result = @transporter_executor.execute(command, FastlaneCore::ItunesTransporter.hide_transporter_output?)
+          hide_output = FastlaneCore::ItunesTransporter.hide_transporter_output?
+          command = runtime.invocation.begin_ios_transporter_dispatch!(command: command, artifact: runtime.binding.fetch("artifact"))
+          begin
+            result = @transporter_executor.execute(command, hide_output)
+          rescue Exception # rubocop:disable Lint/RescueException
+            # Pinned Fastlane may convert the original error (or swallow it via
+            # StandardError#exit_status). The original gate remains authority.
+            runtime.invocation.require_ios_dispatch_not_refused!
+            raise
+          end
+          runtime.invocation.require_ios_dispatch_not_refused!
           # The fixed API-key lane has no password-acquisition/re-upload branch.
           # Ordinary errors still reach the existing readback-first reconciler.
         rescue Exception => error # rubocop:disable Lint/RescueException
           primary = error
           raise
         ensure
+          runtime.invocation.end_ios_transporter_dispatch!
           begin
             runtime.resources.defer_removal!(api_key.fetch(:key_dir), primary: primary)
           rescue Exception => error # rubocop:disable Lint/RescueException

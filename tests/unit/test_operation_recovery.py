@@ -18,6 +18,7 @@ from mobile_release import cli, ios_artifacts, stores
 from mobile_release.cli import _ci, _status, build_parser
 from mobile_release.cancellation import DefaultCancellation
 from mobile_release.config import load_config
+from mobile_release.credentials import artifact_validation_environment
 from mobile_release.errors import StoreOperationError, ValidationError
 from mobile_release.ios import SigningValidityInterval
 from mobile_release.inspection import MAX_INSPECTION_SECONDS
@@ -209,15 +210,26 @@ class OperationRecoveryTests(unittest.TestCase):
 
         state = {"warning": "", "calls": []}
         def command(argv, **kwargs):
-            if argv[0] in {"jarsigner", "keytool"}:
-                state["calls"].append(argv[0])
-                if argv[0] == "jarsigner":
-                    return subprocess.CompletedProcess(argv, 4, jarsigner_output(warning=state["warning"]), "")
-                return subprocess.CompletedProcess(argv, 0, "Signer #1:\n\nCertificate #1:\nSHA256: " + ":".join(["AA"] * 32) + "\n", "")
-            return self.fixture.wire(argv, **kwargs)
+            self.assertIn(argv[0], {"jarsigner", "keytool"})
+            self.assertEqual(set(kwargs), {"environ", "capture", "timeout", "cancellation"})
+            self.assertEqual(kwargs["environ"], artifact_validation_environment(os.environ))
+            self.assertIs(kwargs["capture"], True)
+            self.assertEqual(kwargs["timeout"], {"jarsigner": 120, "keytool": 30}[argv[0]])
+            # Preserve this caller's default argument rather than invent an owner.
+            self.assertIsNone(kwargs["cancellation"])
+            state["calls"].append(argv[0])
+            if argv[0] == "jarsigner":
+                self.assertEqual(argv, ["jarsigner", "-verify", "-strict", str(self.fixture.binary)])
+                return subprocess.CompletedProcess(argv, 4, jarsigner_output(warning=state["warning"]), "")
+            self.assertEqual(argv, ["keytool", "-printcert", "-jarfile", str(self.fixture.binary)])
+            return subprocess.CompletedProcess(argv, 0, "Signer #1:\n\nCertificate #1:\nSHA256: " + ":".join(["AA"] * 32) + "\n", "")
         self.stack.enter_context(patch("mobile_release.cli.validate_aab", new=validate_aab))
         self.stack.enter_context(patch("mobile_release.android._bundletool_manifest", return_value='<manifest package="com.example.reader" android:versionCode="42" android:versionName="1.2.3" />'))
-        self.stack.enter_context(patch("mobile_release.android.subprocess.run", side_effect=command))
+        self.stack.enter_context(patch(
+            "mobile_release._command_process.run_command",
+            side_effect=AssertionError("policy fixture must not acquire a native command owner"),
+        ))
+        self.stack.enter_context(patch("mobile_release.android.run_owned", side_effect=command))
         return state
 
     def test_android_raw_only_refuses_new_owner_but_protected_readback_recovery_keeps_original_signing(self) -> None:
@@ -765,7 +777,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
         modernize_ipa_fixture(self.root / "app.ipa")
         native = NativeProfileSeam()
         native.claims["Reader.app"] = {**signed_entitlements(), "com.apple.developer.associated-domains": ["applinks:fictional.example"]}
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), native.profile_authentication(), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
+        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.run_owned", side_effect=native), native.profile_authentication(), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
             with self.assertRaisesRegex(ValidationError, "final candidate artifact validation failed"):
                 self.invoke("prepare-operation")
         prepare.assert_not_called()
@@ -775,7 +787,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
 
     def test_profile_issuer_rejection_stops_fresh_intent_before_any_store_access(self) -> None:
         native = NativeProfileSeam()
-        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.subprocess.run", side_effect=native), native.profile_authentication() as authentication, patch.object(native, "authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
+        with patch("mobile_release.ios.sys.platform", "darwin"), patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), patch("mobile_release.ios.run_owned", side_effect=native), native.profile_authentication() as authentication, patch.object(native, "authenticate_cms", side_effect=ValidationError("fixed Apple issuer rejection")), patch("mobile_release.cli.prepare_store_operation") as prepare, patch("mobile_release.cli.execute_store_operation") as mutate:
             with self.assertRaisesRegex(ValidationError, "final candidate artifact validation failed"):
                 self.invoke("prepare-operation")
         authentication.assert_called_once(); prepare.assert_not_called(); mutate.assert_not_called()
@@ -792,7 +804,7 @@ class IosOperationRecoveryTests(unittest.TestCase):
                  patch("mobile_release.ios.shutil.which", return_value="/fictional/tool"), \
                  native.profile_authentication() as authentication, \
                  patch.object(native, "authenticate_cms", side_effect=error), \
-                 patch("mobile_release.ios.subprocess.run", side_effect=AssertionError("later native inspection ran")), \
+                 patch("mobile_release.ios.run_owned", side_effect=AssertionError("later native inspection ran")), \
                  patch("mobile_release.cli.prepare_store_operation") as prepare, \
                  patch("mobile_release.cli.execute_store_operation") as mutate, \
                  self.assertRaises(ProcessError) as caught:

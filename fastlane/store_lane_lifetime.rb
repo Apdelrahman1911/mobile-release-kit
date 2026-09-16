@@ -46,6 +46,10 @@ module MobileReleaseKit
       current_invocation&.require_upload_continuation! || true
     end
 
+    def self.require_ios_dispatch_not_refused!
+      current_invocation&.require_ios_dispatch_not_refused! || true
+    end
+
     def self.admit_native_capture!(binding, environment:, argv:, tooling_directory:)
       invocation = current_invocation
       return nil if invocation.nil? && binding.nil?
@@ -80,6 +84,17 @@ module MobileReleaseKit
       end
     end
 
+    # This exception is not proof by itself. Only the original invocation's
+    # fixed pre-send gate can retain it and retire a never-started adapter.
+    class IosDispatchRefused < StandardError
+      attr_reader :primary
+
+      def initialize(primary)
+        super("IPA signing/profile eligibility expired before native dispatch; no new upload was sent")
+        @primary = primary
+      end
+    end
+
     class Invocation
       NESTED_ROLES = {
         "current-ios" => ["ios_testflight_internal", :IosUploadValidation].freeze,
@@ -110,6 +125,8 @@ module MobileReleaseKit
         @unknown = @launches_closed = @nested_launches_closed = false
         @nested = nil
         @resources = @document_reservation = @document = nil
+        @ios_dispatch_command = @ios_dispatch_artifact = @ios_dispatch_adapter = @ios_dispatch_refusal = nil
+        @ios_dispatch_active, @ios_dispatch_state = false, :unreserved
       end
 
       def origin!
@@ -198,6 +215,35 @@ module MobileReleaseKit
         raise_unknown!
       end
 
+      def begin_ios_transporter_dispatch!(command:, artifact:)
+        origin!
+        require_upload_continuation!
+        require_ios_dispatch_not_refused!
+        unless @lane == "ios_testflight_internal" && @mode == "execute" && !@launches_closed &&
+               @nested && @ios_dispatch_command.nil? && command.instance_of?(String) &&
+               !command.empty? && !command.include?("\0") && artifact.instance_of?(String)
+          mark_unknown!(LifetimeError.new)
+          raise_unknown!
+        end
+        @ios_dispatch_command, @ios_dispatch_artifact = command.dup.freeze, artifact.dup.freeze
+        @ios_dispatch_active, @ios_dispatch_state = true, :ready
+        check_ios_dispatch_current!
+        @ios_dispatch_command
+      end
+
+      def end_ios_transporter_dispatch!
+        origin!
+        @ios_dispatch_active = false
+      end
+
+      def require_ios_dispatch_not_refused!
+        origin!
+        return true unless @ios_dispatch_refusal
+
+        require_upload_continuation! # UNKNOWN cleanup is not settled no-send.
+        raise @ios_dispatch_refusal, cause: nil
+      end
+
       def bind_resources!(resources)
         origin!
         type = MobileReleaseKit::StoreLaneResources::Inventory
@@ -269,8 +315,14 @@ module MobileReleaseKit
       def spawn_with_pipes(command, &callback)
         origin!
         require_upload_continuation!
+        require_ios_dispatch_not_refused!
         unless !@launches_closed && command.instance_of?(String) &&
                !command.empty? && !command.include?("\0") && callback
+          mark_unknown!(LifetimeError.new)
+          raise_unknown!
+        end
+        if @ios_dispatch_active && !(@ios_dispatch_state == :ready && @ios_dispatch_adapter.nil? &&
+                                    command.equal?(@ios_dispatch_command))
           mark_unknown!(LifetimeError.new)
           raise_unknown!
         end
@@ -278,9 +330,11 @@ module MobileReleaseKit
         command = command.dup.freeze
         adapter = PipeAdapter.new(self)
         @adapters << adapter
+        @ios_dispatch_adapter = adapter if @ios_dispatch_active
         adapter.execute(command, &callback)
       rescue Exception => error # rubocop:disable Lint/RescueException
         raise if error.is_a?(CommandExitError) && adapter&.retired? && !unknown?
+        raise if error.equal?(@ios_dispatch_refusal) && (adapter.nil? || adapter.retired?) && !unknown?
 
         mark_unknown!(error) unless error.is_a?(LifetimeError) && unknown?
         raise_unknown!
@@ -297,6 +351,37 @@ module MobileReleaseKit
       end
 
       private
+
+      def check_ios_dispatch_current!
+        @nested.require_current_ios_dispatch!(artifact: @ios_dispatch_artifact)
+      rescue MobileReleaseKit::ContractError => error
+        Thread.handle_interrupt(Exception => :never) do
+          @ios_dispatch_state = :refused
+          @ios_dispatch_refusal ||= IosDispatchRefused.new(error)
+          @first_primary ||= @ios_dispatch_refusal
+        end
+        raise @ios_dispatch_refusal, cause: nil
+      end
+
+      def require_current_ios_native_dispatch!(adapter, command)
+        origin!
+        return true unless @ios_dispatch_active
+
+        unless @ios_dispatch_state == :ready && adapter.equal?(@ios_dispatch_adapter) &&
+               command == @ios_dispatch_command
+          mark_unknown!(LifetimeError.new)
+          raise_unknown!
+        end
+        check_ios_dispatch_current!
+        @ios_dispatch_state = :attempted
+        true
+      end
+
+      def original_ios_dispatch_refusal?(adapter, error)
+        origin!
+        @ios_dispatch_state == :refused && adapter.equal?(@ios_dispatch_adapter) &&
+          !error.nil? && error.equal?(@ios_dispatch_refusal)
+      end
 
       def monotonic_ns
         NativeUploadProcess.monotonic_ns
@@ -381,6 +466,15 @@ module MobileReleaseKit
       rescue Exception => error # rubocop:disable Lint/RescueException
         fail_unless_retired!(error)
         raise
+      end
+
+      def require_current_ios_dispatch!(artifact:)
+        @invocation.origin!
+        refuse! unless @state == :settled && @role == "current-ios" && artifact == @artifact &&
+          @adapter.equal?(MobileReleaseKit::IosUploadValidation) && @result&.frozen?
+        # Reuse the original strict result (intent, IPA hash/size and interval),
+        # never a new validator, supplied interval or later filesystem result.
+        @adapter.require_current!(@result)
       end
 
       def capture_failed!(error, observation: nil)
@@ -539,6 +633,7 @@ module MobileReleaseKit
             Thread.handle_interrupt(Exception => :immediate) do
               create_pair(0, @stdin_read, @stdin_write)
               create_pair(1, @stdout_read, @stdout_write)
+              @invocation.send(:require_current_ios_native_dispatch!, self, command)
               @creation = :attempted
               @pid = Process.spawn(command, in: @stdin_read.io, out: @stdout_write.io,
                                    err: @stdout_write.io, close_others: true)
@@ -559,12 +654,16 @@ module MobileReleaseKit
               @body_returned = true
             end
           rescue Exception => error # rubocop:disable Lint/RescueException
-            remember_failure(error)
+            if @creation == :reserved && @invocation.send(:original_ios_dispatch_refusal?, self, error)
+              @creation, @dispatch_refusal = :not_dispatched, error
+            else
+              remember_failure(error)
+            end
           ensure
             # A callback's break/throw/nonlocal return is not successful drain
             # or wait completion. Latch before such control could bypass the
             # ordinary rescue and reach an upstream continuation.
-            @invocation.mark_unknown!(LifetimeError.new) unless @body_returned || @invocation.unknown?
+            @invocation.mark_unknown!(LifetimeError.new) unless @body_returned || @dispatch_refusal || @invocation.unknown?
             @reading = false
             @endpoints.each(&:close_once)
             # Independent, nonblocking cleanup only. No signaling and no retry
@@ -577,10 +676,11 @@ module MobileReleaseKit
               end
             end
             @finished = true
-            @invocation.raise_unknown! unless @body_returned
+            @invocation.raise_unknown! unless @body_returned || (@dispatch_refusal && retired? && !@invocation.unknown?)
           end
           Thread.handle_interrupt(Exception => :immediate) do
             @invocation.require_adapter_continuation!
+            raise @dispatch_refusal, cause: nil if @dispatch_refusal
             raise CommandExitError.new(@status) if @status.signaled?
             @status.exitstatus
           end
@@ -589,6 +689,7 @@ module MobileReleaseKit
         # Includes pending delivery at the interrupt-mask exit itself. A real
         # signaled status remains an ordinary, fully retired command failure.
         raise if error.is_a?(CommandExitError) && retired? && !@invocation.unknown?
+        raise if error.equal?(@dispatch_refusal) && retired? && !@invocation.unknown?
 
         remember_failure(error)
         @invocation.raise_unknown!
@@ -603,8 +704,11 @@ module MobileReleaseKit
       end
 
       def retired?
-        @finished && @creation == :returned && @pair_states.all? { |state| state == :returned } &&
-          @endpoints.all?(&:retired?) && @view&.eof == true && @wait == :reaped
+        return false unless @finished && @pair_states.all? { |state| state == :returned } && @endpoints.all?(&:retired?)
+        return true if @creation == :not_dispatched && @wait == :reserved && @view.nil? &&
+          @invocation.send(:original_ios_dispatch_refusal?, self, @dispatch_refusal)
+
+        @creation == :returned && @view&.eof == true && @wait == :reaped
       end
 
       private

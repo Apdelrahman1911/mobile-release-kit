@@ -6,6 +6,11 @@ require "tmpdir"
 require "fileutils"
 require "time"
 require_relative "apple_fixture"
+require_relative "../../fastlane/store_lane_fastlane_bridges"
+require "fastlane_core/itunes_transporter"
+require "fastlane_core/ipa_upload_package_builder"
+require "fastlane_core/fastlane_pty"
+require "pilot/build_manager"
 
 class AppleReleaseLanesTest < Minitest::Test
   def setup
@@ -175,6 +180,170 @@ class AppleReleaseLanesTest < Minitest::Test
     retry_process(cross_run: true)
     ENV["MOBILE_RELEASE_RECOVERY_CONFIRMATION"] = confirmation
     execute
+  end
+
+  class BridgeEndpoint
+    attr_accessor :autoclose, :close_error, :prepared
+    attr_reader :close_calls
+    def initialize = @close_calls = 0
+    def close_on_exec=(value)
+      @close_on_exec = value
+      prepared&.call
+    end
+    def close
+      @close_calls += 1
+      raise close_error if close_error
+    end
+    def gets(*) = nil
+  end
+
+  def with_real_upload_bridge(cut:, conversion: :none, close_fails: false, foreign_build: false, response_loss: false)
+    # Real Pilot/package/key/transporter/PipeAdapter code, including the pinned
+    # executor's StandardError#exit_status rescue. Native creation/wait/IO are
+    # inert before entry; this is not native process or macOS evidence.
+    lifetime, bridges = MobileReleaseKit::StoreLaneLifetime, MobileReleaseKit::StoreLaneFastlaneBridges
+    private_root = File.join(@root, "bridge-private")
+    [private_root, File.join(private_root, "tmp"), File.join(private_root, "runner")].each { |path| Dir.mkdir(path, 0o700) }
+    stat = File.stat(private_root)
+    artifact = File.join(@root, "candidate.ipa")
+    deadline = MobileReleaseKit::NativeUploadProcess.monotonic_ns + 3_600_000_000_000
+    record = lifetime::Invocation.new(lane: "ios_testflight_internal", mode: "execute", nonce: "n" * 16,
+      output: File.join(@root, "receipt.json"), run_deadline_ns: deadline)
+    binding = {"root" => private_root, "root_device" => stat.dev, "root_inode" => stat.ino,
+      "lane" => "ios_testflight_internal", "mode" => "execute", "shell_home" => false, "macos" => true,
+      "app_id" => "12345", "key_id" => "KEY123", "artifact" => artifact, "run_deadline_ns" => deadline}.freeze
+    resources = MobileReleaseKit::StoreLaneResources::Inventory.new(invocation: record, binding: binding)
+    record.bind_resources!(resources)
+    resources.admit!
+    runtime = Object.new
+    runtime.define_singleton_method(:resources) { resources }
+    runtime.define_singleton_method(:invocation) { record }
+    runtime.define_singleton_method(:binding) { binding }
+    runtime.define_singleton_method(:xml_template) { '<package><%= @data[:ipa_path] %></package>' }
+    runtime.define_singleton_method(:require_active!) { record.require_upload_continuation! }
+    runtime.define_singleton_method(:mark_unknown!) { |error, cleanup: false| record.mark_unknown!(error, cleanup: cleanup) }
+    expire = -> { @time = (@signing_expires_at - @wall_clock).to_i }
+    boundary = {package: :copy_package_ipa!, key: :write_api_key!}[cut]
+    if boundary
+      actual = resources.method(boundary)
+      resources.define_singleton_method(boundary) do |*args, **keywords|
+        result = actual.call(*args, **keywords)
+        expire.call
+        result
+      end
+    end
+    key = {key_id: "KEY123", issuer_id: "synthetic-issuer", key: "synthetic non-credential bytes"}
+    executor = FastlaneCore::AltoolTransporterExecutor.allocate
+    executor.singleton_class.prepend(bridges.const_get(:KeyBridge, false))
+    executor.define_singleton_method(:build_upload_command) { |*| "inert-upload-never-executed" }
+    execute = executor.method(:execute)
+    executor_calls = []
+    executor.define_singleton_method(:execute) do |command, hide_output|
+      executor_calls << command
+      expire.call if cut == :executor
+      result = execute.call(command, hide_output)
+      raise Faraday::TimeoutError, "synthetic response loss after valid native admission" if response_loss
+      result
+    end
+    transporter = FastlaneCore::ItunesTransporter.allocate
+    transporter.singleton_class.prepend(bridges.const_get(:TransporterBridge, false))
+    transporter.instance_variable_set(:@transporter_executor, executor)
+    transporter.instance_variable_set(:@api_key, key)
+    transporter.instance_variable_set(:@jwt, "synthetic-token")
+    builder = FastlaneCore::IpaUploadPackageBuilder.allocate
+    builder.singleton_class.prepend(bridges.const_get(:PackageBridge, false))
+    pilot = Pilot::BuildManager.allocate
+    pilot.singleton_class.prepend(bridges.const_get(:PilotBridge, false))
+    pilot.define_singleton_method(:start) { |options, should_login:| @config = options }
+    pilot.define_singleton_method(:config) { @config }
+    pilot.define_singleton_method(:fetch_app_id) { "12345" }
+    pilot.define_singleton_method(:fetch_app_platform) { "ios" }
+    pilot.define_singleton_method(:check_for_changelog_or_whats_new!) { |*| nil }
+    pilot.define_singleton_method(:transporter_for_selected_team) { |*| transporter }
+    test = self
+    @fastfile.define_singleton_method(:asc_api_key) { key }
+    @fastfile.define_singleton_method(:upload_to_testflight) do |**options|
+      begin
+        pilot.upload(options)
+      rescue StandardError
+        test.instance_variable_get(:@service).visible = true if foreign_build
+        raise Faraday::TimeoutError, "synthetic outer conversion of no-send" if conversion == :converted
+        raise unless conversion == :swallowed
+        true
+      end
+    end
+    @fastfile.define_singleton_method(:validate_current_ios_upload!) do |ipa|
+      test.instance_variable_get(:@upload_validation_calls) << {"ipa" => ipa, "at" => test.instance_variable_get(:@time)}
+      MobileReleaseKit::IosUploadValidation.current!(python: RbConfig.ruby,
+        module_root: File.expand_path("../../src", __dir__), app_root: test.instance_variable_get(:@root),
+        config_path: File.join(test.instance_variable_get(:@root), "release/mobile-release.json"),
+        intent_path: File.join(test.instance_variable_get(:@root), "intent.json"), ipa_path: ipa,
+        intent_sha256: test.instance_variable_get(:@intent_digest), environment: {},
+        tooling_directory: File.expand_path("../../fastlane", __dir__))
+    end
+    type = MobileReleaseKit::NativeUploadValidation.const_get(:CaptureSession, false)
+    output = JSON.generate("documentType" => "ios-current-upload-validation", "schemaVersion" => 1,
+      "operationIntentSha256" => @intent_digest, "ipaSha256" => Digest::SHA256.file(artifact).hexdigest,
+      "ipaSize" => File.size(artifact), "notBefore" => (@wall_clock - 86_400).iso8601,
+      "notAfter" => @signing_expires_at.iso8601).freeze
+    constructor = lambda do |**request|
+      session = type.allocate
+      session.instance_variable_set(:@store_binding, request.fetch(:store_binding))
+      session.instance_variable_set(:@stdout, output)
+      session.instance_variable_set(:@phase, :accepted)
+      session.define_singleton_method(:execute) { output }
+      session.define_singleton_method(:successful_offer?) { true }
+      session.define_singleton_method(:finality_confirmed?) { true }
+      session
+    end
+    endpoints = Array.new(4) { BridgeEndpoint.new }
+    endpoints.last.prepared = expire if cut == :pipe
+    endpoints.first.close_error = IOError.new("synthetic no-send close uncertainty") if close_fails
+    pipes, waits = 0, []
+    pipe = lambda do
+      pipes += 1
+      flunk "unexpected additional pipe" unless pipes.between?(1, 2)
+      endpoints.slice((pipes - 1) * 2, 2)
+    end
+    status = Struct.new(:pid, :exitstatus) do
+      def exited? = true
+      def signaled? = false
+    end.new(4242, 0)
+    spawn = lambda do |command, **_options|
+      assert_equal "inert-upload-never-executed", command
+      @upload_count += 1
+      @service.attributes("builds", "build-1")["uploadedDate"] = Time.now.utc.iso8601
+      @service.visible = true
+      expire.call if cut == :after_send
+      status.pid
+    end
+    pipe_bridge = Object.new.extend(bridges.const_get(:PipeBridge, false))
+    forbidden = ->(*) { flunk "unexpected native operation in inert real-bridge model" }
+    lifetime.stub(:current_invocation, record) do
+      bridges.stub(:runtime!, runtime) do
+        type.stub(:new, constructor) do
+          FastlaneCore::Helper.stub(:test?, false) do
+            FastlaneCore::IpaUploadPackageBuilder.stub(:new, builder) do
+              FastlaneCore::FastlanePty.stub(:spawn, pipe_bridge.method(:spawn)) do
+                IO.stub(:pipe, pipe) do
+                  Process.stub(:spawn, spawn) do
+                    Process.stub(:waitpid2, ->(pid, flags) { waits << [pid, flags]; [pid, status] }) do
+                      Process.stub(:kill, forbidden) do
+                        Process.stub(:detach, forbidden) do
+                          Process.stub(:setsid, forbidden) { yield record, resources, endpoints, executor_calls, waits }
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  ensure
+    resources&.close_independent!
   end
 
   def test_candidate_lost_upload_reply_reconciles_in_process_and_turns_off_notifications
@@ -378,6 +547,103 @@ class AppleReleaseLanesTest < Minitest::Test
       # The durable claim remains consumed even when eligibility expires. A
       # retry may not treat a missing receipt as proof of no possible upload.
       assert journal.fetch("history").any? { |entry| entry["phase"] == "mutation-dispatched" }
+    end
+  end
+
+  def test_original_and_retry_expiry_in_real_bridges_prevents_native_send_and_store_writes
+    [false, true].product(%i[package key executor pipe]).each do |retrying, cut|
+      teardown
+      setup
+      @wall_clock = Time.at(@wall_clock.to_i).utc
+      @service.visible = false
+      prepare("candidate")
+      if retrying
+        retry_process(cross_run: true)
+        ENV["MOBILE_RELEASE_RECOVERY_CONFIRMATION"] = "retry-ios-candidate-upload:#{@intent_digest}:#{@payload.fetch('artifacts').first.fetch('sha256')}"
+      end
+      @signing_expires_at = @wall_clock + (retrying ? 602 : 2)
+      original_bytes = File.binread(File.join(@root, "candidate.ipa"))
+      with_real_upload_bridge(cut: cut) do |record, resources, endpoints, calls, waits|
+        error = assert_raises(MobileReleaseKit::StoreLaneLifetime::IosDispatchRefused) { execute }
+        assert_same error, record.first_primary
+        assert_equal 0, @upload_count
+        assert_empty @service.writes
+        assert_empty waits
+        assert_equal(%i[package key].include?(cut) ? 0 : 1, calls.length)
+        assert endpoints.all? { |endpoint| endpoint.close_calls == (%i[package key].include?(cut) ? 0 : 1) }
+        assert_equal 1, @upload_validation_calls.length
+        assert_equal File.join(@root, "candidate.ipa"), @upload_validation_calls.first.fetch("ipa")
+        assert_equal original_bytes, File.binread(File.join(@root, "candidate.ipa"))
+        assert journal.fetch("history").any? { |entry| entry["phase"] == "mutation-dispatched" }
+        refute journal.fetch("history").any? { |entry| entry["phase"] == "upload-response-ambiguous" }
+        refute File.exist?(File.join(@root, "receipt.json"))
+        refute record.unknown?
+        assert record.seal_uploads!
+        resources.finish!
+        assert record.uploads_sealed_and_retired?
+      end
+    end
+  end
+
+  def test_real_bridge_no_send_primary_survives_outer_conversion_swallow_and_close_uncertainty
+    [false, true].product(%i[converted swallowed], [false, true]).each do |retrying, conversion, close_fails|
+      teardown
+      setup
+      @wall_clock = Time.at(@wall_clock.to_i).utc
+      @service.visible = false
+      prepare("candidate")
+      if retrying
+        retry_process(cross_run: true)
+        ENV["MOBILE_RELEASE_RECOVERY_CONFIRMATION"] = "retry-ios-candidate-upload:#{@intent_digest}:#{@payload.fetch('artifacts').first.fetch('sha256')}"
+      end
+      @signing_expires_at = @wall_clock + (retrying ? 602 : 2)
+      with_real_upload_bridge(cut: :pipe, conversion: conversion, close_fails: close_fails, foreign_build: true) do |record, _resources, endpoints, _calls, waits|
+        lifetime = MobileReleaseKit::StoreLaneLifetime
+        error = assert_raises(close_fails ? lifetime::LifetimeError : lifetime::IosDispatchRefused) { execute }
+        assert_instance_of lifetime::IosDispatchRefused, record.first_primary
+        assert_same record.first_primary, close_fails ? error.primary : error
+        assert_equal close_fails, record.unknown?
+        assert_equal 0, @upload_count
+        assert_empty waits
+        assert_empty @service.writes, "a foreign matching build must not turn no-send into reconciliation writes"
+        assert endpoints.all? { |endpoint| endpoint.close_calls == 1 }
+        assert_equal 1, @upload_validation_calls.length
+        assert journal.fetch("history").any? { |entry| entry["phase"] == "mutation-dispatched" }
+        refute journal.fetch("history").any? { |entry| entry["phase"] == "upload-response-ambiguous" }
+        refute File.exist?(File.join(@root, "receipt.json"))
+        assert_includes record.cleanup_errors, endpoints.first.close_error if close_fails
+      end
+    end
+  end
+
+  def test_real_valid_original_retry_and_response_loss_can_finish_after_signing_expiry
+    [false, true].product([false, true]).each do |retrying, response_loss|
+      teardown
+      setup
+      @wall_clock = Time.at(@wall_clock.to_i).utc
+      @service.visible = false
+      prepare("candidate")
+      if retrying
+        retry_process(cross_run: true)
+        ENV["MOBILE_RELEASE_RECOVERY_CONFIRMATION"] = "retry-ios-candidate-upload:#{@intent_digest}:#{@payload.fetch('artifacts').first.fetch('sha256')}"
+      end
+      @signing_expires_at = @wall_clock + (retrying ? 602 : 2)
+      with_real_upload_bridge(cut: :after_send, response_loss: response_loss) do |record, resources, endpoints, calls, waits|
+        execute
+        assert_equal 1, @upload_count
+        assert_equal 1, calls.length
+        assert_equal [[4242, 0]], waits
+        assert endpoints.all? { |endpoint| endpoint.close_calls == 1 }
+        assert_equal 1, @upload_validation_calls.length
+        expected = retrying ? "operator_authorized_retry" : (response_loss ? "reconciled" : "accepted")
+        assert_equal expected, receipt.fetch("result")
+        assert_operator @wall_clock + @time, :>=, @signing_expires_at
+        assert record.require_ios_dispatch_not_refused!
+        refute record.unknown?
+        assert record.seal_uploads!
+        resources.finish!
+        assert record.uploads_sealed_and_retired?
+      end
     end
   end
 

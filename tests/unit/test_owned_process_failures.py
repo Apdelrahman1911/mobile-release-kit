@@ -233,7 +233,8 @@ class BeforeActiveFailureTests(unittest.TestCase):
              patch.object(preflight_module.shutil, "which", return_value="/fictional/tool"), \
              patch.object(preflight_module, "_xcode_application_identities", return_value=(set(), "failed")) as query:
             self.assertEqual(preflight_module._effective_ios_identity_finding(self.ios).status, Status.BLOCKED)
-        query.assert_called_once_with(self.ios, configuration="Debug", execution_source=None, cancellation=None)
+        query.assert_called_once_with(self.ios, configuration="Debug", project_read_token=None,
+                                      execution_source=None, cancellation=None)
 
     def test_secondary_filesystem_error_cannot_resume_next_platform_identity_query(self):
         self.android.data["ios"] = dict(self.ios.data["ios"])

@@ -3061,7 +3061,8 @@ def helper_main(argv: list[str], policy: int | None) -> int:
 class _Outer:
     def __init__(self, guard: DefaultCancellation, owns: bool, timeout: int,
                  scope: AccountExecutionScope | None, binding: JournalledCommandBinding | None,
-                 *, suppress_cancel: bool, evidence: CommandCallEvidence | None = None) -> None:
+                 *, suppress_cancel: bool, evidence: CommandCallEvidence | None = None,
+                 text: bool = True) -> None:
         self._store_timing = (None if evidence is None else evidence._fixed_timing(
             guard, timeout=timeout, owns=owns, scope=scope, binding=binding))
         self.nonce = os.urandom(16) if scope is None else scope.nonce
@@ -3098,7 +3099,8 @@ class _Outer:
         self.terminal: dict[str, Any] | None = None
         self.phase = "NEW"
         self.handlers_complete = self.local_cleanup_complete = self.cleanup_entered = False
-        self.decoded: tuple[str, str] | None = None
+        self.text = text
+        self.decoded: tuple[str, str] | tuple[bytes, bytes] | None = None
         self.observation: FenceObservationDecoder | None = None
         if binding is not None and binding.fence_observation is FenceObservationPolicy.TRACE_V1:
             self.observation = FenceObservationDecoder(self.nonce, binding._fields["sequence"], uid=binding._fields["uid"])
@@ -3379,8 +3381,13 @@ class _Outer:
                     and self.terminal["result"])
         if complete:
             try:
-                self.decoded = self.outputs[0].decode("utf-8"), self.outputs[1].decode("utf-8")
-            except UnicodeError as error:
+                self.decoded = ((self.outputs[0].decode("utf-8"), self.outputs[1].decode("utf-8"))
+                                if self.text else (bytes(self.outputs[0]), bytes(self.outputs[1])))
+            except BaseException as error:
+                # Conversion is still part of result publication. Allocation or
+                # interruption failure cannot escape before the original slot
+                # accounts for finality, nor publish a successful partial pair.
+                self.decoded = None
                 self.ctx.record(error)
                 complete = False
         observed = None if self.terminal is None else self.terminal["wait"]
@@ -3411,12 +3418,14 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
                 cancellation: DefaultCancellation | None, on_start: Callable[[int], None] | None,
                 cleanup: bool, execution_scope: AccountExecutionScope | None,
                 journal_binding: JournalledCommandBinding | None,
-                _evidence: CommandCallEvidence | None = None) -> subprocess.CompletedProcess[str]:
+                _evidence: CommandCallEvidence | None = None, text: bool = True,
+                ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    _require(type(text) is bool)
     if _evidence is not None:
         _require(type(_evidence) is CommandCallEvidence)
         _evidence._attempt(cancellation, timeout=timeout,
                            ordinary=(execution_scope is None and journal_binding is None
-                                     and on_start is None and cleanup is False))
+                                     and on_start is None and cleanup is False and text is True))
     _require(os.name == "posix" and sys.platform in ("linux", "darwin")
              and _integer(timeout, 1, 86400) and type(cleanup) is bool
              and (on_start is None or callable(on_start))
@@ -3440,7 +3449,7 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
                                      "owned command cancellation handlers could not be restored")
     suppress = cleanup and guard.cancelled and guard.depth > 0
     engine = _Outer(guard, owns, timeout, execution_scope, journal_binding,
-                    suppress_cancel=suppress, evidence=_evidence)
+                    suppress_cancel=suppress, evidence=_evidence, text=text)
 
     def fork_relinquish() -> None:
         if engine.ctx.pid != os.getpid():

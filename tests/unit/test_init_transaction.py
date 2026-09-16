@@ -11,7 +11,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -932,28 +931,79 @@ class InitTransactionTests(unittest.TestCase):
             self.assertEqual(line, b"CHECKPOINT\n", f"child exited early: {line!r}")
             yield process
         finally:
-            # A failed leader can leave descendants holding pipes/locks. This
-            # session belongs only to this fixture; never kill by process name.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=10)
-            for stream in (process.stdin, process.stdout, process.stderr):
-                stream.close()
-            deadline = time.monotonic() + 5
-            while True:
+            # The fixed --child route only applies/recovers init filesystem
+            # work; it has no descendants. Retain the original Popen owner,
+            # never signal or probe its reusable numeric group after waiting.
+            with contextlib.ExitStack() as streams:
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    streams.callback(stream.close)
                 try:
-                    os.killpg(process.pid, 0)
-                except ProcessLookupError:
-                    break
-                self.assertLess(time.monotonic(), deadline, "owned test process group survived cleanup")
-                time.sleep(0.02)
+                    process.kill()
+                finally:
+                    process.wait(timeout=10)
 
     def kill_at(self, root: Path, mode: str, kind: str, label: str, when: str = "after") -> None:
         with self.stopped_child(root, mode, kind, label, when) as process:
-            os.killpg(process.pid, signal.SIGKILL)
-            self.assertEqual(process.wait(timeout=10), -signal.SIGKILL)
+            pass
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+
+    def test_stopped_child_has_one_original_stop_wait_owner_and_closes_each_stream(self) -> None:
+        # Inert fixture-call regression, not evidence of actual child finality.
+        # No numeric pid is available on this double and no native call is allowed.
+        for failures in ((), ("body",), ("kill",), ("wait",), ("stdin",), ("stdout",), ("stderr",),
+                         ("body", "kill", "wait", "stdin", "stdout", "stderr")):
+            with self.subTest(failures=failures):
+                calls = []
+                errors = {name: RuntimeError(f"synthetic {name} failure") for name in failures}
+
+                def reached(name):
+                    calls.append(name)
+                    if name in errors:
+                        raise errors[name]
+
+                def wait(*, timeout):
+                    self.assertEqual(timeout, 10)
+                    reached("wait")
+                    process.returncode = -signal.SIGKILL
+                    return process.returncode
+
+                process = SimpleNamespace(
+                    stdin=SimpleNamespace(close=lambda: reached("stdin")),
+                    stdout=SimpleNamespace(close=lambda: reached("stdout"), readline=lambda: b"CHECKPOINT\n"),
+                    stderr=SimpleNamespace(close=lambda: reached("stderr")),
+                    returncode=None, kill=lambda: reached("kill"), wait=wait,
+                )
+                with patch.object(subprocess, "Popen", return_value=process) as popen, patch.object(
+                        selectors, "DefaultSelector") as factory, patch.object(
+                        os, "kill", side_effect=AssertionError("unexpected numeric signal")), patch.object(
+                        os, "killpg", side_effect=AssertionError("unexpected group signal/probe")), patch.object(
+                        os, "waitpid", side_effect=AssertionError("unexpected numeric wait")):
+                    selector = factory.return_value.__enter__.return_value
+                    selector.select.return_value = [object()]
+
+                    def exercise():
+                        if "body" in errors:
+                            with self.stopped_child(Path("/fictional/init-root"), "apply", "mkdir", tx.PREPARING):
+                                raise errors["body"]
+                        else:
+                            self.kill_at(Path("/fictional/init-root"), "apply", "mkdir", tx.PREPARING)
+
+                    if errors:
+                        with self.assertRaises(RuntimeError) as caught:
+                            exercise()
+                        chain, error = [], caught.exception
+                        while error is not None:
+                            self.assertNotIn(error, chain)
+                            chain.append(error)
+                            error = error.__context__
+                        for original in errors.values():
+                            self.assertIn(original, chain)
+                    else:
+                        exercise()
+                    popen.assert_called_once()
+                    selector.register.assert_called_once_with(process.stdout, selectors.EVENT_READ)
+                    selector.select.assert_called_once_with(30)
+                self.assertEqual(calls, ["kill", "wait", "stderr", "stdout", "stdin"])
 
     def test_real_termination_in_each_phase_then_fresh_process_recovery(self) -> None:
         points = [
@@ -1001,8 +1051,7 @@ class InitTransactionTests(unittest.TestCase):
                         self.assertIn("another init/recovery", error)
                         self.assertEqual(output, "")
                         self.assertEqual(snapshot(root), current)
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=10)
+                self.assertEqual(process.returncode, -signal.SIGKILL)
                 self.kill_at(root, "recover", kind, label)
                 code, _, error = invoke(["init", "--root", str(root), "--recover"])
                 self.assertEqual(code, 0, error)
@@ -1131,7 +1180,7 @@ class InitTransactionTests(unittest.TestCase):
 
 def child() -> None:
     root, mode, kind, label, when = Path(sys.argv[2]), *sys.argv[3:]
-    signal.alarm(45)  # Last-resort self-limit; the parent also owns/kills the group.
+    signal.alarm(45)  # Last-resort self-limit; the parent also owns/kills this child.
     stopped = []
 
     def checkpoint(_index, event, phase):

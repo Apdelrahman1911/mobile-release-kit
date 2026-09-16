@@ -3738,6 +3738,7 @@ class Session:
             seconds = min(5.0, abort["deadline"] - time.monotonic())
             if seconds <= 0:
                 raise _NativeAbortIssue("deadline", "DEADLINE")
+            self._native_abort_guard(abort)
         except BaseException as exc:
             issue = self._native_abort_error(abort, exc, "LOG_ADMISSION")
             result["log_status"] = issue.status if issue.status in {"deadline", "cancelled", "limit"} else "unavailable"
@@ -4740,14 +4741,13 @@ class Session:
                 self._assert_userns_boundary()
             _remaining(cutoff)  # Capture acquisition may not buy a later spawn.
             self._native_abort_stamp(abort, "wall_before")
-            if abort is not None or exit_reason is not None or initial_application or offline_baseline:
-                # Neither observations nor capture acquisition may authorize a
-                # late/cancelled launch. Recheck the ORIGINAL subject cutoff.
-                _remaining(cutoff)
-                if self.cancelled or self.failure is not None:
-                    cancelled = self.cancelled
-                    fail(self.failure or "command cancellation")
-                    raise SessionError("prelaunch observation found a stopped controller")
+            # Every profile shares this final admission check: capture setup
+            # and optional observations cannot authorize a stopped controller.
+            _remaining(cutoff)
+            if self.cancelled or self.failure is not None:
+                cancelled = self.cancelled
+                fail(self.failure or "command cancellation")
+                raise SessionError("prelaunch observation found a stopped controller")
             child = subprocess.Popen(command, cwd=cwd, env=child_env, stdin=subprocess.DEVNULL,
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       close_fds=True, start_new_session=True, **kwargs)
