@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import copy
 import json
-import shutil
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -101,7 +100,7 @@ class WorkflowAttemptTests(unittest.TestCase):
                 self.assertEqual(result["mode"], "resume")
                 self.assertEqual(result["source"], intent["operationSource"])
                 recovered_app = lifecycle.root / (stage + "-recovered-app")
-                shutil.copytree(destination / "operation", recovered_app / ".mobile-release/operation")
+                fixture.private_fixture_copy_tree(destination / "operation", recovered_app / ".mobile-release/operation", app_root=recovered_app)
                 self.assertEqual(
                     (destination / "operation" / f"{stage}-operation-intent.json").read_bytes(),
                     (app / ".mobile-release/operation" / f"{stage}-operation-intent.json").read_bytes(),

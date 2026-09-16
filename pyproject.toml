@@ -49,6 +49,11 @@ mobile_release = ["data/apple-profile-roots.pem"]
   "fastlane/native_upload_validation.rb",
   "fastlane/native_process_spawn.rb",
   "fastlane/native_upload_process.rb",
+  "fastlane/store_document.rb",
+  "fastlane/store_lane_lifetime.rb",
+  "fastlane/store_lane_resources.rb",
+  "fastlane/store_lane_runtime.rb",
+  "fastlane/store_lane_fastlane_bridges.rb",
   "fastlane/release_support.rb",
   "fastlane/run_lane.rb",
 ]

@@ -46,7 +46,7 @@ module InstalledRubyCaptureAssertions
       assert_source_origin(origin, binding, "fastlane/#{record.fetch('platform')}_upload_validation.rb")
     end
     loaded = %W[
-      release_support.rb native_process_spawn.rb native_upload_process.rb
+      release_support.rb native_process_spawn.rb native_upload_process.rb store_lane_lifetime.rb
       native_upload_validation.rb #{record.fetch('platform')}_upload_validation.rb
     ].map { |name| File.join(binding.fetch("toolingRoot"), name) }.sort
     assert_equal loaded, record.fetch("loadedProductFeatures")

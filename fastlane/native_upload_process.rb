@@ -34,7 +34,7 @@ module MobileReleaseKit
     class LifecycleError < Error; end
 
     def self.monotonic_ns
-      Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+      native.monotonic_ns
     end
 
     def self.native

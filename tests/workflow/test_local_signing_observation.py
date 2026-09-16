@@ -8,12 +8,14 @@ import os
 import tempfile
 import threading
 import unittest
+from contextlib import ExitStack, contextmanager
+from functools import wraps
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 from mobile_release import _command_process as command
-from mobile_release import local_signing as signing
+from mobile_release import build_inputs, local_signing as signing
 from mobile_release.errors import CredentialError
 from unit import local_signing_persistent as persistent
 from workflow import local_signing_bridge as bridge
@@ -145,54 +147,6 @@ class ObservationContractTests(unittest.TestCase):
             with self.assertRaisesRegex(CredentialError, 'recovery control generation changed'):
                 attempt.check(session)
         self.assertEqual(session._committed_controls, {'state.json': b'PREPARED'})
-
-    def test_composition_materializer_routes_only_its_private_directory_and_keeps_real_cleanup(self):
-        from unit import test_local_signing_composition as composition
-        from workflow import profile_installation_fixture as profile_fixture
-
-        _materializer_directory = persistent._materializer_directory
-        self.assertIs(composition._materializer_directory, _materializer_directory)
-        self.assertIs(profile_fixture._materializer_directory, _materializer_directory)
-
-        with tempfile.TemporaryDirectory(prefix='mrk-materializer-route-inert-') as name:
-            root, created = Path(name), []
-            private = root / 'private'
-            private.mkdir(mode=0o700)
-            for fail_body in (False, True):
-                with self.subTest(fail_body=fail_body):
-                    owner = _materializer_directory(tempfile.TemporaryDirectory, private, created,
-                                                    prefix='mobile-release-build-inputs-')
-                    actual = Path(owner.name)
-                    self.assertEqual(actual.parent, private)
-                    self.assertEqual(created[-1], actual)
-                    body_error = ValueError('inert body interruption')
-                    try:
-                        with owner:
-                            (actual / 'fictional-input').write_bytes(b'fixture')
-                            if fail_body:
-                                raise body_error
-                    except ValueError as error:
-                        self.assertTrue(fail_body)
-                        self.assertIs(error, body_error)
-                    self.assertFalse(os.path.lexists(actual))
-            allocation_error = OSError('inert allocation failure')
-            failing = Mock(side_effect=allocation_error)
-            with self.assertRaisesRegex(OSError, 'allocation failure') as caught:
-                _materializer_directory(failing, private, created, prefix='mobile-release-build-inputs-')
-            self.assertIs(caught.exception, allocation_error)
-            failing.assert_called_once_with(dir=private, prefix='mobile-release-build-inputs-')
-            untouched = Mock()
-            with self.assertRaisesRegex(AssertionError, 'allocation contract changed'):
-                _materializer_directory(untouched, private, created,
-                                        prefix='mobile-release-build-inputs-', dir=root)
-            untouched.assert_not_called()
-            ordinary = Mock(wraps=tempfile.TemporaryDirectory)
-            with _materializer_directory(ordinary, private, created,
-                                         prefix='mobile-release-profile-auth-', dir=root) as name:
-                self.assertEqual(Path(name).parent, root)
-            ordinary.assert_called_once_with(prefix='mobile-release-profile-auth-', dir=root)
-            self.assertEqual(len(created), 2)
-            self.assertEqual(list(private.iterdir()), [])
 
     def test_original_snapshot_is_validated_before_acquisition_and_never_renews_the_deadline(self):
         with tempfile.TemporaryDirectory(prefix="mrk-original-input-inert-") as temporary:
@@ -326,14 +280,16 @@ class ObservationContractTests(unittest.TestCase):
         commands = [{"ordinal": number, "command": name, "mutation": mutation,
                      "phase": "setup" if number < 27 else "build" if number == 27 else "cleanup"}
                     for number, (name, mutation, _recovery) in enumerate(semantic.HEALTHY_COMMANDS, 1)]
-        files = {name: {"device": 1, "inode": number, "size": len(semantic.FICTIONAL_PEM), "mode": 0o644,
+        files = {name: {"device": 1, "inode": number, "size": len(semantic.FICTIONAL_PEM), "mode": 0o600,
                        "sha256": hashlib.sha256(semantic.FICTIONAL_PEM).hexdigest()}
                  for number, name in enumerate(semantic.EXTRACT_NAMES, 1)}
-        for command, name in zip(commands[5:11], (*semantic.EXTRACT_NAMES, *semantic.IMPORT_NAMES)):
-            command["inputPath"] = "<ROOT>/private/" + name
-            if command["command"] == "import":
-                command["inputFile"] = dict(files[name])
-        commands[8]["inputFile"]["mode"] = 0o600
+        p12 = {"device": 1, "inode": 4, "size": len(b"fictional-p12"), "mode": 0o600,
+               "sha256": hashlib.sha256(b"fictional-p12").hexdigest()}
+        for command, name in zip(commands[5:8], semantic.EXTRACT_NAMES):
+            command.update(inputPath=semantic.INPUT_PREFIX + "distribution.p12", inputFile=dict(p12),
+                           outputPath=semantic.INPUT_PREFIX + name)
+        for command, name in zip(commands[8:11], semantic.IMPORT_NAMES):
+            command.update(inputPath=semantic.INPUT_PREFIX + name, inputFile=dict(files[name]))
         checkpoints = []
         for number, (caller, completed, role, search, default, cleanup) in enumerate(semantic.HEALTHY_CHECKPOINTS, 1):
             state = {"revision": number, "preferences": preferences[role], "inflight": None, "conflict": False,
@@ -352,7 +308,8 @@ class ObservationContractTests(unittest.TestCase):
                    "commandOrdinal": ordinal, "beforePreferences": preferences[before], "afterPreferences": preferences[after]}
             if number < 3:
                 name = semantic.EXTRACT_NAMES[number]
-                row.update(path="<ROOT>/private/" + name, file=files[name])
+                row.update(path=semantic.INPUT_PREFIX + name, file=files[name], returncode=0,
+                           stdout={key: files[name][key] for key in ("size", "sha256")})
             effects.append(row)
             value["events"][index - 1] = {"index": index, "operation": "native-effect/" + operation,
                 "slot": "native", "origin": "model", "phase": phase, "occurrence": occurrence, "details": {}, "succeeded": True}
@@ -365,7 +322,8 @@ class ObservationContractTests(unittest.TestCase):
         root = Path("/fictional-inert-root")  # This data predicate performs no filesystem or native work.
         value = self.inert_healthy_data(root)
         semantic.assert_healthy_observation(root, value)
-        for variant in ("missing-checkpoint", "changed-state", "wrong-import", "early-effect", "early-terminal"):
+        for variant in ("missing-checkpoint", "changed-state", "wrong-import", "changed-input",
+                        "failed-extraction", "changed-stdout", "early-effect", "early-terminal"):
             changed = copy.deepcopy(value)
             contexts = changed["healthyContexts"]
             if variant == "missing-checkpoint":
@@ -375,7 +333,13 @@ class ObservationContractTests(unittest.TestCase):
                 row["state"]["searchAttempted"] = False
                 row["stateSha256"] = hashlib.sha256(signing._json(row["state"])).hexdigest()
             elif variant == "wrong-import":
-                contexts["commands"][8]["inputPath"] = "<ROOT>/private/signing-certificate.pem"
+                contexts["commands"][8]["inputPath"] = semantic.INPUT_PREFIX + "signing-certificate.pem"
+            elif variant == "changed-input":
+                contexts["commands"][5]["inputFile"]["sha256"] = "0" * 64
+            elif variant == "failed-extraction":
+                contexts["effects"][0]["returncode"] = 1
+            elif variant == "changed-stdout":
+                contexts["effects"][0]["stdout"]["sha256"] = "0" * 64
             elif variant == "early-effect":
                 row = contexts["effects"][3]
                 actual = changed["events"][row["eventIndex"] - 1]
@@ -385,6 +349,263 @@ class ObservationContractTests(unittest.TestCase):
                 changed["events"][-1]["index"] = 450
             with self.subTest(variant=variant), self.assertRaises(AssertionError):
                 semantic.assert_healthy_observation(root, changed)
+
+
+class MaterializerObservationContractTests(unittest.TestCase):
+    """Synthetic object graphs only: no descriptor, project or account is owned."""
+
+    def setUp(self):
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        # Inert test descriptors must never reach a product owner or OS FD API.
+        for component, names in (
+            (build_inputs._FD, ("open", "close")),
+            (build_inputs._Directory, ("acquire", "check", "close")),
+            (build_inputs._Project, ("acquire", "check", "cleanup")),
+            (build_inputs.InvocationCustody, ("acquire", "require", "cleanup")),
+            (build_inputs.BuildInputs, ("_check", "replace_all", "cleanup")),
+            (build_inputs.FiniteScratch, ("acquire", "require", "_dispose", "cleanup")),
+            (signing.SigningLease, ("acquire", "assert_owner", "_admit_execution", "close")),
+            (persistent.os, ("open", "close", "fstat")),
+        ):
+            for name in names:
+                stack.enter_context(patch.object(component, name,
+                    side_effect=AssertionError("passive materializer observation invoked " + name)))
+        self.lexists = stack.enter_context(patch.object(persistent.os.path, "lexists", return_value=False))
+
+    @staticmethod
+    @contextmanager
+    def inert_materializer(config, *, build_inputs=None, signing_lease=None, cancellation=None, **forwarded):
+        # Even the outer frame deliberately contains a plausible child local;
+        # only the original non-None PARAMETER selects an inner context.
+        child = config.child
+        invocation = (build_inputs if build_inputs is not None else child).invocation
+        scratch = (build_inputs if build_inputs is not None else child).scratch
+        yield config.result
+
+    @staticmethod
+    def graph():
+        def inert(cls, **fields):
+            owner = object.__new__(cls)  # No constructor/registration/admission.
+            owner.__dict__.update(fields)
+            return owner
+
+        root, guard = Path("/fictional-materializer-oracle"), object()
+        slots = {"outer": [], "child": []}
+
+        def slot(group, *, closed=False):
+            number = 10000 + sum(map(len, slots.values()))  # DATA, never a real FD.
+            result = inert(build_inputs._FD, guard=guard, number=None if closed else number,
+                           open_state="OPEN", close_state="CLOSED" if closed else "NOT_ATTEMPTED")
+            slots[group].append(result)
+            return result
+
+        def directory(path, group):
+            return inert(build_inputs._Directory, path=path, guard=guard, slots=[slot(group)])
+
+        def identity(inode):
+            return dict(device=1, inode=inode, uid=1, gid=1, mode=0o700)
+
+        lease = inert(signing.SigningLease, cancellation=guard, active=None)
+        invocation = inert(build_inputs.InvocationCustody, root=root, cancellation=guard, mode="build",
+            signing_lease=lease, active=True, reserved=True, claimed=False, lock_result=True,
+            reservation_state="ACQUIRED", environment_lock=object(), frames=[])
+        project = inert(build_inputs._Project, root=root, guard=guard, claimed=False,
+            directory=directory(root, "outer"), meta=slot("outer"), meta_identity=identity(1))
+        child = inert(build_inputs.BuildInputs, invocation=invocation, project=project, cancellation=guard,
+            slot=slot("child"), identity=identity(2), prepared=True, claimed=False, created=True,
+            creation={"state": "CREATED"}, control_slots=[slot("child", closed=True)],
+            parents={"iosApp": directory(root / "iosApp", "child")})
+        scratch = inert(build_inputs.FiniteScratch, cancellation=guard, journal=child, name="scratch",
+            parent=directory(root / ".mobile-release/build-inputs", "child"), slot=slot("child"),
+            identity=identity(3), active=True, claimed=False, created=True, creation={"state": "CREATED"},
+            writer_slots=[slot("child", closed=True)], records={"apple-profile": {"binding": object()}},
+            tokens={"apple-profile": object()})
+        child.scratch, invocation.child, invocation.project_owner = scratch, child, project
+        config = SimpleNamespace(root=root, child=child, result=object())
+        return SimpleNamespace(root=root, guard=guard, lease=lease, invocation=invocation,
+            project=project, child=child, scratch=scratch, slots=slots, config=config)
+
+    def context(self, observer, graph, *, inner=True):
+        return observer.context(graph.config, build_inputs=graph.child if inner else None,
+                                signing_lease=graph.lease, cancellation=graph.guard)
+
+    def live(self, observer, graph):
+        return observer.live(root=graph.root, invocation=graph.invocation, lease=graph.lease,
+                             guard=graph.guard, scratch=graph.scratch)
+
+    @staticmethod
+    def retire(graph, group):
+        """Only change synthetic DATA. This is not a cleanup/native receipt."""
+        for slot in graph.slots[group]:
+            slot.number, slot.close_state = None, "CLOSED"
+        if group == "child":
+            graph.child.claimed, graph.child.created = True, False
+            graph.child.creation["state"] = graph.scratch.creation["state"] = "RETIRED"
+            graph.scratch.created, graph.invocation.child = False, None
+        else:
+            graph.invocation.claimed, graph.project.claimed = True, True
+            graph.invocation.active = graph.invocation.reserved = False
+            graph.invocation.lock_result, graph.invocation.project_owner = None, None
+            graph.invocation.reservation_state = "RELEASED"
+
+    def test_factory_returns_the_original_context_and_preserves_arguments_and_exceptions(self):
+        graph, calls, originals = self.graph(), [], []
+
+        @wraps(self.inert_materializer)
+        def recording(*args, **kwargs):
+            calls.append((args, kwargs))
+            context = self.inert_materializer(*args, **kwargs)
+            originals.append(context)
+            return context
+
+        observer = persistent.MaterializerObservation(recording)
+        values, platforms = {}, iter(("ios",))
+        context = observer.context(graph.config, values=values, platforms=platforms, build_inputs=graph.child,
+                                   signing_lease=graph.lease, cancellation=graph.guard)
+        self.assertIs(context, originals[0])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls[0][0]), 1)
+        self.assertIs(calls[0][0][0], graph.config)
+        self.assertEqual(set(calls[0][1]), {"values", "platforms", "build_inputs", "signing_lease", "cancellation"})
+        for name, value in (("values", values), ("platforms", platforms), ("build_inputs", graph.child),
+                            ("signing_lease", graph.lease), ("cancellation", graph.guard)):
+            self.assertIs(calls[0][1][name], value)
+        primary = KeyboardInterrupt("original inert materializer body")
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            with context as result:
+                self.assertIs(result, graph.config.result)
+                self.assertIs(self.live(observer, graph), graph.child)
+                raise primary
+        self.assertIs(caught.exception, primary)
+        self.assertIsNone(context.gen.gi_frame)
+
+        @wraps(self.inert_materializer)
+        def refused(*args, **kwargs):
+            raise primary
+
+        observer = persistent.MaterializerObservation(refused)
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            self.context(observer, graph)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(observer.contexts, [])
+
+    def test_only_the_original_generator_and_unique_inner_parameter_are_accepted(self):
+        graph = self.graph()
+        observer = persistent.MaterializerObservation(self.inert_materializer)
+        with self.context(observer, graph, inner=False):
+            with self.assertRaisesRegex(AssertionError, "exactly one original inner"):
+                self.live(observer, graph)
+        observer = persistent.MaterializerObservation(self.inert_materializer)
+        with self.context(observer, graph), self.context(observer, graph):
+            with self.assertRaisesRegex(AssertionError, "exactly one original inner"):
+                self.live(observer, graph)
+
+        @contextmanager
+        def wrong_code(*args, **kwargs):
+            yield graph.config.result
+
+        copied_frame = SimpleNamespace(f_locals={"build_inputs": graph.child, "invocation": graph.invocation,
+                                                "scratch": graph.scratch})
+        for replacement in (wrong_code, lambda *args, **kwargs: SimpleNamespace(
+                gen=SimpleNamespace(gi_code=observer.code, gi_frame=copied_frame))):
+            @wraps(self.inert_materializer)
+            def substituted(*args, **kwargs):
+                return replacement(*args, **kwargs)
+            observer = persistent.MaterializerObservation(substituted)
+            with self.assertRaisesRegex(AssertionError, "original materializer (context|generator) changed"):
+                self.context(observer, graph)
+            self.assertEqual(observer.contexts, [])
+
+    def test_first_positive_custody_bindings_cannot_be_replaced_or_retargeted(self):
+        changes = (
+            ("invocation", lambda g: setattr(g.child, "invocation", object())),
+            ("guard", lambda g: setattr(g.child, "cancellation", object())),
+            ("account", lambda g: setattr(g.invocation, "signing_lease", object())),
+            ("project", lambda g: setattr(g.child, "project", object())),
+            ("scratch", lambda g: setattr(g.child, "scratch", object())),
+            ("scratch-journal", lambda g: setattr(g.scratch, "journal", object())),
+            ("child-pointer", lambda g: setattr(g.invocation, "child", None)),
+            ("root", lambda g: setattr(g.project, "root", g.root / "different")),
+            ("descriptor", lambda g: setattr(g.child.slot, "number", g.child.slot.number + 1)),
+            ("inventory", lambda g: setattr(g.child, "control_slots", list(g.child.control_slots))),
+            ("identity-object", lambda g: setattr(g.scratch, "identity", dict(g.scratch.identity))),
+            ("identity-value", lambda g: g.scratch.identity.update(inode=999)),
+        )
+        for name, change in changes:
+            graph = self.graph()
+            observer = persistent.MaterializerObservation(self.inert_materializer)
+            with self.subTest(change=name), self.context(observer, graph):
+                self.assertIs(self.live(observer, graph), graph.child)
+                change(graph)
+                with self.assertRaises(AssertionError):
+                    self.live(observer, graph)
+
+    def test_borrowed_scratch_and_original_outer_context_have_distinct_terminal_contracts(self):
+        graph = self.graph()
+        observer = persistent.MaterializerObservation(self.inert_materializer)
+        with self.context(observer, graph, inner=False):
+            with self.context(observer, graph):
+                self.assertIs(self.live(observer, graph), graph.child)
+            self.retire(graph, "child")
+            with self.assertRaisesRegex(AssertionError, "context still lives"):
+                observer.child_settled(outers_live=True)
+        observer.child_settled(outers_live=True)
+        self.assertTrue(graph.scratch.active and graph.scratch.records and graph.scratch.tokens)
+        self.assertFalse(graph.scratch.claimed)  # _dispose is not standalone cleanup.
+        self.assertEqual(len(observer.contexts), 2)  # One outer + exactly one inner.
+        self.assertEqual({call.args[0] for call in self.lexists.call_args_list}, {
+            graph.root / ".mobile-release" / name for name in (
+                "build-inputs/scratch", "build-inputs", "build-inputs-complete.json", "build-inputs-complete.stage")})
+        with self.assertRaisesRegex(AssertionError, "outers did not retire"):
+            observer.outer_settled()
+        self.retire(graph, "outer")
+        observer.outer_settled()
+
+    def test_claimed_and_cleared_pointers_do_not_hide_unretired_or_late_resources(self):
+        for defect in ("child-creation", "scratch-creation", "unknown-slot", "late-control", "lost-prefix", "namespace"):
+            graph = self.graph()
+            observer = persistent.MaterializerObservation(self.inert_materializer)
+            with self.context(observer, graph):
+                self.live(observer, graph)
+            self.retire(graph, "child")
+            if defect == "child-creation":
+                graph.child.creation["state"] = "CREATED"
+            elif defect == "scratch-creation":
+                graph.scratch.creation["state"] = "CREATED"
+            elif defect == "unknown-slot":
+                graph.child.slot.close_state = "UNKNOWN"
+            elif defect == "late-control":
+                late = object.__new__(build_inputs._FD)
+                late.guard, late.number, late.close_state, late.open_state = graph.guard, 20000, "NOT_ATTEMPTED", "OPEN"
+                graph.child.control_slots.append(late)
+            elif defect == "lost-prefix":
+                graph.child.control_slots.clear()
+            else:
+                # Models any lexical entry, including a dangling link; the
+                # oracle must not substitute a symlink-following exists test.
+                self.lexists.side_effect = lambda path: path == graph.root / ".mobile-release/build-inputs-complete.stage"
+            with self.subTest(defect=defect), self.assertRaises(AssertionError):
+                observer.child_settled(outers_live=True)
+            self.lexists.side_effect = None
+            if defect == "late-control":
+                late.number, late.close_state = None, "CLOSED"
+                observer.child_settled(outers_live=True)  # Final inventory includes the genuinely appended object.
+
+    def test_early_cancellation_has_no_factory_context_and_still_requires_original_outer_retirement(self):
+        graph = self.graph()
+        graph.invocation.child = None
+        observer = persistent.MaterializerObservation(self.inert_materializer)
+        observer.bind_outer(root=graph.root, invocation=graph.invocation, lease=graph.lease, guard=graph.guard)
+        observer.child_settled(expected=0)
+        self.retire(graph, "outer")
+        observer.outer_settled()
+        context = self.context(observer, graph, inner=False)
+        with self.assertRaisesRegex(AssertionError, "early cancellation entered materialization"):
+            observer.child_settled(expected=0)
+        self.assertIs(observer.contexts[0][0], context)
+        with context:
+            pass  # Complete only this inert generator; it owns no resources.
 
 
 class RecoveryRefusalContractTests(unittest.TestCase):

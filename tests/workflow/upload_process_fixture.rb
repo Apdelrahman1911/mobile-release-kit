@@ -641,12 +641,28 @@ module UploadProcessFixture
     !!(root && @domain_disposal_required && (@expected_unknown_roots || {}).key?(root) && cleanup_unresolved?(root))
   end
 
+  # This fixture exchanges absolute endpoints with CPython and the original
+  # Ruby native owner. Match that finite domain; never fit/translate epochs.
+  # Selection is lazy: importing a fixture neither samples nor loads product.
+  def clock_identifier
+    host = RbConfig::CONFIG.fetch("host_os")
+    name = if host.match?(/\Alinux/)
+             :CLOCK_MONOTONIC
+           elsif host.match?(/\Adarwin/)
+             :CLOCK_UPTIME_RAW
+           end
+    unless name && Process.const_defined?(name, false)
+      raise Failure.new("clock", "fixture requires its supported native monotonic domain")
+    end
+    Process.const_get(name, false)
+  end
+
   def clock
-    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    Process.clock_gettime(clock_identifier)
   end
 
   def clock_ns
-    Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+    Process.clock_gettime(clock_identifier, :nanosecond)
   end
 
   def atomic_json(path, value)

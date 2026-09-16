@@ -353,9 +353,12 @@ raise SystemExit(status)
     def context(self, case):
         private = case.root / "private"
         private.mkdir(mode=0o700, exist_ok=True)
+        project = case.root / "project"
+        project.mkdir(mode=0o700, exist_ok=True)
         p12, supplied = case.root / "input.p12", case.root / "input.mobileprovision"
         p12.write_bytes(b"fictional signing identity")
         supplied.write_bytes(CONTENT)
+        p12.chmod(0o600); supplied.chmod(0o600)
         payload = profile()
         payload["UUID"] = UUID
         stack = ExitStack()
@@ -364,7 +367,7 @@ raise SystemExit(status)
                                       path, cancellation=cancellation, payload=payload)))
         stack.enter_context(patch.object(credentials, "_run_private", case.model))
         return stack, credentials._temporary_apple_signing_environment(
-            p12=p12, password="fictional", profile=supplied, directory=private, home=case.home,
+            p12=p12, password="fictional", profile=supplied, directory=private, home=case.home, project_root=project,
         )
 
     def test_full_stat_comparison_ignores_only_access_time(self):

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from .cancellation import DefaultCancellation
 
 if TYPE_CHECKING:
-    from ._command_process import AccountExecutionScope, JournalledCommandBinding
+    from ._command_process import AccountExecutionScope, CommandCallEvidence, JournalledCommandBinding
 from .errors import CredentialError, ValidationError
 
 REQUEST_LIMIT = 2 * 1024 * 1024
@@ -139,6 +139,7 @@ def run_owned(
     cancellation: DefaultCancellation | None = None, on_start: Callable[[int], None] | None = None,
     cleanup: bool = False, execution_scope: AccountExecutionScope | None = None,
     journal_binding: JournalledCommandBinding | None = None,
+    _evidence: CommandCallEvidence | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run through the original C/A/W owner, including unconditional cleanup.
 
@@ -150,4 +151,5 @@ def run_owned(
 
     return run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture,
                        output_limit=output_limit, cancellation=cancellation, on_start=on_start,
-                       cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding)
+                       cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding,
+                       _evidence=_evidence)

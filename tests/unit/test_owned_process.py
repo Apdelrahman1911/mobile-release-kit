@@ -1331,6 +1331,9 @@ class CommandSourceOwnerTests(unittest.TestCase):
             session.unresolved = True
             session.close()
             with patch.object(credentials, "_private_path_error", side_effect=AssertionError("private path observed")), \
+                 patch.object(credentials, "read_external_bytes", side_effect=AssertionError("private input read")), \
+                 patch.object(credentials, "invocation_custody", side_effect=AssertionError("invocation acquired")), \
+                 patch.object(credentials, "finite_scratch", side_effect=AssertionError("private scratch acquired")), \
                  patch.object(credentials, "_materialize", side_effect=AssertionError("material written")), \
                  patch.object(credentials, "_authenticated_signing_profile", side_effect=AssertionError("profile authenticated")):
                 with self.assertRaises(local_signing.SigningPending):
@@ -1343,7 +1346,7 @@ class CommandSourceOwnerTests(unittest.TestCase):
                 with self.assertRaises(local_signing.SigningPending):
                     with credentials._temporary_apple_signing_environment(
                         p12=Path("/fictional/input.p12"), password="fictional", profile=Path("/fictional/input.profile"),
-                        directory=lease.home, lease=lease,
+                        directory=lease.home, project_root=lease.home.parent / "project", lease=lease,
                     ):
                         self.fail("revoked signing entered")
 
@@ -1352,6 +1355,14 @@ class CommandSourceOwnerTests(unittest.TestCase):
         from mobile_release.errors import CredentialError
 
         with self.assertRaises(owned.ProcessError) as final_failure, self.source_lease() as lease:
+            project, private = lease.home.parent / "project", lease.home.parent / "private"
+            project.mkdir(mode=0o700)
+            private.mkdir(mode=0o700)
+            p12, source = private / "input.p12", private / "input.profile"
+            p12.write_bytes(b"fictional-p12")
+            source.write_bytes(b"fictional profile")
+            p12.chmod(0o600)
+            source.chmod(0o600)
             sessions, native_cleanup = [], []
             def prepare(session, *_args):
                 sessions.append(session)
@@ -1362,15 +1373,16 @@ class CommandSourceOwnerTests(unittest.TestCase):
                 on_conflict()
                 raise CredentialError("modeled profile conflict")
                 yield  # pragma: no cover - preserves the actual context protocol.
-            with patch.object(credentials, "_authenticated_signing_profile", return_value=(b"fictional", {"UUID": "fictional"})), \
+            with patch.object(credentials, "_authenticated_signing_profile",
+                              return_value=(b"fictional", {"UUID": "12345678-1234-1234-1234-1234567890AB"})), \
                  patch.object(local_signing.SigningSession, "prepare", new=prepare), \
                  patch.object(local_signing.SigningSession, "cleanup_native", new=lambda session: native_cleanup.append(session)), \
                  patch.object(local_signing.SigningSession, "finish", side_effect=AssertionError("conflicted session finalized")), \
                  patch.object(credentials, "_temporary_profile_installation", new=conflict), \
                  self.assertRaises(owned.ProcessError):
                 with credentials._temporary_apple_signing_environment(
-                    p12=Path("/fictional/input.p12"), password="fictional", profile=Path("/fictional/input.profile"),
-                    directory=lease.home, lease=lease,
+                    p12=p12, password="fictional", profile=source,
+                    directory=private, project_root=project, lease=lease,
                 ):
                     self.fail("conflicted signing entered")
             self.assertEqual(len(sessions), 1)

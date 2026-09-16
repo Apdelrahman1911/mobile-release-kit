@@ -111,57 +111,71 @@ class Report:
         output: Path | None = None,
         root: Path | None = None,
         stream: TextIO | None = None,
+        cancellation=None,
     ) -> None:
         import sys
+        from .build_inputs import _app_private_directory, _publish_private_file
 
         rendered = self.render_json() if output_format == "json" else self.render_human()
         if output:
-            supplied = output.expanduser()
-            boundary = root.resolve() if root is not None else Path.cwd().resolve()
-            absolute = Path(
-                os.path.abspath(supplied if supplied.is_absolute() else boundary / supplied)
-            )
-            repository_alias = next(
-                (
-                    ancestor
-                    for ancestor in (absolute, *absolute.parents)
-                    if ancestor.resolve() == boundary
-                ),
-                None,
-            )
-            if repository_alias is None or repository_alias.is_symlink():
-                raise ValidationError("report output must remain inside the project root")
-            relative = absolute.relative_to(repository_alias)
-            current = repository_alias
-            for index, part in enumerate(relative.parts):
-                current = current / part
-                if current.is_symlink():
-                    raise ValidationError("report output must not traverse a symbolic link")
-                if index < len(relative.parts) - 1 and current.exists() and not current.is_dir():
-                    raise ValidationError("report output parent must be a real directory")
-            destination = boundary / relative
-            if destination.exists() and (
-                destination.is_symlink() or not destination.is_file()
-            ):
-                raise ValidationError("report output must be a regular non-symlink file")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if destination.parent.is_symlink() or not destination.parent.is_dir():
-                raise ValidationError("report output parent must be a real directory")
-            descriptor, temporary = tempfile.mkstemp(
-                prefix=f".{destination.name}.", dir=destination.parent
-            )
-            try:
-                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    handle.write(rendered)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.chmod(temporary, 0o600)
-                os.replace(temporary, destination)
-            finally:
-                try:
-                    os.unlink(temporary)
-                except FileNotFoundError:
-                    pass
+            explicit_root = root.expanduser().absolute() if root is not None else Path.cwd()
+            raw_destination = output.expanduser()
+            if not raw_destination.is_absolute():
+                raw_destination = explicit_root / raw_destination
+            if raw_destination == explicit_root / ".mobile-release":
+                raise ValidationError("the application-private root cannot be a report file")
+            with _app_private_directory(raw_destination.parent, app_root=explicit_root,
+                                        cancellation=cancellation) as namespace:
+                supplied = output.expanduser()
+                boundary = root.resolve() if root is not None else Path.cwd().resolve()
+                absolute = Path(
+                    os.path.abspath(supplied if supplied.is_absolute() else boundary / supplied)
+                )
+                repository_alias = next(
+                    (
+                        ancestor
+                        for ancestor in (absolute, *absolute.parents)
+                        if ancestor.resolve() == boundary
+                    ),
+                    None,
+                )
+                if repository_alias is None or repository_alias.is_symlink():
+                    raise ValidationError("report output must remain inside the project root")
+                relative = absolute.relative_to(repository_alias)
+                current = repository_alias
+                for index, part in enumerate(relative.parts):
+                    current = current / part
+                    if current.is_symlink():
+                        raise ValidationError("report output must not traverse a symbolic link")
+                    if index < len(relative.parts) - 1 and current.exists() and not current.is_dir():
+                        raise ValidationError("report output parent must be a real directory")
+                destination = boundary / relative
+                if destination.exists() and (
+                    destination.is_symlink() or not destination.is_file()
+                ):
+                    raise ValidationError("report output must be a regular non-symlink file")
+                if namespace is not None:
+                    _publish_private_file(namespace, destination.name,
+                                          iter((rendered.encode("utf-8"),)), replace=True)
+                else:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if destination.parent.is_symlink() or not destination.parent.is_dir():
+                        raise ValidationError("report output parent must be a real directory")
+                    descriptor, temporary = tempfile.mkstemp(
+                        prefix=f".{destination.name}.", dir=destination.parent
+                    )
+                    try:
+                        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                            handle.write(rendered)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        os.chmod(temporary, 0o600)
+                        os.replace(temporary, destination)
+                    finally:
+                        try:
+                            os.unlink(temporary)
+                        except FileNotFoundError:
+                            pass
         target = stream or sys.stdout
         target.write(rendered)
 

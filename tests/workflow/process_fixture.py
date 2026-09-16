@@ -242,6 +242,7 @@ def driver(root: Path, mode: str, delay: float) -> int:
     from mobile_release import workflow
 
     real_spawn, real_selector = subprocess.Popen, workflow.selectors.DefaultSelector
+    real_cleanup_wait = workflow._TransportProcess._wait_cleanup
     started = time.monotonic()
     launched = []
     observations = {"selectorWaitsAfterLeaderExit": 0, "ready": False}
@@ -264,7 +265,9 @@ def driver(root: Path, mode: str, delay: float) -> int:
         record(root / "launcher.pid", str(process.pid))
         if mode == "popen-cancel":
             limit = time.monotonic() + 8
-            while not ready() and time.monotonic() < limit and process.poll() is None:
+            while not ready() and time.monotonic() < limit:
+                if process_state(process.pid, group=process.pid, deadline=limit) in {"zombie", "absent"}:
+                    break
                 time.sleep(0.01)
             if not ready():
                 raise ReadinessFailure("fixture did not fork before injected cancellation")
@@ -276,7 +279,11 @@ def driver(root: Path, mode: str, delay: float) -> int:
 
     class ObservedSelector(real_selector):
         def select(self, timeout=None):
-            orphaned_pipe = (bool(launched) and ready() and launched[0].poll() is not None
+            # Observe an exited but UNREAPED original leader. A fixture poll()
+            # would consume Transport's wait and retire its group-signal route.
+            orphaned_pipe = (bool(launched) and ready() and
+                             process_state(launched[0].pid, group=launched[0].pid,
+                                           deadline=started + 8) == "zombie"
                              and alive(int(child_path.read_text()), group=launched[0].pid,
                                        deadline=started + 8))
             events = super().select(timeout)  # Real pipe wait, not fake events.
@@ -291,12 +298,20 @@ def driver(root: Path, mode: str, delay: float) -> int:
             raise ReadinessFailure("independent fixture readiness watchdog expired")
         return 2.0 if observations["selectorWaitsAfterLeaderExit"] else 0.0
 
+    def cleanup_wait(original):
+        # The startup-independent BODY clock may deliberately expire by raising.
+        # Cleanup still uses the real original wait and its own finite wall clock.
+        with patch.object(workflow, "time", time):
+            return real_cleanup_wait(original)
+
     result = None
     try:
         with patch.object(workflow.subprocess, "Popen", side_effect=spawn):
             if mode in {"timeout", "unready"}:
                 clock = SimpleNamespace(monotonic=controlled_clock, sleep=time.sleep)
-                with patch.object(workflow, "time", clock), patch.object(workflow.selectors, "DefaultSelector", ObservedSelector):
+                with patch.object(workflow, "time", clock), \
+                        patch.object(workflow.selectors, "DefaultSelector", ObservedSelector), \
+                        patch.object(workflow._TransportProcess, "_wait_cleanup", new=cleanup_wait):
                     try:
                         workflow.Transport().run(ARGV, timeout=1)
                     except workflow.ValidationError as error:
@@ -313,6 +328,7 @@ def driver(root: Path, mode: str, delay: float) -> int:
                     result = "cancelled"
         assert result is not None, "Transport unexpectedly succeeded or swallowed cancellation"
         assert len(launched) == 1
+        assert launched[0].returncode is not None, "Transport did not publish its original terminal wait"
         assert_dead(launched[0].pid, group=launched[0].pid)
         if mode == "unready":
             assert not (root / "gh.pid").exists() and not child_path.exists()
@@ -321,17 +337,17 @@ def driver(root: Path, mode: str, delay: float) -> int:
             assert_dead(int(child_path.read_text()), group=launched[0].pid)
         if mode == "timeout":
             assert observations["selectorWaitsAfterLeaderExit"] > 0
-        # This proof is written BEFORE the harness fallback cleanup below.
+        # This proof is written from Transport's own wait/cleanup, never from
+        # observer metadata or an after-reap harness group-signal fallback.
         observations.update(result=result, deadBeforeFallback=True,
                             realSeconds=time.monotonic() - started)
         record(root / "observations.json", json.dumps(observations))
         return 130 if result == "cancelled" else 0
     finally:
-        for process in launched:
-            kill_owned_group(process.pid)
-            process.wait(timeout=5)
-            if process.stdout is not None:
-                process.stdout.close()
+        # Neither a retained Popen nor a PID marker permits an after-reap or
+        # UNKNOWN retry. Failed cleanup remains a failure for the enclosing
+        # isolated owner; this fixture never converts fallback cleanup to proof.
+        pass
 
 
 def run_case(root: Path, mode: str, *, delay: float = 0) -> dict:
@@ -375,7 +391,7 @@ def run_case(root: Path, mode: str, *, delay: float = 0) -> dict:
             try:
                 launcher = root / "launcher.pid"
                 if launcher.is_file():
-                    kill_owned_group(int(launcher.read_text()))
+                    # An observation target is not authority to signal a group.
                     assert_dead(int(launcher.read_text()))
                 if (root / "child.pid").is_file():
                     assert_dead(int((root / "child.pid").read_text()))

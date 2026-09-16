@@ -33,9 +33,10 @@ successful installation is not approval to release.
 ## After failure or termination
 
 Ordinary precommit failures and catchable interrupts attempt complete rollback. An interrupt
-returns exit 130; a validation/filesystem failure returns exit 2. No success JSON is emitted on
-either. A successful rename followed by an I/O error is classified by the observed journal state,
-not by the error alone: an observed commit is never rolled back.
+returns exit 130; a validation/filesystem failure returns exit 2. Success reporting starts only
+after workspace finalization succeeds. A successful rename followed by an I/O error is
+classified by the observed journal state, not by the error alone: an observed commit is never
+rolled back.
 
 After SIGTERM/SIGKILL, cancellation, an incomplete cleanup or a failed automatic rollback:
 
@@ -57,9 +58,11 @@ safe, including after recovery itself was interrupted.
 | Rollback already complete / `rolled-back-cleanup` | Finish private cleanup without touching destinations. |
 | Cleanup already begun / `cleanup-only` | Finish irreversible private cleanup, even if some control files were already removed. |
 
-An error after commit still reports failure and explains that integration may already be committed;
-inspect it rather than assuming the old config is active. Durable phase markers prevent cleanup
-failure from reversing a completed integration.
+An error after commit still reports failure, but integration may already be committed and the
+diagnostic need not identify that state. Workspace finalization can also fail after apply or
+recovery completed, leaving those changes in effect despite a nonzero exit and no success JSON.
+Inspect the project rather than assuming the old config is active. Durable phase markers prevent
+cleanup failure from reversing a completed integration.
 
 ## Conflicts and privacy
 

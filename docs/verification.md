@@ -512,17 +512,44 @@ inventory; it does not waive the product behaviors that inventory was meant to t
 
 | Platform | Required gate families |
 |---|---|
-| Linux | Offline source installation; ABI/runtime compatibility gates; full Python discovery; all listed Ruby suites, including native/iOS/Android descendant regressions and actual packaged capture; Fastfile validation; first-party/template actionlint; real JDK signer checks; wheel build/inspection/install/smoke/consumer and selected installed-wheel Python checks; source integrity. |
-| macOS | Offline source installation; exact Xcode 26.3/native tools; ABI/runtime compatibility gates; source native-profile gate; all fixed Ruby primitive/helper/capture/adapter suites and separate native signal-observation proof; wheel build/inspection/install/smoke/consumer, including actual installed Ruby capture; installed-wheel native-profile gate; source integrity. |
+| Linux | Offline source installation; ABI/runtime compatibility gates; full Python discovery; all listed Ruby suites, including native/iOS/Android descendant regressions and actual packaged capture; separate source/wheel Store-native gates; Fastfile validation; first-party/template actionlint; real JDK signer checks; wheel build/inspection/install/smoke/consumer and selected installed-wheel Python checks; source integrity. |
+| macOS | Offline source installation; exact Xcode 26.3/native tools; ABI/runtime compatibility gates; source native-profile gate; all fixed Ruby primitive/helper/capture/adapter suites and separate native signal-observation proof; source/wheel Store-native gates; wheel build/inspection/install/smoke/consumer, including actual installed Ruby capture; installed-wheel native-profile gate; source integrity. |
 
 The macOS Ruby and source native-profile gates have no inter-suite dependency;
 both retain their own admission. The native-profile gate runs first after source
 ABI/compatibility so Python failures surface before the Ruby suites. The source
-catalog selects **51 Linux gates and 39 macOS gates**; these are required inventory
+catalog selects **58 Linux gates and 41 macOS gates**; these are required inventory
 counts, not completed or passing runs.
 Every selected gate remains required and any failure stops later gates. Recompute
 inventories when source changes; historical native totals cannot stand in for
 the complete current source-derived method identities and outcomes.
+
+The five Linux Store suites run sequentially in separate per-file captures.
+Their inert lifecycle models and private filesystem assertions do not prove
+native paired-clock behavior, real process exit/finality or Store integration.
+
+The separate Store-native gates require all15 source and14 installed-wheel rows
+for seven fixed logical methods, never raw/default discovery execution. Every
+row has its own original isolated Python domain under one300-second phase
+endpoint, with a tighter20-second case cutoff including capture/idle/accounting.
+Wheel proof retains the genuine source ordinary-exit control and unchanged
+fixture/tool bindings. `--scope store-lane` selects the required preparation,
+source/wheel ABI and Store gates and source integrity (22 Linux/23 macOS gates).
+The fixed `store-lane-macos` Actions target uses the existing reviewed macOS owner
+only; targeted success cannot satisfy the complete protected aggregate.
+
+Immutable source/tool/wheel bindings, original capture/IPC counts and idle-gated
+surviving-file scans are outside observations. The unchanged fixture separately
+checks its original launcher/request/diagnostics before eligible inner disposal;
+successful deleted files are not claimed to be reread by the outside owner.
+The8MiB case limit conservatively sums the inner observation, outside survivors
+and original captures, counting retained overlap twice rather than inventing
+identity credit. Diagnostic files are64KiB-bounded, with256KiB of captures and
+surviving diagnostic bytes per phase; none of this measures peak/transient disk.
+Actual scratch files and directories must share a device before native launch.
+Unknown outer finality retains the domain; inaccessible accounting is unavailable,
+never zero or PASS. Only original outside finality/idle permits outside disposal;
+that disposal is not evidence that an UNKNOWN product owner cleaned itself.
 
 The native capture suite and both platform adapter suites run without the
 separate signal-proof instrumentation. An additional fixed Ruby invocation on
@@ -648,7 +675,7 @@ source ABI and compatibility prerequisites, then the fixed iOS adapter and other
 Ruby native gates retain their relative order. Linux runs its fixed 74 singleton
 Python partitions before the healthy source/wheel capture to expose small failures
 earlier. Name-based profiles, poison-only disposal, original finality and idle,
-all 51 Linux and 39 macOS gates, every partition and the original aggregate cutoffs
+all 58 Linux and 41 macOS gates, every partition and the original aggregate cutoffs
 remain mandatory. Earlier failure leaves later work explicitly unexecuted.
 
 The synthetic adapter process controls use a separate fixed timing profile:

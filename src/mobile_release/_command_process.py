@@ -27,6 +27,7 @@ from typing import Any
 
 from . import _native_process as native
 from . import cancellation as cancellation_state
+from . import _store_lane_contract as store_wire
 from .cancellation import CleanupScope, DefaultCancellation, cancellation_owner
 from .owned_process import (
     OUTPUT_LIMIT, PRIVATE_OUTPUT_LIMIT, REQUEST_LIMIT, ProcessCleanupError,
@@ -613,6 +614,249 @@ class OriginalCommandOutcome:
     @property
     def execution_unknown(self) -> bool:
         return self.no_target is None and self.termination == "signal-wait"
+
+
+_STORE_LANES = frozenset((
+    "android_internal_upload", "android_external_promote", "android_production_draft",
+    "ios_testflight_internal", "ios_testflight_external", "ios_app_store_submit",
+))
+
+
+class CommandCallEvidence:
+    """One passive view of a fixed ordinary readback or Store-lane command slot.
+
+    This does not own a process, issue a command, or manufacture finality. Its
+    finite output reservation and full expected request precede the one call.
+    Private environment values deliberately have no diagnostic representation.
+    """
+
+    def __init__(self, cancellation: DefaultCancellation) -> None:
+        _require(type(cancellation) is DefaultCancellation)
+        self._pid, self._thread = os.getpid(), threading.current_thread()
+        self._guard = cancellation
+        self._reservation: tuple[object, str, str] | None = None
+        self._lane_reservation: tuple[object, str, str, bytes] | None = None
+        self._expected: tuple[Any, ...] | None = None
+        self._lane_timing: store_wire.Timing | None = None
+        self._timing_consumed = False
+        self._used = self._matched = False
+        self._engine: _Outer | None = None
+        self._slot: CommandOutcomeSlot | None = None
+        self._nonce: bytes | None = None
+        self._owner(cancellation)
+        cancellation.check()
+
+    def _owner(self, guard: DefaultCancellation) -> None:
+        # Reject a fork/thread copy before entering any parent guard method.
+        _require(self._pid == os.getpid() and self._thread is threading.current_thread())
+        _require(guard is self._guard and guard.pid == self._pid
+                 and guard.owner_thread is self._thread)
+
+    def _reserve_readback(self, owner: object, role: str, path: Path,
+                          guard: DefaultCancellation) -> None:
+        self._owner(guard)
+        _require(self._reservation is None and self._lane_reservation is None
+                 and self._expected is None and not self._used
+                 and role in ("android", "ios") and path.is_absolute()
+                 and path.name == role + ".json")
+        self._reservation = (owner, role, str(path))
+
+    def _reserve_store_lane(self, owner: object, lane: str, path: Path, nonce: bytes,
+                            guard: DefaultCancellation) -> None:
+        from ._store_lane_evidence import StoreLaneCallEvidence
+
+        self._owner(guard)
+        _require(type(owner) is StoreLaneCallEvidence and owner._command is self
+                 and owner._guard is guard and owner._lane == lane
+                 and owner._output == str(path) and owner._nonce == nonce
+                 and self._reservation is None and self._lane_reservation is None
+                 and self._expected is None and not self._used
+                 and type(lane) is str and lane in _STORE_LANES and _nonce(nonce)
+                 and path.is_absolute() and ".." not in path.parts and "\0" not in str(path))
+        self._lane_reservation = (owner, lane, str(path), nonce)
+
+    def seal_store_lane(self, *, runner: Path, cwd: Path,
+                        environ: Mapping[str, str]) -> tuple[str, ...]:
+        """The six fixed noninteractive lanes only; not a general command role."""
+        self._owner(self._guard)
+        self._guard.check()
+        _require(self._lane_reservation is not None and self._reservation is None
+                 and self._expected is None and not self._used
+                 and runner.is_absolute() and runner.name == "run_lane.rb"
+                 and runner.parent.name == "fastlane" and cwd.is_absolute()
+                 and ".." not in runner.parts and ".." not in cwd.parts)
+        _owner, lane, path, nonce = self._lane_reservation
+        argv = ("bundle", "exec", "ruby", str(runner), lane)
+        environment = tuple(environ.items())
+        _require(all(type(key) is str and type(value) is str and key and "=" not in key
+                     and "\0" not in key and "\0" not in value for key, value in environment)
+                 and len({key for key, _ in environment}) == len(environment)
+                 and dict(environment).get("MOBILE_RELEASE_STORE_RECEIPT_PATH") == path
+                 and dict(environment).get("MOBILE_RELEASE_OPERATION") == lane
+                 and dict(environment).get("MOBILE_RELEASE_STORE_MODE") in ("prepare", "execute")
+                 and dict(environment).get("MOBILE_RELEASE_STORE_LANE_NONCE") == nonce.hex())
+        request = {"argv": list(argv), "cwd": str(cwd), "capture": False,
+                   "limit": PRIVATE_OUTPUT_LIMIT}
+        _valid_request(request)
+        _require(len(_json(request)) <= REQUEST_LIMIT
+                 and sum(len(os.fsencode(key)) + len(os.fsencode(value)) + 2
+                         for key, value in environment) <= REQUEST_LIMIT)
+        # The original file owner sealed these endpoints once before dispatch.
+        # Parsing the environment only verifies that same seal, never renews it.
+        owner = _owner._admit_command_owner(cwd, dict(environment))
+        timing = store_wire.Timing.from_environment(dict(environment))
+        _require(type(owner.timing) is store_wire.Timing and timing == owner.timing)
+        self._lane_timing = owner.timing
+        self._expected = (argv, os.fsencode(cwd),
+                          tuple(sorted((os.fsencode(key), os.fsencode(value))
+                                       for key, value in environment)),
+                          False, PRIVATE_OUTPUT_LIMIT, 60 * 60)
+        return argv
+
+    def seal_readback(self, *, runner: Path, cwd: Path,
+                      environ: Mapping[str, str]) -> tuple[str, ...]:
+        self._owner(self._guard)
+        self._guard.check()
+        _require(self._reservation is not None and self._expected is None and not self._used
+                 and runner.is_absolute() and runner.name == "run_lane.rb"
+                 and runner.parent.name == "fastlane" and cwd.is_absolute())
+        _owner, role, path = self._reservation
+        argv = ("bundle", "exec", "ruby", str(runner), role + "_online_preflight")
+        environment = tuple(environ.items())
+        _require(all(type(key) is str and type(value) is str and key and "=" not in key
+                     and "\0" not in key and "\0" not in value for key, value in environment)
+                 and len({key for key, _ in environment}) == len(environment)
+                 and dict(environment).get("MOBILE_RELEASE_PREFLIGHT_READBACK_PATH") == path)
+        request = {"argv": list(argv), "cwd": str(cwd), "capture": False,
+                   "limit": PRIVATE_OUTPUT_LIMIT}
+        _valid_request(request)
+        _require(len(_json(request)) <= REQUEST_LIMIT
+                 and sum(len(os.fsencode(key)) + len(os.fsencode(value)) + 2
+                         for key, value in environment) <= REQUEST_LIMIT)
+        self._expected = (argv, os.fsencode(cwd),
+                          tuple(sorted((os.fsencode(key), os.fsencode(value))
+                                       for key, value in environment)),
+                          False, PRIVATE_OUTPUT_LIMIT, 15 * 60)
+        return argv
+
+    def _attempt(self, guard: DefaultCancellation | None, *, timeout: int,
+                 ordinary: bool) -> None:
+        self._owner(guard)  # type: ignore[arg-type]
+        _require(not self._used)
+        self._used = True  # No retry/rebind, including a rejected call.
+        if self._lane_reservation is not None:
+            # This fixed data-only hook roots the lane obligation before any
+            # engine/descriptor/child can be created; it grants no execution.
+            self._lane_reservation[0]._command_attempted(self)
+        _require(ordinary and self._expected is not None and timeout == self._expected[5])
+
+    def _bind(self, engine: _Outer) -> None:
+        self._owner(engine.guard)
+        _require(self._used and self._engine is None and type(engine) is _Outer
+                 and engine.scope is None and engine.binding is None and not engine.owns
+                 and engine.slot._engine is engine and engine.slot._scope is None
+                 and engine.slot.read() is None)
+        if self._lane_reservation is not None:
+            _require(engine.evidence is None and self._timing_consumed
+                     and engine._store_timing is self._lane_timing
+                     and engine.ctx.run == self._lane_timing.run
+                     and engine.ctx.hard == self._lane_timing.hard)
+        self._engine, self._slot, self._nonce = engine, engine.slot, engine.nonce
+
+    def _fixed_timing(self, guard: DefaultCancellation, *, timeout: int,
+                      owns: bool, scope: object, binding: object) -> store_wire.Timing | None:
+        self._owner(guard)
+        _require(self._used and self._expected is not None and timeout == self._expected[5]
+                 and not owns and scope is None and binding is None and self._engine is None)
+        if self._lane_reservation is None:
+            _require(self._lane_timing is None)
+            return None  # Ordinary online-readback timing remains unchanged.
+        _require(not self._timing_consumed and type(self._lane_timing) is store_wire.Timing)
+        self._timing_consumed = True  # Failed construction cannot renew/retry.
+        owner = self._lane_reservation[0]
+        environment = {os.fsdecode(key): os.fsdecode(value) for key, value in self._expected[2]}
+        files = owner._admit_command_owner(Path(os.fsdecode(self._expected[1])), environment)
+        _require(files.timing is self._lane_timing
+                 and store_wire.Timing.from_environment(environment) == self._lane_timing)
+        return self._lane_timing
+
+    def _match(self, engine: _Outer) -> None:
+        self._owner(engine.guard)
+        frozen = engine.frozen
+        _require(self._engine is engine and not self._matched and frozen is not None
+                 and self._expected is not None)
+        actual = (frozen.args, frozen.cwd, tuple(sorted(frozen.environment)),
+                  frozen.manifest.capture, frozen.manifest.limit, self._expected[5])
+        _require(actual == self._expected)
+        if self._lane_reservation is not None:
+            _require(engine._store_timing is self._lane_timing
+                     and engine.ctx.run == self._lane_timing.run
+                     and engine.ctx.hard == self._lane_timing.hard)
+        self._matched = True
+
+    def settled_store_lane(self, *, owner: object, lane: str, path: Path,
+                           cancellation: DefaultCancellation) -> OriginalCommandOutcome | None:
+        """Read original group finality, independent of lane/Store success.
+
+        A nonzero command can be contained. Its nested Ruby terminal remains a
+        separate obligation; this method never fabricates that terminal.
+        """
+        self._owner(cancellation)
+        _require(self._lane_reservation is not None and self._reservation is None)
+        original, selected, output, _lane_nonce = self._lane_reservation
+        _require(original is owner and owner._command is self
+                 and selected == lane and output == str(path))
+        engine, slot = self._engine, self._slot
+        if not self._matched or engine is None or slot is None:
+            return None
+        _require(type(engine) is _Outer and type(slot) is CommandOutcomeSlot
+                 and engine.evidence is self and engine.guard is cancellation
+                 and engine.slot is slot and slot._engine is engine and slot._scope is None
+                 and slot._nonce == self._nonce == engine.nonce)
+        outcome = slot.read()
+        if outcome is None:
+            return None
+        _require(type(outcome) is OriginalCommandOutcome and outcome._engine is engine
+                 and outcome.nonce == self._nonce)
+        final = outcome.original_finality
+        if type(final) is not OriginalCommandFinality or final._engine is not engine or engine.phase != "CLOSED":
+            return None
+        _require(outcome.create_w.retired and outcome.run_tool.retired)
+        if outcome.no_target is None:
+            _require(outcome.create_w.attempted and outcome.run_tool.attempted)
+        else:
+            _require(type(outcome.no_target) is NoTargetProof and outcome.no_target._engine is engine
+                     and outcome.result_integrity == "complete")
+        return outcome
+
+    def successful_readback(self, *, owner: object, role: str, path: Path,
+                            cancellation: DefaultCancellation) -> bool:
+        """Observe after original cleanup, including during unrelated failure.
+
+        A nonzero EXCL writer may have encountered a foreign entry. Even real
+        producer finality is therefore insufficient without normal-exit zero.
+        """
+        self._owner(cancellation)
+        _require(self._reservation is not None)
+        reserved_owner, reserved_role, reserved_path = self._reservation
+        _require(reserved_owner is owner and reserved_role == role and reserved_path == str(path))
+        engine, slot = self._engine, self._slot
+        if not self._matched or engine is None or slot is None:
+            return False
+        _require(engine.slot is slot and slot._engine is engine
+                 and slot._nonce == self._nonce == engine.nonce and engine.guard is cancellation)
+        outcome = slot.read()
+        if outcome is None:
+            return False
+        _require(type(outcome) is OriginalCommandOutcome and outcome._engine is engine
+                 and outcome.nonce == self._nonce)
+        final = outcome.original_finality
+        return (type(final) is OriginalCommandFinality and final._engine is engine
+                and outcome.create_w.attempted and outcome.create_w.retired
+                and outcome.run_tool.attempted and outcome.run_tool.retired
+                and outcome.no_target is None and outcome.result_integrity == "complete"
+                and outcome.termination == "normal-exit" and outcome.returncode == 0
+                and engine.phase == "CLOSED")
 
 
 class OriginalCommandReservation:
@@ -2817,11 +3061,15 @@ def helper_main(argv: list[str], policy: int | None) -> int:
 class _Outer:
     def __init__(self, guard: DefaultCancellation, owns: bool, timeout: int,
                  scope: AccountExecutionScope | None, binding: JournalledCommandBinding | None,
-                 *, suppress_cancel: bool) -> None:
+                 *, suppress_cancel: bool, evidence: CommandCallEvidence | None = None) -> None:
+        self._store_timing = (None if evidence is None else evidence._fixed_timing(
+            guard, timeout=timeout, owns=owns, scope=scope, binding=binding))
         self.nonce = os.urandom(16) if scope is None else scope.nonce
         now = time.monotonic_ns()
-        self.ctx = _Context("O", self.nonce, now + timeout * NANOSECOND,
-                            now + timeout * NANOSECOND + CLEANUP_NS,
+        run = now + timeout * NANOSECOND if self._store_timing is None else self._store_timing.run
+        hard = run + CLEANUP_NS if self._store_timing is None else self._store_timing.hard
+        _require(self._store_timing is None or now < run, TIMEOUT)
+        self.ctx = _Context("O", self.nonce, run, hard,
                             guard=guard, suppress_cancel=suppress_cancel)
         self.guard, self.owns, self.scope, self.binding = guard, owns, scope, binding
         self.slot = CommandOutcomeSlot(None, self.nonce, _key=_KEY) if scope is None else scope.outcome
@@ -2839,6 +3087,7 @@ class _Outer:
         self.child: native.Child | None = None
         self.wait: native.WaitReceipt | None = None
         self.frozen: FrozenCommand | None = None
+        self.evidence: CommandCallEvidence | None = None
         self.outputs = [bytearray(), bytearray()]
         self.readers: list[native.FDLease] = []
         self.output_eof = [False, False]
@@ -2993,6 +3242,8 @@ class _Outer:
         ctx.check()
         self.frozen = _freeze_command(argv, environ=environ, cwd=cwd, capture=capture,
                                       output_limit=output_limit, nonce=self.nonce)
+        if self.evidence is not None:
+            self.evidence._match(self)  # Before any command descriptor/process acquisition.
         if self.binding is not None:
             _require(len(self.binding.fence_binding) <= SCALAR_LIMIT)
         self.io = ctx.start_io()
@@ -3159,7 +3410,13 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
                 timeout: int, capture: bool, output_limit: int,
                 cancellation: DefaultCancellation | None, on_start: Callable[[int], None] | None,
                 cleanup: bool, execution_scope: AccountExecutionScope | None,
-                journal_binding: JournalledCommandBinding | None) -> subprocess.CompletedProcess[str]:
+                journal_binding: JournalledCommandBinding | None,
+                _evidence: CommandCallEvidence | None = None) -> subprocess.CompletedProcess[str]:
+    if _evidence is not None:
+        _require(type(_evidence) is CommandCallEvidence)
+        _evidence._attempt(cancellation, timeout=timeout,
+                           ordinary=(execution_scope is None and journal_binding is None
+                                     and on_start is None and cleanup is False))
     _require(os.name == "posix" and sys.platform in ("linux", "darwin")
              and _integer(timeout, 1, 86400) and type(cleanup) is bool
              and (on_start is None or callable(on_start))
@@ -3182,7 +3439,8 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
     guard, owns = cancellation_owner(cancellation, ProcessCleanupError,
                                      "owned command cancellation handlers could not be restored")
     suppress = cleanup and guard.cancelled and guard.depth > 0
-    engine = _Outer(guard, owns, timeout, execution_scope, journal_binding, suppress_cancel=suppress)
+    engine = _Outer(guard, owns, timeout, execution_scope, journal_binding,
+                    suppress_cancel=suppress, evidence=_evidence)
 
     def fork_relinquish() -> None:
         if engine.ctx.pid != os.getpid():
@@ -3199,6 +3457,9 @@ def run_command(argv: Sequence[str], *, environ: Mapping[str, str] | None, cwd: 
                     guard.install()
                     guard.activate()
                 try:
+                    if _evidence is not None:
+                        _evidence._bind(engine)
+                        engine.evidence = _evidence
                     engine.body(argv, environ, cwd, capture, output_limit, on_start)
                 except BaseException as error:
                     engine.ctx.record(error)

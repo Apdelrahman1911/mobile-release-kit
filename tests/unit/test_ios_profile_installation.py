@@ -656,14 +656,16 @@ class ProfileCredentialFlowTests(NativeCaseWorkspaceMixin, unittest.TestCase):
     def setUp(self):
         self.root = self.native_case_directory(prefix="mrk-profile-credentials-")
         self.home = self.root / "home"; self.home.mkdir(mode=0o700)
+        self.project = self.root / "project"; self.project.mkdir(mode=0o700)
         self.private = self.root / "private"; self.private.mkdir(mode=0o700)
         self.p12, self.profile_path = self.private / "identity.p12", self.private / "profile"
         self.p12.write_bytes(b"fictional-p12")
         self.profile_path.write_bytes(b"original-profile-bytes")
+        self.p12.chmod(0o600); self.profile_path.chmod(0o600)
 
     def signing(self):
         return _temporary_apple_signing_environment(p12=self.p12, password="synthetic-secret", profile=self.profile_path,
-                                                  directory=self.private, home=self.home)
+                                                  directory=self.private, home=self.home, project_root=self.project)
 
     def test_authentication_failure_or_invalid_identity_dates_precedes_every_keychain_call(self):
         # Policy-only invalid payloads do not claim that fictional bytes passed

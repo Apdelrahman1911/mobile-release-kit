@@ -68,6 +68,10 @@ _NATIVE_OTHER_SERVICE = "com.apple.cfprefsd.daemon"
 _NATIVE_WRITE_OUTER = b"MRK_NATIVE_WRITE_OUTER\n"
 _NATIVE_WRITE_INNER = b"MRK_NATIVE_WRITE_INNER\n"
 _NATIVE_WRITE_STDERR = _NATIVE_WRITE_OUTER + _NATIVE_WRITE_INNER
+_CHECKED_FILE_CONTENTS = (("external/material", b"selected private bytes"),
+                          ("project/nested/inside-material", b"inside the project"))
+_CHECKED_DIRECTORY_NAMES = ("", "external", "project", "project/nested")
+_CHECKED_CHILDREN = (("external", "lower-link", "project"), ("material",), ("nested",), ("inside-material",))
 _NATIVE_STARTUP_CASES = ("startup-true", "startup-python")
 # Deliberately literal, not code generated from a changing import inventory.
 # Test-only AST checks bind every statement to this module's actual imports.
@@ -2377,6 +2381,7 @@ class Session:
         self._home_state: dict | None = None
         self._userns_state: dict | None = None
         self._native_authority: dict[str, dict] = {}
+        self._checked_files: dict | None = None
         self._native_preparing: str | None = None
         self._native_control: dict | None = None
         self._handlers = {}
@@ -2639,6 +2644,355 @@ class Session:
         if gemfile == installed_gemfile:
             self._validate_installed_bundle_input(deadline=deadline)
         return result
+
+    def _checked_paths(self) -> tuple[Path, Path]:
+        """Two literal Session-derived readers; never a request-selected root."""
+        if (self.platform != "darwin" or self.root.parent != Path("/private/tmp")
+                or re.fullmatch(r"[A-Za-z0-9_-]{1,80}", self.root.name) is None
+                or self.fixture_controls != self.root / "fixture-controls"):
+            raise SessionError("checked-file fixture lost its original Session binding")
+        roots = (self.fixture_controls / "checked-files",
+                 Path("/private/var/folders") / (self.root.name + "-checked-files"))
+        private = (self.runner_home, self.runner_temp, self.control, self.bootstrap,
+                   self.source, self.inputs, self.work, *self.tool_prefixes)
+        if any(_under(a, b) or _under(b, a) for a in roots for b in private):
+            raise SessionError("checked-file fixture overlaps a private or executable root")
+        return roots
+
+    def _checked_binding(self, state: dict) -> None:
+        if (state is not getattr(self, "_checked_files", None) or state["session"] is not self
+                or state["roots"] != self._checked_paths() or state["closed"]):
+            raise SessionError("checked-file fixture state lost its original custody")
+
+    def _checked_charge(self, state: dict, record: dict, size: int) -> None:
+        """Monotonic actual persisted bytes, including unsuccessful preparation."""
+        if (type(size) is not int or size < 0 or type(self.persisted_bytes) is not int
+                or self.persisted_bytes < 0):
+            raise SessionError("checked-file fixture persisted accounting differs")
+        extra = max(0, size - record["charged"])
+        self.persisted_bytes += extra
+        state["note"]["persisted_bytes"] += extra
+        record["charged"] += extra
+        # This is the existing Session total; the coordinator also checks its
+        # matrix-wide bound with charge_matrix_bytes, even on preparation error.
+        if size > len(record["content"]):
+            raise SessionError("checked-file fixture exceeds its finite byte bound")
+
+    def _checked_close_descriptors(self, state: dict) -> list[str]:
+        errors = []
+        for record in reversed([*state["pins"], *state["files"]]):
+            fd, record["fd"] = record["fd"], None
+            if fd is not None:
+                try:
+                    os.close(fd)  # Retired BEFORE close: never retry an ambiguous descriptor.
+                except BaseException as exc:
+                    errors.append(f"checked-file fixture descriptor close {type(exc).__name__}")
+        state["closed"] = True
+        return errors
+
+    def _checked_reinspect(self, state: dict, *, deadline: float) -> None:
+        self._checked_binding(state)
+        errors = []
+        try:
+            self._checked_inspect_originals(state, deadline=deadline)
+        except BaseException as exc:
+            errors.append(exc)
+        # Reconcile all four held original extents even when the first input,
+        # inventory or deadline check failed. Never reopen a returned pathname,
+        # count a substituted entry as ours or stop on the first charge error.
+        for record in state["files"]:
+            try:
+                fd = record["fd"]
+                if fd is None or record["identity"] is None:
+                    raise SessionError("checked-file original persisted extent has no held descriptor")
+                info = os.fstat(fd)
+                if (info.st_dev, info.st_ino) != record["identity"][:2] or not stat.S_ISREG(info.st_mode):
+                    raise SessionError("checked-file persisted extent lost its original identity")
+            except BaseException as exc:
+                state["note"]["persisted_bytes_known"] = False
+                errors.append(exc)
+                continue
+            try:
+                self._checked_charge(state, record, info.st_size)
+            except BaseException as exc:
+                errors.append(exc)  # An oversized original is charged before rejection.
+        try:
+            _remaining(deadline)
+        except BaseException as exc:
+            errors.append(exc)
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup("checked-file original inspection/accounting failed", errors)
+
+    def _checked_inspect_originals(self, state: dict, *, deadline: float) -> None:
+        _remaining(deadline)
+        owned = [pin for pin in state["pins"] if "created" in pin]
+        if (len(state["pins"]) != 15
+                or tuple(pin["path"] for pin in owned) != tuple(root / name for root in state["roots"] for name in _CHECKED_DIRECTORY_NAMES)
+                or tuple(pin["children"] for pin in owned) != _CHECKED_CHILDREN * 2
+                or tuple(row["parent"]["path"] / row["name"] for row in state["files"]) !=
+                    tuple(root / name for root in state["roots"] for name, _ in _CHECKED_FILE_CONTENTS)
+                or tuple(row["parent"]["path"] / row["name"] for row in state["links"]) !=
+                    tuple(root / "lower-link" for root in state["roots"])
+                or tuple(row[0] for row in state["aliases"]) != (Path("/tmp"), Path("/var"))):
+            raise SessionError("checked-file fixture original finite inventory differs")
+        for path, identity, target in state["aliases"]:
+            if (_native_file_key(path.lstat()) != identity or os.readlink(path) != target
+                    or _native_file_key(path.lstat()) != identity):
+                raise SessionError("checked-file system alias changed")
+        for pin in state["pins"]:
+            _remaining(deadline)
+            fd = pin["fd"]
+            if fd is None or os.get_inheritable(fd) or _canonical(pin["path"]) != pin["path"]:
+                raise SessionError("checked-file fixture directory custody is unavailable")
+            named, held = pin["path"].lstat(), os.fstat(fd)
+            if (pin["node"] != (*_home_node(named), stat.S_IMODE(named.st_mode))
+                    or pin["node"] != (*_home_node(held), stat.S_IMODE(held.st_mode))):
+                raise SessionError("checked-file fixture original directory changed")
+            if "children" in pin:
+                # Only these four exclusive fixed directories per root are
+                # enumerated; shared /tmp and /var/folders are never walked.
+                names = []
+                with os.scandir(fd) as entries:
+                    for entry in entries:
+                        _remaining(deadline)
+                        names.append(entry.name)
+                        if len(names) > len(pin["children"]):
+                            raise SessionError("checked-file fixture acquired an unexpected entry")
+                if tuple(sorted(names)) != pin["children"]:
+                    raise SessionError("checked-file fixture finite inventory changed")
+        for record in state["files"]:
+            _remaining(deadline)
+            fd, parent, name = record["fd"], record["parent"], record["name"]
+            if fd is None or os.get_inheritable(fd):
+                raise SessionError("checked-file fixture original file custody is unavailable")
+            if (record["identity"] != _native_file_key(os.fstat(fd))
+                    or record["identity"] != _native_file_key(os.stat(name, dir_fd=parent["fd"], follow_symlinks=False))):
+                raise SessionError("checked-file fixture original file changed")
+            os.lseek(fd, 0, os.SEEK_SET)
+            raw = bytearray()
+            while len(raw) <= len(record["content"]):
+                _remaining(deadline)
+                part = os.read(fd, len(record["content"]) + 1 - len(raw))
+                if not part:
+                    break
+                raw.extend(part)
+            if (bytes(raw) != record["content"] or record["identity"] != _native_file_key(os.fstat(fd))
+                    or record["identity"] != _native_file_key(os.stat(name, dir_fd=parent["fd"], follow_symlinks=False))):
+                raise SessionError("checked-file fixture original bytes changed")
+        for record in state["links"]:
+            _remaining(deadline)
+            parent, name = record["parent"], record["name"]
+            if (record["identity"] != _native_file_key(os.stat(name, dir_fd=parent["fd"], follow_symlinks=False))
+                    or os.readlink(name, dir_fd=parent["fd"]) != "external"):
+                raise SessionError("checked-file fixture lower-link changed")
+        _remaining(deadline)
+
+    def _checked_create(self, state: dict) -> None:
+        """Controller-only exclusive construction; failed/partial trees stay put."""
+        deadline = state["deadline"]
+        for alias, target in ((Path("/tmp"), "private/tmp"), (Path("/var"), "private/var")):
+            _remaining(deadline)
+            before = alias.lstat()
+            actual = os.readlink(alias)
+            if (not stat.S_ISLNK(before.st_mode) or before.st_uid != 0
+                    or actual not in (target, "/" + target)
+                    or _native_file_key(before) != _native_file_key(alias.lstat())):
+                raise SessionError("checked-file fixture requires genuine protected Darwin aliases")
+            state["aliases"].append((alias, _native_file_key(before), actual))
+        ancestors = ((Path("/"), (0o555, 0o755)), (Path("/private"), (0o755,)),
+                     (Path("/private/tmp"), (0o1777,)), (self.root, (0o755,)),
+                     (self.fixture_controls, (0o755,)), (Path("/private/var"), (0o755,)),
+                     (Path("/private/var/folders"), (0o755,)))
+        for path, modes in ancestors:
+            self._native_pin(state, path, modes=modes)
+        by_path = {pin["path"]: pin for pin in state["pins"]}
+        for root in state["roots"]:
+            for relative, children in zip(_CHECKED_DIRECTORY_NAMES, _CHECKED_CHILDREN):
+                _remaining(deadline)
+                path = root / relative
+                parent = by_path[path.parent]
+                # Record the attempt before the exclusive effect. No exception
+                # here authorizes adopting, retrying or removing a collision.
+                pin = {"path": path, "fd": None, "node": None, "parent": parent,
+                       "name": path.name, "created": False, "children": children}
+                state["pins"].append(pin)
+                os.mkdir(path.name, mode=0o700, dir_fd=parent["fd"])
+                pin["created"] = True
+                pin["fd"] = os.open(path.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                    dir_fd=parent["fd"])
+                info = os.fstat(pin["fd"])
+                named = os.stat(path.name, dir_fd=parent["fd"], follow_symlinks=False)
+                if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or os.get_inheritable(pin["fd"])
+                        or _home_node(info) != _home_node(named)):
+                    raise SessionError("checked-file exclusive directory custody differs")
+                os.fchown(pin["fd"], 0, 0)
+                os.fchmod(pin["fd"], 0o555)
+                info = os.fstat(pin["fd"])
+                if (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (0, 0, 0o555):
+                    raise SessionError("checked-file fixture directory protection differs")
+                pin["node"] = (*_home_node(info), stat.S_IMODE(info.st_mode))
+                by_path[path] = pin
+            for relative, content in _CHECKED_FILE_CONTENTS:
+                _remaining(deadline)
+                path = root / relative
+                parent = by_path[path.parent]
+                record = {"fd": None, "parent": parent, "name": path.name, "content": content,
+                          "identity": None, "charged": 0, "accounted": False}
+                state["files"].append(record)
+                record["fd"] = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                       0o600, dir_fd=parent["fd"])
+                errors = []
+                try:
+                    pending = memoryview(content)
+                    while pending:
+                        _remaining(deadline)
+                        count = os.write(record["fd"], pending)
+                        if not 0 < count <= len(pending):
+                            raise SessionError("checked-file fixture write did not progress")
+                        pending = pending[count:]
+                    os.fchown(record["fd"], self.uid, self.gid)
+                    os.fchmod(record["fd"], 0o600)
+                    os.fsync(record["fd"])
+                    info = os.fstat(record["fd"])
+                    if (not stat.S_ISREG(info.st_mode) or (info.st_uid, info.st_gid) != (self.uid, self.gid)
+                            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1
+                            or info.st_size != len(content) or os.get_inheritable(record["fd"])):
+                        raise SessionError("checked-file fixture private file custody differs")
+                    record["identity"] = _native_file_key(info)
+                except BaseException as exc:
+                    errors.append(exc)
+                try:
+                    # Observe actual extent even after short/failed write, mode
+                    # or sync. An unavailable extent is a failure, never zero.
+                    self._checked_charge(state, record, os.fstat(record["fd"]).st_size)
+                    record["accounted"] = True
+                except BaseException as exc:
+                    errors.append(exc)
+                if errors:
+                    raise BaseExceptionGroup("checked-file fixture creation/accounting failed", errors)
+            parent = by_path[root]
+            record = {"parent": parent, "name": "lower-link", "identity": None,
+                      "content": b"external", "charged": 0, "accounted": False}
+            state["links"].append(record)
+            os.symlink("external", record["name"], dir_fd=parent["fd"])
+            self._checked_charge(state, record, len(record["content"]))
+            record["accounted"] = True
+            info = os.stat(record["name"], dir_fd=parent["fd"], follow_symlinks=False)
+            if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_size != len(record["content"]):
+                raise SessionError("checked-file fixture lower-link custody differs")
+            record["identity"] = _native_file_key(info)
+        self._checked_reinspect(state, deadline=deadline)
+
+    def prepare_checked_files(self, phase: str, *, deadline: float) -> None:
+        self._guard()
+        if (phase not in _NATIVE_PHASES or self.platform != "darwin" or not self.admitted
+                or self._admitting or self.process_observer is None):
+            raise SessionError("checked-file fixture requires the admitted original native owner")
+        self._native_deadline(deadline)
+        self.ensure_idle(deadline=deadline)
+        state = getattr(self, "_checked_files", None)
+        if phase == "source":
+            if state is not None:
+                raise SessionError("checked-file fixture source preparation may occur only once")
+            note = {"name": "checked-file-native-fixtures", "ok": False, "persisted_bytes": 0, "persisted_bytes_known": True,
+                    "phases": [], "postcaptures": {}, "roots_removed": False}
+            state = {"session": self, "roots": self._checked_paths(), "deadline": deadline,
+                     "pins": [], "files": [], "links": [], "aliases": [], "note": note,
+                     "prepared": False, "closed": False, "cutoffs": {}}
+            self._checked_files = state
+            self.admission_results.append(note)
+        try:
+            if state is None:
+                raise SessionError("checked-file wheel phase has no original source fixture")
+            self._checked_binding(state)
+            if phase == "source":
+                self._checked_create(state)
+                state["prepared"] = True
+            elif (not state["prepared"] or state["note"]["phases"] != ["source"]
+                    or state["note"]["postcaptures"].get("source", 0) < 1):
+                raise SessionError("checked-file wheel phase requires its original source postconditions")
+            else:
+                self._checked_reinspect(state, deadline=deadline)
+            state["note"]["phases"].append(phase)
+            state["note"]["postcaptures"][phase] = 0
+            state["cutoffs"][phase] = deadline
+        except BaseException:
+            self._fail("checked-file fixture preparation failed")
+            if state is not None:
+                state["note"]["persisted_bytes_known"] = (state["note"]["persisted_bytes_known"]
+                    and all(row["accounted"] for row in [*state["files"], *state["links"]]))
+                self.cleanup_errors.extend(self._checked_close_descriptors(state))
+            raise
+
+    def verify_checked_files(self, phase: str, *, deadline: float) -> None:
+        """After THIS original ordinary capture and its independent idle proof."""
+        self._guard()
+        self._native_deadline(deadline)
+        state = getattr(self, "_checked_files", None)
+        try:
+            if (state is None or not state["prepared"] or not state["note"]["phases"]
+                    or state["note"]["phases"][-1] != phase or state["cutoffs"].get(phase) != deadline
+                    or self.domain_finality is not True
+                    or self._busy or self._active is not None or self._direct_producer_pending):
+                raise SessionError("checked-file postconditions lack original phase/finality")
+            self._checked_reinspect(state, deadline=deadline)
+            state["note"]["postcaptures"][phase] += 1
+        except BaseException:
+            self._fail("checked-file fixture postconditions failed")
+            raise
+
+    def _close_checked_files(self) -> list[str]:
+        state = getattr(self, "_checked_files", None)
+        if state is None or state["closed"]:
+            return []
+        errors = []
+        try:
+            if self.failure is None:
+                if (self.domain_finality is not True or self._busy or self._active is not None
+                        or self._direct_producer_pending or not state["prepared"]
+                        or state["note"]["phases"] != ["source", "wheel"]
+                        or any(state["note"]["postcaptures"].get(p, 0) < 1 for p in _NATIVE_PHASES)):
+                    raise SessionError("checked-file disposal lacks original finality and both phase observations")
+                self._checked_reinspect(state, deadline=self.deadline)
+                for record in [*state["files"], *state["links"]]:
+                    _remaining(self.deadline)
+                    current = os.stat(record["name"], dir_fd=record["parent"]["fd"], follow_symlinks=False)
+                    if record["identity"] != _native_file_key(current):
+                        raise SessionError("checked-file fixture leaf changed before disposal")
+                    os.unlink(record["name"], dir_fd=record["parent"]["fd"])
+                    try:
+                        os.stat(record["name"], dir_fd=record["parent"]["fd"], follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise SessionError("checked-file fixture leaf remains after original unlink")
+                for pin in reversed(state["pins"]):
+                    if "created" not in pin:
+                        continue
+                    _remaining(self.deadline)
+                    # Recheck exact bound entry immediately before each finite
+                    # relative removal. Never recurse or walk a shared parent.
+                    current = os.stat(pin["name"], dir_fd=pin["parent"]["fd"], follow_symlinks=False)
+                    if pin["node"] != (*_home_node(current), stat.S_IMODE(current.st_mode)):
+                        raise SessionError("checked-file fixture directory changed before disposal")
+                    os.rmdir(pin["name"], dir_fd=pin["parent"]["fd"])
+                    try:
+                        os.stat(pin["name"], dir_fd=pin["parent"]["fd"], follow_symlinks=False)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise SessionError("checked-file fixture directory remains after disposal")
+                state["note"]["roots_removed"] = True
+                _remaining(self.deadline)
+        except BaseException as exc:
+            errors.append(f"checked-file fixture disposal {type(exc).__name__}")
+            self._fail("checked-file fixture disposal failed")
+        finally:
+            errors.extend(self._checked_close_descriptors(state))
+        state["note"]["ok"] = bool(state["note"]["roots_removed"] and not errors and self.failure is None)
+        return errors
 
     def _native_deadline(self, deadline: float) -> float:
         if (type(deadline) not in (int, float) or not math.isfinite(deadline)
@@ -5667,6 +6021,14 @@ class Session:
                 except BaseException as exc:
                     self.cleanup_errors.append(f"native authority terminal finalization {type(exc).__name__}")
                     self._fail("native authority owned finalization failed")
+            try:
+                checked_errors = self._close_checked_files()
+                if checked_errors:
+                    self.cleanup_errors.extend(checked_errors)
+                    self._fail("checked-file fixture terminal finalization failed")
+            except BaseException as exc:
+                self.cleanup_errors.append(f"checked-file fixture terminal finalization {type(exc).__name__}")
+                self._fail("checked-file fixture terminal finalization failed")
             try:
                 userns_errors = self._close_userns_boundary()
                 if userns_errors:

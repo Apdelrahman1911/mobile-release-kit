@@ -3,6 +3,7 @@
 require_relative "release_support"
 require_relative "native_process_spawn"
 require_relative "native_upload_process"
+require_relative "store_lane_lifetime"
 
 module MobileReleaseKit
   # Adapters own command selection and result policy. This module owns only a
@@ -14,12 +15,49 @@ module MobileReleaseKit
 
     module_function
 
-    def capture(environment, argv, tooling_directory, max_seconds:, max_output_bytes:, label:, failure_message:)
-      CaptureSession.new(
-        environment: environment, argv: argv, tooling_directory: tooling_directory,
-        max_seconds: max_seconds, max_output_bytes: max_output_bytes,
-        label: label, failure_message: failure_message,
-      ).execute
+    def capture(environment, argv, tooling_directory, max_seconds:, max_output_bytes:, label:, failure_message:, store_binding: nil)
+      binding = StoreLaneLifetime.admit_native_capture!(store_binding,
+        environment: environment, argv: argv, tooling_directory: tooling_directory)
+      environment, argv, tooling_directory = binding.capture_request if binding
+      session = nil
+      returned = false
+      begin
+        # The original reservation already exists. Publish the exact constructor
+        # return before execute; no guessed session or empty registry can repair
+        # a constructor exception/lost return.
+        Thread.handle_interrupt(Exception => :never) do
+          session = CaptureSession.new(
+            environment: environment, argv: argv, tooling_directory: tooling_directory,
+            max_seconds: max_seconds, max_output_bytes: max_output_bytes,
+            label: label, failure_message: failure_message, store_binding: binding,
+          )
+          binding&.bind_session!(session)
+        end
+        output = session.execute
+        if binding
+          observation = session.send(:observe_store_success, binding, output)
+          binding.capture_returned!(observation, output: output)
+        end
+        returned = true
+        output
+      rescue Exception => error # rubocop:disable Lint/RescueException
+        if binding
+          # Latch the original failure BEFORE the existing redaction below or
+          # an upstream ordinary rescue can convert it. Genuine no-creation is
+          # an observation of this exact session, never nil/exit/registry state.
+          begin
+            observation = session&.send(:observe_store_no_creation, binding)
+            binding.capture_failed!(error, observation: observation)
+            session&.cleanup_errors&.each { |cleanup| binding.record_cleanup_error!(cleanup) }
+          rescue Exception => observation_error # rubocop:disable Lint/RescueException
+            binding.fail_unless_retired!(error)
+            binding.record_cleanup_error!(observation_error)
+          end
+        end
+        raise
+      ensure
+        binding&.fail_unless_retired!(StoreLaneLifetime::LifetimeError.new) unless returned
+      end
     rescue IOError, SystemCallError, NativeProcessSpawn::Error, NativeUploadProcess::Error
       # Redact only after selecting the actual original primary. Arbitrary
       # errors and the actual Interrupt/SystemExit object are not reconstructed.
@@ -47,6 +85,18 @@ module MobileReleaseKit
 
     private_class_method :register_session, :release_session, :unresolved_sessions
 
+    class StoreObservation
+      def initialize(session, binding, kind, output)
+        @session, @binding, @kind, @output = session, binding, kind, output
+        freeze
+      end
+
+      def matches?(session, binding, kind, output)
+        @session.equal?(session) && @binding.equal?(binding) && @kind == kind && @output.equal?(output)
+      end
+    end
+    private_constant :StoreObservation
+
     # Retained on UNKNOWN through GC/caller unwind. This is not a public process
     # receipt API, a test callback, or a detached cleanup/reaping worker.
     class CaptureSession
@@ -69,7 +119,8 @@ module MobileReleaseKit
                   :stdout_eof, :stderr_eof, :status_eof, :stdin_close_returned,
                   :phase, :first_error, :caller_primary
 
-      def initialize(environment:, argv:, tooling_directory:, max_seconds:, max_output_bytes:, label:, failure_message:, caller: Thread.current)
+      def initialize(environment:, argv:, tooling_directory:, max_seconds:, max_output_bytes:, label:, failure_message:,
+                     caller: Thread.current, store_binding: nil)
         started_ns = monotonic_ns
         unless (max_seconds.is_a?(Integer) || max_seconds.is_a?(Float)) &&
                max_seconds.finite? && max_seconds.positive? && max_seconds <= MAX_SECONDS &&
@@ -80,6 +131,16 @@ module MobileReleaseKit
         @caller = caller
         @run_deadline_ns = started_ns + (max_seconds * NANOSECONDS).floor
         @hard_cleanup_deadline_ns = @run_deadline_ns + CLEANUP_NS
+        if store_binding
+          original_run, original_hard = store_binding.capture_deadlines
+          @run_deadline_ns = [@run_deadline_ns, original_run].min
+          @hard_cleanup_deadline_ns = [@run_deadline_ns + CLEANUP_NS, original_hard].min
+          unless caller.equal?(Thread.current) && original_hard - original_run == CLEANUP_NS &&
+                 started_ns < @run_deadline_ns && @hard_cleanup_deadline_ns - @run_deadline_ns == CLEANUP_NS
+            raise NativeUploadProcess::LifecycleError
+          end
+        end
+        @store_binding = store_binding
         @capture_slot = NativeUploadProcess::TaskSlot.new(
           caller: caller, parent_slot: nil, run_deadline_ns: @run_deadline_ns,
           hard_cleanup_deadline_ns: @hard_cleanup_deadline_ns,
@@ -239,8 +300,29 @@ module MobileReleaseKit
 
       private
 
+      def observe_store_success(binding, output)
+        unless @store_binding.equal?(binding) && !@store_observation &&
+               @phase == :accepted && output.instance_of?(String) && output.frozen? && output.equal?(@stdout) &&
+               successful_offer? && finality_confirmed?
+          raise NativeUploadProcess::LifecycleError
+        end
+        # Issued only AFTER execute genuinely returned through its final
+        # pending-delivery boundary. Lost returns remain conservative UNKNOWN.
+        @store_observation = StoreObservation.new(self, binding, :success, output)
+      end
+
+      def observe_store_no_creation(binding)
+        return nil unless @store_binding.equal?(binding) && !@store_observation &&
+          no_creator_attempt? && finality_confirmed?
+        @store_observation = StoreObservation.new(self, binding, :not_created, nil)
+      end
+
+      def original_store_observation?(observation)
+        @store_observation.equal?(observation)
+      end
+
       def monotonic_ns
-        Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+        NativeUploadProcess.monotonic_ns
       end
 
       def timeout_error

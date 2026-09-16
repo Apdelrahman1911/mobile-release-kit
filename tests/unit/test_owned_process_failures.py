@@ -233,7 +233,7 @@ class BeforeActiveFailureTests(unittest.TestCase):
              patch.object(preflight_module.shutil, "which", return_value="/fictional/tool"), \
              patch.object(preflight_module, "_xcode_application_identities", return_value=(set(), "failed")) as query:
             self.assertEqual(preflight_module._effective_ios_identity_finding(self.ios).status, Status.BLOCKED)
-        query.assert_called_once_with(self.ios, configuration="Debug", execution_source=None)
+        query.assert_called_once_with(self.ios, configuration="Debug", execution_source=None, cancellation=None)
 
     def test_secondary_filesystem_error_cannot_resume_next_platform_identity_query(self):
         self.android.data["ios"] = dict(self.ios.data["ios"])
@@ -257,12 +257,31 @@ class BeforeActiveFailureTests(unittest.TestCase):
         adc = self.root / "adc.json"
         adc.write_text('{"type":"authorized_user"}')
         adc.chmod(0o600)
+        values = {
+            "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": base64.b64encode(b"fictional-p8").decode("ascii"),
+            "GOOGLE_APPLICATION_CREDENTIALS": str(adc),
+        }
         for kind in ("group", "resource"):
-            with self.subTest(kind=kind), patch.object(credentials, "_validate_p8", side_effect=self.failure(kind)) as p8, \
-                 patch.object(Path, "read_text", side_effect=AssertionError("later ADC read")), \
-                 self.assertRaises(owned.ProcessError):
-                credentials.validate_store_material(self.ios, values={"GOOGLE_APPLICATION_CREDENTIALS": str(adc)}, platforms=("ios", "android"))
+            original = self.failure(kind)
+
+            def failed_p8(selected_path, *, execution_source=None, cancellation=None):
+                self.assertIsNotNone(cancellation)
+                self.assertEqual(selected_path().read_bytes(), b"fictional-p8")
+                raise original
+
+            with self.subTest(kind=kind), patch.object(credentials, "_validate_selected_p8", side_effect=failed_p8) as p8, \
+                 patch.object(credentials, "read_external_bytes", side_effect=AssertionError("later ADC read")) as adc_read, \
+                 self.assertRaises(owned.ProcessError) as caught:
+                credentials.validate_store_material(self.ios, values=values, platforms=("ios", "android"))
             p8.assert_called_once()
+            adc_read.assert_not_called()
+            self.assertTrue(caught.exception.fatal)
+            self.assertTrue(caught.exception.dispatched)
+            if not original.contained:
+                self.assertFalse(caught.exception.contained)
+            if not original.cleanup_complete:
+                self.assertFalse(caught.exception.cleanup_complete)
+            self.assertEqual(adc.read_bytes(), b'{"type":"authorized_user"}')
 
     def test_failed_prerequisite_phases_stop_later_private_work_in_offline_and_signing_modes(self):
         failure = Finding("fictional-failure", Status.FAIL, "Failed prerequisite")
@@ -271,8 +290,10 @@ class BeforeActiveFailureTests(unittest.TestCase):
         home.mkdir(mode=0o700)
 
         @contextmanager
-        def lease():
-            with signing.local_signing_lease(home=home) as owner:
+        def lease(*, cancellation):
+            self.assertIsNotNone(cancellation)
+            with signing.local_signing_lease(home=home, cancellation=cancellation) as owner:
+                self.assertIs(owner.cancellation, cancellation)
                 yield owner
 
         for mode in ("offline", "signing"):
@@ -286,7 +307,7 @@ class BeforeActiveFailureTests(unittest.TestCase):
                     mocks["doctor"].return_value = Report("fixture")
                     mocks[phase].return_value = Report("fixture", [failure]) if phase == "doctor" else [failure]
                     sentinels = [stack.enter_context(patch.object(preflight_module, name)) for name in (
-                        "materialize_build_inputs", "run_ios_build", "run_android_build", "validate_store_material", "online_preflight_findings")]
+                        "materialize_build_inputs", "run_ios_build", "run_android_build", "_selected_store_material", "online_preflight_findings")]
                     report = preflight_module.preflight(self.ios, mode=mode, platforms=("ios",), run_builds=True)
                     self.assertFalse(report.ok)
                     self.assertIn(failure, report.findings)
@@ -357,10 +378,14 @@ class BeforeActiveFailureTests(unittest.TestCase):
         self.ios.data["android"] = android_config()["android"]
         home = self.root / "signed-phase-home"
         home.mkdir(mode=0o700)
+        owners = []
 
         @contextmanager
-        def lease():
-            with signing.local_signing_lease(home=home) as owner:
+        def lease(*, cancellation):
+            self.assertIsNotNone(cancellation)
+            with signing.local_signing_lease(home=home, cancellation=cancellation) as owner:
+                self.assertIs(owner.cancellation, cancellation)
+                owners.append(owner)
                 yield owner
 
         for order in (("android", "ios"), ("ios", "android")):
@@ -371,7 +396,13 @@ class BeforeActiveFailureTests(unittest.TestCase):
                         failed = order[failed_index]
 
                         @contextmanager
-                        def materialize(_config, *, platforms, **_kwargs):
+                        def materialize(_config, *, platforms, cancellation, build_inputs, signing_lease, **_kwargs):
+                            self.assertIs(signing_lease, owners[-1])
+                            self.assertIs(cancellation, signing_lease.cancellation)
+                            self.assertIs(build_inputs.cancellation, cancellation)
+                            self.assertIs(build_inputs.invocation.child, build_inputs)
+                            build_inputs.invocation.require(root=_config.root, cancellation=cancellation,
+                                                            signing_lease=signing_lease)
                             platform = platforms[0]
                             calls.append((platform, "entry"))
                             if platform == failed and phase == "entry":
@@ -383,7 +414,10 @@ class BeforeActiveFailureTests(unittest.TestCase):
                                 if platform == failed and phase == "cleanup":
                                     raise OSError("fictional cleanup failure")
 
-                        def build(platform):
+                        def build(platform, *, cancellation, **kwargs):
+                            self.assertIs(cancellation, owners[-1].cancellation)
+                            if platform == "android":
+                                self.assertIs(kwargs["build_inputs"].cancellation, cancellation)
                             calls.append((platform, "build"))
                             if platform == failed and phase == "build":
                                 raise owned.ProcessCleanupError("fictional build cleanup failure", dispatched=True)
@@ -399,11 +433,12 @@ class BeforeActiveFailureTests(unittest.TestCase):
                             stack.enter_context(patch.object(preflight_module, name, return_value=result))
                         stack.enter_context(patch.object(preflight_module, "local_signing_lease", side_effect=lease))
                         stack.enter_context(patch.object(preflight_module, "materialize_build_inputs", side_effect=materialize))
-                        stack.enter_context(patch.object(preflight_module, "run_android_build", side_effect=lambda *_a, **_k: build("android")))
-                        stack.enter_context(patch.object(preflight_module, "run_ios_build", side_effect=lambda *_a, **_k: build("ios")))
+                        stack.enter_context(patch.object(preflight_module, "run_android_build", side_effect=lambda *_a, **kwargs: build("android", **kwargs)))
+                        stack.enter_context(patch.object(preflight_module, "run_ios_build", side_effect=lambda *_a, **kwargs: build("ios", **kwargs)))
                         validators = [stack.enter_context(patch.object(preflight_module, name)) for name in ("validate_aab", "validate_ipa", "snapshot_ios_artifacts")]
                         report = preflight_module.preflight(self.ios, mode="signing", platforms=order, run_builds=True)
                         self.assertFalse(report.ok)
+                        self.assertTrue(calls)
                         if failed_index == 0:
                             self.assertTrue(all(platform == failed for platform, _ in calls))
                         else:
@@ -416,25 +451,58 @@ class BeforeActiveFailureTests(unittest.TestCase):
                     self.assertEqual(signing.signing_status(home=home)["status"], "idle")
 
     def test_public_preflight_aborts_fatal_initial_check_in_every_mode_without_fake_session_recovery(self):
+        from mobile_release import build_inputs
+
         home = self.root / "home"
         home.mkdir(mode=0o700)
 
         @contextmanager
-        def lease():
-            with signing.local_signing_lease(home=home) as owner:
+        def lease(*, cancellation):
+            self.assertIsNotNone(cancellation)
+            with signing.local_signing_lease(home=home, cancellation=cancellation) as owner:
+                self.assertIs(owner.cancellation, cancellation)
                 yield owner
 
         for mode in ("online", "offline", "signing"):
             for builds in (False, True):
                 for kind in ("group", "resource"):
                     with self.subTest(mode=mode, builds=builds, kind=kind), ExitStack() as stack:
+                        def fail_doctor(config, platforms, *, execution_source=None, cancellation=None):
+                            invocation = build_inputs._ENV_OWNER  # Passive observation, never authority manufacture.
+                            self.assertIs(type(invocation), build_inputs.InvocationCustody)
+                            self.assertIs(config, self.ios)
+                            self.assertEqual(platforms, ("ios",))
+                            self.assertIs(cancellation, invocation.cancellation)
+                            self.assertEqual(invocation.root, config.root)
+                            self.assertTrue(invocation.active and invocation.reserved)
+                            if mode == "online":
+                                self.assertEqual(invocation.mode, "online")
+                                self.assertIsNone(invocation.project_owner)
+                                self.assertFalse(invocation.project_started)
+                            else:
+                                self.assertEqual(invocation.mode, "build")
+                                self.assertIsNotNone(invocation.project_owner)
+                                self.assertTrue(invocation.project_started)
+                                self.assertIs(invocation.project_owner.guard, cancellation)
+                                self.assertEqual(invocation.project_owner.root, config.root)
+                            if mode == "signing" and builds:
+                                self.assertIs(type(execution_source), command.AccountExecutionSource)
+                                self.assertIs(execution_source._lease, invocation.signing_lease)
+                                self.assertIs(execution_source._locked_source, invocation.signing_lease._locked_source)
+                                self.assertIs(invocation.signing_lease.cancellation, cancellation)
+                            else:
+                                self.assertIsNone(invocation.signing_lease)
+                                self.assertIsNone(execution_source)
+                            raise self.failure(kind)
+
                         stack.enter_context(patch.object(preflight_module, "local_signing_lease", side_effect=lease))
-                        stack.enter_context(patch.object(preflight_module, "doctor", side_effect=self.failure(kind)))
+                        doctor = stack.enter_context(patch.object(preflight_module, "doctor", side_effect=fail_doctor))
                         sentinels = [stack.enter_context(patch.object(preflight_module, name)) for name in (
                             "resolve_credential_values", "run_project_checks", "validate_signing_material",
-                            "validate_store_material", "run_android_build", "run_ios_build", "online_preflight_findings")]
+                            "_selected_store_material", "run_android_build", "run_ios_build", "online_preflight_findings")]
                         report = preflight_module.preflight(self.ios, mode=mode, platforms=("ios",), run_builds=builds)
                         self.assertFalse(report.ok)
+                        doctor.assert_called_once()
                         failure = next(item for item in report.findings if item.code == "preflight.process-lifetime")
                         self.assertIn("early command failure does not create", failure.remediation)
                         for sentinel in sentinels:
@@ -442,45 +510,107 @@ class BeforeActiveFailureTests(unittest.TestCase):
                     self.assertEqual(signing.signing_status(home=home)["status"], "idle")
 
     def test_online_fatal_material_and_runner_stop_following_work_without_signing_or_application(self):
+        p8_name = "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"
+        values = {p8_name: base64.b64encode(b"fictional-p8").decode("ascii")}
+        validate_material = credentials.SelectedStoreMaterial.validate
         for kind in ("group", "resource"):
-            for target in ("validate_store_material", "online_preflight_findings"):
+            for target in ("material", "runner"):
                 with self.subTest(kind=kind, target=target), ExitStack() as stack:
+                    original = self.failure(kind)
                     stack.enter_context(patch.object(preflight_module, "doctor", return_value=Report("fixture")))
+                    stack.enter_context(patch.object(preflight_module, "resolve_credential_values", return_value=values))
                     stack.enter_context(patch.object(preflight_module, "credential_findings", return_value=[]))
-                    material = stack.enter_context(patch.object(preflight_module, "validate_store_material", return_value=[]))
-                    runner = stack.enter_context(patch.object(preflight_module, "online_preflight_findings", return_value=[]))
-                    (material if target == "validate_store_material" else runner).side_effect = self.failure(kind)
+                    selection = stack.enter_context(patch.object(preflight_module, "_selected_store_material",
+                                                                  wraps=preflight_module._selected_store_material))
+                    validation = stack.enter_context(patch.object(credentials.SelectedStoreMaterial, "validate",
+                                                                   autospec=True, side_effect=validate_material))
+                    # Only the unavailable P8 policy result is fictional. The
+                    # selection, validation state, scratch, environment and
+                    # invocation stay real; no command outcome/finality is made.
+                    p8 = stack.enter_context(patch.object(credentials, "_validate_selected_p8", return_value=Finding(
+                        "fictional-p8-policy", Status.PASS, "Fictional P8 policy seam, not native authentication")))
+                    native = stack.enter_context(patch.object(credentials, "_run_private",
+                                                               side_effect=AssertionError("unmodeled native operation")))
+                    if target == "material":
+                        p8.side_effect = original
+
+                    def query(*, config, release, platforms, material, invocation):
+                        self.assertIs(config, self.ios)
+                        self.assertEqual(platforms, ("ios",))
+                        self.assertIs(material, validation.call_args.args[0])
+                        self.assertIs(invocation, selection.call_args.kwargs["invocation"])
+                        material.require(config=config, platforms=platforms, invocation=invocation)
+                        self.assertEqual(preflight_module.os.environ.get(p8_name), values[p8_name])
+                        raise original
+
+                    runner = stack.enter_context(patch.object(preflight_module, "online_preflight_findings", side_effect=query))
                     sentinels = [stack.enter_context(patch.object(preflight_module, name)) for name in (
                         "run_project_checks", "effective_identity_findings", "validate_signing_material",
-                        "materialize_build_inputs", "run_ios_build", "run_android_build")]
+                        "materialize_build_inputs", "run_ios_build", "run_android_build", "local_signing_lease")]
                     report = preflight_module.preflight(self.ios, mode="online", platforms=("ios",), run_builds=True)
                     self.assertFalse(report.ok)
                     self.assertTrue(any(item.code == "preflight.process-lifetime" for item in report.findings))
-                    self.assertEqual(runner.call_count, int(target == "online_preflight_findings"))
+                    selection.assert_called_once()
+                    validation.assert_called_once()
+                    p8.assert_called_once()
+                    material = validation.call_args.args[0]
+                    invocation = selection.call_args.kwargs["invocation"]
+                    self.assertIs(material._invocation, invocation)
+                    self.assertIs(material._scratch.cancellation, invocation.cancellation)
+                    self.assertIs(selection.call_args.kwargs["cancellation"], invocation.cancellation)
+                    self.assertIs(p8.call_args.kwargs["cancellation"], invocation.cancellation)
+                    self.assertEqual(material._state, "closed")
+                    self.assertFalse(invocation.active or invocation.project_started)
+                    self.assertEqual(runner.call_count, int(target == "runner"))
+                    native.assert_not_called()
                     for sentinel in sentinels:
                         sentinel.assert_not_called()
 
     def test_missing_adc_static_diagnostic_never_opens_private_files_or_runs_p8(self):
-        values = {"MOBILE_RELEASE_APPLE_API_KEY_P8_PATH": "/fictional/private/p8"}
-        with patch.object(credentials, "_private_path_error") as private_path, \
-             patch.object(credentials, "_validate_p8") as p8, \
-             patch.object(credentials.tempfile, "TemporaryDirectory") as temporary:
+        values = {"MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH": "/fictional/private/p8"}
+        with patch.object(credentials, "read_external_bytes") as private_read, \
+             patch.object(credentials, "_validate_selected_p8") as p8, \
+             patch.object(credentials, "finite_scratch") as scratch:
             findings = credentials.validate_store_material(self.ios, values=values, platforms=("ios", "android"))
         self.assertEqual([(item.code, item.status) for item in findings], [("credential-material.google-adc", Status.MISSING)])
-        private_path.assert_not_called()
+        private_read.assert_not_called()
         p8.assert_not_called()
-        temporary.assert_not_called()
+        scratch.assert_not_called()
 
     def test_public_online_prerequisite_and_unrelated_diagnostic_contract(self):
+        p8_name = "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"
+        values = {p8_name: base64.b64encode(b"fictional-p8").decode("ascii")}
+        validate_material = credentials.SelectedStoreMaterial.validate
         for missing in (None, "version", "identity", "credentials", "material"):
             with self.subTest(missing=missing), ExitStack() as stack:
                 report = Report("doctor", [Finding("unrelated-signing", Status.MISSING, "Unrelated signing input")])
                 stack.enter_context(patch.object(preflight_module, "doctor", return_value=report))
+                stack.enter_context(patch.object(preflight_module, "resolve_credential_values", return_value=values))
                 inventory = stack.enter_context(patch.object(preflight_module, "credential_findings", return_value=[]))
-                material = stack.enter_context(patch.object(preflight_module, "validate_store_material", return_value=[]))
-                online = stack.enter_context(patch.object(preflight_module, "online_preflight_findings", return_value=[Finding("online", Status.PASS, "Ownership observed")]))
+                selection = stack.enter_context(patch.object(preflight_module, "_selected_store_material",
+                                                              wraps=preflight_module._selected_store_material))
+                validation = stack.enter_context(patch.object(credentials.SelectedStoreMaterial, "validate",
+                                                               autospec=True, side_effect=validate_material))
+                # This policy-only stub is not native authentication or an
+                # original command/finality receipt. All material custody is real.
+                p8 = stack.enter_context(patch.object(credentials, "_validate_selected_p8", return_value=Finding(
+                    "fictional-p8-policy", Status.PASS, "Fictional P8 policy seam, not native authentication")))
+                native = stack.enter_context(patch.object(credentials, "_run_private",
+                                                           side_effect=AssertionError("unmodeled native operation")))
+
+                def query(*, config, release, platforms, material, invocation):
+                    self.assertIs(config, self.ios)
+                    self.assertEqual(platforms, ("ios",))
+                    self.assertIs(material, validation.call_args.args[0])
+                    self.assertIs(invocation, selection.call_args.kwargs["invocation"])
+                    material.require(config=config, platforms=platforms, invocation=invocation)
+                    self.assertEqual(preflight_module.os.environ.get(p8_name), values[p8_name])
+                    return [Finding("online", Status.PASS, "Fictional ownership finding")]
+
+                online = stack.enter_context(patch.object(preflight_module, "online_preflight_findings", side_effect=query))
                 sentinels = [stack.enter_context(patch.object(preflight_module, name)) for name in (
-                    "run_project_checks", "effective_identity_findings", "materialize_build_inputs", "run_ios_build")]
+                    "run_project_checks", "effective_identity_findings", "materialize_build_inputs",
+                    "run_ios_build", "run_android_build", "local_signing_lease")]
                 stack.enter_context(patch.dict(self.ios.data["ios"], {"identityStatus": "unverified"}))
                 if missing == "version":
                     from mobile_release.config import ConfigurationError
@@ -490,12 +620,24 @@ class BeforeActiveFailureTests(unittest.TestCase):
                 if missing == "credentials":
                     inventory.return_value = [Finding("credential-missing", Status.MISSING, "No credential")]
                 if missing == "material":
-                    material.return_value = [Finding("invalid-material", Status.INVALID, "Invalid credential")]
+                    p8.return_value = Finding("invalid-material", Status.INVALID, "Invalid credential")
                 result = preflight_module.preflight(self.ios, mode="online", platforms=("ios",), run_builds=True)
                 self.assertIs(result, report)
                 self.assertFalse(result.ok)
-                self.assertEqual(material.call_count, int(missing in (None, "material")))
+                self.assertEqual(selection.call_count, int(missing in (None, "material")))
+                self.assertEqual(validation.call_count, int(missing in (None, "material")))
+                self.assertEqual(p8.call_count, int(missing in (None, "material")))
                 self.assertEqual(online.call_count, int(missing is None))
+                if validation.called:
+                    material = validation.call_args.args[0]
+                    invocation = selection.call_args.kwargs["invocation"]
+                    self.assertIs(material._invocation, invocation)
+                    self.assertIs(material._scratch.cancellation, invocation.cancellation)
+                    self.assertIs(selection.call_args.kwargs["cancellation"], invocation.cancellation)
+                    self.assertIs(p8.call_args.kwargs["cancellation"], invocation.cancellation)
+                    self.assertEqual(material._state, "closed")
+                    self.assertFalse(invocation.active or invocation.project_started)
+                native.assert_not_called()
                 for sentinel in sentinels:
                     sentinel.assert_not_called()
 

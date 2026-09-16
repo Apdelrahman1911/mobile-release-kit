@@ -188,6 +188,58 @@ class AppleReleaseLanesTest < Minitest::Test
     assert_equal ["/v1/builds/build-1", "/v1/buildBetaDetails/detail-1"], @service.writes.map { |_, path, _| path }
   end
 
+  def assert_latched_upload_stops_continuation(converted:)
+    @service.visible = false
+    prepare("candidate")
+    lifetime = MobileReleaseKit::StoreLaneLifetime
+    record = lifetime::Invocation.new(lane: @lane_name, nonce: "n" * 16,
+      output: File.join(@root, "receipt.json"), mode: "execute", run_deadline_ns: 60_000_000_000)
+    primary = IOError.new("synthetic original adapter uncertainty")
+    test = self
+    @fastfile.define_singleton_method(:upload_to_testflight) do |**options|
+      test.upload(options)
+      record.mark_unknown!(primary)
+      raise Faraday::TimeoutError, "synthetic upstream error conversion" if converted
+      true # A swallowed/converted original error is still latched.
+    end
+    @fastfile.define_singleton_method(:poll_exact_ios_build) { |*_, **_| test.flunk "uncertain upload reached readback" }
+    lifetime.stub(:current_invocation, record) do
+      error = assert_raises(lifetime::LifetimeError) { execute }
+      assert_same primary, error.primary
+    end
+    assert_equal 1, @upload_count
+    assert_empty @service.writes
+    refute File.exist?(File.join(@root, "receipt.json"))
+    refute journal.fetch("history").any? { |entry| entry["phase"] == "upload-response-ambiguous" }
+  end
+
+  def test_candidate_normal_upload_return_cannot_bypass_latched_lifetime
+    assert_latched_upload_stops_continuation(converted: false)
+  end
+
+  def test_candidate_converted_upload_error_checks_lifetime_before_ambiguity_journal
+    assert_latched_upload_stops_continuation(converted: true)
+  end
+
+  def test_common_precondition_and_receipt_publication_require_original_continuation
+    @service.visible = false
+    prepare("candidate")
+    lifetime = MobileReleaseKit::StoreLaneLifetime
+    record = lifetime::Invocation.new(lane: @lane_name, nonce: "n" * 16,
+      output: File.join(@root, "receipt.json"), mode: "execute", run_deadline_ns: 60_000_000_000)
+    record.mark_unknown!(IOError.new("synthetic unresolved nested consumer"))
+    test = self
+    @fastfile.define_singleton_method(:atomic_store_document) { |*_, **_| test.flunk "uncertain lifetime reached publication" }
+    lifetime.stub(:current_invocation, record) do
+      assert_raises(lifetime::LifetimeError) do
+        @fastfile.write_precondition(operation: @lane_name, platform: "ios", identity: "model", snapshot: {})
+      end
+      assert_raises(lifetime::LifetimeError) do
+        @fastfile.write_receipt(operation: @lane_name, platform: "ios", identity: "model", result: "accepted", extra: {})
+      end
+    end
+  end
+
   def test_candidate_retained_archive_and_symbols_are_checked_before_any_mutation
     @service.visible = false
     prepare("candidate")

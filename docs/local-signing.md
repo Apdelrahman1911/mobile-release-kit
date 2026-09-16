@@ -1,19 +1,28 @@
 # Local signing ownership and recovery
 
+Production use is **NOT READY until** remediation verification and a new comprehensive
+production-readiness audit pass;
+see [preparation status](../README.md#preparation-status).
+
 ## Scope and admission
 
 Signed iOS **build** preflight temporarily changes the macOS account's keychain
 default/search list and installs an authenticated profile. An exclusive account
-lease covers the entire preflight, before doctor, private validation, project
+lease covers the inner preflight, before doctor, private validation, project
 checks or preparation. Concurrent toolkit commands in different projects using
 the same account fail before those operations; they do not queue, take over a
 PID, or borrow another context's installed profile. Retry after the owner exits.
+The outer invocation first reserves its process environment, then acquires this
+account lease, then admits the project directory. The same actual cancellation
+guard and original lifetime ledger span these owners.
 
 Standalone signed `materialize_build_inputs` calls acquire the same lease before
 private-input inspection or client-file changes and retain it through teardown.
 An explicitly supplied lease is borrowed, not reacquired or released; another
 active signing context is rejected before materialization. This admission does
-not resolve QA-004's separate outer scratch/client-restoration obligations.
+not transfer project-file ownership to the account lease. A separate finite
+[build-input owner](build-inputs-recovery.md) retains the project, original client
+files and decoded scratch through inner signing and consumer cleanup.
 
 Production admission requires macOS, a non-root account with equal real/effective
 UID, its password-database home, and writable local APFS/HFS+ storage. A conflicting
@@ -23,7 +32,9 @@ The internal synthetic-home test seam is not a consumer option.
 
 Android-only, offline, online and signing `--skip-builds` paths do not activate
 account-global iOS signing state and do not acquire this lease. These paths retain
-their own validation. Independent GitHub-hosted runners have separate accounts;
+their own validation. All offline/signing preflight, including skip-builds, still
+holds project admission and the environment reservation; online reserves only the
+environment. Independent GitHub-hosted runners have separate accounts;
 Store-only jobs do not acquire this lease or receive signing assets. Release
 workflow permissions, Store authorization, candidate identity and evidence schemas
 are unchanged. CI-only read permissions are added for matrix execution proofs.
@@ -222,7 +233,7 @@ reported without opening private files or invoking P8 tools. Fatal command or
 cleanup uncertainty stops online checks too. A passing ownership query does not
 clear other failing report findings or approve a release.
 
-Nested profile/signing/process owners use the same actual cancellation guard.
+Nested profile/signing/process and outer build-input owners use the same actual cancellation guard.
 Default main-thread tokens allow implicit borrowing; fixed worker/custom-handler
 callers forward that owner explicitly. They preserve custom/foreign handlers, reject mixed owners, and
 relinquish inherited descriptors after fork without unlocking or deleting parent
@@ -247,11 +258,20 @@ profile/certificate/key bytes, Store credentials or release evidence. Never comm
 upload, cache, attest or attach this directory to a report. Profile authentication
 scratch outside it follows its [own cleanup limits](ios-profile-authority.md).
 
-**QA-004 remains open:** outer build-input scratch/client restoration still needs
-its separate correction. This account/signing repair does not prove that owner
-safe. A protected non-public archive/export rehearsal with the consumer's supported
-profiles and pinned Xcode is still an external activation requirement; fictional
-native models and repository tests cannot establish actual credential suitability.
+Project-input cleanup independently restores admitted original client-file objects
+and exact modes only while its parent/backup/publication bindings remain intact.
+Foreign edits are not overwritten; possibly used scratch survives unknown consumers.
+If account recovery is needed, finish it first, outside the project lock, then follow
+[build-input status/recovery](build-inputs-recovery.md) for the original project/session.
+Project recovery never acquires the account lease. Its terminal control authorizes
+residual metadata removal only, without reopening or restoring current client files.
+Project pending state may contain original files/private material and must not be shared.
+
+These prepared outer-owner changes still need their qualified verification and
+delivered-source rebind. A protected non-public archive/export rehearsal with the
+consumer's supported profiles and pinned Xcode remains an external activation
+requirement; fictional native models and repository tests cannot establish actual
+credential suitability.
 
 ## Verification
 

@@ -217,13 +217,14 @@ Signed iOS build preflight has a separate [account-wide signing lease and
 recoverable command protocol](local-signing.md). Atomic profile installation or
 profile-process settlement alone is not that concurrency/recovery authority.
 
-**Separate open blocker QA-004:** the outer `materialize_build_inputs` scratch and
-client-file restoration do not yet use this cancellation-safe ownership. Default
-cancellation during those outer cleanup entries can leave decoded material or
-temporary client configuration. Inner signing/profile cleanup does not prove those
-outer resources were restored. Inspect the exact owned scratch and configured
-client targets before retrying; preserve originals and other tasks' files. This
-requires separate remediation and prevents a production-readiness verdict.
+Outer `materialize_build_inputs` scratch and client-file restoration use their own
+project-scoped build-input owner throughout acquisition, consumption and cleanup.
+It attempts independent safe restoration, preserves primary failures and intervening
+changes, and retains unresolved state rather than inferring cleanup from inner
+signing/profile success. Inner completion still does not prove outer restoration.
+Use [build-input status and recovery](build-inputs-recovery.md) for the original
+project transaction; account signing recovery remains separate. Hard termination
+cannot run cleanup, and unknown original-worker finality is not deletion authority.
 
 ## Recovery and verification scope
 

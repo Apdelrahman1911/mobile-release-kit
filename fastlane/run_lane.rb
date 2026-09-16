@@ -9,7 +9,8 @@ ENV["FASTLANE_OPT_OUT_USAGE"] = "true"
 ENV["FASTLANE_SKIP_DOCS"] = "true"
 ENV["FASTLANE_SKIP_UPDATE_CHECK"] = "true"
 
-require "fastlane"
+require_relative "store_lane_runtime"
+MobileReleaseKit::StoreLaneRuntime.capture_exit_boundary!
 
 FASTFILE = File.realpath(File.join(__dir__, "Fastfile"))
 ALLOWED_LANES = %w[
@@ -24,6 +25,7 @@ ALLOWED_LANES = %w[
 ].freeze
 
 if ARGV == ["--validate"]
+  require "fastlane"
   Fastlane::FastFile.new(FASTFILE)
   exit 0
 end
@@ -33,4 +35,17 @@ abort "usage: bundle exec ruby fastlane/run_lane.rb LANE" unless ARGV.length == 
 lane = ARGV.fetch(0)
 abort "unsupported shared Store lane: #{lane}" unless ALLOWED_LANES.include?(lane)
 
-Fastlane::LaneManager.cruise_lane(nil, lane, {}, FASTFILE)
+if %w[android_online_preflight ios_online_preflight].include?(lane)
+  # Readback has no Store-document/terminal protocol and keeps its separate
+  # existing command lifetime. It cannot take the six mutating-lane route.
+  require "fastlane"
+  Fastlane::LaneManager.cruise_lane(nil, lane, {}, FASTFILE)
+else
+  # Admission and original invocation/resource reservation precede Fastlane
+  # loading. Only this explicit nonreturning boundary can issue status0/75.
+  MobileReleaseKit::StoreLaneRuntime.run_upload!(lane) do |runtime|
+    require "fastlane"
+    runtime.install_fastlane_bridges!
+    Fastlane::LaneManager.cruise_lane(nil, lane, {}, FASTFILE)
+  end
+end

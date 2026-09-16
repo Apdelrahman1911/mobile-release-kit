@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -10,10 +11,12 @@ import tomllib
 import types
 import unittest
 import zipfile
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from mobile_release import __version__
+from mobile_release import __version__, stores
+from mobile_release._profile_callers import first_primary_context
 from mobile_release.cli import (
     _candidate_context_matches,
     _init,
@@ -31,7 +34,11 @@ from mobile_release.android import (
     run_android_build,
     validate_aab,
 )
+from mobile_release.build_inputs import app_private_namespace, finite_scratch, invocation_custody
+from mobile_release.cancellation import DefaultCancellation
+from mobile_release.owned_process import ProcessCleanupError, ProcessError
 from mobile_release.credentials import (
+    _selected_store_material,
     artifact_validation_environment,
     scrub_credential_capabilities,
 )
@@ -60,9 +67,58 @@ from mobile_release.tooling import REQUIRED_TOOLING_FILES, resolve_tooling_root
 
 from .helpers import android_config, ios_config, write_project
 from .evidence_helpers import build_lifecycle, raw_receipt, workflow_environment
+from .store_lane_model import StoreLaneModel
 
 
 class CliBuildTests(unittest.TestCase):
+    @contextmanager
+    def _online_material(self, config, *, platforms=("android",)):
+        """Real input/guard custody, with no native call or Store authentication."""
+        with tempfile.TemporaryDirectory(prefix="mrk-selected-store-fixture-") as temporary:
+            adc = Path(temporary) / "adc.json"
+            adc.write_bytes(b'{"type":"authorized_user","synthetic":true}')
+            adc.chmod(0o600)
+            values = {"GOOGLE_APPLICATION_CREDENTIALS": str(adc)}
+            if "ios" in platforms:
+                values["MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"] = base64.b64encode(b"synthetic-p8").decode("ascii")
+
+            def p8_validator(selected_path, *, execution_source=None, cancellation=None):
+                self.assertEqual(selected_path().read_bytes(), b"synthetic-p8")
+                self.assertIs(cancellation, invocation.cancellation)
+                return Finding("credential-material.apple-p8", Status.PASS,
+                               "Synthetic native-validator boundary, not cryptographic evidence.")
+
+            with invocation_custody(config.root, mode="online") as invocation, _selected_store_material(
+                    config, values=values, platforms=platforms, invocation=invocation) as material:
+                with patch("mobile_release.credentials._validate_selected_p8", side_effect=p8_validator):
+                    findings = material.validate()
+                self.assertFalse(any(item.status in FAILING_STATUSES for item in findings))
+                material.require(config=config, platforms=platforms, invocation=invocation)
+                yield invocation, material
+
+    @contextmanager
+    def _store_material(self, config, request):
+        """Actual selection/cleanup; synthetic key validation is not crypto evidence."""
+        with first_primary_context(ExitStack(), expose_owner=True) as (resources, guard):
+            record = stores.new_store_lane_evidence(config, request, guard)
+            try:
+                invocation = resources.enter_context(invocation_custody(config.root,
+                    mode="store", cancellation=guard, lane_evidence=record))
+                adc = config.root / "synthetic-adc.json"
+                adc.write_bytes(b'{"type":"authorized_user","synthetic":true}'); adc.chmod(0o600)
+                values = {"GOOGLE_APPLICATION_CREDENTIALS": str(adc),
+                    "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": base64.b64encode(b"synthetic-p8").decode("ascii")}
+                material = resources.enter_context(_selected_store_material(config, values=values,
+                    platforms=(request.platform,), invocation=invocation, cancellation=guard,
+                    lane_evidence=record, stage="production" if request.stage == "production-submit" else request.stage))
+                with patch("mobile_release.credentials._validate_selected_p8", return_value=Finding(
+                        "credential-material.apple-p8", Status.PASS, "Synthetic validation boundary only")):
+                    material.validate()
+                yield invocation, material, record
+            finally:
+                stores.close_store_operation_resources(resources, record, cancellation=guard,
+                                                       primary=sys.exc_info()[1])
+
     @staticmethod
     def _write_init_fixture(root: Path) -> Path:
         (root / "app").mkdir(parents=True)
@@ -156,7 +212,12 @@ class CliBuildTests(unittest.TestCase):
             "fastlane/release_support.rb",
             data_files["share/mobile-release-kit/fastlane"],
         )
-        helpers = ("fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb")
+        helpers = (
+            "fastlane/native_process_spawn.rb", "fastlane/native_upload_process.rb",
+            "fastlane/store_document.rb", "fastlane/store_lane_lifetime.rb",
+            "fastlane/store_lane_resources.rb", "fastlane/store_lane_runtime.rb",
+            "fastlane/store_lane_fastlane_bridges.rb",
+        )
         for helper in helpers:
             self.assertIn(helper, data_files["share/mobile-release-kit/fastlane"])
             self.assertIn(helper, REQUIRED_TOOLING_FILES)
@@ -519,10 +580,12 @@ class CliBuildTests(unittest.TestCase):
                 _timeout: int,
                 *,
                 environment_overrides: dict[str, str] | None = None,
-                signing_session=None, execution_source=None,
+                signing_session=None, execution_source=None, cancellation=None,
             ) -> None:
                 self.assertIsNone(signing_session)
                 self.assertIsNone(execution_source)
+                self.assertIsNotNone(cancellation)
+                cancellation.check()
                 commands.append(argv)
                 overrides.append(environment_overrides or {})
                 archive_index = argv.index("-archivePath") + 1 if "-archivePath" in argv else None
@@ -550,7 +613,9 @@ class CliBuildTests(unittest.TestCase):
             discovered = discover_project(root)
             captured_environment: dict[str, str] = {}
             stale = root / ".mobile-release/build/android/mapping.txt"
-            stale.parent.mkdir(parents=True)
+            with app_private_namespace(config.root) as namespace:
+                (namespace.path / "build").mkdir(mode=0o700)
+                stale.parent.mkdir(mode=0o700)
             stale.write_text("stale mapping\n", encoding="utf-8")
 
             def fake_run(*_args: object, **kwargs: object) -> object:
@@ -589,11 +654,12 @@ class CliBuildTests(unittest.TestCase):
 
     def test_signed_android_build_canonicalizes_final_aab_without_password_argv(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary) / "application"
             config = load_config(write_project(root, android_config()))
             discovered = discover_project(root)
             keystore = Path(temporary) / "upload.jks"
             keystore.write_bytes(b"fixture")
+            keystore.chmod(0o600)
             commands: list[list[str]] = []
             signing_environment: dict[str, str] = {}
 
@@ -607,6 +673,12 @@ class CliBuildTests(unittest.TestCase):
                         archive.writestr("base/manifest/AndroidManifest.xml", b"x")
                         archive.writestr("base/dex/classes.dex", b"x")
                 else:
+                    selected_keystore = Path(command[command.index("-keystore") + 1])
+                    self.assertNotEqual(selected_keystore, keystore)
+                    self.assertEqual(selected_keystore.read_bytes(), b"fixture")
+                    self.assertEqual(selected_keystore.stat().st_mode & 0o777, 0o600)
+                    self.assertIsNotNone(kwargs["cancellation"])
+                    kwargs["cancellation"].check()
                     signing_environment.update(kwargs["environ"])
                 return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
@@ -644,7 +716,9 @@ class CliBuildTests(unittest.TestCase):
             root = Path(temporary)
             config = load_config(write_project(root, ios_config(), platform="ios"))
             commands: list[list[str]] = []
-            session = types.SimpleNamespace(assert_owner=lambda: None)
+            guard = DefaultCancellation(ProcessCleanupError, "synthetic signed build owner")
+            guard._installation, guard._activated, guard.depth = "INSTALLED", True, 0
+            session = types.SimpleNamespace(assert_owner=lambda: None, cancellation=guard)
 
             def fake_run(
                 argv: list[str],
@@ -652,10 +726,11 @@ class CliBuildTests(unittest.TestCase):
                 _timeout: int,
                 *,
                 environment_overrides: dict[str, str] | None = None,
-                signing_session=None, execution_source=None,
+                signing_session=None, execution_source=None, cancellation=None,
             ) -> None:
                 self.assertIs(signing_session, session)
                 self.assertIsNone(execution_source)
+                self.assertIs(cancellation, guard)
                 self.assertEqual(
                     environment_overrides,
                     {
@@ -727,7 +802,7 @@ class CliBuildTests(unittest.TestCase):
                 "are ignored when signing and are not protected by the signature.\n"
             ),
         )
-        with patch("mobile_release.android.subprocess.run", return_value=accepted):
+        with patch("mobile_release.android.run_owned", return_value=accepted):
             self.assertTrue(_verify_jar_signature(Path("candidate.aab")))
         for warning in (
             "The SHA1 algorithm is disabled by the security properties.",
@@ -745,7 +820,7 @@ class CliBuildTests(unittest.TestCase):
                     f"{warning}\n"
                 ),
             )
-            with patch("mobile_release.android.subprocess.run", return_value=unsafe_warning):
+            with patch("mobile_release.android.run_owned", return_value=unsafe_warning):
                 with self.assertRaisesRegex(ValidationError, "jarsigner rejected"):
                     _verify_jar_signature(Path("candidate.aab"))
         unknown_warning = subprocess.CompletedProcess(
@@ -761,13 +836,13 @@ class CliBuildTests(unittest.TestCase):
                 "Warning:\nUnexpected verifier warning.\n"
             ),
         )
-        with patch("mobile_release.android.subprocess.run", return_value=unknown_warning):
+        with patch("mobile_release.android.run_owned", return_value=unknown_warning):
             with self.assertRaisesRegex(ValidationError, "jarsigner rejected"):
                 _verify_jar_signature(Path("candidate.aab"))
         rejected = subprocess.CompletedProcess(
             args=[], returncode=1, stdout="", stderr="signature verification failed"
         )
-        with patch("mobile_release.android.subprocess.run", return_value=rejected):
+        with patch("mobile_release.android.run_owned", return_value=rejected):
             with self.assertRaisesRegex(ValidationError, "jarsigner rejected"):
                 _verify_jar_signature(Path("candidate.aab"))
 
@@ -777,7 +852,7 @@ class CliBuildTests(unittest.TestCase):
             stdout="jar verified.\n",
             stderr="This jar contains entries whose signer certificate is self-signed.\n",
         )
-        with patch("mobile_release.android.subprocess.run", return_value=incomplete_chain):
+        with patch("mobile_release.android.run_owned", return_value=incomplete_chain):
             with self.assertRaisesRegex(ValidationError, "jarsigner rejected"):
                 _verify_jar_signature(Path("candidate.aab"))
 
@@ -790,7 +865,7 @@ class CliBuildTests(unittest.TestCase):
             stdout=f"Signer #1:\n\nCertificate #1:\n SHA256: {first}\n",
             stderr="",
         )
-        with patch("mobile_release.android.subprocess.run", return_value=single):
+        with patch("mobile_release.android.run_owned", return_value=single):
             self.assertEqual(_signer_fingerprint(Path("candidate.aab")), "11" * 32)
         multiple = subprocess.CompletedProcess(
             args=[],
@@ -801,7 +876,7 @@ class CliBuildTests(unittest.TestCase):
             ),
             stderr="",
         )
-        with patch("mobile_release.android.subprocess.run", return_value=multiple):
+        with patch("mobile_release.android.run_owned", return_value=multiple):
             with self.assertRaisesRegex(ValidationError, "multiple distinct"):
                 _signer_fingerprint(Path("candidate.aab"))
 
@@ -852,9 +927,12 @@ class CliBuildTests(unittest.TestCase):
             captured: dict[str, str] = {}
 
             def fake_checks(
-                _config: object, phase: str, *, environ: dict[str, str], execution_source=None
+                _config: object, phase: str, *, environ: dict[str, str],
+                execution_source=None, cancellation=None,
             ) -> list[Finding]:
                 self.assertIsNone(execution_source)
+                self.assertIsNotNone(cancellation)
+                cancellation.check()
                 if phase == "androidArtifact":
                     captured.update(environ)
                 return []
@@ -915,47 +993,46 @@ class CliBuildTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             jar = Path(temporary) / "bundletool.jar"
             jar.write_bytes(b"not the reviewed jar")
-            with patch.dict(
-                os.environ, {"MOBILE_RELEASE_BUNDLETOOL_JAR": str(jar)}, clear=False
-            ), patch("mobile_release.android.subprocess.run") as run:
-                with self.assertRaisesRegex(ValidationError, "reviewed SHA-256"):
+            # Keep correctly retained failed-copy residue inside this fixture;
+            # do not leave an unknown synthetic snapshot in shared /tmp.
+            def scratch_for_fixture(**kwargs):
+                return finite_scratch(parent=Path(temporary), **kwargs)
+            with patch.dict(os.environ, {"MOBILE_RELEASE_BUNDLETOOL_JAR": str(jar)}, clear=False), patch(
+                    "mobile_release.android.finite_scratch", side_effect=scratch_for_fixture), patch(
+                    "mobile_release.android.run_owned") as run:
+                with self.assertRaises(ValidationError):
                     _bundletool_manifest(Path("candidate.aab"))
             run.assert_not_called()
+            self.assertEqual(jar.read_bytes(), b"not the reviewed jar")
             target = Path(temporary) / "target.jar"
             target.write_bytes(b"target")
             jar.unlink()
             jar.symlink_to(target)
-            with patch.dict(
-                os.environ, {"MOBILE_RELEASE_BUNDLETOOL_JAR": str(jar)}, clear=False
-            ):
-                with self.assertRaisesRegex(ValidationError, "symbolic-link"):
+            with patch.dict(os.environ, {"MOBILE_RELEASE_BUNDLETOOL_JAR": str(jar)}, clear=False), patch(
+                    "mobile_release.android.finite_scratch", side_effect=scratch_for_fixture), patch(
+                    "mobile_release.android.run_owned") as run:
+                with self.assertRaisesRegex(ValidationError, "symbolic link"):
                     _bundletool_manifest(Path("candidate.aab"))
+            run.assert_not_called()
+            self.assertTrue(jar.is_symlink())
+            self.assertEqual(target.read_bytes(), b"target")
 
     def test_ci_artifact_environment_uses_store_adapter_names(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {}, clear=True):
+        original = {"MOBILE_RELEASE_IOS_IPA_PATH": "original-value"}
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, original, clear=True):
             root = Path(temporary)
-            artifacts = {
-                "android-aab": root / "app.aab",
-                "android-mapping": root / "mapping.txt",
-                "ios-ipa": root / "app.ipa",
-                "ios-archive": root / "archive.zip",
-                "ios-dsyms": root / "dsyms.zip",
-            }
-            _set_artifact_environment(artifacts)
-            self.assertEqual(
-                os.environ["MOBILE_RELEASE_ANDROID_AAB_PATH"], str(artifacts["android-aab"])
-            )
-            self.assertEqual(
-                os.environ["MOBILE_RELEASE_ANDROID_MAPPING_PATH"],
-                str(artifacts["android-mapping"]),
-            )
-            self.assertEqual(
-                os.environ["MOBILE_RELEASE_IOS_IPA_PATH"], str(artifacts["ios-ipa"])
-            )
-            self.assertNotIn("MOBILE_RELEASE_AAB_PATH", os.environ)
-            self.assertNotIn("MOBILE_RELEASE_IPA_PATH", os.environ)
-            self.assertEqual(os.environ["MOBILE_RELEASE_IOS_ARCHIVE_PATH"], str(artifacts["ios-archive"]))
-            self.assertEqual(os.environ["MOBILE_RELEASE_IOS_DSYMS_PATH"], str(artifacts["ios-dsyms"]))
+            artifacts = {"android-aab": root / "app.aab", "android-mapping": root / "mapping.txt",
+                "ios-ipa": root / "app.ipa", "ios-archive": root / "archive.zip", "ios-dsyms": root / "dsyms.zip"}
+            with invocation_custody(root, mode="online") as invocation, ExitStack() as resources:
+                _set_artifact_environment(artifacts, resources=resources, invocation=invocation)
+                for name, variable in (("android-aab", "MOBILE_RELEASE_ANDROID_AAB_PATH"),
+                    ("android-mapping", "MOBILE_RELEASE_ANDROID_MAPPING_PATH"),
+                    ("ios-ipa", "MOBILE_RELEASE_IOS_IPA_PATH"), ("ios-archive", "MOBILE_RELEASE_IOS_ARCHIVE_PATH"),
+                    ("ios-dsyms", "MOBILE_RELEASE_IOS_DSYMS_PATH")):
+                    self.assertEqual(os.environ[variable], str(artifacts[name]))
+                self.assertNotIn("MOBILE_RELEASE_AAB_PATH", os.environ)
+                self.assertNotIn("MOBILE_RELEASE_IPA_PATH", os.environ)
+            self.assertEqual(dict(os.environ), original)
 
     def test_ci_candidate_artifacts_are_platform_scoped_and_promotions_are_receipt_only(self) -> None:
         artifact = Path("artifact")
@@ -1053,34 +1130,29 @@ class CliBuildTests(unittest.TestCase):
             (root / "fastlane").mkdir()
             (root / "fastlane/Appfile").write_text("raise 'consumer config loaded'\n")
             (root / "fastlane/Pluginfile").write_text("raise 'consumer plugin loaded'\n")
-            captured: list[str] = []
-            captured_environment: dict[str, str] = {}
-            captured_cwd: Path | None = None
+            adc = root / "synthetic-adc.json"
+            adc.write_bytes(b'{"type":"authorized_user","synthetic":true}'); adc.chmod(0o600)
+            model = StoreLaneModel(lambda _argv, _env: (raw_receipt(intent), 0))
+            self.addCleanup(model.close)
 
-            def fake_store_run(argv: list[str], **kwargs: object) -> object:
-                nonlocal captured_cwd
-                self.assertEqual(kwargs["env"]["BUNDLER_VERSION"], "4.0.16")
-                self.assertEqual(kwargs["env"]["BUNDLE_IGNORE_CONFIG"], "1")
-                self.assertEqual(kwargs["env"]["BUNDLE_AUTO_INSTALL"], "false")
-                self.assertEqual(kwargs["env"]["BUNDLE_FROZEN"], "true")
-                self.assertEqual(kwargs["env"]["BUNDLE_PATH"], "/fictional/pinned-bundle")
+            def fake_store_run(argv, **kwargs):
+                environment = kwargs["environ"]
+                self.assertEqual(environment["BUNDLER_VERSION"], "4.0.16")
+                self.assertEqual(environment["BUNDLE_IGNORE_CONFIG"], "1")
+                self.assertEqual(environment["BUNDLE_AUTO_INSTALL"], "false")
+                self.assertEqual(environment["BUNDLE_FROZEN"], "true")
+                self.assertEqual(environment["BUNDLE_PATH"], "/fictional/pinned-bundle")
+                if "_evidence" in kwargs:
+                    return model(argv, **kwargs)
                 if argv[:2] == ["ruby", "-e"]:
                     return subprocess.CompletedProcess(argv, 0, stdout="3.3.12", stderr="")
                 if argv == ["bundle", "--version"]:
-                    return subprocess.CompletedProcess(
-                        argv, 0, stdout="4.0.16", stderr=""
-                    )
+                    return subprocess.CompletedProcess(argv, 0, stdout="4.0.16", stderr="")
                 if argv == ["bundle", "check"]:
                     return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
                 if argv[-1] == str(tooling / "fastlane/native_process_spawn.rb"):
-                    return subprocess.CompletedProcess(
-                        argv, 0, stdout="MRK_RUNTIME_3.3.12_FIDDLE_1.1.2", stderr=""
-                    )
-                captured.extend(argv)
-                captured_environment.update(kwargs["env"])
-                captured_cwd = Path(kwargs["cwd"])
-                receipt_path.write_text(json.dumps(raw_receipt(intent)), encoding="utf-8")
-                return type("Completed", (), {"returncode": 0})()
+                    return subprocess.CompletedProcess(argv, 0, stdout="MRK_RUNTIME_3.3.12_FIDDLE_1.1.2", stderr="")
+                raise AssertionError("unmodeled Store caller command")
 
             request = StoreRequest(
                 stage="candidate",
@@ -1096,6 +1168,7 @@ class CliBuildTests(unittest.TestCase):
                 {
                     **workflow_environment(),
                     "MOBILE_RELEASE_TOOLING_ROOT": str(tooling),
+                    "GOOGLE_APPLICATION_CREDENTIALS": str(adc),
                     "BUNDLE_PATH": "/fictional/pinned-bundle",
                     "BUNDLER_VERSION": "99.0.0",
                     "BUNDLE_IGNORE_CONFIG": "0",
@@ -1118,7 +1191,7 @@ class CliBuildTests(unittest.TestCase):
                 clear=False,
             ), patch("mobile_release.stores.shutil.which", return_value="/usr/bin/tool"), patch(
                 "mobile_release.stores.subprocess.run", side_effect=fake_store_run
-            ):
+            ), patch("mobile_release.stores.run_owned", side_effect=fake_store_run):
                 execute_store_operation(
                     config=config,
                     release=config.release_version(),
@@ -1126,14 +1199,13 @@ class CliBuildTests(unittest.TestCase):
                     operation_intent=intent,
                 )
                 preserved = receipt_path.read_bytes()
-                reused = execute_store_operation(
-                    config=config,
-                    release=config.release_version(),
-                    request=request,
-                    operation_intent=intent,
-                )
-                self.assertEqual(reused, raw_receipt(intent))
+                with self.assertRaisesRegex(StoreOperationError, "original live composite"):
+                    execute_store_operation(config=config, release=config.release_version(),
+                                            request=request, operation_intent=intent)
                 self.assertEqual(receipt_path.read_bytes(), preserved)
+            self.assertEqual(len(model.calls), 1)
+            argv, captured_cwd, captured_environment, _guard = model.calls[0]
+            captured = list(argv)
             self.assertEqual(captured[:3], ["bundle", "exec", "ruby"])
             self.assertEqual(captured[3], str((tooling / "fastlane/run_lane.rb").resolve()))
             self.assertEqual(captured[-1], "android_internal_upload")
@@ -1179,8 +1251,10 @@ class CliBuildTests(unittest.TestCase):
                         "_JAVA_OPTIONS": "-agentlib:must-not-run",
                         "JDK_JAVA_OPTIONS": "-agentlib:must-not-run",
                     }
-                    with patch.dict(os.environ, source, clear=True):
-                        actual = _store_environment(config, config.release_version(), request, root / "raw.json", root / "tooling")
+                    with patch.dict(os.environ, source, clear=True), self._store_material(config, request) as (invocation, material, record):
+                        actual = _store_environment(config, config.release_version(), request, root / "raw.json", root / "tooling",
+                            material=material, invocation=invocation, lane_evidence=record,
+                            source_environment=source, authority=stores.workflow_authority(stage))
                     for name in ("MOBILE_RELEASE_BUNDLETOOL_JAR", "JAVA_HOME"):
                         if (platform, stage) == ("android", "candidate"):
                             self.assertEqual(actual[name], source[name])
@@ -1230,10 +1304,10 @@ class CliBuildTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 1, stdout="", stderr="missing")
 
             with patch.dict(
-                os.environ, {"MOBILE_RELEASE_TOOLING_ROOT": str(tooling)}, clear=False
+                os.environ, {**workflow_environment(), "MOBILE_RELEASE_TOOLING_ROOT": str(tooling)}, clear=False
             ), patch("mobile_release.stores.shutil.which", return_value="/usr/bin/tool"), patch(
-                "mobile_release.stores.subprocess.run", side_effect=missing_bundle
-            ) as run:
+                "mobile_release.stores.run_owned", side_effect=missing_bundle
+            ) as run, patch("mobile_release.stores.subprocess.run") as lane:
                 with self.assertRaisesRegex(
                     StoreOperationError, "Pinned Fastlane dependencies"
                 ):
@@ -1245,6 +1319,7 @@ class CliBuildTests(unittest.TestCase):
                     )
             self.assertEqual(run.call_args_list[-1].args[0], ["bundle", "check"])
             self.assertEqual(run.call_count, 3)
+            lane.assert_not_called()
 
     def test_store_runtime_controls_preserve_explicit_paths_and_ignore_foreign_config(self) -> None:
         supplied = {
@@ -1281,11 +1356,12 @@ class CliBuildTests(unittest.TestCase):
                 path = tooling / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"fictional pinned tooling\n")
-            calls = []
+            calls, runner_directories = [], []
+            explicit = config.root / ".mobile-release/store/explicit-android.json"
 
             def fake_lane(argv, **kwargs):
-                calls.append(argv)
-                environment = kwargs["env"]
+                calls.append(tuple(argv))
+                environment = kwargs["environ"]
                 self.assertEqual(environment["BUNDLE_GEMFILE"], str(tooling / "Gemfile"))
                 self.assertEqual(environment["BUNDLE_PATH"], "/fictional/pinned-bundle")
                 self.assertEqual(environment["BUNDLER_VERSION"], "4.0.16")
@@ -1294,27 +1370,35 @@ class CliBuildTests(unittest.TestCase):
                 self.assertEqual(environment["BUNDLE_FROZEN"], "true")
                 self.assertNotIn("RUBYOPT", environment)
                 self.assertNotIn("RUBYLIB", environment)
-                Path(environment["MOBILE_RELEASE_PREFLIGHT_READBACK_PATH"]).write_text(json.dumps({
-                    "schemaVersion": 1, "platform": "android", "appIdentity": "com.example.reader",
-                    "buildNumber": 42, "buildUnused": True,
-                    "requiredTracks": ["internal", "closed-testing"],
-                    "closedTesterAssignmentVerified": True, "observedAt": "2026-01-01T00:00:00Z",
-                }), encoding="utf-8")
-                return subprocess.CompletedProcess(argv, 0)
+                self.assertIs(kwargs["cancellation"], invocation.cancellation)
+                self.assertIsNone(kwargs["_evidence"])
+                self.assertEqual((kwargs["capture"], kwargs["timeout"]), (False, 900))
+                self.assertEqual(Path(environment["MOBILE_RELEASE_PREFLIGHT_READBACK_PATH"]), explicit)
+                self.assertEqual(json.loads(Path(environment["GOOGLE_APPLICATION_CREDENTIALS"]).read_bytes()),
+                                 {"type": "authorized_user", "synthetic": True})
+                runner_directories.append(Path(kwargs["cwd"]))
+                # Only the call mapping is exercised. No invented successful
+                # original writer, finality receipt or Store readback is used.
+                return subprocess.CompletedProcess(argv, 1)
 
             with patch.dict(os.environ, {
                 "BUNDLE_PATH": "/fictional/pinned-bundle", "BUNDLER_VERSION": "99.0.0",
                 "BUNDLE_IGNORE_CONFIG": "0", "BUNDLE_AUTO_INSTALL": "true", "BUNDLE_FROZEN": "false",
                 "RUBYOPT": "-r/fictional/foreign", "RUBYLIB": "/fictional/foreign",
+                "MOBILE_RELEASE_PREFLIGHT_READBACK_PATH": str(explicit),
             }, clear=True), patch("mobile_release.stores.resolve_tooling_root", return_value=tooling), patch(
                 "mobile_release.stores._require_fastlane_bundle"
-            ), patch("mobile_release.stores.subprocess.run", side_effect=fake_lane):
+            ), patch("mobile_release.stores.run_owned", side_effect=fake_lane), self._online_material(config) as (
+                    invocation, material):
                 findings = online_preflight_findings(
-                    config=config, release=config.release_version(), platforms=("android",)
+                    config=config, release=config.release_version(), platforms=("android",),
+                    invocation=invocation, material=material,
                 )
-            self.assertEqual(findings[-1].status, Status.PASS)
-            self.assertEqual(calls, [["bundle", "exec", "ruby", str(tooling / "fastlane/run_lane.rb"),
-                                      "android_online_preflight"]])
+            self.assertEqual(findings[-1].status, Status.FAIL)
+            self.assertEqual(calls, [("bundle", "exec", "ruby", str(tooling / "fastlane/run_lane.rb"),
+                                     "android_online_preflight")])
+            self.assertFalse(explicit.exists())
+            self.assertTrue(all(not directory.exists() for directory in runner_directories))
 
     def test_store_runtime_admission_rejects_wrong_pins_and_unconfirmed_fiddle_before_lane(self) -> None:
         marker = "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2"
@@ -1343,13 +1427,13 @@ class CliBuildTests(unittest.TestCase):
             def fake(argv, **kwargs):
                 index = len(calls)
                 calls.append(argv)
-                self.assertEqual(kwargs["env"]["BUNDLE_PATH"], "/fictional/pinned-bundle")
-                self.assertEqual(kwargs["env"]["BUNDLE_GEMFILE"], str(tooling / "Gemfile"))
-                self.assertEqual(kwargs["env"]["BUNDLER_VERSION"], "4.0.16")
-                self.assertEqual(kwargs["env"]["BUNDLE_IGNORE_CONFIG"], "1")
-                self.assertEqual(kwargs["env"]["BUNDLE_AUTO_INSTALL"], "false")
-                self.assertEqual(kwargs["env"]["BUNDLE_FROZEN"], "true")
-                self.assertNotIn("BUNDLE_SIMULATE_VERSION", kwargs["env"])
+                self.assertEqual(kwargs["environ"]["BUNDLE_PATH"], "/fictional/pinned-bundle")
+                self.assertEqual(kwargs["environ"]["BUNDLE_GEMFILE"], str(tooling / "Gemfile"))
+                self.assertEqual(kwargs["environ"]["BUNDLER_VERSION"], "4.0.16")
+                self.assertEqual(kwargs["environ"]["BUNDLE_IGNORE_CONFIG"], "1")
+                self.assertEqual(kwargs["environ"]["BUNDLE_AUTO_INSTALL"], "false")
+                self.assertEqual(kwargs["environ"]["BUNDLE_FROZEN"], "true")
+                self.assertNotIn("BUNDLE_SIMULATE_VERSION", kwargs["environ"])
                 if index == failed:
                     return subprocess.CompletedProcess(argv, code, stdout=output, stderr=stderr)
                 return subprocess.CompletedProcess(argv, 0, stdout=expected_outputs[index], stderr="")
@@ -1359,7 +1443,7 @@ class CliBuildTests(unittest.TestCase):
                 "BUNDLER_VERSION": "99.0.0", "BUNDLE_IGNORE_CONFIG": "0", "BUNDLE_FROZEN": "false",
                 "BUNDLE_SIMULATE_VERSION": "4.0.17",
             }, clear=True), patch("mobile_release.stores.shutil.which", return_value="/fictional/ruby"), patch(
-                "mobile_release.stores.subprocess.run", side_effect=fake
+                "mobile_release.stores.run_owned", side_effect=fake
             ), patch.object(subprocess, "Popen", side_effect=AssertionError("unexpected real admission process")) as popen:
                 if failed is None:
                     _require_fastlane_bundle(tooling)
@@ -1380,7 +1464,7 @@ class CliBuildTests(unittest.TestCase):
                     self.assertEqual(calls[4][-1], calls[3][-1])
                 popen.assert_not_called()
         with patch("mobile_release.stores.shutil.which", return_value=None), patch(
-            "mobile_release.stores.subprocess.run"
+            "mobile_release.stores.run_owned"
         ) as run, patch.object(subprocess, "Popen", side_effect=AssertionError("unexpected real admission process")) as popen:
             with self.assertRaisesRegex(StoreOperationError, "Ruby 3.3.12"):
                 _require_fastlane_bundle(tooling)
@@ -1422,9 +1506,12 @@ class CliBuildTests(unittest.TestCase):
             captured_environment: dict[str, str] = {}
 
             def fake_project_checks(
-                _config: object, _phase: str, *, environ: dict[str, str], execution_source=None
+                _config: object, _phase: str, *, environ: dict[str, str],
+                execution_source=None, cancellation=None,
             ) -> list[object]:
                 self.assertIsNone(execution_source)
+                self.assertIsNotNone(cancellation)
+                cancellation.check()
                 captured_environment.update(environ)
                 return []
 
@@ -1490,7 +1577,7 @@ class CliBuildTests(unittest.TestCase):
 
     def test_online_preflight_can_verify_unverified_identity_despite_unrelated_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary) / "application"
             value = ios_config()
             value["ios"]["identityStatus"] = "unverified"
             value["projectChecks"]["preflight"] = [["must-not-run-online"]]
@@ -1503,14 +1590,37 @@ class CliBuildTests(unittest.TestCase):
                 Status.CONFIGURED,
                 "API authentication is configured.",
             )
-            online_pass = Finding(
-                "store.online.ios", Status.PASS, "Read-only ownership proof succeeded."
-            )
-            def online_without_app_credentials(**_kwargs: object) -> list[Finding]:
+            credential_file = Path(temporary) / "candidate.env"
+            original_p8 = Path(temporary) / "selected.p8"
+            original_p8.write_bytes(b"synthetic-selected-p8")
+            original_p8.chmod(0o600)
+            credential_file.write_text("MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH=" +
+                str(original_p8) + "\n", encoding="utf-8")
+            credential_file.chmod(0o600)
+            routed = Finding("store.online.ios", Status.NOT_APPLICABLE,
+                             "Synthetic adapter routing, not a successful Store readback.")
+            selected_guards = []
+            def validate_selected_p8(selected_path, *, execution_source=None, cancellation=None):
+                self.assertNotEqual(selected_path(), original_p8)
+                self.assertEqual(selected_path().read_bytes(), b"synthetic-selected-p8")
+                cancellation.check()
+                selected_guards.append(cancellation)
+                original_p8.write_bytes(b"intervening-external-p8-edit")
+                original_p8.unlink()
+                return Finding("credential-material.apple-p8", Status.PASS,
+                               "Synthetic native-validator boundary only.")
+            def online_without_app_credentials(*, config, release, platforms, material, invocation) -> list[Finding]:
+                material.require(config=config, platforms=platforms, invocation=invocation)
+                self.assertEqual(selected_guards, [invocation.cancellation])
+                self.assertFalse(original_p8.exists())
+                self.assertEqual(base64.b64decode(material.lane_environment(platform="ios")[
+                    "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"]), b"synthetic-selected-p8")
+                self.assertEqual(base64.b64decode(os.environ["MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"]),
+                                 b"synthetic-selected-p8")
                 self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", os.environ)
                 self.assertNotIn("CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE", os.environ)
                 self.assertNotIn("GOOGLE_GHA_CREDS_PATH", os.environ)
-                return [online_pass]
+                return [routed]
 
             with patch.dict(
                 os.environ,
@@ -1523,7 +1633,7 @@ class CliBuildTests(unittest.TestCase):
             ), patch(
                 "mobile_release.preflight.credential_findings", return_value=[configured]
             ) as inventory, patch(
-                "mobile_release.preflight.validate_store_material", return_value=[]
+                "mobile_release.credentials._validate_selected_p8", side_effect=validate_selected_p8
             ), patch(
                 "mobile_release.preflight.online_preflight_findings",
                 side_effect=online_without_app_credentials,
@@ -1533,6 +1643,7 @@ class CliBuildTests(unittest.TestCase):
                     mode="online",
                     platforms=("ios",),
                     run_builds=False,
+                    credentials_file=credential_file,
                 )
             self.assertEqual(inventory.call_args.kwargs["stage"], "candidate")
             online.assert_called_once()
@@ -1582,64 +1693,114 @@ class CliBuildTests(unittest.TestCase):
             if shutil.which("ruby"):
                 ruby = subprocess.run(
                     [
-                        "ruby",
-                        "-I",
-                        str(repository / "fastlane"),
-                        "-e",
+                        "ruby", "-I", str(repository / "fastlane"), "-e",
                         "require 'release_support'; puts MobileReleaseKit.safe_path(ARGV[0], ARGV[1], must_exist: false)",
-                        str(root),
-                        str(report_relative),
+                        str(root), str(report_relative),
                     ],
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    check=False,
+                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
                 )
                 self.assertEqual(ruby.returncode, 0, ruby.stderr)
-                self.assertEqual(
-                    Path(ruby.stdout.strip()).resolve(), (root / report_relative).resolve()
-                )
+                self.assertEqual(Path(ruby.stdout.strip()).resolve(), (root / report_relative).resolve())
+            captured = {}
 
-            captured_cwd: Path | None = None
+            def failed_lane(argv, **kwargs):
+                path = Path(kwargs["environ"]["MOBILE_RELEASE_PREFLIGHT_READBACK_PATH"])
+                self.assertEqual(path, root / report_relative)
+                path.relative_to(root)
+                self.assertIs(kwargs["cancellation"], invocation.cancellation)
+                self.assertIsNone(kwargs["_evidence"])
+                captured.update(path=path, cwd=Path(kwargs["cwd"]))
+                # A caller-owned failure output is preserved, never stale-cleared
+                # or adopted for scratch deletion after the failed native call.
+                with path.open("xb") as output:
+                    output.write(b"synthetic-partial-output")
+                path.chmod(0o600)
+                return subprocess.CompletedProcess(argv, 1)
 
-            def fake_lane(argv: list[str], **kwargs: object) -> object:
-                nonlocal captured_cwd
-                captured_cwd = Path(kwargs["cwd"])
-                path = Path(kwargs["env"]["MOBILE_RELEASE_PREFLIGHT_READBACK_PATH"])
-                path.resolve().relative_to(root.resolve())
-                path.write_text(
-                    json.dumps(
-                        {
-                            "schemaVersion": 1,
-                            "platform": "android",
-                            "appIdentity": "com.example.reader",
-                            "buildNumber": 42,
-                            "buildUnused": True,
-                            "requiredTracks": ["internal", "closed-testing"],
-                            "closedTesterAssignmentVerified": True,
-                            "observedAt": "2026-01-01T00:00:00Z",
-                        }
-                    ),
-                    encoding="utf-8",
-                )
+            with patch.dict(os.environ, {"MOBILE_RELEASE_PREFLIGHT_READBACK_PATH": str(report_relative)}, clear=True), patch(
+                    "mobile_release.stores.resolve_tooling_root", return_value=repository), patch(
+                    "mobile_release.stores._require_fastlane_bundle"), patch(
+                    "mobile_release.stores.run_owned", side_effect=failed_lane), patch(
+                    "mobile_release.stores.read_readback_bytes") as readback, self._online_material(config) as (
+                    invocation, material):
+                findings = online_preflight_findings(config=config, release=config.release_version(),
+                    platforms=("android",), invocation=invocation, material=material)
+            self.assertEqual(findings[-1].status, Status.FAIL)
+            readback.assert_not_called()
+            self.assertEqual(captured["path"].read_bytes(), b"synthetic-partial-output")
+            self.assertNotEqual(captured["cwd"], root)
+            self.assertFalse(captured["cwd"].exists())
+
+    def test_online_readback_override_refuses_occupied_names_and_multiple_platforms_before_native_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            value = android_config()
+            value["ios"] = ios_config()["ios"]
+            config = load_config(write_project(root, value))
+            for kind in ("file", "dangling", "multiple-platforms"):
+                relative = Path(".mobile-release/store") / (kind + ".json")
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if kind == "file":
+                    path.write_bytes(b"foreign-existing-output")
+                elif kind == "dangling":
+                    path.symlink_to(root / "absent-original-target")
+                before = path.lstat() if os.path.lexists(path) else None
+                platforms = ("android", "ios") if kind == "multiple-platforms" else ("android",)
+                with self.subTest(kind=kind), patch.dict(os.environ, {
+                        "MOBILE_RELEASE_PREFLIGHT_READBACK_PATH": str(relative)}, clear=True), self._online_material(
+                        config, platforms=platforms) as (invocation, material), patch(
+                        "mobile_release.stores.resolve_tooling_root") as tooling, patch(
+                        "mobile_release.stores._require_fastlane_bundle") as bundle, patch(
+                        "mobile_release.stores.run_owned") as run:
+                    with self.assertRaises(StoreOperationError) as caught:
+                        online_preflight_findings(config=config, release=config.release_version(),
+                            platforms=platforms, invocation=invocation, material=material)
+                    if kind == "multiple-platforms":
+                        self.assertIn("exactly one platform", str(caught.exception))
+                    tooling.assert_not_called()
+                    bundle.assert_not_called()
+                    run.assert_not_called()
+                if before is None:
+                    self.assertFalse(os.path.lexists(path))
+                else:
+                    self.assertEqual((path.lstat().st_ino, path.lstat().st_mode), (before.st_ino, before.st_mode))
+                    self.assertEqual(path.read_bytes() if kind == "file" else os.readlink(path),
+                                     b"foreign-existing-output" if kind == "file" else str(root / "absent-original-target"))
+
+    def test_online_readback_default_requires_actual_writer_and_stops_other_platforms(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            value = android_config()
+            value["ios"] = ios_config()["ios"]
+            config = load_config(write_project(root, value))
+            calls, outputs = [], []
+
+            def unbound_success(argv, **kwargs):
+                calls.append(tuple(argv))
+                self.assertIsNotNone(kwargs["_evidence"])
+                path = Path(kwargs["environ"]["MOBILE_RELEASE_PREFLIGHT_READBACK_PATH"])
+                with path.open("xb") as output:
+                    output.write(b'{"untrusted":"no original writer receipt"}')
+                path.chmod(0o600)
+                outputs.append(path)
+                # Deliberately not an actual command outcome: no sidecar/private
+                # outcome fields are patched or manufactured by this fixture.
                 return subprocess.CompletedProcess(argv, 0)
 
-            with patch.dict(
-                os.environ,
-                {"MOBILE_RELEASE_PREFLIGHT_READBACK_PATH": str(report_relative)},
-                clear=False,
-            ), patch(
-                "mobile_release.stores.resolve_tooling_root", return_value=repository
-            ), patch("mobile_release.stores._require_fastlane_bundle"), patch(
-                "mobile_release.stores.subprocess.run", side_effect=fake_lane
-            ):
-                findings = online_preflight_findings(
-                    config=config,
-                    release=config.release_version(),
-                    platforms=("android",),
-                )
-            self.assertEqual(findings[-1].status, Status.PASS)
-            self.assertNotEqual(captured_cwd, root)
+            with patch.dict(os.environ, {}, clear=True), patch("mobile_release.stores.resolve_tooling_root",
+                    return_value=Path(__file__).resolve().parents[2]), patch(
+                    "mobile_release.stores._require_fastlane_bundle"), patch(
+                    "mobile_release.stores.run_owned", side_effect=unbound_success), self.assertRaises(ProcessError):
+                with self._online_material(config, platforms=("android", "ios")) as (invocation, material):
+                    online_preflight_findings(config=config, release=config.release_version(),
+                        platforms=("android", "ios"), invocation=invocation, material=material)
+            self.assertEqual(len(calls), 1, "unconfirmed first writer allowed another platform")
+            self.assertEqual(len(outputs), 1)
+            self.assertTrue(invocation.cancellation.lifetime_ledger.fatal)
+            self.assertEqual(outputs[0].read_bytes(), b'{"untrusted":"no original writer receipt"}')
+            # TemporaryDirectory owns the entire synthetic fixture, including
+            # the correctly retained unknown output; no user output is removed.
 
     def test_online_preflight_blocks_explicitly_blocked_or_incomplete_query_identity(self) -> None:
         for status, missing_key in (("blocked", None), ("unverified", "appStoreAppId")):
@@ -1653,8 +1814,8 @@ class CliBuildTests(unittest.TestCase):
                 with patch(
                     "mobile_release.preflight.credential_findings", return_value=[]
                 ), patch(
-                    "mobile_release.preflight.validate_store_material", return_value=[]
-                ), patch(
+                    "mobile_release.preflight._selected_store_material"
+                ) as selection, patch(
                     "mobile_release.preflight.online_preflight_findings"
                 ) as online:
                     report = preflight(
@@ -1664,6 +1825,7 @@ class CliBuildTests(unittest.TestCase):
                         run_builds=False,
                     )
                 online.assert_not_called()
+                selection.assert_not_called()
                 gate = next(item for item in report.findings if item.code == "store.online.gate")
                 self.assertEqual(gate.status, Status.SKIP)
 

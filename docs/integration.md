@@ -130,6 +130,12 @@ release/store/
 .github/workflows/mobile-production-submit.yml
 ```
 
+Generated callers always read `release/mobile-release.json`. `init --apply` rejects a
+`--config` target elsewhere before acquiring the project workspace or writing files; an
+equivalent relative or absolute default target still uses the existing path/symlink checks.
+Other commands retain custom configuration paths, and `init --recover` does not use this
+restriction or a configuration file, so historical initialization journals remain recoverable.
+
 `--apply` creates the required locale/review/TestFlight text files as empty review prompts. Empty
 content intentionally fails metadata preflight until the product owner completes it. Existing
 regular metadata files are preserved even with `--force`; a symlink or non-file at a required

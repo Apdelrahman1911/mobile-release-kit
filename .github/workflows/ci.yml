@@ -8,11 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       verification_target:
-        description: Full verification, Linux/macOS-only evidence, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)
+        description: Full verification, Linux/macOS-only evidence, Store-native macOS, signing-adapter smoke, or fixed-shard matrix canary (partial aggregate remains incomplete)
         type: choice
         required: true
         default: full
-        options: [full, linux, macos, signing-adapter, signing-adapter-linux, signing-adapter-macos, signing-matrix-canary]
+        options: [full, linux, macos, store-lane-macos, signing-adapter, signing-adapter-linux, signing-adapter-macos, signing-matrix-canary]
 
 permissions:
   contents: read
@@ -101,7 +101,7 @@ jobs:
             --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
             --java-home "$JAVA_HOME_21_X64" --summary "$GITHUB_STEP_SUMMARY"
   test-native-profiles:
-    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos') }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'macos' || inputs.verification_target == 'store-lane-macos') }}
     runs-on: macos-26
     timeout-minutes: 60
     permissions:
@@ -146,6 +146,7 @@ jobs:
           bundler-cache: false
       - name: Require isolated macOS source and installed-wheel verification
         env:
+          MRK_SCOPE: ${{ github.event_name == 'workflow_dispatch' && inputs.verification_target == 'store-lane-macos' && 'store-lane' || 'platform' }}
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_PYTHON_312: ${{ steps.python312.outputs.python-path }}
           MRK_PYTHON_313: ${{ steps.python313.outputs.python-path }}
@@ -164,7 +165,7 @@ jobs:
             --runner-home "$HOME" --runner-temp "$RUNNER_TEMP" \
             --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \
-            --summary "$GITHUB_STEP_SUMMARY"
+            --scope "$MRK_SCOPE" --summary "$GITHUB_STEP_SUMMARY"
   test-signing-matrix:
     name: test-signing-matrix (${{ matrix.os }}, ${{ matrix.shard }})
     if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_target == 'full' || inputs.verification_target == 'signing-matrix-canary') }}
