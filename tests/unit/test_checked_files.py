@@ -541,9 +541,13 @@ class NativeCheckedFilesTests(unittest.TestCase):
                 for selected in (inside, case_project / inside.relative_to(project), inside.resolve(strict=True)):
                     with self.assertRaisesRegex(ValidationError, "outside"):
                         checked.read_external_bytes(selected, kind="private-small", project_root=physical_project)
+                lower_link = root / "lower-link"
+                link_info = lower_link.lstat()
+                self.assertTrue(stat.S_ISLNK(link_info.st_mode))
+                self.assertEqual((link_info.st_uid, link_info.st_gid, stat.S_IMODE(link_info.st_mode)), (0, 0, 0o777))
                 with self.assertRaises(ValidationError):
                     checked.read_external_bytes(root / "lower-link/material", kind="private-small", project_root=physical_project)
-                self.assertEqual(os.readlink(root / "lower-link"), "external")
+                self.assertEqual(os.readlink(lower_link), "external")
                 for path, content in ((source, b"selected private bytes"), (inside, b"inside the project")):
                     self.assertEqual(path.read_bytes(), content)
                     after, before = path.lstat(), originals[path]

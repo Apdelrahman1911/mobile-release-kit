@@ -4752,7 +4752,7 @@ class CISandboxPureTests(unittest.TestCase):
         session._checked_files = None
         rig = SimpleNamespace(session=session, nodes={}, fds={}, data={}, positions={}, links={}, events=[],
             next_inode=100, next_fd=700, closed=[], write_calls=0, partial_write=False,
-            fail_close=None, fail_initial_stat=False, fail_file_stat=False, now=0.0)
+            fail_close=None, fail_initial_stat=False, fail_file_stat=False, link_mode_fault=None, now=0.0)
 
         def add(path, mode, *, uid=0, gid=0, data=None):
             if path in rig.nodes:
@@ -4837,8 +4837,26 @@ class CISandboxPureTests(unittest.TestCase):
 
         def symlink(target, name, *, dir_fd):
             path = path_at(name, dir_fd)
-            add(path, stat.S_IFLNK | 0o777, data=target.encode())
+            # Darwin honors the controller's restrictive077 creation mask.
+            add(path, stat.S_IFLNK | 0o700, data=target.encode())
             rig.links[path] = target
+
+        def lchmod(path, mode):
+            self.assertIn(path, tuple(root / "lower-link" for root in roots))
+            self.assertEqual(mode, 0o777)
+            info = rig.nodes[path]
+            self.assertTrue(stat.S_ISLNK(info.st_mode))
+            rig.events.append(("lchmod", path, mode))
+            if rig.link_mode_fault == "no-effect":
+                return
+            info.st_mode = stat.S_IFLNK | mode
+            info.st_ctime_ns += 1
+            if rig.link_mode_fault == "after-effect-error":
+                raise OSError("synthetic lower-link mode error after effect")
+            if rig.link_mode_fault == "identity":
+                info.st_ino += 100
+            if rig.link_mode_fault == "parent":
+                rig.nodes[path.parent].st_ino += 100
 
         def readlink(name, *, dir_fd=None):
             return rig.links[path_at(name, dir_fd)]
@@ -4886,7 +4904,7 @@ class CISandboxPureTests(unittest.TestCase):
                      "O_NOFOLLOW", "O_CLOEXEC", "SEEK_SET")}
         fake_os = SimpleNamespace(**constants, open=opened, close=closed, fstat=held, stat=named,
             get_inheritable=lambda fd: False, mkdir=mkdir, write=write, fchown=chown, fchmod=chmod,
-            fsync=lambda fd: held(fd), symlink=symlink, readlink=readlink, lseek=seek, read=read,
+            fsync=lambda fd: held(fd), symlink=symlink, lchmod=lchmod, readlink=readlink, lseek=seek, read=read,
             scandir=Entries, unlink=unlink, rmdir=rmdir)
         with patch.multiple(self.module, os=fake_os, time=SimpleNamespace(monotonic=lambda: rig.now),
                 _canonical=Path, subprocess=SimpleNamespace(), signal=SimpleNamespace(), socket=SimpleNamespace()), \
@@ -4923,6 +4941,14 @@ class CISandboxPureTests(unittest.TestCase):
             session = rig.session
             session.prepare_checked_files("source", deadline=50.0)
             state = session._checked_files
+            self.assertEqual([event for event in rig.events if event[0] == "lchmod"],
+                             [("lchmod", root / "lower-link", 0o777) for root in rig.roots])
+            for root in rig.roots:
+                for name in self.module._CHECKED_DIRECTORY_NAMES:
+                    self.assertEqual(stat.S_IMODE(rig.nodes[root / name].st_mode), 0o555)
+                for name, _content in self.module._CHECKED_FILE_CONTENTS:
+                    self.assertEqual(stat.S_IMODE(rig.nodes[root / name].st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(rig.nodes[root / "lower-link"].st_mode), 0o777)
             original = {path: vars(info).copy() for path, info in rig.nodes.items()}
             session.verify_checked_files("source", deadline=50.0)
             session.verify_checked_files("source", deadline=50.0)
@@ -4994,7 +5020,8 @@ class CISandboxPureTests(unittest.TestCase):
                 self.assertEqual(state["note"]["persisted_bytes_known"], case not in {"identity", "unavailable-extent"})
 
     def test_checked_file_collision_partial_write_and_first_observation_failure_keep_known_accounting(self):
-        for case in ("collision", "partial-write", "first-observation", "unmeasured", "wheel-unmeasured"):
+        link_faults = ("after-effect-error", "no-effect", "identity", "parent")
+        for case in ("collision", "partial-write", "first-observation", "unmeasured", "wheel-unmeasured", *link_faults):
             with self.subTest(checked_fixture_preparation=case), self._checked_fixture_model() as rig:
                 if case == "collision":
                     rig.add(rig.roots[0], stat.S_IFDIR | 0o700, uid=42)
@@ -5002,12 +5029,16 @@ class CISandboxPureTests(unittest.TestCase):
                     rig.partial_write = True
                 elif case == "first-observation":
                     rig.fail_initial_stat = True
+                elif case in link_faults:
+                    rig.link_mode_fault = case
                 else:
                     if case == "wheel-unmeasured":
                         rig.session.prepare_checked_files("source", deadline=50.0)
                         rig.session.verify_checked_files("source", deadline=50.0)
                     rig.fail_file_stat = True
-                error = FileExistsError if case == "collision" else OSError if case == "first-observation" else BaseExceptionGroup
+                error = (FileExistsError if case == "collision" else
+                         OSError if case in {"first-observation", "after-effect-error"} else
+                         self.module.SessionError if case in link_faults else BaseExceptionGroup)
                 with self.assertRaises(error):
                     rig.session.prepare_checked_files("wheel" if case == "wheel-unmeasured" else "source",
                                                        deadline=75.0 if case == "wheel-unmeasured" else 50.0)
@@ -5018,7 +5049,8 @@ class CISandboxPureTests(unittest.TestCase):
                 self.assertEqual(len(set(rig.closed)), len(rig.closed))
                 self.assertFalse(any(event[0] in {"unlink", "rmdir"} for event in rig.events))
                 self.assertFalse(state["note"]["ok"] or state["note"]["roots_removed"])
-                self.assertEqual(rig.session.persisted_bytes, 7 if case == "partial-write" else 96 if case == "wheel-unmeasured" else 0)
+                self.assertEqual(rig.session.persisted_bytes,
+                                 7 if case == "partial-write" else 96 if case == "wheel-unmeasured" else 48 if case in link_faults else 0)
                 self.assertEqual(state["note"]["persisted_bytes_known"], case not in {"unmeasured", "wheel-unmeasured"})
                 if case == "wheel-unmeasured":
                     self.assertEqual((len(state["files"]), len(state["links"])), (4, 2))
@@ -5030,6 +5062,11 @@ class CISandboxPureTests(unittest.TestCase):
                     self.assertEqual(bytes(rig.data[rig.roots[0] / "external/material"]), b"selecte")
                 elif case == "unmeasured":
                     self.assertEqual(bytes(rig.data[rig.roots[0] / "external/material"]), b"selected private bytes")
+                elif case in link_faults:
+                    self.assertIn(rig.roots[0] / "lower-link", rig.nodes)
+                    self.assertEqual([event for event in rig.events if event[0] == "lchmod"],
+                                     [("lchmod", rig.roots[0] / "lower-link", 0o777)])
+                    self.assertIsNone(state["links"][0]["identity"], "failed mode cannot publish a frozen original")
                 self.assertEqual(rig.session._close_checked_files(), [])
 
     def test_native_input_reads_and_rechecks_keep_original_custody_bytes_and_close_errors(self):

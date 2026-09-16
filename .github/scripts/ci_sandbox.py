@@ -2880,8 +2880,29 @@ class Session:
             self._checked_charge(state, record, len(record["content"]))
             record["accounted"] = True
             info = os.stat(record["name"], dir_fd=parent["fd"], follow_symlinks=False)
-            if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_size != len(record["content"]):
+            if (not stat.S_ISLNK(info.st_mode) or (info.st_uid, info.st_gid, info.st_nlink) != (0, 0, 1)
+                    or info.st_size != len(record["content"])
+                    or os.readlink(record["name"], dir_fd=parent["fd"]) != "external"):
                 raise SessionError("checked-file fixture lower-link custody differs")
+            original = (*_home_node(info), info.st_nlink, info.st_size)
+            if any(parent["node"] != (*_home_node(held), stat.S_IMODE(held.st_mode))
+                   for held in (os.fstat(parent["fd"]), parent["path"].lstat())):
+                raise SessionError("checked-file fixture lower-link parent changed")
+            _remaining(deadline)
+            # Darwin applies the controller's077 umask to symlinks and checks
+            # their read permissions. Change only this new public fixture link,
+            # never its target or the root-owned0555 parent. lchmod is explicitly
+            # no-follow; a missing/failed capability retains the partial fixture.
+            os.lchmod(parent["path"] / record["name"], 0o777)
+            _remaining(deadline)
+            info = os.stat(record["name"], dir_fd=parent["fd"], follow_symlinks=False)
+            if (original != (*_home_node(info), info.st_nlink, info.st_size)
+                    or stat.S_IMODE(info.st_mode) != 0o777
+                    or os.readlink(record["name"], dir_fd=parent["fd"]) != "external"
+                    or any(parent["node"] != (*_home_node(held), stat.S_IMODE(held.st_mode))
+                           for held in (os.fstat(parent["fd"]), parent["path"].lstat()))):
+                raise SessionError("checked-file fixture lower-link mode or custody differs")
+            # Bind post-lchmod timestamps as part of the immutable original.
             record["identity"] = _native_file_key(info)
         self._checked_reinspect(state, deadline=deadline)
 
