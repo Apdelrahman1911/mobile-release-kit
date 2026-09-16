@@ -103,7 +103,8 @@ class StoreLaneControllerTests(unittest.TestCase):
         c, checks = controller_module(), ci_module("ci_checks")
         rig = SimpleNamespace(c=c, checks=checks, paths=fixture_paths(c), clock=10.0, runs=[], outputs=[], removals=[],
                               originals=[], fails_at=None, output_error_at=None, advance=1.0, failed=False, inner_bytes=11,
-                              platform=platform, environments=[])
+                              platform=platform, environments=[], capture_calls=[], original_snapshots=[],
+                              failure_stderr=b"", failure_stdout=None)
         rig.boundary = session_double(sandbox_module(), "darwin" if platform == "macos" else "linux")
         rig.boundary.uid = rig.boundary.gid = 61001
         for name in ("source", "work", "inputs", "python", "ruby"):
@@ -114,7 +115,8 @@ class StoreLaneControllerTests(unittest.TestCase):
         rig.abi = c.NativeABIState(phases={phase: tuple(native_capture_fixture() for _ in range(3))
                                          for phase in ("source", "wheel")})
         rig.binding = {"wheelSha256": None}
-        rig.outside = {"fixtures": {name: {"sha256": "a" * 64} for name in c.STORE_NATIVE_FIXTURES},
+        rig.outside = {"fixtures": {name: {"path": str(rig.paths.source / name), "sha256": "a" * 64}
+                                    for name in c.STORE_NATIVE_FIXTURES},
                        "ruby": {"sha256": "b" * 64}, "bundler": {"sha256": "c" * 64},
                        "python": {"sha256": "d" * 64}, "fastlane": {}}
 
@@ -146,9 +148,12 @@ class StoreLaneControllerTests(unittest.TestCase):
             rig.runs.append((tuple(argv), options))
             rig.clock += rig.advance
             failed = index == rig.fails_at
-            value = native_capture_fixture(stdout=c.store_native_wire(rig.binding) if is_binding else b"fixed synthetic bytes\n",
+            stdout = c.store_native_wire(rig.binding) if is_binding else b"fixed synthetic bytes\n"
+            value = native_capture_fixture(stdout=rig.failure_stdout if failed and rig.failure_stdout is not None else stdout,
+                stderr=rig.failure_stderr if failed else b"",
                 ok=not failed, returncode=1 if failed else 0, primary_error="command exited 1" if failed else None)
             rig.originals.append(value)
+            rig.original_snapshots.append(dict(vars(value)))
             rig.session.persisted_bytes += sum(value.persisted)
             rig.failed = failed
             return value
@@ -167,7 +172,11 @@ class StoreLaneControllerTests(unittest.TestCase):
 
     def _gate(self, rig, phase="source"):
         c = rig.c
-        rig.binding = {"wheelSha256": None if phase == "source" else "e" * 64}
+        _python, _prefix, modules, tooling = c.store_native_layout(rig.paths, phase)
+        rig.binding = {"wheelSha256": None if phase == "source" else "e" * 64,
+            "files": {name: {"path": str(tooling / name.removeprefix("fastlane/") if name.startswith("fastlane/")
+                                       else modules / name.removeprefix("src/")), "sha256": "a" * 64}
+                      for name in rig.checks.STORE_NATIVE_PRODUCTS}}
         clock = SimpleNamespace(monotonic=lambda: rig.clock)
         with patch.object(c, "time", clock), patch.object(rig.checks, "time", clock), \
                 patch.object(c, "check_capacity"), patch.object(c, "require_retained_header"), \
@@ -178,15 +187,20 @@ class StoreLaneControllerTests(unittest.TestCase):
                 patch.object(c, "create_file"), patch.object(c, "store_native_file_binding", return_value={"sha256": "f" * 64}), \
                 patch.object(c, "parse_store_native_case", side_effect=lambda _result, _paths, _platform, _phase, subcase, identifier, *a, **k:
                               {"subcase": subcase, "test_id": identifier, "inner_observed_bytes": rig.inner_bytes}), \
+                patch.object(c, "original_native_capture", wraps=c.original_native_capture) as capture, \
                 patch.object(Path, "mkdir"), patch.object(c.os, "chmod"), patch.object(c.os, "chown"):
-            return c.perform_step(c.Step("store-lane-native-" + phase, kind="store-native", seconds=300),
+            result = c.perform_step(c.Step("store-lane-native-" + phase, kind="store-native", seconds=300),
                 rig.paths, rig.session, rig.checks, {}, rig.platform, deadline=1000.0, native_abi=rig.abi, store_native=rig.state)
+            rig.capture_calls.extend(capture.call_args_list)
+            return result
 
     def test_each_row_keeps_one_original_and_one_absolute_phase_with_reusable_bound_source_control(self):
         for platform in ("linux", "macos"):
             with self.subTest(platform=platform):
                 rig = self._rig(platform)
-                source = self._gate(rig)
+                with patch.object(rig.c, "native_failure_diagnostic") as diagnostic:
+                    source = self._gate(rig)
+                diagnostic.assert_not_called()
                 self.assertTrue(source.ok, source.details)
                 self.assertEqual(len(rig.runs), 16)  # Binding plus all15 source rows.
                 self.assertEqual(len(rig.outputs), 16)
@@ -206,7 +220,9 @@ class StoreLaneControllerTests(unittest.TestCase):
                     self.assertEqual(options["absolute_deadline"], min(310.0, 30.0 + index))
                     if index:
                         self.assertEqual(argv[1:4], ("-I", "-S", "-B"))
-                wheel = self._gate(rig, "wheel")
+                with patch.object(rig.c, "native_failure_diagnostic") as diagnostic:
+                    wheel = self._gate(rig, "wheel")
+                diagnostic.assert_not_called()
                 self.assertTrue(wheel.ok, wheel.details)
                 self.assertEqual(len(rig.runs), 31)
                 self.assertEqual(len(rig.environments), 31)
@@ -214,28 +230,150 @@ class StoreLaneControllerTests(unittest.TestCase):
                 self.assertFalse(any("ordinary-at-exit-control" in argv for argv, _ in rig.runs[16:]))
                 for index in (0, 16):
                     argv, options = rig.runs[index]
+                    self.assertIsNone(rig.capture_calls[index].kwargs["store_native_diagnostic"])
                     for key, leaf in (("HOME", "home"), ("TMPDIR", "tmp"), ("TMP", "tmp"), ("TEMP", "tmp")):
                         forbidden = {**options["env"], key: str(Path(argv[7]) / leaf)}
                         with self.assertRaisesRegex(sandbox_module().SessionError, "fixed clean-environment boundary"):
                             rig.boundary._environment(forbidden, deadline=options["absolute_deadline"])
+                for phase, calls in (("source", rig.capture_calls[1:16]), ("wheel", rig.capture_calls[17:])):
+                    modules = rig.c.store_native_layout(rig.paths, phase)[2]
+                    expected_files = {str(modules / name.removeprefix("src/")): name
+                                      for name in rig.checks.STORE_NATIVE_PRODUCTS if name.endswith(".py")}
+                    expected_files.update({str(rig.paths.source / name): name
+                                           for name in rig.c.STORE_NATIVE_FIXTURES if name.endswith(".py")})
+                    for call, (subcase, identifier) in zip(calls, rig.checks.store_lane_native_rows(ROOT, phase)):
+                        scope = call.kwargs["store_native_diagnostic"]
+                        self.assertEqual((scope.phase, scope.subcase, scope.identifier), (phase, subcase, identifier))
+                        self.assertEqual(dict(scope.filenames), expected_files)
+                        with self.assertRaises(AttributeError):
+                            scope.identifier = "foreign"
+                        with self.assertRaises(TypeError):
+                            scope.filenames["/private/foreign.py"] = "tests/foreign.py"
+                # A later mutation of the test's binding dictionary cannot
+                # rewrite the already-frozen per-original diagnostic scope.
+                rig.binding["files"]["src/mobile_release/_command_process.py"]["path"] = "/private/foreign.py"
+                self.assertEqual(dict(scope.filenames), expected_files)
         rig = self._rig()
         self.assertFalse(self._gate(rig, "wheel").ok)
         self.assertEqual(rig.runs, [])
 
     def test_capture_failure_retains_first_error_and_never_walks_unknown_or_runs_another_row(self):
-        rig = self._rig()
-        rig.fails_at = 2
-        result = self._gate(rig)
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error, "COMMAND_EXIT_OR_FINALITY")
-        self.assertEqual(len(rig.runs), 3)
-        self.assertEqual(len(rig.outputs), 2)  # The failed/latched domain forbids any filesystem scan.
-        self.assertEqual(len(rig.removals), 2)
-        self.assertIn("unavailable", result.details["surviving_accounting"])
-        self.assertEqual(result.details["captures"][-1]["capture"]["returncode"], 1)
-        self.assertEqual(result.details["captures"][-1]["capture"]["persisted"], list(rig.originals[-1].persisted))
-        self.assertEqual([row["status"] for row in result.details["rows"][:3]], ["PASS", "FAIL", "UNEXECUTED"])
-        self.assertEqual(rig.state.phases, {})
+        private = "PRIVATE_STORE_NATIVE_DIAGNOSTIC_CANARY"
+        frame = lambda path, line: f'  File "{path}", line {line}, in {private}\n'.encode()
+        faults = ("bound", "unbound", "foreign", "duplicate", "malformed", "private-field", "prerequisite",
+                  "class-record", "stdout-marker", "ruby-binding", "parser-exception", "parser-interrupt",
+                  "parser-expiry", "scan-exception", "scan-expiry")
+        for phase in ("source", "wheel"):
+            for fault in faults:
+                with self.subTest(phase=phase, fault=fault):
+                    rig = self._rig()
+                    c = rig.c
+                    if phase == "wheel":
+                        self.assertTrue(self._gate(rig).ok)
+                    before = len(rig.runs)
+                    inventory = rig.checks.store_lane_native_rows(ROOT, phase)
+                    index = next(index for index, (subcase, _) in enumerate(inventory) if subcase == "success0")
+                    identifier = inventory[index][1]
+                    rig.fails_at = before if fault == "ruby-binding" else before + index + 1
+                    relative = "tests/workflow/test_store_lane_native.py"
+                    fixture = "tests/workflow/store_lane_native_fixture.py"
+                    product = "src/mobile_release/_command_process.py"
+                    modules = c.store_native_layout(rig.paths, phase)[2]
+                    opposite = c.store_native_layout(rig.paths, "wheel" if phase == "source" else "source")[2]
+                    rejected = (frame(rig.paths.work / "source-build" / product, 71)
+                                + frame(opposite / "mobile_release/_command_process.py", 72)
+                                + frame("/private/" + private + "/" + relative, 73)
+                                + frame(modules / "mobile_release/unbound.py", 74))
+                    headers = (frame(rig.paths.source / relative, 201) + frame(rig.paths.source / fixture, 202)
+                               + frame(modules / "mobile_release/_command_process.py", 203)) * 4
+                    expected_locations = ([{"file": relative, "line": 201}, {"file": fixture, "line": 202},
+                                           {"file": product, "line": 203}] * 4)[-8:]
+                    callback = {"id": identifier, "outcome": "error", "category": "os-error", "errno": 2, "returncode": None}
+                    diagnostic_phase = "tests"
+                    if fault == "foreign":
+                        callback["id"] = next(value for _, value in inventory if value != identifier)
+                    elif fault == "private-field":
+                        callback["message"] = private
+                    elif fault == "prerequisite":
+                        diagnostic_phase, callback["id"] = "prerequisite", "system-code"
+                    elif fault == "class-record":
+                        callback["id"] = "setUpClass (workflow.test_store_lane_native.StoreLaneNativeTests)"
+                    diagnostic = {"schema": 1, "phase": diagnostic_phase, "records": [callback]}
+                    marker = c.NATIVE_DIAGNOSTIC_PREFIX.encode() + c.store_native_wire(diagnostic)
+                    if fault == "duplicate":
+                        marker *= 2
+                    elif fault == "malformed":
+                        marker = c.NATIVE_DIAGNOSTIC_PREFIX.encode() + b"not-json\n"
+                    elif fault == "stdout-marker":
+                        rig.failure_stdout, marker = marker, b""
+                    rig.failure_stderr = (rejected + (b"" if fault == "unbound" else headers)
+                        + f"    private_source('{private}')\nFileNotFoundError: /private/{private}\n".encode() + marker)
+                    native_parser, native_scan = c.native_failure_diagnostic, c._native_bound_failure_locations
+
+                    def parse(text, expected, *, deadline):
+                        if fault == "parser-exception":
+                            raise RuntimeError(private)
+                        if fault == "parser-interrupt":
+                            raise KeyboardInterrupt(private)
+                        if fault == "parser-expiry":
+                            rig.clock = deadline
+                        return native_parser(text, expected, deadline=deadline)
+
+                    def scan(text, filenames, *, deadline):
+                        if fault == "scan-exception":
+                            raise ValueError(private)
+                        if fault == "scan-expiry":
+                            rig.clock = deadline
+                        return native_scan(text, filenames, deadline=deadline)
+
+                    with patch.object(c, "native_failure_diagnostic", side_effect=parse) as parsed, \
+                            patch.object(c, "_native_bound_failure_locations", side_effect=scan) as projected, \
+                            patch.object(c, "read_regular", side_effect=AssertionError(private)) as read:
+                        result = self._gate(rig, phase)
+                    read.assert_not_called()
+                    self.assertFalse(result.ok)
+                    self.assertEqual(result.error, "COMMAND_EXIT_OR_FINALITY")
+                    self.assertEqual(len(rig.runs), rig.fails_at + 1)
+                    # The failed/latched domain never authorizes another scan,
+                    # original, disposal, or a replacement deadline.
+                    self.assertEqual(len(rig.outputs), rig.fails_at)
+                    self.assertEqual(len(rig.removals), rig.fails_at)
+                    self.assertIn("unavailable", result.details["surviving_accounting"])
+                    failed, original = result.details["captures"][-1], rig.originals[-1]
+                    self.assertEqual(failed["status"], "FAIL")
+                    self.assertEqual(failed["capture"], c.capture_observations(original))
+                    self.assertEqual(vars(original), rig.original_snapshots[-1])
+                    with self.assertRaisesRegex(c.VerificationError, "COMMAND_EXIT_OR_FINALITY"):
+                        c.require_original_finality(original)
+                    self.assertEqual(set(rig.state.phases), set() if phase == "source" else {"source"})
+                    expected_status = (["UNEXECUTED"] * len(inventory) if fault == "ruby-binding" else
+                                       ["PASS"] * index + ["FAIL"] + ["UNEXECUTED"] * (len(inventory) - index - 1))
+                    self.assertEqual([row["status"] for row in result.details["rows"]], expected_status)
+                    if fault == "ruby-binding":
+                        parsed.assert_not_called()
+                    else:
+                        parsed.assert_called_once_with(rig.failure_stderr.decode("utf-8", "replace"), (identifier,),
+                                                       deadline=rig.runs[-1][1]["absolute_deadline"])
+                    if fault in {"bound", "unbound"}:
+                        self.assertEqual(failed["native_diagnostic"], diagnostic)
+                        projected.assert_called_once_with(rig.failure_stderr.decode("utf-8", "replace"),
+                            rig.capture_calls[-1].kwargs["store_native_diagnostic"].filenames,
+                            deadline=rig.runs[-1][1]["absolute_deadline"])
+                        if fault == "bound":
+                            self.assertEqual(failed["native_test_locations"], expected_locations)
+                        else:
+                            self.assertNotIn("native_test_locations", failed)
+                    else:
+                        self.assertNotIn("native_diagnostic", failed)
+                        self.assertNotIn("native_test_locations", failed)
+                        if not fault.startswith("scan-"):
+                            projected.assert_not_called()
+                    if fault.startswith(("parser-", "scan-")):
+                        self.assertEqual(failed["store_native_diagnostic_error"],
+                                         {"error": "STORE_NATIVE_DIAGNOSTIC_UNAVAILABLE"})
+                    public = c.store_native_wire(result.details).decode()
+                    for hidden in (private, str(rig.paths.source), str(modules), "/private/", "private_source"):
+                        self.assertNotIn(hidden, public)
         rig = self._rig()
         rig.output_error_at = 1
         result = self._gate(rig)

@@ -930,6 +930,15 @@ class StoreLaneNativeState:
 
 
 @dataclasses.dataclass(frozen=True)
+class StoreNativeDiagnostic:
+    """One source-selected Python row and its already-bound frame-name map."""
+    phase: str
+    subcase: str
+    identifier: str
+    filenames: MappingProxyType
+
+
+@dataclasses.dataclass(frozen=True)
 class MatrixSelection:
     """Frozen finite workflow values, never inherited by the clean subject env."""
     repository: str
@@ -3005,7 +3014,8 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
                             deadline: float, seconds: int, env: dict, output_limit: int = 65536,
                             cpu_seconds: int = 180, signing_adapter_diagnostic: SigningAdapterDiagnostic | None = None,
                             signing_matrix_diagnostic: SigningMatrixDiagnostic | None = None,
-                            signing_matrix_pair_deadline: float | None = None):
+                            signing_matrix_pair_deadline: float | None = None,
+                            store_native_diagnostic: StoreNativeDiagnostic | None = None):
     """One original ordinary capture plus idle closure under the same cutoff.
 
     Never synthesize/merge CapturedRun objects. Semantic parsing follows this
@@ -3016,6 +3026,20 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
     check_clock(deadline)
     if signing_matrix_pair_deadline is not None and signing_matrix_diagnostic is None:
         raise VerificationError("SIGNING_MATRIX_DIAGNOSTIC_SCOPE")
+    if store_native_diagnostic is not None:
+        scope = store_native_diagnostic
+        arguments = tuple(map(str, argv))
+        if (type(scope) is not StoreNativeDiagnostic or scope.phase not in {"source", "wheel"}
+                or scope.subcase != name or type(scope.identifier) is not str
+                or not re.fullmatch(r"workflow\.test_store_lane_native\.StoreLaneNativeTests\.test_[A-Za-z0-9_]+", scope.identifier)
+                or type(scope.filenames) is not MappingProxyType or not 0 < len(scope.filenames) <= 512
+                or signing_adapter_diagnostic is not None or signing_matrix_diagnostic is not None
+                or arguments.count(str(paths.source / "tests/workflow/store_lane_native_fixture.py")) != 1):
+            raise VerificationError("STORE_NATIVE_DIAGNOSTIC_SCOPE")
+        for option, expected in (("--phase", scope.phase), ("--subcase", scope.subcase)):
+            if (arguments.count(option) != 1 or arguments.index(option) + 1 == len(arguments)
+                    or arguments[arguments.index(option) + 1] != expected):
+                raise VerificationError("STORE_NATIVE_DIAGNOSTIC_SCOPE")
     if signing_adapter_diagnostic is not None:
         scope = signing_adapter_diagnostic
         if (type(scope) is not SigningAdapterDiagnostic or scope.phase not in {"source", "wheel"}
@@ -3062,6 +3086,22 @@ def original_native_capture(session, argv, paths: Paths, rows: list[dict], name:
             row["idle_error"] = error_details(exc)
     if primary is not None:
         row["status"] = "FAIL"
+        if store_native_diagnostic is not None and capture_failed:
+            try:
+                scope = store_native_diagnostic
+                stderr = result.stderr.decode("utf-8", "replace")
+                diagnostic = native_failure_diagnostic(stderr, (scope.identifier,), deadline=deadline)
+                if (diagnostic is not None and diagnostic["phase"] == "tests"
+                        and all(item["id"] == scope.identifier for item in diagnostic["records"])):
+                    projected = {"native_diagnostic": diagnostic}
+                    if any(item["outcome"] in {"error", "failure"} for item in diagnostic["records"]):
+                        locations = _native_bound_failure_locations(stderr, scope.filenames, deadline=deadline)
+                        if locations:
+                            projected["native_test_locations"] = locations
+                    check_clock(deadline)
+                    row.update(projected)
+            except BaseException:
+                row["store_native_diagnostic_error"] = {"error": "STORE_NATIVE_DIAGNOSTIC_UNAVAILABLE"}
         if signing_adapter_diagnostic is not None:
             try:
                 diagnostic = signing_adapter_failure(result.stderr, signing_adapter_diagnostic, deadline=deadline)
@@ -3247,6 +3287,13 @@ def _native_test_failure_locations(text: str, paths: Paths, phase: str, source_f
         if str(actual) in filenames:
             raise VerificationError("NATIVE_DIAGNOSTIC_SCOPE")
         filenames[str(actual)] = name
+    return _native_bound_failure_locations(text, filenames, deadline=deadline)
+
+
+def _native_bound_failure_locations(text: str, filenames, *, deadline: float | None = None) -> list:
+    """Scan original text against a prebound map; never inspect a reported path."""
+    if deadline is not None:
+        check_clock(deadline)
     locations = []
     # One bounded scan, not one full-log search per inventoried source file.
     pattern = (r'(?m)^  File "([^"\r\n]{1,4096})", line ([1-9][0-9]{0,5}), '
@@ -4958,6 +5005,25 @@ def perform_store_lane_gate(step: Step, paths: Paths, session, checks, platform:
             raise VerificationError("STORE_NATIVE_ROW_INVENTORY")
         details["rows"] = [{"subcase": subcase, "test_id": identifier, "status": "UNEXECUTED"} for subcase, identifier in inventory]
         binding, outside = store_native_bindings(paths, session, checks, phase, deadline=cutoff)
+        # Freeze diagnostic names from the SAME checked bindings before any
+        # capture. Store source runs source/src, not ordinary source-build/src;
+        # installed-wheel names must come from their actual bound origins.
+        filenames = {}
+        for bindings in (binding["files"], outside["fixtures"]):
+            for relative, item in bindings.items():
+                check_clock(cutoff)
+                if not relative.endswith(".py"):
+                    continue
+                actual = item["path"]
+                if (not re.fullmatch(r"(?:src/mobile_release|tests(?:/[A-Za-z_][A-Za-z0-9_]*)*)/[A-Za-z_][A-Za-z0-9_]*\.py", relative)
+                        or type(actual) is not str or not Path(actual).is_absolute() or actual in filenames):
+                    raise VerificationError("STORE_NATIVE_DIAGNOSTIC_SCOPE")
+                filenames[actual] = relative
+        if not 0 < len(filenames) <= 512:
+            raise VerificationError("STORE_NATIVE_DIAGNOSTIC_SCOPE")
+        filenames = MappingProxyType(filenames)
+        diagnostics = tuple(StoreNativeDiagnostic(phase, subcase, identifier, filenames)
+                            for subcase, identifier in inventory)
         control_bindings = {name: outside[name] for name in ("fixtures", "ruby", "bundler", "fastlane")}
         if phase == "wheel":
             if "source" not in state.phases or state.source_control is None or state.control_bindings != control_bindings:
@@ -4973,7 +5039,7 @@ def perform_store_lane_gate(step: Step, paths: Paths, session, checks, platform:
         argv = (paths.ruby, paths.source / "tests/workflow/store_lane_native_fixture.rb", "binding", phase, prefix, paths.source, modules, active_directory,
                 *((paths.wheel, binding["wheelSha256"]) if phase == "wheel" else ()))
 
-        def capture(command, name):
+        def capture(command, name, diagnostic=None):
             nonlocal accounted
             accounted = False
             original = primary = None
@@ -4981,7 +5047,7 @@ def perform_store_lane_gate(step: Step, paths: Paths, session, checks, platform:
             try:
                 original = original_native_capture(session, command, paths, rows, name, deadline=active_cutoff,
                     seconds=STORE_NATIVE_CASE_SECONDS, env=store_native_environment(paths, platform, phase, active_directory),
-                    output_limit=STORE_NATIVE_JSON_BYTES, cpu_seconds=20)
+                    output_limit=STORE_NATIVE_JSON_BYTES, cpu_seconds=20, store_native_diagnostic=diagnostic)
                 originals.append(original)
             except BaseException as error:
                 primary = error
@@ -5043,7 +5109,7 @@ def perform_store_lane_gate(step: Step, paths: Paths, session, checks, platform:
             active_identity = store_native_directory(active_directory, session, deadline=active_cutoff)
             argv = store_native_case_argv(paths, phase, subcase, binding_file, active_directory,
                                           deadline=cutoff, wheel_sha256=binding["wheelSha256"])
-            value = capture(argv, subcase)
+            value = capture(argv, subcase, diagnostics[index])
             row.update(parse_store_native_case(value, paths, platform, phase, subcase, identifier,
                                                active_directory, binding, outside,
                                                owner=(session.uid, session.gid, active_identity[0]), deadline=active_cutoff))
