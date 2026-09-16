@@ -52,6 +52,7 @@ class CredentialMetadataTests(unittest.TestCase):
             root = private / "application"
             value = android_config()
             value["ios"] = ios_config()["ios"]
+            value["metadata"]["iosLocales"] = ios_config()["metadata"]["iosLocales"]
             config = load_config(write_project(root, value))
             root = config.root
             equal_config = load_config(config.path)
@@ -311,6 +312,7 @@ class CredentialMetadataTests(unittest.TestCase):
                     root = private / "project"
                     value = android_config()
                     value["ios"] = ios_config()["ios"]
+                    value["metadata"]["iosLocales"] = ios_config()["metadata"]["iosLocales"]
                     value["services"] = {"androidFirebase": "required", "iosFirebase": "required"}
                     config = load_config(write_project(root, value))
                     (root / "iosApp").mkdir()
@@ -390,6 +392,7 @@ class CredentialMetadataTests(unittest.TestCase):
             root = Path(temporary)
             value = android_config()
             value["ios"] = ios_config()["ios"]
+            value["metadata"]["iosLocales"] = ios_config()["metadata"]["iosLocales"]
             value["services"] = {"androidFirebase": "required", "iosFirebase": "required"}
             config = load_config(write_project(root, value))
             (root / "app").mkdir(exist_ok=True)

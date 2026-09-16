@@ -1145,8 +1145,19 @@ class _StoreNamespace:
             if not exists:
                 _need(self.create, "required private source directory is missing")
                 _mkdir_private(name, parent, self.cancellation, self.creations[index])
-            number = self.slots[index].open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                                            dir_fd=parent)
+            slot = self.slots[index]
+            try:
+                number = slot.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                   dir_fd=parent)
+            except OSError as error:
+                # Only the original builtin's proven no-effect refusal is an
+                # ordinary path diagnostic. Unknown acquisitions stay fatal.
+                if error.errno in (errno.ENOTDIR, errno.ELOOP) and slot.open_state == "NO_EFFECT":
+                    raise BuildInputError(
+                        "build inputs: application-private parents must be real directories "
+                        "without symbolic links"
+                    ) from None
+                raise
             identity = _directory(os.fstat(number))
             self.identities[index] = identity
             _need(identity["uid"] == os.geteuid() and identity["mode"] == 0o700

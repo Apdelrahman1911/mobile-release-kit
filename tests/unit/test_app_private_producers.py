@@ -179,6 +179,179 @@ class AppPrivateProducerTests(unittest.TestCase):
                     self.produce(config, guard, producer)
                 self.assertEqual(self.snapshot(config.root), before)
 
+    def test_private_parent_direct_refusals_are_nonfatal_validation(self):
+        for relative, failed_index in ((".mobile-release", 0), (".mobile-release/reports", 1)):
+            for condition in ("symlink", "file"):
+                with self.subTest(relative=relative, condition=condition):
+                    config, guard = self.fixture()
+                    target = config.root / relative
+                    if failed_index:
+                        target.parent.mkdir(mode=0o700)
+                    if condition == "symlink":
+                        foreign = config.root / "synthetic-foreign"
+                        foreign.mkdir(mode=0o700)
+                        (foreign / "keep").write_bytes(b"preserve foreign bytes")
+                        target.symlink_to(foreign, target_is_directory=True)
+                    else:
+                        target.write_bytes(b"preserve incompatible private parent")
+                    before = self.snapshot(config.root)
+                    destination = config.root / ".mobile-release/reports/doctor.json"
+                    stream, observed = io.StringIO(), []
+                    actual_cleanup = inputs._StoreNamespace.cleanup
+
+                    def cleanup(owner):
+                        # Observe the original receipts before their real cleanup;
+                        # wrapping _FD.open would change its direct-refusal anchor.
+                        observed.append((owner, tuple((slot.number, slot.open_state, slot.close_state)
+                                                      for slot in owner.slots)))
+                        return actual_cleanup(owner)
+
+                    with patch.object(inputs._StoreNamespace, "cleanup", cleanup), patch.object(
+                            inputs, "_publish_private_file", side_effect=AssertionError("private writer reached")) as publish:
+                        with self.assertRaises(inputs.BuildInputError) as failure:
+                            Report("doctor").emit(output=destination, root=config.root, output_format="json",
+                                                  stream=stream, cancellation=guard)
+                    publish.assert_not_called()
+                    self.assertIsInstance(failure.exception, ValidationError)
+                    self.assertNotIsInstance(failure.exception, ProcessError)
+                    self.assertEqual(str(failure.exception),
+                                     "build inputs: application-private parents must be real directories "
+                                     "without symbolic links")
+                    self.assertIsNone(failure.exception.__cause__)
+                    self.assertTrue(failure.exception.__suppress_context__)
+                    self.assertEqual(len(observed), 1)
+                    owner, receipts = observed[0]
+                    self.assertEqual(receipts[failed_index], (None, "NO_EFFECT", "NOT_ATTEMPTED"))
+                    self.assertEqual(owner.slots[failed_index].open_state, "NO_EFFECT")
+                    self.assertTrue(owner.parent.slots)
+                    self.assertTrue(all(slot.open_state == "OPEN" and slot.number is None
+                                        and slot.close_state == "CLOSED"
+                                        for slot in (*owner.parent.slots, *owner.slots[:failed_index])))
+                    self.assertTrue(all(slot.number is None and slot.close_state == "CLOSED"
+                                        for slot in owner.slots))
+                    self.assertTrue(owner.closed())
+                    verdict = guard.lifetime_ledger.verdict()
+                    self.assertTrue(verdict.cleanup_complete)
+                    self.assertEqual((verdict.commands, verdict.profile_calls), (0, 0))
+                    self.assertEqual((verdict.command_dispatched, verdict.profile_dispatched), (False, False))
+                    guard.check()
+                    self.assertEqual(stream.getvalue(), "")
+                    self.assertFalse(destination.exists())
+                    self.assertEqual(self.snapshot(config.root), before)
+
+    def test_private_parent_wrapped_matching_errno_remains_fatal(self):
+        for code in (errno.ENOTDIR, errno.ELOOP):
+            with self.subTest(errno=code):
+                config, guard = self.fixture()
+                (config.root / ".mobile-release").mkdir(mode=0o700)
+                before = self.snapshot(config.root)
+                destination = config.root / ".mobile-release/reports/doctor.json"
+                stream, observed, attempts = io.StringIO(), [], []
+                actual_open, actual_cleanup = os.open, inputs._StoreNamespace.cleanup
+
+                def opening(name, flags, mode=0o777, *, dir_fd=None):
+                    if name == ".mobile-release":
+                        attempts.append(name)
+                        # No real unknown FD is leaked: errno without the exact
+                        # builtin refusal is still not a no-effect receipt.
+                        raise OSError(code, "synthetic indirect private refusal")
+                    return actual_open(name, flags, mode, dir_fd=dir_fd)
+
+                def cleanup(owner):
+                    observed.append((owner, tuple((slot.number, slot.open_state, slot.close_state)
+                                                  for slot in owner.slots)))
+                    return actual_cleanup(owner)
+
+                with patch.object(inputs.os, "open", opening), patch.object(
+                        inputs._StoreNamespace, "cleanup", cleanup), patch.object(
+                        inputs, "_publish_private_file", side_effect=AssertionError("private writer reached")) as publish:
+                    with self.assertRaises(ProcessError) as failure:
+                        Report("doctor").emit(output=destination, root=config.root, output_format="json",
+                                              stream=stream, cancellation=guard)
+                publish.assert_not_called()
+                self.assertEqual(attempts, [".mobile-release"])
+                self.assertTrue(failure.exception.fatal)
+                self.assertFalse(failure.exception.cleanup_complete)
+                self.assertFalse(failure.exception.dispatched)
+                self.assertTrue(failure.exception.contained)
+                self.assertEqual(len(observed), 1)
+                owner, receipts = observed[0]
+                self.assertEqual(receipts[0], (None, "UNKNOWN", "NOT_ATTEMPTED"))
+                self.assertIsNone(owner.slots[0].number)
+                self.assertEqual((owner.slots[0].open_state, owner.slots[0].close_state),
+                                 ("UNKNOWN", "NOT_ATTEMPTED"))
+                self.assertEqual((owner.slots[1].open_state, owner.slots[1].close_state), ("NEW", "CLOSED"))
+                self.assertTrue(owner.parent.slots)
+                self.assertTrue(all(slot.open_state == "OPEN" and slot.number is None
+                                    and slot.close_state == "CLOSED" for slot in owner.parent.slots))
+                self.assertFalse(owner.closed())
+                verdict = guard.lifetime_ledger.verdict()
+                self.assertTrue(verdict.fatal)
+                self.assertEqual((verdict.commands, verdict.profile_calls), (0, 0))
+                with self.assertRaises(ProcessError):
+                    guard.check()
+                self.assertEqual(stream.getvalue(), "")
+                self.assertFalse(destination.exists())
+                self.assertEqual(self.snapshot(config.root), before)
+
+    def test_private_parent_direct_refusal_keeps_later_close_failure_fatal(self):
+        config, guard = self.fixture()
+        private = config.root / ".mobile-release"
+        private.mkdir(mode=0o700)
+        (private / "reports").write_bytes(b"preserve incompatible private parent")
+        before = self.snapshot(config.root)
+        destination = private / "reports/doctor.json"
+        stream, observed, attempts, completed = io.StringIO(), {}, [], []
+        actual_cleanup, actual_close = inputs._StoreNamespace.cleanup, os.close
+
+        def cleanup(owner):
+            observed["owner"] = owner
+            observed["refusal"] = (owner.slots[1].number, owner.slots[1].open_state, owner.slots[1].close_state)
+            observed["original_slot"], observed["original_fd"] = owner.slots[0], owner.slots[0].number
+            return actual_cleanup(owner)
+
+        def close(number):
+            if number == observed.get("original_fd"):
+                attempts.append(number)
+                actual_close(number)
+                completed.append(number)  # Actual original close completed before the lost return.
+                raise OSError("synthetic lost original private parent close return")
+            return actual_close(number)
+
+        with patch.object(inputs._StoreNamespace, "cleanup", cleanup), patch.object(
+                inputs.os, "close", close), patch.object(
+                inputs, "_publish_private_file", side_effect=AssertionError("private writer reached")) as publish:
+            with self.assertRaises(ProcessError) as failure:
+                Report("doctor").emit(output=destination, root=config.root, output_format="json",
+                                      stream=stream, cancellation=guard)
+        publish.assert_not_called()
+        self.assertTrue(failure.exception.fatal)
+        self.assertFalse(failure.exception.cleanup_complete)
+        self.assertFalse(failure.exception.dispatched)
+        self.assertTrue(failure.exception.contained)
+        owner, original = observed["owner"], observed["original_slot"]
+        self.assertEqual(observed["refusal"], (None, "NO_EFFECT", "NOT_ATTEMPTED"))
+        self.assertIs(type(observed["original_fd"]), int)
+        self.assertEqual(attempts, [observed["original_fd"]])
+        self.assertEqual(completed, attempts)
+        self.assertIs(original, owner.slots[0])
+        self.assertIsNone(original.number)
+        self.assertEqual((original.open_state, original.close_state), ("OPEN", "UNKNOWN"))
+        self.assertIsNone(owner.slots[1].number)
+        self.assertEqual((owner.slots[1].open_state, owner.slots[1].close_state), ("NO_EFFECT", "CLOSED"))
+        self.assertTrue(owner.parent.slots)
+        self.assertTrue(all(slot.open_state == "OPEN" and slot.number is None
+                            and slot.close_state == "CLOSED" for slot in owner.parent.slots))
+        self.assertFalse(owner.closed())
+        verdict = guard.lifetime_ledger.verdict()
+        self.assertTrue(verdict.fatal)
+        self.assertEqual((verdict.commands, verdict.profile_calls), (0, 0))
+        with self.assertRaises(ProcessError):
+            guard.check()
+        self.assertEqual(stream.getvalue(), "")
+        self.assertFalse(destination.exists())
+        self.assertEqual(self.snapshot(config.root), before)
+
     def test_fixed_build_reset_retains_live_original_target_and_preserves_replacement(self):
         for replace_target in (False, True):
             with self.subTest(replace_target=replace_target):
