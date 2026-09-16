@@ -73,9 +73,12 @@ from .store_lane_model import StoreLaneModel
 
 class CliBuildTests(unittest.TestCase):
     @contextmanager
-    def _online_material(self, config, *, platforms=("android",)):
+    def _online_material(self, config, *, fixture_root, platforms=("android",)):
         """Real input/guard custody, with no native call or Store authentication."""
-        with tempfile.TemporaryDirectory(prefix="mrk-selected-store-fixture-") as temporary:
+        self.assertEqual(config.root.parent, fixture_root)
+        # Only this explicit fixture parent survives the caller's clean environment.
+        with tempfile.TemporaryDirectory(prefix="mrk-selected-store-fixture-", dir=fixture_root) as temporary, \
+             patch.dict(os.environ, {"TMPDIR": str(fixture_root)}, clear=False):
             adc = Path(temporary) / "adc.json"
             adc.write_bytes(b'{"type":"authorized_user","synthetic":true}')
             adc.chmod(0o600)
@@ -98,14 +101,17 @@ class CliBuildTests(unittest.TestCase):
                 yield invocation, material
 
     @contextmanager
-    def _store_material(self, config, request):
+    def _store_material(self, config, request, *, fixture_root):
         """Actual selection/cleanup; synthetic key validation is not crypto evidence."""
-        with first_primary_context(ExitStack(), expose_owner=True) as (resources, guard):
+        self.assertEqual(config.root.parent, fixture_root)
+        with tempfile.TemporaryDirectory(prefix="mrk-selected-store-fixture-", dir=fixture_root) as temporary, \
+             patch.dict(os.environ, {"TMPDIR": str(fixture_root)}, clear=False), \
+             first_primary_context(ExitStack(), expose_owner=True) as (resources, guard):
             record = stores.new_store_lane_evidence(config, request, guard)
             try:
                 invocation = resources.enter_context(invocation_custody(config.root,
                     mode="store", cancellation=guard, lane_evidence=record))
-                adc = config.root / "synthetic-adc.json"
+                adc = Path(temporary) / "adc.json"
                 adc.write_bytes(b'{"type":"authorized_user","synthetic":true}'); adc.chmod(0o600)
                 values = {"GOOGLE_APPLICATION_CREDENTIALS": str(adc),
                     "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": base64.b64encode(b"synthetic-p8").decode("ascii")}
@@ -1192,7 +1198,8 @@ class CliBuildTests(unittest.TestCase):
 
     def test_store_adapter_uses_pinned_ruby_lane_runner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            fixture_root = Path(temporary).resolve()
+            root = fixture_root / "application"
             config = load_config(write_project(root, android_config()))
             tooling = root / "tooling"
             (tooling / "fastlane").mkdir(parents=True)
@@ -1217,7 +1224,7 @@ class CliBuildTests(unittest.TestCase):
             (root / "fastlane").mkdir()
             (root / "fastlane/Appfile").write_text("raise 'consumer config loaded'\n")
             (root / "fastlane/Pluginfile").write_text("raise 'consumer plugin loaded'\n")
-            adc = root / "synthetic-adc.json"
+            adc = fixture_root / "synthetic-adc.json"
             adc.write_bytes(b'{"type":"authorized_user","synthetic":true}'); adc.chmod(0o600)
             model = StoreLaneModel(lambda _argv, _env: (raw_receipt(intent), 0))
             self.addCleanup(model.close)
@@ -1254,6 +1261,7 @@ class CliBuildTests(unittest.TestCase):
                 os.environ,
                 {
                     **workflow_environment(),
+                    "TMPDIR": str(fixture_root),
                     "MOBILE_RELEASE_TOOLING_ROOT": str(tooling),
                     "GOOGLE_APPLICATION_CREDENTIALS": str(adc),
                     "BUNDLE_PATH": "/fictional/pinned-bundle",
@@ -1324,7 +1332,8 @@ class CliBuildTests(unittest.TestCase):
         for platform, factory in (("android", android_config), ("ios", ios_config)):
             for stage in ("candidate", "external-testing", "production-submit"):
                 with self.subTest(platform=platform, stage=stage), tempfile.TemporaryDirectory() as temporary:
-                    root = Path(temporary)
+                    fixture_root = Path(temporary).resolve()
+                    root = fixture_root / "application"
                     config = load_config(write_project(root, factory()))
                     request = StoreRequest(
                         stage=stage, platform=platform, confirmation="not-executed",
@@ -1338,7 +1347,8 @@ class CliBuildTests(unittest.TestCase):
                         "_JAVA_OPTIONS": "-agentlib:must-not-run",
                         "JDK_JAVA_OPTIONS": "-agentlib:must-not-run",
                     }
-                    with patch.dict(os.environ, source, clear=True), self._store_material(config, request) as (invocation, material, record):
+                    with patch.dict(os.environ, source, clear=True), self._store_material(
+                            config, request, fixture_root=fixture_root) as (invocation, material, record):
                         actual = _store_environment(config, config.release_version(), request, root / "raw.json", root / "tooling",
                             material=material, invocation=invocation, lane_evidence=record,
                             source_environment=source, authority=stores.workflow_authority(stage))
@@ -1436,7 +1446,7 @@ class CliBuildTests(unittest.TestCase):
 
     def test_store_runtime_controls_reach_the_online_lane_without_inheriting_preloads(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             config = load_config(write_project(root / "application", android_config()))
             tooling = root / "tooling"
             for relative in REQUIRED_TOOLING_FILES:
@@ -1475,7 +1485,7 @@ class CliBuildTests(unittest.TestCase):
                 "MOBILE_RELEASE_PREFLIGHT_READBACK_PATH": str(explicit),
             }, clear=True), patch("mobile_release.stores.resolve_tooling_root", return_value=tooling), patch(
                 "mobile_release.stores._require_fastlane_bundle"
-            ), patch("mobile_release.stores.run_owned", side_effect=fake_lane), self._online_material(config) as (
+            ), patch("mobile_release.stores.run_owned", side_effect=fake_lane), self._online_material(config, fixture_root=root) as (
                     invocation, material):
                 findings = online_preflight_findings(
                     config=config, release=config.release_version(), platforms=("android",),
@@ -1935,7 +1945,8 @@ class CliBuildTests(unittest.TestCase):
 
     def test_online_readback_path_is_inside_app_and_accepted_by_ruby_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            fixture_root = Path(temporary).resolve()
+            root = fixture_root / "application"
             config = load_config(write_project(root, android_config()))
             report_relative = Path(".mobile-release/store/preflight-android.json")
             repository = Path(__file__).resolve().parents[2]
@@ -1970,7 +1981,7 @@ class CliBuildTests(unittest.TestCase):
                     "mobile_release.stores.resolve_tooling_root", return_value=repository), patch(
                     "mobile_release.stores._require_fastlane_bundle"), patch(
                     "mobile_release.stores.run_owned", side_effect=failed_lane), patch(
-                    "mobile_release.stores.read_readback_bytes") as readback, self._online_material(config) as (
+                    "mobile_release.stores.read_readback_bytes") as readback, self._online_material(config, fixture_root=fixture_root) as (
                     invocation, material):
                 findings = online_preflight_findings(config=config, release=config.release_version(),
                     platforms=("android",), invocation=invocation, material=material)
@@ -1982,9 +1993,11 @@ class CliBuildTests(unittest.TestCase):
 
     def test_online_readback_override_refuses_occupied_names_and_multiple_platforms_before_native_work(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            fixture_root = Path(temporary).resolve()
+            root = fixture_root / "application"
             value = android_config()
             value["ios"] = ios_config()["ios"]
+            value["metadata"]["iosLocales"] = ios_config()["metadata"]["iosLocales"]
             config = load_config(write_project(root, value))
             for kind in ("file", "dangling", "multiple-platforms"):
                 relative = Path(".mobile-release/store") / (kind + ".json")
@@ -1998,7 +2011,7 @@ class CliBuildTests(unittest.TestCase):
                 platforms = ("android", "ios") if kind == "multiple-platforms" else ("android",)
                 with self.subTest(kind=kind), patch.dict(os.environ, {
                         "MOBILE_RELEASE_PREFLIGHT_READBACK_PATH": str(relative)}, clear=True), self._online_material(
-                        config, platforms=platforms) as (invocation, material), patch(
+                        config, fixture_root=fixture_root, platforms=platforms) as (invocation, material), patch(
                         "mobile_release.stores.resolve_tooling_root") as tooling, patch(
                         "mobile_release.stores._require_fastlane_bundle") as bundle, patch(
                         "mobile_release.stores.run_owned") as run:
@@ -2019,9 +2032,11 @@ class CliBuildTests(unittest.TestCase):
 
     def test_online_readback_default_requires_actual_writer_and_stops_other_platforms(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            fixture_root = Path(temporary).resolve()
+            root = fixture_root / "application"
             value = android_config()
             value["ios"] = ios_config()["ios"]
+            value["metadata"]["iosLocales"] = ios_config()["metadata"]["iosLocales"]
             config = load_config(write_project(root, value))
             calls, outputs = [], []
 
@@ -2041,7 +2056,7 @@ class CliBuildTests(unittest.TestCase):
                     return_value=Path(__file__).resolve().parents[2]), patch(
                     "mobile_release.stores._require_fastlane_bundle"), patch(
                     "mobile_release.stores.run_owned", side_effect=unbound_success), self.assertRaises(ProcessError):
-                with self._online_material(config, platforms=("android", "ios")) as (invocation, material):
+                with self._online_material(config, fixture_root=fixture_root, platforms=("android", "ios")) as (invocation, material):
                     online_preflight_findings(config=config, release=config.release_version(),
                         platforms=("android", "ios"), invocation=invocation, material=material)
             self.assertEqual(len(calls), 1, "unconfirmed first writer allowed another platform")

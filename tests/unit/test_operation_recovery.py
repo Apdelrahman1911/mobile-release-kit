@@ -110,8 +110,9 @@ class StoreWireFixture:
     Release reconciliation is separately covered against pinned Ruby clients.
     """
 
-    def __init__(self, root: Path):
-        self.root = root
+    def __init__(self, fixture_root: Path):
+        self.fixture_root = fixture_root.resolve()
+        self.root = root = self.fixture_root / "application"
         self.config = load_config(write_project(root, android_config()))
         self.binary = root / "app.aab"
         with zipfile.ZipFile(self.binary, "w") as archive:
@@ -127,7 +128,7 @@ class StoreWireFixture:
         self.raise_after_mutation = False
         self.preconditions: list[Path] = []
         self.outputs = {stage: root / ".mobile-release" / stage for stage in ("candidate", "external-testing", "production-submit")}
-        self.adc = root / "synthetic-adc.json"
+        self.adc = self.fixture_root / "synthetic-adc.json"
         self.adc.write_bytes(b'{"type":"authorized_user","synthetic":true}'); self.adc.chmod(0o600)
         self.model = StoreLaneModel(self.document)
 
@@ -173,7 +174,7 @@ class StoreWireFixture:
 
     def invoke(self, stage: str, mode: str, *, attempt: int = 1, output: Path | None = None, intent: Path | None = None) -> int:
         with patch.dict(os.environ, {**workflow_environment(stage, attempt=attempt),
-                "GOOGLE_APPLICATION_CREDENTIALS": str(self.adc), "TMPDIR": str(self.root)},
+                "GOOGLE_APPLICATION_CREDENTIALS": str(self.adc), "TMPDIR": str(self.fixture_root)},
                 clear=True), redirect_stdout(io.StringIO()):
             return _ci(build_parser().parse_args(self.command(stage, mode, output=output, intent=intent)))
 
@@ -595,7 +596,7 @@ class OperationRecoveryTests(unittest.TestCase):
                         raise failure
 
                 environment = {**workflow_environment("candidate"),
-                    "GOOGLE_APPLICATION_CREDENTIALS": str(self.fixture.adc), "TMPDIR": str(self.fixture.root)}
+                    "GOOGLE_APPLICATION_CREDENTIALS": str(self.fixture.adc), "TMPDIR": str(self.fixture.fixture_root)}
                 with patch.dict(os.environ, environment, clear=True), patch.object(
                     cli, "first_primary_context", side_effect=owner
                 ), redirect_stdout(output):
@@ -637,7 +638,7 @@ class OperationRecoveryTests(unittest.TestCase):
         args = build_parser().parse_args(self.fixture.command("external-testing", "execute-store"))
         args.recovery_run_id = intent["authorizedBy"]["runId"]
         env = {**workflow_environment("external-testing", run_id="900", head="e" * 40),
-               "GOOGLE_APPLICATION_CREDENTIALS": str(self.fixture.adc)}
+               "GOOGLE_APPLICATION_CREDENTIALS": str(self.fixture.adc), "TMPDIR": str(self.fixture.fixture_root)}
         with patch.dict(os.environ, env, clear=True), redirect_stdout(io.StringIO()):
             self.assertEqual(_ci(args), 0)
         receipt = load_release_receipt(self.fixture.outputs["external-testing"] / "external-testing-receipt.json")
