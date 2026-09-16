@@ -603,6 +603,8 @@ module StoreLaneNativeFixture
       StoreLaneNativeFixture.need(actual.equal?(options), "selected synthetic transporter")
       transporter
     end
+    # Select the fixture's logging preference through the original Fastlane API.
+    FastlaneCore::ItunesTransporter.hide_transporter_output
     manager.upload(options)
     need(dispatches.length == 1 && commands.length == 2, "real bridge dispatch count")
     # A separate benign direct child exercises the real installed PipeBridge.
