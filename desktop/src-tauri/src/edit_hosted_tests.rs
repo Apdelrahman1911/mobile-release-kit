@@ -17,12 +17,14 @@ const SCOPE: &str = "configuration-owner-hosted-v1";
 const LOSS_SCOPE: &str = "configuration-owner-management-loss-hosted-v1";
 const STOP_SCOPE: &str = "configuration-owner-stop-hosted-v1";
 const CLOCK_SCOPE: &str = "configuration-owner-clock-retention-hosted-v1";
+const EOF_SCOPE: &str = "configuration-transaction-eof-hosted-v1";
 const OBSERVATION: Duration = Duration::from_secs(45);
 const NOT_VERIFIED: &[&str] = &["production-runtime-custody", "production-save-enablement", "native-gui", "window-reload-crash",
     "parent-death", "native-stuck-wait-close", "windows-filesystem", "stores", "mobile-builds", "installers"];
 const IGNORE: &[u8] = b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n";
 const NOOP_IGNORE: &[u8] = b"# fixed synthetic comment\r\n/.mobile-release/\r\n/.mobile-release-init-prepare/\r\n/.mobile-release-init/\r\n/.mobile-release-init-cleanup/\r\n";
 const UNRELATED: &[u8] = b"fixed synthetic unrelated content\n";
+const EOF_IGNORE_BASE: &[u8] = b"# fixed synthetic EOF ignore\n";
 static BATCH_CLAIMED: AtomicBool = AtomicBool::new(false);
 static RETAINED: Mutex<Option<Retention>> = Mutex::new(None);
 static FIXTURE_FILES: FixtureFiles = FixtureFiles {
@@ -93,21 +95,96 @@ impl BlockingGate {
     }
 }
 
+// The sole extra bootstrap selector is a private, pre-registration two-value
+// mode. No renderer/environment method can select it. Its separate source hash
+// is admitted before this Schedule can be queued for an original Session.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum EofCase { Precommit, Postcommit }
+impl EofCase {
+    pub(super) fn name(self) -> &'static str {
+        match self { Self::Precommit => "precommit-eof", Self::Postcommit => "postcommit-eof" }
+    }
+    fn project(self) -> &'static str {
+        match self { Self::Precommit => "project-config-precommit-eof", Self::Postcommit => "project-config-postcommit-eof" }
+    }
+    fn boundary(self) -> &'static str {
+        match self { Self::Precommit => "before-COMMITTED", Self::Postcommit => "after-durable-COMMITTED" }
+    }
+    fn checkpoint(self) -> &'static str {
+        match self { Self::Precommit => "publisher-entry", Self::Postcommit => "descriptor-close" }
+    }
+    fn marker(self) -> &'static [u8] {
+        match self {
+            Self::Precommit => b"MRK_CONFIG_EOF_V1 precommit-eof boundary=before-COMMITTED\n",
+            Self::Postcommit => b"MRK_CONFIG_EOF_V1 postcommit-eof boundary=after-durable-COMMITTED\n",
+        }
+    }
+    fn summary(self) -> &'static [u8] {
+        match self {
+            Self::Precommit => b"MRK_CONFIG_EOF_V1 precommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=1 terminal=ROLLED_BACK durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+            Self::Postcommit => b"MRK_CONFIG_EOF_V1 postcommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=descriptor-close applied=1 committed=1 rolledBack=0 terminal=COMMITTED durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+        }
+    }
+    fn stderr_bytes(self) -> usize { self.marker().len() + self.summary().len() }
+}
+pub(super) fn eof_bootstrap() -> &'static str {
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/native_desktop_config_eof.py")
+}
+
+// Byte-exact two-record streaming admission. It allocates no input buffer and
+// has no arbitrary JSON/log/line parser. Missing, duplicated, malformed, wrong-
+// case and extra bytes cannot become an observation. EOF is checked separately
+// by the SAME original stderr reader; these records are never stdout frames.
+#[derive(Default)]
+struct EofControl { bytes: usize, failed: bool }
+impl EofControl {
+    fn observe(&mut self, case: EofCase, bytes: &[u8]) -> bool {
+        if self.failed { return false; }
+        for byte in bytes {
+            let expected = if self.bytes < case.marker().len() { case.marker().get(self.bytes) }
+                else { case.summary().get(self.bytes - case.marker().len()) };
+            if expected != Some(byte) { self.failed = true; return false; }
+            self.bytes += 1;
+        }
+        true
+    }
+    fn boundary_only(&self, case: EofCase) -> bool { !self.failed && self.bytes == case.marker().len() }
+    fn complete(&self, case: EofCase) -> bool { !self.failed && self.bytes == case.stderr_bytes() }
+    fn records(&self, case: EofCase) -> usize {
+        usize::from(!self.failed && self.bytes >= case.marker().len()) + usize::from(self.complete(case))
+    }
+}
+
 pub(super) struct Schedule {
     prefix: AsyncGate, terminal: AsyncGate, inspection: BlockingGate,
     prefix_bytes: AtomicUsize, apply_suffix_started: AtomicBool,
     accepted_sequence: AtomicU32, held_terminal: Mutex<Option<(u32, wire::CoreEditOutcome)>>,
     inspection_returned: AtomicBool, acquisition_refused: AtomicBool, failed: AtomicBool,
+    eof: Option<EofCase>, eof_control: Mutex<EofControl>,
 }
 impl Default for Schedule {
     fn default() -> Self {
         Self { prefix: AsyncGate::default(), terminal: AsyncGate::default(), inspection: BlockingGate::default(),
             prefix_bytes: AtomicUsize::new(0), apply_suffix_started: AtomicBool::new(false),
             accepted_sequence: AtomicU32::new(u32::MAX), held_terminal: Mutex::new(None),
-            inspection_returned: AtomicBool::new(false), acquisition_refused: AtomicBool::new(false), failed: AtomicBool::new(false) }
+            inspection_returned: AtomicBool::new(false), acquisition_refused: AtomicBool::new(false), failed: AtomicBool::new(false),
+            eof: None, eof_control: Mutex::new(EofControl::default()) }
     }
 }
 impl Schedule {
+    pub(super) fn eof_case(&self) -> Option<EofCase> { self.eof }
+    pub(super) fn observe_stderr(&self, bytes: &[u8]) -> bool {
+        let Some(case) = self.eof else { return true; }; // Ordinary stderr rules are unchanged.
+        let accepted = self.eof_control.lock().map(|mut control| control.observe(case, bytes)).unwrap_or(false);
+        if !accepted { self.failed.store(true, Ordering::SeqCst); }
+        accepted
+    }
+    pub(super) fn stderr_complete(&self) -> bool {
+        let Some(case) = self.eof else { return true; };
+        let complete = self.eof_control.lock().map(|control| control.complete(case)).unwrap_or(false);
+        if !complete { self.failed.store(true, Ordering::SeqCst); }
+        complete
+    }
     pub(super) async fn write_original(&self, writer: &mut ChildStdin, bytes: &[u8], ordinal: usize) -> std::io::Result<()> {
         if ordinal == 3 && self.prefix.armed.load(Ordering::SeqCst) {
             if bytes.first() != Some(&b'{') || bytes.len() < 2 {
@@ -290,6 +367,10 @@ const SOURCES: &[Source] = &[
     Source { id: "preview", relative: "src/mobile_release/api/_preview.py", compiled: include_bytes!("../../../src/mobile_release/api/_preview.py") },
     Source { id: "nativeFixture", relative: "tests/native_desktop_config.py", compiled: include_bytes!("../../../tests/native_desktop_config.py") },
 ];
+// Deliberately not added to SOURCES: ordinary/loss/H1–H4 receipt schemas retain
+// their exact 26-key map. Only the separately admitted EOF invocation adds it.
+const EOF_SOURCE: Source = Source { id: "transactionEofShim", relative: "tests/native_desktop_config_eof.py",
+    compiled: include_bytes!("../../../tests/native_desktop_config_eof.py") };
 
 struct Inputs { root: PathBuf, identity: Identity, bindings: Value }
 impl Inputs {
@@ -346,6 +427,22 @@ impl Inputs {
         let current = fs::symlink_metadata(&self.root).map_err(|_| Failure::FixtureIo)?;
         require(current.is_dir() && Identity::of(&current) == self.identity, Failure::FixtureIo)
     }
+    fn admit_eof_source(&mut self) -> Check<()> {
+        self.same_root()?;
+        require(self.root.file_name().and_then(|name| name.to_str()) == Some("config-transaction-eof"), Failure::HostedGuardRefused)?;
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().and_then(Path::parent).ok_or(Failure::HostedGuardRefused)?;
+        let actual = read_regular(&repository.join(EOF_SOURCE.relative), 2 * 1024 * 1024)?;
+        let expected = hash(EOF_SOURCE.compiled);
+        require(hash(&actual.bytes) == expected, Failure::SourceBindingMismatch)?;
+        let sources = self.bindings.get_mut("sourceHashes").and_then(Value::as_object_mut).ok_or(Failure::SourceBindingMismatch)?;
+        require(sources.insert(EOF_SOURCE.id.to_owned(), json!(expected)).is_none(), Failure::SourceBindingMismatch)?;
+        let payloads = self.bindings.get_mut("payloadHashes").and_then(Value::as_object_mut).ok_or(Failure::PayloadMismatch)?;
+        for (name, value) in [("eofDraft", hash(&eof_draft_bytes()?)), ("eofConfig", hash(&eof_config_bytes()?)),
+                              ("eofInitialIgnore", hash(EOF_IGNORE_BASE)), ("eofIgnore", hash(&eof_ignore_bytes()))] {
+            require(payloads.insert(name.to_owned(), json!(value)).is_none(), Failure::PayloadMismatch)?;
+        }
+        Ok(())
+    }
 }
 
 fn document() -> Value {
@@ -364,6 +461,18 @@ fn create_bytes() -> Check<Vec<u8>> {
     Ok(bytes)
 }
 fn noop_bytes() -> Check<Vec<u8>> { let mut bytes = draft_bytes()?; bytes.extend_from_slice(b"\r\n"); Ok(bytes) }
+fn eof_document() -> Value {
+    let mut draft = document();
+    draft["android"]["applicationId"] = json!("org.fixture.updated");
+    draft
+}
+fn eof_draft_bytes() -> Check<Vec<u8>> { serde_json::to_vec(&eof_document()).map_err(|_| Failure::PayloadMismatch) }
+fn eof_config_bytes() -> Check<Vec<u8>> {
+    let mut bytes = serde_json::to_vec_pretty(&eof_document()).map_err(|_| Failure::PayloadMismatch)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+fn eof_ignore_bytes() -> Vec<u8> { [EOF_IGNORE_BASE, IGNORE].concat() }
 
 #[derive(Clone, Copy)]
 enum Case { Create, NoOp, Discard }
@@ -410,7 +519,20 @@ struct Facts {
     force_attempted: bool,
 }
 
-fn original_resource_facts(session: &Session, loss: Option<ManagementLoss>) -> Check<Facts> {
+#[derive(Clone, Copy)]
+enum ExpectedStderr { Empty, TransactionEof(EofCase) }
+impl ExpectedStderr {
+    fn accepts(self, session: &Session, end: &ReadEnd) -> bool {
+        if end.frames != 0 { return false; } // stderr control never counts as stdout protocol.
+        match self {
+            Self::Empty => session.fixture_schedule.eof_case().is_none() && end.bytes == 0,
+            Self::TransactionEof(case) => session.fixture_schedule.eof_case() == Some(case)
+                && end.bytes == case.stderr_bytes() && session.fixture_schedule.stderr_complete(),
+        }
+    }
+}
+
+fn original_resource_facts(session: &Session, loss: Option<ManagementLoss>, expected_stderr: ExpectedStderr) -> Check<Facts> {
     // These are the retained original books. Do not poll/join/close a resource
     // again or replace a missing receipt with an is_finished/Drop observation.
     // Actual manager join plus the complete original-resource proof makes its
@@ -455,7 +577,7 @@ fn original_resource_facts(session: &Session, loss: Option<ManagementLoss>) -> C
         && !session.fixture_driver_loss.load(Ordering::SeqCst) && !session.fixture_watchdog_loss.load(Ordering::SeqCst)
         && !session.fixture_schedule.failed.load(Ordering::SeqCst)
         && !book.force_attempted && out.bytes > 0 && out.bytes <= wire::STDOUT_LIMIT
-        && err.bytes == 0 && err.frames == 0, Failure::OriginalCustodyUnknown)?;
+        && expected_stderr.accepts(session, err), Failure::OriginalCustodyUnknown)?;
     Ok(Facts { original_wait:true, stdout_eof:out.eof, stderr_eof:err.eof,
         stdin_closed:write.closed, stdout_closed:out.closed, stderr_closed:err.closed,
         startup_joined:book.inspection_joined && book.acquisition_joined,
@@ -464,7 +586,10 @@ fn original_resource_facts(session: &Session, loss: Option<ManagementLoss>) -> C
         request_frames:write.frames, response_frames:out.frames, stdout_bytes:out.bytes, stderr_bytes:err.bytes,
         force_attempted:book.force_attempted })
 }
-fn original_facts(session: &Session) -> Check<Facts> { original_resource_facts(session, None) }
+fn original_facts(session: &Session) -> Check<Facts> { original_resource_facts(session, None, ExpectedStderr::Empty) }
+fn original_eof_facts(session: &Session, case: EofCase) -> Check<Facts> {
+    original_resource_facts(session, None, ExpectedStderr::TransactionEof(case))
+}
 
 fn no_acquisition_facts(session: &Session) -> Check<Facts> {
     // Separate proof, NOT a relaxed spawned-child checker. The positive
@@ -660,7 +785,7 @@ fn management_loss_facts(batch: &Batch, original: &Arc<Session>, loss: Managemen
     FIXTURE_FILES.admit()?;
     require(!batch.missing_original && batch.originals.len() == 1
         && Arc::ptr_eq(&batch.originals[0], original), Failure::OriginalCustodyUnknown)?;
-    let facts = original_resource_facts(original, Some(loss))?;
+    let facts = original_resource_facts(original, Some(loss), ExpectedStderr::Empty)?;
     require((facts.request_frames, facts.response_frames) == (1, 2), Failure::UnexpectedOutcome)?;
     let registry_disabled = {
         let registry = batch.owner.inner.lock();
@@ -1270,4 +1395,253 @@ async fn hosted_config_terminal_deadline_original_resources() {
 #[ignore = "only the reviewed disposable original-startup-STOP hosted process"]
 async fn hosted_config_startup_stop_original_resources() {
     hosted_clock_original_resources(ClockCase::StartupStop).await;
+}
+
+fn eof_receipt(inputs: &Inputs, cases: &[Value], passed: bool, settled: bool, failure: Option<Failure>) -> Check<()> {
+    require(!passed || settled && cases.len() == 2 && failure.is_none(), Failure::ReceiptIo)?;
+    receipt_document(inputs, json!({"schemaVersion":1,"scope":EOF_SCOPE,
+        "status":if passed {"passed"} else {"failed"},"allOwnersSettled":settled,"failureCode":failure,
+        "bindings":inputs.bindings,"cases":cases,"notVerified":NOT_VERIFIED}))
+}
+
+fn eof_all_settled(batch: &Batch) -> bool {
+    // Do not relax Batch::all_settled's zero-stderr policy for older fixtures.
+    FIXTURE_FILES.all_settled() && !batch.missing_original && batch.owner.can_exit()
+        && batch.originals.len() <= 2
+        && batch.originals.iter().zip([EofCase::Precommit, EofCase::Postcommit])
+            .all(|(original, case)| original_eof_facts(original, case).is_ok())
+}
+
+async fn exercise_eof(batch: &mut Batch, inputs: &Inputs, case: EofCase) -> Check<()> {
+    inputs.same_root()?;
+    require(eof_all_settled(batch) && !batch.owner.disabled(), Failure::OriginalCustodyUnknown)?;
+    let root = inputs.root.join(case.name());
+    fs::DirBuilder::new().mode(0o700).create(&root).map_err(|_| Failure::FixtureIo)?;
+    fs::DirBuilder::new().mode(0o700).create(root.join("release")).map_err(|_| Failure::FixtureIo)?;
+    write_new(&root.join("release/mobile-release.json"), &noop_bytes()?, 0o640)?;
+    write_new(&root.join(".gitignore"), EOF_IGNORE_BASE, 0o600)?;
+    write_new(&root.join("unrelated.txt"), UNRELATED, 0o600)?;
+    let before = originals(&root)?;
+    require(before.iter().map(|file| file.identity.mode & 0o7777).eq([0o640, 0o600, 0o600]), Failure::PayloadMismatch)?;
+
+    let schedule = Arc::new(Schedule { eof: Some(case), ..Schedule::default() });
+    {
+        let mut next = batch.owner.inner.fixture_next_schedule.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+        require(next.is_none(), Failure::UnexpectedStatus)?;
+        *next = Some(schedule.clone()); // Before original registration; no live selector change.
+    }
+    let mut guard = GateGuard::new(&batch.owner, schedule.clone());
+    let original = batch.open(case.project(), &root)?;
+    require(Arc::ptr_eq(&schedule, &original.fixture_schedule), Failure::OriginalCustodyUnknown)?;
+    let editing = observed(&batch.owner, &original.id, Phase::Editing).await?;
+    let checkout = editing.checkout.as_ref().ok_or(Failure::UnexpectedStatus)?;
+    require(checkout.base == document(), Failure::UnexpectedOutcome)?;
+    let admission = batch.owner.prepare("main", PrepareConfigEdit { session_id: original.id.clone(),
+        revision: checkout.revision.clone(), expected_base: checkout.base.clone(), draft: eof_document(),
+        draft_revision: 1, baseline_generation: 0 }).map_err(|_| Failure::NativeCommandRejected)?;
+    require(projection(&admission, &original.id)?.phase == Phase::Preparing, Failure::UnexpectedStatus)?;
+    let reviewing = observed(&batch.owner, &original.id, Phase::Reviewing).await?;
+    let plan = reviewing.prepared.as_ref().ok_or(Failure::UnexpectedStatus)?;
+    require(plan.revision == checkout.revision && plan.draft_revision == 1 && plan.baseline_generation == 0
+        && !plan.view.create_release_directory && plan.view.files.len() == 2
+        && plan.view.files[0].path == "release/mobile-release.json" && plan.view.files[0].action == "replace"
+        && plan.view.files[1].path == ".gitignore" && plan.view.files[1].action == "append",
+        Failure::UnexpectedOutcome)?;
+    require(before == originals(&root)?, Failure::PayloadMismatch)?;
+    inventory(&root, &[".gitignore", "release", "unrelated.txt"])?;
+    inventory(&root.join("release"), &["mobile-release.json"])?;
+    let admission = batch.owner.apply("main", &original.id, &plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+    require(projection(&admission, &original.id)?.apply_submitted, Failure::UnexpectedStatus)?;
+    let (active, cleanup) = original_clock(batch, &original)?;
+    let endpoint = active.ok_or(Failure::UnexpectedStatus)?;
+    require(cleanup.is_none(), Failure::UnexpectedStatus)?;
+
+    // Wait only for the original stderr reader's exact marker. Do not acquire
+    // its pipe, any registry/resource book across an await, or inspect project
+    // and transaction files while installed work is held in the child.
+    until(OBSERVATION, || {
+        require(!batch.owner.disabled() && !schedule.failed.load(Ordering::SeqCst), Failure::OriginalCustodyUnknown)?;
+        let control = schedule.eof_control.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+        Ok(control.boundary_only(case))
+    }).await?;
+    let close_before_deadline = Instant::now() < endpoint;
+    require(close_before_deadline && !*original.stop.borrow(), Failure::UnexpectedStatus)?;
+    let closing = batch.owner.close("main", &original.id).map_err(|_| Failure::NativeCommandRejected)?;
+    let closing = projection(&closing, &original.id)?;
+    require(closing.phase == Phase::Finalizing && closing.native_reason == Reason::Cancelled
+        && closing.apply_submitted, Failure::UnexpectedStatus)?;
+    guard.release(); // Only sticky original Close; the shim's gate is select-only.
+
+    let terminal = observed(&batch.owner, &original.id, Phase::Final).await?;
+    require(terminal.native_finality == NativeFinality::Settled && !terminal.late_settled
+        && terminal.apply_submitted && terminal.native_reason == Reason::Cancelled
+        && batch.owner.can_exit() && !batch.owner.disabled(), Failure::OriginalCustodyUnknown)?;
+    let facts = original_eof_facts(&original, case)?;
+    require((facts.request_frames, facts.response_frames) == (3, 3), Failure::UnexpectedOutcome)?;
+    let core = terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+    let committed = case == EofCase::Postcommit;
+    require(core.effect == if committed { Effect::Committed } else { Effect::RolledBack }
+        && core.journal == Journal::Clean && core.resources == ResourceState::Settled
+        && core.reason == CoreReason::Cancelled, Failure::UnexpectedOutcome)?;
+    let correlation = terminal.prepared.as_ref().is_some_and(|retained| retained.plan_token == plan.plan_token
+        && retained.revision == plan.revision && retained.draft_revision == 1 && retained.baseline_generation == 0)
+        && terminal.checkout.as_ref().is_some_and(|retained| retained.revision == plan.revision && retained.base == document())
+        && schedule.sequence() == Some(2);
+    let records = {
+        let control = schedule.eof_control.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+        require(control.complete(case), Failure::UnexpectedOutcome)?;
+        control.records(case)
+    };
+    require(correlation && records == 2 && schedule.released(), Failure::UnexpectedOutcome)?;
+
+    // Only after full original native wait/EOF/close/join receipts may the
+    // fixture observe files. The rollback case demands original inodes too.
+    let after = originals(&root)?;
+    let originals_preserved = before == after;
+    let payloads_installed = after[0].bytes == eof_config_bytes()? && after[1].bytes == eof_ignore_bytes();
+    let modes_preserved = before.iter().zip(&after).all(|(old, new)| old.identity.mode == new.identity.mode
+        && old.identity.device == new.identity.device && old.identity.owner == new.identity.owner);
+    let unrelated_preserved = before[2] == after[2];
+    require(originals_preserved == !committed && payloads_installed == committed && modes_preserved && unrelated_preserved
+        && (!committed || before[0].identity.inode != after[0].identity.inode && before[1].identity.inode != after[1].identity.inode),
+        Failure::PayloadMismatch)?;
+    inventory(&root, &[".gitignore", "release", "unrelated.txt"])?;
+    inventory(&root.join("release"), &["mobile-release.json"])?;
+    let fixture_files_settled = FIXTURE_FILES.all_settled();
+    require(fixture_files_settled, Failure::FixtureCustodyUnknown)?;
+    let mut evidence = serde_json::to_value(&facts).map_err(|_| Failure::ReceiptIo)?;
+    evidence["name"] = json!(case.name());
+    evidence["evidenceKind"] = json!("real-stdin-eof-at-controlled-transaction-boundary");
+    evidence["bootstrapMode"] = json!("instrumented-genuine-engine");
+    evidence["nativePhase"] = json!(terminal.phase);
+    evidence["nativeFinality"] = json!(terminal.native_finality);
+    evidence["nativeReason"] = json!(terminal.native_reason);
+    evidence["applySubmitted"] = json!(terminal.apply_submitted);
+    evidence["lateSettled"] = json!(terminal.late_settled);
+    evidence["ownerDisabled"] = json!(batch.owner.disabled());
+    evidence["outcome"] = json!(core);
+    evidence["terminalSeq"] = json!(schedule.sequence());
+    evidence["preparedCorrelation"] = json!(correlation);
+    evidence["closeBeforeActiveDeadline"] = json!(close_before_deadline);
+    evidence["controlRecords"] = json!(records);
+    evidence["boundary"] = json!(case.boundary());
+    // These literal-valued facts are admitted only by the byte-exact original
+    // stderr parser above. They do not replace any native resource receipts.
+    evidence["actualStdinEof"] = json!(true);
+    evidence["eofReadCount"] = json!(1);
+    evidence["nonemptyReadCount"] = json!(0);
+    evidence["readErrorCount"] = json!(0);
+    evidence["originalCheckpoint"] = json!(case.checkpoint());
+    evidence["committedPublication"] = json!(committed);
+    evidence["rolledBackPublication"] = json!(!committed);
+    evidence["terminalDurable"] = json!(true);
+    evidence["fixedRecovery"] = json!(true);
+    evidence["journalClean"] = json!(true);
+    evidence["originalsPreserved"] = json!(originals_preserved);
+    evidence["payloadsInstalled"] = json!(payloads_installed);
+    evidence["modesPreserved"] = json!(modes_preserved);
+    evidence["unrelatedPreserved"] = json!(unrelated_preserved);
+    evidence["journalAbsent"] = json!(true);
+    evidence["fixtureFilesSettled"] = json!(fixture_files_settled);
+    batch.cases.push(evidence);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable real transaction-boundary EOF hosted process"]
+async fn hosted_config_transaction_eof_original_resources() {
+    if BATCH_CLAIMED.swap(true, Ordering::SeqCst) {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+        panic!("hosted configuration batch was already claimed");
+    }
+    let mut inputs = match Inputs::admit() {
+        Ok(inputs) => inputs,
+        Err(code) => {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted configuration EOF admission refused: {code:?}");
+        },
+    };
+    if inputs.admit_eof_source().is_err() || eof_receipt(&inputs, &[], false, false, Some(Failure::NotCompleted)).is_err() {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+        panic!("hosted configuration EOF source/receipt refused before native admission");
+    }
+    let mut batch = delta_batch(&inputs).unwrap_or_else(|code| panic!("hosted configuration EOF setup refused before native work: {code:?}"));
+    for case in [EofCase::Precommit, EofCase::Postcommit] {
+        let checked = exercise_eof(&mut batch, &inputs, case).await;
+        if checked.is_err() || !eof_all_settled(&batch) || batch.owner.disabled() { batch.stop_original().await; }
+        let settled = eof_all_settled(&batch);
+        if !settled || batch.owner.disabled() || matches!(checked, Err(Failure::OriginalCustodyUnknown | Failure::FixtureCustodyUnknown)) {
+            if FIXTURE_FILES.all_settled() { let _ = eof_receipt(&inputs, &batch.cases, false, false, Some(Failure::OriginalCustodyUnknown)); }
+            retain_unknown_runtime().await;
+            return; // No second case/process admission on missing original proof.
+        }
+        if let Err(code) = checked {
+            let _ = eof_receipt(&inputs, &batch.cases, false, true, Some(code));
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted configuration EOF case failed after settlement: {code:?}");
+        }
+        if eof_receipt(&inputs, &batch.cases, false, false, Some(Failure::NotCompleted)).is_err() {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted configuration EOF progress receipt failed after settlement");
+        }
+    }
+    if batch.owner.shutdown().await.is_err() || !eof_all_settled(&batch) || batch.cases.len() != 2 {
+        if FIXTURE_FILES.all_settled() { let _ = eof_receipt(&inputs, &batch.cases, false, false, Some(Failure::OriginalCustodyUnknown)); }
+        retain_unknown_runtime().await;
+        return;
+    }
+    if eof_receipt(&inputs, &batch.cases, true, true, None).is_err() {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+        panic!("hosted configuration EOF final receipt failed after settlement");
+    }
+}
+
+#[test]
+fn eof_control_exact_records_and_chunk_boundaries() {
+    // Inert parser only: no owner, clock, runtime, environment, IO or process.
+    for case in [EofCase::Precommit, EofCase::Postcommit] {
+        let bytes = [case.marker(), case.summary()].concat();
+        for chunk_size in 1..=bytes.len() + 1 {
+            let mut control = EofControl::default();
+            for chunk in bytes.chunks(chunk_size) { assert!(control.observe(case, chunk)); }
+            assert!(control.complete(case));
+            assert_eq!(control.records(case), 2);
+            assert!(!control.observe(case, b"\n"));
+            assert!(!control.complete(case));
+        }
+        let mut control = EofControl::default();
+        assert!(control.observe(case, case.marker()));
+        assert!(control.boundary_only(case));
+        assert_eq!(control.records(case), 1);
+        assert!(!control.complete(case));
+        assert!(control.observe(case, case.summary()));
+        assert!(control.complete(case));
+    }
+}
+
+#[test]
+fn eof_control_refuses_missing_changed_or_duplicate_records() {
+    for case in [EofCase::Precommit, EofCase::Postcommit] {
+        let bytes = [case.marker(), case.summary()].concat();
+        for length in 0..bytes.len() {
+            let mut control = EofControl::default();
+            assert!(control.observe(case, &bytes[..length]));
+            assert!(!control.complete(case));
+        }
+        for index in 0..bytes.len() {
+            let mut changed = bytes.clone();
+            changed[index] = b'!';
+            let mut control = EofControl::default();
+            assert!(!control.observe(case, &changed));
+            assert!(!control.complete(case));
+        }
+        let mut duplicate = EofControl::default();
+        assert!(duplicate.observe(case, case.marker()));
+        assert!(!duplicate.observe(case, case.marker()));
+        let mut reversed = EofControl::default();
+        assert!(!reversed.observe(case, case.summary()));
+        let other = if case == EofCase::Precommit { EofCase::Postcommit } else { EofCase::Precommit };
+        let mut wrong_case = EofControl::default();
+        assert!(!wrong_case.observe(case, other.marker()));
+    }
 }

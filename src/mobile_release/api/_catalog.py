@@ -177,12 +177,17 @@ def _credential_catalog() -> list[CredentialHelp]:
 
 
 def catalog() -> CatalogResult:
+    # Local import avoids a catalogue/preview cycle. Help needs no valid draft,
+    # pin or successful proposal, and remains fixed selected-package data.
+    from ._github_setup import github_setup_help
+
     schema, fields = _resource("project.schema.json"), _resource("field-help.json")
     if not isinstance(schema, dict) or schema.get("$id") != "urn:mobile-release-kit:schema:project:1" or not isinstance(fields, list):
         raise ApiError("resource_unavailable", "The bundled core catalogue has an incompatible shape")
     return {
         "schemaVersion": 1, "schema": schema, "fields": fields,
         "credentials": _credential_catalog(),
+        "githubSetup": github_setup_help(),
         "metadata": {
             "requiredLocaleText": {platform: list(names) for platform, names in REQUIRED_LOCALE_TEXT.items()},
             "textLimits": dict(TEXT_LIMITS), "androidReleaseNoteLimit": ANDROID_NOTE_LIMIT,

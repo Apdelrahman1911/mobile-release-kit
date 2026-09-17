@@ -14,6 +14,7 @@ pub mod supervisor;
 pub mod bridge;
 mod document_lifetime;
 mod edit_commands;
+mod github_commands;
 pub mod edit_protocol;
 pub mod edit_owner;
 #[cfg(feature = "desktop-shell")]

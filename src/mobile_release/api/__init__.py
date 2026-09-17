@@ -14,11 +14,13 @@ from ..errors import ConfigurationError
 from ._catalog import catalog, requirement_descriptors
 from ._json import bounded_json_text
 from ._preview import preview_config, suggest_config
+from ._github_setup import propose_github_setup
 from ._snapshot import project_snapshot, snapshot_available
 from .contracts import ApiError, CapabilitiesResult, ValidateResult, assurance, issue
 
 __all__ = ["ApiError", "execute"]
-METHODS = ("capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview")
+METHODS = ("capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
+           "github.setup.propose")
 _FUTURE_ACTIONS = (
     "project.initialize", "config.save", "doctor", "preflight.offline",
     "preflight.signing", "preflight.online", "android.build", "ios.build",
@@ -71,7 +73,8 @@ def execute(method: str, params: dict[str, Any]) -> dict[str, Any]:
     if type(params) is not dict or any(type(key) is not str for key in params):
         raise ApiError("invalid_params", "Method parameters must be a JSON object with string keys")
     allowed = {"project.snapshot": {"root", "configPath"}, "config.validate": {"draft"},
-               "config.suggest": {"hints"}, "config.preview": {"base", "draft"}}.get(method, set())
+               "config.suggest": {"hints"}, "config.preview": {"base", "draft"},
+               "github.setup.propose": {"draft", "toolingRepository", "toolingSha", "suppliedSnapshot"}}.get(method, set())
     required = {"root"} if method == "project.snapshot" else allowed
     if set(params) - allowed or required - set(params):
         raise ApiError("invalid_params", "Unknown or missing parameters for the selected method")
@@ -85,4 +88,6 @@ def execute(method: str, params: dict[str, Any]) -> dict[str, Any]:
         return suggest_config(params["hints"])
     if method == "config.preview":
         return preview_config(params["base"], params["draft"])
+    if method == "github.setup.propose":
+        return propose_github_setup(params["draft"], params["toolingRepository"], params["toolingSha"], params["suppliedSnapshot"])
     return project_snapshot(params["root"], params.get("configPath", "release/mobile-release.json"))

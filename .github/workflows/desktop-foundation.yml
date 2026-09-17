@@ -7,11 +7,14 @@ on:
       - desktop/**
       - tests/desktop/**
       - tests/native_desktop_config.py
+      - tests/native_desktop_config_eof.py
       - src/mobile_release/api/**
       - src/mobile_release/_desktop_engine.py
       - src/mobile_release/_desktop_edit_*.py
       - src/mobile_release/config_edit.py
       - src/mobile_release/config_payloads.py
+      - src/mobile_release/workflow_payloads.py
+      - src/mobile_release/cli.py
       - src/mobile_release/init_workspace_custody.py
       - src/mobile_release/cancellation.py
       - src/mobile_release/build_inputs.py
@@ -165,6 +168,15 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py config-owner-delta'
+      - name: Verify real EOF before and after durable configuration commit
+        if: matrix.platform != 'windows'
+        timeout-minutes: 3
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py config-transaction-eof'
       - name: Verify core transactions before the last retained terminal-fault control
         if: matrix.platform != 'windows'
         timeout-minutes: 5
@@ -194,6 +206,8 @@ jobs:
             ${{ steps.prepare.outputs.root }}/config-stop/receipt.json
             ${{ steps.prepare.outputs.root }}/config-terminal-deadline/receipt.json
             ${{ steps.prepare.outputs.root }}/config-startup-stop/receipt.json
+            ${{ steps.prepare.outputs.root }}/config-transaction-eof-checks.json
+            ${{ steps.prepare.outputs.root }}/config-transaction-eof/receipt.json
             ${{ steps.prepare.outputs.root }}/config-core-checks.json
             ${{ steps.prepare.outputs.root }}/config-ordinary.json
             ${{ steps.prepare.outputs.root }}/config-committed-fsync.json

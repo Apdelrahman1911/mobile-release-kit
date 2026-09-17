@@ -1,5 +1,7 @@
-import fieldHelp from '../../src/mobile_release/api/data/field-help.json';
-import projectSchema from '../../src/mobile_release/api/data/project.schema.json';
+import fieldHelp from '../../src/mobile_release/api/data/field-help.json' with { type: 'json' };
+import projectSchema from '../../src/mobile_release/api/data/project.schema.json' with { type: 'json' };
+import githubSetupResource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
+import { githubSetupError, parseGitHubSetupHelp } from './githubSetupProtocol.ts';
 import type { ApiError, Assurance, Catalog, DesktopApi, FieldHelp, JsonObject, ProjectSnapshot } from './types.ts';
 
 // Inert, explicit browser-design fixture. Nothing here is a project observation.
@@ -9,11 +11,16 @@ const assurance: Assurance = {
   writesPerformed: false, releaseReadiness: 'unknown',
 };
 
+// Only shipped core guidance is displayed in explicit browser design mode.
+// No JS template renderer or successful proposal fixture exists here.
+const githubSetup = parseGitHubSetupHelp(githubSetupResource.help);
+if (!githubSetup) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
+
 const catalog: Catalog = {
   // TypeScript adds optional `undefined` properties when inferring heterogeneous
   // JSON arrays. The exact core-owned JSON resource cannot contain undefined.
   schemaVersion: 1, schema: projectSchema as unknown as JsonObject, fields: fieldHelp as FieldHelp[],
-  credentials: [], metadata: null, assurance: { ...assurance, basis: 'schema-policy' },
+  credentials: [], metadata: null, githubSetup, assurance: { ...assurance, basis: 'schema-policy' },
 };
 
 const example: ProjectSnapshot = {
@@ -63,6 +70,7 @@ export const previewApi: DesktopApi = {
   configPreview: async () => {
     throw { code: 'PreviewOnly', message: 'Core draft review is unavailable in browser preview. No configuration was reviewed.', retryable: false } satisfies ApiError;
   },
+  proposeGitHubSetup: async () => { throw githubSetupError({ code: 'PreviewOnly' }); },
   openConfigEdit: editUnavailable,
   prepareConfigEdit: editUnavailable,
   applyConfigEdit: editUnavailable,

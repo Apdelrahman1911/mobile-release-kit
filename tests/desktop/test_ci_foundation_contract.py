@@ -101,7 +101,106 @@ def validate_delta(report: dict, kind: str) -> dict:
         source_hashes=dict.fromkeys(helper.CONFIG_OWNER_SOURCES, "3" * 64), python_hash="2" * 64)
 
 
+def transaction_eof_report() -> dict:
+    report = owner_report()
+    report["scope"] = "configuration-transaction-eof-hosted-v1"
+    report["bindings"]["sourceHashes"] = dict.fromkeys(helper.CONFIG_TRANSACTION_EOF_SOURCES, "3" * 64)
+    report["bindings"]["payloadHashes"].update(dict.fromkeys(("eofDraft", "eofConfig", "eofInitialIgnore", "eofIgnore"), "4" * 64))
+    report["cases"] = []
+    for committed in (False, True):
+        name = "postcommit-eof" if committed else "precommit-eof"
+        boundary = "after-durable-COMMITTED" if committed else "before-COMMITTED"
+        checkpoint = "descriptor-close" if committed else "publisher-entry"
+        terminal = "COMMITTED" if committed else "ROLLED_BACK"
+        records = (f"MRK_CONFIG_EOF_V1 {name} boundary={boundary}\n"
+            f"MRK_CONFIG_EOF_V1 {name} eof=1 nonempty=0 readErrors=0 checkpoint={checkpoint} "
+            f"applied=1 committed={int(committed)} rolledBack={int(not committed)} terminal={terminal} "
+            "durable=1 recovery=1 clean=1 settled=1 cancelled=1\n")
+        report["cases"].append({"name": name, "evidenceKind": "real-stdin-eof-at-controlled-transaction-boundary",
+            "bootstrapMode": "instrumented-genuine-engine", "nativePhase": "final", "nativeFinality": "settled",
+            "nativeReason": "cancelled", "applySubmitted": True, "lateSettled": False, "ownerDisabled": False,
+            "outcome": {"effect": "committed" if committed else "rolled_back", "journal": "clean", "resources": "settled", "reason": "cancelled"},
+            "terminalSeq": 2, "preparedCorrelation": True, "closeBeforeActiveDeadline": True, "controlRecords": 2,
+            "boundary": boundary, "actualStdinEof": True, "eofReadCount": 1, "nonemptyReadCount": 0, "readErrorCount": 0,
+            "originalCheckpoint": checkpoint, "committedPublication": committed, "rolledBackPublication": not committed,
+            "terminalDurable": True, "fixedRecovery": True, "journalClean": True, "originalsPreserved": not committed,
+            "payloadsInstalled": committed, "modesPreserved": True, "unrelatedPreserved": True, "journalAbsent": True,
+            "fixtureFilesSettled": True, "requestFrames": 3, "responseFrames": 3, "stdoutBytes": 4096,
+            "stderrBytes": len(records.encode("ascii")), "forceAttempted": False,
+            **dict.fromkeys(helper.CONFIG_OWNER_FINALITY, True)})
+    return report
+
+
+def validate_transaction_eof(report: dict) -> dict:
+    return helper.validate_config_transaction_eof_receipt(report, source_sha="1" * 40, platform="linux",
+        source_hashes=dict.fromkeys(helper.CONFIG_TRANSACTION_EOF_SOURCES, "3" * 64), python_hash="2" * 64)
+
+
 class FixedCompilerHelperTests(unittest.TestCase):
+    def test_transaction_eof_requires_original_eof_settlement_and_distinct_commit_outcomes(self):
+        report = transaction_eof_report()
+        self.assertIs(validate_transaction_eof(report), report)
+        for index, case in enumerate(report["cases"]):
+            mutations = [{field: not value} for field, value in case.items() if type(value) is bool]
+            mutations += [{field: True} for field, value in case.items() if type(value) is int]
+            mutations += [{"stderrBytes": 0}, {"stdoutBytes": 0}, {"eofReadCount": 0}, {"nonemptyReadCount": 1},
+                {"readErrorCount": 1}, {"controlRecords": 1}, {"requestFrames": 2}, {"responseFrames": 2},
+                {"boundary": "uncontrolled"}, {"originalCheckpoint": "injected-cancellation"},
+                {"bootstrapMode": "fake-result"}, {"evidenceKind": "genuine-os-fault"},
+                {"nativeReason": "none"}, {"nativePhase": "unknown"}, {"nativeFinality": "unknown"},
+                {"outcome": {**case["outcome"], "reason": "none"}},
+                {"outcome": report["cases"][1 - index]["outcome"]}, {"unrecognizedFact": True}]
+            for changed in mutations:
+                failed = deepcopy(report)
+                failed["cases"][index].update(changed)
+                with self.subTest(case=index, change=changed), self.assertRaises(helper.CheckFailure):
+                    validate_transaction_eof(failed)
+
+    def test_transaction_eof_is_bound_to_the_extra_shim_and_complete_payload_inventory(self):
+        report = transaction_eof_report()
+        for changed in ({"scope": "production-save-enablement"}, {"allOwnersSettled": False}, {"schemaVersion": True},
+                        {"failureCode": "not_completed"}, {"notVerified": []}, {"status": "failed"},
+                        {"cases": report["cases"][:1]}, {"cases": list(reversed(report["cases"]))}, {"extra": True}):
+            with self.subTest(top=changed), self.assertRaises(helper.CheckFailure):
+                validate_transaction_eof({**report, **changed})
+        for field, value in (("sourceSha", "0" * 40), ("pythonSha256", "0" * 64), ("sourceHashes", {}),
+                             ("runtimeMode", "production"), ("target", helper.TARGETS["windows"]), ("payloadHashes", {})):
+            failed = deepcopy(report)
+            failed["bindings"][field] = value
+            with self.subTest(binding=field), self.assertRaises(helper.CheckFailure):
+                validate_transaction_eof(failed)
+        for group, key in (("sourceHashes", "transactionEofShim"), ("payloadHashes", "eofDraft"),
+                           ("payloadHashes", "eofConfig"), ("payloadHashes", "eofInitialIgnore"), ("payloadHashes", "eofIgnore")):
+            failed = deepcopy(report)
+            del failed["bindings"][group][key]
+            with self.subTest(group=group, key=key), self.assertRaises(helper.CheckFailure):
+                validate_transaction_eof(failed)
+        with self.assertRaises(helper.CheckFailure):
+            validate_owner(report)  # New evidence cannot masquerade as an older healthy-save receipt.
+
+    def test_transaction_eof_is_one_bounded_phase_before_last_retained_fault(self):
+        source = HELPER.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "run" and any(keyword.arg == "check" and isinstance(keyword.value, ast.Constant)
+                     and keyword.value.value == "config-transaction-eof-native-contract" for keyword in node.keywords)]
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertEqual(next(keyword.value.value for keyword in call.keywords if keyword.arg == "timeout"), 90)
+        constants = [item.value for item in call.args[0].elts if isinstance(item, ast.Constant)]
+        self.assertEqual(constants, ["test", "--lib", "--features", "development-runtime", "--", "--exact", "--ignored", "--test-threads=1"])
+        self.assertTrue(any(isinstance(item, ast.Name) and item.id == "CONFIG_TRANSACTION_EOF_TEST" for item in call.args[0].elts))
+        self.assertLess(source.index('elif name == "config-owner-delta"'), source.index('elif name == "config-transaction-eof"'))
+        self.assertLess(source.index('elif name == "config-transaction-eof"'), source.index('elif name == "config-core"'))
+        for section in (source.split('elif name == "config-core":', 1)[1].split('    else:', 1)[0],
+                        source.split('require(name == "clean"', 1)[1]):
+            self.assertIn("config_transaction_eof_receipt(context)", section)
+        workflow = (SOURCE / ".github/workflows/desktop-foundation.yml").read_text(encoding="utf-8")
+        self.assertLess(workflow.index("ci_foundation.py config-owner-delta"), workflow.index("ci_foundation.py config-transaction-eof"))
+        self.assertLess(workflow.index("ci_foundation.py config-transaction-eof"), workflow.index("ci_foundation.py config-core"))
+        self.assertIn("/config-transaction-eof-checks.json", workflow)
+        self.assertIn("/config-transaction-eof/receipt.json", workflow)
+
     def test_prepared_eof_and_partial_apply_cannot_claim_accepted_apply(self):
         report = delta_report("stop")
         self.assertIs(validate_delta(report, "stop"), report)

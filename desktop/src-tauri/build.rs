@@ -27,7 +27,7 @@ fn main() {
     {
         const COMMANDS: &[&str] = &[
             "app_info", "choose_project", "project_snapshot", "catalog",
-            "validate_config", "suggest_config", "preview_config",
+            "validate_config", "suggest_config", "preview_config", "propose_github_setup",
             "open_config_edit", "prepare_config_edit", "apply_config_edit",
             "close_config_edit", "config_edit_status",
         ];

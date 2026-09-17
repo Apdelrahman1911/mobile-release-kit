@@ -681,4 +681,48 @@ main:focus { outline: none; }
   .save-outcome-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .save-actions .button { white-space: normal; }
 }
+.github-form, .github-proposal, .github-workflow, .github-environment { min-width: 0; }
+.github-draft { padding: 17px; background: var(--subtle); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 24px; }
+.github-draft > strong { font-size: 12px; }
+.github-draft > .button { margin-top: 12px; }
+.github-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 24px; margin: 18px 0; }
+.github-facts dt { font-size: 10px; color: var(--muted); margin-bottom: 6px; }
+.github-facts dd { margin: 0; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
+.github-fact-wide { grid-column: 1 / -1; }
+.github-input-help > p { margin-top: 9px; font-size: 11px; }
+.github-help { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+.github-help > summary { cursor: pointer; font-size: 12px; color: #456e62; line-height: 1.7; }
+.github-help .help-definitions { margin: 17px 0 0; }
+.github-help .help-definitions > div { margin-bottom: 14px; }
+.github-help > summary:focus-visible, .github-workflow > summary:focus-visible, .github-workflow pre:focus-visible { outline: 3px solid #71b8a9; outline-offset: 3px; }
+.github-comparison { min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 17px; margin: 25px 0; }
+.github-comparison legend { padding: 0 7px; font-size: 13px; font-weight: 600; }
+.github-legend-title { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.github-comparison-toggle { display: flex; align-items: flex-start; gap: 9px; margin: 20px 0 10px; font-size: 12px; line-height: 1.7; }
+.github-comparison-toggle input { margin-top: 4px; accent-color: var(--primary); }
+.github-assertion { border-top: 1px solid var(--line); padding-top: 18px; margin-top: 18px; }
+.github-assertion > .form-grid { margin-top: 14px; }
+.github-guidance { margin: 25px 0; }
+.github-guidance > p { margin: 7px 0 16px; font-size: 11px; }
+.github-propose-action { border-top: 1px solid var(--line); padding-top: 20px; display: flex; align-items: flex-start; gap: 18px; }
+.github-propose-action > p { max-width: 550px; font-size: 11px; }
+.github-scope-note { font-size: 11px; margin: 15px 0; }
+.github-workflow { border: 1px solid var(--line); border-radius: 7px; padding: 15px; margin-top: 13px; }
+.github-workflow > summary { cursor: pointer; font-size: 12px; line-height: 2; }
+.github-workflow > summary > .badge { margin-left: 12px; white-space: normal; }
+.github-workflow-meta { margin: 13px 0; font-size: 10px; }
+.github-workflow pre { overflow: auto; max-height: 440px; max-width: 100%; background: var(--subtle); border: 1px solid var(--line); border-radius: 6px; padding: 15px; line-height: 1.8; white-space: pre; }
+.github-environment { border-top: 1px solid var(--line); padding-top: 21px; margin-top: 21px; }
+.github-environment > p { font-size: 11px; margin-top: 7px; }
+.github-requirements { margin: 16px 0 0; padding-left: 18px; }
+.github-requirements li { margin-top: 17px; padding-left: 5px; }
+.github-requirements li > div { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+.github-requirements p { font-size: 11px; margin-top: 5px; }
+.github-disabled-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 20px; }
+@media (max-width: 600px) {
+  .github-facts { grid-template-columns: minmax(0, 1fr); }
+  .github-propose-action { flex-direction: column; gap: 12px; }
+  .github-workflow > summary > .badge { display: flex; width: fit-content; margin: 7px 0 0; }
+  .github-comparison { padding: 12px; }
+}
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

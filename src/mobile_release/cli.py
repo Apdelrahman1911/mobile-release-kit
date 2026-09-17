@@ -64,12 +64,12 @@ from .stores import (
 )
 from .tooling import resolve_tooling_root
 from .workflow import authenticate_operation_intent
+from .workflow_payloads import (
+    TOOLING_REPOSITORY_RE, MissingWorkflowPlaceholder, normalize_tooling_reference, pinned_schema_reference,
+    render_workflow_caller,
+)
 
 DEFAULT_CONFIG = "release/mobile-release.json"
-TOOLING_REPOSITORY_RE = re.compile(
-    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/"
-    r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?"
-)
 
 
 def _add_config_argument(parser: argparse.ArgumentParser, *, optional: bool = False) -> None:
@@ -384,14 +384,8 @@ def _init_apply(args: argparse.Namespace, root: Path, proposed: dict[str, Any], 
     template_dir = _find_template_dir(root, args.template_dir)
     if template_dir is None:
         raise ValidationError("workflow caller templates are unavailable")
-    if not args.tooling_sha or not re.fullmatch(r"[0-9A-Fa-f]{40}", args.tooling_sha):
-        raise ValidationError("--tooling-sha full commit is required to install workflow callers")
-    if not args.tooling_repository or not TOOLING_REPOSITORY_RE.fullmatch(args.tooling_repository):
-        raise ValidationError("--tooling-repository must be a safe GitHub OWNER/REPO coordinate")
-    proposed["$schema"] = (
-        f"https://raw.githubusercontent.com/{args.tooling_repository}/"
-        f"{args.tooling_sha.lower()}/schemas/project.schema.json"
-    )
+    repository, tooling_sha = normalize_tooling_reference(args.tooling_repository, args.tooling_sha)
+    proposed["$schema"] = pinned_schema_reference(repository, tooling_sha)
     sources = sorted(template_dir.glob("*.yml"))
     if not 1 <= len(sources) <= 64:
         raise ValidationError("workflow caller template directory must contain 1–64 callers")
@@ -409,19 +403,11 @@ def _init_apply(args: argparse.Namespace, root: Path, proposed: dict[str, Any], 
         if len(data) > 1024 * 1024:
             raise ValidationError("workflow caller template exceeds 1 MiB")
         try:
-            rendered = data.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ValidationError("workflow caller template must be UTF-8") from error
-        placeholders = {
-            "__MOBILE_RELEASE_KIT_SHA__": args.tooling_sha.lower(),
-            "__MOBILE_RELEASE_KIT_REPOSITORY__": args.tooling_repository,
-        }
-        if any(name not in rendered for name in placeholders):
-            raise ValidationError(f"workflow caller template lacks required placeholder(s): {source}")
-        for placeholder, replacement in placeholders.items():
-            rendered = rendered.replace(placeholder, replacement)
+            rendered = render_workflow_caller(data, repository, tooling_sha)
+        except MissingWorkflowPlaceholder as error:
+            raise ValidationError(f"workflow caller template lacks required placeholder(s): {source}") from error
         destination = _lexical_project_path(root, root / ".github/workflows" / source.name)
-        prepared.append((destination, rendered.encode("utf-8"), "workflow caller"))
+        prepared.append((destination, rendered, "workflow caller"))
     metadata_paths = [_lexical_project_path(root, path) for path in _metadata_skeleton(proposed)]
     gitignore = root / ".gitignore"
     paths = [path for path, _, _ in prepared] + metadata_paths + [gitignore]

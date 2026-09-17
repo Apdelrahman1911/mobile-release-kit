@@ -6,9 +6,10 @@ backend, or replacement for the audited CLI's ownership services.
 
 ## Current executable scope
 
-The seven passive renderer commands are `app_info`, `choose_project`,
+The eight passive renderer commands are `app_info`, `choose_project`,
 `project_snapshot {projectId}`, `catalog`, `validate_config {draft}`,
-`suggest_config {hints}`, and `preview_config {base, draft}`.
+`suggest_config {hints}`, `preview_config {base, draft}`, and
+`propose_github_setup {draft, toolingRepository, toolingSha, suppliedSnapshot}`.
 Snapshot and draft validation return the core result without inventing verified
 facts or saving files. Project IDs refer to Rust-held native picker selections;
 renderer-provided roots/executables/command lines/method names are not admitted.
@@ -98,9 +99,13 @@ not a bypass of M1's production execution gate.
 ## Passive protocol and original child owner
 
 Only `capabilities`, `catalog`, `project.snapshot`, `config.validate`,
-`config.suggest`, and `config.preview` can be requested. Suggestions and previews
+`config.suggest`, `config.preview`, and `github.setup.propose` can be requested. Suggestions and previews
 are bounded in-memory preparation, never saving or filesystem revision authority;
-see `docs/desktop-configuration-preview.md`. One fresh selected Python process
+see `docs/desktop-configuration-preview.md` and `docs/desktop-github-setup.md`.
+The GitHub command admits a complete closed typed object, including explicit
+null for an absent supplied snapshot. It can neither select a repository path
+nor authenticate, write, apply, fetch a template or dispatch a workflow.
+One fresh selected Python process
 gets `-I -S -B`, a fixed bootstrap,
 trusted core resource, fixed trusted cwd, and an environment cleared to constant
 LANG/LC_ALL (plus absolute SystemRoot on Windows). No project cwd, PYTHONPATH,
@@ -156,7 +161,7 @@ optional/platform graph. Default features are empty; `desktop-shell` adds Tauri,
 rfd and tauri-build. Headless check does not require GTK/WebKit. `build.rs` uses
 only std bookkeeping in a headless build, but serde/tokio proc macros and
 transitive build scripts still require independent source/execution review.
-Optional tauri-build generates allow/deny permissions for only the twelve named
+Optional tauri-build generates allow/deny permissions for only the thirteen named
 commands. The main local capability grants their allow permissions plus event
 listen/unlisten, not renderer event emission or general filesystem access.
 

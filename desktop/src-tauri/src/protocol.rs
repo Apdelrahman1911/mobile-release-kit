@@ -12,13 +12,14 @@ pub const DEPTH_LIMIT: usize = 32;
 pub const NODE_LIMIT: usize = 20_000;
 
 #[derive(Clone, Copy, Debug)]
-pub enum Method { Capabilities, Catalog, ProjectSnapshot, ValidateConfig, SuggestConfig, PreviewConfig }
+pub enum Method { Capabilities, Catalog, ProjectSnapshot, ValidateConfig, SuggestConfig, PreviewConfig, ProposeGithubSetup }
 impl Method {
     pub fn name(self) -> &'static str {
         match self {
             Self::Capabilities => "capabilities", Self::Catalog => "catalog",
             Self::ProjectSnapshot => "project.snapshot", Self::ValidateConfig => "config.validate",
             Self::SuggestConfig => "config.suggest", Self::PreviewConfig => "config.preview",
+            Self::ProposeGithubSetup => "github.setup.propose",
         }
     }
 }
@@ -176,7 +177,8 @@ mod tests {
         assert_eq!(bytes.last(), Some(&b'\n'));
         let parsed = strict_json(&bytes);
         assert_eq!(parsed.ok(), Some(json!({"protocol":1,"id":"query-1","method":"capabilities","params":{}})));
-        for (method, name) in [(Method::SuggestConfig, "config.suggest"), (Method::PreviewConfig, "config.preview")] {
+        for (method, name) in [(Method::SuggestConfig, "config.suggest"), (Method::PreviewConfig, "config.preview"),
+                               (Method::ProposeGithubSetup, "github.setup.propose")] {
             let bytes = encode_request("query-2", method, &json!({})).unwrap_or_default();
             assert_eq!(strict_json(&bytes).ok().and_then(|value| value.get("method").cloned()), Some(json!(name)));
         }

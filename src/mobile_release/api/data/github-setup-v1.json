@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "workflows": {
+    "preflight": "name: Mobile release preflight\n\non:\n  workflow_dispatch:\n    inputs:\n      platform:\n        description: Platform to validate\n        required: true\n        default: both\n        type: choice\n        options:\n          - android\n          - ios\n          - both\n\npermissions:\n  contents: read\n\njobs:\n  preflight:\n    uses: __MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-preflight.yml@__MOBILE_RELEASE_KIT_SHA__\n    with:\n      tooling_sha: __MOBILE_RELEASE_KIT_SHA__\n      source_sha: ${{ github.sha }}\n      platform: ${{ inputs.platform }}\n",
+    "candidate": "name: Mobile internal candidate\non:\n  workflow_dispatch:\n    inputs:\n      platform:\n        description: Platform to build once and upload to internal testing\n        required: true\n        type: choice\n        options:\n        - android\n        - ios\n        - both\n      confirmation:\n        description: candidate:<platform>:<version>:<build>\n        required: true\n        type: string\n      recovery_run_id:\n        description: Run holding the original intent or selected complete final; never replaces authorization.\n        required: false\n        default: ''\n        type: string\n      recovery_confirmation:\n        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.\n        required: false\n        default: ''\n        type: string\npermissions: {}\njobs:\n  candidate:\n    permissions:\n      actions: read\n      artifact-metadata: write\n      attestations: write\n      contents: read\n      id-token: write\n    uses: __MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-candidate.yml@__MOBILE_RELEASE_KIT_SHA__\n    with:\n      tooling_sha: __MOBILE_RELEASE_KIT_SHA__\n      source_sha: ${{ github.sha }}\n      platform: ${{ inputs.platform }}\n      confirmation: ${{ inputs.confirmation }}\n      recovery_run_id: ${{ inputs.recovery_run_id }}\n      recovery_confirmation: ${{ inputs.recovery_confirmation }}\n",
+    "external-testing": "name: Mobile external testing\non:\n  workflow_dispatch:\n    inputs:\n      platform:\n        description: Platform whose exact internal build should be promoted\n        required: true\n        type: choice\n        options:\n        - android\n        - ios\n        - both\n      candidate_run_id:\n        description: Common candidate evidence run; leave blank for per-platform or preserved recovery inputs.\n        required: false\n        default: ''\n        type: string\n      confirmation:\n        description: external-testing:<platform>:<version>:<build>\n        required: true\n        type: string\n      recovery_run_id:\n        description: Run holding the original intent or selected complete final; never replaces authorization.\n        required: false\n        default: ''\n        type: string\n      recovery_confirmation:\n        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.\n        required: false\n        default: ''\n        type: string\n      candidate_android_run_id:\n        description: android candidate evidence run; cannot conflict with a common run.\n        required: false\n        default: ''\n        type: string\n      candidate_ios_run_id:\n        description: ios candidate evidence run; cannot conflict with a common run.\n        required: false\n        default: ''\n        type: string\npermissions: {}\njobs:\n  external-testing:\n    permissions:\n      actions: read\n      artifact-metadata: write\n      attestations: write\n      contents: read\n      id-token: write\n    uses: __MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-external-testing.yml@__MOBILE_RELEASE_KIT_SHA__\n    with:\n      tooling_sha: __MOBILE_RELEASE_KIT_SHA__\n      source_sha: ${{ github.sha }}\n      platform: ${{ inputs.platform }}\n      candidate_run_id: ${{ inputs.candidate_run_id }}\n      confirmation: ${{ inputs.confirmation }}\n      recovery_run_id: ${{ inputs.recovery_run_id }}\n      recovery_confirmation: ${{ inputs.recovery_confirmation }}\n      candidate_android_run_id: ${{ inputs.candidate_android_run_id }}\n      candidate_ios_run_id: ${{ inputs.candidate_ios_run_id }}\n",
+    "production-submit": "name: Mobile production submission\non:\n  workflow_dispatch:\n    inputs:\n      platform:\n        description: Exactly one platform to prepare for production review\n        required: true\n        type: choice\n        options:\n        - android\n        - ios\n      candidate_run_id:\n        description: Common candidate evidence run; leave blank for per-platform or preserved recovery inputs.\n        required: false\n        default: ''\n        type: string\n      external_run_id:\n        description: Common external evidence run; leave blank for per-platform or preserved recovery inputs.\n        required: false\n        default: ''\n        type: string\n      confirmation:\n        description: production-submit:<platform>:<version>:<build>\n        required: true\n        type: string\n      recovery_run_id:\n        description: Run holding the original intent or selected complete final; never replaces authorization.\n        required: false\n        default: ''\n        type: string\n      recovery_confirmation:\n        description: Exact additional iOS recovery confirmation, only when requested by reconciliation.\n        required: false\n        default: ''\n        type: string\n      candidate_android_run_id:\n        description: android candidate evidence run; cannot conflict with a common run.\n        required: false\n        default: ''\n        type: string\n      candidate_ios_run_id:\n        description: ios candidate evidence run; cannot conflict with a common run.\n        required: false\n        default: ''\n        type: string\n      external_android_run_id:\n        description: android external evidence run; cannot conflict with a common run.\n        required: false\n        default: ''\n        type: string\n      external_ios_run_id:\n        description: ios external evidence run; cannot conflict with a common run.\n        required: false\n        default: ''\n        type: string\npermissions: {}\njobs:\n  production-submit:\n    permissions:\n      actions: read\n      artifact-metadata: write\n      attestations: write\n      contents: read\n      id-token: write\n    uses: __MOBILE_RELEASE_KIT_REPOSITORY__/.github/workflows/reusable-production-submit.yml@__MOBILE_RELEASE_KIT_SHA__\n    with:\n      tooling_sha: __MOBILE_RELEASE_KIT_SHA__\n      source_sha: ${{ github.sha }}\n      platform: ${{ inputs.platform }}\n      candidate_run_id: ${{ inputs.candidate_run_id }}\n      external_run_id: ${{ inputs.external_run_id }}\n      confirmation: ${{ inputs.confirmation }}\n      recovery_run_id: ${{ inputs.recovery_run_id }}\n      recovery_confirmation: ${{ inputs.recovery_confirmation }}\n      candidate_android_run_id: ${{ inputs.candidate_android_run_id }}\n      candidate_ios_run_id: ${{ inputs.candidate_ios_run_id }}\n      external_android_run_id: ${{ inputs.external_android_run_id }}\n      external_ios_run_id: ${{ inputs.external_ios_run_id }}\n"
+  },
+  "help": {
+    "schemaVersion": 1,
+    "inputs": [
+      {
+        "id": "toolingRepository",
+        "label": "Toolkit repository",
+        "requiredness": "required",
+        "what": "The GitHub OWNER/REPO containing the shared Mobile Release Kit reusable workflows, not the application repository.",
+        "why": "Every caller names this toolkit repository together with an explicit immutable commit; there is no account default.",
+        "where": "Open the trusted toolkit repository on GitHub and copy only its owner and repository name from the address. Confirm the intended publisher independently.",
+        "format": "OWNER/REPO, for example example/mobile-release-kit. Use the repository coordinate only, not a URL, branch, tag or credential.",
+        "failure": "An invalid coordinate rejects the preview. A valid spelling does not verify repository existence, access, publisher identity or workflow compatibility."
+      },
+      {
+        "id": "toolingSha",
+        "label": "Full toolkit commit",
+        "requiredness": "required",
+        "what": "The complete 40-hexadecimal commit SHA of the toolkit release you intend the callers to use, not an application source commit.",
+        "why": "The same commit is written in both the reusable-workflow reference and tooling_sha so mutable branches or tags cannot silently select another revision.",
+        "where": "On the independently trusted toolkit release or commit page, open the commit details and copy the full SHA. Choose a version compatible with the installed core and review that correspondence separately.",
+        "format": "Exactly 40 hexadecimal characters. Uppercase is normalized to lowercase. A short SHA, branch, tag or release label is not accepted.",
+        "failure": "An invalid pin rejects the preview. This app does not contact GitHub, resolve the SHA or establish that the selected remote workflows match the shipped templates."
+      },
+      {
+        "id": "suppliedSnapshot",
+        "label": "Optional supplied comparison",
+        "requiredness": "optional",
+        "what": "Your own optional absence or byte-length/SHA256 assertions for the four fixed caller files. These are not a snapshot read by this app.",
+        "why": "They allow a limited comparison without reading or accepting arbitrary existing workflow text, repository trees or accidental secrets.",
+        "where": "Use only a separately obtained summary you intend to compare, or leave comparison unset. Do not paste workflow contents, tokens, keys or credential values here.",
+        "format": "For a fixed caller choose not supplied, reported absent, or a reported file length from 0 to 1048576 bytes and its 64-character lowercase SHA256. Omitted callers are unknown, not absent.",
+        "failure": "Invalid or duplicate records reject the preview. A matching supplied digest is not proof of file contents, an unchanged repository, a safe no-op, overwrite permission or Apply authority."
+      }
+    ],
+    "guidance": [
+      {
+        "id": "source-authority",
+        "label": "Source and toolkit authority",
+        "what": "The candidate and production branches shown here are configured policy. The toolkit coordinate and SHA are syntactically pinned inputs only.",
+        "why": "A later release must bind actual application source, an authorized repository and compatible immutable toolkit workflows; a draft cannot supply that proof.",
+        "where": "Review source.candidateBranch and source.productionBranch in project settings, then have the repository owner establish actual source and protection separately.",
+        "format": "Callers retain the literal GitHub source expression and use the same toolkit SHA twice. The schema reference is informational and is not fetched or saved.",
+        "failure": "No Git state, repository identity, remote commit, branch protection or installed-template compatibility has been verified. Format-valid never means release-ready."
+      },
+      {
+        "id": "protected-environments",
+        "label": "Protected environments and approvals",
+        "what": "The fixed environments are mobile-candidate, mobile-external-testing and mobile-production. Their existing configuration is unknown.",
+        "why": "Approvals and stage-specific authority must precede later activation. Production requires reviewed approvers; reviewer identities, branch rules and bypass policy are administrator decisions.",
+        "where": "An authorized administrator reviews repository Settings, Environments, Actions permissions and reusable-workflow access before adding authority or activating a caller.",
+        "format": "Keep the callers' exact permissions and fixed environment-scoped names. Do not add secrets: inherit or broad repository-write permissions. This checklist is not a GitHub API request.",
+        "failure": "No environment, reviewer, branch rule, access permission or secret has been inspected or changed. A generated caller does not establish safe repository setup."
+      },
+      {
+        "id": "runner-policy",
+        "label": "Hosted runner eligibility",
+        "what": "Before storing secrets or activating callers, the administrator must ensure no self-hosted runner can match the pinned ubuntu-24.04 or macos-26 labels.",
+        "why": "A runner.environment check happens after scheduling. It is defense in depth, not proof that an eligible malicious runner never received a job or credential.",
+        "where": "Review actual repository and organization runner inventory and policy with the responsible administrator, and preserve the eligibility restriction.",
+        "format": "Use the documented hosted runner scope. This toolkit does not configure a trusted custom runner group or verify runner inventory in this preview.",
+        "failure": "A label alone is not trust or server-side scheduling protection. Unverified eligibility remains unresolved even if every generated workflow looks correct."
+      },
+      {
+        "id": "credentials",
+        "label": "Names only; keep values private",
+        "what": "The requirement list contains only policy-selected credential names, kinds and reasons. All presence, values, correctness and account access remain unknown.",
+        "why": "Only candidate receives build-signing assets. External testing and production must not receive a keystore, P12, profile or Firebase client file; Store and build authority stay separated.",
+        "where": "Use the administrator's protected environment and secret-management process. Google WIF needs actual immutable repository/environment trust and separately scoped accounts. Apple review-state key generation, retention and rotation are external responsibilities.",
+        "format": "Set only the listed fixed environment-scoped names for enabled platforms and conditional Firebase, private-dependency or demo-account needs. Local _PATH alternatives are local guidance, not extra GitHub secret names. Never enter credential values here.",
+        "failure": "This app does not read credentials, test access, provision WIF, store secrets or generate keys. Presence is not verification; incomplete operations still require their original private commitment key and version."
+      },
+      {
+        "id": "preflight-and-releases",
+        "label": "Preview does not run a workflow",
+        "what": "Even a non-publishing preflight can execute application checks and builds. This preview does not dispatch it or any release operation.",
+        "why": "Candidate creation, build-once promotion, production preparation and recovery need the existing source binding, exact confirmations, protected approvals and authenticated evidence.",
+        "where": "After separately reviewed setup, use the documented protected workflow lifecycle and retain its real evidence. GitHub App login and guarded desktop dispatch remain unavailable.",
+        "format": "Keep every shipped permission, confirmation and recovery input. Production submission selects one platform. Public release is never automated.",
+        "failure": "No workflow run, native build, Store request or release evidence is created or authenticated. A successful proposal cannot enable Connect, Apply, secret provisioning or dispatch."
+      },
+      {
+        "id": "scope",
+        "label": "Proposed; nothing applied",
+        "what": "This service produces four caller texts and a guidance checklist from a bounded in-memory draft and the shipped templates.",
+        "why": "It is useful preparation without project reads, application execution, network access, writes or a misleading claim of repository authority.",
+        "where": "Review the read-only proposal alongside its core-owned help. A future real setup operation needs its own authenticated observation, preconditions, explicit confirmation and reconciliation.",
+        "format": "The caller convention is release/mobile-release.json. This preview does not generate or save the full init configuration, metadata skeleton or .gitignore transaction.",
+        "failure": "A resource error or unavailable runtime remains unavailable, never a fallback to another template source. Generated hashes and supplied comparisons cannot become a repository revision, Apply token or safe retry."
+      }
+    ]
+  }
+}

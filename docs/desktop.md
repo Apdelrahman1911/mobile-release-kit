@@ -32,8 +32,9 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 | Static snapshot | Bounded recognized text-file hints and configuration observations on supported POSIX filesystems | An atomic snapshot, Git source authority, successful build, signing or Store state |
 | Configuration | Guided in-memory drafts with core-owned schema/policy validation and contextual help | Saving a file, checking path existence, approving an app identity or release readiness |
 | Configuration save implementation (disabled) | Separate native owner, exact two-file preview/apply contract, guided confirmation and original-outcome handling | Enabled saving, native window/process qualification, general project initialization or Windows file transactions |
+| GitHub setup proposal | Guided toolkit pin inputs, core-generated read-only workflow previews, contextual help and environment/credential-name checklist | GitHub login/contact, repository observation, compatibility verification, file writes, secret provisioning or workflow dispatch |
 | Environment | Static capability and missing-feature explanations | Running the full doctor, SDK version probes or native admission |
-| Credentials, metadata, GitHub, releases, artifacts, recovery | Guided navigation and honest unavailable states | Stored credentials, created workflows, completed operations, authenticated evidence or “no recovery needed” |
+| Credentials, metadata, releases, artifacts, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
 
 Windows can use portable catalog/validation and pure suggestion/preview services. Its safe snapshot reader
 and native Android ownership backend require a separate Win32 handle/Job Object
@@ -67,9 +68,15 @@ methods are:
   draft, with default/example provenance and no invented detected platform.
 - `config.preview`, `{base, draft}` — bounded, redacted known-field changes and
   shared-policy field context; no filesystem revision, save token or writes.
+- `github.setup.propose`, `{draft, toolingRepository, toolingSha, suppliedSnapshot}`
+  — four core-generated workflow proposals and desired setup guidance, with no
+  repository observation or Apply authority. `suppliedSnapshot` is explicitly
+  null or caller-supplied digest/size assertions, never an observed file tree.
 
 Exact additive preparation contracts, limits and the static-hint projection are
 documented in [desktop configuration preview](desktop-configuration-preview.md).
+The GitHub wire contract and its deliberately non-mutating scope are documented
+in [GitHub setup proposals](desktop-github-setup.md).
 
 Configuration saving does **not** expand this passive method list. Its separate
 finite owner and core transaction contract are documented in

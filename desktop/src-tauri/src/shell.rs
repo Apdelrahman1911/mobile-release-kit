@@ -74,6 +74,12 @@ async fn validate_config(draft: Value, state: State<'_, ShellState>) -> Result<V
 async fn suggest_config(hints: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> { state.bridge.suggest_config(hints).await }
 #[tauri::command]
 async fn preview_config(base: Value, draft: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> { state.bridge.preview_config(base, draft).await }
+#[tauri::command]
+async fn propose_github_setup(request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    let input = crate::github_commands::proposal(request_body(&request)?)?;
+    not_closing(&state)?;
+    state.bridge.propose_github_setup(input).await
+}
 
 fn edit_window(webview: &Webview) -> Result<&str, BridgeError> {
     if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
@@ -299,6 +305,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_info, choose_project, project_snapshot, catalog, validate_config, suggest_config, preview_config,
+            propose_github_setup,
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,
         ])
         .on_window_event(|window, event| {

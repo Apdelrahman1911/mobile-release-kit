@@ -75,8 +75,95 @@ export interface Catalog {
   fields: FieldHelp[];
   credentials: CredentialHelp[];
   metadata: MetadataRules | null;
+  githubSetup: GitHubSetupHelp;
   assurance: Assurance;
 }
+
+// Passive GitHub setup DTOs. Pins and digests are assertions, not authority.
+export type GitHubWorkflowId = 'preflight' | 'candidate' | 'external-testing' | 'production-submit';
+export type GitHubWorkflowPath = '.github/workflows/mobile-preflight.yml' | '.github/workflows/mobile-candidate.yml' | '.github/workflows/mobile-external-testing.yml' | '.github/workflows/mobile-production-submit.yml';
+export type GitHubSetupStage = 'candidate' | 'external-testing' | 'production';
+export type GitHubGuidanceId = 'source-authority' | 'protected-environments' | 'runner-policy' | 'credentials' | 'preflight-and-releases' | 'scope';
+export interface GitHubHelpText {
+  label: string;
+  what: string;
+  why: string;
+  where: string;
+  format: string;
+  failure: string;
+}
+export interface GitHubSetupHelp {
+  schemaVersion: 1;
+  inputs: (GitHubHelpText & (
+    { id: 'toolingRepository' | 'toolingSha'; requiredness: 'required' } |
+    { id: 'suppliedSnapshot'; requiredness: 'optional' }
+  ))[];
+  guidance: (GitHubHelpText & { id: GitHubGuidanceId })[];
+}
+export type GitHubWorkflowAssertion =
+  | { id: GitHubWorkflowId; state: 'absent' }
+  | { id: GitHubWorkflowId; state: 'present'; byteLength: number; sha256: string };
+export interface GitHubSuppliedSnapshot { workflows: GitHubWorkflowAssertion[] }
+export interface GitHubSetupRequest {
+  draft: JsonObject;
+  toolingRepository: string;
+  toolingSha: string;
+  suppliedSnapshot: GitHubSuppliedSnapshot | null;
+}
+export interface GitHubProposalFacts {
+  githubContacted: false;
+  repositoryObserved: false;
+  toolingRefResolved: false;
+  templateCompatibility: 'unknown';
+  comparisonBasis: 'caller-supplied-digest-summary';
+  snapshotProvided: boolean;
+  applyAvailable: false;
+}
+export interface GitHubRequirement extends RequirementDescriptor {
+  kind: 'secret' | 'variable' | 'file' | 'manual';
+  stage: GitHubSetupStage;
+  platform: 'android' | 'ios' | 'project';
+  environment: 'mobile-candidate' | 'mobile-external-testing' | 'mobile-production';
+}
+export type GitHubComparison = 'not-supplied' | 'reported-absent' | 'supplied-digest-match' | 'supplied-digest-differs';
+export interface GitHubWorkflowProposal {
+  id: GitHubWorkflowId;
+  path: GitHubWorkflowPath;
+  content: string;
+  byteLength: number;
+  sha256: string;
+  comparison: GitHubComparison;
+}
+type GitHubAssurance = Assurance & { basis: 'schema-policy' };
+interface GitHubInvalidIssue extends Issue {
+  code: 'config.invalid';
+  status: 'INVALID';
+  message: 'Configuration does not satisfy the shared core format/policy rules; review the draft and contextual field guidance.';
+  remediation: 'Correct the input and validate again; no changes were saved.';
+}
+interface GitHubResultBase {
+  schemaVersion: 1;
+  facts: GitHubProposalFacts;
+  assurance: GitHubAssurance;
+}
+export interface GitHubSetupInvalid extends GitHubResultBase {
+  state: 'invalid';
+  validation: { valid: false; state: 'invalid'; issues: [GitHubInvalidIssue]; requirements: []; assurance: GitHubAssurance };
+}
+export interface GitHubSetupProposed extends GitHubResultBase {
+  state: 'proposed';
+  validation: { valid: true; state: 'format-valid'; issues: []; requirements: GitHubRequirement[]; assurance: GitHubAssurance };
+  templateSet: { coreVersion: string; resourceVersion: 1; resourceSha256: string };
+  tooling: { repository: string; sha: string; schemaReference: string; state: 'format-only' };
+  workflows: GitHubWorkflowProposal[];
+  settings: {
+    configPath: 'release/mobile-release.json';
+    sourcePolicy: { candidateBranch: string; productionBranch: string; basis: 'configured-policy' };
+    environments: { stage: GitHubSetupStage; name: GitHubRequirement['environment'] }[];
+    guidanceIds: GitHubGuidanceId[];
+  };
+}
+export type GitHubSetupResult = GitHubSetupInvalid | GitHubSetupProposed;
 
 export interface MetadataRules {
   requiredLocaleText: { android: string[]; ios: string[] };
@@ -246,6 +333,7 @@ export interface DesktopApi {
   validate(draft: JsonObject): Promise<ValidationResult>;
   suggestConfig(hints: SuggestionHints): Promise<ConfigSuggestion>;
   configPreview(base: JsonObject | null, draft: JsonObject): Promise<ConfigPreview>;
+  proposeGitHubSetup(request: GitHubSetupRequest): Promise<GitHubSetupResult>;
   openConfigEdit(projectId: string): Promise<ConfigEditStatus>;
   prepareConfigEdit(request: PrepareConfigEditRequest): Promise<ConfigEditStatus>;
   applyConfigEdit(sessionId: string, planToken: string): Promise<ConfigEditStatus>;

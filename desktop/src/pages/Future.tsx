@@ -1,17 +1,7 @@
-import type { AppInfo, Page } from '../types.ts';
+import type { AppInfo } from '../types.ts';
 import { futureReason } from '../certainty.ts';
 import { Badge, DisabledAction, EmptyState, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
-
-export function GitHub({ onNavigate, info }: { onNavigate: (page: Page) => void; info: AppInfo | null }) {
-  return <>
-    <PageHeading eyebrow="GITHUB" title="A protected path from source to Store." description="Release work belongs in reviewed workflows, with explicit source identity and protected environments." />
-    <section className="card connect-card"><div className="github-visual"><Icon name="github" size={45} /></div><div><Badge>Not connected</Badge><h2>Connect the workflow, not just an account.</h2><p>GitHub device login, repository setup plans, secret configuration, and protected dispatch are not implemented yet. No repository, permission, or credential has been checked.</p><DisabledAction label="Connect GitHub" icon="github" reason={futureReason(info?.capabilities, 'github.login', 'Publisher-registered GitHub App login and the secure token vault are not implemented.')} /></div></section>
-    <div className="three-card-grid">{[{ icon: 'branch' as const, title: 'Repository & source', detail: 'Select the repository and bind release work to an actual observed commit.' }, { icon: 'metadata' as const, title: 'Reviewed setup', detail: 'Review proposed workflow files and remote changes before anything is applied.' }, { icon: 'shield' as const, title: 'Protected environments', detail: 'Keep approvals, write-only secrets, and Store authority inside protected jobs.' }].map((step, index) => <section className="card setup-step" key={step.title}><span className="step-number">0{index + 1}</span><Icon name={step.icon} size={25} /><h3>{step.title}</h3><p>{step.detail}</p><Badge>Not implemented</Badge></section>)}</div>
-    <section className="card"><SectionHeading title="Your source policy" description="You can review the configured candidate and production branches now. This does not query GitHub or verify branch protection." /><button className="button secondary" onClick={() => onNavigate('settings')}>Review project settings<Icon name="arrow" size={17} /></button></section>
-    <div className="notice notice-info"><Icon name="lock" /><div><strong>No automatic public release</strong><p>Future release actions must preserve source binding, review, protected approvals, authentic evidence, and the core Store guards. Public release is never automated.</p></div></div>
-  </>;
-}
 
 export function Releases({ info }: { info: AppInfo | null }) {
   return <>

@@ -6,7 +6,7 @@
   "local": true,
   "permissions": [
     "allow-app-info", "allow-choose-project", "allow-project-snapshot", "allow-catalog",
-    "allow-validate-config", "allow-suggest-config", "allow-preview-config",
+    "allow-validate-config", "allow-suggest-config", "allow-preview-config", "allow-propose-github-setup",
     "allow-open-config-edit", "allow-prepare-config-edit", "allow-apply-config-edit",
     "allow-close-config-edit", "allow-config-edit-status",
     "core:event:allow-listen", "core:event:allow-unlisten"

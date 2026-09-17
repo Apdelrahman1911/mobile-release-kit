@@ -77,6 +77,37 @@ class CredentialHelp(TypedDict):
     failure: str
 
 
+GitHubGuidanceId = Literal["source-authority", "protected-environments", "runner-policy",
+                           "credentials", "preflight-and-releases", "scope"]
+
+
+class GitHubSetupInputHelp(TypedDict):
+    id: Literal["toolingRepository", "toolingSha", "suppliedSnapshot"]
+    label: str
+    requiredness: Literal["required", "optional"]
+    what: str
+    why: str
+    where: str
+    format: str
+    failure: str
+
+
+class GitHubSetupGuidance(TypedDict):
+    id: GitHubGuidanceId
+    label: str
+    what: str
+    why: str
+    where: str
+    format: str
+    failure: str
+
+
+class GitHubSetupHelp(TypedDict):
+    schemaVersion: Literal[1]
+    inputs: list[GitHubSetupInputHelp]
+    guidance: list[GitHubSetupGuidance]
+
+
 class MethodCapability(TypedDict):
     method: str
     available: bool
@@ -105,6 +136,7 @@ class CatalogResult(TypedDict):
     fields: list[FieldHelp]
     credentials: list[CredentialHelp]
     metadata: dict[str, Any]
+    githubSetup: GitHubSetupHelp
     assurance: Assurance
 
 
@@ -182,6 +214,79 @@ class PreviewResult(TypedDict):
     comparison: DraftComparison
     fields: list[FieldContext]
     assurance: Assurance
+
+
+class GitHubProposalFacts(TypedDict):
+    githubContacted: Literal[False]
+    repositoryObserved: Literal[False]
+    toolingRefResolved: Literal[False]
+    templateCompatibility: Literal["unknown"]
+    comparisonBasis: Literal["caller-supplied-digest-summary"]
+    snapshotProvided: bool
+    applyAvailable: Literal[False]
+
+
+class GitHubTemplateSet(TypedDict):
+    coreVersion: str
+    resourceVersion: Literal[1]
+    resourceSha256: str
+
+
+class GitHubToolingReference(TypedDict):
+    repository: str
+    sha: str
+    schemaReference: str
+    state: Literal["format-only"]
+
+
+class GitHubWorkflowProposal(TypedDict):
+    id: Literal["preflight", "candidate", "external-testing", "production-submit"]
+    path: str
+    content: str
+    byteLength: int
+    sha256: str
+    comparison: Literal["not-supplied", "reported-absent", "supplied-digest-match", "supplied-digest-differs"]
+
+
+class GitHubSourcePolicy(TypedDict):
+    candidateBranch: str
+    productionBranch: str
+    basis: Literal["configured-policy"]
+
+
+class GitHubEnvironment(TypedDict):
+    stage: Literal["candidate", "external-testing", "production"]
+    name: Literal["mobile-candidate", "mobile-external-testing", "mobile-production"]
+
+
+class GitHubSetupSettings(TypedDict):
+    configPath: Literal["release/mobile-release.json"]
+    sourcePolicy: GitHubSourcePolicy
+    environments: list[GitHubEnvironment]
+    guidanceIds: list[GitHubGuidanceId]
+
+
+class GitHubInvalidProposal(TypedDict):
+    schemaVersion: Literal[1]
+    state: Literal["invalid"]
+    validation: ValidateResult  # Exact invalid/redacted subset; no requirements.
+    facts: GitHubProposalFacts
+    assurance: Assurance
+
+
+class GitHubSetupProposal(TypedDict):
+    schemaVersion: Literal[1]
+    state: Literal["proposed"]
+    validation: ValidateResult  # Exact format-valid subset; no issues.
+    facts: GitHubProposalFacts
+    assurance: Assurance
+    templateSet: GitHubTemplateSet
+    tooling: GitHubToolingReference
+    workflows: list[GitHubWorkflowProposal]
+    settings: GitHubSetupSettings
+
+
+GitHubSetupResult = GitHubInvalidProposal | GitHubSetupProposal
 
 
 class ConfigObservation(TypedDict):

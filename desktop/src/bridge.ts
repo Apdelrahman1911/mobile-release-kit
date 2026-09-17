@@ -1,4 +1,5 @@
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
+import { githubSetupError, githubSetupRequestFits, githubSetupResultMatches, parseCatalogGitHubSetup, parseGitHubSetupResult } from './githubSetupProtocol.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 export type NativeEditListen = (event: 'config-edit-state', onStatus: (status: unknown) => void) => Promise<() => void>;
@@ -30,10 +31,30 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     appInfo: () => call<AppInfo>('app_info'),
     chooseProject: () => call<ProjectReference | null>('choose_project'),
     snapshot: (projectId) => call<ProjectSnapshot>('project_snapshot', { projectId }),
-    catalog: () => call<Catalog>('catalog'),
+    catalog: async () => {
+      const result = await call<Catalog>('catalog');
+      const githubSetup = parseCatalogGitHubSetup(result);
+      if (!githubSetup) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
+      return { ...result, githubSetup: structuredClone(githubSetup) };
+    },
     validate: (draft: JsonObject) => call<ValidationResult>('validate_config', { draft }),
     suggestConfig: (hints: SuggestionHints) => call<ConfigSuggestion>('suggest_config', { hints }),
     configPreview: (base: JsonObject | null, draft: JsonObject) => call<ConfigPreview>('preview_config', { base, draft }),
+    proposeGitHubSetup: async (input) => {
+      try {
+        if (!githubSetupRequestFits(input)) throw { code: 'invalid_request' };
+        // Closed arguments, no project path/identity, values, tokens or flags.
+        // Copy before await so a retained test double/caller cannot rebind it.
+        const request = structuredClone(input);
+        const value = await call<unknown>('propose_github_setup', {
+          draft: structuredClone(request.draft), toolingRepository: request.toolingRepository,
+          toolingSha: request.toolingSha, suppliedSnapshot: structuredClone(request.suppliedSnapshot),
+        });
+        const result = parseGitHubSetupResult(value);
+        if (!result || !githubSetupResultMatches(result, request)) throw { code: 'GitHubSetupResponseInvalid' };
+        return structuredClone(result);
+      } catch (error) { throw githubSetupError(error); }
+    },
     openConfigEdit: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId }),
     prepareConfigEdit: ({ sessionId, revision, expectedBase, draft, draftRevision, baselineGeneration }) =>
       call<ConfigEditStatus>('prepare_config_edit', { sessionId, revision, expectedBase, draft, draftRevision, baselineGeneration }),

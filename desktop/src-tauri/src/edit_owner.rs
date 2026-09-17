@@ -540,6 +540,11 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
             Ok(0) => {
                 eof = true;
                 if !stderr && !frame.is_empty() { failed = true; inner.trigger(&owner.id, Reason::ProtocolError, Instant::now()); inner.unknown(&owner.id); }
+                #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+                if stderr && !owner.fixture_schedule.stderr_complete() {
+                    failed = true;
+                    inner.trigger(&owner.id, Reason::ProtocolError, Instant::now()); inner.unknown(&owner.id);
+                }
                 break;
             }
             Ok(length) => {
@@ -556,6 +561,11 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                     frame.clear();
                     inner.trigger(&owner.id, Reason::OutputLimit, Instant::now());
                     inner.unknown(&owner.id);
+                }
+                #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+                if stderr && !discard && !owner.fixture_schedule.observe_stderr(&buffer[..length]) {
+                    failed = true; discard = true;
+                    inner.trigger(&owner.id, Reason::ProtocolError, Instant::now()); inner.unknown(&owner.id);
                 }
                 if stderr || discard { continue; } // Still drain to actual EOF.
                 for byte in &buffer[..length] {
@@ -720,8 +730,17 @@ fn spawn_original(runtime: VerifiedRuntime, inner: &Inner, owner: &Session) {
         let stopped = *owner.stop.borrow();
         if stopped || inner.deadline(&owner.id).is_none_or(|end| now >= end) { return; }
         let mut command = Command::new(&runtime.python);
-        command.args(["-I", "-S", "-B"]).arg(&runtime.bootstrap).arg(&runtime.core)
-            .current_dir(&runtime.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
+        command.args(["-I", "-S", "-B"]);
+        #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+        if owner.fixture_schedule.eof_case().is_some() {
+            command.arg(hosted_tests::eof_bootstrap());
+        } else { command.arg(&runtime.bootstrap); }
+        #[cfg(not(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos"))))]
+        command.arg(&runtime.bootstrap);
+        command.arg(&runtime.core);
+        #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+        if let Some(case) = owner.fixture_schedule.eof_case() { command.arg(case.name()); }
+        command.current_dir(&runtime.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
         let mut slot = match owner.startup.lock() {
             Ok(slot) => slot,

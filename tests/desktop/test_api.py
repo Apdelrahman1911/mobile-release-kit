@@ -226,7 +226,8 @@ class ApiPureTests(unittest.TestCase):
             self.assertEqual(caps["hostPlatform"], "windows")
             methods = {item["method"]: item["available"] for item in caps["methods"]}
             self.assertEqual(methods, {"capabilities": True, "catalog": True, "project.snapshot": False,
-                                       "config.validate": True, "config.suggest": True, "config.preview": True})
+                                       "config.validate": True, "config.suggest": True, "config.preview": True,
+                                       "github.setup.propose": True})
             self.assertTrue(execute("config.validate", {"draft": draft()})["valid"])
             with self.assertRaises(ApiError) as caught:
                 execute("project.snapshot", {"root": "C:\\selected"})

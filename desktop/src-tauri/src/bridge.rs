@@ -60,6 +60,11 @@ impl DesktopBridge {
         if !(base.is_null() || base.is_object()) || !draft.is_object() { return Err(BridgeError::invalid()); }
         self.supervisor.query(Method::PreviewConfig, json!({"base": base, "draft": draft})).await
     }
+    pub(crate) async fn propose_github_setup(&self, input: crate::github_commands::Proposal) -> Result<Value, BridgeError> {
+        // A passive proposal has no selected-root, login, write or dispatch
+        // authority. Only the core renders its fixed shipped workflow set.
+        self.supervisor.query(Method::ProposeGithubSetup, input.into_params()?).await
+    }
     pub async fn project_snapshot(&self, project_id: String) -> Result<Value, BridgeError> {
         let root = self.project_root(&project_id)?;
         self.supervisor.query(Method::ProjectSnapshot, json!({"root": root})).await

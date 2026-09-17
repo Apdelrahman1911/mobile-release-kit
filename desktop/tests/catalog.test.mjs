@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import help from '../../src/mobile_release/api/data/field-help.json' with { type: 'json' };
 import schema from '../../src/mobile_release/api/data/project.schema.json' with { type: 'json' };
+import githubSetupResource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
 import { emptyDraft, fieldsFor, getValue, localeRequirements, setValue } from '../src/catalog.ts';
 import { apiError, bridgeMode, createNativeApi } from '../src/bridge.ts';
 import { methodReason } from '../src/certainty.ts';
@@ -22,7 +23,10 @@ test('browser preview requires the exact explicit flag; native errors cannot sel
 
 test('native bridge uses only closed command names and Rust-owned project identifiers', async () => {
   const calls = [];
-  const api = createNativeApi('native', async (command, args) => { calls.push({ command, args }); return null; });
+  const api = createNativeApi('native', async (command, args) => {
+    calls.push({ command, args });
+    return command === 'catalog' ? { schemaVersion: 1, schema: {}, fields: [], credentials: [], metadata: null, githubSetup: githubSetupResource.help, assurance: {} } : null;
+  });
   await api.appInfo();
   await api.chooseProject();
   await api.snapshot('bound-project-id');

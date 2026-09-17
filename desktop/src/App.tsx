@@ -7,6 +7,8 @@ import { initialWorkspace, isDirty, workspaceReducer } from './drafts.ts';
 import type { WorkspaceAction } from './drafts.ts';
 import { editRetainsDraft, editStartReason } from './configEdit.ts';
 import { ConfigEditController } from './configEditController.ts';
+import { GitHubSetupController } from './githubSetupController.ts';
+import { githubSetupError } from './githubSetupProtocol.ts';
 import { suggestionHints } from './preparation.ts';
 import type { ApiError, AppInfo, Catalog, DesktopApi, HelpContent, JsonValue, Page } from './types.ts';
 import { Badge, ConfirmDialog, ErrorNotice, HelpDialog, PageHeading } from './components/Common.tsx';
@@ -18,7 +20,8 @@ import { Dashboard } from './pages/Dashboard.tsx';
 import { Environment } from './pages/Environment.tsx';
 import { Credentials } from './pages/Credentials.tsx';
 import { Metadata } from './pages/Metadata.tsx';
-import { Artifacts, GitHub, Recovery, Releases } from './pages/Future.tsx';
+import { Artifacts, Recovery, Releases } from './pages/Future.tsx';
+import { GitHub } from './pages/GitHub.tsx';
 
 const navigation: { id: Page; label: string; icon: IconName; group: 'workspace' | 'release' }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: 'dashboard', group: 'workspace' },
@@ -47,6 +50,7 @@ export function App() {
   const [workspace, setWorkspace] = useState(initialWorkspace);
   const workspaceRef = useRef(workspace);
   const editControllerRef = useRef<ConfigEditController | null>(null);
+  const githubControllerRef = useRef<GitHubSetupController | null>(null);
   // Keep the reducer's latest state synchronously visible to save admission.
   // A React render/effect delay must not let an older review authorize Apply.
   const dispatch = useCallback((action: WorkspaceAction) => {
@@ -54,6 +58,7 @@ export function App() {
     if (next === workspaceRef.current) return;
     workspaceRef.current = next;
     setWorkspace(next);
+    githubControllerRef.current?.syncProject();
     editControllerRef.current?.syncDraft();
   }, []);
   const [configEdit] = useState(() => new ConfigEditController({
@@ -63,6 +68,12 @@ export function App() {
   }));
   editControllerRef.current = configEdit;
   const saveState = useSyncExternalStore(configEdit.subscribe, configEdit.getSnapshot, configEdit.getSnapshot);
+  const [githubSetup] = useState(() => new GitHubSetupController(() => {
+    const current = workspaceRef.current;
+    return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
+  }));
+  githubControllerRef.current = githubSetup;
+  const githubState = useSyncExternalStore(githubSetup.subscribe, githubSetup.getSnapshot, githubSetup.getSnapshot);
   const requests = useRef(0);
   const bootGeneration = useRef(0);
   const main = useRef<HTMLElement>(null);
@@ -75,6 +86,7 @@ export function App() {
 
   const bootstrap = useCallback(async () => {
     const generation = ++bootGeneration.current;
+    githubSetup.beginConnection();
     setLoading(true);
     setBootError(null);
     setCatalogError(null);
@@ -85,22 +97,27 @@ export function App() {
       const appInfo = await connection.appInfo();
       if (generation !== bootGeneration.current) return;
       setInfo(appInfo);
+      githubSetup.setConnection(connection, appInfo);
       if (connection.mode === 'preview' || methodReason(appInfo, 'catalog', connection.mode) === null) {
         try {
           const result = await connection.catalog();
-          if (generation === bootGeneration.current) setCatalog(result);
+          if (generation === bootGeneration.current) {
+            if (!githubSetup.admitHelp(result.githubSetup)) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
+            setCatalog(result);
+          }
         } catch (error) {
-          if (generation === bootGeneration.current) { setCatalog(null); setCatalogError(apiError(error)); }
+          if (generation === bootGeneration.current) { setCatalog(null); githubSetup.helpUnavailable(); setCatalogError(apiError(error)); }
         }
       } else {
         setCatalog(null);
+        githubSetup.helpUnavailable();
       }
     } catch (error) {
-      if (generation === bootGeneration.current) { setInfo(null); setCatalog(null); setBootError(apiError(error)); }
+      if (generation === bootGeneration.current) { setInfo(null); setCatalog(null); githubSetup.connectionUnavailable(); setBootError(apiError(error)); }
     } finally {
       if (generation === bootGeneration.current) setLoading(false);
     }
-  }, []);
+  }, [githubSetup]);
 
   useEffect(() => {
     void bootstrap();
@@ -109,6 +126,7 @@ export function App() {
 
   useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
   useEffect(() => () => configEdit.dispose(), [configEdit]);
+  useEffect(() => () => githubSetup.dispose(), [githubSetup]);
 
   useEffect(() => {
     document.title = `${currentNavigation?.label ?? 'Dashboard'} · Mobile Release Kit${preview ? ' · Browser preview' : ''}`;
@@ -249,7 +267,7 @@ export function App() {
         {page === 'environment' && <Environment info={info} preview={preview} onRetry={() => void bootstrap()} loading={loading} />}
         {page === 'credentials' && <Credentials catalog={catalog} onHelp={setHelp} />}
         {page === 'metadata' && <Metadata catalog={catalog}>{editor(true)}</Metadata>}
-        {page === 'github' && <GitHub info={info} onNavigate={navigate} />}
+        {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} />}
         {page === 'releases' && <Releases info={info} />}
         {page === 'artifacts' && <Artifacts info={info} />}
         {page === 'recovery' && <Recovery info={info} />}
