@@ -70,6 +70,12 @@ jobs:
           fi
       - name: Check out exact candidate without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          # Check out exact blob line endings even on Windows. Later source
+          # checks intentionally ignore the image's system/global Git config.
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
         with:
           ref: ${{ github.sha }}
           persist-credentials: false

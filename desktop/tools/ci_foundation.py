@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from typing import TextIO
 import zipfile
 
 RUST = "1.98.0"
@@ -36,6 +37,12 @@ NATIVE_CASES = (
     "stdout_limit", "stderr_limit", "delay_exit", "busy-abandon", "operation-timeout",
     "shutdown-active", "controlled-startup", "controlled-io-join",
 )
+TOOL_CHECKS = frozenset({
+    "source-head", "source-tree", "source-clean", "rust-toolchain-install",
+    "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
+    "node-version", "npm-locked-no-scripts", "headless-test-compile-only",
+    "typescript-no-emit", "vite-assets", "tauri-debug-compile-only", "passive-native-contract",
+})
 
 
 class CheckFailure(ValueError):
@@ -69,12 +76,24 @@ def write_json(path: Path, value: object) -> None:
         stream.write("\n")
 
 
-def run(argv: list[str], *, cwd: Path, env: dict[str, str], timeout: int,
-        capture: bool = False) -> str:
+def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout: int,
+        capture: bool = False, output: TextIO | None = None) -> str:
     # Only fixed commands below reach this internal helper. No shell, inherited
     # credentials, renderer input, project hook or arbitrary command selection.
-    result = subprocess.run(argv, cwd=cwd, env=env, check=True, timeout=timeout,
-                            text=True, stdout=subprocess.PIPE if capture else None)
+    require(check in TOOL_CHECKS, "Unknown fixed compiler check")
+    require(not (capture and output is not None), "Conflicting compiler output destinations")
+    print(f"Fixed check: {check}", flush=True)
+    try:
+        result = subprocess.run(argv, cwd=cwd, env=env, check=True, timeout=timeout,
+                                text=True, stdout=subprocess.PIPE if capture else output)
+    except subprocess.CalledProcessError as error:
+        # Do not interpolate exception text: it includes argv and may contain
+        # local paths or captured output. These labels come only from fixed code.
+        raise CheckFailure(f"Fixed check {check} exited {error.returncode}") from None
+    except subprocess.TimeoutExpired:
+        raise CheckFailure(f"Fixed check {check} exceeded its deadline") from None
+    except OSError:
+        raise CheckFailure(f"Fixed check {check} could not start") from None
     if capture:
         require(len(result.stdout.encode("utf-8")) <= 1024 * 1024, "Tool metadata exceeded its bound")
         return result.stdout.strip()
@@ -122,10 +141,10 @@ def source_unchanged(context: dict) -> None:
     source, root = Path(context["source"]), Path(context["root"])
     git = context["git"]
     environment = clean_environment(root)
-    require(run([git, "rev-parse", "HEAD"], cwd=source, env=environment, timeout=15, capture=True)
+    require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15, capture=True)
             == context["sourceSha"], "Checkout commit changed")
     run([git, "diff", "--no-ext-diff", "--no-textconv", "--exit-code", "--quiet", "HEAD", "--"],
-        cwd=source, env=environment, timeout=15)
+        check="source-clean", cwd=source, env=environment, timeout=15)
 
 
 def no_cargo_configuration(directories: tuple[Path, ...]) -> None:
@@ -191,9 +210,9 @@ def prepare(platform: str) -> None:
     rustup = shutil.which("rustup")
     require(git is not None and rustup is not None, "Hosted compiler tools unavailable")
     environment = clean_environment(root)
-    require(run([git, "rev-parse", "HEAD"], cwd=source, env=environment, timeout=15, capture=True) == sha,
+    require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15, capture=True) == sha,
             "Event and checkout source differ")
-    tree = run([git, "rev-parse", "HEAD^{tree}"], cwd=source, env=environment, timeout=15, capture=True)
+    tree = run([git, "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=source, env=environment, timeout=15, capture=True)
     inventory = []
     total = 0
     package = source / "src/mobile_release"
@@ -253,12 +272,12 @@ def load_context(platform: str) -> dict:
 def tools(context: dict, environment: dict[str, str]) -> tuple[str, str]:
     root = Path(context["root"])
     cargo = run([context["rustup"], "which", "--toolchain", RUST, "cargo"], cwd=root,
-                env=environment, timeout=15, capture=True)
+                check="cargo-selection", env=environment, timeout=15, capture=True)
     rustc = run([context["rustup"], "which", "--toolchain", RUST, "rustc"], cwd=root,
-                env=environment, timeout=15, capture=True)
+                check="rustc-selection", env=environment, timeout=15, capture=True)
     require(all(Path(value).is_absolute() and Path(value).is_file() for value in (cargo, rustc)),
             "Selected compiler paths unavailable")
-    version = run([rustc, "-vV"], cwd=root, env=environment, timeout=15, capture=True)
+    version = run([rustc, "-vV"], check="rust-version-target", cwd=root, env=environment, timeout=15, capture=True)
     require(f"release: {RUST}\n" in version + "\n"
             and f"host: {TARGETS[context['platform']]}\n" in version + "\n", "Compiler host/version differs")
     environment["RUSTC"] = rustc
@@ -274,21 +293,21 @@ def phase(name: str, platform: str) -> None:
     source_unchanged(context)
     no_cargo_configuration((root, *root.parents))
     if name == "acquire":
-        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal"],
-            cwd=root, env=environment, timeout=600)
+        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+            check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
         cargo, _ = tools(context, environment)
         features = "development-runtime" if platform == "linux" else "desktop-shell,development-runtime"
         # Metadata filters acquisition to this platform and active feature graph.
         with (root / "metadata.json").open("x", encoding="utf-8") as output:
-            subprocess.run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
-                            "--features", features, "--filter-platform", TARGETS[platform],
-                            "--manifest-path", str(manifest)], cwd=root, env=environment,
-                           check=True, timeout=600, stdout=output, text=True)
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                 "--features", features, "--filter-platform", TARGETS[platform],
+                 "--manifest-path", str(manifest)], check="locked-platform-metadata", cwd=root,
+                env=environment, timeout=600, output=output)
         observed_node = None
         if platform != "linux":
             node = shutil.which("node")
             require(node is not None, "Selected Node unavailable")
-            observed_node = run([node, "--version"], cwd=root, env=environment, timeout=15, capture=True)
+            observed_node = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=15, capture=True)
             require(observed_node == NODE, "Selected Node version differs")
             npm = (Path(node).parent / "node_modules/npm/bin/npm-cli.js" if platform == "windows" else
                    Path(node).parent.parent / "lib/node_modules/npm/bin/npm-cli.js")
@@ -296,7 +315,7 @@ def phase(name: str, platform: str) -> None:
             run([node, "--max-old-space-size=768", str(npm), "ci", "--ignore-scripts", "--no-audit", "--no-fund",
                  "--userconfig", str(root / "npmrc-user"), "--globalconfig", str(root / "npmrc-global"),
                  "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/"],
-                cwd=source / "desktop", env=environment, timeout=300)
+                check="npm-locked-no-scripts", cwd=source / "desktop", env=environment, timeout=300)
         source_unchanged(context)
         phase_receipt(context, name, ["rust-toolchain-install", "rust-version-target", "locked-platform-metadata"]
                       + (["node-version", "npm-locked-no-scripts"] if platform != "linux" else []), node=observed_node)
@@ -306,21 +325,21 @@ def phase(name: str, platform: str) -> None:
               "--target", TARGETS[platform], "--manifest-path", str(manifest), "--target-dir", str(root / "target")]
     if name == "compile":
         run([cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"],
-            cwd=root, env=environment, timeout=600)
+            check="headless-test-compile-only", cwd=root, env=environment, timeout=600)
         observed_node = None
         if platform != "linux":
             node = shutil.which("node")
             require(node is not None, "Node unavailable after setup")
-            observed_node = run([node, "--version"], cwd=root, env=environment, timeout=15, capture=True)
+            observed_node = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=15, capture=True)
             require(observed_node == NODE, "Selected Node version changed")
             desktop = source / "desktop"
             run([node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"],
-                cwd=desktop, env=environment, timeout=60)
+                check="typescript-no-emit", cwd=desktop, env=environment, timeout=60)
             run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
                  str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
-                cwd=desktop, env=environment, timeout=90)
+                check="vite-assets", cwd=desktop, env=environment, timeout=90)
             run([cargo, "build", *common, "--features", "desktop-shell,development-runtime",
-                 "--bin", "mobile-release-kit-desktop"], cwd=root, env=environment, timeout=1500)
+                 "--bin", "mobile-release-kit-desktop"], check="tauri-debug-compile-only", cwd=root, env=environment, timeout=1500)
         source_unchanged(context)
         phase_receipt(context, name, ["rust-version-target", "headless-test-compile-only"]
                       + (["node-version", "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"]
@@ -331,7 +350,7 @@ def phase(name: str, platform: str) -> None:
                            MRK_DESKTOP_HOSTED_CHECKS="passive-v1", GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
                            GITHUB_SHA=context["sourceSha"])
         run([cargo, "test", *common, "--lib", "--features", "development-runtime", NATIVE_TEST,
-             "--", "--exact", "--ignored", "--test-threads=1"], cwd=root, env=environment, timeout=300)
+             "--", "--exact", "--ignored", "--test-threads=1"], check="passive-native-contract", cwd=root, env=environment, timeout=300)
         source_unchanged(context)
         native_receipt(context)
         phase_receipt(context, name, ["rust-version-target", NATIVE_TEST, "native-receipt-acceptance"])

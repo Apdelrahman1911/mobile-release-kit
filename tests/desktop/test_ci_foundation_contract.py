@@ -1,0 +1,102 @@
+"""Pure compiler-helper contracts; never run its main, phases, tools or fixtures.
+
+All subprocess calls in these tests are inert mocks. Source inspection checks
+the fixed caller inventory rather than executing hosted admission on the VPS.
+"""
+from __future__ import annotations
+
+import ast
+from contextlib import redirect_stdout
+import importlib.util
+import io
+from pathlib import Path
+import subprocess
+import unittest
+from unittest.mock import patch
+
+SOURCE = Path(__file__).resolve().parents[2]
+HELPER = SOURCE / "desktop/tools/ci_foundation.py"
+SPEC = importlib.util.spec_from_file_location("desktop_ci_foundation_contract", HELPER)
+assert SPEC is not None and SPEC.loader is not None
+helper = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(helper)
+
+
+class FixedCompilerHelperTests(unittest.TestCase):
+    def test_fixed_command_shape_capture_and_metadata_output_are_preserved(self):
+        argv = ["/never-executed/tool", "private-argument-canary"]
+        environment = {"PRIVATE_CANARY": "not-a-log-value"}
+        completed = subprocess.CompletedProcess(argv, 0, "1.98.0\n")
+        with patch.object(helper.subprocess, "run", return_value=completed) as called, redirect_stdout(io.StringIO()) as logs:
+            result = helper.run(argv, check="rust-version-target", cwd=Path("/unused"),
+                                env=environment, timeout=15, capture=True)
+            self.assertEqual(result, "1.98.0")
+            called.assert_called_once_with(argv, cwd=Path("/unused"), env=environment,
+                                           check=True, timeout=15, text=True, stdout=subprocess.PIPE)
+            self.assertEqual(logs.getvalue(), "Fixed check: rust-version-target\n")
+        with patch.object(helper.subprocess, "run", return_value=completed) as called, redirect_stdout(io.StringIO()):
+            destination = io.StringIO()
+            self.assertEqual(helper.run(argv, check="locked-platform-metadata", cwd=Path("/unused"),
+                                         env={}, timeout=600, output=destination), "")
+            self.assertIs(called.call_args.kwargs["stdout"], destination)
+            self.assertTrue(called.call_args.kwargs["check"])
+            self.assertEqual(called.call_args.kwargs["timeout"], 600)
+
+    def test_failure_diagnostics_never_include_command_paths_or_captured_values(self):
+        private = "PRIVATE-CANARY-NOT-FOR-OUTPUT"
+        failures = (
+            (subprocess.CalledProcessError(1, [private], output=private, stderr=private),
+             "Fixed check source-clean exited 1"),
+            (subprocess.TimeoutExpired([private], 15, output=private, stderr=private),
+             "Fixed check source-clean exceeded its deadline"),
+            (OSError(13, private, private), "Fixed check source-clean could not start"),
+        )
+        for error, expected in failures:
+            with self.subTest(kind=type(error).__name__), patch.object(helper.subprocess, "run", side_effect=error), redirect_stdout(io.StringIO()) as logs:
+                with self.assertRaises(helper.CheckFailure) as caught:
+                    helper.run([private], check="source-clean", cwd=Path("/unused"),
+                               env={"PRIVATE": private}, timeout=15)
+                self.assertEqual(str(caught.exception), expected)
+                self.assertNotIn(private, logs.getvalue() + str(caught.exception))
+                self.assertTrue(caught.exception.__suppress_context__)
+
+    def test_unlisted_labels_conflicting_output_and_capture_overflow_refuse(self):
+        with patch.object(helper.subprocess, "run") as called, redirect_stdout(io.StringIO()):
+            with self.assertRaises(helper.CheckFailure):
+                helper.run(["unused"], check="unlisted", cwd=Path("/unused"), env={}, timeout=15)
+            with self.assertRaises(helper.CheckFailure):
+                helper.run(["unused"], check="source-head", cwd=Path("/unused"), env={}, timeout=15,
+                           capture=True, output=io.StringIO())
+            called.assert_not_called()
+        with patch.object(helper.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "x" * (1024 * 1024 + 1))), redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(helper.CheckFailure, "metadata exceeded"):
+                helper.run(["unused"], check="source-head", cwd=Path("/unused"), env={}, timeout=15, capture=True)
+
+    def test_fixed_callers_and_private_toolchain_install_do_not_bypass_wrapper(self):
+        tree = ast.parse(HELPER.read_text(encoding="utf-8"))
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        raw_calls = [node for node in calls if isinstance(node.func, ast.Attribute)
+                     and isinstance(node.func.value, ast.Name)
+                     and node.func.value.id == "subprocess" and node.func.attr == "run"]
+        wrapper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run")
+        self.assertEqual(len(raw_calls), 1)
+        self.assertIn(raw_calls[0], list(ast.walk(wrapper)))
+        tool_calls = [node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "run"]
+        labels = []
+        for call in tool_calls:
+            label = next(keyword.value for keyword in call.keywords if keyword.arg == "check")
+            self.assertIsInstance(label, ast.Constant)
+            self.assertIn(label.value, helper.TOOL_CHECKS)
+            labels.append(label.value)
+        self.assertEqual(set(labels), helper.TOOL_CHECKS)
+        install = next(call for call in tool_calls if any(keyword.arg == "check"
+                       and isinstance(keyword.value, ast.Constant)
+                       and keyword.value.value == "rust-toolchain-install" for keyword in call.keywords))
+        self.assertIsInstance(install.args[0], ast.List)
+        constants = [item.value for item in install.args[0].elts if isinstance(item, ast.Constant)]
+        self.assertEqual(constants, ["toolchain", "install", "--profile", "minimal", "--no-self-update"])
+        self.assertTrue(any(isinstance(item, ast.Name) and item.id == "RUST" for item in install.args[0].elts))
+
+
+if __name__ == "__main__":
+    unittest.main()
