@@ -1,7 +1,9 @@
-"""Passive desktop API v1. Never invoke CLI/report emitters or native processes.
+"""Read-only desktop API v1. Never invoke CLI/report emitters or native processes.
 
 Only the closed read-only methods below are implemented. Stateful/native operations need
 a separately reviewed owner and cannot be added as a generic callable bridge.
+Credential assessment processes only explicitly supplied scalars/assertions; it
+neither acquires credential files nor enables a renderer secret-entry route.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ from .. import __version__
 from ..config import parse_config_text
 from ..errors import ConfigurationError
 from ._catalog import catalog, requirement_descriptors
+from ._credential_assessment import assess_credentials
 from ._json import bounded_json_text
 from ._preview import preview_config, suggest_config
 from ._github_setup import propose_github_setup
@@ -20,7 +23,7 @@ from .contracts import ApiError, CapabilitiesResult, ValidateResult, assurance, 
 
 __all__ = ["ApiError", "execute"]
 METHODS = ("capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
-           "github.setup.propose")
+           "github.setup.propose", "credentials.assess")
 _FUTURE_ACTIONS = (
     "project.initialize", "config.save", "doctor", "preflight.offline",
     "preflight.signing", "preflight.online", "android.build", "ios.build",
@@ -38,8 +41,10 @@ def capabilities() -> CapabilitiesResult:
         "hostPlatform": host, "mode": "read-only-foundation",
         "methods": [
             {"method": name, "available": name != "project.snapshot" or snapshot_available(),
-             "reason": ("Requires the reviewed POSIX static reader; Windows filesystem snapshots are unavailable."
+             "reason": ("Static snapshots are unavailable on this profile; the staged Windows reader awaits independent ABI/native qualification."
                         if name == "project.snapshot" and not snapshot_available()
+                        else "Pure supplied-input assessment only; no selected files, native or service verification."
+                        if name == "credentials.assess"
                         else "Implemented passive API; no native, signing or Store verification.")}
             for name in METHODS
         ],
@@ -49,8 +54,10 @@ def capabilities() -> CapabilitiesResult:
         "limitations": [
             "Static hints and format-valid configuration do not establish release readiness.",
             "No configuration is saved and no project, Git or native tool is executed.",
-            "No credential values, Store services, release evidence or recovery journals are inspected.",
-            "Windows static filesystem reads and native release execution remain unavailable pending reviewed backends.",
+            "Credential assessment processes supplied scalars and file assertions only; no credential files, Store services, release evidence or recovery journals are inspected.",
+            "Credential assessment does not enable renderer secret entry, native acquisition, storage or assignment.",
+            "The staged Windows original-parent snapshot reader remains disabled pending independent ABI/native W1-W6 qualification.",
+            "Windows build/process ownership, configuration writes and packaged-runtime custody have separate closed gates.",
             "A native desktop bridge and packaged standalone runtime require their own verification.",
         ],
     }
@@ -67,9 +74,14 @@ def validate_draft(draft: object) -> ValidateResult:
 
 
 def execute(method: str, params: dict[str, Any]) -> dict[str, Any]:
-    """Dispatch a closed passive service after independent parameter admission."""
+    """Dispatch a closed read-only service after independent parameter admission."""
     if type(method) is not str or method not in METHODS:
         raise ApiError("unknown_method", "Unknown or unavailable desktop core method")
+    if method == "credentials.assess":
+        # This method owns a separate closed admission/error vocabulary. Do not
+        # let the older generic parameter errors or validate_draft's reflective
+        # configuration issues escape through its secret-bearing boundary.
+        return assess_credentials(params)
     if type(params) is not dict or any(type(key) is not str for key in params):
         raise ApiError("invalid_params", "Method parameters must be a JSON object with string keys")
     allowed = {"project.snapshot": {"root", "configPath"}, "config.validate": {"draft"},

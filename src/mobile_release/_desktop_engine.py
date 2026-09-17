@@ -21,7 +21,7 @@ MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_DEPTH = 32
 MAX_VALUES = 20_000
 METHODS = frozenset({"capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
-                     "github.setup.propose"})
+                     "github.setup.propose", "credentials.assess"})
 _ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z", re.ASCII)
 
 

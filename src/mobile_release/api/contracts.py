@@ -1,7 +1,9 @@
-"""Version-one passive service data. Protocol framing belongs to the engine.
+"""Version-one read-only service data. Protocol framing belongs to the engine.
 
 All assurance flags describe what these services did, never release authority.
 The UI must not turn a format-valid configuration into native/Store verification.
+Supplied-input credential assessment has its own assurance, not the passive
+catalogue's credentialsRead:false statement.
 """
 from __future__ import annotations
 
@@ -77,6 +79,327 @@ class CredentialHelp(TypedDict):
     failure: str
 
 
+CredentialKindId = Literal["android-keystore", "android-firebase", "apple-p12", "apple-profile",
+                           "asc-p8", "ios-firebase", "google-wif", "project-read-token"]
+CredentialFieldId = Literal["file", "storePassword", "keyAlias", "keyPassword", "password", "keyId",
+                            "issuerId", "provider", "serviceAccount", "token"]
+CredentialControlId = Literal["project", "platform", "stage", "purpose", "mode", "label", "choose",
+                              "prepare", "review", "save", "assign", "replace", "delete", "cancel",
+                              "discard", "lock"]
+CredentialStateId = Literal["unknown", "missing", "invalid", "configured", "format-valid", "native-not-run",
+                            "service-not-run", "stored", "locked", "unlocked", "assigned", "stale",
+                            "cleanup-unknown", "unavailable"]
+
+
+class CredentialGuideField(TypedDict):
+    id: CredentialFieldId
+    requirement: str
+    alternatives: list[str]
+    input: Literal["file", "secret", "text"]
+    maxBytes: int | None
+    suffixes: list[str]
+    label: str
+    requiredness: Literal["conditional"]
+    requiredWhen: str
+    what: str
+    why: str
+    where: str
+    format: str
+    failure: str
+
+
+class CredentialGuideKind(TypedDict):
+    id: CredentialKindId
+    label: str
+    platform: Literal["android", "ios", "project"]
+    defaultLabel: str
+    fields: list[CredentialGuideField]
+    plannedChecks: list[str]
+    notVerified: list[str]
+
+
+class CredentialGuideControl(TypedDict):
+    id: CredentialControlId
+    label: str
+    requiredness: Literal["required", "conditional", "optional"]
+    requiredWhen: str
+    what: str
+    why: str
+    where: str
+    format: str
+    failure: str
+
+
+class CredentialGuideState(TypedDict):
+    id: CredentialStateId
+    label: str
+    meaning: str
+
+
+class CredentialGuide(TypedDict):
+    schemaVersion: Literal[1]
+    policyVersion: Literal["credential-policy-v1"]
+    availability: Literal["guide-only"]
+    kinds: list[CredentialGuideKind]
+    controls: list[CredentialGuideControl]
+    states: list[CredentialGuideState]
+
+
+AssessmentPlatform = Literal["android", "ios", "project"]
+AssessmentStage = Literal["candidate", "external-testing", "production"]
+AssessmentPurpose = Literal["full", "signing", "store"]
+AssessmentState = Literal["not-applicable", "missing", "unknown", "invalid", "configured", "format-valid"]
+AssessmentIdentity = Literal["not-applicable", "not-assessed", "match", "mismatch"]
+AssessmentUnavailableReason = Literal["not-run", "incomplete", "unsupported-format", "unsupported-variant",
+                                      "material-limit", "parser-limit"]
+AssessmentRejectedReason = Literal["empty-file", "suffix-conflict", "malformed-container"]
+AssessmentIssueCode = Literal["not-run", "incomplete", "unsupported-format", "unsupported-variant",
+                              "material-limit", "parser-limit", "empty-file", "suffix-conflict",
+                              "malformed-container", "required-missing", "value-nul", "scalar-format",
+                              "pkcs8-algorithm", "firebase-shape", "identity-mismatch"]
+AssessmentScope = Literal["value-admission", "identifier-format", "file-nonempty", "suffix-consistency",
+                          "container-parse", "jks-header", "pfx-envelope", "cms-signed-data-envelope",
+                          "pkcs8-envelope", "json-document", "plist-document", "ec-p256-identifiers",
+                          "firebase-shape", "application-identity"]
+AssessmentRequirement = Literal[
+    "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64", "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD",
+    "MOBILE_RELEASE_ANDROID_KEY_ALIAS", "MOBILE_RELEASE_ANDROID_KEY_PASSWORD",
+    "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64", "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64",
+    "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD", "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64",
+    "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64", "MOBILE_RELEASE_ASC_KEY_ID", "MOBILE_RELEASE_ASC_ISSUER_ID",
+    "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64", "MOBILE_RELEASE_GOOGLE_WIF_PROVIDER",
+    "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT", "MOBILE_RELEASE_PROJECT_READ_TOKEN",
+]
+
+
+class AssessmentContext(TypedDict):
+    draft: dict[str, Any]
+    platform: AssessmentPlatform
+    stage: AssessmentStage
+    purpose: AssessmentPurpose
+
+
+class AssessmentUnavailableObservation(TypedDict):
+    status: Literal["unavailable"]
+    reason: AssessmentUnavailableReason
+
+
+class AssessmentRejectedObservation(TypedDict):
+    status: Literal["rejected"]
+    reason: AssessmentRejectedReason
+
+
+class AssessmentJksObservation(TypedDict):
+    status: Literal["observed"]
+    byteCount: int
+    format: Literal["jks"]
+    version: Literal[1, 2]
+
+
+class AssessmentPfxObservation(TypedDict):
+    status: Literal["observed"]
+    byteCount: int
+    format: Literal["pkcs12"]
+    version: Literal[3]
+    authSafe: Literal["data", "signed-data"]
+
+
+class AssessmentCmsObservation(TypedDict):
+    status: Literal["observed"]
+    byteCount: int
+    format: Literal["cms-signed-data"]
+    encoding: Literal["der"]
+
+
+class AssessmentP8Observation(TypedDict):
+    status: Literal["observed"]
+    byteCount: int
+    format: Literal["pkcs8"]
+    encoding: Literal["pem", "der"]
+    algorithm: Literal["ec", "rsa", "other"]
+    curve: Literal["p256", "other"] | None
+
+
+class AssessmentAndroidClientInfo(TypedDict):
+    packageName: str | None
+
+
+class AssessmentClientInfo(TypedDict):
+    androidClientInfo: AssessmentAndroidClientInfo | None
+
+
+class AssessmentAndroidClient(TypedDict):
+    clientInfo: AssessmentClientInfo | None
+
+
+class AssessmentAndroidProjection(TypedDict):
+    root: Literal["object", "other"]
+    clients: list[AssessmentAndroidClient | None] | None
+
+
+class AssessmentIosProjection(TypedDict):
+    root: Literal["dictionary", "other"]
+    bundleId: str | None
+
+
+class AssessmentAndroidJsonObservation(TypedDict):
+    status: Literal["observed"]
+    byteCount: int
+    format: Literal["firebase-json"]
+    document: AssessmentAndroidProjection
+
+
+class AssessmentIosPlistObservation(TypedDict):
+    status: Literal["observed"]
+    byteCount: int
+    format: Literal["firebase-plist"]
+    encoding: Literal["xml", "binary"]
+    document: AssessmentIosProjection
+
+
+AssessmentNoSuccessObservation = AssessmentUnavailableObservation | AssessmentRejectedObservation | None
+
+
+class AssessmentKeystoreFields(TypedDict):
+    storePassword: str | None
+    keyAlias: str | None
+    keyPassword: str | None
+
+
+class AssessmentP12Fields(TypedDict):
+    password: str | None
+
+
+class AssessmentP8Fields(TypedDict):
+    keyId: str | None
+    issuerId: str | None
+
+
+class AssessmentWifFields(TypedDict):
+    provider: str | None
+    serviceAccount: str | None
+
+
+class AssessmentTokenFields(TypedDict):
+    token: str | None
+
+
+class AssessmentNoScalarFields(TypedDict):
+    pass
+
+
+class AssessmentKeystoreInput(TypedDict):
+    kind: Literal["android-keystore"]
+    fields: AssessmentKeystoreFields
+    observation: AssessmentJksObservation | AssessmentPfxObservation | AssessmentNoSuccessObservation
+
+
+class AssessmentAndroidFirebaseInput(TypedDict):
+    kind: Literal["android-firebase"]
+    fields: AssessmentNoScalarFields
+    observation: AssessmentAndroidJsonObservation | AssessmentNoSuccessObservation
+
+
+class AssessmentP12Input(TypedDict):
+    kind: Literal["apple-p12"]
+    fields: AssessmentP12Fields
+    observation: AssessmentPfxObservation | AssessmentNoSuccessObservation
+
+
+class AssessmentProfileInput(TypedDict):
+    kind: Literal["apple-profile"]
+    fields: AssessmentNoScalarFields
+    observation: AssessmentCmsObservation | AssessmentNoSuccessObservation
+
+
+class AssessmentP8Input(TypedDict):
+    kind: Literal["asc-p8"]
+    fields: AssessmentP8Fields
+    observation: AssessmentP8Observation | AssessmentNoSuccessObservation
+
+
+class AssessmentIosFirebaseInput(TypedDict):
+    kind: Literal["ios-firebase"]
+    fields: AssessmentNoScalarFields
+    observation: AssessmentIosPlistObservation | AssessmentNoSuccessObservation
+
+
+class AssessmentWifInput(TypedDict):
+    kind: Literal["google-wif"]
+    fields: AssessmentWifFields
+    observation: None
+
+
+class AssessmentTokenInput(TypedDict):
+    kind: Literal["project-read-token"]
+    fields: AssessmentTokenFields
+    observation: None
+
+
+AssessmentInput = (
+    AssessmentKeystoreInput | AssessmentAndroidFirebaseInput | AssessmentP12Input | AssessmentProfileInput
+    | AssessmentP8Input | AssessmentIosFirebaseInput | AssessmentWifInput | AssessmentTokenInput
+)
+
+
+class CredentialAssessmentRequest(TypedDict):
+    schemaVersion: Literal[1]
+    policyVersion: Literal["credential-policy-v1"]
+    context: AssessmentContext
+    input: AssessmentInput
+
+
+class AssessmentResultContext(TypedDict):
+    platform: AssessmentPlatform
+    stage: AssessmentStage
+    purpose: AssessmentPurpose
+
+
+class AssessmentApplicability(TypedDict):
+    state: Literal["required", "not-applicable"]
+    reason: Literal["selected", "wrong-platform", "platform-disabled", "not-required"]
+
+
+class AssessmentCheck(TypedDict):
+    scope: AssessmentScope
+    outcome: Literal["passed", "failed", "asserted-pass", "asserted-fail"]
+
+
+class AssessmentFieldResult(TypedDict):
+    id: CredentialFieldId
+    requirement: AssessmentRequirement
+    presence: Literal["missing", "supplied"]
+    state: AssessmentState
+    issues: list[AssessmentIssueCode]
+    checks: list[AssessmentCheck]
+
+
+class AssessmentAssurance(TypedDict):
+    basis: Literal["supplied-input-only"]
+    scalarValuesProcessed: bool
+    fileObservationsProcessed: bool
+    selectedFilesRead: Literal[False]
+    keyringAccessed: Literal[False]
+    storageWritesPerformed: Literal[False]
+    projectCodeExecuted: Literal[False]
+    sourceCustody: Literal["not-established"]
+    nativeValidation: Literal["not-run"]
+    serviceValidation: Literal["not-run"]
+    releaseReadiness: Literal["unknown"]
+
+
+class CredentialAssessmentResult(TypedDict):
+    schemaVersion: Literal[1]
+    policyVersion: Literal["credential-policy-v1"]
+    kind: CredentialKindId
+    context: AssessmentResultContext
+    applicability: AssessmentApplicability
+    state: AssessmentState
+    fields: list[AssessmentFieldResult]
+    identity: AssessmentIdentity
+    assurance: AssessmentAssurance
+
+
 GitHubGuidanceId = Literal["source-authority", "protected-environments", "runner-policy",
                            "credentials", "preflight-and-releases", "scope"]
 
@@ -135,6 +458,7 @@ class CatalogResult(TypedDict):
     schema: dict[str, Any]
     fields: list[FieldHelp]
     credentials: list[CredentialHelp]
+    credentialGuide: CredentialGuide | None
     metadata: dict[str, Any]
     githubSetup: GitHubSetupHelp
     assurance: Assurance

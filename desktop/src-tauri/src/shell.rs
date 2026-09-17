@@ -1,64 +1,29 @@
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::{sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::Duration};
 use serde_json::Value;
 use tauri::{Emitter, Manager, State, Webview, WebviewUrl, WebviewWindowBuilder};
-use tokio::sync::watch;
+use tokio::sync::{watch, oneshot, Mutex as AsyncMutex};
 use crate::{
+    asset_commands::{self, AssetError, CommandError, Reason},
+    asset_session::{AssetStatus, DocumentBinding, OriginalWork},
     bridge::{AppInfo, DesktopBridge, Project},
-    document_lifetime::{DocumentAction, DocumentLifetime},
     edit_commands, edit_owner::EditOwner, edit_protocol::ConfigEditStatus,
     error::BridgeError,
 };
 
 const MAIN_WINDOW: &str = "main";
 const EDIT_EVENT: &str = "config-edit-state";
-
-/// Startup observations feed the edit registry synchronously. The registry,
-/// not this mutex or a renderer token, linearizes invalidation with admission.
-#[derive(Clone)]
-struct DocumentBinding { lifetime: Arc<Mutex<DocumentLifetime>>, edits: EditOwner }
-impl DocumentBinding {
-    fn new(edits: EditOwner) -> Self { Self { lifetime: Arc::new(Mutex::new(DocumentLifetime::default())), edits } }
-    fn apply(&self, lifetime: &mut DocumentLifetime, action: DocumentAction) {
-        match action {
-            DocumentAction::Bind => {
-                if self.edits.initial_document(MAIN_WINDOW).is_err() {
-                    lifetime.invalidate();
-                    self.edits.document_lost(MAIN_WINDOW);
-                }
-            }
-            DocumentAction::Lost => self.edits.document_lost(MAIN_WINDOW),
-            DocumentAction::None => {},
-        }
-    }
-    fn observe(&self, event: impl FnOnce(&mut DocumentLifetime) -> DocumentAction) {
-        match self.lifetime.lock() {
-            Ok(mut lifetime) => {
-                let action = event(&mut lifetime);
-                self.apply(&mut lifetime, action);
-            }
-            Err(_) => self.edits.document_lost(MAIN_WINDOW),
-        }
-    }
-    fn navigation(&self, trusted: bool) -> bool {
-        match self.lifetime.lock() {
-            Ok(mut lifetime) => {
-                let (allowed, action) = lifetime.navigation(trusted);
-                self.apply(&mut lifetime, action);
-                allowed
-            }
-            Err(_) => { self.edits.document_lost(MAIN_WINDOW); false }
-        }
-    }
-    fn lost(&self) { self.observe(DocumentLifetime::invalidate); }
-    fn hook_installed(&self) { self.observe(DocumentLifetime::crash_hook_installed); }
-}
+const ASSET_EVENT: &str = "asset-session-state";
 
 struct ShellState {
     bridge: Arc<DesktopBridge>, document: DocumentBinding,
-    picker: Arc<AtomicBool>, closing: AtomicBool, exit_ready: AtomicBool,
+    #[cfg(not(target_os = "linux"))] picker: Arc<AtomicBool>,
+    #[cfg(not(target_os = "linux"))] closing: AtomicBool,
+    exit_ready: AtomicBool,
     relay_stop: watch::Sender<bool>,
-    relay: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    relay: AsyncMutex<RelayBook>,
+    #[cfg(target_os = "linux")] exit_observer: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
+struct RelayBook { handle: Option<tauri::async_runtime::JoinHandle<()>>, settled: bool }
 
 #[tauri::command]
 async fn app_info(state: State<'_, ShellState>) -> Result<AppInfo, BridgeError> { Ok(state.bridge.app_info().await) }
@@ -92,10 +57,15 @@ fn request_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, B
     }
 }
 fn not_closing(state: &ShellState) -> Result<(), BridgeError> {
+    #[cfg(target_os = "linux")]
+    { return state.document.not_quitting(); }
+    #[cfg(not(target_os = "linux"))]
+    {
     if state.closing.load(Ordering::SeqCst) {
         return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action."));
     }
     Ok(())
+    }
 }
 
 // Async Tauri entrypoints enter the application runtime, but admission itself
@@ -137,8 +107,64 @@ async fn config_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, 
     state.bridge.edits.status()
 }
 
+fn asset_window(webview: &Webview) -> Result<(), AssetError> {
+    if webview.label() == MAIN_WINDOW { Ok(()) } else { Err(AssetError::invalid()) }
+}
+fn asset_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, AssetError> {
+    match request.body() { tauri::ipc::InvokeBody::Json(value) => Ok(value), tauri::ipc::InvokeBody::Raw(_) => Err(AssetError::invalid()) }
+}
+
+#[tauri::command]
+async fn vault_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?; Ok(state.document.status())
+}
+#[tauri::command]
+async fn vault_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    asset_window(&webview)?; asset_commands::open(asset_body(&request)?)?; state.document.open_session()
+}
+#[tauri::command]
+async fn asset_context(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    asset_window(&webview)?; let args = asset_commands::context(asset_body(&request)?)?; state.document.context(args)
+}
+#[tauri::command]
+async fn asset_choose(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    asset_window(&webview)?; let args = asset_commands::choose(asset_body(&request)?)?; state.document.choose(app, args)
+}
+#[tauri::command]
+async fn credential_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, CommandError> {
+    asset_window(&webview)?; let args = asset_commands::prepare(asset_body(&request)?)?;
+    let id = state.document.prepare(args)?;
+    let document = state.document.clone(); drop(state); drop(request);
+    // This waiter owns neither Fields nor an original operation handle. Tauri
+    // may still retain its admitted IPC body; no prompt physical-erasure claim.
+    document.prepared(id).await
+}
+#[tauri::command]
+async fn vault_prepare_delete(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    asset_window(&webview)?; let args = asset_commands::delete(asset_body(&request)?)?; state.document.prepare_delete(args)
+}
+#[tauri::command]
+async fn vault_commit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    asset_window(&webview)?; let token = asset_commands::preview_token(asset_body(&request)?)?; state.document.commit(token)
+}
+#[tauri::command]
+async fn vault_bind(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    asset_window(&webview)?; let token = asset_commands::preview_token(asset_body(&request)?)?; state.document.bind(token)
+}
+#[tauri::command]
+async fn vault_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    asset_window(&webview)?; let id = asset_commands::discard(asset_body(&request)?)?; state.document.discard(id)
+}
+#[tauri::command]
+async fn vault_lock(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    asset_window(&webview)?; asset_commands::lock(asset_body(&request)?)?; state.document.lock_session()
+}
+
+#[cfg(not(target_os = "linux"))]
 struct PickerGuard(Arc<AtomicBool>);
+#[cfg(not(target_os = "linux"))]
 impl Drop for PickerGuard { fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); } }
+#[cfg(not(target_os = "linux"))]
 #[tauri::command]
 async fn choose_project(state: State<'_, ShellState>) -> Result<Option<Project>, BridgeError> {
     not_closing(&state)?;
@@ -159,6 +185,16 @@ async fn choose_project(state: State<'_, ShellState>) -> Result<Option<Project>,
     }).await.map_err(|_| BridgeError::new("picker_failed", "The native project picker did not settle normally."))?
 }
 
+#[cfg(target_os = "linux")]
+#[tauri::command]
+async fn choose_project(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Option<Project>, AssetError> {
+    asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?;
+    let id = state.document.choose_project(app)?;
+    // Only an observer of the retained original operation; no path or native
+    // handle belongs to this invoke future, even if the renderer disappears.
+    state.document.project_result(id).await
+}
+
 fn trusted_document(url: &tauri::Url) -> bool {
     // Tauri special-cases App("index.html") to the base app URL. Accept its
     // native empty/root-path normalization, not arbitrary same-origin assets.
@@ -171,37 +207,70 @@ fn trusted_document(url: &tauri::Url) -> bool {
         && url.query().is_none() && url.fragment().is_none() && matches!(url.path(), "" | "/")
 }
 
-fn start_relay(app: tauri::AppHandle, edits: EditOwner, mut stop: watch::Receiver<bool>) -> tauri::async_runtime::JoinHandle<()> {
+fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
     let mut revisions = edits.subscribe();
-    tauri::async_runtime::spawn(async move {
+    let mut assets = document.subscribe();
+    let (start, enter) = oneshot::channel();
+    let handle = tauri::async_runtime::spawn(async move {
+        if enter.await.is_err() { return; }
         loop {
             if *stop.borrow() { return; }
             // status() releases its native locks before any renderer callback.
             // Events are best effort: the UI subscribes then fetches status and
             // orders both by native revision, never by arrival time.
             if let Ok(status) = edits.status() { let _ = app.emit_to(MAIN_WINDOW, EDIT_EVENT, &status); }
+            let status = document.status();
+            let _ = app.emit_to(MAIN_WINDOW, ASSET_EVENT, &status);
             tokio::select! {
                 biased;
                 result = stop.changed() => { if result.is_err() || *stop.borrow() { return; } },
                 result = revisions.changed() => { if result.is_err() { return; } },
+                result = assets.changed() => { if result.is_err() { return; } },
+                // Observation only: status checks fixed original endpoints and
+                // already-ended joins. It launches no operation or new clock.
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {},
             }
         }
-    })
+    });
+    (handle, start)
 }
 
-async fn settle_relay(app: &tauri::AppHandle) {
-    let handle = {
-        let state = app.state::<ShellState>();
-        state.relay_stop.send_replace(true);
-        // No user callback or await holds this slot's short lock. Even an
-        // errored Join result positively settles this data-only observer task;
-        // it cannot change the independently established core/child result.
-        let mut slot = state.relay.lock().unwrap_or_else(|error| error.into_inner());
-        slot.take()
-    };
-    if let Some(handle) = handle { let _ = handle.await; }
+async fn settle_relay(app: &tauri::AppHandle) -> bool {
+    let state = app.state::<ShellState>(); state.relay_stop.send_replace(true);
+    let mut book = state.relay.lock().await;
+    if book.settled { return true; }
+    // Await only a BORROW of the original retained handle. An observer's loss
+    // cannot detach it. Even Err positively joins this data-only relay; it does
+    // not change the independently established native/core result.
+    let Some(handle) = book.handle.as_mut() else { return false; };
+    let _ = handle.await;
+    book.handle.take(); book.settled = true; true
 }
 
+#[cfg(target_os = "linux")]
+fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
+    let (start, enter) = oneshot::channel();
+    let handle = tauri::async_runtime::spawn(async move {
+        if enter.await.is_err() { return; }
+        loop {
+            // One fixed, app-level data-only observer. No native dialog, IO,
+            // query, assignment publication, retry or deadline renewal here.
+            // can_exit polls only an already-ended original quit coordinator.
+            if document.can_exit() {
+                if !settle_relay(&app).await || !document.can_exit() { return; }
+                app.state::<ShellState>().exit_ready.store(true, Ordering::SeqCst);
+                app.exit(0); return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+    (handle, start)
+}
+
+#[cfg(target_os = "linux")]
+fn request_shutdown(app: &tauri::AppHandle) { app.state::<ShellState>().document.request_quit(app.clone()); }
+
+#[cfg(not(target_os = "linux"))]
 fn request_shutdown(app: &tauri::AppHandle) {
     let state = app.state::<ShellState>();
     // The native picker has no safe cancellation primitive. Keep its original
@@ -231,7 +300,7 @@ fn request_shutdown(app: &tauri::AppHandle) {
         // one must not skip stopping/settling the other's original resources.
         let (passive, edit) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown());
         if passive.is_ok() && edit.is_ok() && bridge.supervisor.can_exit() && bridge.edits.can_exit() {
-            settle_relay(&app).await;
+            if !settle_relay(&app).await { return; }
             app.state::<ShellState>().exit_ready.store(true, Ordering::SeqCst);
             app.exit(0);
         } else {
@@ -241,6 +310,223 @@ fn request_shutdown(app: &tauri::AppHandle) {
             app.state::<ShellState>().closing.store(false, Ordering::SeqCst);
         }
     });
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), Project, Quit }
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) async fn run_owned_dialog(_: &tauri::AppHandle, owner: &Arc<OriginalWork>, _: DialogChoice) -> Result<Option<std::path::PathBuf>, Reason> {
+    owner.gui.not_created(Reason::UnsupportedPlatform); Err(Reason::UnsupportedPlatform)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) use owned_gtk::run_owned_dialog;
+
+#[cfg(target_os = "linux")]
+mod owned_gtk {
+    use super::*;
+    use std::{cell::RefCell, path::PathBuf, sync::Weak};
+    use gtk::prelude::*;
+    use crate::{asset_session::GuiCall, credential_format::FileKind};
+
+    // Exactly one actual native object book on the existing GTK main thread.
+    // This is resource ownership, not another document/authority registry.
+    thread_local! { static DIALOG: RefCell<Option<NativeDialog>> = const { RefCell::new(None) }; }
+    enum Object { File(gtk::FileChooserDialog), Message(gtk::MessageDialog) }
+    struct NativeDialog {
+        id: u32, object: Object, filter: Option<gtk::FileFilter>,
+        response: Option<gtk::glib::SignalHandlerId>, destroy: Option<gtk::glib::SignalHandlerId>,
+    }
+    impl Object {
+        fn close(&self) { match self { Self::File(dialog) => dialog.close(), Self::Message(dialog) => dialog.close() } }
+        fn show(&self) { match self { Self::File(dialog) => dialog.show(), Self::Message(dialog) => dialog.show() } }
+        fn disconnect(&self, handler: gtk::glib::SignalHandlerId) {
+            match self { Self::File(dialog) => dialog.disconnect(handler), Self::Message(dialog) => dialog.disconnect(handler) }
+        }
+    }
+
+    fn destroyed(weak: &Weak<GuiCall>) {
+        let Some(call) = weak.upgrade() else { return; };
+        let unexpected = if let Some(mut facts) = call.facts() {
+            let unexpected = !facts.response && call.owner().is_some_and(|owner| !owner.stopped());
+            facts.destroyed = true; facts.showing = false; unexpected
+        } else { true };
+        if unexpected { call.failed(Reason::SourceRefused); }
+        call.changed();
+    }
+    fn native_path(dialog: &gtk::FileChooserDialog) -> Result<PathBuf, Reason> {
+        // Exactly one accepted-response filename() call. Before any additional
+        // application path copy, enforce native byte/component bounds. Neither
+        // this hint nor its basename is ever returned as an asset DTO.
+        let path = dialog.filename().ok_or(Reason::SourceRefused)?;
+        crate::asset_source::path_hint(&path)?; Ok(path)
+    }
+    fn not_created(call: &Arc<GuiCall>, reason: Reason) { call.not_created(reason); call.failed(reason); }
+
+    fn construct(app: tauri::AppHandle, call: Arc<GuiCall>, choice: DialogChoice) {
+        if !gtk::is_initialized_main_thread() { not_created(&call, Reason::Unqualified); return; }
+        let Some(owner) = call.owner() else { not_created(&call, Reason::CleanupUnknown); return; };
+        if owner.interrupted() { not_created(&call, Reason::UserCancelled); return; }
+        if DIALOG.with(|book| book.borrow().is_some()) { not_created(&call, Reason::Busy); return; }
+        let Some(window) = app.get_webview_window(MAIN_WINDOW) else { not_created(&call, Reason::DocumentLost); return; };
+        let parent = match window.gtk_window() { Ok(parent) => parent, Err(_) => { not_created(&call, Reason::Unqualified); return; } };
+        if let Some(mut facts) = call.facts() { facts.constructing = true; } else { call.failed(Reason::CleanupUnknown); return; }
+        if matches!(choice, DialogChoice::File(_)) {
+            let Some(settings) = gtk::Settings::default() else { not_created(&call, Reason::Unqualified); return; };
+            settings.set_gtk_recent_files_enabled(false);
+            if settings.is_gtk_recent_files_enabled() { not_created(&call, Reason::Unqualified); return; }
+        }
+        if owner.interrupted() { not_created(&call, Reason::UserCancelled); return; }
+        let object = match choice {
+            DialogChoice::File(kind) => {
+                let title = match kind { FileKind::AndroidKeystore => "Choose an Android JKS keystore", FileKind::AndroidFirebase => "Choose Android Firebase JSON" };
+                Object::File(gtk::FileChooserDialog::with_buttons(Some(title), Some(&parent), gtk::FileChooserAction::Open,
+                    &[("Cancel", gtk::ResponseType::Cancel), ("Select", gtk::ResponseType::Accept)]))
+            }
+            DialogChoice::Project => Object::File(gtk::FileChooserDialog::with_buttons(Some("Choose a mobile project folder"), Some(&parent), gtk::FileChooserAction::SelectFolder,
+                &[("Cancel", gtk::ResponseType::Cancel), ("Select", gtk::ResponseType::Accept)])),
+            DialogChoice::Quit => Object::Message(gtk::MessageDialog::new(Some(&parent), gtk::DialogFlags::MODAL, gtk::MessageType::Question, gtk::ButtonsType::OkCancel,
+                "Unsaved in-memory changes will be lost. Choose Cancel to keep working, or OK to stop owned operations and wait for cleanup before quitting. A save already accepted may still complete; quitting does not undo committed files.")),
+        };
+        // Adopt the late returned object BEFORE any STOP check/configuration.
+        // A cancellation during its constructor cannot lose its destruction
+        // obligation. No callback captures a strong dialog or application cycle.
+        DIALOG.with(|book| *book.borrow_mut() = Some(NativeDialog { id: owner.id, object, filter: None, response: None, destroy: None }));
+        if let Some(mut facts) = call.facts() { facts.created = true; facts.constructing = false; }
+        DIALOG.with(|book| {
+            let mut book = book.borrow_mut();
+            let Some(entry) = book.as_mut().filter(|entry| entry.id == owner.id) else { call.failed(Reason::CleanupUnknown); return; };
+            let response_call = Arc::downgrade(&call); let destroy_call = Arc::downgrade(&call);
+            match &entry.object {
+                Object::File(dialog) => {
+                    dialog.set_local_only(true); dialog.set_select_multiple(false); dialog.set_create_folders(false);
+                    dialog.set_modal(true); dialog.set_destroy_with_parent(true);
+                    if let DialogChoice::File(kind) = choice {
+                        let filter = gtk::FileFilter::new();
+                        match kind {
+                            FileKind::AndroidKeystore => {
+                                filter.set_name(Some("JKS keystore (.jks, .keystore)"));
+                                for pattern in ["*.jks", "*.JKS", "*.keystore", "*.KEYSTORE"] { filter.add_pattern(pattern); }
+                            }
+                            FileKind::AndroidFirebase => {
+                                filter.set_name(Some("Android Firebase JSON (.json)"));
+                                for pattern in ["*.json", "*.JSON"] { filter.add_pattern(pattern); }
+                            }
+                        }
+                        dialog.add_filter(filter.clone()); dialog.set_filter(&filter); entry.filter = Some(filter);
+                    }
+                    entry.response = Some(dialog.connect_response(move |dialog, response| {
+                        let Some(call) = response_call.upgrade() else { return; };
+                        // Latch the actual response/endpoint under the real
+                        // admission lock BEFORE calling filename(), without
+                        // holding that lock over any GTK API.
+                        if call.begin_response(response == gtk::ResponseType::Accept, false) == Some(true) { call.selected_path(native_path(dialog)); }
+                    }));
+                    entry.destroy = Some(dialog.connect_destroy(move |_| destroyed(&destroy_call)));
+                }
+                Object::Message(dialog) => {
+                    dialog.set_title("Quit and discard unsaved drafts?"); dialog.set_destroy_with_parent(true);
+                    entry.response = Some(dialog.connect_response(move |_, response| {
+                        if let Some(call) = response_call.upgrade() { let _ = call.begin_response(response == gtk::ResponseType::Ok, true); }
+                    }));
+                    entry.destroy = Some(dialog.connect_destroy(move |_| destroyed(&destroy_call)));
+                }
+            }
+        });
+        if owner.interrupted() { call.changed(); return; }
+        if let Some(mut facts) = call.facts() { facts.showing = true; }
+        DIALOG.with(|book| { if let Some(entry) = book.borrow().as_ref().filter(|entry| entry.id == owner.id) { entry.object.show(); } });
+        call.presented(); call.changed();
+    }
+
+    fn close_after_response(call: Arc<GuiCall>, id: u32) {
+        if !gtk::is_initialized_main_thread() { call.failed(Reason::CleanupUnknown); return; }
+        // Entry into this non-main-origin queued closure is the response-unwind
+        // barrier. close() itself is only a request, NEVER destruction proof.
+        let destroyed = call.facts().is_some_and(|facts| facts.destroyed);
+        if !destroyed {
+            DIALOG.with(|book| {
+                if let Some(entry) = book.borrow().as_ref().filter(|entry| entry.id == id) { entry.object.close(); }
+                else { call.failed(Reason::CleanupUnknown); }
+            });
+        }
+        if let Some(mut facts) = call.facts() { facts.close_ack = true; }
+        call.changed();
+    }
+    fn release_after_destroy(call: Arc<GuiCall>, id: u32) {
+        if !gtk::is_initialized_main_thread() { call.failed(Reason::CleanupUnknown); return; }
+        if !call.facts().is_some_and(|facts| facts.destroyed && facts.close_ack) { call.failed(Reason::CleanupUnknown); return; }
+        let original = DIALOG.with(|book| {
+            let mut book = book.borrow_mut();
+            if book.as_ref().is_some_and(|entry| entry.id == id) { book.take() } else { None }
+        });
+        let Some(mut original) = original else { call.failed(Reason::CleanupUnknown); return; };
+        if let Some(handler) = original.response.take() { original.object.disconnect(handler); }
+        if let Some(handler) = original.destroy.take() { original.object.disconnect(handler); }
+        drop(original); // Original dialog/filter/handler refs, on their thread.
+        if let Some(mut facts) = call.facts() { facts.released = true; }
+        call.changed();
+    }
+
+    pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, choice: DialogChoice) -> Result<Option<PathBuf>, Reason> {
+        let call = owner.gui.clone();
+        // Tauri run_on_main_thread is inline for a main-thread caller. Checking
+        // here AND at both dispatch points is required for actual unwind proof.
+        if gtk::is_initialized_main_thread() || !gtk::is_initialized() {
+            not_created(&call, Reason::Unqualified); return Err(Reason::Unqualified);
+        }
+        let window = match app.get_webview_window(MAIN_WINDOW) {
+            Some(window) => window, None => { not_created(&call, Reason::DocumentLost); return Err(Reason::DocumentLost); }
+        };
+        {
+            let Some(mut facts) = call.facts() else { call.failed(Reason::CleanupUnknown); return Err(Reason::CleanupUnknown); };
+            if facts.dispatched || facts.created { return Err(Reason::CleanupUnknown); }
+            facts.dispatched = true;
+        }
+        let construct_call = call.clone(); let construct_app = app.clone();
+        if window.run_on_main_thread(move || construct(construct_app, construct_call, choice)).is_err() {
+            // Scheduling failure is not positive not-created evidence. Keep the
+            // original acquisition facts and coordinator, with no fallback.
+            call.failed(Reason::CleanupUnknown);
+        }
+        loop {
+            let (close, release, outcome) = {
+                let Some(mut facts) = call.facts() else { call.failed(Reason::CleanupUnknown); return Err(Reason::CleanupUnknown); };
+                let outcome = if facts.not_created { Some(Err(facts.refusal.unwrap_or(Reason::SourceRefused))) }
+                    else if facts.destroyed && facts.released && facts.close_ack {
+                        if matches!(choice, DialogChoice::Quit) { Some(Ok(None)) }
+                        else if let Some(reason) = facts.refusal { Some(Err(reason)) }
+                        else if !facts.accepted || owner.interrupted() { Some(Err(Reason::UserCancelled)) }
+                        else { Some(facts.selected.take().map(Some).ok_or(Reason::SourceRefused)) }
+                    } else { None };
+                let close = facts.created && (facts.response || facts.destroyed || owner.interrupted()) && !facts.close_queued;
+                if close { facts.close_queued = true; }
+                let release = facts.destroyed && facts.close_ack && !facts.release_queued;
+                if release { facts.release_queued = true; }
+                (close, release, outcome)
+            };
+            if let Some(outcome) = outcome { return outcome; }
+            if close {
+                if gtk::is_initialized_main_thread() { call.failed(Reason::CleanupUnknown); }
+                else {
+                    let call = call.clone(); let failure = call.clone(); let id = owner.id;
+                    if window.run_on_main_thread(move || close_after_response(call, id)).is_err() { failure.failed(Reason::CleanupUnknown); }
+                }
+            }
+            if release {
+                if gtk::is_initialized_main_thread() { call.failed(Reason::CleanupUnknown); }
+                else {
+                    let call = call.clone(); let failure = call.clone(); let id = owner.id;
+                    if window.run_on_main_thread(move || release_after_destroy(call, id)).is_err() { failure.failed(Reason::CleanupUnknown); }
+                }
+            }
+            tokio::select! {
+                _ = call.wake.notified() => {},
+                _ = tokio::time::sleep(Duration::from_millis(25)) => {},
+            }
+        }
+    }
 }
 
 pub fn run() {
@@ -255,11 +541,14 @@ pub fn run() {
         .setup(|app| {
             let resources = app.path().resource_dir()?;
             let bridge = Arc::new(DesktopBridge::new(resources));
-            let document = DocumentBinding::new(bridge.edits.clone());
+            let document = DocumentBinding::new(bridge.clone());
             let (relay_stop, stop_receiver) = watch::channel(false);
             app.manage(ShellState {
-                bridge: bridge.clone(), document: document.clone(), picker: Arc::new(AtomicBool::new(false)),
-                closing: AtomicBool::new(false), exit_ready: AtomicBool::new(false), relay_stop, relay: Mutex::new(None),
+                bridge: bridge.clone(), document: document.clone(),
+                #[cfg(not(target_os = "linux"))] picker: Arc::new(AtomicBool::new(false)),
+                #[cfg(not(target_os = "linux"))] closing: AtomicBool::new(false),
+                exit_ready: AtomicBool::new(false), relay_stop, relay: AsyncMutex::new(RelayBook { handle: None, settled: false }),
+                #[cfg(target_os = "linux")] exit_observer: Mutex::new(None),
             });
             let navigation = document.clone();
             let page = document.clone();
@@ -298,15 +587,29 @@ pub fn run() {
             }
             #[cfg(not(target_os = "linux"))]
             { let _ = window; /* Windows has no qualified crash/filesystem backend: never bind editing. */ }
-            let handle = start_relay(app.handle().clone(), bridge.edits.clone(), stop_receiver);
             let state = app.state::<ShellState>();
-            *state.relay.lock().unwrap_or_else(|error| error.into_inner()) = Some(handle);
+            // Setup is synchronous and these fresh slots cannot be contended.
+            // Both observer bodies wait behind barriers until their ORIGINAL
+            // handles have been stored in the application, not an invoke.
+            let mut book = state.relay.try_lock().map_err(|_| "The original event relay could not be retained.")?;
+            let (handle, start) = start_relay(app.handle().clone(), bridge.edits.clone(), document.clone(), stop_receiver);
+            book.handle = Some(handle); drop(book);
+            let _ = start.send(());
+            #[cfg(target_os = "linux")]
+            {
+                let mut book = state.exit_observer.lock().map_err(|_| "The original exit observer could not be retained.")?;
+                let (handle, start) = start_exit_observer(app.handle().clone(), document);
+                *book = Some(handle); drop(book);
+                let _ = start.send(());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             app_info, choose_project, project_snapshot, catalog, validate_config, suggest_config, preview_config,
             propose_github_setup,
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,
+            vault_status, vault_open, asset_context, asset_choose, credential_prepare,
+            vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,
         ])
         .on_window_event(|window, event| {
             if window.label() != MAIN_WINDOW { return; }

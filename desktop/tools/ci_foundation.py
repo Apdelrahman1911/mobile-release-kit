@@ -24,6 +24,25 @@ import zipfile
 RUST = "1.98.0"
 PYTHON = "3.14.7"
 NODE = "v24.20.0"
+BOUNDARY_SCOPE = "passive-v1"
+COMPILE_SCOPE = "shell-compile-v1"
+COMPILE_EVIDENCE_SCOPE = "desktop-shell-compile-only-v1"
+COMPILE_WORKFLOW = ".github/workflows/desktop-session-compile.yml"
+COMPILE_REF = "refs/heads/verify/desktop-session-compile"
+COMPILE_PHASES = ("prepare", "acquire", "compile", "clean")
+COMPILE_CHECKS = {
+    "acquire": ("rust-toolchain-install", "rust-version-target", "locked-platform-metadata",
+                "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "headless-test-compile-only", "node-version",
+                "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"),
+}
+EMPTY_NATIVE_DIRECTORIES = (
+    "native", "config-owner", "config-driver-loss", "config-watchdog-loss", "config-stop",
+    "config-terminal-deadline", "config-startup-stop", "config-transaction-eof",
+)
+COMPILER_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target", "appdata", "localappdata", "npm-cache")
+COMPILER_PRIVATE_FILES = ("context.json", "core.zip", "metadata.json", "npmrc-user", "npmrc-global", "gitconfig-empty")
+COMPILE_PUBLIC_FILES = ("public-bindings.json", "acquire-checks.json", "compile-checks.json")
 NATIVE_TEST = "supervisor::hosted_tests::passive_hosted_contract"
 CONFIG_OWNER_TEST = "edit_owner::hosted_tests::hosted_config_edit_owner_original_resources"
 CONFIG_DRIVER_LOSS_TEST = "edit_owner::hosted_tests::hosted_config_driver_loss_original_resources"
@@ -125,6 +144,74 @@ def require(condition: bool, message: str) -> None:
         raise CheckFailure(message)
 
 
+def admit_phase(scope: str, phase: str) -> None:
+    """Closed scope selection, before context, tools, or native dispatch."""
+    require(scope in {BOUNDARY_SCOPE, COMPILE_SCOPE}, "Unknown desktop verification scope")
+    if scope == COMPILE_SCOPE:
+        require(phase in COMPILE_PHASES, "Compiler-only scope cannot execute a native phase")
+
+
+def compile_workflow_binding(environment: dict[str, str]) -> dict[str, str]:
+    """Pure binding to the actual fixed verification workflow, not a caller path."""
+    sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
+    run_id, attempt = environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
+    require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None,
+            "Compiler workflow source identity differs")
+    require(all(re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None for value in (run_id, attempt)),
+            "Compiler workflow run identity differs")
+    require(environment.get("GITHUB_REF") == COMPILE_REF
+            and environment.get("GITHUB_WORKFLOW_SHA") == sha
+            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{COMPILE_WORKFLOW}@{COMPILE_REF}",
+            "Compiler workflow/ref binding differs")
+    event = environment.get("GITHUB_EVENT_NAME")
+    require(event == "push" or event == "workflow_dispatch" and environment.get("MRK_EXPECTED_SHA") == sha,
+            "Compiler workflow event or exact dispatch source differs")
+    return {"workflowPath": COMPILE_WORKFLOW, "workflowSha": sha,
+            "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
+            "runId": run_id, "attempt": attempt}
+
+
+def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
+    """A compile receipt licenses only compiler-output cleanup, not native finality."""
+    require(phase in COMPILE_CHECKS and context.get("executionScope") == COMPILE_SCOPE,
+            "Compiler receipt scope differs")
+    require(type(value) is dict, "Missing compiler phase receipt")
+    binding_names = ("sourceSha", "platform", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")
+    expected = {
+        "schemaVersion": 1, "scope": COMPILE_EVIDENCE_SCOPE, "phase": phase, "status": "passed",
+        **{name: context[name] for name in binding_names},
+        "rust": {"release": RUST, "target": TARGETS[context["platform"]]}, "node": NODE,
+        "checks": [{"check": name, "exitCode": 0} for name in COMPILE_CHECKS[phase]],
+    }
+    require(type(value.get("schemaVersion")) is int and value == expected
+            and all(type(row.get("exitCode")) is int for row in value.get("checks", [])),
+            "Compiler phase receipt is incomplete or its original source/checks differ")
+    return value
+
+
+def parse_compile_receipt(raw: bytes) -> object:
+    require(type(raw) is bytes and 0 < len(raw) <= 16384, "Compiler phase receipt exceeds its bound")
+    def pairs(items: list[tuple[str, object]]) -> dict:
+        result = {}
+        for key, value in items:
+            require(key not in result, "Duplicate compiler receipt field")
+            result[key] = value
+        return result
+    def nonfinite(_: str) -> None:
+        raise CheckFailure("Nonfinite compiler receipt value")
+    try:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_constant=nonfinite)
+    except (ValueError, UnicodeError, RecursionError):
+        raise CheckFailure("Malformed compiler phase receipt") from None
+
+
+def validate_compile_inventory(names: set[str], nonempty_native: set[str]) -> None:
+    expected = set(COMPILER_DIRECTORIES + EMPTY_NATIVE_DIRECTORIES + COMPILER_PRIVATE_FILES + COMPILE_PUBLIC_FILES)
+    require(names == expected and not nonempty_native,
+            "Compiler-only task contains missing, unexpected, or native outputs; retain it")
+
+
 def ordinary(path: Path) -> None:
     details = path.lstat()
     require(stat.S_ISREG(details.st_mode) and details.st_nlink == 1
@@ -174,7 +261,7 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
 def admitted_host() -> str:
     require(os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") == "passive-v1",
+            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, COMPILE_SCOPE},
             "This fixed check requires an explicitly admitted disposable hosted job")
     platform = os.environ.get("MRK_DESKTOP_PLATFORM", "")
     require(platform in TARGETS and platform == {
@@ -605,15 +692,24 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                   scope: str = "passive-development-foundation-only") -> None:
     # Only called after the fixed phase and final source check actually succeed.
     # Missing files on failed/skipped phases cannot become passing evidence.
-    write_json(Path(context["root"]) / f"{name}-checks.json", {
+    value = {
         "schemaVersion": 1, "scope": scope, "phase": name,
         "status": "passed", "sourceSha": context["sourceSha"], "platform": context["platform"],
         "rust": {"release": RUST, "target": TARGETS[context["platform"]]}, "node": node,
         "checks": [{"check": check, "exitCode": 0} for check in checks],
-    })
+    }
+    if context.get("executionScope") == COMPILE_SCOPE:
+        require(name in COMPILE_CHECKS and scope == "passive-development-foundation-only",
+                "Compiler-only phase cannot produce native evidence")
+        value.update(scope=COMPILE_EVIDENCE_SCOPE,
+                     **{key: context[key] for key in ("workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")})
+        validate_compile_receipt(value, context, name)
+    write_json(Path(context["root"]) / f"{name}-checks.json", value)
 
 
-def prepare(platform: str) -> None:
+def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
+    admit_phase(scope, "prepare")
+    binding = compile_workflow_binding(os.environ) if scope == COMPILE_SCOPE else {}
     source = Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True)
     temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
     sha = os.environ["GITHUB_SHA"]
@@ -661,13 +757,18 @@ def prepare(platform: str) -> None:
             archive.writestr(member, data, compress_type=zipfile.ZIP_DEFLATED)
             inventory.append({"path": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
     context = {"root": str(root), "source": str(source), "sourceSha": sha, "platform": platform,
+               "executionScope": scope,
                "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                "git": git, "rustup": rustup, "python": str(Path(sys.executable).resolve(strict=True))}
+    context.update(binding)
+    workflow = COMPILE_WORKFLOW if scope == COMPILE_SCOPE else ".github/workflows/desktop-foundation.yml"
+    if scope == COMPILE_SCOPE:
+        context["workflowSha256"] = hash_file(source / workflow)
     source_unchanged(context)
     write_json(root / "context.json", context)
-    write_json(root / "public-bindings.json", {
-        "scope": "passive-development-foundation-only", "sourceSha": sha, "sourceTree": tree,
-        "workflowSha256": hash_file(source / ".github/workflows/desktop-foundation.yml"),
+    public = {
+        "scope": COMPILE_EVIDENCE_SCOPE if scope == COMPILE_SCOPE else "passive-development-foundation-only", "sourceSha": sha, "sourceTree": tree,
+        "workflowSha256": hash_file(source / workflow),
         "runId": context["runId"], "attempt": context["attempt"], "platform": platform,
         "image": os.environ.get("ImageOS", "") + "/" + os.environ.get("ImageVersion", ""),
         # Version only (never hostname): future kernel-bound runtime admission
@@ -683,23 +784,32 @@ def prepare(platform: str) -> None:
         "configOwnerFixtureSha256": hash_file(source / "desktop/src-tauri/src/edit_hosted_tests.rs"),
         "notQualified": ["production-runtime", "native-GUI", "native-document-lifecycle", "configuration-saving",
                          "Windows-filesystem", "installers", "release-operations"],
-    })
+    }
+    if scope == COMPILE_SCOPE:
+        public.update(binding)
+        public["notQualified"].append("test-execution")
+    write_json(root / "public-bindings.json", public)
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
         output.write(f"root={root}\n")
     print("Prepared bounded source ZIP and source-bound synthetic check inputs.")
 
 
-def load_context(platform: str) -> dict:
+def load_context(platform: str, scope: str = BOUNDARY_SCOPE) -> dict:
     root = Path(os.environ["MRK_DESKTOP_CI_ROOT"])
     require(root.is_absolute() and root.name.startswith("mrk-desktop-foundation-")
             and root.parent == Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
             and not root.is_symlink(), "Unrecognized task root")
     ordinary(root / "context.json")
     context = json.loads((root / "context.json").read_text(encoding="utf-8"))
-    require(context["root"] == str(root) and context["platform"] == platform
+    require(context["root"] == str(root) and context["platform"] == platform and context.get("executionScope") == scope
             and context["sourceSha"] == os.environ["GITHUB_SHA"]
             and context["runId"] == os.environ["GITHUB_RUN_ID"]
             and context["attempt"] == os.environ["GITHUB_RUN_ATTEMPT"], "Task context differs")
+    if scope == COMPILE_SCOPE:
+        binding = compile_workflow_binding(os.environ)
+        require(all(context.get(key) == value for key, value in binding.items())
+                and context.get("workflowSha256") == hash_file(Path(context["source"]) / COMPILE_WORKFLOW),
+                "Compiler task workflow binding changed")
     return context
 
 
@@ -719,8 +829,49 @@ def tools(context: dict, environment: dict[str, str]) -> tuple[str, str]:
     return cargo, rustc
 
 
-def phase(name: str, platform: str) -> None:
-    context = load_context(platform)
+def clean_compile(context: dict) -> None:
+    """Only positively completed compiler work; no fabricated native receipts."""
+    require(context.get("executionScope") == COMPILE_SCOPE, "Wrong compiler cleanup scope")
+    root, source = Path(context["root"]), Path(context["source"])
+    for phase_name in COMPILE_CHECKS:
+        path = root / f"{phase_name}-checks.json"
+        ordinary(path)
+        require(0 < path.stat().st_size <= 16384, "Compiler phase receipt exceeds its bound")
+        with path.open("rb") as stream:
+            raw = stream.read(16385)
+        validate_compile_receipt(parse_compile_receipt(raw), context, phase_name)
+    nonempty = set()
+    for name in EMPTY_NATIVE_DIRECTORIES:
+        directory = root / name
+        require(directory.is_dir() and not directory.is_symlink()
+                and not getattr(directory.lstat(), "st_file_attributes", 0) & 0x400,
+                "Compiler native placeholder is no longer an ordinary directory")
+        if any(directory.iterdir()):
+            nonempty.add(name)
+    validate_compile_inventory({path.name for path in root.iterdir()}, nonempty)
+    # Validate the complete deletion roster before removing any of it. All were
+    # created by prepare/acquire/compile in this fresh hosted job, never user data.
+    directories = [source / relative for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/gen")]
+    directories.extend(root / name for name in COMPILER_DIRECTORIES)
+    for directory in directories:
+        require(directory.is_dir() and not directory.is_symlink()
+                and not getattr(directory.lstat(), "st_file_attributes", 0) & 0x400,
+                "Task-owned compiler output directory differs")
+    for name in COMPILER_PRIVATE_FILES + COMPILE_PUBLIC_FILES:
+        ordinary(root / name)
+    for directory in directories:
+        shutil.rmtree(directory)
+    for name in EMPTY_NATIVE_DIRECTORIES:
+        (root / name).rmdir()
+    for name in COMPILER_PRIVATE_FILES:
+        (root / name).unlink()
+    require({path.name for path in root.iterdir()} == set(COMPILE_PUBLIC_FILES), "Unexpected output after compiler cleanup")
+    print("Removed settled compiler-only outputs; preserved exactly three public receipts. No native qualification.")
+
+
+def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
+    admit_phase(scope, name)
+    context = load_context(platform, scope)
     root, source = Path(context["root"]), Path(context["source"])
     environment = clean_environment(root)
     # The owner fixture binds its compiled source to this exact event commit.
@@ -729,6 +880,9 @@ def phase(name: str, platform: str) -> None:
     manifest = source / "desktop/src-tauri/Cargo.toml"
     source_unchanged(context)
     no_cargo_configuration((root, *root.parents))
+    if name == "clean" and scope == COMPILE_SCOPE:
+        clean_compile(context)
+        return
     if name == "acquire":
         run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
             check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
@@ -943,8 +1097,10 @@ def main() -> int:
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)
     try:
+        scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")
+        admit_phase(scope, args.phase)
         platform = admitted_host()
-        prepare(platform) if args.phase == "prepare" else phase(args.phase, platform)
+        prepare(platform, scope) if args.phase == "prepare" else phase(args.phase, platform, scope)
     except Exception as error:
         reason = str(error) if isinstance(error, CheckFailure) else type(error).__name__
         print(f"Desktop {args.phase} failed: {reason}. Preserve evidence; no native or product success is implied.", file=sys.stderr)

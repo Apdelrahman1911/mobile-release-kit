@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Callable, Literal, TypeVar
 
 from .cancellation import CleanupScope, DefaultCancellation, cancellation_owner, _mark_fork_unsafe
 from .errors import ValidationError
+from .credential_policy import (CREDENTIALS_FILE_MAX_BYTES, PRIVATE_SMALL_MAX_BYTES,
+                                PRIVATE_GENERAL_MAX_BYTES)
 from .owned_process import ProcessCleanupError
 from ._profile_callers import fatal_cancellation_error
 
@@ -28,9 +30,6 @@ if TYPE_CHECKING:
 ExternalKind = Literal["credentials-file", "private-small", "private-general", "public-tool"]
 PrivateKind = Literal["credentials-file", "private-small", "private-general"]
 
-CREDENTIALS_FILE_MAX_BYTES = 256 * 1024
-PRIVATE_SMALL_MAX_BYTES = 4 * 1024 * 1024
-PRIVATE_GENERAL_MAX_BYTES = 32 * 1024 * 1024
 BUNDLETOOL_VERSION = "1.18.3"
 BUNDLETOOL_SHA256 = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
 # Upstream release1.18.3 asset329035725 metadata, independently recorded before

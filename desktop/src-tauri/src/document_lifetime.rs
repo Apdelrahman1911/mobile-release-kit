@@ -16,6 +16,10 @@ pub(crate) struct DocumentLifetime {
 }
 
 impl DocumentLifetime {
+    /// Native-only query of this exact original lifetime, not a copied renderer
+    /// generation or readiness flag. Invalidation remains absorbing.
+    pub(crate) fn original_bound(&self) -> bool { self.bound && !self.lost }
+
     pub(crate) fn navigation(&mut self, trusted: bool) -> (bool, DocumentAction) {
         if !trusted || self.lost || self.navigation_seen || self.finished {
             return (false, self.invalidate());

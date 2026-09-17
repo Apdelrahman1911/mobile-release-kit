@@ -1,7 +1,10 @@
 import fieldHelp from '../../src/mobile_release/api/data/field-help.json' with { type: 'json' };
 import projectSchema from '../../src/mobile_release/api/data/project.schema.json' with { type: 'json' };
 import githubSetupResource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
+import credentialGuideResource from '../../src/mobile_release/api/data/credential-guide-v1.json' with { type: 'json' };
 import { githubSetupError, parseGitHubSetupHelp } from './githubSetupProtocol.ts';
+import { parseCredentialGuide } from './credentialGuide.ts';
+import { assetError } from './assetSessionProtocol.ts';
 import type { ApiError, Assurance, Catalog, DesktopApi, FieldHelp, JsonObject, ProjectSnapshot } from './types.ts';
 
 // Inert, explicit browser-design fixture. Nothing here is a project observation.
@@ -17,6 +20,7 @@ const githubSetup = parseGitHubSetupHelp(githubSetupResource.help);
 if (!githubSetup) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
 
 const catalog: Catalog = {
+  credentialGuide: parseCredentialGuide(credentialGuideResource),
   // TypeScript adds optional `undefined` properties when inferring heterogeneous
   // JSON arrays. The exact core-owned JSON resource cannot contain undefined.
   schemaVersion: 1, schema: projectSchema as unknown as JsonObject, fields: fieldHelp as FieldHelp[],
@@ -50,6 +54,7 @@ const example: ProjectSnapshot = {
 const editUnavailable = async (): Promise<never> => {
   throw { code: 'PreviewOnly', message: 'Browser preview has no native edit owner, save plan or finality. No save operation was performed.', retryable: false } satisfies ApiError;
 };
+const assetUnavailable = async (): Promise<never> => { throw assetError({ code: 'AssetSessionUnavailable' }); };
 
 export const previewApi: DesktopApi = {
   mode: 'preview',
@@ -77,4 +82,15 @@ export const previewApi: DesktopApi = {
   closeConfigEdit: editUnavailable,
   configEditStatus: editUnavailable,
   subscribeConfigEdit: editUnavailable,
+  assetStatus: assetUnavailable,
+  openAssetSession: assetUnavailable,
+  setAssetContext: assetUnavailable,
+  chooseAsset: assetUnavailable,
+  prepareCredential: assetUnavailable,
+  prepareAssetDelete: assetUnavailable,
+  commitAsset: assetUnavailable,
+  bindAsset: assetUnavailable,
+  discardAsset: assetUnavailable,
+  lockAssetSession: assetUnavailable,
+  subscribeAssets: assetUnavailable,
 };

@@ -1,8 +1,12 @@
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
 import { githubSetupError, githubSetupRequestFits, githubSetupResultMatches, parseCatalogGitHubSetup, parseGitHubSetupResult } from './githubSetupProtocol.ts';
+import { parseCatalogCredentialGuide } from './credentialGuide.ts';
+import { assetError, assetRequestFits, parseAssetStatus } from './assetSessionProtocol.ts';
+import type { AssetCommand } from './assetSessionProtocol.ts';
+import type { AssetStatus } from './assetSessionTypes.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 export function bridgeMode(previewFlag: unknown, isNative: boolean): BridgeMode {
   if (previewFlag === '1') return 'preview';
@@ -26,6 +30,16 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     try { return await invoke<T>(command, args); }
     catch (error) { throw apiError(error); }
   };
+  const assetCall = async (command: AssetCommand, args: Record<string, unknown>): Promise<AssetStatus> => {
+    try {
+      if (!assetRequestFits(command, args)) throw { code: 'asset_invalid_request' };
+      // These bounded copies belong only to this invocation. Neither input nor
+      // raw rejection data is kept in UI state, diagnostics or browser storage.
+      const result = parseAssetStatus(await call<unknown>(command, structuredClone(args)));
+      if (!result) throw { code: 'AssetStatusInvalid' };
+      return result;
+    } catch (error) { throw assetError(error); }
+  };
   return {
     mode,
     appInfo: () => call<AppInfo>('app_info'),
@@ -35,7 +49,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       const result = await call<Catalog>('catalog');
       const githubSetup = parseCatalogGitHubSetup(result);
       if (!githubSetup) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
-      return { ...result, githubSetup: structuredClone(githubSetup) };
+      return { ...result, githubSetup: structuredClone(githubSetup), credentialGuide: parseCatalogCredentialGuide(result) };
     },
     validate: (draft: JsonObject) => call<ValidationResult>('validate_config', { draft }),
     suggestConfig: (hints: SuggestionHints) => call<ConfigSuggestion>('suggest_config', { hints }),
@@ -65,6 +79,22 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (mode !== 'native' || !listen) throw { code: 'NativeBridgeRequired', message: 'Native edit status events are unavailable. Saving is disabled.', retryable: false } satisfies ApiError;
       try { return await listen('config-edit-state', onStatus); }
       catch (error) { throw apiError(error); }
+    },
+    assetStatus: () => assetCall('vault_status', {}),
+    openAssetSession: () => assetCall('vault_open', { mode: 'session' }),
+    setAssetContext: (request) => assetCall('asset_context', { ...request }),
+    chooseAsset: (request) => assetCall('asset_choose', { ...request }),
+    prepareCredential: (request) => assetCall('credential_prepare', { ...request }),
+    prepareAssetDelete: (record) => assetCall('vault_prepare_delete', { ...record }),
+    commitAsset: (previewToken) => assetCall('vault_commit', { previewToken }),
+    bindAsset: (previewToken) => assetCall('vault_bind', { previewToken }),
+    discardAsset: (operationId) => assetCall('vault_discard', { operationId }),
+    lockAssetSession: () => assetCall('vault_lock', { discardSession: true }),
+    subscribeAssets: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'AssetSessionUnavailable' };
+        return await listen('asset-session-state', onStatus);
+      } catch (error) { throw assetError(error); }
     },
   };
 }

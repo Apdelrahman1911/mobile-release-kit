@@ -33,13 +33,25 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 | Configuration | Guided in-memory drafts with core-owned schema/policy validation and contextual help | Saving a file, checking path existence, approving an app identity or release readiness |
 | Configuration save implementation (disabled) | Separate native owner, exact two-file preview/apply contract, guided confirmation and original-outcome handling | Enabled saving, native window/process qualification, general project initialization or Windows file transactions |
 | GitHub setup proposal | Guided toolkit pin inputs, core-generated read-only workflow previews, contextual help and environment/credential-name checklist | GitHub login/contact, repository observation, compatibility verification, file writes, secret provisioning or workflow dispatch |
+| Pure credential assessment (internal only) | Core policy over explicitly supplied scalars and finite file observations, with a private result-sanitizing adapter | Renderer secret entry, file acquisition/parser qualification, password verification, native custody, storage or assignment |
 | Environment | Static capability and missing-feature explanations | Running the full doctor, SDK version probes or native admission |
 | Credentials, metadata, releases, artifacts, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
 
-Windows can use portable catalog/validation and pure suggestion/preview services. Its safe snapshot reader
-and native Android ownership backend require a separate Win32 handle/Job Object
-implementation; a POSIX fallback or `pathlib` check-before-open is not sufficient.
-Native Windows build support remains required before product completion.
+Windows can use the portable passive services. Its original-parent static reader
+is staged in source but **disabled pending independent ABI/native W1–W6
+qualification**. The initial target is native x64 Windows on ordinary local NTFS:
+bounded ordinary or verbatim drive paths, exact long-name/case observations,
+accessible non-reparse directories and single-link files. Unsupported roots,
+case-sensitive directories, sharing conflicts or insufficient access refuse;
+there is no POSIX, full-path or weaker-sharing fallback.
+
+Acquisition uses documented `NtCreateFile`, one captured volume root, then one
+component relative to each retained original parent with `OBJ_DONT_REPARSE`.
+Name/metadata equality only vetoes admission; share-read-only does not prevent
+attribute-only reparse/case changes. Partial results remain non-atomic static
+observations, not ACL ownership or selection-to-request custody. Windows native
+build/process ownership, configuration Save and packaged-runtime custody are
+separate closed gates; this reader does not implement or enable them.
 
 The UI distinguishes *configured*, *format-valid*, *observed hint*, *unknown*,
 *partial*, *stale*, *unavailable*, *native-verified*, and *service-verified*.
@@ -72,6 +84,9 @@ methods are:
   — four core-generated workflow proposals and desired setup guidance, with no
   repository observation or Apply authority. `suppliedSnapshot` is explicitly
   null or caller-supplied digest/size assertions, never an observed file tree.
+- `credentials.assess`, `{schemaVersion, policyVersion, context, input}` — pure
+  assessment of supplied scalars and closed mechanical observations, not a
+  credential reader. This does not add a renderer command or enable the vault.
 
 Exact additive preparation contracts, limits and the static-hint projection are
 documented in [desktop configuration preview](desktop-configuration-preview.md).
@@ -126,6 +141,171 @@ abandonment does not abandon a process owner. Unknown finality prevents reuse.
 This direct-child design **must not** be reused for builds, native validation,
 signing or other descendant-producing/stateful work without the separately
 reviewed ownership/cancellation backend.
+
+### Supplied-input credential assessment (no renderer routing)
+
+The R1 pure contract uses exactly:
+
+```text
+{schemaVersion:1, policyVersion:"credential-policy-v1",
+ context:{draft:object, platform:"android"|"ios"|"project",
+          stage:"candidate"|"external-testing"|"production", purpose:"full"|"signing"|"store"},
+ input:{kind:Kind, fields:Fields, observation:Observation}}
+```
+
+Every declared member is required, including explicit null scalar/observation
+members. Extras, wrong exact JSON types, bool-as-int, contradictory tags and
+`stage:"all"` refuse. The draft keeps the existing configuration schema: core
+independently bounds, serializes and parses it without reading a project. It
+does not reuse potentially reflective `config.validate` issues. No selected
+paths, bytes/Base64, filenames, labels, project IDs, digests or native claims
+are accepted outside that unchanged draft schema.
+
+| Kind | Platform | Exact scalar fields | Allowed observed formats |
+| --- | --- | --- | --- |
+| `android-keystore` | android | `storePassword`, `keyAlias`, `keyPassword` | JKS, PKCS#12 |
+| `android-firebase` | android | none (`{}`) | Firebase JSON projection |
+| `apple-p12` | ios | `password` | PKCS#12 |
+| `apple-profile` | ios | none (`{}`) | CMS SignedData |
+| `asc-p8` | ios | `keyId`, `issuerId` | unencrypted PKCS#8 |
+| `ios-firebase` | ios | none (`{}`) | Firebase plist projection |
+| `google-wif` | android | `provider`, `serviceAccount` | none; observation must be null |
+| `project-read-token` | project | `token` | none; observation must be null |
+
+Scalars are null or UTF-8 strings, at most 4,096 decoded bytes each and 65,536
+bytes in aggregate. Null/empty means missing. Nonempty NUL-containing values
+fail value admission, not password verification. Whitespace is not trimmed;
+shared core identifier rules remain unchanged, as do all CLI readers and bool
+policy seams. The closed union currently has at most three scalar companions.
+
+File observation null means no submitted selection. Common nonnull variants are
+`{status:"unavailable",reason}` with `not-run`, `incomplete`, `unsupported-format`,
+`unsupported-variant`, `material-limit` or `parser-limit`, and
+`{status:"rejected",reason}` with `empty-file`, `suffix-conflict` or
+`malformed-container`. These are not IO/picker/custody failure reports.
+
+Observed variants all require `status:"observed"`, a positive exact integer
+`byteCount` within the canonical core material limit (4 or 32 MiB), and exactly:
+
+| Format | Additional members |
+| --- | --- |
+| `jks` | `version:1|2` |
+| `pkcs12` | `version:3`, `authSafe:"data"|"signed-data"` |
+| `cms-signed-data` | `encoding:"der"` |
+| `pkcs8` | `encoding:"pem"|"der"`, `algorithm:"ec"|"rsa"|"other"`, `curve:"p256"|"other"|null` |
+| `firebase-json` | `document:AndroidProjection` |
+| `firebase-plist` | `encoding:"xml"|"binary"`, `document:IosProjection` |
+
+Non-EC PKCS#8 requires curve null. EC other/null curves are representable but
+fail the core EC/P-256 predicate. These tags assert only their named envelope
+scope, never key usability, parser/platform qualification or password validity.
+
+```text
+AndroidProjection = {root:"object"|"other", clients:null|Client[]}
+Client = null|{clientInfo:null|{androidClientInfo:null|{packageName:null|string}}}
+IosProjection = {root:"dictionary"|"other", bundleId:null|string}
+```
+
+Root other requires the other member null. Null represents an absent/wrong-type
+node; all clients and their order must be preserved, including malformed ones.
+There are at most 256 clients and 1,024 UTF-8 bytes per projected string. Core
+reconstructs minimal decoded documents and uses the shared Firebase shape/match
+predicate: every Android client must have required objects and a nonempty
+package name, with at least one exact applicationId match; iOS needs a string
+BUNDLE_ID with an exact bundleId match. Empty Android arrays/iOS strings are
+complete shapes without a match. Shape failure is not identity mismatch.
+Duplicate/trailing-input/entity/parser/allocation checks remain native R5 work.
+
+Observation JSON is at most 64 KiB, 4,096 nodes and depth 8. Draft JSON remains
+at most 512 KiB. The existing actual envelope limit (1 MiB including newline,
+depth 32 and 20,000 nodes including keys) still wins; direct pure calls also
+bound exact JSON params. Escaping counts toward encoded bounds. No truncation,
+sampling, dropping malformed clients or deduplication makes an input fit.
+
+The existing requirement selector remains the sole stage/purpose/platform and
+service-flag authority. It is intersected with the selected guide's canonical
+kind/field associations, in guide order. Project-token assessment explicitly
+uses `project` and an empty release-platform selection; its existing candidate
+full/signing/source-flag rule is unchanged. Applicability reason precedence is
+`wrong-platform`, `platform-disabled`, `not-required`, then `selected`. A partial
+kind association is unavailable rather than a guessed policy.
+
+The result has only `schemaVersion`, `policyVersion`, `kind`, finite
+`context:{platform,stage,purpose}`, `applicability:{state,reason}`, `state`,
+`fields`, `identity` and `assurance`. Every field has constant guide `id` and
+canonical `requirement`, `presence:"missing"|"supplied"`, `state`, at most one
+issue code and at most three ordered, nonduplicate `{scope,outcome}` checks.
+There are 1–4 fields and a separate 16-KiB result bound. No raw values, draft,
+IDs, paths, sizes, counts, hashes, lengths/prefixes or free-text details return.
+Presence describes the submitted value/assertion, not actual file existence.
+
+- Not applicable: all fields and aggregate `not-applicable`, no checks/issues.
+- Missing: `missing`/`required-missing`; unavailable observation: `unknown` with
+  its reason; rejected observation: `invalid` with only its limited file reason.
+- Recognized JKS/PFX/CMS/P8 envelopes are at most `configured`. Each file is
+  assessed independently of scalar companions: a missing/invalid password or
+  identifier never becomes a file/password failure.
+- Scalars use `value-admission` and, for alias/ASC/WIF identifiers only,
+  `identifier-format` with actual `passed`/`failed` outcomes over supplied data.
+- File rejection checks (`file-nonempty`, `suffix-consistency`, `container-parse`)
+  are `asserted-fail`; observed envelope/document checks are `asserted-pass`.
+  Pure P8 `ec-p256-identifiers` and Firebase `firebase-shape`/
+  `application-identity` checks use `passed`/`failed`, not native assurance.
+- Only a matching Firebase projection is `format-valid`, in the supplied-data
+  document/identity scope. Shape failure is `firebase-shape`/`not-assessed`;
+  complete-shape mismatch is `identity-mismatch`/`mismatch`.
+- Aggregate precedence after applicability is invalid, missing, unknown, then
+  configured (format-valid for matching Firebase). Other field facts are kept;
+  neither unknown nor stale is retrospectively called invalid.
+
+Assessment assurance is separate from the passive catalogue's
+`credentialsRead:false` contract:
+
+```text
+{basis:"supplied-input-only", scalarValuesProcessed:bool, fileObservationsProcessed:bool,
+ selectedFilesRead:false, keyringAccessed:false, storageWritesPerformed:false,
+ projectCodeExecuted:false, sourceCustody:"not-established", nativeValidation:"not-run",
+ serviceValidation:"not-run", releaseReadiness:"unknown"}
+```
+
+The processed booleans mean any string (even empty) and any nonnull observation
+was admitted and processed. A direct caller can fabricate observations, not
+native custody. No result means stored, assigned, password-verified or ready.
+
+Expected refusals are `retryable:false` and use only these fixed messages:
+
+| Code | Message |
+| --- | --- |
+| `assessment_invalid_request` | The assessment request has an unsupported shape or value type. |
+| `assessment_limit` | The assessment request exceeds a supported interface bound. |
+| `assessment_version` | This assessment schema version is unavailable. |
+| `assessment_policy_stale` | Credential policy changed; prepare the context again. |
+| `assessment_context_invalid` | The submitted draft is not valid for assessment. |
+| `assessment_unavailable` | Credential assessment is unavailable; no credential was verified. |
+
+Policy version must first be a 1–64-byte ASCII letters/digits/`._-` token; a
+different well-shaped token is stale, not an invalid credential. Unexpected
+dependency exceptions use the engine's constant failure path, never reflective
+config/parser or arbitrary ApiError messages.
+
+The private Rust adapter admits/rebuilds closed types, validates result context,
+kind, version, field/check/aggregate invariants and the 16-KiB cap, and discards
+raw engine error messages. Only these six codes and fixed owner `busy`,
+`shutting_down`, `query_timeout` and `cleanup_unknown` survive; other errors
+become `assessment_unavailable`. Actual native context changes must eventually
+use local `assessment_context_stale` / `Assessment context changed; prepare
+again.`, not a core-supplied stale flag. No native binding is implemented here.
+Future routing must retain and recheck the exact live document, serialized draft,
+context, policy, kind and original selection/record revision after core success.
+
+There is no `credentials_assess` renderer invoke or generic method selector.
+The existing Supervisor, two slots/no queue, 10-second endpoint, single 2-second
+cleanup allowance, original-child/write/EOF/reap/join settlement, retained
+unknown and production/platform gates are unchanged. Request, serialization,
+Python/Rust and owner buffers create copies; unknown cleanup can retain them.
+No zeroization, crash/swap/OS-memory erasure, payload logging/cache/storage or
+earlier resource release is promised. Native custody/parsers, credential entry,
+vault lifecycle/backends and feature activation remain separate prerequisites.
 
 ## Runtime and UI trust boundaries
 

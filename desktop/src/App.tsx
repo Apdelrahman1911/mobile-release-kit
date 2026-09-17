@@ -8,6 +8,7 @@ import type { WorkspaceAction } from './drafts.ts';
 import { editRetainsDraft, editStartReason } from './configEdit.ts';
 import { ConfigEditController } from './configEditController.ts';
 import { GitHubSetupController } from './githubSetupController.ts';
+import { AssetSessionController } from './assetSessionController.ts';
 import { githubSetupError } from './githubSetupProtocol.ts';
 import { suggestionHints } from './preparation.ts';
 import type { ApiError, AppInfo, Catalog, DesktopApi, HelpContent, JsonValue, Page } from './types.ts';
@@ -51,12 +52,14 @@ export function App() {
   const workspaceRef = useRef(workspace);
   const editControllerRef = useRef<ConfigEditController | null>(null);
   const githubControllerRef = useRef<GitHubSetupController | null>(null);
+  const assetControllerRef = useRef<AssetSessionController | null>(null);
   // Keep the reducer's latest state synchronously visible to save admission.
   // A React render/effect delay must not let an older review authorize Apply.
   const dispatch = useCallback((action: WorkspaceAction) => {
     const next = workspaceReducer(workspaceRef.current, action);
     if (next === workspaceRef.current) return;
     workspaceRef.current = next;
+    assetControllerRef.current?.syncProject();
     setWorkspace(next);
     githubControllerRef.current?.syncProject();
     editControllerRef.current?.syncDraft();
@@ -74,6 +77,12 @@ export function App() {
   }));
   githubControllerRef.current = githubSetup;
   const githubState = useSyncExternalStore(githubSetup.subscribe, githubSetup.getSnapshot, githubSetup.getSnapshot);
+  const [assetSession] = useState(() => new AssetSessionController(() => {
+    const current = workspaceRef.current;
+    return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
+  }));
+  assetControllerRef.current = assetSession;
+  const assetState = useSyncExternalStore(assetSession.subscribe, assetSession.getSnapshot, assetSession.getSnapshot);
   const requests = useRef(0);
   const bootGeneration = useRef(0);
   const main = useRef<HTMLElement>(null);
@@ -127,6 +136,8 @@ export function App() {
   useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
   useEffect(() => () => configEdit.dispose(), [configEdit]);
   useEffect(() => () => githubSetup.dispose(), [githubSetup]);
+  useEffect(() => { if (api) void assetSession.connect(api); }, [api, assetSession]);
+  useEffect(() => () => assetSession.dispose(), [assetSession]);
 
   useEffect(() => {
     document.title = `${currentNavigation?.label ?? 'Dashboard'} · Mobile Release Kit${preview ? ' · Browser preview' : ''}`;
@@ -265,7 +276,7 @@ export function App() {
         {page === 'dashboard' && <Dashboard session={session} info={info} preview={preview} chooseDisabled={chooseDisabled} refreshReason={loading ? 'Capabilities are loading.' : refreshReason} onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="A little clarity before the next release." description="Edit a practical, schema-driven draft. The bundled core provides every field, requirement, and validation rule." />{editor()}</>}
         {page === 'environment' && <Environment info={info} preview={preview} onRetry={() => void bootstrap()} loading={loading} />}
-        {page === 'credentials' && <Credentials catalog={catalog} onHelp={setHelp} />}
+        {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} onHelp={setHelp} />}
         {page === 'metadata' && <Metadata catalog={catalog}>{editor(true)}</Metadata>}
         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} />}
         {page === 'releases' && <Releases info={info} />}

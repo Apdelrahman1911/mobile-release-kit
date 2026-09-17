@@ -37,8 +37,13 @@ from .credential_requirements import (
     ENVIRONMENT_NAMES, STAGES, Requirement, requirements,
     _apple_api_requirements, _apple_review_requirements, _google_requirements,
 )
-MAX_PRIVATE_MATERIAL_SIZE = 32 * 1024 * 1024
-SMALL_PRIVATE_MATERIAL_SIZE = 4 * 1024 * 1024
+from .credential_policy import (
+    MAX_PRIVATE_MATERIAL_SIZE, SMALL_PRIVATE_MATERIAL_SIZE,
+    credential_format_error as _shared_credential_format_error,
+    firebase_payload_matches_application as _shared_firebase_payload_matches_application,
+    material_size_limit as _shared_material_size_limit,
+)
+
 PROFILE_UUID_RE = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
     r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
@@ -391,43 +396,13 @@ def _value_state(
 
 
 def _material_size_limit(name: str) -> int:
-    if any(token in name for token in ("P8", "PROFILE", "SERVICE", "SERVICES")):
-        return SMALL_PRIVATE_MATERIAL_SIZE
-    return MAX_PRIVATE_MATERIAL_SIZE
+    """Compatibility seam; shared pure policy preserves the existing fallback."""
+    return _shared_material_size_limit(name)
 
 
 def _credential_format_error(name: str, value: str) -> str | None:
-    if name == "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_BASE64":
-        try:
-            decoded = base64.b64decode(value, validate=True)
-        except (binascii.Error, ValueError):
-            return "The commitment key must be canonical base64."
-        if len(decoded) != 32:
-            return "The commitment key must decode to exactly 32 bytes."
-    patterns = {
-        "MOBILE_RELEASE_ANDROID_KEY_ALIAS": r"[A-Za-z0-9_.-]{1,255}",
-        "MOBILE_RELEASE_ASC_KEY_ID": r"[A-Z0-9]{10}",
-        "MOBILE_RELEASE_ASC_ISSUER_ID": (
-            r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
-            r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
-        ),
-        "MOBILE_RELEASE_GOOGLE_WIF_PROVIDER": (
-            r"projects/[1-9][0-9]*/locations/global/workloadIdentityPools/"
-            r"[A-Za-z0-9_-]+/providers/[A-Za-z0-9_-]+"
-        ),
-        "MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT": (
-            r"[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9-]+\.iam\.gserviceaccount\.com"
-        ),
-        "MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION": r"[A-Za-z0-9_.-]{1,64}",
-    }
-    pattern = patterns.get(name)
-    if pattern and not re.fullmatch(pattern, value):
-        return "The configured value has an invalid public identifier format."
-    if name == "MOBILE_RELEASE_APPLE_REVIEW_CONTACT_EMAIL" and not re.fullmatch(
-        r"[^\s@]+@[^\s@]+\.[^\s@]+", value
-    ):
-        return "The configured review contact email has an invalid format."
-    return None
+    """Compatibility seam; admission remains separate from scalar-format policy."""
+    return _shared_credential_format_error(name, value)
 
 
 def credential_findings(
@@ -1704,17 +1679,9 @@ def _firebase_content_matches_application(
             payload = json.loads(content.decode("utf-8"))
         except (UnicodeDecodeError, ValueError, RecursionError):
             return False
-        if type(payload) is not dict or type(payload.get("client")) is not list:
-            return False
-        matched = False
-        for client in payload["client"]:
-            if type(client) is not dict or type(client.get("client_info")) is not dict:
-                return False
-            info = client["client_info"].get("android_client_info")
-            if type(info) is not dict or type(info.get("package_name")) is not str or not info["package_name"]:
-                return False
-            matched |= info["package_name"] == expected_identity
-        return matched
+        return _shared_firebase_payload_matches_application(
+            payload, platform=platform, expected_identity=expected_identity,
+        )
     if platform != "ios":
         return False
     import plistlib
@@ -1724,8 +1691,9 @@ def _firebase_content_matches_application(
         payload = plistlib.loads(content)
     except (AttributeError, IndexError, KeyError, TypeError, ValueError, OverflowError, RecursionError, ExpatError):
         return False
-    return (type(payload) is dict and type(payload.get("BUNDLE_ID")) is str
-            and payload["BUNDLE_ID"] == expected_identity)
+    return _shared_firebase_payload_matches_application(
+        payload, platform=platform, expected_identity=expected_identity,
+    )
 
 
 def _validate_firebase_material(

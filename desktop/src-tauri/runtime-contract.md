@@ -154,6 +154,28 @@ must first be selected/cancelled rather than abandoned by closing the event loop
 The native confirmation/picker/close behavior remains unverified until actual
 disposable-hosted shell qualification.
 
+### Staged Windows static reader (disabled)
+
+The Python original-parent reader is source-stage only; its public activation
+constant remains false pending independent ABI and six-group native qualification.
+The initial profile is native x64/ordinary local NTFS, with bounded drive or
+verbatim-drive roots, no reparse/case-sensitive ancestry, exact long-name vetoes
+and access/sharing refusal. A single captured native volume root and subsequent
+one-component `NtCreateFile` opens relative to retained original parents use
+`OBJ_DONT_REPARSE`; no full-path/file-ID reopen or weaker-sharing fallback exists.
+Share-read-only does not exclude attribute-only mutation. Metadata equality is
+not atomicity, private ownership or proof against mapped writes/ABA.
+
+The picker still retains a path, not selection-to-request handle custody. The
+existing command, SnapshotResult and original-child 10s + one 2s owner are
+unchanged. The reader has one cooperative 5s budget, not kernel-call cancellation.
+Unknown/pending native completion pins its arena/parents and nonreturningly
+fail-stops the child; termination is not an adapter CloseHandle receipt or proof
+of original Rust IO settlement. Portable methods and POSIX imports never load
+the lazy Windows bindings. Added Python leaves change the whole core ZIP binding
+on every platform. No Job Object/build owner, Save or production-runtime gate is
+activated by this source or its inert tests.
+
 ## Dependency and check boundary
 
 Direct crates and toolchain are exact-pinned; Cargo.lock records the complete

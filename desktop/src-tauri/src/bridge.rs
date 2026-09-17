@@ -1,8 +1,10 @@
 //! Fixed application services. Project roots enter the registry only through
 //! the Rust-side native picker, never through a renderer-supplied path.
-use std::{collections::BTreeMap, path::PathBuf, sync::Mutex};
+use std::{collections::BTreeMap, path::PathBuf, sync::{Mutex, atomic::{AtomicU32, Ordering}}};
 #[cfg(feature = "desktop-shell")]
-use std::{path::Component, sync::atomic::{AtomicU64, Ordering}};
+use std::sync::atomic::AtomicU64;
+#[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+use std::path::Component;
 use serde::Serialize;
 use serde_json::{json, Value};
 use crate::{edit_owner::EditOwner, edit_protocol::ConfigEditStatus, error::BridgeError, protocol::Method, runtime::{RuntimeConfig, RuntimeStatus}, supervisor::Supervisor};
@@ -16,12 +18,14 @@ pub struct AppInfo {
     pub runtime: RuntimeStatus, pub capabilities: Option<Value>,
 }
 
-struct RegisteredProject { view: Project, root: PathBuf }
+struct RegisteredProject { view: Project, root: PathBuf, identity: Option<crate::asset_source::DirectoryIdentity> }
+pub(crate) struct ProjectRoster { pub(crate) generation: u32, pub(crate) roots: Vec<crate::asset_source::RegisteredRoot> }
 
 pub struct DesktopBridge {
     pub supervisor: Supervisor,
     pub edits: EditOwner,
     projects: Mutex<BTreeMap<String, RegisteredProject>>,
+    project_generation: AtomicU32,
     #[cfg(feature = "desktop-shell")]
     sequence: AtomicU64,
 }
@@ -29,7 +33,7 @@ impl DesktopBridge {
     pub fn new(resource_dir: PathBuf) -> Self {
         let runtime = RuntimeConfig::packaged(resource_dir);
         Self {
-            supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime), projects: Mutex::new(BTreeMap::new()),
+            supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime), projects: Mutex::new(BTreeMap::new()), project_generation: AtomicU32::new(1),
             #[cfg(feature = "desktop-shell")]
             sequence: AtomicU64::new(1),
         }
@@ -84,7 +88,53 @@ impl DesktopBridge {
         let root = self.project_root(&project_id)?;
         self.edits.open(window, project_id, root)
     }
+    /// Only called while the real DocumentBinding admission lock is held. No
+    /// project method calls back into that lock. These are private native hints.
+    pub(crate) fn native_roster(&self) -> Result<ProjectRoster, crate::asset_commands::AssetError> {
+        use crate::asset_commands::{AssetError, Reason};
+        let projects = self.projects.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+        let mut roots = Vec::new(); roots.try_reserve_exact(projects.len()).map_err(|_| AssetError::new(Reason::Capacity))?;
+        for project in projects.values() {
+            roots.push(crate::asset_source::RegisteredRoot { path: project.root.clone(), identity: project.identity.ok_or_else(|| AssetError::new(Reason::Unqualified))? });
+        }
+        Ok(ProjectRoster { generation: self.project_generation.load(Ordering::SeqCst), roots })
+    }
+    pub(crate) fn native_project(&self, id: &str) -> Result<(u32, crate::asset_source::RegisteredRoot), crate::asset_commands::AssetError> {
+        use crate::asset_commands::{AssetError, Reason};
+        let projects = self.projects.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+        let project = projects.get(id).ok_or_else(AssetError::invalid)?;
+        Ok((self.project_generation.load(Ordering::SeqCst), crate::asset_source::RegisteredRoot {
+            path: project.root.clone(), identity: project.identity.ok_or_else(|| AssetError::new(Reason::Unqualified))?,
+        }))
+    }
+    pub(crate) fn registry_generation(&self) -> u32 { self.project_generation.load(Ordering::SeqCst) }
+    pub(crate) fn native_generation(&self) -> Result<u32, crate::asset_commands::AssetError> {
+        let _projects = self.projects.lock().map_err(|_| crate::asset_commands::AssetError::new(crate::asset_commands::Reason::CleanupUnknown))?;
+        Ok(self.project_generation.load(Ordering::SeqCst))
+    }
+
     #[cfg(feature = "desktop-shell")]
+    pub(crate) fn publish_checked_project(&self, proof: crate::asset_source::ProjectProbe, expected_generation: u32) -> Result<Project, crate::asset_commands::AssetError> {
+        use crate::asset_commands::{AssetError, Reason};
+        let mut projects = self.projects.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+        if self.project_generation.load(Ordering::SeqCst) != expected_generation { return Err(AssetError::new(Reason::ContextStale)); }
+        if let Some(existing) = projects.values().find(|entry| entry.root == proof.path()) {
+            if existing.identity != Some(proof.identity()) { return Err(AssetError::new(Reason::SourceChanged)); }
+            return Ok(existing.view.clone());
+        }
+        if projects.len() >= 64 { return Err(AssetError::new(Reason::Capacity)); }
+        let text = proof.path().to_str().ok_or_else(AssetError::invalid)?;
+        if text.len() > crate::asset_source::PATH_LIMIT { return Err(AssetError::invalid()); }
+        let next_generation = expected_generation.checked_add(1).ok_or_else(|| AssetError::new(Reason::CleanupUnknown))?;
+        let sequence = self.sequence.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
+            .map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+        let project = Project { id: format!("project-{sequence}"),
+            name: proof.path().file_name().and_then(|name| name.to_str()).unwrap_or(text).to_owned(), path: text.to_owned() };
+        projects.insert(project.id.clone(), RegisteredProject { view: project.clone(), root: proof.path().to_path_buf(), identity: Some(proof.identity()) });
+        self.project_generation.store(next_generation, Ordering::SeqCst);
+        Ok(project)
+    }
+    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
     pub(crate) fn register_picked_project(&self, path: PathBuf) -> Result<Project, BridgeError> {
         if self.supervisor.stopping() || self.edits.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() || self.edits.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -101,7 +151,10 @@ impl DesktopBridge {
             id: format!("project-{sequence}"),
             name: path.file_name().and_then(|name| name.to_str()).unwrap_or(text).to_owned(), path: text.to_owned(),
         };
-        projects.insert(project.id.clone(), RegisteredProject { view: project.clone(), root: path });
+        let generation = self.project_generation.load(Ordering::SeqCst).checked_add(1)
+            .ok_or_else(|| BridgeError::new("unavailable", "The project registry generation is exhausted."))?;
+        projects.insert(project.id.clone(), RegisteredProject { view: project.clone(), root: path, identity: None });
+        self.project_generation.store(generation, Ordering::SeqCst);
         Ok(project)
     }
 }

@@ -1,3 +1,5 @@
+import type { AssetSessionApi } from './assetSessionTypes.ts';
+
 // Closed passive service contracts. Python owns field policy and assurance.
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -48,6 +50,34 @@ export interface CredentialHelp extends Omit<HelpContent, 'label'> {
   alternatives: string[];
 }
 
+export type CredentialKindId = 'android-keystore' | 'android-firebase' | 'apple-p12' | 'apple-profile' | 'asc-p8' | 'ios-firebase' | 'google-wif' | 'project-read-token';
+export interface CredentialGuideField extends HelpContent {
+  id: string;
+  requirement: string;
+  alternatives: string[];
+  input: 'file' | 'secret' | 'text';
+  maxBytes: number | null;
+  suffixes: string[];
+  requiredness: 'conditional';
+}
+export interface CredentialKind {
+  id: CredentialKindId;
+  label: string;
+  platform: 'android' | 'ios' | 'project';
+  defaultLabel: string;
+  fields: CredentialGuideField[];
+  plannedChecks: string[];
+  notVerified: string[];
+}
+export interface CredentialGuide {
+  schemaVersion: 1;
+  policyVersion: 'credential-policy-v1';
+  availability: 'guide-only';
+  kinds: CredentialKind[];
+  controls: (HelpContent & { id: string })[];
+  states: { id: string; label: string; meaning: string }[];
+}
+
 export interface RequirementDescriptor {
   name: string;
   kind: string;
@@ -74,6 +104,7 @@ export interface Catalog {
   schema: JsonObject;
   fields: FieldHelp[];
   credentials: CredentialHelp[];
+  credentialGuide: CredentialGuide | null;
   metadata: MetadataRules | null;
   githubSetup: GitHubSetupHelp;
   assurance: Assurance;
@@ -324,7 +355,7 @@ export interface PrepareConfigEditRequest {
   baselineGeneration: number;
 }
 
-export interface DesktopApi {
+export interface DesktopApi extends AssetSessionApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   chooseProject(): Promise<ProjectReference | null>;

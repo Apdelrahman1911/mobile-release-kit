@@ -11,6 +11,7 @@ from ..credential_requirements import ENVIRONMENT_NAMES, requirements
 from ..metadata import (ALLOWED_SUFFIXES, ANDROID_NOTE_LIMIT, MAX_ARCHIVE_SIZE,
                         MAX_FILE_COUNT, MAX_FILE_SIZE, REQUIRED_LOCALE_TEXT, TEXT_LIMITS)
 from .contracts import ApiError, CatalogResult, CredentialHelp, RequirementDescriptor, assurance
+from ._credential_guide import credential_guide
 
 _RESOURCE_LIMIT = 256 * 1024
 
@@ -184,9 +185,18 @@ def catalog() -> CatalogResult:
     schema, fields = _resource("project.schema.json"), _resource("field-help.json")
     if not isinstance(schema, dict) or schema.get("$id") != "urn:mobile-release-kit:schema:project:1" or not isinstance(fields, list):
         raise ApiError("resource_unavailable", "The bundled core catalogue has an incompatible shape")
+    try:
+        asset_guide = credential_guide()
+    except ApiError as error:
+        if error.code != "resource_unavailable":
+            raise
+        # The additive guide may be unavailable without hiding legacy help.
+        # Its strict loader does not read any alternate resource.
+        asset_guide = None
     return {
         "schemaVersion": 1, "schema": schema, "fields": fields,
         "credentials": _credential_catalog(),
+        "credentialGuide": asset_guide,
         "githubSetup": github_setup_help(),
         "metadata": {
             "requiredLocaleText": {platform: list(names) for platform, names in REQUIRED_LOCALE_TEXT.items()},

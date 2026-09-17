@@ -43,7 +43,7 @@ struct Inner {
     fixture_next_schedule: Mutex<Option<Arc<hosted_tests::Schedule>>>,
 }
 struct Registry {
-    generation: String, window: Option<String>, document_bound: bool, document_lost: bool,
+    generation: String, loss_generation: String, window: Option<String>, document_bound: bool, document_lost: bool,
     revision: u32, exhausted: bool, stopping: bool, disabled: bool,
     active: Option<ActiveOwner>, last: Option<EditProjection>, blocked_projects: BTreeSet<String>,
 }
@@ -204,18 +204,30 @@ impl Inner {
     }
 }
 
+// A loss tombstone is never an admission/session identity. Precompute it before
+// any DocumentBinding lock exists, so actual first loss needs no RNG/allocation.
+// Preserve the closed 32-lowercase-hex status grammar even on redacted cleanup.
+fn loss_tombstone(generation: &str) -> String {
+    if generation == "00000000000000000000000000000000" { "10000000000000000000000000000000".to_owned() }
+    else { "00000000000000000000000000000000".to_owned() }
+}
+fn invalidate_generation(generation: &mut String, tombstone: &mut String, lost: &mut bool) {
+    if !*lost { std::mem::swap(generation, tombstone); *lost = true; }
+}
+
 impl EditOwner {
     pub fn new(runtime: RuntimeConfig) -> Self {
         let generated = nonce();
         let disabled = generated.is_err();
         let generation = generated.unwrap_or_else(|_| "00000000000000000000000000000000".to_owned());
+        let loss_generation = loss_tombstone(&generation);
         let (changes, _) = watch::channel(0);
         Self { inner: Arc::new(Inner { runtime, changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, feature = "development-runtime"))]
             fixture_authorized: AtomicBool::new(false),
             #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
             fixture_next_schedule: Mutex::new(None),
-            registry: Mutex::new(Registry { generation, window: None, document_bound: false, document_lost: false,
+            registry: Mutex::new(Registry { generation, loss_generation, window: None, document_bound: false, document_lost: false,
                 revision: 0, exhausted: false, stopping: false, disabled, active: None, last: None, blocked_projects: BTreeSet::new() }) }) }
     }
     pub fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
@@ -241,13 +253,13 @@ impl EditOwner {
         let owner = {
             let mut r = self.inner.lock();
             if r.window.as_deref().is_some_and(|bound| bound != window) { return; }
-            r.document_lost = true; // Never rebind a later document in this slice.
-            match nonce() { Ok(generation) => r.generation = generation, Err(_) => r.disabled = true }
-            let owner = r.active.as_ref().map(|a| a.session.id.clone());
+            let Registry { generation, loss_generation, document_lost, .. } = &mut *r;
+            invalidate_generation(generation, loss_generation, document_lost);
+            let owner = r.active.as_ref().map(|a| a.session.clone());
             self.inner.bump(&mut r);
             owner
         };
-        if let Some(id) = owner { self.inner.trigger(&id, Reason::WindowLost, Instant::now()); }
+        if let Some(owner) = owner { self.inner.trigger(&owner.id, Reason::WindowLost, Instant::now()); }
     }
 
     pub fn open(&self, window: &str, project_id: String, root: PathBuf) -> Result<ConfigEditStatus, BridgeError> {
@@ -1188,6 +1200,24 @@ mod hosted_tests;
 mod clock_tests {
     use super::{ACTIVE, FINALIZATION, REVIEW, SOFT_STOP, Reason, claim_phase, expired_phase, phase_deadline};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn first_loss_swaps_a_valid_non_authorizing_tombstone_without_rng_or_allocation() {
+        for original in ["00000000000000000000000000000000", "0123456789abcdef0123456789abcdef"] {
+            let mut generation = original.to_owned();
+            let mut tombstone = super::loss_tombstone(&generation);
+            let prepared_pointer = tombstone.as_ptr();
+            let mut lost = false;
+            super::invalidate_generation(&mut generation, &mut tombstone, &mut lost);
+            assert!(lost); assert_ne!(generation, original);
+            assert_eq!(generation.as_ptr(), prepared_pointer);
+            assert_eq!(generation.len(), 32);
+            assert!(generation.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+            super::invalidate_generation(&mut generation, &mut tombstone, &mut lost);
+            assert_eq!(generation.as_ptr(), prepared_pointer); // Never swap back.
+            assert_ne!(generation, original);
+        }
+    }
 
     #[test]
     fn review_claim_and_deadline_boundaries() {

@@ -19,7 +19,7 @@ required-features = ["desktop-shell"]
 
 [features]
 default = []
-desktop-shell = ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk"]
+desktop-shell = ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk", "dep:gtk"]
 development-runtime = []
 
 [dependencies]
@@ -35,6 +35,7 @@ rfd = { version = "=0.15.4", optional = true, default-features = false, features
 nix = { version = "=0.30.1", default-features = false, features = ["fs"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "=0.18.2", optional = true, default-features = false, features = [] }
 webkit2gtk = { version = "=2.0.2", optional = true, default-features = false, features = ["v2_20"] }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dependencies]

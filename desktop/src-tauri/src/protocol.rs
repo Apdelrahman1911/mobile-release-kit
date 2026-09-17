@@ -12,7 +12,7 @@ pub const DEPTH_LIMIT: usize = 32;
 pub const NODE_LIMIT: usize = 20_000;
 
 #[derive(Clone, Copy, Debug)]
-pub enum Method { Capabilities, Catalog, ProjectSnapshot, ValidateConfig, SuggestConfig, PreviewConfig, ProposeGithubSetup }
+pub enum Method { Capabilities, Catalog, ProjectSnapshot, ValidateConfig, SuggestConfig, PreviewConfig, ProposeGithubSetup, AssessCredentials }
 impl Method {
     pub fn name(self) -> &'static str {
         match self {
@@ -20,6 +20,7 @@ impl Method {
             Self::ProjectSnapshot => "project.snapshot", Self::ValidateConfig => "config.validate",
             Self::SuggestConfig => "config.suggest", Self::PreviewConfig => "config.preview",
             Self::ProposeGithubSetup => "github.setup.propose",
+            Self::AssessCredentials => "credentials.assess",
         }
     }
 }
@@ -182,6 +183,14 @@ mod tests {
             let bytes = encode_request("query-2", method, &json!({})).unwrap_or_default();
             assert_eq!(strict_json(&bytes).ok().and_then(|value| value.get("method").cloned()), Some(json!(name)));
         }
+    }
+    #[test]
+    fn assessment_method_has_only_the_fixed_wire_name() {
+        // Registration only; no Supervisor, renderer invoke or native route.
+        let bytes = encode_request("query-1", Method::AssessCredentials, &json!({})).unwrap_or_default();
+        assert_eq!(strict_json(&bytes).ok(), Some(json!({
+            "protocol": 1, "id": "query-1", "method": "credentials.assess", "params": {}
+        })));
     }
     #[test]
     fn rejects_duplicates_at_every_object_depth() {

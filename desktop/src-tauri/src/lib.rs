@@ -15,6 +15,11 @@ pub mod bridge;
 mod document_lifetime;
 mod edit_commands;
 mod github_commands;
+mod credential_assessment;
+mod credential_format;
+mod asset_commands;
+mod asset_source;
+mod asset_session;
 pub mod edit_protocol;
 pub mod edit_owner;
 #[cfg(feature = "desktop-shell")]

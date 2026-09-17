@@ -249,9 +249,10 @@ export function parseGitHubSetupHelp(value: unknown): GitHubSetupHelp | null {
 
 export function parseCatalogGitHubSetup(value: unknown): GitHubSetupHelp | null {
   try {
-    // The new help boundary and catalogue envelope are closed. Existing schema,
-    // field and metadata consumers keep their existing, separate contracts.
-    return keys(value, ['schemaVersion', 'schema', 'fields', 'credentials', 'metadata', 'githubSetup', 'assurance']) && value.schemaVersion === 1
+    // Admit only the original envelope or its explicit credential-guide extension.
+    // The independent guide parser cannot supply GitHub proposal authority.
+    const envelope = ['schemaVersion', 'schema', 'fields', 'credentials', 'metadata', 'githubSetup', 'assurance'];
+    return (keys(value, envelope) || keys(value, [...envelope, 'credentialGuide'])) && value.schemaVersion === 1
       ? parseGitHubSetupHelp(value.githubSetup) : null;
   } catch { return null; }
 }
