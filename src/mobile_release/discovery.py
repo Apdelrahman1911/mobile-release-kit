@@ -4,12 +4,11 @@ import os
 import re
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Iterable
+from pathlib import Path, PurePosixPath
+from typing import Any, Iterable, Mapping
 
 from .config import ReleaseConfig
 from .init_transaction import STATE_NAMES, is_state_name
-from .owned_process import OUTPUT_LIMIT, ProcessError, run_owned
 
 IGNORED_PARTS = {
     *STATE_NAMES,
@@ -23,6 +22,27 @@ IGNORED_PARTS = {
     "node_modules",
 }
 PRIVATE_PREFIXES = {("release", "private")}
+
+
+def run_owned(*args, **kwargs):
+    """Preserve the existing injectable command seam without an eager import."""
+    from .owned_process import run_owned as owned_run
+
+    return owned_run(*args, **kwargs)
+
+
+def __getattr__(name: str):
+    # Compatibility for callers inspecting/patching the former imported names.
+    # This fixed accessor is not API dispatch; passive parsers never use it.
+    if name == "OUTPUT_LIMIT":
+        from .owned_process import OUTPUT_LIMIT
+
+        return OUTPUT_LIMIT
+    if name == "ProcessError":
+        from .owned_process import ProcessError
+
+        return ProcessError
+    raise AttributeError(name)
 
 
 @dataclass(frozen=True)
@@ -65,6 +85,7 @@ def valid_observed_source(git: GitContext) -> bool:
 def _run(root: Path, argv: list[str], *, execution_source=None, cancellation=None) -> str | None:
     # Local import keeps credentials' static project-selection dependency acyclic.
     from .credentials import scrub_credential_capabilities
+    from .owned_process import OUTPUT_LIMIT as default_output_limit, ProcessError
 
     environment = scrub_credential_capabilities(os.environ)
     if argv and argv[0] == "git":
@@ -96,7 +117,7 @@ def _run(root: Path, argv: list[str], *, execution_source=None, cancellation=Non
             cwd=root,
             environ=environment,
             capture=True,
-            output_limit=OUTPUT_LIMIT,
+            output_limit=globals().get("OUTPUT_LIMIT", default_output_limit),
             timeout=10,
             execution_scope=None if execution_source is None else execution_source.new_scope(),
             cancellation=cancellation,
@@ -189,6 +210,11 @@ def _gradle_application_aliases(root: Path) -> set[str]:
 
     catalog = root / "gradle/libs.versions.toml"
     text = _read_small(catalog) if catalog.is_file() else ""
+    return parse_gradle_application_aliases(text)
+
+
+def parse_gradle_application_aliases(text: str) -> set[str]:
+    """Parse already-admitted text; no paths, tools or project code are opened."""
     if not text:
         return set()
     try:
@@ -243,12 +269,22 @@ def _applies_android_application_plugin(text: str, catalog_aliases: set[str]) ->
 def discover_android(root: Path) -> dict[str, Any] | None:
     build_files = list(_candidate_files(root, {"build.gradle", "build.gradle.kts"}))
     catalog_aliases = _gradle_application_aliases(root)
+    return parse_android_sources(
+        ((path.relative_to(root).as_posix(), _read_small(path)) for path in build_files),
+        catalog_aliases=catalog_aliases,
+    )
+
+
+def parse_android_sources(
+    build_files: Iterable[tuple[str, str]], *, catalog_aliases: set[str],
+) -> dict[str, Any] | None:
+    """Apply the existing static Android hints policy to a finite text inventory."""
     candidates: list[dict[str, Any]] = []
-    for path in build_files:
-        text = _strip_gradle_comments(_read_small(path))
+    for relative, source_text in build_files:
+        text = _strip_gradle_comments(source_text)
         if not _applies_android_application_plugin(text, catalog_aliases):
             continue
-        relative_parent = path.parent.relative_to(root)
+        relative_parent = PurePosixPath(relative).parent
         module = ":" + ":".join(relative_parent.parts) if relative_parent.parts else ":"
         app_id_match = re.search(
             r"applicationId\s*(?:=\s*)?[\"']([A-Za-z][A-Za-z0-9_.]+)[\"']", text
@@ -260,7 +296,7 @@ def discover_android(root: Path) -> dict[str, Any] | None:
         candidates.append(
             {
                 "module": module,
-                "buildFile": str(path.relative_to(root)),
+                "buildFile": relative,
                 "applicationId": app_id_match.group(1) if app_id_match else None,
                 "namespace": namespace_match.group(1) if namespace_match else None,
                 "debugApplicationIdSuffix": suffix_match.group(1) if suffix_match else None,
@@ -299,6 +335,22 @@ def discover_ios(root: Path) -> dict[str, Any] | None:
     texts: list[str] = []
     for path in _candidate_files(root, {"project.pbxproj", "project.yml"}, (".xcconfig",)):
         texts.append(_read_small(path))
+    return parse_ios_sources(
+        projects=[str(path.relative_to(root)) for path in projects],
+        workspaces=[str(path.relative_to(root)) for path in workspaces],
+        scheme_names=[path.stem for path in schemes],
+        generated_sources=[str(path.relative_to(root)) for path in project_yml],
+        texts=texts,
+    )
+
+
+def parse_ios_sources(
+    *, projects: list[str], workspaces: list[str], scheme_names: list[str],
+    generated_sources: list[str], texts: Iterable[str],
+) -> dict[str, Any] | None:
+    """Parse finite static iOS hints; never evaluate Xcode or generated projects."""
+    if not workspaces and not projects and not generated_sources:
+        return None
     merged = "\n".join(texts)
     assignments: dict[str, str] = {}
     for key, value in re.findall(
@@ -324,19 +376,19 @@ def discover_ios(root: Path) -> dict[str, Any] | None:
     bundle_ids = sorted(expanded)
 
     result: dict[str, Any] = {
-        "projects": [str(path.relative_to(root)) for path in projects],
-        "workspaces": [str(path.relative_to(root)) for path in workspaces],
-        "schemes": sorted({path.stem for path in schemes}),
+        "projects": projects,
+        "workspaces": workspaces,
+        "schemes": sorted(set(scheme_names)),
         "bundleIds": bundle_ids,
-        "generatedProjectSources": [str(path.relative_to(root)) for path in project_yml],
+        "generatedProjectSources": generated_sources,
     }
     store_ids = [value for value in bundle_ids if not value.endswith((".debug", ".dev"))]
     if len(store_ids) == 1:
         result["bundleId"] = store_ids[0]
     if len(projects) == 1:
-        result["project"] = str(projects[0].relative_to(root))
+        result["project"] = projects[0]
     if len(workspaces) == 1:
-        result["workspace"] = str(workspaces[0].relative_to(root))
+        result["workspace"] = workspaces[0]
     if len(result["schemes"]) == 1:
         result["scheme"] = result["schemes"][0]
     return result
@@ -353,11 +405,18 @@ def discover_version_source(root: Path) -> dict[str, str]:
         for path in _candidate_files(root, set(), (".properties", ".xcconfig"))
         if "version" in path.name.lower() and path not in common_paths
     )
-    for path in (*common_paths, *discovered_paths):
-        if not path.is_file() or _ignored_path(root, path):
-            continue
+    return parse_version_sources(
+        (path.relative_to(root).as_posix(), _read_small(path))
+        for path in (*common_paths, *discovered_paths)
+        if path.is_file() and not _ignored_path(root, path)
+    )
+
+
+def parse_version_sources(sources: Iterable[tuple[str, str]]) -> dict[str, str]:
+    """Suggest key names only, not an authoritative parsed release version."""
+    for relative, text in sources:
         keys = set(
-            re.findall(r"(?m)^[ \t]*([A-Z][A-Z0-9_]{0,63})[ \t]*=", _read_small(path))
+            re.findall(r"(?m)^[ \t]*([A-Z][A-Z0-9_]{0,63})[ \t]*=", text)
         )
         pairs: list[tuple[str, str]] = []
         for name_key in sorted(
@@ -379,11 +438,51 @@ def discover_version_source(root: Path) -> dict[str, str]:
         if len(pairs) == 1:
             name_key, build_key = pairs[0]
             return {
-                "versionSource": str(path.relative_to(root)),
+                "versionSource": relative,
                 "versionNameKey": name_key,
                 "versionBuildKey": build_key,
             }
     return {}
+
+
+def parse_project_sources(
+    sources: Mapping[str, str], directories: Iterable[str],
+) -> dict[str, Any]:
+    """Reuse discovery policy on a finite, caller-admitted POSIX-path inventory.
+
+    This function performs no IO. Its caller must enforce input bounds and
+    namespace admission. Its output remains unverified static suggestions.
+    """
+    common = ("release/version.properties", "config/version.xcconfig", "version.properties")
+    version_paths = [name for name in common if name in sources]
+    version_paths.extend(sorted(
+        name for name in sources if name not in common
+        and "version" in PurePosixPath(name).name.lower()
+        and name.endswith((".properties", ".xcconfig"))
+    ))
+    result: dict[str, Any] = parse_version_sources((name, sources[name]) for name in version_paths)
+    android = parse_android_sources(
+        ((name, sources[name]) for name in sorted(sources)
+         if PurePosixPath(name).name in {"build.gradle", "build.gradle.kts"}),
+        catalog_aliases=parse_gradle_application_aliases(sources.get("gradle/libs.versions.toml", "")),
+    )
+    directory_paths = [PurePosixPath(name) for name in directories]
+    ios = parse_ios_sources(
+        projects=sorted(str(path) for path in directory_paths if path.suffix == ".xcodeproj"),
+        workspaces=sorted(str(path) for path in directory_paths if path.suffix == ".xcworkspace"
+                          and not any(parent.suffix == ".xcodeproj" for parent in path.parents)),
+        scheme_names=[PurePosixPath(name).stem for name in sources if name.endswith(".xcscheme")
+                      and "xcshareddata" in PurePosixPath(name).parts],
+        generated_sources=sorted(name for name in sources if PurePosixPath(name).name == "project.yml"),
+        texts=(sources[name] for name in sorted(sources)
+               if PurePosixPath(name).name in {"project.pbxproj", "project.yml"}
+               or name.endswith(".xcconfig")),
+    )
+    if android:
+        result["android"] = android
+    if ios:
+        result["ios"] = ios
+    return result
 
 
 def discover_project(root: Path, *, include_git: bool = True, execution_source=None, cancellation=None) -> dict[str, Any]:

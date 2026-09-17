@@ -33,7 +33,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-mobile_release = ["data/apple-profile-roots.pem"]
+mobile_release = ["data/apple-profile-roots.pem", "api/data/*.json"]
 
 [tool.setuptools.data-files]
 "share/mobile-release-kit" = ["Gemfile", "Gemfile.lock"]

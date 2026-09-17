@@ -35,3 +35,9 @@ fastlane/test_output/
 *.mobileprovision
 *.env
 release/private/
+
+# Desktop dependencies and reproducible, task-owned build outputs
+desktop/node_modules/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/src-tauri/resources/runtime/
