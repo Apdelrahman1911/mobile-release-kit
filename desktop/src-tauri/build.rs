@@ -30,6 +30,8 @@ fn main() {
             "validate_config", "suggest_config", "preview_config", "propose_github_setup",
             "open_config_edit", "prepare_config_edit", "apply_config_edit",
             "close_config_edit", "config_edit_status",
+            "github_workflow_edit_open", "github_workflow_edit_prepare", "github_workflow_edit_apply",
+            "github_workflow_edit_close", "github_workflow_edit_status",
             "vault_status", "vault_open", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
         ];

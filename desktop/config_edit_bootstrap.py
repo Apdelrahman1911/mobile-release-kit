@@ -6,13 +6,15 @@ import time
 
 def main() -> int:
     started = time.monotonic()
-    if (len(sys.argv) != 2 or not sys.flags.isolated or not sys.flags.no_site
+    workflows = len(sys.argv) == 3 and sys.argv[2] == "github_workflows"
+    if ((len(sys.argv) != 2 and not workflows) or not sys.flags.isolated or not sys.flags.no_site
             or not sys.dont_write_bytecode or not os.path.isabs(sys.argv[1])
-            or sys.version_info < (3, 11) or not (sys.platform.startswith("linux") or sys.platform == "darwin")):
+            or sys.version_info < (3, 11) or not (sys.platform.startswith("linux") or sys.platform == "darwin")
+            or (workflows and sys.platform != "linux")):
         return 78
     sys.path.insert(0, sys.argv[1])
     from mobile_release._desktop_edit_engine import main as run_engine
-    return run_engine(started=started)
+    return run_engine(started=started, workflows=workflows)
 
 
 if __name__ == "__main__":

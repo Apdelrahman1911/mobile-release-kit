@@ -13,14 +13,17 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from ._desktop_edit_protocol import EditRequest, ProtocolError, REQUEST_LIMIT, parse_request
+from ._desktop_edit_protocol import EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL, REQUEST_LIMIT, parse_request
 
 if TYPE_CHECKING:
     from .cancellation import DefaultCancellation
 
 
 class EditInput:
-    def __init__(self, started: float) -> None:
+    def __init__(self, started: float, *, protocol: str = PROTOCOL) -> None:
+        if protocol not in {PROTOCOL, WORKFLOW_PROTOCOL}:
+            raise ProtocolError("Invalid fixed edit domain")
+        self.protocol = protocol
         self.pid = os.getpid()
         self.thread = threading.current_thread()
         self.started = started
@@ -129,7 +132,7 @@ class EditInput:
                 # well as newly readable OS bytes/EOF before any native effect.
                 self.active = True
                 self.guard.check()
-                request = parse_request(raw, sequence=sequence, session=session)
+                request = parse_request(raw, sequence=sequence, session=session, protocol=self.protocol)
                 self.guard.check()
                 self.frames += 1
                 self.apply_active = request.op == "apply"

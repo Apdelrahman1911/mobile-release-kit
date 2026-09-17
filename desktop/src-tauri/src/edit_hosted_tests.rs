@@ -97,34 +97,46 @@ impl BlockingGate {
     }
 }
 
-// The sole extra bootstrap selector is a private, pre-registration two-value
+// The sole extra bootstrap selector is a private, domain-specific fixed-case
 // mode. No renderer/environment method can select it. Its separate source hash
 // is admitted before this Schedule can be queued for an original Session.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum EofCase { Precommit, Postcommit }
+pub(super) enum EofCase { Precommit, Postcommit, WorkflowPrecommit, WorkflowPostcommit, WorkflowConflict }
 impl EofCase {
     pub(super) fn name(self) -> &'static str {
-        match self { Self::Precommit => "precommit-eof", Self::Postcommit => "postcommit-eof" }
+        match self { Self::Precommit | Self::WorkflowPrecommit => "precommit-eof",
+            Self::Postcommit | Self::WorkflowPostcommit => "postcommit-eof", Self::WorkflowConflict => "precommit-conflict-eof" }
+    }
+    pub(super) fn domain(self) -> EditDomain {
+        match self { Self::Precommit | Self::Postcommit => EditDomain::Configuration, _ => EditDomain::GitHubWorkflows }
     }
     fn project(self) -> &'static str {
-        match self { Self::Precommit => "project-config-precommit-eof", Self::Postcommit => "project-config-postcommit-eof" }
+        match self { Self::Precommit => "project-config-precommit-eof", Self::Postcommit => "project-config-postcommit-eof",
+            Self::WorkflowPrecommit => "project-workflow-precommit-eof", Self::WorkflowPostcommit => "project-workflow-postcommit-eof",
+            Self::WorkflowConflict => "project-workflow-precommit-conflict-eof" }
     }
     fn boundary(self) -> &'static str {
-        match self { Self::Precommit => "before-COMMITTED", Self::Postcommit => "after-durable-COMMITTED" }
+        match self { Self::Postcommit | Self::WorkflowPostcommit => "after-durable-COMMITTED", _ => "before-COMMITTED" }
     }
     fn checkpoint(self) -> &'static str {
-        match self { Self::Precommit => "publisher-entry", Self::Postcommit => "descriptor-close" }
+        match self { Self::Postcommit | Self::WorkflowPostcommit => "descriptor-close", _ => "publisher-entry" }
     }
     fn marker(self) -> &'static [u8] {
         match self {
             Self::Precommit => b"MRK_CONFIG_EOF_V1 precommit-eof boundary=before-COMMITTED\n",
             Self::Postcommit => b"MRK_CONFIG_EOF_V1 postcommit-eof boundary=after-durable-COMMITTED\n",
+            Self::WorkflowPrecommit => b"MRK_WORKFLOW_EOF_V1 precommit-eof boundary=before-COMMITTED\n",
+            Self::WorkflowPostcommit => b"MRK_WORKFLOW_EOF_V1 postcommit-eof boundary=after-durable-COMMITTED\n",
+            Self::WorkflowConflict => b"MRK_WORKFLOW_EOF_V1 precommit-conflict-eof boundary=before-COMMITTED\n",
         }
     }
     fn summary(self) -> &'static [u8] {
         match self {
             Self::Precommit => b"MRK_CONFIG_EOF_V1 precommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=1 terminal=ROLLED_BACK durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
             Self::Postcommit => b"MRK_CONFIG_EOF_V1 postcommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=descriptor-close applied=1 committed=1 rolledBack=0 terminal=COMMITTED durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+            Self::WorkflowPrecommit => b"MRK_WORKFLOW_EOF_V1 precommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=1 terminal=ROLLED_BACK durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+            Self::WorkflowPostcommit => b"MRK_WORKFLOW_EOF_V1 postcommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=descriptor-close applied=1 committed=1 rolledBack=0 terminal=COMMITTED durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+            Self::WorkflowConflict => b"MRK_WORKFLOW_EOF_V1 precommit-conflict-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=0 terminal=UNKNOWN durable=0 recovery=1 clean=0 settled=1 cancelled=1\n",
         }
     }
     fn stderr_bytes(self) -> usize { self.marker().len() + self.summary().len() }
@@ -200,10 +212,15 @@ impl Schedule {
         } else { writer.write_all(bytes).await }
     }
     pub(super) async fn before_frame(&self, frame: &ChildFrame) {
-        if let ChildFrame::Terminal(sequence, terminal) = frame {
+        let terminal = match frame {
+            ChildFrame::Terminal(sequence, terminal) => Some((*sequence, terminal.outcome())),
+            ChildFrame::WorkflowTerminal(sequence, terminal) => Some((*sequence, terminal.outcome())),
+            _ => None,
+        };
+        if let Some((sequence, outcome)) = terminal {
             if self.terminal.armed.load(Ordering::SeqCst) {
                 match self.held_terminal.lock() {
-                    Ok(mut held) if held.is_none() => *held = Some((*sequence, terminal.outcome())),
+                    Ok(mut held) if held.is_none() => *held = Some((sequence, outcome)),
                     _ => { self.failed.store(true, Ordering::SeqCst); },
                 }
                 // No registry/resource-book mutex is acquired here. This is
@@ -243,8 +260,13 @@ impl GateGuard {
     fn new(owner: &EditOwner, schedule: Arc<Schedule>) -> Self { Self { owner: owner.clone(), schedule, released: false } }
     fn release(&mut self) {
         if self.released { return; }
-        let id = self.owner.inner.lock().active.as_ref().map(|active| active.session.id.clone());
-        if let Some(id) = id { let _ = self.owner.close("main", &id); }
+        let original = self.owner.inner.lock().active.as_ref().map(|active| (active.session.id.clone(), active.session.domain));
+        if let Some((id, domain)) = original {
+            match domain {
+                EditDomain::Configuration => { let _ = self.owner.close("main", &id); },
+                EditDomain::GitHubWorkflows => { let _ = self.owner.close_workflow("main", &id); },
+            }
+        }
         self.schedule.release();
         self.released = true;
     }
@@ -287,10 +309,10 @@ async fn retain_unknown_runtime() {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Identity { device: u64, inode: u64, mode: u32, owner: u32 }
+struct Identity { device: u64, inode: u64, mode: u32, owner: u32, group: u32 }
 impl Identity {
     fn of(metadata: &fs::Metadata) -> Self {
-        Self { device: metadata.dev(), inode: metadata.ino(), mode: metadata.mode(), owner: metadata.uid() }
+        Self { device: metadata.dev(), inode: metadata.ino(), mode: metadata.mode(), owner: metadata.uid(), group: metadata.gid() }
     }
 }
 #[derive(PartialEq, Eq)]
@@ -1652,5 +1674,871 @@ fn eof_control_refuses_missing_changed_or_duplicate_records() {
         let other = if case == EofCase::Precommit { EofCase::Postcommit } else { EofCase::Precommit };
         let mut wrong_case = EofControl::default();
         assert!(!wrong_case.observe(case, other.marker()));
+    }
+}
+
+// This extension uses the original Batch/Session, stream decoder, schedules,
+// FixtureFiles and retention books above. There is no workflow supervisor or
+// alternate recovery owner. A separate ignored invocation selects source or
+// the helper's one inventory-bound ZIP before any original owner is admitted.
+#[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod workflow {
+    use super::*;
+    use crate::{asset_session::DocumentBinding, asset_source::{self, SourceBook}, bridge::{DesktopBridge, Project}};
+
+    const OWNER_SCOPE: &str = "github-workflow-owner-hosted-v1";
+    const TRANSACTION_SCOPE: &str = "github-workflow-transaction-eof-hosted-v1";
+    const DOMAIN: &str = "github_workflows";
+    const REPOSITORY: &str = "Example/mobile-release-kit";
+    const PIN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PROTECTED_CONFIG: &[u8] = b"fixed synthetic configuration; intentionally not parsed\r\n";
+    const PROTECTED_IGNORE: &[u8] = b"# fixed synthetic workflow ignore\r\n";
+    const UMASK_PROBE: &[u8] = b"fixed workflow fixture umask\n";
+    const WORKFLOW_NOT_VERIFIED: &[&str] = &["production-runtime-custody", "production-workflow-enablement", "native-gui",
+        "webview-callbacks-or-crash-hook", "parent-death", "native-stuck-wait-close", "persisted-recovery",
+        "macos-windows-workflow-writes", "credentials", "remote-github", "stores", "mobile-builds", "installers"];
+    const NAMES: [&str; 4] = ["mobile-preflight.yml", "mobile-candidate.yml", "mobile-external-testing.yml", "mobile-production-submit.yml"];
+    const IDS: [&str; 4] = ["preflight", "candidate", "external-testing", "production-submit"];
+    const WORKFLOW_IDS: [workflow_wire::WorkflowId; 4] = [workflow_wire::WorkflowId::Preflight, workflow_wire::WorkflowId::Candidate,
+        workflow_wire::WorkflowId::ExternalTesting, workflow_wire::WorkflowId::ProductionSubmit];
+    const CANONICAL: [&[u8]; 4] = [include_bytes!("../../../templates/workflows/mobile-preflight.yml"),
+        include_bytes!("../../../templates/workflows/mobile-candidate.yml"), include_bytes!("../../../templates/workflows/mobile-external-testing.yml"),
+        include_bytes!("../../../templates/workflows/mobile-production-submit.yml")];
+    const RESOURCE: &[u8] = include_bytes!("../../../src/mobile_release/api/data/github-setup-v1.json");
+    const WORKFLOW_PATH: &str = ".github/workflows/desktop-github-workflow-apply-native.yml";
+    const WORKFLOW_SOURCE: &[u8] = include_bytes!("../../../.github/workflows/desktop-github-workflow-apply-native.yml");
+    const WORKFLOW_REF: &str = "refs/heads/verify/desktop-github-workflow-apply-native";
+    const EXTRA_SOURCES: &[Source] = &[
+        Source { id:"workflowProtocol", relative:"desktop/src-tauri/src/github_workflow_edit_protocol.rs", compiled:include_bytes!("github_workflow_edit_protocol.rs") },
+        Source { id:"bridge", relative:"desktop/src-tauri/src/bridge.rs", compiled:include_bytes!("bridge.rs") },
+        Source { id:"documentBinding", relative:"desktop/src-tauri/src/asset_session.rs", compiled:include_bytes!("asset_session.rs") },
+        Source { id:"documentLifetime", relative:"desktop/src-tauri/src/document_lifetime.rs", compiled:include_bytes!("document_lifetime.rs") },
+        Source { id:"assetSource", relative:"desktop/src-tauri/src/asset_source.rs", compiled:include_bytes!("asset_source.rs") },
+        Source { id:"assetCommands", relative:"desktop/src-tauri/src/asset_commands.rs", compiled:include_bytes!("asset_commands.rs") },
+        Source { id:"supervisor", relative:"desktop/src-tauri/src/supervisor.rs", compiled:include_bytes!("supervisor.rs") },
+        Source { id:"editCommands", relative:"desktop/src-tauri/src/edit_commands.rs", compiled:include_bytes!("edit_commands.rs") },
+        Source { id:"githubCommands", relative:"desktop/src-tauri/src/github_commands.rs", compiled:include_bytes!("github_commands.rs") },
+        Source { id:"workflowEdit", relative:"src/mobile_release/github_workflow_edit.py", compiled:include_bytes!("../../../src/mobile_release/github_workflow_edit.py") },
+        Source { id:"workflowPayloads", relative:"src/mobile_release/workflow_payloads.py", compiled:include_bytes!("../../../src/mobile_release/workflow_payloads.py") },
+        Source { id:"githubSetup", relative:"src/mobile_release/api/_github_setup.py", compiled:include_bytes!("../../../src/mobile_release/api/_github_setup.py") },
+        Source { id:"githubResource", relative:"src/mobile_release/api/data/github-setup-v1.json", compiled:RESOURCE },
+        Source { id:"canonicalPreflight", relative:"templates/workflows/mobile-preflight.yml", compiled:CANONICAL[0] },
+        Source { id:"canonicalCandidate", relative:"templates/workflows/mobile-candidate.yml", compiled:CANONICAL[1] },
+        Source { id:"canonicalExternalTesting", relative:"templates/workflows/mobile-external-testing.yml", compiled:CANONICAL[2] },
+        Source { id:"canonicalProductionSubmit", relative:"templates/workflows/mobile-production-submit.yml", compiled:CANONICAL[3] },
+    ];
+    static PROBES: Mutex<Vec<SourceBook>> = Mutex::new(Vec::new());
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mode { Source, Zip }
+    impl Mode { fn name(self) -> &'static str { if self == Self::Source { "source" } else { "zip" } } }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Case { Fresh, Parent, Mixed, Preserve, Conflict, RegisteredRoot, RegistryPrepare, RegistryApply, ConfigBusy, DocumentLost }
+    impl Case {
+        fn name(self) -> &'static str {
+            match self { Self::Fresh => "create-fresh", Self::Parent => "create-under-github", Self::Mixed => "mixed-create-preserve",
+                Self::Preserve => "preserve-all", Self::Conflict => "different-refusal", Self::RegisteredRoot => "root-replaced-before-open",
+                Self::RegistryPrepare => "registration-before-prepare", Self::RegistryApply => "registration-before-apply",
+                Self::ConfigBusy => "config-blocks-workflow", Self::DocumentLost => "document-loss" }
+        }
+        fn mask(self) -> [bool; 4] {
+            match self { Self::Mixed => [true,false,true,false], Self::Preserve => [true;4], Self::Conflict => [true,false,false,false], _ => [false;4] }
+        }
+    }
+    const SOURCE_CASES: [Case; 10] = [Case::Fresh, Case::Parent, Case::Mixed, Case::Preserve, Case::Conflict,
+        Case::RegisteredRoot, Case::RegistryPrepare, Case::RegistryApply, Case::ConfigBusy, Case::DocumentLost];
+    const EOF_CASES: [EofCase; 3] = [EofCase::WorkflowPrecommit, EofCase::WorkflowPostcommit, EofCase::WorkflowConflict];
+
+    struct Admitted { inputs: Inputs, mode: Mode, eof: bool, python: PathBuf, core: PathBuf, repository: PathBuf,
+        payloads: [Vec<u8>;4], allowed: Vec<PathBuf> }
+
+    fn draft() -> Value { let mut value = document(); value["source"]["productionBranch"] = json!("production"); value }
+    fn draft_wire() -> Check<Vec<u8>> { serde_json::to_vec(&draft()).map_err(|_| Failure::PayloadMismatch) }
+
+    fn rendered() -> Check<[Vec<u8>;4]> {
+        // The actual child uses workflow_payloads.render_workflow_caller. This
+        // independent DATA expectation also requires the shipped resource's
+        // complete texts to byte-equal the four canonical caller sources.
+        let resource: Value = serde_json::from_slice(RESOURCE).map_err(|_| Failure::PayloadMismatch)?;
+        require(resource["schemaVersion"] == 1 && resource["workflows"].as_object().is_some_and(|rows| rows.len() == 4), Failure::PayloadMismatch)?;
+        let mut result: [Vec<u8>;4] = std::array::from_fn(|_| Vec::new());
+        for index in 0..4 {
+            let text = std::str::from_utf8(CANONICAL[index]).map_err(|_| Failure::PayloadMismatch)?;
+            require(resource["workflows"][IDS[index]].as_str() == Some(text)
+                && text.contains("__MOBILE_RELEASE_KIT_SHA__") && text.contains("__MOBILE_RELEASE_KIT_REPOSITORY__"), Failure::PayloadMismatch)?;
+            result[index] = text.replace("__MOBILE_RELEASE_KIT_SHA__", PIN).replace("__MOBILE_RELEASE_KIT_REPOSITORY__", REPOSITORY).into_bytes();
+            require(!result[index].is_empty() && result[index].len() <= 16 * 1024, Failure::PayloadMismatch)?;
+        }
+        Ok(result)
+    }
+    fn source_entry(path: &str) -> bool {
+        path.starts_with("mobile_release/") && path.len() <= 256 && path.is_ascii()
+            && path.split('/').all(|part| !part.is_empty() && part != "." && part != ".."
+                && part.bytes().all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c)))
+            && [".py", ".json", ".pem"].iter().any(|suffix| path.ends_with(suffix))
+    }
+    struct CoreBinding { source_tree: String, workflow_sha256: String, run_id: String, attempt: String, reference: String,
+        zip_sha256: String, inventory_sha256: String }
+    fn bind_core(repository: &Path, task: &Path, sha: &str) -> Check<CoreBinding> {
+        let metadata = read_regular(&task.join("metadata.json"), 2 * 1024 * 1024)?;
+        let metadata: Value = serde_json::from_slice(&metadata.bytes).map_err(|_| Failure::SourceBindingMismatch)?;
+        require(metadata.as_object().is_some_and(|fields| fields.len() == 8)
+            && metadata["sourceSha"].as_str() == Some(sha), Failure::SourceBindingMismatch)?;
+        let tree = metadata["sourceTree"].as_str().ok_or(Failure::SourceBindingMismatch)?;
+        let run_id = environment("GITHUB_RUN_ID")?; let attempt = environment("GITHUB_RUN_ATTEMPT")?;
+        let reference = environment("GITHUB_REF")?;
+        require(tree.len() == 40 && tree.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+            && tree != "0".repeat(40) && reference == WORKFLOW_REF
+            && [&run_id, &attempt].iter().all(|value| !value.is_empty() && value.len() <= 20
+                && !value.starts_with('0') && value.bytes().all(|c| c.is_ascii_digit()))
+            && metadata["runId"].as_str() == Some(run_id.as_str()) && metadata["attempt"].as_str() == Some(attempt.as_str())
+            && metadata["ref"].as_str() == Some(reference.as_str()), Failure::SourceBindingMismatch)?;
+        let workflow_sha256 = hash(WORKFLOW_SOURCE);
+        require(hash(&read_regular(&repository.join(WORKFLOW_PATH), 2 * 1024 * 1024)?.bytes) == workflow_sha256
+            && metadata["workflowSha256"].as_str() == Some(workflow_sha256.as_str()), Failure::SourceBindingMismatch)?;
+        let rows = metadata["coreFiles"].as_array().ok_or(Failure::SourceBindingMismatch)?;
+        require(!rows.is_empty() && rows.len() <= 2048, Failure::SourceBindingMismatch)?;
+        let mut previous = ""; let mut total = 0usize;
+        for row in rows {
+            let path = row["path"].as_str().ok_or(Failure::SourceBindingMismatch)?;
+            require(row.as_object().is_some_and(|row| row.len() == 3) && source_entry(path) && path > previous, Failure::SourceBindingMismatch)?;
+            let file = read_regular(&repository.join("src").join(path), 8 * 1024 * 1024)?;
+            total = total.checked_add(file.bytes.len()).ok_or(Failure::SourceBindingMismatch)?;
+            require(total <= 32 * 1024 * 1024 && row["size"].as_u64() == Some(file.bytes.len() as u64)
+                && row["sha256"].as_str() == Some(hash(&file.bytes).as_str()), Failure::SourceBindingMismatch)?;
+            previous = path;
+        }
+        let zip = read_regular(&task.join("core.zip"), 32 * 1024 * 1024)?;
+        let zip_hash = hash(&zip.bytes);
+        require(metadata["coreZipSha256"].as_str() == Some(zip_hash.as_str()), Failure::SourceBindingMismatch)?;
+        // ZIP content construction/inventory is the reviewed helper's original
+        // DATA operation. No ZIP parsing/import/extraction occurs in this fixture.
+        // The reviewed helper authenticates sourceTree through its original Git
+        // DATA calls. This fixture binds that exact metadata, not a second Git
+        // process or a claim that a hash alone authenticates the checkout.
+        Ok(CoreBinding { source_tree:tree.to_owned(), workflow_sha256, run_id, attempt, reference, zip_sha256:zip_hash,
+            inventory_sha256:hash(&serde_json::to_vec(rows).map_err(|_| Failure::SourceBindingMismatch)?) })
+    }
+    fn write_mask_probe(root: &Path) -> Check<()> {
+        FIXTURE_FILES.admit()?;
+        let path = root.join("umask-check");
+        let mut original = fs::OpenOptions::new().create_new(true).write(true).mode(0o644).open(&path).map_err(|_| Failure::FixtureIo)?;
+        FIXTURE_FILES.acquired();
+        let wrote = original.write_all(UMASK_PROBE);
+        FIXTURE_FILES.close_original(original)?;
+        require(wrote.is_ok(), Failure::FixtureIo)?;
+        let observed = read_regular(&path, 128)?;
+        require(observed.bytes == UMASK_PROBE && observed.identity.mode & 0o7777 == 0o600, Failure::HostedGuardRefused)
+    }
+    impl Admitted {
+        fn admit(eof: bool) -> Check<Self> {
+            FIXTURE_FILES.admit()?;
+            require(environment("MRK_DESKTOP_WORKFLOW_HOSTED_CHECKS")? == "github-workflows-v1"
+                && environment("GITHUB_ACTIONS")? == "true" && environment("RUNNER_ENVIRONMENT")? == "github-hosted"
+                && environment("RUNNER_OS")? == "Linux" && environment("RUNNER_ARCH")? == "X64"
+                && crate::runtime::COMPILED_TARGET == "x86_64-unknown-linux-gnu"
+                && rustix::process::getuid().as_raw() != 0
+                && rustix::process::getuid() == rustix::process::geteuid(), Failure::HostedGuardRefused)?;
+            let mode = match environment("MRK_DESKTOP_WORKFLOW_INPUT")?.as_str() {
+                "source" => Mode::Source, "zip" if !eof => Mode::Zip, _ => return Err(Failure::HostedGuardRefused),
+            };
+            let temporary = canonical_input("RUNNER_TEMP", false)?;
+            let root = canonical_input("MRK_DESKTOP_EDIT_TEST_ROOT", true)?;
+            let task = root.parent().ok_or(Failure::HostedGuardRefused)?;
+            let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).canonicalize().map_err(|_| Failure::HostedGuardRefused)?;
+            let repository = manifest.parent().and_then(Path::parent).ok_or(Failure::HostedGuardRefused)?.to_path_buf();
+            let name = if eof { "workflow-transaction-eof" } else if mode == Mode::Source { "workflow-owner-source" } else { "workflow-owner-zip" };
+            require(root.file_name().and_then(|name| name.to_str()) == Some(name) && task != temporary && task.starts_with(&temporary)
+                && std::env::current_dir().map_err(|_| Failure::HostedGuardRefused)? == manifest
+                && !root.starts_with(&repository) && !repository.starts_with(&root), Failure::HostedGuardRefused)?;
+            let metadata = fs::symlink_metadata(&root).map_err(|_| Failure::HostedGuardRefused)?;
+            require(metadata.is_dir() && metadata.mode() & 0o7777 == 0o700 && metadata.uid() == rustix::process::geteuid().as_raw()
+                && metadata.gid() == rustix::process::getegid().as_raw()
+                && fs::read_dir(&root).map_err(|_| Failure::HostedGuardRefused)?.next().is_none(), Failure::HostedGuardRefused)?;
+            let python = canonical_input("MRK_DESKTOP_DEV_PYTHON", true)?;
+            let core = canonical_input("MRK_DESKTOP_DEV_CORE", true)?;
+            require(core == if mode == Mode::Source { repository.join("src") } else { task.join("core.zip") }
+                && !python.starts_with(task) && !python.starts_with(&repository), Failure::HostedGuardRefused)?;
+            let sha = environment("GITHUB_SHA")?;
+            require(sha.len() == 40 && sha.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                && sha != "0".repeat(40) && environment("MRK_DESKTOP_EDIT_SOURCE_SHA")? == sha
+                && option_env!("GITHUB_SHA") == Some(sha.as_str()), Failure::SourceBindingMismatch)?;
+            let mut source_hashes = serde_json::Map::new();
+            for item in SOURCES.iter().chain(EXTRA_SOURCES).chain(if eof { std::slice::from_ref(&EOF_SOURCE) } else { &[] }) {
+                let bytes = read_regular(&repository.join(item.relative), 2 * 1024 * 1024)?.bytes;
+                let expected = hash(item.compiled);
+                require(hash(&bytes) == expected && source_hashes.insert(item.id.to_owned(), json!(expected)).is_none(), Failure::SourceBindingMismatch)?;
+            }
+            let core_binding = bind_core(&repository, task, &sha)?;
+            let payloads = rendered()?;
+            let mut payload_hashes = serde_json::Map::new();
+            for index in 0..4 { payload_hashes.insert(IDS[index].into(), json!(hash(&payloads[index]))); }
+            let bindings = json!({"sourceSha":sha,"sourceTree":core_binding.source_tree,"workflowSha256":core_binding.workflow_sha256,
+                "runId":core_binding.run_id,"attempt":core_binding.attempt,"ref":core_binding.reference,
+                "domain":DOMAIN,"host":"linux","target":crate::runtime::COMPILED_TARGET,
+                "runtimeMode":"trusted-development-only","runtimeInput":mode.name(),
+                "pythonSha256":hash(&read_regular(&python,64*1024*1024)?.bytes),"coreZipSha256":core_binding.zip_sha256,"coreInventorySha256":core_binding.inventory_sha256,
+                "sourceHashes":source_hashes,"payloadHashes":{"draft":hash(&draft_wire()?),"workflows":payload_hashes,
+                    "protectedConfig":hash(PROTECTED_CONFIG),"protectedIgnore":hash(PROTECTED_IGNORE),"unrelated":hash(UNRELATED),"umaskProbe":hash(UMASK_PROBE)},
+                "templateResourceSha256":hash(RESOURCE),"toolingRepository":REPOSITORY,"toolingSha":PIN,
+                "inheritedFileMaskObserved":true,"requestedCreateMode":420,"observedCreateMode":384,"newDirectoryMode":493,
+                "documentEvidence":"controlled-original-lifetime-not-gui-callbacks"});
+            let allowed = if eof { EOF_CASES.iter().map(|case| root.join(case.name())).collect() }
+                else if mode == Mode::Zip { vec![root.join(Case::Fresh.name())] }
+                else { SOURCE_CASES.iter().map(|case| root.join(case.name()))
+                    .chain([root.join("registration-prepare-extra"),root.join("registration-apply-extra")]).collect() };
+            write_mask_probe(&root)?;
+            Ok(Self { inputs:Inputs { root, identity:Identity::of(&metadata), bindings }, mode, eof, python, core, repository, payloads, allowed })
+        }
+        fn permit(&self, owner: &EditOwner) -> Check<()> {
+            self.inputs.same_root()?;
+            require(owner.can_exit() && !owner.disabled() && !owner.inner.hosted_qualified(EditDomain::GitHubWorkflows), Failure::HostedGuardRefused)?;
+            let mut slot = owner.inner.fixture_workflow.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            require(slot.is_none(), Failure::HostedGuardRefused)?;
+            *slot = Some(Arc::new(WorkflowFixturePermit { owner:Arc::downgrade(&owner.inner), roots:self.allowed.clone(),
+                python:self.python.clone(), core:self.core.clone(), bootstrap:self.repository.join("desktop/config_edit_bootstrap.py"),
+                cwd:self.repository.join("desktop"), binding_sha256:hash(&serde_json::to_vec(&self.inputs.bindings).map_err(|_| Failure::SourceBindingMismatch)?),
+                eof:self.eof }));
+            Ok(())
+        }
+    }
+
+    fn probes_settled() -> bool { PROBES.lock().is_ok_and(|books| books.iter().all(SourceBook::settled)) }
+    struct Original { batch: Batch, bridge: Arc<DesktopBridge>, document: DocumentBinding }
+    impl Original {
+        fn new(input: &Admitted) -> Check<Self> {
+            let bridge = Arc::new(DesktopBridge::new(input.inputs.root.clone()));
+            let owner = bridge.edits.clone();
+            {
+                let mut retained = RETAINED.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+                require(retained.is_none(), Failure::OriginalCustodyUnknown)?;
+                *retained = Some(Retention { _owner:owner.clone(), originals:Vec::new() });
+            }
+            input.permit(&owner)?;
+            let document = DocumentBinding::new(bridge.clone());
+            // Controlled integration observations, explicitly NOT callbacks or
+            // evidence that a real webview/crash hook exists in this headless lane.
+            require(document.navigation(true), Failure::NativeCommandRejected)?;
+            document.observe(|life| life.started(true)); document.hook_installed(); document.observe(|life| life.finished(true));
+            require(owner.workflow_status().is_ok_and(|s| s.capability.available), Failure::NativeCommandRejected)?;
+            Ok(Self { batch:Batch { owner, originals:Vec::new(), missing_original:false, cases:Vec::new() }, bridge, document })
+        }
+        fn register(&self, root: &Path) -> Check<Project> {
+            require(probes_settled() && FIXTURE_FILES.all_settled(), Failure::OriginalCustodyUnknown)?;
+            let generation = self.bridge.native_generation().map_err(|_| Failure::NativeCommandRejected)?;
+            let (proof, settled) = {
+                let mut originals = PROBES.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+                require(originals.len() < 12, Failure::OriginalCustodyUnknown)?;
+                // Retain BEFORE the original probe can acquire anything. This
+                // fixture-only retention mutex is not the document/registry
+                // lock. Even an unwind leaves the same original book here.
+                originals.push(SourceBook::new());
+                let book = originals.last_mut().ok_or(Failure::OriginalCustodyUnknown)?;
+                let proof = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                    asset_source::probe_project(book, root.to_path_buf(), &[], &mut || false)))
+                    .map_err(|_| Failure::OriginalCustodyUnknown)?;
+                (proof, book.settled())
+            };
+            require(settled, Failure::OriginalCustodyUnknown)?;
+            let proof = proof.map_err(|_| Failure::NativeCommandRejected)?;
+            let project = self.document.workflow_fixture_publish(proof, generation).map_err(|_| Failure::NativeCommandRejected)?;
+            let (_, registered) = self.bridge.native_project(&project.id).map_err(|_| Failure::NativeCommandRejected)?;
+            let actual = fs::symlink_metadata(root).map_err(|_| Failure::FixtureIo)?;
+            let identity = registered.identity.workflow_identity();
+            require(registered.path == root && identity.device == actual.dev().to_string() && identity.inode == actual.ino().to_string()
+                && identity.mode == actual.mode() && identity.uid == actual.uid() && identity.gid == actual.gid(), Failure::PayloadMismatch)?;
+            Ok(project)
+        }
+        fn retain_open(&mut self) -> Check<Arc<Session>> {
+            let original = {
+                let registry = self.batch.owner.inner.lock();
+                if registry.last.as_ref().is_some_and(|last| !self.batch.originals.iter().any(|owner| owner.id == last.session_id)) {
+                    self.batch.missing_original = true;
+                }
+                registry.active.as_ref().map(|active| active.session.clone())
+            };
+            let original = original.ok_or_else(|| { self.batch.missing_original = true; Failure::OriginalCustodyUnknown })?;
+            self.batch.originals.push(original.clone());
+            RETAINED.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.as_mut().ok_or(Failure::OriginalCustodyUnknown)?.originals.push(original.clone());
+            Ok(original)
+        }
+        fn open(&mut self, project: &Project) -> Check<Arc<Session>> {
+            require(self.settled() && !self.batch.owner.disabled(), Failure::OriginalCustodyUnknown)?;
+            let result = self.bridge.open_workflow_edit(&self.document, "main", project.id.clone());
+            let original = self.retain_open()?; // Before even inspecting an error reply.
+            let status = result.map_err(|_| Failure::NativeCommandRejected)?;
+            require(select(&status, &original.id)?.phase == Phase::Opening && original.domain == EditDomain::GitHubWorkflows, Failure::UnexpectedStatus)?;
+            Ok(original)
+        }
+        fn settled(&self) -> bool {
+            FIXTURE_FILES.all_settled() && probes_settled() && !self.batch.missing_original && self.batch.owner.can_exit()
+                && self.batch.originals.iter().all(|original| match original.fixture_schedule.eof_case() {
+                    Some(case) => original_eof_facts(original,case).is_ok(), None => original_facts(original).is_ok(),
+                })
+        }
+        async fn stop(&self) {
+            let current = self.batch.owner.inner.lock().active.as_ref().map(|active| (active.session.id.clone(),active.session.domain));
+            if let Some((id, domain)) = current {
+                if domain == EditDomain::GitHubWorkflows {
+                    let _ = self.batch.owner.close_workflow("main",&id);
+                    let _ = observed_workflow(&self.batch.owner,&id,Phase::Final,false).await;
+                } else { self.batch.stop_original().await; }
+            }
+        }
+    }
+    fn select(status: &WorkflowEditStatus, id: &str) -> Check<workflow_wire::Projection> {
+        require(status.domain == DOMAIN, Failure::UnexpectedStatus)?;
+        status.active.as_ref().filter(|p| p.session_id == id).or_else(|| status.last_terminal.as_ref().filter(|p| p.session_id == id))
+            .cloned().ok_or(Failure::UnexpectedStatus)
+    }
+    async fn observed_workflow(owner: &EditOwner, id: &str, desired: Phase, expected_effect_unknown: bool) -> Check<workflow_wire::Projection> {
+        let end = Instant::now() + OBSERVATION;
+        let mut revisions = owner.subscribe();
+        loop {
+            let status = owner.workflow_status().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            let current = select(&status,id)?;
+            if !expected_effect_unknown {
+                require(!owner.disabled() && current.phase != Phase::Unknown && current.native_finality != NativeFinality::Unknown
+                    && !current.late_settled, Failure::OriginalCustodyUnknown)?;
+            }
+            if current.phase == desired && (!expected_effect_unknown || status.active.is_none()) { return Ok(current); }
+            require(current.phase != Phase::Final, Failure::UnexpectedStatus)?;
+            tokio::select! {
+                result = revisions.changed() => { result.map_err(|_| Failure::UnexpectedStatus)?; },
+                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(end)) => return Err(Failure::ObservationTimeout),
+            }
+        }
+    }
+
+    #[derive(PartialEq, Eq)]
+    struct Snapshot { files: std::collections::BTreeMap<String,OriginalFile>, directories: std::collections::BTreeMap<String,Identity> }
+    fn mkdir(path: &Path) -> Check<()> {
+        FIXTURE_FILES.admit()?;
+        fs::DirBuilder::new().mode(0o700).create(path).map_err(|_| Failure::FixtureIo)
+    }
+    fn snapshot(root: &Path) -> Check<Snapshot> {
+        // Finite synthetic DATA tree only, not journal discovery or recovery.
+        // A journal/nonregular/unknown object refuses this observation outright.
+        let mut files = std::collections::BTreeMap::new();
+        let mut directories = std::collections::BTreeMap::new();
+        let mut pending = vec![String::new()];
+        let leaves: Vec<String> = [".gitignore", "unrelated.txt", "release/mobile-release.json", ".github/other.txt", ".github/workflows/unrelated.txt"]
+            .into_iter().map(str::to_owned).chain(NAMES.iter().map(|name| format!(".github/workflows/{name}"))).collect();
+        while let Some(relative) = pending.pop() {
+            FIXTURE_FILES.admit()?;
+            let path = root.join(&relative);
+            let metadata = fs::symlink_metadata(&path).map_err(|_| Failure::FixtureIo)?;
+            require(metadata.is_dir() && directories.len() < 4, Failure::PayloadMismatch)?;
+            directories.insert(relative.clone(), Identity::of(&metadata));
+            let mut count = 0;
+            for entry in fs::read_dir(path).map_err(|_| Failure::FixtureIo)? {
+                count += 1; require(count <= 12, Failure::PayloadMismatch)?;
+                let entry = entry.map_err(|_| Failure::FixtureIo)?;
+                let name = entry.file_name().into_string().map_err(|_| Failure::PayloadMismatch)?;
+                let child = if relative.is_empty() { name } else { format!("{relative}/{name}") };
+                let stat = fs::symlink_metadata(root.join(&child)).map_err(|_| Failure::FixtureIo)?;
+                if stat.is_dir() {
+                    require(["release", ".github", ".github/workflows"].contains(&child.as_str()), Failure::PayloadMismatch)?;
+                    pending.push(child);
+                } else {
+                    require(leaves.contains(&child) && files.len() < 9, Failure::PayloadMismatch)?;
+                    let read = read_regular(&root.join(&child), 1024 * 1024)?;
+                    require(files.insert(child,read).is_none(), Failure::PayloadMismatch)?;
+                }
+            }
+        }
+        Ok(Snapshot { files, directories })
+    }
+    fn seed(input: &Admitted, case: Case) -> Check<PathBuf> {
+        input.inputs.same_root()?;
+        let root = input.inputs.root.join(case.name());
+        mkdir(&root)?;
+        write_new(&root.join(".gitignore"),PROTECTED_IGNORE,0o600)?;
+        write_new(&root.join("unrelated.txt"),UNRELATED,0o600)?;
+        if case != Case::Fresh {
+            mkdir(&root.join("release"))?;
+            let config = if case == Case::ConfigBusy { noop_bytes()? } else { PROTECTED_CONFIG.to_vec() };
+            write_new(&root.join("release/mobile-release.json"),&config,0o640)?;
+        }
+        if matches!(case, Case::Parent | Case::Mixed | Case::Preserve | Case::Conflict) {
+            mkdir(&root.join(".github"))?;
+            write_new(&root.join(".github/other.txt"),UNRELATED,0o600)?;
+        }
+        if matches!(case, Case::Mixed | Case::Preserve | Case::Conflict) {
+            mkdir(&root.join(".github/workflows"))?;
+            write_new(&root.join(".github/workflows/unrelated.txt"),UNRELATED,0o600)?;
+        }
+        for (index,preserve) in case.mask().into_iter().enumerate() {
+            if preserve {
+                let mut bytes = input.payloads[index].clone();
+                if case == Case::Conflict { bytes.push(b'\n'); }
+                write_new(&root.join(".github/workflows").join(NAMES[index]),&bytes,0o640)?;
+            }
+        }
+        Ok(root)
+    }
+    fn observed_roster(input: &Admitted, before: &Snapshot, checkout: &workflow_wire::Checkout) -> Check<()> {
+        require(checkout.observed.len() == 4, Failure::UnexpectedOutcome)?;
+        for index in 0..4 {
+            let path = format!(".github/workflows/{}",NAMES[index]);
+            let expected = match before.files.get(&path) {
+                Some(file) => workflow_wire::ObservedFile::Present { id:WORKFLOW_IDS[index], byte_length:file.bytes.len() as u32, sha256:hash(&file.bytes) },
+                None => workflow_wire::ObservedFile::Absent { id:WORKFLOW_IDS[index] },
+            };
+            require(checkout.observed[index] == expected && input.payloads[index].len() <= 16 * 1024, Failure::UnexpectedOutcome)?;
+        }
+        Ok(())
+    }
+    fn prepare_args(id: &str, revision: &str) -> PrepareWorkflowEdit {
+        PrepareWorkflowEdit { session_id:id.to_owned(),revision:revision.to_owned(),draft:draft(),tooling_repository:REPOSITORY.into(),
+            tooling_sha:PIN.into(),draft_revision:1,baseline_generation:0 }
+    }
+    async fn prepare(original: &Original, id: &str, checkout: &workflow_wire::Checkout) -> Check<workflow_wire::Prepared> {
+        let reply = original.bridge.prepare_workflow_edit(&original.document,"main",prepare_args(id,&checkout.revision))
+            .map_err(|_| Failure::NativeCommandRejected)?;
+        require(select(&reply,id)?.phase == Phase::Preparing, Failure::UnexpectedStatus)?;
+        observed_workflow(&original.batch.owner,id,Phase::Reviewing,false).await?.prepared.ok_or(Failure::UnexpectedOutcome)
+    }
+    fn verify_plan(input: &Admitted, before: &Snapshot, checkout: &workflow_wire::Checkout, plan: &workflow_wire::Prepared) -> Check<Vec<String>> {
+        require(plan.revision == checkout.revision && plan.draft_revision == 1 && plan.baseline_generation == 0
+            && plan.view.matches_observed(&checkout.observed) && plan.view.files.len() == 4
+            && plan.view.template_set.core_version == crate::runtime::CORE_VERSION && plan.view.template_set.resource_version == 1
+            && plan.view.template_set.resource_sha256 == hash(RESOURCE)
+            && plan.view.tooling.repository == REPOSITORY && plan.view.tooling.sha == PIN && plan.view.tooling.state == "format-only"
+            && plan.view.tooling.schema_reference == format!("https://raw.githubusercontent.com/{REPOSITORY}/{PIN}/schemas/project.schema.json"), Failure::UnexpectedOutcome)?;
+        for index in 0..4 {
+            let file = &plan.view.files[index]; let path = format!(".github/workflows/{}",NAMES[index]);
+            let preserve = before.files.contains_key(&path);
+            require(file.id == WORKFLOW_IDS[index] && file.path == path
+                && file.action == if preserve { workflow_wire::Action::Preserve } else { workflow_wire::Action::Create }
+                && file.generated.content.as_bytes() == input.payloads[index] && file.generated.byte_length as usize == input.payloads[index].len()
+                && file.generated.sha256 == hash(&input.payloads[index]), Failure::PayloadMismatch)?;
+        }
+        let directories: Vec<String> = [".github", ".github/workflows"].into_iter().filter(|name| !before.directories.contains_key(*name)).map(str::to_owned).collect();
+        require(plan.view.create_directories == directories, Failure::UnexpectedOutcome)?;
+        Ok(directories)
+    }
+    fn installed(input: &Admitted, root: &Path, before: &Snapshot, directories: &[String]) -> Check<()> {
+        let after = snapshot(root)?;
+        require(before.files.iter().all(|(path,old)| after.files.get(path) == Some(old))
+            && before.directories.iter().all(|(path,old)| after.directories.get(path) == Some(old)), Failure::PayloadMismatch)?;
+        for index in 0..4 {
+            let path = format!(".github/workflows/{}",NAMES[index]);
+            let file = after.files.get(&path).ok_or(Failure::PayloadMismatch)?;
+            require(file.bytes == input.payloads[index], Failure::PayloadMismatch)?;
+            if !before.files.contains_key(&path) {
+                require(file.identity.mode & 0o7777 == 0o600 && file.identity.owner == rustix::process::geteuid().as_raw()
+                    && file.identity.group == rustix::process::getegid().as_raw(), Failure::PayloadMismatch)?;
+            }
+        }
+        for name in directories {
+            require(after.directories.get(name).is_some_and(|identity| identity.mode & 0o7777 == 0o755), Failure::PayloadMismatch)?;
+        }
+        let creates = NAMES.iter().filter(|name| !before.files.contains_key(&format!(".github/workflows/{name}"))).count();
+        require(after.files.len() == before.files.len() + creates && after.directories.len() == before.directories.len() + directories.len(), Failure::PayloadMismatch)
+    }
+    fn terminal_data(name: &str, original: &Session, terminal: &workflow_wire::Projection, observations: Value, eof: Option<EofCase>) -> Check<Value> {
+        let facts = if let Some(case) = eof { original_eof_facts(original,case)? } else { original_facts(original)? };
+        let mut value = serde_json::to_value(facts).map_err(|_| Failure::ReceiptIo)?;
+        value["name"] = json!(name); value["domain"] = json!(DOMAIN);
+        value["nativePhase"] = json!(terminal.phase); value["nativeFinality"] = json!(terminal.native_finality);
+        value["nativeReason"] = json!(terminal.native_reason); value["applySubmitted"] = json!(terminal.apply_submitted);
+        value["lateSettled"] = json!(terminal.late_settled); value["outcome"] = json!(terminal.core_outcome);
+        value["terminalSeq"] = json!(original.fixture_schedule.sequence());
+        value["registeredByOriginalProbe"] = json!(true); value["sourceProbesSettled"] = json!(probes_settled());
+        value["observations"] = observations;
+        Ok(value)
+    }
+    fn settled_terminal(owner: &EditOwner, terminal: &workflow_wire::Projection) -> Check<()> {
+        require(terminal.phase == Phase::Final && terminal.native_finality == NativeFinality::Settled
+            && !terminal.late_settled && owner.can_exit() && !owner.disabled(), Failure::OriginalCustodyUnknown)
+    }
+    fn cancelled(terminal: &workflow_wire::Projection, native: Reason) -> Check<()> {
+        let core = terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        require(!terminal.apply_submitted && terminal.native_reason == native && core.effect == Effect::NotStarted
+            && core.journal == Journal::NotCreated && core.resources == ResourceState::Settled
+            && matches!(core.reason, CoreReason::Cancelled | CoreReason::None), Failure::UnexpectedOutcome)
+    }
+    async fn config_busy(original: &mut Original, root: &Path, project: &Project) -> Check<()> {
+        let before = snapshot(root)?;
+        let previous = original.batch.owner.workflow_status().map_err(|_| Failure::UnexpectedStatus)?.last_terminal.ok_or(Failure::UnexpectedStatus)?;
+        original.batch.owner.inner.fixture_authorized.store(true,Ordering::SeqCst);
+        let reply = original.bridge.open_config_edit("main",project.id.clone());
+        let session = original.retain_open()?;
+        require(projection(&reply.map_err(|_| Failure::NativeCommandRejected)?,&session.id)?.phase == Phase::Opening, Failure::UnexpectedStatus)?;
+        observed(&original.batch.owner,&session.id,Phase::Editing).await?;
+        let own = original.batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+        let other = original.batch.owner.workflow_status().map_err(|_| Failure::UnexpectedStatus)?;
+        require(other.active.is_none() && other.capability.reason == EditAvailability::OtherEditActive
+            && other.last_terminal.as_ref().is_some_and(|last| last.session_id == previous.session_id)
+            && own.status_revision == other.status_revision
+            && original.bridge.open_workflow_edit(&original.document,"main",project.id.clone()).is_err_and(|error| error.code == "busy"), Failure::UnexpectedStatus)?;
+        original.batch.owner.close("main",&session.id).map_err(|_| Failure::NativeCommandRejected)?;
+        let terminal = observed(&original.batch.owner,&session.id,Phase::Final).await?;
+        let facts = original_facts(&session)?;
+        let core = terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        require((facts.request_frames,facts.response_frames) == (1,2) && session.fixture_schedule.sequence() == Some(0)
+            && core.effect == Effect::NotStarted && core.journal == Journal::NotCreated && core.resources == ResourceState::Settled
+            && matches!(core.reason,CoreReason::Cancelled | CoreReason::None) && terminal.native_reason == Reason::Discarded
+            && original.batch.owner.workflow_status().is_ok_and(|status| status.last_terminal.is_none())
+            && snapshot(root)? == before && original.settled(), Failure::UnexpectedOutcome)?;
+        original.batch.owner.inner.fixture_authorized.store(false,Ordering::SeqCst);
+        let mut evidence = serde_json::to_value(facts).map_err(|_| Failure::ReceiptIo)?;
+        evidence["name"] = json!(Case::ConfigBusy.name()); evidence["domain"] = json!("configuration");
+        evidence["nativePhase"] = json!(terminal.phase); evidence["nativeFinality"] = json!(terminal.native_finality);
+        evidence["nativeReason"] = json!(terminal.native_reason); evidence["applySubmitted"] = json!(false);
+        evidence["lateSettled"] = json!(terminal.late_settled); evidence["outcome"] = json!(core);
+        evidence["terminalSeq"] = json!(0); evidence["registeredByOriginalProbe"] = json!(true); evidence["sourceProbesSettled"] = json!(true);
+        evidence["observations"] = json!({"oppositeDomainRefused":true,"sharedStatusRevision":true,"sharedLastTerminalReplaced":true,
+            "configurationFilesUnchanged":true,"workflowPermitStillSeparate":true});
+        original.batch.cases.push(evidence);
+        Ok(())
+    }
+    async fn exercise_owner(original: &mut Original, input: &Admitted, case: Case) -> Check<()> {
+        require(original.settled() && !original.batch.owner.disabled(), Failure::OriginalCustodyUnknown)?;
+        let root = seed(input,case)?;
+        let project = original.register(&root)?;
+        if case == Case::ConfigBusy { return config_busy(original,&root,&project).await; }
+        let registered = original.bridge.native_project(&project.id).map_err(|_| Failure::UnexpectedStatus)?;
+        if case == Case::RegisteredRoot {
+            // Replacement happens before original Open, not through a forged
+            // identity. Retain the old synthetic directory for VM disposal.
+            fs::rename(&root,input.inputs.root.join("root-before-open-retired")).map_err(|_| Failure::FixtureIo)?;
+            mkdir(&root)?; write_new(&root.join("unrelated.txt"),UNRELATED,0o600)?;
+            require(fs::symlink_metadata(&root).map_err(|_| Failure::FixtureIo)?.ino().to_string()
+                != registered.1.identity.workflow_identity().inode, Failure::PayloadMismatch)?;
+        }
+        let before = snapshot(&root)?;
+        let session = original.open(&project)?;
+        require(session.registration.as_ref().is_some_and(|registration| registration.generation == registered.0 && registration.root == registered.1), Failure::UnexpectedStatus)?;
+        if case == Case::RegisteredRoot {
+            let terminal = observed_workflow(&original.batch.owner,&session.id,Phase::Final,false).await?;
+            settled_terminal(&original.batch.owner,&terminal)?;
+            let facts = original_facts(&session)?;
+            let core = terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+            require((facts.request_frames,facts.response_frames) == (1,1) && session.fixture_schedule.sequence() == Some(0)
+                && terminal.checkout.is_none() && terminal.prepared.is_none() && !terminal.apply_submitted
+                && core.effect == Effect::NotStarted && core.journal == Journal::NotCreated && core.resources == ResourceState::Settled
+                && core.reason == CoreReason::StaleRevision && terminal.native_reason == Reason::None && snapshot(&root)? == before, Failure::UnexpectedOutcome)?;
+            original.batch.cases.push(terminal_data(case.name(),&session,&terminal,json!({"registeredIdentityRetained":true,
+                "replacementRejectedBeforeCheckout":true,"replacementTreeUnchanged":true}),None)?);
+            return Ok(());
+        }
+        let editing = observed_workflow(&original.batch.owner,&session.id,Phase::Editing,false).await?;
+        let checkout = editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        observed_roster(input,&before,checkout)?;
+        if case == Case::Fresh {
+            let config = original.batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+            let workflow = original.batch.owner.workflow_status().map_err(|_| Failure::UnexpectedStatus)?;
+            require(config.active.is_none() && config.capability.reason == EditAvailability::OtherEditActive
+                && config.status_revision == workflow.status_revision
+                && original.bridge.open_config_edit("main",project.id.clone()).is_err_and(|error| error.code == "busy"), Failure::UnexpectedStatus)?;
+        }
+        if case == Case::RegistryPrepare {
+            let extra = input.inputs.root.join("registration-prepare-extra"); mkdir(&extra)?; original.register(&extra)?;
+            require(original.bridge.prepare_workflow_edit(&original.document,"main",prepare_args(&session.id,&checkout.revision)).is_err(), Failure::UnexpectedStatus)?;
+            let terminal = observed_workflow(&original.batch.owner,&session.id,Phase::Final,false).await?;
+            settled_terminal(&original.batch.owner,&terminal)?; cancelled(&terminal,Reason::CallerLost)?;
+            let facts = original_facts(&session)?;
+            require((facts.request_frames,facts.response_frames) == (1,2) && session.fixture_schedule.sequence() == Some(0)
+                && terminal.prepared.is_none() && snapshot(&root)? == before, Failure::UnexpectedOutcome)?;
+            original.batch.cases.push(terminal_data(case.name(),&session,&terminal,json!({"newRegistrationPublishedUnderDocumentLock":true,
+                "originalRegistrationRetained":true,"staleCommandNotSent":true,"treeUnchanged":true}),None)?);
+            return Ok(());
+        }
+        if case == Case::Conflict {
+            original.bridge.prepare_workflow_edit(&original.document,"main",prepare_args(&session.id,&checkout.revision)).map_err(|_| Failure::NativeCommandRejected)?;
+            let terminal = observed_workflow(&original.batch.owner,&session.id,Phase::Final,false).await?;
+            settled_terminal(&original.batch.owner,&terminal)?;
+            let core = terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+            let conflict = terminal.conflict.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+            let facts = original_facts(&session)?;
+            require((facts.request_frames,facts.response_frames) == (2,2) && session.fixture_schedule.sequence() == Some(1)
+                && terminal.prepared.is_none() && !terminal.apply_submitted && conflict.reason == "existing_workflow_differs"
+                && conflict.conflicts.len() == 1 && conflict.conflicts[0].id == WORKFLOW_IDS[0]
+                && conflict.matches_observed(&checkout.observed) && core.effect == Effect::NotStarted && core.journal == Journal::NotCreated
+                && core.resources == ResourceState::Settled && core.reason == CoreReason::None && terminal.native_reason == Reason::None
+                && snapshot(&root)? == before, Failure::UnexpectedOutcome)?;
+            original.batch.cases.push(terminal_data(case.name(),&session,&terminal,json!({"noPlanToken":true,"oneDifferingNewline":true,
+                "noPreparedFrame":true,"wholeBundleRefused":true,"treeUnchanged":true}),None)?);
+            return Ok(());
+        }
+        let plan = prepare(original,&session.id,checkout).await?;
+        let directories = verify_plan(input,&before,checkout,&plan)?;
+        require(snapshot(&root)? == before, Failure::PayloadMismatch)?;
+        if matches!(case,Case::RegistryApply | Case::DocumentLost) {
+            if case == Case::RegistryApply {
+                let extra = input.inputs.root.join("registration-apply-extra"); mkdir(&extra)?; original.register(&extra)?;
+                require(original.bridge.apply_workflow_edit(&original.document,"main",&session.id,&plan.plan_token).is_err(), Failure::UnexpectedStatus)?;
+            } else {
+                original.document.lost();
+                require(!original.document.navigation(true)
+                    && original.bridge.apply_workflow_edit(&original.document,"main",&session.id,&plan.plan_token).is_err()
+                    && original.bridge.open_workflow_edit(&original.document,"main",project.id.clone()).is_err(), Failure::UnexpectedStatus)?;
+            }
+            let terminal = observed_workflow(&original.batch.owner,&session.id,Phase::Final,false).await?;
+            settled_terminal(&original.batch.owner,&terminal)?;
+            cancelled(&terminal,if case == Case::RegistryApply { Reason::CallerLost } else { Reason::WindowLost })?;
+            let facts = original_facts(&session)?;
+            require((facts.request_frames,facts.response_frames) == (2,3) && session.fixture_schedule.sequence() == Some(1)
+                && terminal.prepared.as_ref().is_some_and(|p| p.plan_token == plan.plan_token && p.revision == checkout.revision)
+                && snapshot(&root)? == before, Failure::UnexpectedOutcome)?;
+            let observations = if case == Case::RegistryApply { json!({"newRegistrationPublishedUnderDocumentLock":true,
+                "originalRegistrationRetained":true,"staleCommandNotSent":true,"treeUnchanged":true}) }
+                else { json!({"controlledOriginalDocumentLoss":true,"originalStopRequested":true,"replacementDocumentRefused":true,
+                    "preparedCorrelationRetained":true,"treeUnchanged":true,"guiCallbacksNotClaimed":true}) };
+            original.batch.cases.push(terminal_data(case.name(),&session,&terminal,observations,None)?);
+            return Ok(());
+        }
+        let reply = original.bridge.apply_workflow_edit(&original.document,"main",&session.id,&plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+        require(select(&reply,&session.id)?.apply_submitted, Failure::UnexpectedStatus)?;
+        if case == Case::Fresh {
+            let duplicate = original.bridge.apply_workflow_edit(&original.document,"main",&session.id,&plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+            require(select(&duplicate,&session.id)?.apply_submitted, Failure::UnexpectedStatus)?;
+        }
+        let terminal = observed_workflow(&original.batch.owner,&session.id,Phase::Final,false).await?;
+        settled_terminal(&original.batch.owner,&terminal)?;
+        let facts = original_facts(&session)?;
+        let core = terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        let preserve = case.mask().into_iter().filter(|value| *value).count();
+        require((facts.request_frames,facts.response_frames) == (3,3) && session.fixture_schedule.sequence() == Some(2)
+            && terminal.apply_submitted && terminal.native_reason == Reason::None && core.resources == ResourceState::Settled
+            && core.reason == CoreReason::None && core.effect == if preserve == 4 { Effect::Unchanged } else { Effect::Committed }
+            && core.journal == if preserve == 4 { Journal::NotCreated } else { Journal::Clean }
+            && terminal.prepared.as_ref().is_some_and(|p| p.plan_token == plan.plan_token && p.revision == checkout.revision
+                && p.draft_revision == 1 && p.baseline_generation == 0), Failure::UnexpectedOutcome)?;
+        installed(input,&root,&before,&directories)?;
+        let config = original.batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+        let workflow = original.batch.owner.workflow_status().map_err(|_| Failure::UnexpectedStatus)?;
+        require(config.last_terminal.is_none() && config.status_revision == workflow.status_revision, Failure::UnexpectedStatus)?;
+        original.batch.cases.push(terminal_data(case.name(),&session,&terminal,json!({"created":4-preserve,"preserved":preserve,
+            "directoriesCreated":directories,"canonicalPayloads":true,"templateIdentity":true,"completePreparedBytes":true,
+            "capturePrepareUnchanged":true,"protectedPreserved":true,"existingIdentityPreserved":true,
+            "createModesMasked":true,"directoryModesExact":true,"duplicateApplyObservation":case==Case::Fresh,
+            "oppositeDomainRefused":case==Case::Fresh,"sharedStatusRevision":true}),None)?);
+        Ok(())
+    }
+
+    fn introduce_sibling(root: &Path) -> Check<OriginalFile> {
+        // The only parent-side mutation while the original child waits at its
+        // known pre-COMMITTED barrier. Retain this creating descriptor's facts;
+        // never inspect journal slots or install a second EOF reader.
+        FIXTURE_FILES.admit()?;
+        let path = root.join(".github/workflows/unrelated.txt");
+        let mut file = fs::OpenOptions::new().create_new(true).write(true).mode(0o600).custom_flags(nix::libc::O_NOFOLLOW)
+            .open(path).map_err(|_| Failure::FixtureIo)?;
+        FIXTURE_FILES.acquired();
+        let wrote = file.write_all(UNRELATED); let metadata = file.metadata();
+        FIXTURE_FILES.close_original(file)?;
+        require(wrote.is_ok(), Failure::FixtureIo)?;
+        let metadata = metadata.map_err(|_| Failure::FixtureIo)?;
+        require(metadata.is_file() && metadata.len() == UNRELATED.len() as u64 && metadata.mode() & 0o7777 == 0o600, Failure::FixtureIo)?;
+        Ok(OriginalFile { identity:Identity::of(&metadata),bytes:UNRELATED.to_vec() })
+    }
+    async fn exercise_eof(original: &mut Original, input: &Admitted, case: EofCase) -> Check<()> {
+        require(input.eof && input.mode == Mode::Source && EOF_CASES.contains(&case)
+            && original.settled() && !original.batch.owner.disabled(), Failure::OriginalCustodyUnknown)?;
+        let root = input.inputs.root.join(case.name()); mkdir(&root)?; mkdir(&root.join("release"))?;
+        write_new(&root.join("release/mobile-release.json"),PROTECTED_CONFIG,0o640)?;
+        write_new(&root.join(".gitignore"),PROTECTED_IGNORE,0o600)?; write_new(&root.join("unrelated.txt"),UNRELATED,0o600)?;
+        let before = snapshot(&root)?;
+        let project = original.register(&root)?;
+        let schedule = Arc::new(Schedule { eof:Some(case), ..Schedule::default() });
+        {
+            let mut next = original.batch.owner.inner.fixture_next_schedule.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            require(next.is_none(), Failure::UnexpectedStatus)?; *next = Some(schedule.clone());
+        }
+        let mut guard = GateGuard::new(&original.batch.owner,schedule.clone());
+        let session = original.open(&project)?;
+        require(Arc::ptr_eq(&session.fixture_schedule,&schedule), Failure::OriginalCustodyUnknown)?;
+        let editing = observed_workflow(&original.batch.owner,&session.id,Phase::Editing,false).await?;
+        let checkout = editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        observed_roster(input,&before,checkout)?;
+        let plan = prepare(original,&session.id,checkout).await?;
+        let directories = verify_plan(input,&before,checkout,&plan)?;
+        require(directories == [".github", ".github/workflows"] && snapshot(&root)? == before, Failure::PayloadMismatch)?;
+        let reply = original.bridge.apply_workflow_edit(&original.document,"main",&session.id,&plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+        require(select(&reply,&session.id)?.apply_submitted, Failure::UnexpectedStatus)?;
+        let (active,cleanup) = original_clock(&original.batch,&session)?;
+        let endpoint = active.ok_or(Failure::UnexpectedStatus)?;
+        require(cleanup.is_none(), Failure::UnexpectedStatus)?;
+        until(OBSERVATION, || {
+            require(!original.batch.owner.disabled() && !schedule.failed.load(Ordering::SeqCst), Failure::OriginalCustodyUnknown)?;
+            Ok(schedule.eof_control.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.boundary_only(case))
+        }).await?;
+        let introduced = if case == EofCase::WorkflowConflict { Some(introduce_sibling(&root)?) } else { None };
+        require(Instant::now() < endpoint && !*session.stop.borrow(), Failure::UnexpectedStatus)?;
+        let closing = original.batch.owner.close_workflow("main",&session.id).map_err(|_| Failure::NativeCommandRejected)?;
+        let closing = select(&closing,&session.id)?;
+        require(closing.phase == Phase::Finalizing && closing.native_reason == Reason::Cancelled && closing.apply_submitted, Failure::UnexpectedStatus)?;
+        guard.release();
+        let unknown = case == EofCase::WorkflowConflict;
+        let committed = case == EofCase::WorkflowPostcommit;
+        let terminal = observed_workflow(&original.batch.owner,&session.id,if unknown { Phase::Unknown } else { Phase::Final },unknown).await?;
+        let facts = original_eof_facts(&session,case)?;
+        let core = terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        require(original.settled() && (facts.request_frames,facts.response_frames) == (3,3) && schedule.sequence() == Some(2)
+            && terminal.apply_submitted && terminal.native_reason == Reason::Cancelled
+            && core.effect == if unknown { Effect::Unknown } else if committed { Effect::Committed } else { Effect::RolledBack }
+            && core.journal == if unknown { Journal::RecoveryRequired } else { Journal::Clean }
+            && core.resources == ResourceState::Settled && core.reason == CoreReason::Cancelled
+            && terminal.prepared.as_ref().is_some_and(|p| p.plan_token == plan.plan_token && p.revision == checkout.revision
+                && p.draft_revision == 1 && p.baseline_generation == 0)
+            && terminal.checkout.as_ref().is_some_and(|p| p.revision == checkout.revision && p.observed == checkout.observed)
+            && schedule.eof_control.lock().is_ok_and(|control| control.complete(case) && control.records(case) == 2)
+            && schedule.released(), Failure::UnexpectedOutcome)?;
+        if unknown {
+            // Intentional effect Unknown is NOT normal native finality. Only
+            // the unchanged original wait/EOF/close/join proof above permits
+            // these fixed read-only synthetic observations and receipt return.
+            require(original.batch.owner.disabled() && terminal.phase == Phase::Unknown && terminal.native_finality == NativeFinality::Unknown
+                && terminal.late_settled && original.batch.owner.inner.lock().blocked_projects.contains(&project.id), Failure::UnexpectedOutcome)?;
+            let config = original.batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+            let workflow = original.batch.owner.workflow_status().map_err(|_| Failure::UnexpectedStatus)?;
+            require(config.active.is_none() && workflow.active.is_none() && config.capability.reason == EditAvailability::CleanupUnknown
+                && workflow.capability.reason == EditAvailability::CleanupUnknown && config.status_revision == workflow.status_revision,
+                Failure::UnexpectedStatus)?;
+            require(introduced.as_ref() == Some(&read_regular(&root.join(".github/workflows/unrelated.txt"),1024)?), Failure::PayloadMismatch)?;
+            for index in 0..4 {
+                require(read_regular(&root.join(".github/workflows").join(NAMES[index]),16*1024)?.bytes == input.payloads[index], Failure::PayloadMismatch)?;
+            }
+            require(fs::symlink_metadata(root.join(".mobile-release-init")).is_ok_and(|metadata| metadata.is_dir()), Failure::PayloadMismatch)?;
+            for (path,file) in &before.files { require(read_regular(&root.join(path),1024*1024)? == *file, Failure::PayloadMismatch)?; }
+        } else {
+            settled_terminal(&original.batch.owner,&terminal)?;
+            if committed { installed(input,&root,&before,&directories)?; }
+            else { require(snapshot(&root)? == before, Failure::PayloadMismatch)?; }
+        }
+        let observations = json!({"evidenceKind":"real-stdin-eof-at-controlled-transaction-boundary",
+            "bootstrapMode":"instrumented-genuine-engine","boundary":case.boundary(),"originalCheckpoint":case.checkpoint(),
+            "closeBeforeActiveDeadline":true,"controlRecords":2,"actualStdinEof":true,"eofReadCount":1,"nonemptyReadCount":0,"readErrorCount":0,
+            "preparedCorrelation":true,"committedPublication":committed,"rolledBackPublication":!committed&&!unknown,
+            "terminalDurable":!unknown,"fixedRecovery":true,"journalClean":!unknown,"journalAbsent":!unknown,
+            "originalTreeRestored":!committed&&!unknown,"canonicalPayloadsRemain":committed||unknown,"protectedPreserved":true,
+            "unrelatedIntroducedBeforeEof":unknown,"introducedOriginalPreserved":unknown,"recoveryEvidenceRetained":unknown,
+            "sharedBlockedProject":unknown,"bothDomainsDisabled":unknown,"noFurtherAdmission":unknown,
+            "fixtureFilesSettled":FIXTURE_FILES.all_settled()});
+        original.batch.cases.push(terminal_data(case.name(),&session,&terminal,observations,Some(case))?);
+        Ok(())
+    }
+    fn receipt(input: &Admitted, cases: &[Value], passed: bool, resources: bool, owner_disabled: bool, failure: Option<Failure>) -> Check<()> {
+        let complete = if input.eof { EOF_CASES.len() } else if input.mode == Mode::Source { SOURCE_CASES.len() } else { 1 };
+        require(!passed || resources && cases.len() == complete && failure.is_none() && owner_disabled == input.eof, Failure::ReceiptIo)?;
+        receipt_document(&input.inputs,json!({"schemaVersion":1,"scope":if input.eof { TRANSACTION_SCOPE } else { OWNER_SCOPE },"domain":DOMAIN,
+            "status":if passed { "passed" } else { "failed" },"allOwnersSettled":resources&&!owner_disabled,
+            "originalResourcesSettled":resources,"ownerDisabled":owner_disabled,"retainedEffectUnknown":passed&&input.eof,
+            "failureCode":failure,"bindings":input.inputs.bindings,"cases":cases,"notVerified":WORKFLOW_NOT_VERIFIED}))
+    }
+    pub(super) async fn run(eof: bool) {
+        if BATCH_CLAIMED.swap(true,Ordering::SeqCst) {
+            if !FIXTURE_FILES.all_settled() || !probes_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted workflow batch already claimed");
+        }
+        let input = match Admitted::admit(eof) {
+            Ok(input) => input,
+            Err(code) => { if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+                panic!("hosted workflow admission refused: {code:?}"); },
+        };
+        if receipt(&input,&[],false,false,false,Some(Failure::NotCompleted)).is_err() {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted workflow partial receipt unavailable before native work");
+        }
+        let mut original = match Original::new(&input) {
+            Ok(original) => original,
+            Err(code) => { if !FIXTURE_FILES.all_settled() || !probes_settled() { retain_unknown_runtime().await; return; }
+                panic!("hosted workflow original document refused before native work: {code:?}"); },
+        };
+        let count = if eof { EOF_CASES.len() } else if input.mode == Mode::Source { SOURCE_CASES.len() } else { 1 };
+        for ordinal in 0..count {
+            let result = if eof { exercise_eof(&mut original,&input,EOF_CASES[ordinal]).await }
+                else { exercise_owner(&mut original,&input,SOURCE_CASES[ordinal]).await };
+            let expected_unknown = eof && ordinal == EOF_CASES.len()-1 && result.is_ok();
+            if result.is_err() || !original.settled() || original.batch.owner.disabled() && !expected_unknown { original.stop().await; }
+            let settled = original.settled();
+            if !settled || original.batch.owner.disabled() && !expected_unknown
+                || matches!(result,Err(Failure::OriginalCustodyUnknown|Failure::FixtureCustodyUnknown)) {
+                if FIXTURE_FILES.all_settled() && probes_settled() {
+                    let _ = receipt(&input,&original.batch.cases,false,false,original.batch.owner.disabled(),Some(Failure::OriginalCustodyUnknown));
+                }
+                retain_unknown_runtime().await; return;
+            }
+            if let Err(code) = result {
+                let _ = receipt(&input,&original.batch.cases,false,true,original.batch.owner.disabled(),Some(code));
+                if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+                panic!("hosted workflow case failed after original resource settlement: {code:?}");
+            }
+            if !expected_unknown && receipt(&input,&original.batch.cases,false,false,false,Some(Failure::NotCompleted)).is_err() {
+                if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+                panic!("hosted workflow progress receipt failed after original settlement");
+            }
+        }
+        // No shutdown, reopen, recovery or next native owner after the expected
+        // effect-Unknown case. Its disabled original owner remains retained.
+        if !eof && original.batch.owner.shutdown().await.is_err() || !original.settled() {
+            retain_unknown_runtime().await; return;
+        }
+        if receipt(&input,&original.batch.cases,true,true,original.batch.owner.disabled(),None).is_err() {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted workflow final receipt failed after original settlement");
+        }
+    }
+
+    #[test]
+    fn workflow_fixture_permit_roster_rejects_cross_domain_or_bootstrap_reuse() {
+        // Pure DATA checks only, with no runtime/owner/IO/nonce admission.
+        assert!(!qualified(EditDomain::GitHubWorkflows,false)); assert!(!qualified(EditDomain::GitHubWorkflows,true));
+        assert_eq!(SOURCE_CASES.last().map(|case| case.name()),Some("document-loss"));
+        assert_eq!(EOF_CASES.last().map(|case| case.name()),Some("precommit-conflict-eof"));
+        assert!(WorkflowFixturePermit::bootstrap_case(false,Path::new("/inert/create-fresh"),None));
+        assert!(!WorkflowFixturePermit::bootstrap_case(true,Path::new("/inert/create-fresh"),None));
+        for case in EOF_CASES {
+            let root = Path::new("/inert").join(case.name());
+            assert!(WorkflowFixturePermit::bootstrap_case(true,&root,Some(case)));
+            assert!(!WorkflowFixturePermit::bootstrap_case(false,&root,Some(case)));
+            assert!(!WorkflowFixturePermit::bootstrap_case(true,Path::new("/inert/wrong-case"),Some(case)));
+        }
+        for case in [EofCase::Precommit,EofCase::Postcommit] {
+            assert!(!WorkflowFixturePermit::bootstrap_case(true,&Path::new("/inert").join(case.name()),Some(case)));
+        }
+        assert!(source_entry("mobile_release/api/data/github-setup-v1.json"));
+        for invalid in ["../mobile_release/a.py","mobile_release/../a.py","mobile_release//a.py","mobile_release/a.pyc","/mobile_release/a.py"] {
+            assert!(!source_entry(invalid));
+        }
+    }
+}
+
+#[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable source-or-ZIP Linux workflow-owner process"]
+async fn hosted_workflow_edit_owner_original_resources() { workflow::run(false).await; }
+
+#[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable Linux workflow transaction EOF process"]
+async fn hosted_workflow_transaction_eof_original_resources() { workflow::run(true).await; }
+
+#[test]
+fn workflow_eof_records_are_domain_distinct_and_exact() {
+    // Same original streaming decoder, inert bytes only; no new reader/owner.
+    for case in [EofCase::WorkflowPrecommit,EofCase::WorkflowPostcommit,EofCase::WorkflowConflict] {
+        assert!(case.domain() == EditDomain::GitHubWorkflows);
+        let bytes = [case.marker(),case.summary()].concat();
+        for width in 1..=bytes.len()+1 {
+            let mut control = EofControl::default();
+            for chunk in bytes.chunks(width) { assert!(control.observe(case,chunk)); }
+            assert!(control.complete(case)); assert_eq!(control.records(case),2);
+            assert!(!control.observe(case,b"\n"));
+        }
+        for other in [EofCase::Precommit,EofCase::Postcommit,EofCase::WorkflowPrecommit,EofCase::WorkflowPostcommit,EofCase::WorkflowConflict] {
+            if case == other { continue; }
+            let mut control = EofControl::default(); assert!(!control.observe(case,other.marker()));
+        }
+        for end in 0..bytes.len() {
+            let mut control = EofControl::default(); assert!(control.observe(case,&bytes[..end])); assert!(!control.complete(case));
+        }
+        for index in 0..bytes.len() {
+            let mut changed = bytes.clone(); changed[index] = b'!';
+            let mut control = EofControl::default(); assert!(!control.observe(case,&changed));
+        }
     }
 }

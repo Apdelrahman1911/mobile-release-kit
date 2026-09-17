@@ -1,0 +1,147 @@
+name: Desktop GitHub workflow Apply native verification
+
+on:
+  push:
+    branches: [verify/desktop-github-workflow-apply-native]
+    paths:
+      - desktop/**
+      - src/mobile_release/**
+      - templates/workflows/**
+      - tests/native_desktop_config.py
+      - tests/native_desktop_config_eof.py
+      - tests/desktop/test_ci_foundation_contract.py
+      - pyproject.toml
+      - .github/workflows/desktop-github-workflow-apply-native.yml
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed workflow Apply candidate (synthetic native verification only)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-github-workflow-apply-native-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  workflow-apply-native:
+    name: Fixed headless workflow Apply / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      MRK_DESKTOP_PLATFORM: linux
+      MRK_DESKTOP_HOSTED_CHECKS: github-workflow-apply-native-v1
+      MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
+    steps:
+      - name: Require exact disposable non-root Linux verification source
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]
+          [[ "$ImageOS" == ubuntu24 && "$EUID" -ne 0 ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-github-workflow-apply-native ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-github-workflow-apply-native.yml@$GITHUB_REF" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == push ]]
+          fi
+      - name: Check out exact candidate without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select fixed native helper Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Prepare exact bounded source and ZIP bindings
+        id: prepare
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py prepare'
+      - name: Acquire only locked headless Linux compiler inputs
+        timeout-minutes: 15
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
+      - name: Compile the headless library tests without execution
+        timeout-minutes: 12
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
+      - name: Verify original bridge owners and one separate ZIP parity case
+        timeout-minutes: 5
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py workflow-owner'
+      - name: Verify original transaction EOF and retain the final recovery conflict
+        timeout-minutes: 3
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py workflow-transaction-eof'
+      - name: Verify core partitions with uncertain-close strictly last
+        timeout-minutes: 5
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py workflow-core'
+      - name: Validate DATA receipts only and retain all outputs for VM disposal
+        if: success()
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py clean'
+      - name: Retain only allowlisted synthetic receipts
+        if: always() && steps.prepare.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-github-workflow-apply-native-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.prepare.outputs.root }}/public-bindings.json
+            ${{ steps.prepare.outputs.root }}/acquire-checks.json
+            ${{ steps.prepare.outputs.root }}/compile-checks.json
+            ${{ steps.prepare.outputs.root }}/workflow-owner-checks.json
+            ${{ steps.prepare.outputs.root }}/workflow-owner-source/receipt.json
+            ${{ steps.prepare.outputs.root }}/workflow-owner-zip/receipt.json
+            ${{ steps.prepare.outputs.root }}/workflow-transaction-eof-checks.json
+            ${{ steps.prepare.outputs.root }}/workflow-transaction-eof/receipt.json
+            ${{ steps.prepare.outputs.root }}/workflow-core-checks.json
+            ${{ steps.prepare.outputs.root }}/workflow-ordinary.json
+            ${{ steps.prepare.outputs.root }}/workflow-committed-fsync.json
+            ${{ steps.prepare.outputs.root }}/workflow-committed-close.json
+            ${{ steps.prepare.outputs.root }}/retention-checks.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1

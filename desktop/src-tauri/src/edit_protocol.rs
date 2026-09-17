@@ -71,7 +71,10 @@ pub enum Phase { Opening, Editing, Preparing, Reviewing, Applying, Finalizing, F
 pub enum NativeFinality { Pending, Settled, Unknown }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum EditAvailability { Available, UnsupportedPlatform, RuntimeUnqualified, CleanupUnknown, Shutdown }
+pub enum EditAvailability { Available, UnsupportedPlatform, RuntimeUnqualified, CleanupUnknown, Shutdown, OtherEditActive }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EditDomain { Configuration, GitHubWorkflows }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,10 +88,40 @@ pub struct Prepared { pub revision: String, pub plan_token: String, pub draft_re
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditProjection {
+    // Internal domain/custody are not configuration DTO fields. Workflow data
+    // is projected only through its separately typed, domain-tagged surface.
+    #[serde(skip)]
+    pub(crate) domain: EditDomain,
+    #[serde(skip)]
+    pub(crate) workflow: Option<crate::github_workflow_edit_protocol::Details>,
     pub project_id: String, pub session_id: String, pub owner_generation: String,
     pub phase: Phase, pub review_remaining_ms: u32, pub checkout: Option<Checkout>,
     pub prepared: Option<Prepared>, pub apply_submitted: bool, pub core_outcome: Option<CoreEditOutcome>,
     pub native_reason: NativeEditReason, pub native_finality: NativeFinality, pub late_settled: bool,
+}
+impl EditProjection {
+    pub(crate) fn revision(&self) -> Option<&str> {
+        match self.domain {
+            EditDomain::Configuration => self.checkout.as_ref().map(|c| c.revision.as_str()),
+            EditDomain::GitHubWorkflows => self.workflow.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
+        }
+    }
+    pub(crate) fn plan_token(&self) -> Option<&str> {
+        match self.domain {
+            EditDomain::Configuration => self.prepared.as_ref().map(|p| p.plan_token.as_str()),
+            EditDomain::GitHubWorkflows => self.workflow.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
+        }
+    }
+    pub(crate) fn workflow_projection(&self) -> Result<crate::github_workflow_edit_protocol::Projection, BridgeError> {
+        use crate::github_workflow_edit_protocol::{DOMAIN, Projection};
+        if self.domain != EditDomain::GitHubWorkflows { return Err(BridgeError::protocol()); }
+        let detail = self.workflow.as_ref().ok_or_else(BridgeError::protocol)?;
+        Ok(Projection { domain: DOMAIN, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
+            owner_generation: self.owner_generation.clone(), phase: self.phase, review_remaining_ms: self.review_remaining_ms,
+            checkout: detail.checkout.clone(), prepared: detail.prepared.clone(), conflict: detail.conflict.clone(),
+            apply_submitted: self.apply_submitted, core_outcome: self.core_outcome.clone(), native_reason: self.native_reason,
+            native_finality: self.native_finality, late_settled: self.late_settled })
+    }
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -204,7 +237,20 @@ pub struct TerminalReply { pub plan_token: Option<String>, pub effect: Effect, p
 impl TerminalReply {
     pub fn outcome(&self) -> CoreEditOutcome { CoreEditOutcome { effect: self.effect.clone(), journal: self.journal.clone(), resources: self.resources.clone(), reason: self.reason.clone() } }
 }
-pub enum ChildFrame { Opened(Opened), Prepared(PreparedReply), Terminal(u32, TerminalReply) }
+pub enum ChildFrame {
+    Opened(Opened), Prepared(PreparedReply), Terminal(u32, TerminalReply),
+    WorkflowOpened(crate::github_workflow_edit_protocol::Opened),
+    WorkflowPrepared(crate::github_workflow_edit_protocol::PreparedReply),
+    WorkflowTerminal(u32, crate::github_workflow_edit_protocol::TerminalReply),
+}
+impl ChildFrame {
+    pub(crate) fn domain(&self) -> EditDomain {
+        match self {
+            Self::Opened(_) | Self::Prepared(_) | Self::Terminal(..) => EditDomain::Configuration,
+            Self::WorkflowOpened(_) | Self::WorkflowPrepared(_) | Self::WorkflowTerminal(..) => EditDomain::GitHubWorkflows,
+        }
+    }
+}
 
 pub fn request(session: &str, seq: u32, op: &str, params: Value) -> Result<Vec<u8>, BridgeError> {
     if !token(session) || seq > 2 { return Err(BridgeError::invalid()); }

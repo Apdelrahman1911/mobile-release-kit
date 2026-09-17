@@ -80,6 +80,7 @@ class InertFailure(BaseException):
 class InertRevision:
     token: str
     release_directory_absent: bool
+    profile: transaction.TypedEditProfile = transaction.TypedEditProfile.CONFIGURATION
 
 
 class InertWorkspace:
@@ -141,6 +142,8 @@ class InertScope:
 
 
 class InertLease:
+    profile = transaction.TypedEditProfile.CONFIGURATION
+
     def __init__(self, config=None, ignore=None, *, release_absent=True):
         self.originals = (observed(edit.CONFIG_PATH, config, 10), observed(edit.IGNORE_PATH, ignore, 11))
         self.revision = InertRevision(_REVISION, release_absent)
@@ -220,6 +223,14 @@ class ConfigEditTests(unittest.TestCase):
         self.assertEqual(caught.exception.outcome.reason, reason)
         self.assertNotIn("private-native", str(caught.exception))
         return caught.exception.outcome
+
+    def test_workflow_lease_cannot_capture_configuration_files(self):
+        with inert_native():
+            lease = InertLease()
+            lease.profile = transaction.TypedEditProfile.GITHUB_WORKFLOWS
+            self.assert_refused("invalid_params", lambda: edit.capture_config_edit(lease))
+            self.assertEqual(lease.scopes, [])
+            self.assertEqual(lease.reads, [])
 
     def test_capture_publishes_only_settled_two_slot_base_and_revision(self):
         value = draft()

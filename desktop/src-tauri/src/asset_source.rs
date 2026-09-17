@@ -12,6 +12,13 @@ pub(crate) const DESCRIPTOR_LIMIT: usize = 512;
 pub(crate) struct DirectoryIdentity { dev: u64, ino: u64, mode: u32, uid: u32, gid: u32 }
 impl DirectoryIdentity {
     pub(crate) fn same_object(self, other: Self) -> bool { self.dev == other.dev && self.ino == other.ino }
+    pub(crate) fn workflow_identity(self) -> crate::github_workflow_edit_protocol::RegisteredIdentity {
+        // This closed private authority DTO is not the test-only projection.
+        // Preserve full st_mode and both ownership fields, with lossless u64s.
+        crate::github_workflow_edit_protocol::RegisteredIdentity {
+            device: self.dev.to_string(), inode: self.ino.to_string(), mode: self.mode, uid: self.uid, gid: self.gid,
+        }
+    }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn fixture_value(self) -> serde_json::Value {
         serde_json::json!({"device":self.dev.to_string(),"inode":self.ino.to_string(),"mode":self.mode,"owner":self.uid})
@@ -19,7 +26,7 @@ impl DirectoryIdentity {
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileIdentity { common: DirectoryIdentity, nlink: u64, size: u64, mtime: (i64, i64), ctime: (i64, i64) }
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct RegisteredRoot { pub(crate) path: PathBuf, pub(crate) identity: DirectoryIdentity }
 
 // Native-only metadata hint. Not serialized, hashed into an ID, or a capability
@@ -453,5 +460,22 @@ mod tests {
     fn complete_roster_is_refused_before_any_open_when_over_capacity() {
         assert!(roster_limit([510], 1).is_ok()); assert!(roster_limit([511], 1).is_err());
         assert!(roster_limit([127; 32], 0).is_err());
+    }
+    #[test]
+    fn workflow_registration_compares_full_native_facts_path_and_generation() {
+        use crate::edit_owner::WorkflowRegistration;
+        let identity = DirectoryIdentity { dev:u64::MAX,ino:u64::MAX,mode:0o40750,uid:u32::MAX,gid:u32::MAX-1 };
+        let wire = identity.workflow_identity();
+        assert_eq!(wire.device,u64::MAX.to_string()); assert_eq!(wire.inode,u64::MAX.to_string());
+        assert_eq!((wire.mode,wire.uid,wire.gid),(0o40750,u32::MAX,u32::MAX-1));
+        let original = WorkflowRegistration { generation:7,root:RegisteredRoot { path:PathBuf::from("/inert/project"),identity } };
+        assert!(original == original.clone());
+        for altered in [DirectoryIdentity { dev:1,..identity },DirectoryIdentity { ino:1,..identity },
+            DirectoryIdentity { mode:0o40700,..identity },DirectoryIdentity { uid:1,..identity },DirectoryIdentity { gid:1,..identity }] {
+            let mut changed = original.clone(); changed.root.identity = altered; assert!(original != changed);
+        }
+        let mut changed = original.clone(); changed.root.path = PathBuf::from("/inert/other"); assert!(original != changed);
+        let mut changed = original.clone(); changed.generation += 1; assert!(original != changed);
+        // Value comparisons only: no stat/open, filesystem or registration.
     }
 }

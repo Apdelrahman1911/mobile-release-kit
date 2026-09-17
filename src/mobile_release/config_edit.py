@@ -26,7 +26,7 @@ from .config import (MAX_CONFIG_BYTES, configuration_data_equal, parse_config_te
 from .config_payloads import (MAX_IGNORE_BYTES, append_ignore_lines,
                               prepare_edit_ignore, serialize_config_data)
 from .errors import ConfigurationError, ValidationError
-from .init_transaction import ObservedFile
+from .init_transaction import ObservedFile, TypedEditProfile
 
 if TYPE_CHECKING:
     from .init_transaction import InitApplyOutcome, InitOperationFailure, InitWorkspace
@@ -310,6 +310,7 @@ def _snapshot(value: object, path: str, limit: int) -> _FileSnapshot:
 def _admit_revision(native: _NativeContract, revision: object,
                     files: tuple[_FileSnapshot, _FileSnapshot]) -> None:
     if (type(revision) is not native.revision or type(revision.token) is not str
+            or revision.profile is not TypedEditProfile.CONFIGURATION
             or _TOKEN.fullmatch(revision.token) is None
             or type(revision.release_directory_absent) is not bool
             or revision.release_directory_absent and files[0].data is not None):
@@ -343,7 +344,7 @@ def capture_config_edit(lease: InitRootLease) -> ConfigCheckout:
         native = _native_contract()
     except BaseException as error:
         raise ConfigEditFailure(_pure_failure(error)) from None
-    if type(lease) is not native.lease:
+    if type(lease) is not native.lease or lease.profile is not TypedEditProfile.CONFIGURATION:
         _reject("invalid_params")
     try:
         with lease.workspace_scope() as workspace:

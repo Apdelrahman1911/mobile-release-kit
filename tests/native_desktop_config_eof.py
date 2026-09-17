@@ -5,6 +5,10 @@ root and compiled-source admission. It runs the genuine engine on its original
 main thread and three pipes. No extra reader, cancellation setter, transaction,
 thread, child, descriptor or rendezvous file is introduced. This is NOT ordinary
 bootstrap-startup evidence or permission to enable production configuration Save.
+
+The optional, exact github_workflows selector has a separate receipt prefix and
+three fixed cases. Its conflict sibling is inserted by the original parent
+fixture's file ledger, never by this shim. Configuration argv/records stay exact.
 """
 from __future__ import annotations
 
@@ -14,6 +18,19 @@ import sys
 import threading
 import time
 
+_WORKFLOW_CASES = ("precommit-eof", "postcommit-eof", "precommit-conflict-eof")
+
+
+def _selection(arguments):
+    """Closed DATA grammar; a selector is not hosted/root/source admission."""
+    if type(arguments) is not list or any(type(item) is not str for item in arguments):
+        return None
+    if len(arguments) == 2 and arguments[1] in {"precommit-eof", "postcommit-eof"}:
+        return False, arguments[1]
+    if len(arguments) == 3 and arguments[1] == "github_workflows" and arguments[2] in _WORKFLOW_CASES:
+        return True, arguments[2]
+    return None
+
 
 def _need(condition: bool) -> None:
     if not condition:
@@ -21,8 +38,9 @@ def _need(condition: bool) -> None:
 
 
 class _Observation:
-    def __init__(self, case, control, transaction, cancellation, descriptors):
+    def __init__(self, case, control, transaction, cancellation, descriptors, *, workflows=False):
         self.case = case
+        self.workflows = workflows
         self.control = control
         self.transaction = transaction
         self.cancellation = cancellation
@@ -42,6 +60,14 @@ class _Observation:
         self.checkpoint = "unexpected"
         self.committed_returns = 0
         self.rollback_returns = 0
+
+    @property
+    def precommit(self):
+        return self.case == "precommit-eof" or self.workflows and self.case == "precommit-conflict-eof"
+
+    @property
+    def prefix(self):
+        return "MRK_WORKFLOW_EOF_V1" if self.workflows else "MRK_CONFIG_EOF_V1"
 
     def retain_boundary(self, workspace, fd) -> None:
         guard = workspace._guard
@@ -64,6 +90,11 @@ class _Observation:
               and source.apply_active and source.frames == 3 and not source.buffer
               and source.thread is threading.current_thread() is threading.main_thread()
               and source.active_end is not None and time.monotonic() < source.active_end - 0.25)
+        if self.workflows:
+            _need(workspace._typed_profile is self.transaction.TypedEditProfile.GITHUB_WORKFLOWS
+                  and scope.lease.profile is self.transaction.TypedEditProfile.GITHUB_WORKFLOWS
+                  and workspace._workflow_complete and workspace._workflow_header is not None
+                  and workspace._workflow_plan is not None)
         slots = [slot for slot in workspace._slots if slot.number == fd]
         _need(len(slots) == 1 and type(slots[0]) is self.descriptors._FD
               and slots[0].guard is guard and slots[0].open_state == "OPEN"
@@ -88,11 +119,11 @@ class _Observation:
     def gate(self) -> None:
         _need(not self.marker_written and not self.resumed and not self.guard.cancelled
               and not self.source.stopped and not self.source.buffer)
-        boundary = "before-COMMITTED" if self.case == "precommit-eof" else "after-durable-COMMITTED"
+        boundary = "before-COMMITTED" if self.precommit else "after-durable-COMMITTED"
         # Borrow only the original engine-owned stderr. Nonblocking writes make
         # the small observation bound real; the engine alone consumes its close.
         os.set_blocking(2, False)
-        self.write_record(f"MRK_CONFIG_EOF_V1 {self.case} boundary={boundary}\n".encode("ascii"))
+        self.write_record(f"{self.prefix} {self.case} boundary={boundary}\n".encode("ascii"))
         self.marker_written = True
         while True:
             _need(time.monotonic() < self.control_end)
@@ -109,7 +140,7 @@ class _Observation:
                 self.rollback_returns = min(2, self.rollback_returns + 1)
             return result
         self.retain_boundary(workspace, fd)
-        if self.case == "precommit-eof":
+        if self.precommit:
             self.gate()
         result = self.publish_original(workspace, fd, plan, state)
         self.committed_returns = min(2, self.committed_returns + 1)
@@ -147,7 +178,7 @@ class _Observation:
                                 (self.cancellation.DefaultCancellation.check.__code__, guard)):
                 valid = valid and frame is not None and frame.f_code is code and frame.f_locals.get("self") is owner
                 frame = frame.f_back if frame is not None else None
-            if self.case == "precommit-eof":
+            if self.precommit:
                 valid = (valid and frame is not None
                          and frame.f_code is self.transaction.InitWorkspace._checkpoint.__code__
                          and frame.f_locals.get("self") is workspace and frame.f_back is not None
@@ -179,6 +210,8 @@ class _Observation:
                    and request.params.get("planToken") == engine.published_token
                    and engine.published_token is not None and source.frames == 3 and engine.frames == 2
                    and workspace._typed_claimed and workspace._install_started)
+        if self.workflows:
+            applied = applied and engine.workflows is True and source.protocol == self.control.WORKFLOW_PROTOCOL
         terminal = workspace._terminal_seen if workspace._terminal_seen in {"COMMITTED", "ROLLED_BACK"} else "UNKNOWN"
         durable = workspace._terminal_durable and not workspace._terminal_ambiguous
         recovery = workspace._recovery_claimed and not workspace._cleanup_mode
@@ -189,7 +222,11 @@ class _Observation:
                    and guard.handler_state == "RESTORED" and not guard.lifetime_ledger.fatal
                    and outcome is not None and outcome.resources == "settled")
         cancelled = guard.cancelled and source.stopped and outcome is not None and outcome.reason == "cancelled"
-        self.write_record((f"MRK_CONFIG_EOF_V1 {self.case} eof={self.eof_reads} nonempty={self.nonempty_reads} "
+        # A workflow precommit conflict is NOT rolled-back success. Original
+        # _locations refuses the sibling before rollback moves: terminal UNKNOWN,
+        # recovery-required, resources settled, cancelled. Rust validates that
+        # distinct exact record and ends the original invocation after it.
+        self.write_record((f"{self.prefix} {self.case} eof={self.eof_reads} nonempty={self.nonempty_reads} "
                            f"readErrors={self.read_errors} checkpoint={self.checkpoint} applied={int(applied)} "
                            f"committed={self.committed_returns} rolledBack={self.rollback_returns} terminal={terminal} "
                            f"durable={int(durable)} recovery={int(recovery)} clean={int(clean)} "
@@ -217,18 +254,22 @@ class _ControlOS:
 
 def main() -> int:
     started = time.monotonic()
-    if (len(sys.argv) != 3 or sys.argv[2] not in {"precommit-eof", "postcommit-eof"}
+    selected = _selection(sys.argv[1:])
+    if (selected is None
             or not sys.flags.isolated or not sys.flags.no_site or not sys.dont_write_bytecode
             or not os.path.isabs(sys.argv[1]) or sys.version_info < (3, 11)
             or not (sys.platform.startswith("linux") or sys.platform == "darwin")
             or threading.current_thread() is not threading.main_thread()):
+        return 78
+    workflows, case = selected
+    if workflows and (sys.platform != "linux" or os.uname().machine != "x86_64"):
         return 78
     sys.path.insert(0, sys.argv[1])
     from mobile_release import _desktop_edit_control as control
     from mobile_release import _desktop_edit_engine as engine
     from mobile_release import build_inputs, cancellation, init_transaction
 
-    observation = _Observation(sys.argv[2], control, init_transaction, cancellation, build_inputs)
+    observation = _Observation(case, control, init_transaction, cancellation, build_inputs, workflows=workflows)
     original_os = control.os
     original_terminal = engine._Engine.terminal
 
@@ -246,7 +287,7 @@ def main() -> int:
         control.os = _ControlOS(original_os, observation)
         init_transaction.InitWorkspace._publish_terminal = publish
         engine._Engine.terminal = terminal
-        return engine.main(started=started)
+        return engine.main(started=started, workflows=True) if workflows else engine.main(started=started)
     finally:
         engine._Engine.terminal = original_terminal
         init_transaction.InitWorkspace._publish_terminal = observation.publish_original

@@ -46,6 +46,16 @@ pub(crate) fn prepare(body: &Value) -> Result<PrepareConfigEdit, BridgeError> {
     Ok(value)
 }
 
+pub(crate) fn workflow_prepare(body: &Value) -> Result<crate::github_workflow_edit_protocol::PrepareWorkflowEdit, BridgeError> {
+    use crate::github_workflow_edit_protocol::{PrepareWorkflowEdit, value_bounds};
+    let value: PrepareWorkflowEdit = decode(body, REQUEST_LIMIT)?;
+    if !token(&value.session_id) || !token(&value.revision) || !value.draft.is_object()
+        || value.tooling_repository.len() > 140 || value.tooling_sha.len() > 40
+        || value.draft_revision == u32::MAX || value.baseline_generation == u32::MAX { return Err(BridgeError::invalid()); }
+    value_bounds(&value.draft, 28, 512 * 1024)?;
+    Ok(value)
+}
+
 pub(crate) fn apply(body: &Value) -> Result<Apply, BridgeError> {
     let value: Apply = decode(body, 256)?;
     if !token(&value.session_id) || !token(&value.plan_token) { return Err(BridgeError::invalid()); }
@@ -102,5 +112,25 @@ mod tests {
         let body = json!({"sessionId": SESSION, "revision": REVISION, "expectedBase": null,
             "draft": {"large": "a".repeat(512 * 1024)}, "draftRevision": 1, "baselineGeneration": 0});
         assert!(prepare(&body).is_err());
+    }
+
+    #[test]
+    fn workflow_prepare_has_only_draft_pin_and_local_correlation_fields() {
+        let body = json!({"sessionId":SESSION,"revision":REVISION,"draft":{},"toolingRepository":"example/toolkit",
+            "toolingSha":"a".repeat(40),"draftRevision":1,"baselineGeneration":0});
+        assert!(workflow_prepare(&body).is_ok());
+        assert!(prepare(&body).is_err());
+        for key in ["expectedBase","suppliedSnapshot","root","registeredIdentity","path","content","force","credentials"] {
+            let mut bad = body.clone(); bad[key] = Value::Null; assert!(workflow_prepare(&bad).is_err());
+        }
+        for key in ["draftRevision","baselineGeneration"] {
+            for value in [json!(true),json!(-1),json!(1.0),json!(u32::MAX),json!(u64::from(u32::MAX)+1)] {
+                let mut bad = body.clone(); bad[key] = value; assert!(workflow_prepare(&bad).is_err());
+            }
+        }
+        let mut bad = body.clone(); bad["draft"] = json!({"wide":vec![Value::Null;7998]});
+        assert!(workflow_prepare(&bad).is_err());
+        let mut bad = body; bad["toolingRepository"] = json!("é".repeat(71));
+        assert!(workflow_prepare(&bad).is_err());
     }
 }

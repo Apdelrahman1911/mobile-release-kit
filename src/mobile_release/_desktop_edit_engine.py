@@ -1,4 +1,4 @@
-"""One original synchronous native configuration-edit child, no descendants.
+"""One original synchronous native typed-edit child, no descendants.
 
 Only desktop/config_edit_bootstrap.py admits this entry point. It is neither a
 CLI mutation method nor the passive engine. The native capability gate remains
@@ -14,13 +14,17 @@ from pathlib import Path
 from typing import Any
 
 from ._desktop_edit_control import EditInput
-from ._desktop_edit_protocol import EditRequest, ProtocolError, response
+from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL,
+                                     registered_identity, response)
 from .build_inputs import _attempt_all
 from .cancellation import CleanupScope, DefaultCancellation
 from .config_edit import (ConfigEditFailure, CoreEditOutcome, apply_config_edit,
                           capture_config_edit, discard_config_edit, prepare_config_edit)
 from .errors import ValidationError
-from .init_transaction import InitOperationFailure
+from .github_workflow_edit import (WorkflowConflict, apply_github_workflow_edit,
+                                   capture_github_workflow_edit, discard_github_workflow_edit,
+                                   prepare_github_workflow_edit)
+from .init_transaction import InitOperationFailure, TypedEditProfile
 from .init_workspace_custody import InitRootLease
 
 
@@ -43,14 +47,18 @@ def _root(value: str) -> Path:
 
 
 class _Engine:
-    def __init__(self, started: float) -> None:
+    def __init__(self, started: float, *, workflows: bool = False) -> None:
+        if type(workflows) is not bool:
+            raise ProtocolError("Invalid fixed edit domain")
+        self.workflows = workflows
         self.guard = DefaultCancellation(ValidationError, "configuration edit custody did not settle")
-        self.input = EditInput(started)
+        self.input = EditInput(started, protocol=WORKFLOW_PROTOCOL if workflows else PROTOCOL)
         self.lease: InitRootLease | None = None
         self.authority: Any = None
         self.last_request: EditRequest | None = None
         self.published_token: str | None = None
         self.outcome: CoreEditOutcome | None = None
+        self.conflict: WorkflowConflict | None = None
         self.first: BaseException | None = None
         self.frames = 0
         self.stdout_bytes = 0
@@ -91,7 +99,10 @@ class _Engine:
     def cleanup(self) -> None:
         def retire() -> None:
             if self.authority is not None:
-                discard_config_edit(self.authority)
+                if self.workflows:
+                    discard_github_workflow_edit(self.authority)
+                else:
+                    discard_config_edit(self.authority)
         actions = [retire]
         if self.lease is not None:
             actions.append(self.lease.close)
@@ -132,12 +143,24 @@ class _Engine:
         request = self.input.request(0, None)
         self.last_request = request
         self.guard.check()
-        self.lease = InitRootLease(_root(request.params["root"]), cancellation=self.guard)
+        root = _root(request.params["root"])
+        if self.workflows:
+            # The closed lease compares all five facts to raw original fstat on
+            # acquire and subsequent checks BEFORE any workflow observation.
+            self.lease = InitRootLease(root, cancellation=self.guard,
+                profile=TypedEditProfile.GITHUB_WORKFLOWS,
+                registered_identity=registered_identity(request.params["registeredIdentity"]))
+        else:
+            self.lease = InitRootLease(root, cancellation=self.guard)
         self.lease.acquire()
-        checkout = capture_config_edit(self.lease)
+        checkout = capture_github_workflow_edit(self.lease) if self.workflows else capture_config_edit(self.lease)
         self.authority = checkout
-        opened = response(request, "opened", {"revision": checkout.revision, "base": checkout.base,
-                                                "scopeResources": "settled"})
+        if self.workflows:
+            opened = response(request, "opened", {"revision": checkout.revision, "observed": checkout.observed,
+                                                  "scopeResources": "settled"})
+        else:
+            opened = response(request, "opened", {"revision": checkout.revision, "base": checkout.base,
+                                                  "scopeResources": "settled"})
         self.input.idle()
         self.write(opened)
         request = self.input.request(1, request.session)
@@ -146,8 +169,19 @@ class _Engine:
         if request.op == "discard":
             self.outcome = CoreEditOutcome("not_started", "not_created", "settled", "none")
             return
-        plan = prepare_config_edit(self.lease, checkout, request.params["revision"],
-                                   request.params["expectedBase"], request.params["draft"])
+        if self.workflows:
+            plan = prepare_github_workflow_edit(self.lease, checkout, request.params["revision"],
+                request.params["draft"], request.params["toolingRepository"], request.params["toolingSha"])
+            if type(plan) is WorkflowConflict:
+                # A refused review has no token and no prepared frame. Settle
+                # the same original lease/input before the bounded terminal.
+                self.conflict, self.outcome = plan, plan.outcome
+                # Keep the original retired checkout for idempotent discard;
+                # detached conflict DATA is never an authority to clean up.
+                return
+        else:
+            plan = prepare_config_edit(self.lease, checkout, request.params["revision"],
+                                       request.params["expectedBase"], request.params["draft"])
         self.authority = plan
         prepared = response(request, "prepared", {"revision": plan.revision, "planToken": plan.token,
                                                    "view": plan.view, "scopeResources": "settled"})
@@ -165,7 +199,7 @@ class _Engine:
             return
         if request.params["planToken"] != plan.token:
             raise ProtocolError("The original plan token is required")
-        self.outcome = apply_config_edit(self.lease, plan)
+        self.outcome = apply_github_workflow_edit(self.lease, plan) if self.workflows else apply_config_edit(self.lease, plan)
 
     def terminal(self) -> None:
         if self.last_request is None:
@@ -176,10 +210,16 @@ class _Engine:
             outcome = CoreEditOutcome(outcome.effect, outcome.journal, "unknown",
                                       outcome.reason if outcome.reason != "none" else "custody_unknown")
         self.outcome = outcome
-        self.write(response(self.last_request, "terminal", {
+        result = {
             "planToken": self.published_token, "effect": outcome.effect, "journal": outcome.journal,
             "resources": outcome.resources, "reason": outcome.reason,
-        }), terminal=True)
+        }
+        if self.workflows:
+            result["kind"] = "outcome"
+            if self.conflict is not None:
+                del result["planToken"]
+                result.update(kind="conflict", revision=self.conflict.revision, conflict=self.conflict.view)
+        self.write(response(self.last_request, "terminal", result), terminal=True)
 
     def close_output(self) -> None:
         first: BaseException | None = None
@@ -196,8 +236,8 @@ class _Engine:
             raise first
 
 
-def main(*, started: float | None = None) -> int:
-    engine = _Engine(time.monotonic() if started is None else started)
+def main(*, started: float | None = None, workflows: bool = False) -> int:
+    engine = _Engine(time.monotonic() if started is None else started, workflows=workflows)
     scope = CleanupScope(engine.guard, engine.cleanup, owns_cancellation=True, first_primary=True)
     try:
         try:

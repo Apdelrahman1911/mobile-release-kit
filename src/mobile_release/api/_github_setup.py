@@ -17,7 +17,8 @@ from .. import __version__
 from ..config import MAX_CONFIG_BYTES
 from ..credential_requirements import ENVIRONMENT_NAMES, STAGES
 from ..errors import ConfigurationError, ValidationError
-from ..workflow_payloads import (REPOSITORY_PLACEHOLDER, SHA_PLACEHOLDER,
+from ..workflow_payloads import (GITHUB_WORKFLOWS as WORKFLOWS,
+                                 REPOSITORY_PLACEHOLDER, SHA_PLACEHOLDER,
                                  normalize_tooling_reference, pinned_schema_reference,
                                  render_workflow_caller)
 from ._json import bounded_json_text
@@ -25,12 +26,6 @@ from ._preview import _validate
 from .contracts import (ApiError, GitHubProposalFacts, GitHubSetupHelp,
                         GitHubSetupResult, assurance)
 
-WORKFLOWS = (
-    ("preflight", ".github/workflows/mobile-preflight.yml"),
-    ("candidate", ".github/workflows/mobile-candidate.yml"),
-    ("external-testing", ".github/workflows/mobile-external-testing.yml"),
-    ("production-submit", ".github/workflows/mobile-production-submit.yml"),
-)
 INPUT_IDS = ("toolingRepository", "toolingSha", "suppliedSnapshot")
 GUIDANCE_IDS = ("source-authority", "protected-environments", "runner-policy",
                 "credentials", "preflight-and-releases", "scope")

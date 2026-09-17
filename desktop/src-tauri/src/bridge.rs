@@ -1,7 +1,7 @@
 //! Fixed application services. Project roots enter the registry only through
 //! the Rust-side native picker, never through a renderer-supplied path.
 use std::{collections::BTreeMap, path::PathBuf, sync::{Mutex, atomic::{AtomicU32, Ordering}}};
-#[cfg(feature = "desktop-shell")]
+#[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
 use std::sync::atomic::AtomicU64;
 #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
 use std::path::Component;
@@ -26,7 +26,7 @@ pub struct DesktopBridge {
     pub edits: EditOwner,
     projects: Mutex<BTreeMap<String, RegisteredProject>>,
     project_generation: AtomicU32,
-    #[cfg(feature = "desktop-shell")]
+    #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
     sequence: AtomicU64,
 }
 impl DesktopBridge {
@@ -34,7 +34,7 @@ impl DesktopBridge {
         let runtime = RuntimeConfig::packaged(resource_dir);
         Self {
             supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime), projects: Mutex::new(BTreeMap::new()), project_generation: AtomicU32::new(1),
-            #[cfg(feature = "desktop-shell")]
+            #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
             sequence: AtomicU64::new(1),
         }
     }
@@ -88,6 +88,27 @@ impl DesktopBridge {
         let root = self.project_root(&project_id)?;
         self.edits.open(window, project_id, root)
     }
+    pub(crate) fn open_workflow_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        project_id: String) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
+        // A ticket contains only preallocated identity/executor DATA. The real
+        // document mutex rechecks admission and encloses native_project plus
+        // the shared owner's synchronous claim/enqueue, with no path fallback.
+        let ticket = self.edits.workflow_open_ticket(window)?;
+        let selected = project_id.clone();
+        document.workflow_edit_admit(|_| Ok(selected), |bridge, registration|
+            bridge.edits.open_workflow(window, project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_workflow_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::github_workflow_edit_protocol::PrepareWorkflowEdit) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.workflow_edit_admit(|bridge| bridge.edits.workflow_project(window, &session_id), |bridge, registration|
+            bridge.edits.prepare_workflow(window, args, registration))
+    }
+    pub(crate) fn apply_workflow_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        session_id: &str, plan_token: &str) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
+        document.workflow_edit_admit(|bridge| bridge.edits.workflow_project(window, session_id), |bridge, registration|
+            bridge.edits.apply_workflow(window, session_id, plan_token, registration))
+    }
     /// Only called while the real DocumentBinding admission lock is held. No
     /// project method calls back into that lock. These are private native hints.
     pub(crate) fn native_roster(&self) -> Result<ProjectRoster, crate::asset_commands::AssetError> {
@@ -113,7 +134,7 @@ impl DesktopBridge {
         Ok(self.project_generation.load(Ordering::SeqCst))
     }
 
-    #[cfg(feature = "desktop-shell")]
+    #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
     pub(crate) fn publish_checked_project(&self, proof: crate::asset_source::ProjectProbe, expected_generation: u32) -> Result<Project, crate::asset_commands::AssetError> {
         use crate::asset_commands::{AssetError, Reason};
         let mut projects = self.projects.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;

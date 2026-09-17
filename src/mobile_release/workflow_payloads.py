@@ -1,8 +1,9 @@
-"""Pure workflow-caller bytes shared by CLI init and passive setup proposals.
+"""Pure workflow-caller bytes and the closed desktop caller roster.
 
-No template discovery, path, environment, transaction or remote authority lives
-here. A syntactically pinned reference is not a resolved or trusted Git commit.
-Callers retain their own input/output budgets and resource origin admission.
+No template discovery, filesystem, environment, transaction or remote authority
+lives here. Fixed path strings are not custody of those files. A syntactically
+pinned reference is not a resolved or trusted Git commit. Callers retain their
+own input/output budgets and resource origin admission.
 """
 from __future__ import annotations
 
@@ -17,6 +18,12 @@ TOOLING_REPOSITORY_RE = re.compile(
 )
 SHA_PLACEHOLDER = "__MOBILE_RELEASE_KIT_SHA__"
 REPOSITORY_PLACEHOLDER = "__MOBILE_RELEASE_KIT_REPOSITORY__"
+GITHUB_WORKFLOWS = (
+    ("preflight", ".github/workflows/mobile-preflight.yml"),
+    ("candidate", ".github/workflows/mobile-candidate.yml"),
+    ("external-testing", ".github/workflows/mobile-external-testing.yml"),
+    ("production-submit", ".github/workflows/mobile-production-submit.yml"),
+)
 
 
 class MissingWorkflowPlaceholder(ValidationError):

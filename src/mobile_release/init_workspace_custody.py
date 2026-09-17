@@ -1,4 +1,4 @@
-"""Native-only rooted lease for one finite configuration edit, not a controller.
+"""Native-only rooted lease for one closed finite edit, not a controller.
 
 Never imported from the passive API. A retained no-follow root has no flock
 over review; each short scope opens a fresh description of '.' and lends it
@@ -7,6 +7,7 @@ to InitWorkspace. All handles are original accepted _FD slots.
 from __future__ import annotations
 
 import os
+import stat
 import sys
 import threading
 import uuid
@@ -19,10 +20,7 @@ from .build_inputs import (BuildInputError, _Directory, _FD, _attempt_all,
                            _init_pending_names_locked)
 from .cancellation import CleanupScope, DefaultCancellation
 from .init_transaction import (InitApplyOutcome, InitOperationFailure,
-                               InitWorkspace, ObservedFile)
-
-_PATHS = ("release/mobile-release.json", ".gitignore")
-_LIMITS = (512 * 1024, 1024 * 1024)
+                               InitWorkspace, ObservedFile, TypedEditProfile)
 
 
 def _failure(reason: str, primary: BaseException | None = None, *,
@@ -35,7 +33,7 @@ def _failure(reason: str, primary: BaseException | None = None, *,
 
 class RootedRevision:
     """Exact private immutable capture; a token string cannot reconstruct it."""
-    __slots__ = ("_lease", "_token", "_parents", "_parent_facts", "_files", "_raw", "_absent")
+    __slots__ = ("_lease", "_profile", "_token", "_parents", "_parent_facts", "_files", "_raw", "_absent")
 
     def __new__(cls, *args: Any, **kwargs: Any):
         raise TypeError("rooted revisions are bound only by the original lease")
@@ -60,8 +58,21 @@ class RootedRevision:
         return self._token
 
     @property
+    def profile(self) -> TypedEditProfile:
+        return self._profile
+
+    @property
     def release_directory_absent(self) -> bool:
+        if self._profile is not TypedEditProfile.CONFIGURATION:
+            raise _failure("invalid_params")
         return self._absent
+
+    @property
+    def missing_workflow_directories(self) -> tuple[str, ...]:
+        if self._profile is not TypedEditProfile.GITHUB_WORKFLOWS:
+            raise _failure("invalid_params")
+        parents = dict(self._parents)
+        return tuple(path for path in self._profile.directories if parents[path] is None)
 
 
 class LockedInitScope:
@@ -152,12 +163,29 @@ class LockedInitScope:
 
 
 class InitRootLease:
-    def __init__(self, root: Path, *, cancellation: DefaultCancellation) -> None:
-        if type(cancellation) is not DefaultCancellation:
+    def __init__(self, root: Path, *, cancellation: DefaultCancellation,
+                 profile: TypedEditProfile = TypedEditProfile.CONFIGURATION,
+                 registered_identity: dict[str, int] | None = None) -> None:
+        if type(cancellation) is not DefaultCancellation or type(profile) is not TypedEditProfile:
             raise _failure("invalid_params")
         cancellation._check_owner()
         if threading.current_thread() is not threading.main_thread():
             raise _failure("invalid_params")
+        if profile is TypedEditProfile.GITHUB_WORKFLOWS:
+            if (type(registered_identity) is not dict
+                    or set(registered_identity) != {"device", "inode", "mode", "uid", "gid"}
+                    or any(type(value) is not int for value in registered_identity.values())
+                    or not 0 <= registered_identity["device"] < 2**64
+                    or not 0 < registered_identity["inode"] < 2**64
+                    or any(not 0 <= registered_identity[key] < 2**32 for key in ("mode", "uid", "gid"))
+                    or not stat.S_ISDIR(registered_identity["mode"])):
+                raise _failure("invalid_params")
+            self._registered_identity = tuple(sorted(registered_identity.items()))
+        else:
+            if registered_identity is not None:
+                raise _failure("invalid_params")
+            self._registered_identity = None
+        self._profile = profile
         self.root, self.guard = root, cancellation
         self.directory = _Directory(root, cancellation, edit_checkpoints=True)
         self._scopes: list[LockedInitScope] = []
@@ -171,6 +199,10 @@ class InitRootLease:
         self._close_claimed = False
         self.closed = False
 
+    @property
+    def profile(self) -> TypedEditProfile:
+        return self._profile
+
     def acquire(self) -> None:
         self.guard._check_owner()
         if self._acquire_claimed or self._close_claimed:
@@ -183,6 +215,8 @@ class InitRootLease:
         except BaseException as error:
             raise _failure("custody_unknown", error, unknown=True) from None
         if not (sys.platform == "darwin" or sys.platform.startswith("linux")):
+            raise _failure("unsupported_platform")
+        if self._profile is TypedEditProfile.GITHUB_WORKFLOWS and not sys.platform.startswith("linux"):
             raise _failure("unsupported_platform")
         try:
             value = str(self.root)
@@ -217,7 +251,18 @@ class InitRootLease:
             raise _failure("custody_unknown", unknown=True)
         try:
             self.directory.check()
+            if self._profile is TypedEditProfile.GITHUB_WORKFLOWS:
+                # Rust registration carries full st_mode, not S_IMODE. Read the
+                # original retained root descriptor before any target capture;
+                # a new pathname observation is not registration authority.
+                value = os.fstat(self.directory.fd)
+                facts = dict(device=value.st_dev, inode=value.st_ino, mode=value.st_mode,
+                             uid=value.st_uid, gid=value.st_gid)
+                if not stat.S_ISDIR(value.st_mode) or tuple(sorted(facts.items())) != self._registered_identity:
+                    raise _failure("stale_revision")
         except KeyboardInterrupt:
+            raise
+        except InitOperationFailure:
             raise
         except BaseException as error:
             fatal = self.guard.lifetime_ledger.fatal
@@ -234,10 +279,13 @@ class InitRootLease:
         self.check()
         scope = self._active
         if (scope is None or scope.workspace is not workspace or self._revision is not None
-                or type(observed) is not tuple or len(observed) != 2
+                or workspace._typed_profile is not self._profile
+                or type(observed) is not tuple or len(observed) != len(self._profile.paths)
                 or any(type(item) is not ObservedFile or item.path != path
                        or workspace._captured.get(path) is not item
-                       for path, item in zip(_PATHS, observed))):
+                       for path, item in zip(self._profile.paths, observed))
+                or set(workspace._captured) != set(self._profile.paths)
+                or set(workspace.parents) != set(self._profile.directories)):
             raise _failure("invalid_params")
         revision = object.__new__(RootedRevision)
         parents = tuple((path, tuple(sorted(value.items())) if value is not None else None)
@@ -245,20 +293,23 @@ class InitRootLease:
         files = tuple((item.path, tuple(sorted(item.before.items())) if item.before is not None else None,
                        item.data) for item in observed)
         for name, value in (
-            ("_lease", self), ("_token", uuid.uuid4().hex), ("_parents", parents),
+            ("_lease", self), ("_profile", self._profile), ("_token", uuid.uuid4().hex), ("_parents", parents),
             ("_parent_facts", tuple(sorted(workspace._parent_facts.items()))),
             ("_files", files), ("_raw", tuple(sorted(workspace._raw_observations.items()))),
-            ("_absent", workspace.parents.get("release") is None),
+            ("_absent", self._profile is TypedEditProfile.CONFIGURATION and workspace.parents["release"] is None),
         ):
             object.__setattr__(revision, name, value)
         self._revision = revision
         return revision
 
     def _recheck(self, workspace: InitWorkspace, revision: RootedRevision) -> None:
+        if revision._profile is not self._profile or workspace._typed_profile is not self._profile:
+            raise _failure("invalid_params")
         workspace.parents = {path: dict(value) if value is not None else None
                              for path, value in revision._parents}
         try:
-            current = tuple(workspace.observe(path, limit=limit) for path, limit in zip(_PATHS, _LIMITS))
+            current = tuple(workspace.observe(path, limit=limit)
+                            for path, limit in zip(self._profile.paths, self._profile.observation_limits))
         except (KeyboardInterrupt, InitOperationFailure):
             raise
         except BaseException as error:
@@ -280,7 +331,7 @@ class InitRootLease:
             self._capture_claimed = True
         else:
             if (type(revision) is not RootedRevision or revision is not self._revision
-                    or revision._lease is not self or self._rechecks >= 2):
+                    or revision._lease is not self or revision._profile is not self._profile or self._rechecks >= 2):
                 raise _failure("invalid_params")
             self._rechecks += 1
         owner = LockedInitScope(self)

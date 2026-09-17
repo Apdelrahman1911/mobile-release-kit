@@ -17,10 +17,12 @@ import unicodedata
 import uuid
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Iterator
 
 from .errors import ValidationError
+from .workflow_payloads import GITHUB_WORKFLOWS as WORKFLOWS
 
 PREPARING = ".mobile-release-init-prepare"
 READY = ".mobile-release-init"
@@ -35,6 +37,34 @@ MAX_DIRECTORY_ENTRIES = 100_000
 CONTROLS = {"header.json", "header.tmp", "plan.json", "plan.tmp",
             "commit.pending", "rollback.pending", "COMMITTED", "ROLLED_BACK"}
 PROBES = {"probe-a", "probe-b", "probe-c"}
+
+
+class TypedEditProfile(Enum):
+    """Two internal native domains, never a caller-supplied path inventory."""
+
+    CONFIGURATION = "configuration"
+    GITHUB_WORKFLOWS = "github-workflows"
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        if self is TypedEditProfile.CONFIGURATION:
+            return ("release/mobile-release.json", ".gitignore")
+        return tuple(path for _, path in WORKFLOWS)
+
+    @property
+    def observation_limits(self) -> tuple[int, ...]:
+        return ((512 * 1024, 1024 * 1024) if self is TypedEditProfile.CONFIGURATION
+                else (1024 * 1024,) * 4)
+
+    @property
+    def payload_limits(self) -> tuple[int, ...]:
+        return (self.observation_limits if self is TypedEditProfile.CONFIGURATION
+                else (16 * 1024,) * 4)
+
+    @property
+    def directories(self) -> tuple[str, ...]:
+        return (("release",) if self is TypedEditProfile.CONFIGURATION
+                else (".github", ".github/workflows"))
 
 
 class InitInterrupted(KeyboardInterrupt):
@@ -321,6 +351,14 @@ class InitWorkspace:
         self._last_read_facts: tuple[tuple[str, int], ...] | None = None
         self._captured: dict[str, ObservedFile] = {}
         self._typed_claimed = False
+        self._typed_profile: TypedEditProfile | None = None
+        # Workflow recovery has original, in-memory authority. A syntactically
+        # valid on-disk journal cannot supply another roster or cleanup target.
+        # Incomplete PREPARING is deliberately retained, not name-adopted.
+        self._workflow_header: bytes | None = None
+        self._workflow_plan: bytes | None = None
+        self._workflow_controls: dict[str, dict[str, Any]] = {}
+        self._workflow_complete = False
         self._creation = {"state": "NEW"}
         self._install_started = False
         self._installing = False
@@ -345,6 +383,7 @@ class InitWorkspace:
         workspace = cls(scope.lease.root)
         scope.claim_workspace(workspace)
         workspace._guard, workspace._scope = scope.lease.guard, scope
+        workspace._typed_profile = scope.lease.profile
         workspace.fd = scope.fd
         workspace.flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         workspace.root_identity = _dir_identity(os.fstat(workspace.fd))
@@ -575,9 +614,16 @@ class InitWorkspace:
                             _require(tuple(sorted(_directory(os.fstat(child)).items())) == self._parent_facts[relative],
                                      "original ancestor metadata changed while opening")
                         handle = child
-                elif planning and relative not in self.parents:
-                    self.parents[relative] = None
-                    self._parent_facts[relative] = None
+                elif planning:
+                    # Recheck preloads parents from the original revision.
+                    # The descendant of an absent ancestor is still an explicit
+                    # absence fact; skipping its existing key loses that fact.
+                    if relative not in self.parents:
+                        self.parents[relative] = None
+                    _require(self.parents[relative] is None,
+                             "destination ancestor changed or is unsafe")
+                    if self._guard is not None:
+                        self._parent_facts[relative] = None
             if not missing:
                 self._alias(handle, path.split("/")[-1])
             yield None if missing else handle
@@ -710,6 +756,9 @@ class InitWorkspace:
     def _header(self, fd: int) -> dict[str, Any]:
         item = self._read(fd, "header.json", MAX_CONTROL_BYTES)
         _require(item is not None, "missing recovery header")
+        if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+            self._workflow_control("header.json", item[0])
+            _require(item[1] == self._workflow_header, "original workflow header changed")
         header = _parse(item[1])
         _require(set(header) == {"schemaVersion", "transactionId", "root"}
                  and type(header["schemaVersion"]) is int and header["schemaVersion"] == 1
@@ -732,6 +781,9 @@ class InitWorkspace:
         header = self._header(fd)
         item = self._read(fd, "plan.json", MAX_CONTROL_BYTES)
         _require(item is not None, "missing READY plan; preserve journal, do not guess")
+        if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+            self._workflow_control("plan.json", item[0])
+            _require(item[1] == self._workflow_plan, "original workflow plan changed")
         plan = _parse(item[1])
         _require(set(plan) == {*header, "directories", "files"}
                  and _json({k: plan[k] for k in header}) == _json(header), "plan/header binding differs")
@@ -764,8 +816,43 @@ class InitWorkspace:
                  "recovery inode belongs to another filesystem")
         _require(sum(v["size"] for e in plan["files"] for v in (e["before"], e["after"]) if v) <= MAX_TOTAL_BYTES,
                  "recovery byte bound exceeded")
+        if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+            _require(tuple(e["path"] for e in plan["files"]) == self._typed_profile.paths
+                     and tuple(e["path"] for e in plan["directories"]) == self._typed_profile.directories
+                     and all((e["before"] is None) != (e["after"] is None) for e in plan["files"]),
+                     "workflow recovery cannot replace or adopt another inventory")
         self.parents = {e["path"]: e["before"] or e["after"] for e in plan["directories"]}
         return plan
+
+    def _workflow_control(self, name: str, identity: Any) -> dict[str, Any]:
+        """Return only original control authority, including renamed markers."""
+        original = {"COMMITTED": "commit.pending", "ROLLED_BACK": "rollback.pending"}.get(name, name)
+        expected = self._workflow_controls.get(original)
+        _require(expected is not None and identity == expected,
+                 "original workflow control identity changed")
+        return expected
+
+    def _bind_workflow_controls(self, fd: int, header: bytes, plan: bytes,
+                                parsed_plan: dict[str, Any]) -> None:
+        """Freeze completed original staging before any READY publication.
+
+        Before this completes, automatic recovery retains PREPARING. These
+        bytes come from the original renderer-independent generated plan, not
+        from a recovery parser or a subsequently supplied digest.
+        """
+        _require(not self._workflow_controls and self._workflow_header is None
+                 and self._workflow_plan is None, "workflow controls are one-use")
+        expected = {"header.json": header, "plan.json": plan,
+                    "commit.pending": self._marker(parsed_plan, "COMMITTED"),
+                    "rollback.pending": self._marker(parsed_plan, "ROLLED_BACK")}
+        captured = {}
+        for name, content in expected.items():
+            item = self._read(fd, name, MAX_CONTROL_BYTES)
+            _require(item is not None and item[1] == content,
+                     "workflow staging control differs from original bytes")
+            captured[name] = dict(item[0])
+        self._workflow_header, self._workflow_plan = header, plan
+        self._workflow_controls = captured
 
     @staticmethod
     def _marker(plan: dict[str, Any], state: str) -> bytes:
@@ -777,6 +864,8 @@ class InitWorkspace:
         for state, pending in (("COMMITTED", "commit.pending"), ("ROLLED_BACK", "rollback.pending")):
             item, staged = self._read(fd, state, MAX_CONTROL_BYTES), self._read(fd, pending, MAX_CONTROL_BYTES)
             _require((item is None) != (staged is None), "missing or duplicated terminal-marker location")
+            if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+                self._workflow_control(state if item is not None else pending, (item or staged)[0])
             _require((item or staged)[1] == self._marker(plan, state), "terminal marker binding differs")
             if item:
                 present.append(state)
@@ -788,6 +877,8 @@ class InitWorkspace:
         _require(self._terminal(fd, plan) is None, "transaction is already terminal")
         pending = "commit.pending" if state == "COMMITTED" else "rollback.pending"
         identity = self._binding(fd, pending)
+        if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+            identity = self._workflow_control(pending, identity)
         assert identity is not None
         # This is a native handoff, not a whole-session cancellation deferral.
         # The decision latches inside its verified read, before fsync/close.
@@ -900,10 +991,14 @@ class InitWorkspace:
             self._fsync(fd)
             for item, _ in changes:
                 _require(self._current(item.path) == item.before, "input changed during staging")
+            if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+                self._bind_workflow_controls(fd, _json(header), _json(plan), plan)
             # Creation and recovery must accept exactly the same contract.
             # Validate serialized bytes/locations before publishing READY.
             self._locations(fd, self._load(fd), final="old")
             _require(self._terminal(fd, plan) is None, "staged transaction cannot already be terminal")
+            if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+                self._workflow_complete = True
         self._state_move(PREPARING, READY)
         return plan
 
@@ -956,6 +1051,17 @@ class InitWorkspace:
 
     def _preparing_inventory(self, fd: int) -> None:
         names = set(self._list(fd))
+        if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+            _require(self._workflow_complete,
+                     "incomplete original workflow preparation must be retained")
+            plan = self._load(fd)
+            expected = set(self._workflow_controls)
+            expected.update(f"new-{i}" for i, entry in enumerate(plan["files"]) if entry["after"])
+            expected.update(f"directory-{i}" for i, entry in enumerate(plan["directories"]) if entry["after"])
+            _require(names == expected, "original workflow preparation inventory changed")
+            self._locations(fd, plan, final="old")
+            _require(self._terminal(fd, plan) is None, "workflow preparation is unexpectedly terminal")
+            return
         def slot(name: str, prefix: str) -> bool:
             match = re.fullmatch(prefix + r"-(0|[1-9][0-9]{0,2})", name)
             return match is not None and int(match[1]) < MAX_FILES
@@ -984,6 +1090,25 @@ class InitWorkspace:
 
     def _cleanup(self) -> None:
         with self._private(CLEANUP) as fd:
+            workflow_entries: dict[str, tuple[bool, dict[str, Any]]] = {}
+            if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+                _require(self._workflow_complete,
+                         "incomplete original workflow preparation must be retained")
+                # A single original in-session cleanup starts with complete
+                # control proof. Lost/modified control suffixes cannot be
+                # adopted by the generic persisted CLI-recovery allowance.
+                original = self._load(fd)
+                self._inventory(fd, original)
+                self._terminal(fd, original)
+                # Derive only the original fixed proof, not fresh journal
+                # authority. Preserved files have no legal old/new staging slot.
+                workflow_entries = {name: (False, value) for name, value in self._workflow_controls.items()}
+                workflow_entries.update(COMMITTED=workflow_entries["commit.pending"],
+                                        ROLLED_BACK=workflow_entries["rollback.pending"])
+                workflow_entries.update({f"new-{i}": (False, entry["after"])
+                                         for i, entry in enumerate(original["files"]) if entry["after"]})
+                workflow_entries.update({f"directory-{i}": (True, entry["after"])
+                                         for i, entry in enumerate(original["directories"]) if entry["after"]})
             names = set(self._list(fd))
             _require(len(names) <= 2 * MAX_FILES + len(CONTROLS) + len(PROBES), "cleanup inventory bound exceeded")
             # Capture before validating the phase/content, not afterward: a
@@ -1004,11 +1129,18 @@ class InitWorkspace:
                     _require(observed_bytes <= MAX_TOTAL_BYTES + len(CONTROLS) * MAX_CONTROL_BYTES,
                              "cleanup byte bound exceeded")
                 entries[name] = (directory, binding)
+                if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+                    _require(workflow_entries.get(name) == entries[name],
+                             "original workflow cleanup entry changed")
+                    entries[name] = workflow_entries[name]
 
             def verify_entry(name: str) -> bool:
                 try:
                     self._private_check(fd, CLEANUP)
                     directory, expected = entries[name]
+                    if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+                        _require(workflow_entries.get(name) == (directory, expected),
+                                 "original workflow cleanup proof changed")
                     _require(self._binding(fd, name, directory=directory,
                                       limit=MAX_CONTROL_BYTES if name in CONTROLS else MAX_FILE_BYTES) == expected,
                              "cleanup entry changed")
@@ -1028,10 +1160,18 @@ class InitWorkspace:
                     states = names & {"COMMITTED", "ROLLED_BACK"}
                     _require(len(states) == 1, "contradictory cleanup terminal states")
                     state = next(iter(states))
-                    _require(self._read(fd, state, MAX_CONTROL_BYTES)[1] == self._marker(plan, state),
+                    marker = self._read(fd, state, MAX_CONTROL_BYTES)
+                    if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+                        self._workflow_control(state, marker[0] if marker is not None else None)
+                    _require(marker[1] == self._marker(plan, state),
                              "cleanup terminal marker binding differs")
                     for state, pending in (("COMMITTED", "commit.pending"), ("ROLLED_BACK", "rollback.pending")):
                         item = self._read(fd, pending, MAX_CONTROL_BYTES)
+                        if self._typed_profile is TypedEditProfile.GITHUB_WORKFLOWS:
+                            _require((item is None) == (state in states),
+                                     "original workflow cleanup pending marker disappeared")
+                            if item is not None:
+                                self._workflow_control(pending, item[0])
                         _require(not (item is not None and state in states), "duplicated cleanup marker")
                         _require(item is None or item[1] == self._marker(plan, state), "cleanup pending marker differs")
                     if data:
@@ -1126,6 +1266,8 @@ class InitWorkspace:
         self._recovery_claimed = True
         if self._creation["state"] != "CREATED" or self.private_identity is None:
             return
+        _require(self._typed_profile is not TypedEditProfile.GITHUB_WORKFLOWS or self._workflow_complete,
+                 "incomplete original workflow preparation must be retained")
         _require(not self._terminal_ambiguous, "terminal publication is uncertain; preserve the journal")
         _require(self._terminal_seen != "COMMITTED" or self._terminal_durable,
                  "commit decision is known but durability is unconfirmed; preserve the journal")
@@ -1140,15 +1282,24 @@ class InitWorkspace:
             self._cleanup_mode = False
 
     def apply_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
-        """Native-only one-attempt facade; legacy CLI keeps its public API."""
+        """Configuration-only facade; legacy CLI keeps its public API."""
+        return self._apply_typed(changes, TypedEditProfile.CONFIGURATION)
+
+    def apply_workflows_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
+        """Four fixed generated callers: create absent or preserve, never replace."""
+        return self._apply_typed(changes, TypedEditProfile.GITHUB_WORKFLOWS)
+
+    def _apply_typed(self, changes: list[tuple[ObservedFile, bytes | None]],
+                     profile: TypedEditProfile) -> InitApplyOutcome:
         if self._scope is None or self._guard is None or self._typed_claimed:
             raise InitOperationFailure(InitApplyOutcome("not_started", "not_created", "settled", "invalid_params"))
         self._typed_claimed = True
+        if self._typed_profile is not profile:
+            raise InitOperationFailure(InitApplyOutcome("not_started", "not_created", "settled", "invalid_params"))
         try:
             self._checkpoint()
-            paths = ("release/mobile-release.json", ".gitignore")
-            limits = (512 * 1024, 1024 * 1024)
-            _require(type(changes) is list and len(changes) == 2, "invalid desktop change count")
+            paths, limits = profile.paths, profile.payload_limits
+            _require(type(changes) is list and len(changes) == len(paths), "invalid desktop change count")
             for change, path, limit in zip(changes, paths, limits):
                 _require(type(change) is tuple and len(change) == 2, "invalid desktop change")
                 item, payload = change
@@ -1156,6 +1307,13 @@ class InitWorkspace:
                 _require(type(item) is ObservedFile and original is not None and item == original
                          and item.path == path and (payload is None or type(payload) is bytes and len(payload) <= limit),
                          "desktop changes do not match the original revision")
+                if profile is TypedEditProfile.GITHUB_WORKFLOWS:
+                    _require((item.before is not None and payload is None)
+                             or (item.before is None and item.data is None and type(payload) is bytes and 0 < len(payload)),
+                             "workflow changes cannot replace existing files or omit absent callers")
+            if profile is TypedEditProfile.GITHUB_WORKFLOWS:
+                _require(set(self._captured) == set(paths) and tuple(sorted(self.parents)) == profile.directories,
+                         "workflow capture is not the exact fixed domain")
             validate_paths(list(paths))
             self.require_clean()
             for item, _ in changes:

@@ -4,9 +4,12 @@ import { parseCatalogCredentialGuide } from './credentialGuide.ts';
 import { assetError, assetRequestFits, parseAssetStatus } from './assetSessionProtocol.ts';
 import type { AssetCommand } from './assetSessionProtocol.ts';
 import type { AssetStatus } from './assetSessionTypes.ts';
+import { parseGitHubWorkflowEditStatus, workflowEditError, workflowEditRequestFits } from './githubWorkflowEditProtocol.ts';
+import type { GitHubWorkflowEditCommand } from './githubWorkflowEditProtocol.ts';
+import type { GitHubWorkflowEditStatus } from './githubWorkflowEditTypes.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 export function bridgeMode(previewFlag: unknown, isNative: boolean): BridgeMode {
   if (previewFlag === '1') return 'preview';
@@ -39,6 +42,15 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!result) throw { code: 'AssetStatusInvalid' };
       return result;
     } catch (error) { throw assetError(error); }
+  };
+  const workflowCall = async (command: GitHubWorkflowEditCommand, args: unknown): Promise<GitHubWorkflowEditStatus> => {
+    try {
+      if (!workflowEditRequestFits(command, args)) throw { code: 'GitHubWorkflowRequestInvalid' };
+      const value = await call<unknown>(command, structuredClone(args) as Record<string, unknown>);
+      const status = parseGitHubWorkflowEditStatus(value);
+      if (!status) throw { code: 'GitHubWorkflowStatusInvalid' };
+      return structuredClone(status);
+    } catch (error) { throw workflowEditError(error); }
   };
   return {
     mode,
@@ -79,6 +91,17 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (mode !== 'native' || !listen) throw { code: 'NativeBridgeRequired', message: 'Native edit status events are unavailable. Saving is disabled.', retryable: false } satisfies ApiError;
       try { return await listen('config-edit-state', onStatus); }
       catch (error) { throw apiError(error); }
+    },
+    openGitHubWorkflowEdit: (projectId) => workflowCall('github_workflow_edit_open', { projectId }),
+    prepareGitHubWorkflowEdit: (request) => workflowCall('github_workflow_edit_prepare', request),
+    applyGitHubWorkflowEdit: (sessionId, planToken) => workflowCall('github_workflow_edit_apply', { sessionId, planToken }),
+    closeGitHubWorkflowEdit: (sessionId) => workflowCall('github_workflow_edit_close', { sessionId }),
+    githubWorkflowEditStatus: () => workflowCall('github_workflow_edit_status', {}),
+    subscribeGitHubWorkflowEdit: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'NativeBridgeRequired' };
+        return await listen('github-workflow-edit-status', onStatus);
+      } catch (error) { throw workflowEditError(error); }
     },
     assetStatus: () => assetCall('vault_status', {}),
     openAssetSession: () => assetCall('vault_open', { mode: 'session' }),

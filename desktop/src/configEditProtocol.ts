@@ -217,7 +217,7 @@ export function parseConfigEditStatus(value: unknown): ConfigEditStatus | null {
         !keys(value, ['schemaVersion', 'windowGeneration', 'statusRevision', 'capability', 'active', 'lastTerminal']) || value.schemaVersion !== 1 ||
         !token(value.windowGeneration) || !isU32(value.statusRevision) ||
         !keys(value.capability, ['available', 'reason']) || typeof value.capability.available !== 'boolean' ||
-        !oneOf(value.capability.reason, ['available', 'unsupported_platform', 'runtime_unqualified', 'cleanup_unknown', 'shutdown']) ||
+        !oneOf(value.capability.reason, ['available', 'unsupported_platform', 'runtime_unqualified', 'cleanup_unknown', 'shutdown', 'other_edit_active']) ||
         value.capability.available !== (value.capability.reason === 'available') ||
         !(value.active === null || projection(value.active)) || !(value.lastTerminal === null || projection(value.lastTerminal))) return null;
     const result = value as unknown as ConfigEditStatus;

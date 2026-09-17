@@ -12,6 +12,7 @@ import type { ConfigEditStatus, DesktopApi } from './types.ts';
 
 interface EditContext {
   project: (projectId: string) => ProjectSession | null;
+  otherEditReason?: (projectId: string) => string | null;
   onConfirmedSave: (receipt: ConfirmedConfigSave) => void;
   onRecoveryRequired?: (attention: ConfigRecoveryAttention) => void;
 }
@@ -108,6 +109,7 @@ export class ConfigEditController {
 
   start(projectId: string): boolean {
     if (this.disposed || !this.api || this.api.mode !== 'native') return false;
+    if (this.context.otherEditReason?.(projectId)) return false;
     const session = this.context.project(projectId);
     if (editStartReason(this.state, session) !== null || !session?.draft || !this.state.status) return false;
     const binding: EditDraftBinding = freezeJson({

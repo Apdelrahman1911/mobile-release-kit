@@ -1,4 +1,5 @@
 import type { AssetSessionApi } from './assetSessionTypes.ts';
+import type { GitHubWorkflowEditApi } from './githubWorkflowEditTypes.ts';
 
 // Closed passive service contracts. Python owns field policy and assurance.
 export type JsonPrimitive = string | number | boolean | null;
@@ -303,7 +304,7 @@ export type BridgeMode = 'native' | 'preview' | 'unavailable';
 
 // Dedicated native edit owner, not methods on the passive query service.
 // Tokens are opaque 32-lowercase-hex strings; all counters are bounded u32.
-export type EditAvailability = 'available' | 'unsupported_platform' | 'runtime_unqualified' | 'cleanup_unknown' | 'shutdown';
+export type EditAvailability = 'available' | 'unsupported_platform' | 'runtime_unqualified' | 'cleanup_unknown' | 'shutdown' | 'other_edit_active';
 export type NativeEditReason = 'none' | 'discarded' | 'cancelled' | 'active_timeout' | 'review_expired' | 'caller_lost' | 'window_lost' | 'shutdown' | 'runtime_unavailable' | 'spawn_failed' | 'protocol_error' | 'io_error' | 'output_limit' | 'cleanup_unknown';
 export type CoreEditReason = 'none' | 'invalid_params' | 'invalid_config' | 'ignore_conflict' | 'stale_revision' | 'pending_state' | 'busy' | 'cancelled' | 'filesystem_error' | 'custody_unknown' | 'unsupported_platform';
 export interface CoreEditOutcome {
@@ -355,7 +356,7 @@ export interface PrepareConfigEditRequest {
   baselineGeneration: number;
 }
 
-export interface DesktopApi extends AssetSessionApi {
+export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   chooseProject(): Promise<ProjectReference | null>;

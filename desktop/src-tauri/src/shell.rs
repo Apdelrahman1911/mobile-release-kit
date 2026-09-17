@@ -7,6 +7,7 @@ use crate::{
     asset_session::{AssetStatus, DocumentBinding, NativeResponse, OriginalWork},
     bridge::{AppInfo, DesktopBridge, Project},
     edit_commands, edit_owner::EditOwner, edit_protocol::ConfigEditStatus,
+    github_workflow_edit_protocol::WorkflowEditStatus,
     error::BridgeError,
 };
 
@@ -37,6 +38,7 @@ macro_rules! gtk_fixture {
 
 const MAIN_WINDOW: &str = "main";
 const EDIT_EVENT: &str = "config-edit-state";
+const WORKFLOW_EDIT_EVENT: &str = "github-workflow-edit-status";
 const ASSET_EVENT: &str = "asset-session-state";
 
 struct ShellState {
@@ -156,6 +158,44 @@ async fn config_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, 
     }.await;
     fixture_result!(observed, edit, &result);
     result
+}
+
+#[tauri::command]
+async fn github_workflow_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::open(request_body(&request)?)?;
+    state.bridge.open_workflow_edit(&state.document, window, args.project_id)
+}
+#[tauri::command]
+async fn github_workflow_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::workflow_prepare(request_body(&request)?)?;
+    state.bridge.prepare_workflow_edit(&state.document, window, args)
+}
+#[tauri::command]
+async fn github_workflow_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::apply(request_body(&request)?)?;
+    state.bridge.apply_workflow_edit(&state.document, window, &args.session_id, &args.plan_token)
+}
+#[tauri::command]
+async fn github_workflow_edit_close(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::close(request_body(&request)?)?;
+    // STOP remains available to the original document during quit; loss has
+    // already stopped this same owner. No new root lookup/claim is involved.
+    state.bridge.edits.close_workflow(window, &args.session_id)
+}
+#[tauri::command]
+async fn github_workflow_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    edit_commands::status(request_body(&request)?)?;
+    state.bridge.edits.workflow_status()
 }
 
 fn asset_window(webview: &Webview) -> Result<(), AssetError> {
@@ -301,6 +341,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             // Events are best effort: the UI subscribes then fetches status and
             // orders both by native revision, never by arrival time.
             if let Ok(status) = edits.status() { let _ = app.emit_to(MAIN_WINDOW, EDIT_EVENT, &status); }
+            if let Ok(status) = edits.workflow_status() { let _ = app.emit_to(MAIN_WINDOW, WORKFLOW_EDIT_EVENT, &status); }
             let status = document.status();
             let _ = app.emit_to(MAIN_WINDOW, ASSET_EVENT, &status);
             tokio::select! {
@@ -973,6 +1014,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             app_info, choose_project, project_snapshot, catalog, validate_config, suggest_config, preview_config,
             propose_github_setup,
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,
+            github_workflow_edit_open, github_workflow_edit_prepare, github_workflow_edit_apply,
+            github_workflow_edit_close, github_workflow_edit_status,
             vault_status, vault_open, asset_context, asset_choose, credential_prepare,
             vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,
         ])

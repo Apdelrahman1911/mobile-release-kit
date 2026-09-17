@@ -4,20 +4,102 @@
 //! packaged spawn gate remain closed. No Windows edit backend is admitted.
 use std::{collections::BTreeSet, future::{Future, pending}, path::PathBuf, pin::Pin, process::ExitStatus,
     sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, ChildStderr, ChildStdin, ChildStdout},
     sync::{Mutex as AsyncMutex, Notify, mpsc, watch}, task::JoinHandle};
 #[cfg(all(unix, feature = "development-runtime", debug_assertions))]
 use {std::process::Stdio, tokio::process::Command};
 use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, ConfigEditStatus, CoreReason,
-    EditAvailability, EditProjection, Effect, Journal, NativeEditReason as Reason, NativeFinality, Phase,
-    PrepareConfigEdit, Prepared, ResourceState}, error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}};
+    EditAvailability, EditDomain, EditProjection, Effect, Journal, NativeEditReason as Reason, NativeFinality, Phase,
+    PrepareConfigEdit, Prepared, ResourceState}, github_workflow_edit_protocol::{self as workflow_wire, PrepareWorkflowEdit, WorkflowEditStatus},
+    error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}};
 
 const NATIVE_EDIT_QUALIFIED: bool = false;
+const NATIVE_WORKFLOW_EDIT_QUALIFIED: bool = false;
 const ACTIVE: Duration = Duration::from_secs(30);
 const REVIEW: Duration = Duration::from_secs(15 * 60);
 const SOFT_STOP: Duration = Duration::from_secs(8);
 const FINALIZATION: Duration = Duration::from_secs(10);
+
+fn qualified(domain: EditDomain, configuration_fixture: bool) -> bool {
+    match domain {
+        EditDomain::Configuration => NATIVE_EDIT_QUALIFIED || configuration_fixture,
+        EditDomain::GitHubWorkflows => NATIVE_WORKFLOW_EDIT_QUALIFIED,
+    }
+}
+fn capability_reason(domain: EditDomain, active: Option<EditDomain>, stopping: bool, disabled: bool,
+    domain_qualified: bool, document_live: bool) -> EditAvailability {
+    // Opposite-domain pending/Unknown is never presented as globally idle,
+    // even when a separate reason also closes this domain's qualification.
+    if active.is_some_and(|owner| owner != domain) { EditAvailability::OtherEditActive }
+    else if stopping { EditAvailability::Shutdown }
+    else if disabled { EditAvailability::CleanupUnknown }
+    else if match domain {
+        EditDomain::Configuration => !(cfg!(target_os = "linux") || cfg!(target_os = "macos")),
+        EditDomain::GitHubWorkflows => !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
+    } { EditAvailability::UnsupportedPlatform }
+    else if !domain_qualified || !document_live { EditAvailability::RuntimeUnqualified }
+    else { EditAvailability::Available }
+}
+fn exact_apply_receipt(projection: &EditProjection, domain: EditDomain, generation: &str, session: &str, plan: &str) -> bool {
+    projection.domain == domain && projection.owner_generation == generation && projection.session_id == session
+        && projection.apply_submitted && projection.plan_token() == Some(plan)
+}
+fn request_bytes(domain: EditDomain, session: &str, seq: u32, op: &str, params: Value) -> Result<Vec<u8>, BridgeError> {
+    match domain {
+        EditDomain::Configuration => wire::request(session, seq, op, params),
+        EditDomain::GitHubWorkflows => workflow_wire::request(session, seq, op, params),
+    }
+}
+enum DomainStatus { Configuration(ConfigEditStatus), GitHubWorkflows(WorkflowEditStatus) }
+impl DomainStatus {
+    fn configuration(self) -> Result<ConfigEditStatus, BridgeError> {
+        match self { Self::Configuration(status) => Ok(status), _ => Err(BridgeError::protocol()) }
+    }
+    fn workflows(self) -> Result<WorkflowEditStatus, BridgeError> {
+        match self { Self::GitHubWorkflows(status) => Ok(status), _ => Err(BridgeError::protocol()) }
+    }
+}
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct WorkflowRegistration {
+    pub(crate) generation: u32, pub(crate) root: crate::asset_source::RegisteredRoot,
+}
+pub(crate) struct WorkflowOpenTicket { owner: Arc<Inner>, id: String, executor: tokio::runtime::Handle }
+
+// Only the ignored headless workflow fixture can construct this private value,
+// after its fixed hosted/root/source/runtime/payload admission. No environment
+// flag, configuration fixture, renderer command, or production build mints it.
+#[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+struct WorkflowFixturePermit {
+    owner: std::sync::Weak<Inner>, roots: Vec<PathBuf>, python: PathBuf, core: PathBuf,
+    bootstrap: PathBuf, cwd: PathBuf, binding_sha256: String, eof: bool,
+}
+#[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl WorkflowFixturePermit {
+    fn owns(&self, inner: &Inner) -> bool {
+        self.owner.upgrade().is_some_and(|original| std::ptr::eq(Arc::as_ptr(&original), inner))
+            && self.binding_sha256.len() == 64
+            && self.binding_sha256.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    }
+    fn root(&self, inner: &Inner, path: &std::path::Path) -> bool {
+        self.owns(inner) && self.roots.iter().any(|root| root == path)
+    }
+    fn bootstrap_case(eof: bool, path: &std::path::Path, case: Option<hosted_tests::EofCase>) -> bool {
+        match (eof, case) {
+            (false, None) => true,
+            (true, Some(case)) => case.domain() == EditDomain::GitHubWorkflows
+                && path.file_name().and_then(|name| name.to_str()) == Some(case.name()),
+            _ => false,
+        }
+    }
+    fn spawn(&self, inner: &Inner, session: &Session, runtime: &VerifiedRuntime) -> bool {
+        session.domain == EditDomain::GitHubWorkflows
+            && session.registration.as_ref().is_some_and(|registration| self.root(inner, &registration.root.path)
+                && Self::bootstrap_case(self.eof, &registration.root.path, session.fixture_schedule.eof_case()))
+            && runtime.python == self.python && runtime.core == self.core
+            && runtime.bootstrap == self.bootstrap && runtime.cwd == self.cwd
+    }
+}
 
 // Value-only clock decisions shared by the real lock-held admission/expiry
 // paths and inert boundary tests. No alternate clock source or owner exists.
@@ -39,6 +121,8 @@ struct Inner {
     poisoned: AtomicBool,
     #[cfg(all(test, feature = "development-runtime"))]
     fixture_authorized: AtomicBool,
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fixture_workflow: Mutex<Option<Arc<WorkflowFixturePermit>>>,
     #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
     fixture_next_schedule: Mutex<Option<Arc<hosted_tests::Schedule>>>,
 }
@@ -62,6 +146,9 @@ impl<T> Default for Pipe<T> { fn default() -> Self { Self { io: None, close: Rec
 struct Startup { attempted: bool, returned: bool, failed: bool, child: Option<Child> }
 impl Default for Startup { fn default() -> Self { Self { attempted: false, returned: false, failed: false, child: None } } }
 struct Session {
+    domain: EditDomain, registration: Option<WorkflowRegistration>,
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fixture_workflow: Option<Arc<WorkflowFixturePermit>>,
     id: String, commands: mpsc::Sender<Vec<u8>>, receiver: AsyncMutex<Option<mpsc::Receiver<Vec<u8>>>>,
     stop: watch::Sender<bool>, wake: Notify, force_due: AtomicBool, driver_done: AtomicBool,
     pipes: watch::Sender<PipeAcquisition>, frames: mpsc::Sender<ChildFrame>,
@@ -103,17 +190,20 @@ fn nonce() -> Result<String, BridgeError> {
     for byte in bytes { value.push(HEX[usize::from(byte >> 4)] as char); value.push(HEX[usize::from(byte & 15)] as char); }
     Ok(value)
 }
-fn edit_unknown() -> BridgeError { BridgeError::new("cleanup_unknown", "The original configuration edit owner is retained; further edits are disabled.") }
-fn invalid_owner() -> BridgeError { BridgeError::new("invalid_edit_owner", "This document does not own that live configuration edit.") }
+fn edit_unknown() -> BridgeError { BridgeError::new("cleanup_unknown", "The original edit owner is retained; further edits are disabled.") }
+fn invalid_owner() -> BridgeError { BridgeError::new("invalid_edit_owner", "This document does not own that live edit domain.") }
 
 impl Inner {
-    fn hosted_qualified(&self) -> bool {
+    fn hosted_qualified(&self, domain: EditDomain) -> bool {
         // No production/environment bypass. Only the ignored hosted fixture's
         // descendant module can set this private, per-owner test authorization.
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if domain == EditDomain::GitHubWorkflows
+            && self.fixture_workflow.lock().is_ok_and(|permit| permit.as_ref().is_some_and(|permit| permit.owns(self))) { return true; }
         #[cfg(all(test, feature = "development-runtime"))]
-        { NATIVE_EDIT_QUALIFIED || self.fixture_authorized.load(Ordering::SeqCst) }
+        { qualified(domain, self.fixture_authorized.load(Ordering::SeqCst)) }
         #[cfg(not(all(test, feature = "development-runtime")))]
-        { NATIVE_EDIT_QUALIFIED }
+        { qualified(domain, false) }
     }
     fn lock(&self) -> MutexGuard<'_, Registry> {
         match self.registry.lock() {
@@ -127,25 +217,44 @@ impl Inner {
         self.changes.send_replace(registry.revision);
         self.changed.notify_waiters();
     }
-    fn capability(&self, r: &Registry) -> Capability {
-        let reason = if r.stopping { EditAvailability::Shutdown }
-            else if r.disabled || r.exhausted || self.poisoned.load(Ordering::SeqCst) { EditAvailability::CleanupUnknown }
-            else if !(cfg!(target_os = "linux") || cfg!(target_os = "macos")) { EditAvailability::UnsupportedPlatform }
-            else if !self.hosted_qualified() || !r.document_bound || r.document_lost { EditAvailability::RuntimeUnqualified }
-            else { EditAvailability::Available };
+    fn capability(&self, r: &Registry, domain: EditDomain) -> Capability {
+        let reason = capability_reason(domain, r.active.as_ref().map(|a| a.session.domain), r.stopping,
+            r.disabled || r.exhausted || self.poisoned.load(Ordering::SeqCst), self.hosted_qualified(domain),
+            r.document_bound && !r.document_lost);
         Capability { available: reason == EditAvailability::Available, reason }
     }
     fn snapshot(&self, r: &Registry) -> Result<ConfigEditStatus, BridgeError> {
         if r.exhausted || self.poisoned.load(Ordering::SeqCst) { return Err(edit_unknown()); }
-        let active = r.active.as_ref().map(|a| {
+        let active = r.active.as_ref().filter(|a| a.session.domain == EditDomain::Configuration).map(|a| {
             let mut projection = a.projection.clone();
             projection.review_remaining_ms = a.review_end.saturating_duration_since(Instant::now()).as_millis().min(u128::from(u32::MAX)) as u32;
             projection
         });
         let status = ConfigEditStatus { schema_version: 1, window_generation: r.generation.clone(), status_revision: r.revision,
-            capability: self.capability(r), active, last_terminal: r.last.clone() };
+            capability: self.capability(r, EditDomain::Configuration), active,
+            last_terminal: r.last.as_ref().filter(|p| p.domain == EditDomain::Configuration).cloned() };
         wire::bounded(&status, wire::STATUS_LIMIT)?;
         Ok(status)
+    }
+    fn workflow_snapshot(&self, r: &Registry) -> Result<WorkflowEditStatus, BridgeError> {
+        if r.exhausted || self.poisoned.load(Ordering::SeqCst) { return Err(edit_unknown()); }
+        let active = r.active.as_ref().filter(|a| a.session.domain == EditDomain::GitHubWorkflows).map(|a| {
+            let mut projection = a.projection.workflow_projection()?;
+            projection.review_remaining_ms = a.review_end.saturating_duration_since(Instant::now()).as_millis().min(REVIEW.as_millis()) as u32;
+            Ok::<workflow_wire::Projection, BridgeError>(projection)
+        }).transpose()?;
+        let last_terminal = r.last.as_ref().filter(|p| p.domain == EditDomain::GitHubWorkflows)
+            .map(EditProjection::workflow_projection).transpose()?;
+        let status = WorkflowEditStatus { schema_version: 1, domain: workflow_wire::DOMAIN, window_generation: r.generation.clone(),
+            status_revision: r.revision, capability: self.capability(r, EditDomain::GitHubWorkflows), active, last_terminal };
+        wire::bounded(&status, workflow_wire::STATUS_LIMIT)?;
+        Ok(status)
+    }
+    fn snapshot_for(&self, r: &Registry, domain: EditDomain) -> Result<DomainStatus, BridgeError> {
+        match domain {
+            EditDomain::Configuration => self.snapshot(r).map(DomainStatus::Configuration),
+            EditDomain::GitHubWorkflows => self.workflow_snapshot(r).map(DomainStatus::GitHubWorkflows),
+        }
     }
     fn trigger_locked(&self, r: &mut Registry, id: &str, reason: Reason, at: Instant) {
         let Some(a) = r.active.as_mut().filter(|a| a.session.id == id) else { return; };
@@ -193,13 +302,14 @@ impl Inner {
         let mut r = self.lock();
         self.expire_locked(&mut r, id, now.max(Instant::now()));
     }
-    fn admission(&self, r: &Registry, window: &str) -> Result<(), BridgeError> {
+    fn admission(&self, r: &Registry, window: &str, domain: EditDomain) -> Result<(), BridgeError> {
         if r.window.as_deref() != Some(window) || !r.document_bound || r.document_lost { return Err(invalid_owner()); }
-        match self.capability(r).reason {
+        match self.capability(r, domain).reason {
             EditAvailability::Available => Ok(()),
+            EditAvailability::OtherEditActive => Err(BridgeError::new("busy", "One original edit owner is already active in the other domain.")),
             EditAvailability::Shutdown => Err(BridgeError::shutdown()),
             EditAvailability::CleanupUnknown => Err(edit_unknown()),
-            _ => Err(BridgeError::unavailable("Native configuration editing is not qualified for this runtime and document.")),
+            _ => Err(BridgeError::unavailable("This native edit domain is not qualified for the runtime and original document.")),
         }
     }
 }
@@ -225,6 +335,8 @@ impl EditOwner {
         Self { inner: Arc::new(Inner { runtime, changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, feature = "development-runtime"))]
             fixture_authorized: AtomicBool::new(false),
+            #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            fixture_workflow: Mutex::new(None),
             #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
             fixture_next_schedule: Mutex::new(None),
             registry: Mutex::new(Registry { generation, loss_generation, window: None, document_bound: false, document_lost: false,
@@ -232,9 +344,14 @@ impl EditOwner {
     }
     pub fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
     pub fn status(&self) -> Result<ConfigEditStatus, BridgeError> { self.inner.snapshot(&self.inner.lock()) }
+    pub(crate) fn workflow_status(&self) -> Result<WorkflowEditStatus, BridgeError> { self.inner.workflow_snapshot(&self.inner.lock()) }
     pub fn stopping(&self) -> bool { self.inner.lock().stopping }
     pub fn disabled(&self) -> bool { let r = self.inner.lock(); r.disabled || self.inner.poisoned.load(Ordering::SeqCst) || r.exhausted }
     pub fn can_exit(&self) -> bool { self.inner.lock().active.is_none() }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn workflow_fixture_registration_permitted(&self, path: &std::path::Path) -> bool {
+        self.inner.fixture_workflow.lock().is_ok_and(|permit| permit.as_ref().is_some_and(|permit| permit.root(&self.inner, path)))
+    }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn session_gtk_idle(&self, stopping: bool) -> Result<serde_json::Value, &'static str> {
         let r = self.inner.lock();
@@ -271,17 +388,52 @@ impl EditOwner {
     }
 
     pub fn open(&self, window: &str, project_id: String, root: PathBuf) -> Result<ConfigEditStatus, BridgeError> {
-        { let r = self.inner.lock(); self.inner.admission(&r, window)?; }
+        self.open_domain(window, project_id, root, EditDomain::Configuration, None, None)?.configuration()
+    }
+    pub(crate) fn workflow_open_ticket(&self, window: &str) -> Result<WorkflowOpenTicket, BridgeError> {
+        { let r = self.inner.lock(); self.inner.admission(&r, window, EditDomain::GitHubWorkflows)?; }
+        // Entropy is obtained before the real document/selection mutex. This
+        // private ticket performs no observation, registration, claim or spawn.
+        let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
+        Ok(WorkflowOpenTicket { owner: self.inner.clone(), id: nonce()?, executor })
+    }
+    pub(crate) fn open_workflow(&self, window: &str, project_id: String, registration: WorkflowRegistration,
+        ticket: WorkflowOpenTicket) -> Result<WorkflowEditStatus, BridgeError> {
+        let root = registration.root.path.clone();
+        self.open_domain(window, project_id, root, EditDomain::GitHubWorkflows, Some(registration), Some(ticket))?.workflows()
+    }
+    fn open_domain(&self, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
+        registration: Option<WorkflowRegistration>, ticket: Option<WorkflowOpenTicket>) -> Result<DomainStatus, BridgeError> {
+        { let r = self.inner.lock(); self.inner.admission(&r, window, domain)?; }
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let fixture_workflow = if domain == EditDomain::GitHubWorkflows && !NATIVE_WORKFLOW_EDIT_QUALIFIED {
+            let permit = self.inner.fixture_workflow.lock().map_err(|_| edit_unknown())?.clone().ok_or_else(invalid_owner)?;
+            if !permit.root(&self.inner, &root) { return Err(invalid_owner()); }
+            Some(permit) // This exact immutable original permit travels to spawn.
+        } else { None };
         if project_id.is_empty() || project_id.len() > 128 { return Err(BridgeError::invalid()); }
         let root = root.to_str().filter(|s| s.len() <= 4096).ok_or_else(BridgeError::invalid)?;
-        let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
-        let id = nonce()?;
-        let bytes = wire::request(&id, 0, "open", json!({"root": root}))?;
+        let (id, executor) = match (domain, ticket) {
+            (EditDomain::Configuration, None) => {
+                let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
+                (nonce()?, executor)
+            },
+            (EditDomain::GitHubWorkflows, Some(ticket)) if Arc::ptr_eq(&self.inner, &ticket.owner) => (ticket.id, ticket.executor),
+            _ => return Err(invalid_owner()),
+        };
+        let params = match (domain, registration.as_ref()) {
+            (EditDomain::Configuration, None) => json!({"root": root}),
+            (EditDomain::GitHubWorkflows, Some(binding)) => json!({"root":root,"registeredIdentity":binding.root.identity.workflow_identity()}),
+            _ => return Err(invalid_owner()),
+        };
+        let bytes = request_bytes(domain, &id, 0, "open", params)?;
         let (commands, receiver) = mpsc::channel(1);
         let (stop, _) = watch::channel(false);
         let (pipes, _) = watch::channel(PipeAcquisition::Pending);
         let (frames, frame_rx) = mpsc::channel(3);
-        let session = Arc::new(Session { id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
+        let session = Arc::new(Session { domain, registration, id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
+            #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            fixture_workflow,
             wake: Notify::new(), force_due: AtomicBool::new(false), driver_done: AtomicBool::new(false), resource_unknown: AtomicBool::new(false),
             pipes, frames, driver_joined: AtomicBool::new(false), driver_join_failed: AtomicBool::new(false),
             watchdog_joined: AtomicBool::new(false), watchdog_join_failed: AtomicBool::new(false), manager_join_failed: AtomicBool::new(false),
@@ -298,18 +450,19 @@ impl EditOwner {
             manager: AsyncMutex::new(None), observer: AsyncMutex::new(None) });
         let admission = {
             let mut r = self.inner.lock();
-            self.inner.admission(&r, window)?;
-            if r.active.is_some() { return Err(BridgeError::new("busy", "One original configuration edit owner is already active.")); }
+            self.inner.admission(&r, window, domain)?;
+            if r.active.is_some() { return Err(BridgeError::new("busy", "One original edit owner is already active.")); }
             if r.blocked_projects.contains(&project_id) { return Err(BridgeError::new("pending_state", "This project requires separately authorized recovery; the desktop cannot retry it.")); }
             let now = Instant::now();
             let generation = r.generation.clone();
             r.active = Some(ActiveOwner { session: session.clone(), review_end: now + REVIEW, phase_end: Some(now + ACTIVE), cleanup_start: None,
                 prepare_counters: None, claimed_seq: 0, opened: false, prepared: false, terminal: false, unknown: false,
-                projection: EditProjection { project_id, session_id: id.clone(), owner_generation: generation, phase: Phase::Opening,
+                projection: EditProjection { domain, workflow: (domain == EditDomain::GitHubWorkflows).then(workflow_wire::Details::default),
+                    project_id, session_id: id.clone(), owner_generation: generation, phase: Phase::Opening,
                     review_remaining_ms: REVIEW.as_millis() as u32, checkout: None, prepared: None, apply_submitted: false,
                     core_outcome: None, native_reason: Reason::None, native_finality: NativeFinality::Pending, late_settled: false } });
             self.inner.bump(&mut r);
-            self.inner.snapshot(&r)? // Admission reply captured BEFORE queue/start.
+            self.inner.snapshot_for(&r, domain)? // Admission reply captured BEFORE queue/start.
         };
         if session.commands.try_send(bytes).is_err() { self.inner.unknown(&id); return Err(edit_unknown()); }
         if register_original_tasks(&executor, self.inner.clone(), session.clone()).is_err() {
@@ -321,27 +474,44 @@ impl EditOwner {
     }
 
     pub fn prepare(&self, window: &str, args: PrepareConfigEdit) -> Result<ConfigEditStatus, BridgeError> {
-        if !wire::token(&args.session_id) || !wire::token(&args.revision) { return Err(BridgeError::invalid()); }
-        let bytes = wire::request(&args.session_id, 1, "prepare", json!({"revision": &args.revision, "expectedBase": &args.expected_base, "draft": &args.draft}))?;
+        self.prepare_domain(window, EditDomain::Configuration, &args.session_id, &args.revision,
+            (args.draft_revision, args.baseline_generation),
+            json!({"revision": &args.revision, "expectedBase": &args.expected_base, "draft": &args.draft}), None)?.configuration()
+    }
+    pub(crate) fn prepare_workflow(&self, window: &str, args: PrepareWorkflowEdit, registration: WorkflowRegistration) -> Result<WorkflowEditStatus, BridgeError> {
+        self.prepare_domain(window, EditDomain::GitHubWorkflows, &args.session_id, &args.revision,
+            (args.draft_revision, args.baseline_generation), json!({"revision":&args.revision,"draft":&args.draft,
+                "toolingRepository":&args.tooling_repository,"toolingSha":&args.tooling_sha}), Some(registration))?.workflows()
+    }
+    fn prepare_domain(&self, window: &str, domain: EditDomain, session_id: &str, revision: &str,
+        counters: (u32, u32), params: Value, registration: Option<WorkflowRegistration>) -> Result<DomainStatus, BridgeError> {
+        if !wire::token(session_id) || !wire::token(revision) { return Err(BridgeError::invalid()); }
+        let bytes = request_bytes(domain, session_id, 1, "prepare", params)?;
         let (session, reply) = {
             let mut r = self.inner.lock();
-            self.inner.admission(&r, window)?;
+            self.inner.admission(&r, window, domain)?;
             let now = Instant::now(); // Time and claim share the registry race.
             let generation = r.generation.clone();
-            let a = r.active.as_mut().filter(|a| a.session.id == args.session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
+            let a = r.active.as_mut().filter(|a| a.session.domain == domain && a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
             if a.projection.phase != Phase::Editing || a.prepare_counters.is_some() || !a.opened { return Err(invalid_owner()); }
+            if a.session.registration != registration {
+                self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
+            }
             let Some(phase_end) = claim_phase(a.review_end, now) else {
-                let at = a.review_end; self.inner.trigger_locked(&mut r, &args.session_id, Reason::ReviewExpired, at); return Err(invalid_owner());
+                let at = a.review_end; self.inner.trigger_locked(&mut r, session_id, Reason::ReviewExpired, at); return Err(invalid_owner());
             };
             // Wrong revisions do not revise an original checkout or renew time.
-            if a.projection.checkout.as_ref().map(|c| c.revision.as_str()) != Some(args.revision.as_str()) { return Err(invalid_owner()); }
-            a.prepare_counters = Some((args.draft_revision, args.baseline_generation));
+            if a.projection.revision() != Some(revision) {
+                if domain == EditDomain::GitHubWorkflows { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); }
+                return Err(invalid_owner());
+            }
+            a.prepare_counters = Some(counters);
             a.claimed_seq = 1;
             a.phase_end = Some(phase_end);
             a.projection.phase = Phase::Preparing;
             let session = a.session.clone();
             self.inner.bump(&mut r);
-            (session, self.inner.snapshot(&r)?)
+            (session, self.inner.snapshot_for(&r, domain)?)
         };
         if session.commands.try_send(bytes).is_err() { self.inner.trigger(&session.id, Reason::IoError, Instant::now()); self.inner.unknown(&session.id); }
         session.wake.notify_waiters();
@@ -349,21 +519,33 @@ impl EditOwner {
     }
 
     pub fn apply(&self, window: &str, session_id: &str, plan_token: &str) -> Result<ConfigEditStatus, BridgeError> {
+        self.apply_domain(window, EditDomain::Configuration, session_id, plan_token, None)?.configuration()
+    }
+    pub(crate) fn apply_workflow(&self, window: &str, session_id: &str, plan_token: &str, registration: WorkflowRegistration) -> Result<WorkflowEditStatus, BridgeError> {
+        self.apply_domain(window, EditDomain::GitHubWorkflows, session_id, plan_token, Some(registration))?.workflows()
+    }
+    fn apply_domain(&self, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
+        registration: Option<WorkflowRegistration>) -> Result<DomainStatus, BridgeError> {
         if !wire::token(session_id) || !wire::token(plan_token) { return Err(BridgeError::invalid()); }
-        let bytes = wire::request(session_id, 2, "apply", json!({"planToken": plan_token}))?;
+        let bytes = request_bytes(domain, session_id, 2, "apply", json!({"planToken": plan_token}))?;
         let (session, reply) = {
             let mut r = self.inner.lock();
             if r.window.as_deref() != Some(window) || r.document_lost { return Err(invalid_owner()); }
             // Repeated exact Apply is observation only, including terminal/Unknown.
-            let existing = r.active.as_ref().map(|a| &a.projection).filter(|p| p.session_id == session_id).or_else(|| r.last.as_ref().filter(|p| p.session_id == session_id));
-            if existing.is_some_and(|p| p.owner_generation == r.generation && p.apply_submitted && p.prepared.as_ref().is_some_and(|p| p.plan_token == plan_token)) {
-                return self.inner.snapshot(&r);
+            let existing = r.active.as_ref().map(|a| &a.projection).filter(|p| p.domain == domain && p.session_id == session_id)
+                .or_else(|| r.last.as_ref().filter(|p| p.domain == domain && p.session_id == session_id));
+            if existing.is_some_and(|p| exact_apply_receipt(p, domain, &r.generation, session_id, plan_token)) {
+                return self.inner.snapshot_for(&r, domain);
             }
-            self.inner.admission(&r, window)?;
+            self.inner.admission(&r, window, domain)?;
             let now = Instant::now();
             let generation = r.generation.clone();
-            let a = r.active.as_mut().filter(|a| a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
-            if a.projection.phase != Phase::Reviewing || !a.prepared || a.projection.prepared.as_ref().map(|p| p.plan_token.as_str()) != Some(plan_token) { return Err(invalid_owner()); }
+            let a = r.active.as_mut().filter(|a| a.session.domain == domain && a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
+            if a.projection.phase != Phase::Reviewing || !a.prepared { return Err(invalid_owner()); }
+            if a.session.registration != registration || a.projection.plan_token() != Some(plan_token) {
+                if domain == EditDomain::GitHubWorkflows { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); }
+                return Err(invalid_owner());
+            }
             let Some(phase_end) = claim_phase(a.review_end, now) else {
                 let at = a.review_end; self.inner.trigger_locked(&mut r, session_id, Reason::ReviewExpired, at); return Err(invalid_owner());
             };
@@ -373,7 +555,7 @@ impl EditOwner {
             a.phase_end = Some(phase_end);
             let session = a.session.clone();
             self.inner.bump(&mut r);
-            (session, self.inner.snapshot(&r)?)
+            (session, self.inner.snapshot_for(&r, domain)?)
         };
         if session.commands.try_send(bytes).is_err() { self.inner.trigger(session_id, Reason::IoError, Instant::now()); self.inner.unknown(session_id); }
         session.wake.notify_waiters();
@@ -381,18 +563,32 @@ impl EditOwner {
     }
 
     pub fn close(&self, window: &str, session_id: &str) -> Result<ConfigEditStatus, BridgeError> {
+        self.close_domain(window, EditDomain::Configuration, session_id)?.configuration()
+    }
+    pub(crate) fn close_workflow(&self, window: &str, session_id: &str) -> Result<WorkflowEditStatus, BridgeError> {
+        self.close_domain(window, EditDomain::GitHubWorkflows, session_id)?.workflows()
+    }
+    fn close_domain(&self, window: &str, domain: EditDomain, session_id: &str) -> Result<DomainStatus, BridgeError> {
         if !wire::token(session_id) { return Err(BridgeError::invalid()); }
         let mut r = self.inner.lock();
         self.inner.expire_locked(&mut r, session_id, Instant::now());
         let reason = {
             if r.window.as_deref() != Some(window) || !r.document_bound || r.document_lost { return Err(invalid_owner()); }
-            if r.last.as_ref().is_some_and(|p| p.session_id == session_id && p.owner_generation == r.generation) { return self.inner.snapshot(&r); }
-            let a = r.active.as_ref().filter(|a| a.session.id == session_id && a.projection.owner_generation == r.generation).ok_or_else(invalid_owner)?;
-            if a.cleanup_start.is_some() { return self.inner.snapshot(&r); }
+            if r.last.as_ref().is_some_and(|p| p.domain == domain && p.session_id == session_id && p.owner_generation == r.generation) { return self.inner.snapshot_for(&r, domain); }
+            let a = r.active.as_ref().filter(|a| a.session.domain == domain && a.session.id == session_id && a.projection.owner_generation == r.generation).ok_or_else(invalid_owner)?;
+            if a.cleanup_start.is_some() { return self.inner.snapshot_for(&r, domain); }
             if a.projection.apply_submitted { Reason::Cancelled } else { Reason::Discarded }
         };
         self.inner.trigger_locked(&mut r, session_id, reason, Instant::now());
-        self.inner.snapshot(&r)
+        self.inner.snapshot_for(&r, domain)
+    }
+    pub(crate) fn workflow_project(&self, window: &str, session_id: &str) -> Result<String, BridgeError> {
+        let r = self.inner.lock();
+        if r.window.as_deref() != Some(window) || !r.document_bound || r.document_lost || !wire::token(session_id) { return Err(invalid_owner()); }
+        let projection = r.active.as_ref().map(|a| &a.projection).filter(|p| p.session_id == session_id)
+            .or_else(|| r.last.as_ref().filter(|p| p.session_id == session_id)).ok_or_else(invalid_owner)?;
+        if projection.domain != EditDomain::GitHubWorkflows || projection.owner_generation != r.generation { return Err(invalid_owner()); }
+        Ok(projection.project_id.clone())
     }
 
     pub async fn shutdown(&self) -> Result<(), BridgeError> {
@@ -591,12 +787,18 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                 for byte in &buffer[..length] {
                     if discard { break; }
                     frame.push(*byte);
-                    if frame.len() > wire::RESPONSE_LIMIT {
+                    let response_limit = if owner.domain == EditDomain::GitHubWorkflows { workflow_wire::RESPONSE_LIMIT } else { wire::RESPONSE_LIMIT };
+                    if frame.len() > response_limit {
                         discard = true; failed = true; frame.clear();
                         inner.trigger(&owner.id, Reason::OutputLimit, Instant::now()); inner.unknown(&owner.id);
                     } else if *byte == b'\n' {
                         count += 1;
-                        let parsed = if count <= 3 { wire::decode(&frame, &owner.id) } else { Err(BridgeError::protocol()) };
+                        let parsed = if count <= 3 {
+                            match owner.domain {
+                                EditDomain::Configuration => wire::decode(&frame, &owner.id),
+                                EditDomain::GitHubWorkflows => workflow_wire::decode(&frame, &owner.id),
+                            }
+                        } else { Err(BridgeError::protocol()) };
                         match parsed {
                             Ok(parsed) => {
                                 #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
@@ -629,12 +831,34 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
     ReadEnd { frames: observed_frames, bytes: total, eof, closed, failed }
 }
 
+fn terminal_sequence(seq: u32, claimed: u32, prepared: bool, cleaning: bool) -> bool {
+    let lowest = if prepared { 1 } else { 0 };
+    if cleaning { seq >= lowest && seq <= claimed } else { seq == claimed }
+}
+fn terminal_projection_admissible(projection: &EditProjection, plan_token: Option<&str>, core: &wire::CoreEditOutcome) -> bool {
+    if plan_token != projection.plan_token()
+        || !projection.apply_submitted && (!matches!(core.effect, Effect::NotStarted | Effect::Unknown)
+            || !matches!(core.journal, Journal::NotCreated | Journal::Unknown))
+        || core.reason == CoreReason::None && projection.apply_submitted
+            && !matches!((&core.effect, &core.journal), (Effect::Committed, Journal::Clean) | (Effect::Unchanged, Journal::NotCreated)) { return false; }
+    if projection.domain == EditDomain::GitHubWorkflows && matches!(core.effect, Effect::Unchanged | Effect::Committed | Effect::RolledBack) {
+        let Some(prepared) = projection.workflow.as_ref().and_then(|w| w.prepared.as_ref()) else { return false; };
+        let creates = prepared.view.files.iter().any(|f| f.action == workflow_wire::Action::Create);
+        if (core.effect == Effect::Unchanged) == creates { return false; }
+    }
+    true
+}
+fn terminal_admissible(a: &ActiveOwner, seq: u32, plan_token: Option<&str>, core: &wire::CoreEditOutcome) -> bool {
+    terminal_sequence(seq, a.claimed_seq, a.prepared, a.cleanup_start.is_some())
+        && terminal_projection_admissible(&a.projection, plan_token, core)
+}
+
 fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
     let mut r = inner.lock();
     let now = Instant::now();
     inner.expire_locked(&mut r, &owner.id, now); // Receipt and expiry serialize.
     let Some(a) = r.active.as_mut().filter(|a| a.session.id == owner.id) else { return; };
-    let mut invalid = a.terminal;
+    let mut invalid = a.terminal || frame.domain() != owner.domain || a.projection.domain != owner.domain;
     let mut terminal = false;
     let mut uncertain = false;
     if !invalid {
@@ -659,15 +883,8 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
                 } else { invalid = true; }
             }
             ChildFrame::Terminal(seq, result) => {
-                let lowest = if a.prepared { 1 } else { 0 };
-                let correlated = if a.cleanup_start.is_some() { seq >= lowest && seq <= a.claimed_seq } else { seq == a.claimed_seq };
-                let expected = a.projection.prepared.as_ref().map(|p| p.plan_token.as_str());
                 let core = result.outcome();
-                if !correlated || result.plan_token.as_deref() != expected
-                    || !a.projection.apply_submitted && (!matches!(core.effect, Effect::NotStarted | Effect::Unknown)
-                        || !matches!(core.journal, Journal::NotCreated | Journal::Unknown))
-                    || core.reason == CoreReason::None && a.projection.apply_submitted
-                        && !matches!((&core.effect, &core.journal), (Effect::Committed, Journal::Clean) | (Effect::Unchanged, Journal::NotCreated)) {
+                if !terminal_admissible(a, seq, result.plan_token.as_deref(), &core) {
                     invalid = true;
                 } else {
                     uncertain = core.resources == ResourceState::Unknown || core.effect == Effect::Unknown || core.journal == Journal::Unknown;
@@ -676,6 +893,51 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
                     terminal = true;
                     #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
                     owner.fixture_schedule.accepted_terminal(seq);
+                }
+            }
+            ChildFrame::WorkflowOpened(opened) => {
+                if a.opened || a.prepared || a.claimed_seq != 0 { invalid = true; }
+                else if let Some(detail) = a.projection.workflow.as_mut() {
+                    detail.checkout = Some(workflow_wire::Checkout { revision: opened.revision, observed: opened.observed });
+                    a.opened = true;
+                    if a.cleanup_start.is_none() { a.projection.phase = Phase::Editing; a.phase_end = None; }
+                } else { invalid = true; }
+            }
+            ChildFrame::WorkflowPrepared(prepared) => {
+                if !a.opened || a.prepared || a.claimed_seq != 1 || a.projection.revision() != Some(prepared.revision.as_str()) {
+                    invalid = true;
+                } else if let (Some((draft_revision, baseline_generation)), Some(detail)) = (a.prepare_counters, a.projection.workflow.as_mut()) {
+                    if !detail.checkout.as_ref().is_some_and(|old| prepared.view.matches_observed(&old.observed)) { invalid = true; }
+                    else {
+                        detail.prepared = Some(workflow_wire::Prepared { revision: prepared.revision, plan_token: prepared.plan_token,
+                            draft_revision, baseline_generation, view: prepared.view });
+                        a.prepared = true;
+                        if a.cleanup_start.is_none() { a.projection.phase = Phase::Reviewing; a.phase_end = None; }
+                    }
+                } else { invalid = true; }
+            }
+            ChildFrame::WorkflowTerminal(seq, result) => {
+                let core = result.outcome();
+                if let workflow_wire::TerminalReply::Conflict { revision, conflict, .. } = &result {
+                    if !a.opened || a.prepared || a.projection.apply_submitted || seq != 1
+                        || a.projection.revision() != Some(revision.as_str())
+                        || !a.projection.workflow.as_ref().and_then(|w| w.checkout.as_ref())
+                            .is_some_and(|old| conflict.matches_observed(&old.observed)) { invalid = true; }
+                }
+                if !terminal_admissible(a, seq, result.plan_token(), &core) { invalid = true; }
+                if !invalid {
+                    if let workflow_wire::TerminalReply::Conflict { conflict, .. } = result {
+                        if let Some(detail) = a.projection.workflow.as_mut() { detail.conflict = Some(conflict); }
+                        else { invalid = true; }
+                    }
+                    if !invalid {
+                        uncertain = core.resources == ResourceState::Unknown || core.effect == Effect::Unknown || core.journal == Journal::Unknown;
+                        a.projection.core_outcome = Some(core);
+                        a.terminal = true;
+                        terminal = true;
+                        #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+                        owner.fixture_schedule.accepted_terminal(seq);
+                    }
                 }
             }
         }
@@ -737,6 +999,17 @@ async fn watchdog(inner: Arc<Inner>, owner: Arc<Session>) {
 }
 
 fn spawn_original(runtime: VerifiedRuntime, inner: &Inner, owner: &Session) {
+    let workflow_allowed = NATIVE_WORKFLOW_EDIT_QUALIFIED;
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let workflow_allowed = workflow_allowed || owner.fixture_workflow.as_ref().is_some_and(|original| {
+        inner.fixture_workflow.lock().is_ok_and(|current| current.as_ref().is_some_and(|current| Arc::ptr_eq(current, original)))
+            && original.spawn(inner, owner, &runtime)
+    });
+    if owner.domain == EditDomain::GitHubWorkflows && (!workflow_allowed
+        || !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))) {
+        inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
+        return; // A configuration permit cannot bypass either workflow gate.
+    }
     #[cfg(not(all(unix, feature = "development-runtime", debug_assertions)))]
     {
         let _ = runtime;
@@ -752,12 +1025,14 @@ fn spawn_original(runtime: VerifiedRuntime, inner: &Inner, owner: &Session) {
         let mut command = Command::new(&runtime.python);
         command.args(["-I", "-S", "-B"]);
         #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
-        if owner.fixture_schedule.eof_case().is_some() {
+        if let Some(case) = owner.fixture_schedule.eof_case() {
+            if case.domain() != owner.domain { inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now()); return; }
             command.arg(hosted_tests::eof_bootstrap());
         } else { command.arg(&runtime.bootstrap); }
         #[cfg(not(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos"))))]
         command.arg(&runtime.bootstrap);
         command.arg(&runtime.core);
+        if owner.domain == EditDomain::GitHubWorkflows { command.arg("github_workflows"); }
         #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
         if let Some(case) = owner.fixture_schedule.eof_case() { command.arg(case.name()); }
         command.current_dir(&runtime.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
@@ -1261,5 +1536,124 @@ mod clock_tests {
         assert_eq!(expired_phase(review, None, false, review + FINALIZATION), Some((review, Reason::ReviewExpired)));
         assert_eq!(expired_phase(review, Some(review + ACTIVE), false, review), Some((review, Reason::ReviewExpired)));
         assert_eq!(expired_phase(review, None, true, review + ACTIVE), None);
+    }
+}
+
+#[cfg(test)]
+mod workflow_domain_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    const SESSION: &str = "0123456789abcdef0123456789abcdef";
+    const GENERATION: &str = "fedcba9876543210fedcba9876543210";
+    const REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PLAN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn projection(preserve: bool) -> EditProjection {
+        // Pure DTOs only; not an alternate owner/supervisor, native registry,
+        // runtime, channel, task, root, clock or fixture authorization.
+        use workflow_wire::{Action, FileView, Generated, Observation, ObservedFile, WorkflowId};
+        let content = "name: inert\n";
+        let hash = format!("{:x}",Sha256::digest(content.as_bytes()));
+        let roster = [(WorkflowId::Preflight,".github/workflows/mobile-preflight.yml"),
+            (WorkflowId::Candidate,".github/workflows/mobile-candidate.yml"),
+            (WorkflowId::ExternalTesting,".github/workflows/mobile-external-testing.yml"),
+            (WorkflowId::ProductionSubmit,".github/workflows/mobile-production-submit.yml")];
+        let files = roster.into_iter().map(|(id,path)| FileView { id,path:path.into(),
+            action:if preserve { Action::Preserve } else { Action::Create },
+            observed:if preserve { Observation::Present { byte_length:content.len() as u32,sha256:hash.clone() } } else { Observation::Absent {} },
+            generated:Generated { content:content.into(),byte_length:content.len() as u32,sha256:hash.clone() } }).collect();
+        let observed = roster.into_iter().map(|(id,_)| if preserve {
+            ObservedFile::Present { id,byte_length:content.len() as u32,sha256:hash.clone() }
+        } else { ObservedFile::Absent { id } }).collect();
+        let view = workflow_wire::PreparedView { schema_version:1,files,create_directories:Vec::new(),
+            template_set:workflow_wire::TemplateSet { core_version:"0.3.0".into(),resource_version:1,resource_sha256:"a".repeat(64) },
+            tooling:workflow_wire::Tooling { repository:"example/toolkit".into(),sha:"0".repeat(40),
+                schema_reference:format!("https://raw.githubusercontent.com/example/toolkit/{}/schemas/project.schema.json","0".repeat(40)),state:"format-only".into() } };
+        EditProjection { domain:EditDomain::GitHubWorkflows,workflow:Some(workflow_wire::Details {
+            checkout:Some(workflow_wire::Checkout { revision:REVISION.into(),observed }),
+            prepared:Some(workflow_wire::Prepared { revision:REVISION.into(),plan_token:PLAN.into(),draft_revision:1,baseline_generation:0,view }),conflict:None }),
+            project_id:"project-1".into(),session_id:SESSION.into(),owner_generation:GENERATION.into(),phase:Phase::Reviewing,
+            review_remaining_ms:900000,checkout:None,prepared:None,apply_submitted:false,core_outcome:None,
+            native_reason:Reason::None,native_finality:NativeFinality::Pending,late_settled:false }
+    }
+    fn outcome(effect: Effect, journal: Journal, reason: CoreReason) -> wire::CoreEditOutcome {
+        wire::CoreEditOutcome { effect,journal,resources:ResourceState::Settled,reason }
+    }
+    #[test]
+    fn configuration_fixture_never_qualifies_workflow_or_hides_an_opposite_unknown_owner() {
+        assert!(!NATIVE_WORKFLOW_EDIT_QUALIFIED);
+        assert!(!qualified(EditDomain::GitHubWorkflows,false));
+        assert!(!qualified(EditDomain::GitHubWorkflows,true));
+        assert!(!qualified(EditDomain::Configuration,false));
+        assert!(qualified(EditDomain::Configuration,true));
+        for (domain,other) in [(EditDomain::Configuration,EditDomain::GitHubWorkflows),
+            (EditDomain::GitHubWorkflows,EditDomain::Configuration)] {
+            for stopping in [false,true] { for disabled in [false,true] {
+                assert_eq!(capability_reason(domain,Some(other),stopping,disabled,false,false),EditAvailability::OtherEditActive);
+            } }
+            assert_eq!(capability_reason(domain,Some(domain),false,true,false,true),EditAvailability::CleanupUnknown);
+            assert_eq!(capability_reason(domain,None,true,false,false,true),EditAvailability::Shutdown);
+        }
+    }
+    #[test]
+    fn only_exact_already_submitted_domain_session_generation_and_token_are_observation() {
+        let mut p = projection(false);
+        assert!(!exact_apply_receipt(&p,EditDomain::GitHubWorkflows,GENERATION,SESSION,PLAN));
+        p.apply_submitted = true;
+        for phase in [Phase::Applying,Phase::Finalizing,Phase::Unknown,Phase::Final] {
+            p.phase = phase;
+            assert!(exact_apply_receipt(&p,EditDomain::GitHubWorkflows,GENERATION,SESSION,PLAN));
+            assert!(!exact_apply_receipt(&p,EditDomain::Configuration,GENERATION,SESSION,PLAN));
+            assert!(!exact_apply_receipt(&p,EditDomain::GitHubWorkflows,REVISION,SESSION,PLAN));
+            assert!(!exact_apply_receipt(&p,EditDomain::GitHubWorkflows,GENERATION,REVISION,PLAN));
+            assert!(!exact_apply_receipt(&p,EditDomain::GitHubWorkflows,GENERATION,SESSION,REVISION));
+        }
+    }
+    #[test]
+    fn terminal_sequence_keeps_claim_and_original_cleanup_correlation() {
+        for claimed in 0..=2 { for received in 0..=2 {
+            assert_eq!(terminal_sequence(received,claimed,false,false),received == claimed);
+            assert_eq!(terminal_sequence(received,claimed,false,true),received <= claimed);
+            assert_eq!(terminal_sequence(received,claimed,true,true),received >= 1 && received <= claimed);
+        } }
+        let mut refused = projection(false);
+        refused.workflow.as_mut().unwrap().prepared = None;
+        let stopped = outcome(Effect::NotStarted,Journal::NotCreated,CoreReason::None);
+        assert!(terminal_projection_admissible(&refused,None,&stopped));
+        assert!(!terminal_projection_admissible(&refused,Some(PLAN),&stopped)); // No dummy refusal token.
+        assert!(!terminal_projection_admissible(&refused,None,&outcome(Effect::Committed,Journal::Clean,CoreReason::None)));
+    }
+    #[test]
+    fn workflow_unchanged_and_created_results_require_the_original_action_set() {
+        let mut creates = projection(false); creates.apply_submitted = true;
+        let mut preserves = projection(true); preserves.apply_submitted = true;
+        let installed = outcome(Effect::Committed,Journal::Clean,CoreReason::None);
+        let unchanged = outcome(Effect::Unchanged,Journal::NotCreated,CoreReason::None);
+        let rollback = outcome(Effect::RolledBack,Journal::Clean,CoreReason::FilesystemError);
+        assert!(terminal_projection_admissible(&creates,Some(PLAN),&installed));
+        assert!(!terminal_projection_admissible(&creates,Some(PLAN),&unchanged));
+        assert!(terminal_projection_admissible(&creates,Some(PLAN),&rollback));
+        assert!(terminal_projection_admissible(&preserves,Some(PLAN),&unchanged));
+        assert!(!terminal_projection_admissible(&preserves,Some(PLAN),&installed));
+        assert!(!terminal_projection_admissible(&preserves,Some(PLAN),&rollback));
+        assert!(!terminal_projection_admissible(&creates,Some(REVISION),&installed));
+        creates.apply_submitted = false;
+        assert!(!terminal_projection_admissible(&creates,Some(PLAN),&installed));
+    }
+    #[test]
+    fn configuration_wire_and_projection_never_gain_workflow_authority_fields() {
+        let params = json!({"root":"/inert/project"});
+        assert_eq!(request_bytes(EditDomain::Configuration,SESSION,0,"open",params.clone()).unwrap(),
+            wire::request(SESSION,0,"open",params.clone()).unwrap());
+        assert!(request_bytes(EditDomain::GitHubWorkflows,SESSION,0,"open",params).is_err());
+        let p = projection(false);
+        let workflow = serde_json::to_value(p.workflow_projection().unwrap()).unwrap();
+        assert_eq!(workflow["domain"],"github_workflows");
+        assert!(workflow.get("root").is_none()); assert!(workflow.get("registeredIdentity").is_none());
+        let mut configuration = p; configuration.domain = EditDomain::Configuration; configuration.workflow = None;
+        assert!(configuration.workflow_projection().is_err());
+        let encoded = serde_json::to_value(configuration).unwrap();
+        assert!(encoded.get("domain").is_none()); assert!(encoded.get("workflow").is_none());
+        assert!(encoded.get("conflict").is_none()); assert_eq!(encoded["checkout"],Value::Null);
     }
 }

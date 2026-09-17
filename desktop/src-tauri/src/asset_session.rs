@@ -461,6 +461,65 @@ impl DocumentBinding {
         if result.as_ref().is_err_and(|error| error.reason == Reason::CleanupUnknown) { self.coordinator_failed(state); }
         result
     }
+    /// Workflow admission uses this actual document/selection mutex, not a
+    /// separate lock or an unlocked not_quitting observation. Both callbacks
+    /// are synchronous, bounded in-memory work only; open entropy must already
+    /// be in the EditOwner's private ticket. The asset qualification gate is
+    /// deliberately NOT workflow qualification.
+    pub(crate) fn workflow_edit_admit<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::WorkflowRegistration) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        let mut state = self.lock();
+        self.expire(&mut state, Instant::now());
+        if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
+        if !state.lifetime.original_bound() || state.lost_observed {
+            return Err(BridgeError::new("invalid_edit_owner", "This document does not own that live edit domain."));
+        }
+        if state.stopping || self.inner.bridge.supervisor.stopping() { return Err(BridgeError::shutdown()); }
+        if self.inner.bridge.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
+        if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
+        if state.retiring || state.lock_pending || state.slot.as_ref().is_some_and(|slot|
+            slot.operation == Operation::ChooseProject && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) {
+            return Err(BridgeError::new("busy", "The original native project selection has not settled."));
+        }
+        let id = project_id(&self.inner.bridge)?;
+        // Selection admission/publication and document loss cannot interleave
+        // this native lookup with the original owner's claim and enqueue. The
+        // registry guard is released before taking EditOwner's lock.
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&id));
+        let (generation, root) = selected.map_err(|error| match error.reason {
+            Reason::CleanupUnknown => {
+                // Registry poison is sticky and revokes the original edit;
+                // an error reply alone must not leave a live review token.
+                self.inner.bridge.edits.document_lost(MAIN);
+                BridgeError::cleanup_unknown()
+            }
+            Reason::Unqualified => BridgeError::unavailable("The selected project has no qualified native root identity."),
+            _ => BridgeError::invalid(),
+        })?;
+        enqueue(&self.inner.bridge, crate::edit_owner::WorkflowRegistration { generation, root })
+    }
+    /// Headless controlled-integration entry only: consume a real, already
+    /// settled SourceBook probe under this SAME document admission mutex. It
+    /// does not enable asset services or manufacture project/root identities.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn workflow_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32) -> Result<Project, AssetError> {
+        let mut state = self.lock();
+        self.expire(&mut state, Instant::now());
+        if !state.lifetime.original_bound() || state.lost_observed { return Err(AssetError::new(Reason::DocumentLost)); }
+        if state.unknown || state.exhausted { return Err(AssetError::new(Reason::CleanupUnknown)); }
+        if state.stopping || state.quit_pending || state.retiring || state.lock_pending || state.slot.is_some()
+            || state.session || state.context.is_some() || !state.records.is_empty() || !state.assignments.is_empty()
+            || self.inner.bridge.supervisor.stopping() || self.inner.bridge.supervisor.disabled()
+            || !self.inner.bridge.edits.workflow_fixture_registration_permitted(proof.path()) {
+            return Err(AssetError::new(Reason::Unqualified));
+        }
+        let published = self.registry_result(&mut state, self.inner.bridge.publish_checked_project(proof, generation))?;
+        self.bump(&mut state);
+        Ok(published)
+    }
     fn current_context(&self, state: &mut DocumentState, revision: u32) -> Result<Arc<NativeContext>, AssetError> {
         let context = state.context.as_ref().filter(|context| context.revision == revision).cloned().ok_or_else(|| AssetError::new(Reason::ContextStale))?;
         let matches = self.context_matches(state, &context);

@@ -5,6 +5,7 @@ import credentialGuideResource from '../../src/mobile_release/api/data/credentia
 import { githubSetupError, parseGitHubSetupHelp } from './githubSetupProtocol.ts';
 import { parseCredentialGuide } from './credentialGuide.ts';
 import { assetError } from './assetSessionProtocol.ts';
+import { workflowEditError } from './githubWorkflowEditProtocol.ts';
 import type { ApiError, Assurance, Catalog, DesktopApi, FieldHelp, JsonObject, ProjectSnapshot } from './types.ts';
 
 // Inert, explicit browser-design fixture. Nothing here is a project observation.
@@ -55,6 +56,7 @@ const editUnavailable = async (): Promise<never> => {
   throw { code: 'PreviewOnly', message: 'Browser preview has no native edit owner, save plan or finality. No save operation was performed.', retryable: false } satisfies ApiError;
 };
 const assetUnavailable = async (): Promise<never> => { throw assetError({ code: 'AssetSessionUnavailable' }); };
+const workflowUnavailable = async (): Promise<never> => { throw workflowEditError({ code: 'PreviewOnly' }); };
 
 export const previewApi: DesktopApi = {
   mode: 'preview',
@@ -82,6 +84,12 @@ export const previewApi: DesktopApi = {
   closeConfigEdit: editUnavailable,
   configEditStatus: editUnavailable,
   subscribeConfigEdit: editUnavailable,
+  openGitHubWorkflowEdit: workflowUnavailable,
+  prepareGitHubWorkflowEdit: workflowUnavailable,
+  applyGitHubWorkflowEdit: workflowUnavailable,
+  closeGitHubWorkflowEdit: workflowUnavailable,
+  githubWorkflowEditStatus: workflowUnavailable,
+  subscribeGitHubWorkflowEdit: workflowUnavailable,
   assetStatus: assetUnavailable,
   openAssetSession: assetUnavailable,
   setAssetContext: assetUnavailable,

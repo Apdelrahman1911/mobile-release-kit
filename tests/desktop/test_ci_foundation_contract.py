@@ -10,6 +10,7 @@ from copy import deepcopy
 from contextlib import redirect_stdout
 import importlib.util
 import io
+import json
 from pathlib import Path
 import subprocess
 import unittest
@@ -620,6 +621,609 @@ class FixedCompilerHelperTests(unittest.TestCase):
         constants = [item.value for item in install.args[0].elts if isinstance(item, ast.Constant)]
         self.assertEqual(constants, ["toolchain", "install", "--profile", "minimal", "--no-self-update"])
         self.assertTrue(any(isinstance(item, ast.Name) and item.id == "RUST" for item in install.args[0].elts))
+
+
+def workflow_environment() -> dict:
+    return {"GITHUB_SHA": "1" * 40, "GITHUB_WORKFLOW_SHA": "1" * 40,
+            "GITHUB_REPOSITORY": "fictional/project", "GITHUB_REF": helper.WORKFLOW_NATIVE_REF,
+            "GITHUB_WORKFLOW_REF": f"fictional/project/{helper.WORKFLOW_NATIVE_WORKFLOW}@{helper.WORKFLOW_NATIVE_REF}",
+            "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_EVENT_NAME": "push"}
+
+
+def workflow_host_report() -> dict:
+    return {"kernelRelease": "fixed-synthetic-kernel", "machine": "x86_64", "nonRoot": True,
+            "filesystem": {"device": "23", "blockSize": 4096, "fragmentSize": 4096, "nameMax": 255, "flags": 0}}
+
+
+def workflow_context() -> dict:
+    return {**helper.workflow_native_binding(workflow_environment()), "executionScope": helper.WORKFLOW_NATIVE_SCOPE,
+            "platform": "linux", "sourceTree": "3" * 40, "workflowSha256": "4" * 64,
+            "root": "/synthetic/workflow-task", "source": "/synthetic/source", "python": "/selected/python",
+            "observedHost": workflow_host_report(),
+            "workflowInputs": {"sourceFiles": [{"path": path, "size": 1, "sha256": "5" * 64}
+                                               for path in helper.WORKFLOW_NATIVE_SOURCES],
+                               "coreFiles": [{"path": "mobile_release/__init__.py", "size": 1, "sha256": "6" * 64}],
+                               "coreZipSha256": "7" * 64, "pythonSha256": "2" * 64}}
+
+
+def workflow_phase_report(name: str) -> dict:
+    context = workflow_context()
+    return {"schemaVersion": 1, "scope": helper.WORKFLOW_NATIVE_EVIDENCE_SCOPE, "phase": name, "status": "passed",
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha",
+                                            "workflowRef", "workflowSha256", "runId", "attempt", "workflowInputs")},
+            "rust": {"release": helper.RUST, "target": helper.TARGETS["linux"]}, "python": helper.PYTHON,
+            "features": ["development-runtime"], "testTarget": "lib",
+            "checks": [{"check": check, "exitCode": 0} for check in helper.WORKFLOW_NATIVE_CHECKS[name]],
+            "notVerified": list(helper.WORKFLOW_NOT_VERIFIED)}
+
+
+def workflow_core_report(partition: str) -> dict:
+    rows = helper.WORKFLOW_CORE_ROWS[partition]
+    return deepcopy({"schemaVersion": 1, "suite": "desktop-workflow-native", "domain": "github_workflows",
+        "partition": partition, "status": "passed", "reason": "none", "failedAt": None,
+        "retained": True, "uncertaintyLatched": partition != "committed-fsync",
+        "injection": helper.WORKFLOW_CORE_INJECTIONS[partition], "host": workflow_host_report(),
+        "bindings": {"sourceSha": "1" * 40, "sourceKind": "source", "sourceHashes": dict.fromkeys(helper.WORKFLOW_CORE_SOURCES, "3" * 64),
+                     "pythonSha256": "2" * 64, **helper.WORKFLOW_PAYLOAD_BINDINGS},
+        "completed": [row[0] for row in rows],
+        "cases": [{"case": name, "outcome": {"effect": effect, "journal": journal, "resources": resources, "reason": reason},
+                   "owner": {"closed": True, "handlerRestored": True, "fatal": fatal}, "observed": observed}
+                  for name, effect, journal, resources, reason, fatal, observed in rows]})
+
+
+def validate_workflow_core(value: object, partition: str) -> dict:
+    return helper.validate_workflow_core_receipt(value, partition, source_sha="1" * 40,
+        source_hashes=dict.fromkeys(helper.WORKFLOW_CORE_SOURCES, "3" * 64), python_hash="2" * 64, host=workflow_host_report())
+
+
+# Inert receipt expectations transcribed from independent Rust contract DATA
+# da0dc551ec6ce88993282f8d364b7481eb7c3ddedfdfe0eca6de024922d27809.
+# They are not produced by, or accepted as, a native invocation.
+WORKFLOW_NATIVE_SOURCE_KEYS = (
+    'fixture', 'owner', 'editProtocol', 'runtime', 'protocol',
+    'errors', 'library', 'build', 'cargoManifest', 'cargoLock',
+    'bootstrap', 'passiveBootstrap', 'corePackage', 'engine', 'control',
+    'coreProtocol', 'configEdit', 'configPayloads', 'config', 'transaction',
+    'rootCustody', 'cancellation', 'buildInputs', 'coreErrors', 'preview',
+    'nativeFixture', 'workflowProtocol', 'bridge', 'documentBinding', 'documentLifetime',
+    'assetSource', 'assetCommands', 'supervisor', 'editCommands', 'githubCommands',
+    'workflowEdit', 'workflowPayloads', 'githubSetup', 'githubResource', 'canonicalPreflight',
+    'canonicalCandidate', 'canonicalExternalTesting', 'canonicalProductionSubmit',
+)
+WORKFLOW_CASE_COMMON = {'originalWait': True, 'stdoutEof': True, 'stderrEof': True, 'stdinClosed': True, 'stdoutClosed': True, 'stderrClosed': True, 'startupJoined': True, 'ioJoined': True, 'driverJoined': True, 'watchdogJoined': True, 'managerJoined': True, 'forceAttempted': False, 'registeredByOriginalProbe': True, 'sourceProbesSettled': True}
+WORKFLOW_NATIVE_FIXED_BINDINGS = {
+    'domain': 'github_workflows',
+    'host': 'linux',
+    'target': 'x86_64-unknown-linux-gnu',
+    'runtimeMode': 'trusted-development-only',
+    'templateResourceSha256': '4d486fc24ebf24271dbb5227174df7c8f28a530a97011e004da643fdad7fe17c',
+    'toolingRepository': 'Example/mobile-release-kit',
+    'toolingSha': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    'inheritedFileMaskObserved': True,
+    'requestedCreateMode': 420,
+    'observedCreateMode': 384,
+    'newDirectoryMode': 493,
+    'documentEvidence': 'controlled-original-lifetime-not-gui-callbacks',
+    'ref': 'refs/heads/verify/desktop-github-workflow-apply-native',
+    "payloadHashes": {
+        'draft': '7c19854e3652c3f3ed698c02fa6078e3e8f62f73682517617bac86cb0038acc7',
+        'workflows': {'preflight': '50845641f06763aab532900d1b3b186a5d684d465a4d63fab05f53c99f9685de', 'candidate': '8fb540be24c263c97f7dbf95df524a8b11633e5fa7b1dc92e77cd648ad16e32f', 'external-testing': '97fa27d95cc7b2d75be0c3a0860af1d350edb6a52741ed87c0a5b13eca8386f1', 'production-submit': '85865a4df661ef7c7b708b55598a70d56fd84957ce07c9c60f15bcf10a5554b8'},
+        'protectedConfig': 'd0eb25f7006a26234235a3a4e7ed7588f36f3ce7fc95f1e707b0d57c8d4b83d0',
+        'protectedIgnore': 'd4247a03ac6b6122d0402ff195f354112aca945da5d8e9ce362d19701dbcafe6',
+        'unrelated': '0e4722e0ca13cfc08d5e8bd61c73d37c9880610e1723a8eb1c2363e92e2eebef',
+        'umaskProbe': '9c32669444fb9694299448392c40adef003059b9987eb57efcfc685cd4c00a56',
+    },
+}
+
+WORKFLOW_OWNER_CASE_DATA = (
+    {'name': 'create-fresh', 'domain': 'github_workflows', 'requestFrames': 3, 'responseFrames': 3, 'terminalSeq': 2, 'nativePhase': 'final', 'nativeFinality': 'settled', 'nativeReason': 'none', 'applySubmitted': True, 'lateSettled': False, 'stderrBytes': 0,
+     "outcome": {'effect': 'committed', 'journal': 'clean', 'resources': 'settled', 'reason': 'none'},
+     "observations": {'created': 4, 'preserved': 0, 'directoriesCreated': ['.github', '.github/workflows'], 'canonicalPayloads': True, 'templateIdentity': True, 'completePreparedBytes': True, 'capturePrepareUnchanged': True, 'protectedPreserved': True, 'existingIdentityPreserved': True, 'createModesMasked': True, 'directoryModesExact': True, 'duplicateApplyObservation': True, 'oppositeDomainRefused': True, 'sharedStatusRevision': True}},
+    {'name': 'create-under-github', 'domain': 'github_workflows', 'requestFrames': 3, 'responseFrames': 3, 'terminalSeq': 2, 'nativePhase': 'final', 'nativeFinality': 'settled', 'nativeReason': 'none', 'applySubmitted': True, 'lateSettled': False, 'stderrBytes': 0,
+     "outcome": {'effect': 'committed', 'journal': 'clean', 'resources': 'settled', 'reason': 'none'},
+     "observations": {'created': 4, 'preserved': 0, 'directoriesCreated': ['.github/workflows'], 'canonicalPayloads': True, 'templateIdentity': True, 'completePreparedBytes': True, 'capturePrepareUnchanged': True, 'protectedPreserved': True, 'existingIdentityPreserved': True, 'createModesMasked': True, 'directoryModesExact': True, 'duplicateApplyObservation': False, 'oppositeDomainRefused': False, 'sharedStatusRevision': True}},
+    {'name': 'mixed-create-preserve', 'domain': 'github_workflows', 'requestFrames': 3, 'responseFrames': 3, 'terminalSeq': 2, 'nativePhase': 'final', 'nativeFinality': 'settled', 'nativeReason': 'none', 'applySubmitted': True, 'lateSettled': False, 'stderrBytes': 0,
+     "outcome": {'effect': 'committed', 'journal': 'clean', 'resources': 'settled', 'reason': 'none'},
+     "observations": {'created': 2, 'preserved': 2, 'directoriesCreated': [], 'canonicalPayloads': True, 'templateIdentity': True, 'completePreparedBytes': True, 'capturePrepareUnchanged': True, 'protectedPreserved': True, 'existingIdentityPreserved': True, 'createModesMasked': True, 'directoryModesExact': True, 'duplicateApplyObservation': False, 'oppositeDomainRefused': False, 'sharedStatusRevision': True}},
+    {'name': 'preserve-all', 'domain': 'github_workflows', 'requestFrames': 3, 'responseFrames': 3, 'terminalSeq': 2, 'nativePhase': 'final', 'nativeFinality': 'settled', 'nativeReason': 'none', 'applySubmitted': True, 'lateSettled': False, 'stderrBytes': 0,
+     "outcome": {'effect': 'unchanged', 'journal': 'not_created', 'resources': 'settled', 'reason': 'none'},
+     "observations": {'created': 0, 'preserved': 4, 'directoriesCreated': [], 'canonicalPayloads': True, 'templateIdentity': True, 'completePreparedBytes': True, 'capturePrepareUnchanged': True, 'protectedPreserved': True, 'existingIdentityPreserved': True, 'createModesMasked': True, 'directoryModesExact': True, 'duplicateApplyObservation': False, 'oppositeDomainRefused': False, 'sharedStatusRevision': True}},
+    {'name': 'different-refusal', 'domain': 'github_workflows', 'requestFrames': 2, 'responseFrames': 2, 'terminalSeq': 1, 'nativePhase': 'final', 'nativeFinality': 'settled', 'nativeReason': 'none', 'applySubmitted': False, 'lateSettled': False, 'stderrBytes': 0,
+     "outcome": {'effect': 'not_started', 'journal': 'not_created', 'resources': 'settled', 'reason': 'none'},
+     "observations": {'noPlanToken': True, 'oneDifferingNewline': True, 'noPreparedFrame': True, 'wholeBundleRefused': True, 'treeUnchanged': True}},
+    {'name': 'root-replaced-before-open', 'domain': 'github_workflows', 'requestFrames': 1, 'responseFrames': 1, 'terminalSeq': 0, 'nativePhase': 'final', 'nativeFinality': 'settled', 'nativeReason': 'none', 'applySubmitted': False, 'lateSettled': False, 'stderrBytes': 0,
+     "outcome": {'effect': 'not_started', 'journal': 'not_created', 'resources': 'settled', 'reason': 'stale_revision'},
+     "observations": {'registeredIdentityRetained': True, 'replacementRejectedBeforeCheckout': True, 'replacementTreeUnchanged': True}},
+    {'name': 'registration-before-prepare', 'domain': 'github_workflows', 'requestFrames': 1, 'responseFrames': 2, 'terminalSeq': 0, 'nativePhase': 'final', 'nativeFinality': 'settled', 'nativeReason': 'caller_lost', 'applySubmitted': False, 'lateSettled': False, 'stderrBytes': 0,
+     "outcome": {'effect': 'not_started', 'journal': 'not_created', 'resources': 'settled', 'reason': 'none'},
+     "observations": {'newRegistrationPublishedUnderDocumentLock': True, 'originalRegistrationRetained': True, 'staleCommandNotSent': True, 'treeUnchanged': True}},
+    {'name': 'registration-before-apply', 'domain': 'github_workflows', 'requestFrames': 2, 'responseFrames': 3, 'terminalSeq': 1, 'nativePhase': 'final', 'nativeFinality': 'settled', 'nativeReason': 'caller_lost', 'applySubmitted': False, 'lateSettled': False, 'stderrBytes': 0,
+     "outcome": {'effect': 'not_started', 'journal': 'not_created', 'resources': 'settled', 'reason': 'none'},
+     "observations": {'newRegistrationPublishedUnderDocumentLock': True, 'originalRegistrationRetained': True, 'staleCommandNotSent': True, 'treeUnchanged': True}},
+    {'name': 'config-blocks-workflow', 'domain': 'configuration', 'requestFrames': 1, 'responseFrames': 2, 'terminalSeq': 0, 'nativePhase': 'final', 'nativeFinality': 'settled', 'nativeReason': 'discarded', 'applySubmitted': False, 'lateSettled': False, 'stderrBytes': 0,
+     "outcome": {'effect': 'not_started', 'journal': 'not_created', 'resources': 'settled', 'reason': 'none'},
+     "observations": {'oppositeDomainRefused': True, 'sharedStatusRevision': True, 'sharedLastTerminalReplaced': True, 'configurationFilesUnchanged': True, 'workflowPermitStillSeparate': True}},
+    {'name': 'document-loss', 'domain': 'github_workflows', 'requestFrames': 2, 'responseFrames': 3, 'terminalSeq': 1, 'nativePhase': 'final', 'nativeFinality': 'settled', 'nativeReason': 'window_lost', 'applySubmitted': False, 'lateSettled': False, 'stderrBytes': 0,
+     "outcome": {'effect': 'not_started', 'journal': 'not_created', 'resources': 'settled', 'reason': 'none'},
+     "observations": {'controlledOriginalDocumentLoss': True, 'originalStopRequested': True, 'replacementDocumentRefused': True, 'preparedCorrelationRetained': True, 'treeUnchanged': True, 'guiCallbacksNotClaimed': True}},
+)
+
+WORKFLOW_EOF_CASE_DATA = (
+    {'name': 'precommit-eof', 'domain': 'github_workflows', 'requestFrames': 3, 'responseFrames': 3, 'terminalSeq': 2, 'nativePhase': 'final', 'nativeFinality': 'settled', 'nativeReason': 'cancelled', 'applySubmitted': True, 'lateSettled': False, 'stderrBytes': 258,
+     "outcome": {'effect': 'rolled_back', 'journal': 'clean', 'resources': 'settled', 'reason': 'cancelled'},
+     "observations": {'evidenceKind': 'real-stdin-eof-at-controlled-transaction-boundary', 'bootstrapMode': 'instrumented-genuine-engine', 'boundary': 'before-COMMITTED', 'originalCheckpoint': 'publisher-entry', 'closeBeforeActiveDeadline': True, 'controlRecords': 2, 'actualStdinEof': True, 'eofReadCount': 1, 'nonemptyReadCount': 0, 'readErrorCount': 0, 'preparedCorrelation': True, 'committedPublication': False, 'rolledBackPublication': True, 'terminalDurable': True, 'fixedRecovery': True, 'journalClean': True, 'journalAbsent': True, 'originalTreeRestored': True, 'canonicalPayloadsRemain': False, 'protectedPreserved': True, 'unrelatedIntroducedBeforeEof': False, 'introducedOriginalPreserved': False, 'recoveryEvidenceRetained': False, 'sharedBlockedProject': False, 'bothDomainsDisabled': False, 'noFurtherAdmission': False, 'fixtureFilesSettled': True}},
+    {'name': 'postcommit-eof', 'domain': 'github_workflows', 'requestFrames': 3, 'responseFrames': 3, 'terminalSeq': 2, 'nativePhase': 'final', 'nativeFinality': 'settled', 'nativeReason': 'cancelled', 'applySubmitted': True, 'lateSettled': False, 'stderrBytes': 266,
+     "outcome": {'effect': 'committed', 'journal': 'clean', 'resources': 'settled', 'reason': 'cancelled'},
+     "observations": {'evidenceKind': 'real-stdin-eof-at-controlled-transaction-boundary', 'bootstrapMode': 'instrumented-genuine-engine', 'boundary': 'after-durable-COMMITTED', 'originalCheckpoint': 'descriptor-close', 'closeBeforeActiveDeadline': True, 'controlRecords': 2, 'actualStdinEof': True, 'eofReadCount': 1, 'nonemptyReadCount': 0, 'readErrorCount': 0, 'preparedCorrelation': True, 'committedPublication': True, 'rolledBackPublication': False, 'terminalDurable': True, 'fixedRecovery': True, 'journalClean': True, 'journalAbsent': True, 'originalTreeRestored': False, 'canonicalPayloadsRemain': True, 'protectedPreserved': True, 'unrelatedIntroducedBeforeEof': False, 'introducedOriginalPreserved': False, 'recoveryEvidenceRetained': False, 'sharedBlockedProject': False, 'bothDomainsDisabled': False, 'noFurtherAdmission': False, 'fixtureFilesSettled': True}},
+    {'name': 'precommit-conflict-eof', 'domain': 'github_workflows', 'requestFrames': 3, 'responseFrames': 3, 'terminalSeq': 2, 'nativePhase': 'unknown', 'nativeFinality': 'unknown', 'nativeReason': 'cancelled', 'applySubmitted': True, 'lateSettled': True, 'stderrBytes': 272,
+     "outcome": {'effect': 'unknown', 'journal': 'recovery_required', 'resources': 'settled', 'reason': 'cancelled'},
+     "observations": {'evidenceKind': 'real-stdin-eof-at-controlled-transaction-boundary', 'bootstrapMode': 'instrumented-genuine-engine', 'boundary': 'before-COMMITTED', 'originalCheckpoint': 'publisher-entry', 'closeBeforeActiveDeadline': True, 'controlRecords': 2, 'actualStdinEof': True, 'eofReadCount': 1, 'nonemptyReadCount': 0, 'readErrorCount': 0, 'preparedCorrelation': True, 'committedPublication': False, 'rolledBackPublication': False, 'terminalDurable': False, 'fixedRecovery': True, 'journalClean': False, 'journalAbsent': False, 'originalTreeRestored': False, 'canonicalPayloadsRemain': True, 'protectedPreserved': True, 'unrelatedIntroducedBeforeEof': True, 'introducedOriginalPreserved': True, 'recoveryEvidenceRetained': True, 'sharedBlockedProject': True, 'bothDomainsDisabled': True, 'noFurtherAdmission': True, 'fixtureFilesSettled': True}},
+)
+
+def workflow_owner_report(mode: str = "source", *, eof: bool = False) -> dict:
+    rows = WORKFLOW_EOF_CASE_DATA if eof else WORKFLOW_OWNER_CASE_DATA if mode == "source" else WORKFLOW_OWNER_CASE_DATA[:1]
+    keys = (*WORKFLOW_NATIVE_SOURCE_KEYS, "transactionEofShim") if eof else WORKFLOW_NATIVE_SOURCE_KEYS
+    return deepcopy({"schemaVersion": 1, "domain": "github_workflows", "status": "passed", "failureCode": None,
+        "scope": "github-workflow-transaction-eof-hosted-v1" if eof else "github-workflow-owner-hosted-v1",
+        "allOwnersSettled": not eof, "originalResourcesSettled": True, "ownerDisabled": eof, "retainedEffectUnknown": eof,
+        "notVerified": list(helper.WORKFLOW_NOT_VERIFIED),
+        "cases": [{**WORKFLOW_CASE_COMMON, "stdoutBytes": 4096, **row} for row in rows],
+        "bindings": {**WORKFLOW_NATIVE_FIXED_BINDINGS, "sourceSha": "1" * 40, "sourceTree": "3" * 40,
+            "workflowSha256": "4" * 64, "runId": "123", "attempt": "2", "pythonSha256": "2" * 64,
+            "coreZipSha256": "7" * 64,
+            "coreInventorySha256": "b78b4a875a0341d629a8aaa0148a9816f9cbc24cd55f14168a2b54a8a1cea4c0",
+            "sourceHashes": dict.fromkeys(keys, "3" * 64), "runtimeInput": mode}})
+
+
+def validate_workflow_owner(value: object, mode: str = "source", *, eof: bool = False) -> dict:
+    if eof:
+        return helper.validate_workflow_transaction_eof_receipt(value, context=workflow_context(),
+            source_hashes=dict.fromkeys((*WORKFLOW_NATIVE_SOURCE_KEYS, "transactionEofShim"), "3" * 64))
+    return helper.validate_workflow_owner_receipt(value, mode, context=workflow_context(),
+        source_hashes=dict.fromkeys(WORKFLOW_NATIVE_SOURCE_KEYS, "3" * 64))
+
+
+class WorkflowNativeHelperTests(unittest.TestCase):
+    """Explicit inert selectors; data consumers/source checks, never fixtures."""
+
+    def test_owner_source_matrix_and_single_zip_case_require_original_mode_and_case_inventory(self):
+        for mode in ("source", "zip"):
+            report = workflow_owner_report(mode)
+            with patch.object(helper, "run", side_effect=AssertionError("no subprocess")), \
+                    patch.object(helper, "hash_file", side_effect=AssertionError("no file read")):
+                self.assertIs(validate_workflow_owner(report, mode), report)
+            self.assertEqual(len(report["cases"]), 10 if mode == "source" else 1)
+            for changed in ({"schemaVersion": True}, {"domain": "configuration"}, {"status": "failed"},
+                            {"allOwnersSettled": False}, {"originalResourcesSettled": False}, {"ownerDisabled": True},
+                            {"retainedEffectUnknown": True}, {"failureCode": "not_completed"}, {"notVerified": []},
+                            {"cases": []}, {"cases": report["cases"] * 2}, {"extra": True}):
+                with self.subTest(mode=mode, change=changed), self.assertRaises(helper.CheckFailure):
+                    validate_workflow_owner({**report, **changed}, mode)
+            with self.assertRaises(helper.CheckFailure):
+                validate_workflow_owner(report, "zip" if mode == "source" else "source")
+        report = workflow_owner_report()
+        self.assertEqual(tuple(case["name"] for case in report["cases"]), (
+            "create-fresh", "create-under-github", "mixed-create-preserve", "preserve-all", "different-refusal",
+            "root-replaced-before-open", "registration-before-prepare", "registration-before-apply", "config-blocks-workflow", "document-loss"))
+        for altered in (list(reversed(report["cases"])), report["cases"][:-1]):
+            with self.assertRaises(helper.CheckFailure):
+                validate_workflow_owner({**report, "cases": altered})
+        for index in (6, 7, 8, 9):
+            report["cases"][index]["outcome"]["reason"] = "cancelled"
+        self.assertIs(validate_workflow_owner(report), report)  # Only the four closed EOF/discard races allow both reasons.
+        for value in (None, [], True, "passed"):
+            with self.assertRaises(helper.CheckFailure):
+                validate_workflow_owner(value)
+
+    def test_owner_bindings_require_every_original_source_runtime_payload_workflow_and_run_field(self):
+        for eof in (False, True):
+            report = workflow_owner_report(eof=eof)
+            self.assertEqual(len(report["bindings"]), 24)
+            self.assertEqual(len(report["bindings"]["sourceHashes"]), 44 if eof else 43)
+            for key in report["bindings"]:
+                changed = deepcopy(report)
+                del changed["bindings"][key]
+                with self.subTest(eof=eof, missing=key), self.assertRaises(helper.CheckFailure):
+                    validate_workflow_owner(changed, eof=eof)
+            for key, value in (("sourceSha", "2" * 40), ("sourceTree", "2" * 40), ("workflowSha256", "0" * 64),
+                               ("runId", "124"), ("attempt", "3"), ("ref", "refs/heads/main"), ("domain", "configuration"),
+                               ("host", "macos"), ("target", helper.TARGETS["windows"]), ("runtimeMode", "production"),
+                               ("runtimeInput", "zip"), ("pythonSha256", "0" * 64), ("coreZipSha256", "0" * 64),
+                               ("coreInventorySha256", "0" * 64), ("sourceHashes", {}), ("payloadHashes", {}),
+                               ("requestedCreateMode", True), ("observedCreateMode", 420), ("newDirectoryMode", 493.0),
+                               ("inheritedFileMaskObserved", 1), ("documentEvidence", "genuine-gui-callbacks"), ("extra", False)):
+                changed = deepcopy(report)
+                changed["bindings"][key] = value
+                with self.subTest(eof=eof, key=key), self.assertRaises(helper.CheckFailure):
+                    validate_workflow_owner(changed, eof=eof)
+            for group in ("sourceHashes", "payloadHashes"):
+                for key in report["bindings"][group]:
+                    changed = deepcopy(report)
+                    del changed["bindings"][group][key]
+                    with self.subTest(eof=eof, group=group, key=key), self.assertRaises(helper.CheckFailure):
+                        validate_workflow_owner(changed, eof=eof)
+
+    def test_owner_original_returns_correlations_frames_and_observations_are_strict(self):
+        for eof in (False, True):
+            report = workflow_owner_report(eof=eof)
+            for index, case in enumerate(report["cases"]):
+                self.assertEqual(len(case), 28)
+                for key, original in case.items():
+                    values = (not original, int(original)) if type(original) is bool else (True, float(original)) if type(original) is int else ()
+                    for value in values:
+                        changed = deepcopy(report)
+                        changed["cases"][index][key] = value
+                        with self.subTest(eof=eof, case=case["name"], key=key, value=value), self.assertRaises(helper.CheckFailure):
+                            validate_workflow_owner(changed, eof=eof)
+                for key, original in case["observations"].items():
+                    values = (not original, int(original)) if type(original) is bool else (True, float(original), original + 1) if type(original) is int else (None,)
+                    for value in values:
+                        changed = deepcopy(report)
+                        changed["cases"][index]["observations"][key] = value
+                        with self.subTest(eof=eof, case=case["name"], observation=key, value=value), self.assertRaises(helper.CheckFailure):
+                            validate_workflow_owner(changed, eof=eof)
+                for key, value in (("stdoutBytes", 0), ("stdoutBytes", 12 * 1024 * 1024 + 1),
+                                   ("requestFrames", case["requestFrames"] + 1), ("responseFrames", case["responseFrames"] + 1),
+                                   ("terminalSeq", case["terminalSeq"] + 1), ("nativeReason", "uncontrolled"),
+                                   ("domain", "configuration" if case["domain"] == "github_workflows" else "github_workflows"),
+                                   ("extra", True), ("observations", {}),
+                                   ("outcome", {**case["outcome"], "resources": "unknown"}),
+                                   ("outcome", {**case["outcome"], "reason": "filesystem_error"})):
+                    changed = deepcopy(report)
+                    changed["cases"][index][key] = value
+                    with self.subTest(eof=eof, case=case["name"], key=key), self.assertRaises(helper.CheckFailure):
+                        validate_workflow_owner(changed, eof=eof)
+
+    def test_eof_last_conflict_is_native_unknown_with_actual_original_resources_not_normal_settlement(self):
+        report = workflow_owner_report(eof=True)
+        self.assertIs(validate_workflow_owner(report, eof=True), report)
+        self.assertEqual([case["stderrBytes"] for case in report["cases"]], [258, 266, 272])
+        self.assertEqual([case["outcome"]["effect"] for case in report["cases"]], ["rolled_back", "committed", "unknown"])
+        self.assertIs(report["allOwnersSettled"], False)
+        self.assertIs(report["originalResourcesSettled"], True)
+        for changed in ({"allOwnersSettled": True}, {"originalResourcesSettled": False}, {"ownerDisabled": False},
+                        {"retainedEffectUnknown": False}, {"cases": report["cases"][:2]},
+                        {"cases": list(reversed(report["cases"]))}, {"scope": "github-workflow-owner-hosted-v1"}):
+            with self.subTest(change=changed), self.assertRaises(helper.CheckFailure):
+                validate_workflow_owner({**report, **changed}, eof=True)
+        last = report["cases"][-1]
+        self.assertEqual((last["nativePhase"], last["nativeFinality"], last["lateSettled"]), ("unknown", "unknown", True))
+        self.assertEqual(last["outcome"], {"effect": "unknown", "journal": "recovery_required", "resources": "settled", "reason": "cancelled"})
+        for key, value in (("nativePhase", "final"), ("nativeFinality", "settled"), ("lateSettled", False), ("stderrBytes", 258),
+                           ("outcome", {"effect": "committed", "journal": "clean", "resources": "settled", "reason": "none"})):
+            changed = deepcopy(report)
+            changed["cases"][-1][key] = value
+            with self.assertRaises(helper.CheckFailure):
+                validate_workflow_owner(changed, eof=True)
+        with self.assertRaises(helper.CheckFailure):
+            validate_workflow_owner(report)  # Expected negative EOF cannot substitute for a healthy owner proof.
+
+    def test_native_receipt_reader_enforces_its_smaller_bound_before_any_open(self):
+        with patch.object(helper, "ordinary"), patch.object(Path, "stat") as details, \
+                patch.object(Path, "open", side_effect=AssertionError("oversized data must not be opened")):
+            details.return_value.st_size = 65537
+            with self.assertRaises(helper.CheckFailure):
+                helper.workflow_json(Path("/never-opened/receipt.json"), maximum=65536)
+        source = HELPER.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for name in ("workflow_owner_receipt", "workflow_transaction_eof_receipt"):
+            wrapper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+            calls = [node for node in ast.walk(wrapper) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "workflow_json"]
+            self.assertEqual(len(calls), 1)
+            self.assertIn("maximum=64 * 1024", ast.get_source_segment(source, calls[0]))
+
+    def test_native_scope_is_separate_and_refuses_other_phases_before_context_or_tools(self):
+        self.assertNotIn(helper.WORKFLOW_NATIVE_SCOPE, helper.COMPILE_PROFILES)
+        self.assertEqual(set(helper.COMPILE_PROFILES), {helper.COMPILE_SCOPE, helper.GTK_COMPILE_SCOPE})
+        with patch.object(helper, "load_context", side_effect=AssertionError("no context IO")), \
+                patch.object(helper, "tools", side_effect=AssertionError("no compiler selection")):
+            for name in ("native", "config-owner", "config-task-loss", "config-owner-delta", "config-transaction-eof", "config-core", "unknown"):
+                with self.subTest(phase=name), self.assertRaises(helper.CheckFailure):
+                    helper.phase(name, "linux", helper.WORKFLOW_NATIVE_SCOPE)
+            for scope in (*helper.COMPILE_PROFILES, helper.BOUNDARY_SCOPE):
+                for name in ("workflow-owner", "workflow-transaction-eof", "workflow-core"):
+                    with self.subTest(scope=scope, phase=name), self.assertRaises(helper.CheckFailure):
+                        helper.phase(name, "linux", scope)
+            for platform in ("macos", "windows", "unexpected"):
+                for name in helper.WORKFLOW_NATIVE_PHASES:
+                    with self.subTest(platform=platform, phase=name), self.assertRaises(helper.CheckFailure):
+                        helper.phase(name, platform, helper.WORKFLOW_NATIVE_SCOPE)
+                with self.assertRaises(helper.CheckFailure):
+                    helper.prepare(platform, helper.WORKFLOW_NATIVE_SCOPE)
+        for name in helper.WORKFLOW_NATIVE_PHASES:
+            helper.admit_phase(helper.WORKFLOW_NATIVE_SCOPE, name)
+
+    def test_binding_requires_fixed_workflow_ref_source_attempt_and_exact_dispatch(self):
+        environment = workflow_environment()
+        expected = helper.workflow_native_binding(environment)
+        self.assertEqual(expected["workflowPath"], ".github/workflows/desktop-github-workflow-apply-native.yml")
+        for key, value in (("GITHUB_SHA", "bad"), ("GITHUB_WORKFLOW_SHA", "2" * 40), ("GITHUB_REF", helper.COMPILE_REF),
+                           ("GITHUB_WORKFLOW_REF", "other/workflow"), ("GITHUB_REPOSITORY", "other/project"),
+                           ("GITHUB_RUN_ID", "0"), ("GITHUB_RUN_ATTEMPT", "-1"), ("GITHUB_EVENT_NAME", "pull_request")):
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                helper.workflow_native_binding({**environment, key: value})
+        with self.assertRaises(helper.CheckFailure):
+            helper.workflow_native_binding({**environment, "GITHUB_SHA": "0" * 40, "GITHUB_WORKFLOW_SHA": "0" * 40})
+        dispatch = {**environment, "GITHUB_EVENT_NAME": "workflow_dispatch"}
+        for sha in (None, "2" * 40, "main"):
+            with self.subTest(expected_sha=sha), self.assertRaises(helper.CheckFailure):
+                helper.workflow_native_binding({**dispatch, "MRK_EXPECTED_SHA": sha})
+        self.assertEqual(helper.workflow_native_binding({**dispatch, "MRK_EXPECTED_SHA": "1" * 40}), expected)
+        for scope in helper.COMPILE_PROFILES:
+            with self.assertRaises(helper.CheckFailure):
+                helper.compile_workflow_binding(environment, scope)
+
+    def test_observed_host_is_typed_nonroot_linux_data_not_filesystem_qualification(self):
+        host = workflow_host_report()
+        helper.validate_workflow_host(host)
+        for changes in ({"nonRoot": False}, {"nonRoot": 1}, {"machine": "aarch64"}, {"kernelRelease": ""},
+                        {"kernelRelease": "private\nline"}, {"kernelRelease": "x" * 257}, {"extra": True}):
+            with self.subTest(change=changes), self.assertRaises(helper.CheckFailure):
+                helper.validate_workflow_host({**host, **changes})
+        for key, value in (("device", 23), ("device", "023"), ("device", "-1"), ("device", str(2**64)),
+                           ("blockSize", True), ("fragmentSize", 4096.0), ("nameMax", 0), ("flags", False), ("flags", -1)):
+            with self.subTest(key=key, value=value), self.assertRaises(helper.CheckFailure):
+                helper.validate_workflow_host({**host, "filesystem": {**host["filesystem"], key: value}})
+
+    def test_phase_receipts_are_closed_typed_source_bound_and_not_compiler_proof(self):
+        context = workflow_context()
+        for name in helper.WORKFLOW_NATIVE_CHECKS:
+            report = workflow_phase_report(name)
+            self.assertIs(helper.validate_workflow_phase_receipt(report, context, name), report)
+            for key, value in (("schemaVersion", True), ("sourceSha", "2" * 40), ("sourceTree", "2" * 40),
+                               ("platform", "windows"), ("workflowPath", helper.COMPILE_WORKFLOW), ("workflowSha256", "6" * 64),
+                               ("workflowSha", "2" * 40), ("workflowRef", "other/ref"), ("runId", "124"), ("attempt", "1"),
+                               ("status", "failed"), ("features", ["desktop-shell", "development-runtime"]),
+                               ("testTarget", "session-gtk-qualification"), ("notVerified", []),
+                               ("checks", report["checks"][:-1]), ("node", helper.NODE), ("extra", False)):
+                with self.subTest(phase=name, key=key), self.assertRaises(helper.CheckFailure):
+                    helper.validate_workflow_phase_receipt({**report, key: value}, context, name)
+            for value in (False, 1, 0.0, None):
+                changed = deepcopy(report)
+                changed["checks"][0]["exitCode"] = value
+                with self.assertRaises(helper.CheckFailure):
+                    helper.validate_workflow_phase_receipt(changed, context, name)
+            changed = deepcopy(report)
+            changed["workflowInputs"]["sourceFiles"][0]["size"] = True
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_workflow_phase_receipt(changed, context, name)
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_compile_receipt(report, context, "compile")
+            for scope in (*helper.COMPILE_PROFILES, helper.BOUNDARY_SCOPE):
+                with self.assertRaises(helper.CheckFailure):
+                    helper.validate_workflow_phase_receipt(report, {**context, "executionScope": scope}, name)
+
+    def test_receipt_bytes_refuse_duplicate_nonfinite_truncated_extra_and_oversized_data(self):
+        report = workflow_core_report("ordinary")
+        raw = json.dumps(report, separators=(",", ":")).encode()
+        self.assertEqual(helper.parse_workflow_receipt(raw), report)
+        for malformed in (raw.replace(b'"schemaVersion":1', b'"schemaVersion":0,"schemaVersion":1'),
+                          raw.replace(b'"scopesClosed":2', b'"scopesClosed":0,"scopesClosed":2'),
+                          raw[:-1], raw + b'{}', b'{"bad":NaN}', b'{"bad":Infinity}', b'\xff', b'', b' ' * (128 * 1024 + 1)):
+            with self.subTest(size=len(malformed)), self.assertRaises(helper.CheckFailure):
+                helper.parse_workflow_receipt(malformed)
+
+    def test_core_roster_and_terminal_controls_keep_orthogonal_unknown_facts(self):
+        names = (
+            "capture-prepare-discard", "existing-differs", "oversized", "unreadable", "symlink-leaf", "symlink-ancestor",
+            "hardlink", "aliased-leaf", "nonregular-fifo", "registered-root-replaced", "stale-leaf-bytes-before-prepare",
+            "stale-leaf-inode-before-apply", "stale-ancestor-mode-before-prepare", "absent-ancestor-before-prepare",
+            "absent-leaf-before-apply", "stale-root-before-apply", "pending-init", "pending-build", "contention-init",
+            "contention-build", "review-unlocked", "partial-install-rollback", "incomplete-preparing", "wrong-roster-controls",
+            "unowned-staging-slot", "rollback-pending-replaced", "cleanup-committed-unused-missing",
+            "cleanup-rolled-back-unused-missing", "commit-pending-replaced",
+        )
+        self.assertEqual(tuple(row[0] for row in helper.WORKFLOW_CORE_ROWS["ordinary"]), names)
+        self.assertEqual(tuple(len(helper.WORKFLOW_CORE_ROWS[name]) for name in helper.WORKFLOW_PARTITIONS), (29, 1, 1))
+        with patch.object(helper, "run", side_effect=AssertionError("no subprocess")), \
+                patch.object(helper, "hash_file", side_effect=AssertionError("no file read")):
+            for partition in helper.WORKFLOW_PARTITIONS:
+                report = workflow_core_report(partition)
+                self.assertIs(validate_workflow_core(report, partition), report)
+                self.assertTrue(report["retained"])
+        ordinary = workflow_core_report("ordinary")
+        self.assertEqual(ordinary["cases"][-1]["outcome"], {"effect": "unknown", "journal": "recovery_required",
+                                                              "resources": "settled", "reason": "filesystem_error"})
+        self.assertTrue(ordinary["uncertaintyLatched"])
+        fsync = workflow_core_report("committed-fsync")
+        self.assertEqual(fsync["cases"][0]["outcome"], {"effect": "committed", "journal": "recovery_required",
+                                                        "resources": "settled", "reason": "filesystem_error"})
+        self.assertFalse(fsync["uncertaintyLatched"])
+        close = workflow_core_report("committed-close")
+        self.assertEqual(close["cases"][0]["outcome"], {"effect": "committed", "journal": "clean", "resources": "unknown", "reason": "cancelled"})
+        self.assertTrue(close["cases"][0]["owner"]["fatal"])
+        self.assertEqual(close["cases"][0]["observed"]["afterUnknownProbes"], 0)
+
+    def test_core_receipts_refuse_incomplete_reordered_cross_domain_or_laundered_outcomes(self):
+        for partition in helper.WORKFLOW_PARTITIONS:
+            report = workflow_core_report(partition)
+            changes = ({"schemaVersion": True}, {"suite": "desktop-config-native"}, {"domain": "configuration"},
+                       {"status": "failed"}, {"reason": "other"}, {"failedAt": report["completed"][-1]}, {"retained": False},
+                       {"uncertaintyLatched": not report["uncertaintyLatched"]}, {"injection": "genuine-os-fault"},
+                       {"completed": report["completed"][:-1]}, {"cases": report["cases"][:-1]}, {"allOwnersSettled": True})
+            for changed in changes:
+                with self.subTest(partition=partition, change=changed), self.assertRaises(helper.CheckFailure):
+                    validate_workflow_core({**report, **changed}, partition)
+            changed = deepcopy(report)
+            changed["cases"][-1]["outcome"].update(resources="settled", reason="none", effect="committed", journal="clean")
+            with self.assertRaises(helper.CheckFailure):
+                validate_workflow_core(changed, partition)
+        report = workflow_core_report("ordinary")
+        for cases in (list(reversed(report["cases"])), report["cases"] + [report["cases"][-1]]):
+            with self.assertRaises(helper.CheckFailure):
+                validate_workflow_core({**report, "cases": cases}, "ordinary")
+        for value in (None, [], True, "passed"):
+            with self.assertRaises(helper.CheckFailure):
+                validate_workflow_core(value, "ordinary")
+
+    def test_each_core_observed_fact_and_owner_return_is_exact_and_strictly_typed(self):
+        for partition in helper.WORKFLOW_PARTITIONS:
+            report = workflow_core_report(partition)
+            for index, case in enumerate(report["cases"]):
+                for group in ("owner", "observed"):
+                    for key, original in case[group].items():
+                        values = (not original, int(original)) if type(original) is bool else (True, float(original), original + 1) if type(original) is int else (None,)
+                        for value in values:
+                            changed = deepcopy(report)
+                            changed["cases"][index][group][key] = value
+                            with self.subTest(partition=partition, case=case["case"], group=group, key=key, value=value), self.assertRaises(helper.CheckFailure):
+                                validate_workflow_core(changed, partition)
+                changed = deepcopy(report)
+                changed["cases"][index]["observed"]["unobservedSummary"] = True
+                with self.assertRaises(helper.CheckFailure):
+                    validate_workflow_core(changed, partition)
+
+    def test_core_bindings_require_exact_source_payload_template_and_host_inputs(self):
+        report = workflow_core_report("ordinary")
+        for key, value in (("sourceSha", "0" * 40), ("sourceKind", "zip"), ("sourceHashes", {}), ("pythonSha256", "0" * 64),
+                           ("draftSha256", "0" * 64), ("toolingRepository", "other/repository"), ("toolingSha", "main"),
+                           ("templateSet", {}), ("payloadHashes", {}), ("extra", True)):
+            changed = deepcopy(report)
+            changed["bindings"][key] = value
+            with self.subTest(binding=key), self.assertRaises(helper.CheckFailure):
+                validate_workflow_core(changed, "ordinary")
+        for group in ("sourceHashes", "payloadHashes", "templateSet"):
+            for key in report["bindings"][group]:
+                changed = deepcopy(report)
+                del changed["bindings"][group][key]
+                with self.subTest(group=group, key=key), self.assertRaises(helper.CheckFailure):
+                    validate_workflow_core(changed, "ordinary")
+        changed = deepcopy(report)
+        changed["host"]["filesystem"]["device"] = "24"
+        with self.assertRaises(helper.CheckFailure):
+            validate_workflow_core(changed, "ordinary")
+
+    def test_source_closure_is_narrow_complete_and_keeps_config_map_unchanged(self):
+        self.assertEqual(len(helper.CONFIG_OWNER_SOURCES), 26)
+        self.assertEqual(len(helper.WORKFLOW_OWNER_SOURCES), 43)
+        self.assertEqual(len(helper.WORKFLOW_TRANSACTION_EOF_SOURCES), 44)
+        self.assertEqual(len(helper.WORKFLOW_CORE_SOURCES), 14)
+        self.assertEqual(helper.WORKFLOW_TRANSACTION_EOF_SOURCES["transactionEofShim"], "tests/native_desktop_config_eof.py")
+        for path in (helper.WORKFLOW_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py", "desktop/src-tauri/src/document_lifetime.rs",
+                     "desktop/src-tauri/src/asset_source.rs", "desktop/src-tauri/src/github_workflow_edit_protocol.rs",
+                     "desktop/native/linux-mount-observation/src/lib.rs", "tests/native_desktop_config.py",
+                     "src/mobile_release/api/data/github-setup-v1.json", "templates/workflows/mobile-production-submit.yml"):
+            self.assertIn(path, helper.WORKFLOW_NATIVE_SOURCES)
+        for path in ("desktop/package-lock.json", "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/tests/session_gtk_qualification.rs"):
+            self.assertNotIn(path, helper.WORKFLOW_NATIVE_SOURCES)
+        self.assertEqual(helper.WORKFLOW_NATIVE_SOURCES, tuple(sorted(set(helper.WORKFLOW_NATIVE_SOURCES))))
+        self.assertEqual(helper.WORKFLOW_PAYLOAD_BINDINGS["templateSet"]["resourceSha256"], "4d486fc24ebf24271dbb5227174df7c8f28a530a97011e004da643fdad7fe17c")
+
+    def test_native_metadata_binds_original_source_zip_workflow_and_run_without_paths(self):
+        context = workflow_context()
+        metadata = helper.workflow_core_metadata(context)
+        self.assertEqual(metadata, {"sourceSha": "1" * 40, "sourceTree": "3" * 40, "workflowSha256": "4" * 64,
+            "runId": "123", "attempt": "2", "ref": "refs/heads/verify/desktop-github-workflow-apply-native",
+            "coreFiles": context["workflowInputs"]["coreFiles"], "coreZipSha256": "7" * 64})
+        self.assertNotIn("root", metadata)
+        self.assertNotIn("source", metadata)
+        self.assertNotIn("python", metadata)
+
+    def test_successor_requires_prior_phase_and_original_resource_receipts_without_replay(self):
+        context = workflow_context()
+        observed = []
+        def data(path):
+            if path.name.endswith("-started.json"):
+                return {"scope": helper.WORKFLOW_NATIVE_SCOPE, "phase": path.name.removesuffix("-started.json"),
+                        "sourceSha": "1" * 40, "runId": "123", "attempt": "2"}
+            return workflow_phase_report(path.name.removesuffix("-checks.json"))
+        with patch.object(helper, "workflow_json", side_effect=data), patch.object(Path, "exists", return_value=False), \
+                patch.object(Path, "is_symlink", return_value=False), \
+                patch.object(helper, "workflow_owner_receipt", side_effect=lambda _, mode: observed.append(mode)), \
+                patch.object(helper, "workflow_transaction_eof_receipt", side_effect=lambda _: observed.append("eof")), \
+                patch.object(helper, "workflow_core_receipt", side_effect=AssertionError("core has not run")), \
+                patch.object(helper, "run", side_effect=AssertionError("no subprocess")):
+            helper.workflow_predecessors(context, "workflow-core")
+        self.assertEqual(observed, ["source", "zip", "eof"])
+        def bad_data(path):
+            value = data(path)
+            if path.name == "compile-checks.json":
+                value["sourceSha"] = "2" * 40
+            return value
+        with patch.object(helper, "workflow_json", side_effect=bad_data), \
+                patch.object(helper, "workflow_owner_receipt", side_effect=AssertionError("prior compiler binding failed")):
+            with self.assertRaises(helper.CheckFailure):
+                helper.workflow_predecessors(context, "workflow-core")
+        with patch.object(helper, "workflow_json", side_effect=data), \
+                patch.object(helper, "workflow_owner_receipt", side_effect=helper.CheckFailure("unsettled source owner")), \
+                patch.object(helper, "workflow_transaction_eof_receipt", side_effect=AssertionError("cannot advance past unsettled owner")):
+            with self.assertRaises(helper.CheckFailure):
+                helper.workflow_predecessors(context, "workflow-core")
+        with patch.object(Path, "exists", return_value=True), patch.object(helper, "write_json") as emit:
+            with self.assertRaises(helper.CheckFailure):
+                helper.workflow_phase_start(context, "acquire")
+        emit.assert_not_called()
+
+    def test_fixed_headless_commands_have_one_source_matrix_one_zip_case_and_closed_bounds(self):
+        tree = ast.parse(HELPER.read_text(encoding="utf-8"))
+        phase = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "phase_workflow_native")
+        calls = [node for node in ast.walk(phase) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "run"]
+        by_label = {next(keyword.value.value for keyword in call.keywords if keyword.arg == "check"): call for call in calls}
+        bounds = {"rust-toolchain-install": 600, "workflow-locked-headless-metadata": 600, "headless-test-compile-only": 600,
+                  "workflow-owner-source-native-contract": 180, "workflow-owner-zip-native-contract": 60,
+                  "workflow-transaction-eof-native-contract": 90, "workflow-core-ordinary": 90,
+                  "workflow-core-committed-fsync": 45, "workflow-core-committed-close": 45}
+        self.assertEqual(set(by_label), set(bounds))
+        self.assertEqual(len(calls), len(bounds))
+        for label, timeout in bounds.items():
+            self.assertEqual(next(keyword.value.value for keyword in by_label[label].keywords if keyword.arg == "timeout"), timeout)
+        for label in ("workflow-owner-source-native-contract", "workflow-owner-zip-native-contract", "workflow-transaction-eof-native-contract"):
+            constants = [node.value for node in by_label[label].args[0].elts if isinstance(node, ast.Constant)]
+            self.assertEqual(constants, ["test", "--lib", "--features", "development-runtime", "--", "--exact", "--ignored", "--test-threads=1"])
+        constants = [node.value for node in by_label["headless-test-compile-only"].args[0].elts if isinstance(node, ast.Constant)]
+        self.assertEqual(constants, ["test", "--lib", "--no-run", "--features", "development-runtime"])
+        source = ast.get_source_segment(HELPER.read_text(encoding="utf-8"), phase)
+        for forbidden in ("npm", "node-version", "vite", "desktop-shell", "CONFIG_OWNER_TEST", "NATIVE_TEST", "MRK_DESKTOP_CONFIG_NATIVE", "MRK_DESKTOP_EDIT_HOSTED_CHECKS"):
+            self.assertNotIn(forbidden, source)
+        self.assertIn('"--locked", "--offline", "--jobs", "1", "--no-default-features"', source)
+        self.assertIn('"--domain", "github_workflows", "--case"', source)
+
+    def test_close_control_is_last_native_call_and_cleanup_has_no_subprocess_or_deletion(self):
+        source = HELPER.read_text(encoding="utf-8")
+        core = source.split('elif name == "workflow-core":', 1)[1].split('    else:', 1)[0]
+        self.assertLess(core.index('check="workflow-core-ordinary"'), core.index('check="workflow-core-committed-fsync"'))
+        self.assertLess(core.index('check="workflow-core-committed-fsync"'), core.index('check="workflow-core-committed-close"'))
+        tail = core.split('check="workflow-core-committed-close"', 1)[1]
+        self.assertNotIn("run(", tail)
+        self.assertNotIn("source_unchanged(", tail)
+        self.assertIn('workflow_core_receipt(context, "committed-close")', tail)
+        self.assertIn("workflow_inputs_unchanged(context)", tail)
+        context = workflow_context()
+        with patch.object(helper, "workflow_predecessors") as previous, patch.object(helper, "workflow_inputs_unchanged") as inputs, \
+                patch.object(helper, "write_json") as emit, patch.object(helper, "run", side_effect=AssertionError("no subprocess")), \
+                patch.object(helper, "tools", side_effect=AssertionError("no tools")), \
+                patch.object(helper.shutil, "rmtree", side_effect=AssertionError("no deletion")), redirect_stdout(io.StringIO()):
+            helper.clean_workflow_native(context)  # Every side effect is inertly mocked.
+        previous.assert_called_once_with(context, "clean")
+        inputs.assert_called_once_with(context)
+        receipt = emit.call_args.args[1]
+        self.assertEqual(receipt["status"], "retained")
+        for key in ("deleted", "laterNativeWork", "projectProbes"):
+            self.assertIs(receipt[key], False)
+        self.assertIs(receipt["vmDisposalRequired"], True)
+
+    def test_workflow_is_one_pinned_readonly_linux_job_with_allowlisted_receipts_only(self):
+        workflow = (SOURCE / helper.WORKFLOW_NATIVE_WORKFLOW).read_text(encoding="utf-8")
+        self.assertEqual(workflow.count("runs-on:"), 1)
+        self.assertIn("runs-on: ubuntu-24.04", workflow)
+        self.assertIn("contents: read", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        for action in ("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+                       "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+                       "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"):
+            self.assertIn(action, workflow)
+        for forbidden in ("strategy:", "matrix", "setup-node", "apt-get", "sudo", "continue-on-error", "pull_request", "secrets.", "node_modules", "core.zip", "context.json", "*.json"):
+            self.assertNotIn(forbidden, workflow)
+        positions = [workflow.index(f"ci_foundation.py {phase}'") for phase in helper.WORKFLOW_NATIVE_PHASES]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(workflow.count("ci_foundation.py "), len(helper.WORKFLOW_NATIVE_PHASES))
+        allowlist = [line.strip().split("${{ steps.prepare.outputs.root }}/", 1)[1]
+                     for line in workflow.splitlines() if line.strip().startswith("${{ steps.prepare.outputs.root }}/")]
+        self.assertEqual(allowlist, ["public-bindings.json", "acquire-checks.json", "compile-checks.json", "workflow-owner-checks.json",
+            "workflow-owner-source/receipt.json", "workflow-owner-zip/receipt.json", "workflow-transaction-eof-checks.json",
+            "workflow-transaction-eof/receipt.json", "workflow-core-checks.json", "workflow-ordinary.json",
+            "workflow-committed-fsync.json", "workflow-committed-close.json", "retention-checks.json"])
 
 
 if __name__ == "__main__":

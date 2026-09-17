@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { ReactNode } from 'react';
 import { getValue } from '../catalog.ts';
 import { futureReason } from '../certainty.ts';
 import type { ProjectSession } from '../drafts.ts';
@@ -45,7 +46,7 @@ function draftBranch(session: ProjectSession | null, path: string): string {
 function Proposal({ result }: { result: GitHubSetupProposed }) {
   return <section className="github-proposal" aria-label="Read-only GitHub setup proposal">
     <div className="card">
-      <SectionHeading title="Proposed — nothing applied" description="Complete caller text from the shared core. No files were saved and no GitHub, Git or Store state was observed."><Badge tone="info">GitHub not contacted</Badge></SectionHeading>
+      <SectionHeading title="Passive proposal — nothing applied by this preview" description="Complete caller text from the shared core. This preview saves no files and observes no GitHub, Git or Store state. Any separate native operation is reported in Local workflow files."><Badge tone="info">GitHub not contacted</Badge></SectionHeading>
       <dl className="github-facts">
         <div><dt>Toolkit repository</dt><dd><code>{result.tooling.repository}</code></dd></div>
         <div><dt>Toolkit commit · format-only</dt><dd><code>{result.tooling.sha}</code></dd></div>
@@ -93,7 +94,7 @@ function Proposal({ result }: { result: GitHubSetupProposed }) {
   </section>;
 }
 
-export function GitHub({ info, session, state, controller, loading, onReload, onNavigate }: {
+export function GitHub({ info, session, state, controller, loading, onReload, onNavigate, nativeReview }: {
   info: AppInfo | null;
   session: ProjectSession | null;
   state: GitHubSetupState;
@@ -101,6 +102,7 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
   loading: boolean;
   onReload: () => void;
   onNavigate: (page: Page) => void;
+  nativeReview: ReactNode;
 }) {
   const [inputHelpOpen, setInputHelpOpen] = useState({ repository: false, sha: false, snapshot: false });
   const helpOpened = (field: keyof typeof inputHelpOpen, open: boolean) => setInputHelpOpen((current) => current[field] === open ? current : { ...current, [field]: open });
@@ -109,9 +111,9 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
   const shaHelp = state.help?.inputs.find((entry) => entry.id === 'toolingSha');
   const snapshotHelp = state.help?.inputs.find((entry) => entry.id === 'suppliedSnapshot');
   return <>
-    <PageHeading eyebrow="GITHUB" title="Review the setup. Keep authority separate." description="Prepare four workflow caller previews and a core-sourced checklist from your in-memory draft. Nothing is connected, saved or applied." />
+    <PageHeading eyebrow="GITHUB" title="Review the setup. Keep authority separate." description="Preview four caller files and a core-sourced checklist. Local installation needs its own fresh native review and confirmation; remote GitHub setup remains unavailable." />
     <section className="card connect-card"><div className="github-visual"><Icon name="github" size={45} /></div><div><Badge>Not connected</Badge><h2>A proposal is not repository access.</h2><p>Account login, repository setup, secret provisioning and guarded dispatch remain unavailable. This passive preview does not contact GitHub.</p><DisabledAction label="Connect GitHub" icon="github" reason={futureReason(info?.capabilities, 'github.authenticate', 'Publisher-registered GitHub App login and the secure token vault are not implemented.')} /></div></section>
-    <div className="notice notice-info"><Icon name="shield" /><div><strong>GitHub not contacted · nothing applied</strong><p>Repository state, toolkit ref existence, template compatibility and release readiness remain unknown. A generated proposal never enables a release operation.</p></div></div>
+    <div className="notice notice-info"><Icon name="shield" /><div><strong>GitHub not contacted · remote authority unavailable</strong><p>Remote repository state, toolkit ref existence, template compatibility and release readiness remain unknown. A passive proposal never authorizes local writes or a release. Separate local operation outcomes are shown below.</p></div></div>
     <form className="card github-form" onSubmit={(event) => { event.preventDefault(); void controller.propose(); }}>
       <SectionHeading title="Preview setup from your draft" description="Toolkit inputs are separate from the application’s source identity. No account or commit is preselected."><Badge>{state.pending ? 'Preparing preview…' : 'In-memory only'}</Badge></SectionHeading>
       <div className="github-draft">
@@ -155,10 +157,11 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
     </form>
     {state.invalidated && <div className="notice notice-warning" role="status"><Icon name="info" /><div><strong>Previous preview discarded</strong><p>The project, draft, toolkit inputs, comparison or service generation changed. Preview again; an older reply cannot restore stale output.</p></div></div>}
     {state.error && <ErrorNotice error={state.error} title="Setup preview unavailable" />}
-    {state.result?.state === 'invalid' && <section className="card"><SectionHeading title="Draft needs correction" description="The core returned no workflow or settings proposal. Nothing was saved or applied, and GitHub was not contacted."><Badge tone="danger">Format invalid</Badge></SectionHeading><Issues issues={state.result.validation.issues} /><button type="button" className="button secondary" onClick={() => onNavigate('settings')}>Review the draft and field guidance</button></section>}
+    {state.result?.state === 'invalid' && <section className="card"><SectionHeading title="Draft needs correction" description="The passive core returned no workflow or settings proposal. This preview saved or applied nothing and did not contact GitHub."><Badge tone="danger">Format invalid</Badge></SectionHeading><Issues issues={state.result.validation.issues} /><button type="button" className="button secondary" onClick={() => onNavigate('settings')}>Review the draft and field guidance</button></section>}
     {state.result?.state === 'proposed' && <Proposal result={state.result} />}
-    <section className="card"><SectionHeading title="Authority stays disabled" description="Preview cannot enable Connect, Apply, credential provisioning, checks or dispatch. Those operations need separate reviewed ownership and authorization." /><div className="github-disabled-actions">
-      <DisabledAction label="Apply GitHub setup" icon="lock" reason={futureReason(info?.capabilities, 'github.setup', 'Authenticated repository setup and apply are not implemented. A passive preview has no Apply authority.')} />
+    {nativeReview}
+    <section className="card"><SectionHeading title="Remote authority stays disabled" description="Neither a preview nor local caller installation enables Connect, remote setup, credential provisioning, checks or dispatch. Those operations need separate reviewed ownership and authorization." /><div className="github-disabled-actions">
+      <DisabledAction label="Apply remote GitHub setup" icon="lock" reason={futureReason(info?.capabilities, 'github.setup', 'Authenticated repository setup and remote apply are not implemented. A local file plan has no remote authority.')} />
       <DisabledAction label="Provision GitHub secrets" icon="key" reason={futureReason(info?.capabilities, 'github.setup', 'Environment and secret provisioning are not implemented. No credential values are accepted.')} />
       <DisabledAction label="Run checks / dispatch" icon="rocket" reason={futureReason(info?.capabilities, 'release.candidate', 'Protected workflow dispatch and native release execution are not implemented.')} />
     </div></section>

@@ -106,8 +106,12 @@ export class GitHubSetupController {
   private disposed = false;
   private listeners = new Set<() => void>();
   private readonly selectedProject: () => ProjectSession | null;
+  private readonly onContextChange: (() => void) | undefined;
 
-  constructor(selectedProject: () => ProjectSession | null) { this.selectedProject = selectedProject; }
+  constructor(selectedProject: () => ProjectSession | null, onContextChange?: () => void) {
+    this.selectedProject = selectedProject;
+    this.onContextChange = onContextChange;
+  }
 
   getSnapshot = (): GitHubSetupState => this.state;
   subscribe = (listener: () => void): (() => void) => {
@@ -118,6 +122,9 @@ export class GitHubSetupController {
   private update(patch: Partial<GitHubSetupState>): void {
     if (this.disposed) return;
     this.state = freeze({ ...this.state, ...patch });
+    // This notification only revokes a separate native review's stale input
+    // binding. A passive result or supplied assertion never grants authority.
+    this.onContextChange?.();
     for (const listener of this.listeners) listener();
   }
 

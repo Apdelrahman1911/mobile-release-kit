@@ -241,6 +241,7 @@ const availabilityCopy: Record<EditAvailability, string> = {
   runtime_unqualified: 'This build has no qualified native edit runtime. Drafting does not enable production saving.',
   cleanup_unknown: 'Native cleanup or an earlier outcome is unverified. Saving remains disabled; do not repeat Apply.',
   shutdown: 'The native application is stopping. No new save session can be opened.',
+  other_edit_active: 'A local workflow edit owns the shared native edit service. Finish or close that original session before preparing a configuration save.',
 };
 
 export function nativeStartReason(state: ConfigEditState): string | null {
@@ -270,6 +271,21 @@ export function editStartReason(state: ConfigEditState, session: ProjectSession 
   if (!editInputFits(session.baseline, session.draft)) return 'The draft and retained baseline exceed the bounded JSON edit contract or contain unsupported JSON. Your values were not truncated.';
   // Deliberately no isDirty guard: only native preparation can establish a
   // whole-operation no-op, and a clean config can still need ignore additions.
+  return null;
+}
+
+// Synchronous renderer exclusion before an opposite-domain Open reply/event.
+// This is a refusal only; the shared native registry is still the real owner.
+export function configurationOwnerReason(state: ConfigEditState, projectId: string): string | null {
+  if (state.nativeBlocked || state.integrityFailed || state.generationLost || state.observationIssue) {
+    return 'Configuration edit ownership is unverified. Observe the original native status; do not open a competing workflow edit.';
+  }
+  if (state.status?.active || !completedAttempt(state.attempt) || (state.attempt && !state.attempt.handled)) {
+    return 'A configuration edit is still owned or awaiting settlement. Finish or close that original session before reviewing workflow files.';
+  }
+  if (state.recoveryProjects.some((item) => item.projectId === projectId)) {
+    return 'This project needs separate configuration transaction recovery. A workflow edit cannot clear its journal or bypass that block.';
+  }
   return null;
 }
 

@@ -781,3 +781,17 @@ main:focus { outline: none; }
 .session-records article p { margin: .25rem 0 .5rem; }
 .session-limit-note { font-size: .83rem; border-radius: 8px; background: #f4f6fa; padding: .85rem 1rem; }
 @media (max-width: 900px) { .session-context-fields { grid-template-columns: 1fr; } }
+.native-workflow-panel, .workflow-review, .workflow-confirm-dialog { min-width: 0; }
+.native-workflow-panel > .section-heading { align-items: flex-start; }
+.workflow-files { margin: 20px 0; }
+.workflow-files td code { display: block; margin-top: 6px; max-width: 240px; overflow-wrap: anywhere; font-size: 10px; }
+.workflow-confirm-text { border-top: 1px solid var(--line); padding-top: 15px; margin: 20px 0; }
+.workflow-confirm-text > summary { cursor: pointer; font-size: 12px; line-height: 1.8; }
+.workflow-confirm-text > summary:focus-visible { outline: 3px solid #71b8a9; outline-offset: 3px; }
+.workflow-conflict { border: 1px solid var(--line); background: var(--subtle); border-radius: 8px; padding: 18px; margin: 20px 0; }
+.workflow-conflict h3 { font-size: 13px; }
+.workflow-conflict ul { list-style: none; padding: 0; }
+.workflow-conflict li { display: grid; grid-template-columns: minmax(100px, 1fr) 1fr; gap: 8px 14px; font-size: 12px; border-top: 1px solid var(--line); padding-top: 13px; margin-top: 13px; }
+.workflow-conflict li code { grid-column: 1 / -1; overflow-wrap: anywhere; font-size: 10px; }
+.workflow-conflict > p { font-size: 11px; margin-top: 15px; }
+@media (max-width: 600px) { .workflow-conflict li { grid-template-columns: minmax(0, 1fr); } }
