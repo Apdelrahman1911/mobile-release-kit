@@ -61,7 +61,7 @@ struct ShellState {
 }
 
 #[tauri::command]
-async fn app_info(state: State<'_, ShellState>) -> AppInfo { state.bridge.app_info().await }
+async fn app_info(state: State<'_, ShellState>) -> Result<AppInfo, BridgeError> { Ok(state.bridge.app_info().await) }
 #[tauri::command]
 async fn catalog(state: State<'_, ShellState>) -> Result<Value, BridgeError> { state.bridge.catalog().await }
 #[tauri::command(rename_all = "camelCase")]
