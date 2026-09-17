@@ -628,7 +628,7 @@ mod windows_snapshot_failure_diagnostics {
         "short_alias_access_denied", "short_alias_sharing_violation", "short_alias_not_supported",
         "short_alias_invalid_parameter", "short_alias_name_collision", "short_alias_volume_disabled",
         "short_alias_privilege_unavailable", "short_alias_other_refused",
-        "saved_dacl_bound", "world_sid_bound", "fixture_dacl_denial_required", "fixture_dacl_not_effective",
+        "saved_dacl_bound", "saved_dacl_unsupported", "world_sid_bound", "fixture_dacl_denial_required", "fixture_dacl_not_effective",
         "dacl_restore_original_object", "saved_dacl_present", "dacl_restoration_not_confirmed",
         "fixture_restoration_bound", "fixture_retained_arena_bound", "fixture_arena_bound",
         "fixture_path_bound", "fixture_inherited_handle", "fixture_zero_file_id"];
@@ -639,10 +639,34 @@ mod windows_snapshot_failure_diagnostics {
         "unknown_method", "invalid_params", "unsafe_path", "platform_unavailable", "snapshot_unavailable"];
 
     #[derive(Debug, PartialEq, Eq)]
-    enum Marker { Absent, Invalid, Valid { stage: &'static str, code: &'static str } }
+    enum Marker { Absent, Invalid, Valid { stage: &'static str, code: &'static str, comparison: Option<Value> } }
 
     fn closed(value: &str, allowed: &[&'static str]) -> Option<&'static str> {
         allowed.iter().copied().find(|candidate| *candidate == value)
+    }
+
+    fn dacl_comparison(value: &Value) -> bool {
+        const POLICY: &[&str] = &["presenceEqual", "nullEqual", "controlEqual", "protectedEqual", "defaultedEqual",
+            "autoInheritanceEqual", "aclRevisionEqual", "orderedAcesEqual"];
+        const OTHER: &[&str] = &["role", "savedShapeValid", "observedShapeValid", "lengthEqual", "bytesEqual"];
+        let Some(fields) = value.as_object() else { return false; };
+        if fields.len() != POLICY.len() + OTHER.len()
+            || !POLICY.iter().chain(OTHER).all(|key| fields.contains_key(*key))
+            || !matches!(value["role"].as_str(), Some("denied-file" | "denied-directory")) { return false; }
+        let (Some(saved), Some(observed)) = (value["savedShapeValid"].as_bool(), value["observedShapeValid"].as_bool())
+            else { return false; };
+        let valid = saved && observed;
+        if ["lengthEqual", "bytesEqual"].iter().chain(POLICY).any(|key| !value[*key].is_null() && !value[*key].is_boolean())
+            || value["lengthEqual"].is_null() != value["bytesEqual"].is_null()
+            || (valid && value["lengthEqual"].is_null())
+            || POLICY.iter().any(|key| if valid { !value[*key].is_boolean() } else { !value[*key].is_null() }) {
+            return false;
+        }
+        if value["bytesEqual"] == true && (value["lengthEqual"] != true || saved != observed
+            || (valid && POLICY.iter().any(|key| value[*key] != true))) { return false; }
+        if valid && value["controlEqual"].as_bool() != Some(["presenceEqual", "protectedEqual", "defaultedEqual", "autoInheritanceEqual"]
+            .iter().all(|key| value[*key] == true)) { return false; }
+        true
     }
 
     fn marker(bytes: &[u8], id: &str, nonce: &str) -> Marker {
@@ -673,7 +697,8 @@ mod windows_snapshot_failure_diagnostics {
         if !body.is_ascii() || body.contains(&b'\r') { return Marker::Invalid; }
         let Ok(value) = protocol::strict_json(body) else { return Marker::Invalid; };
         let Some(fields) = value.as_object() else { return Marker::Invalid; };
-        if fields.len() != 6 || !["schemaVersion", "scope", "id", "nonce", "stage", "code"].iter()
+        let has_comparison = fields.contains_key("comparison");
+        if fields.len() != 6 + usize::from(has_comparison) || !["schemaVersion", "scope", "id", "nonce", "stage", "code"].iter()
             .all(|field| fields.contains_key(*field))
             || value["schemaVersion"].as_u64() != Some(1) || value["scope"].as_str() != Some(SCOPE)
             || value["id"].as_str() != Some(id) || value["nonce"].as_str() != Some(nonce) {
@@ -681,7 +706,12 @@ mod windows_snapshot_failure_diagnostics {
         }
         let Some(stage) = value["stage"].as_str().and_then(|value| closed(value, STAGES)) else { return Marker::Invalid; };
         let Some(code) = value["code"].as_str().and_then(|value| closed(value, CODES)) else { return Marker::Invalid; };
-        Marker::Valid { stage, code }
+        let comparison = if has_comparison {
+            if (id, stage, code) != ("acl-type", "restoration", "dacl_restoration_not_confirmed")
+                || !dacl_comparison(&value["comparison"]) { return Marker::Invalid; }
+            Some(value["comparison"].clone())
+        } else { None };
+        Marker::Valid { stage, code, comparison }
     }
 
     fn summary(id: &str, nonce: &str, exit: i32, owner_code: Option<&str>, stderr: &[u8]) -> Value {
@@ -690,7 +720,11 @@ mod windows_snapshot_failure_diagnostics {
         let failure = match marker(stderr, id, nonce) {
             Marker::Absent => json!({"status":"absent"}),
             Marker::Invalid => json!({"status":"invalid"}),
-            Marker::Valid { stage, code } => json!({"status":"valid","stage":stage,"code":code}),
+            Marker::Valid { stage, code, comparison } => {
+                let mut failure = json!({"status":"valid","stage":stage,"code":code});
+                if let Some(comparison) = comparison { failure["comparison"] = comparison; }
+                failure
+            },
         };
         json!({"schemaVersion":1,"scope":SCOPE,"id":fixed_id,"exitCode":exit,
             "ownerErrorCode":owner_code,"fixtureFailure":failure})
@@ -715,6 +749,126 @@ mod windows_snapshot_failure_diagnostics {
         use super::*;
 
         #[test]
+        fn dacl_comparison_is_closed_log_only_and_bounded() -> Result<(), Box<dyn std::error::Error>> {
+            let nonce = "a".repeat(64);
+            let id = "acl-type";
+            let policy = ["presenceEqual", "nullEqual", "controlEqual", "protectedEqual", "defaultedEqual",
+                "autoInheritanceEqual", "aclRevisionEqual", "orderedAcesEqual"];
+            let facts = json!({"role":"denied-directory","savedShapeValid":true,"observedShapeValid":true,
+                "lengthEqual":true,"bytesEqual":false,"presenceEqual":true,"nullEqual":true,"controlEqual":false,
+                "protectedEqual":true,"defaultedEqual":true,"autoInheritanceEqual":false,
+                "aclRevisionEqual":true,"orderedAcesEqual":true});
+            let base = json!({"schemaVersion":1,"scope":SCOPE,"id":id,"nonce":nonce,
+                "stage":"restoration","code":"dacl_restoration_not_confirmed","comparison":facts});
+            let encode = |value: &Value| -> Result<Vec<u8>, serde_json::Error> {
+                let mut bytes = PREFIX.to_vec();
+                bytes.extend_from_slice(&serde_json::to_vec(value)?); bytes.push(b'\n');
+                Ok(bytes)
+            };
+            let valid = encode(&base)?;
+            let expected = Marker::Valid { stage: "restoration", code: "dacl_restoration_not_confirmed",
+                comparison: Some(facts.clone()) };
+            assert!(dacl_comparison(&facts));
+            assert_eq!(marker(&valid, id, &nonce), expected);
+            let result = summary(id, &nonce, 78, Some("engine_failed"), &valid);
+            assert_eq!(result, json!({"schemaVersion":1,"scope":SCOPE,"id":id,"exitCode":78,
+                "ownerErrorCode":"engine_failed","fixtureFailure":{"status":"valid","stage":"restoration",
+                    "code":"dacl_restoration_not_confirmed","comparison":facts}}));
+            assert!(!result.to_string().contains(&nonce)); // No new success, raw SD, or reader evidence field.
+            for role in ["denied-file", "denied-directory"] {
+                let mut frame = base.clone(); frame["comparison"]["role"] = json!(role);
+                assert!(matches!(marker(&encode(&frame)?, id, &nonce), Marker::Valid { comparison: Some(_), .. }));
+            }
+            for (saved, observed) in [(false, false), (false, true), (true, false)] {
+                let mut unknown = facts.clone();
+                unknown["savedShapeValid"] = json!(saved); unknown["observedShapeValid"] = json!(observed);
+                for key in policy { unknown[key] = Value::Null; }
+                for (length, bytes) in [(json!(true), json!(false)), (json!(false), json!(false)), (Value::Null, Value::Null)] {
+                    unknown["lengthEqual"] = length; unknown["bytesEqual"] = bytes;
+                    assert!(dacl_comparison(&unknown));
+                    let mut frame = base.clone(); frame["comparison"] = unknown.clone();
+                    assert!(matches!(marker(&encode(&frame)?, id, &nonce), Marker::Valid { comparison: Some(_), .. }));
+                    for key in policy {
+                        let mut bad = unknown.clone(); bad[key] = json!(true);
+                        assert!(!dacl_comparison(&bad)); // Invalid layout cannot produce a policy equality fact.
+                    }
+                }
+                unknown["lengthEqual"] = json!(true); unknown["bytesEqual"] = json!(true);
+                assert_eq!(dacl_comparison(&unknown), saved == observed);
+            }
+            let mut normalized = facts.clone();
+            for key in policy { normalized[key] = json!(true); }
+            normalized["lengthEqual"] = json!(false);
+            assert!(dacl_comparison(&normalized)); // Raw differences can accompany complete policy equality.
+            normalized["bytesEqual"] = json!(true);
+            assert!(!dacl_comparison(&normalized));
+            normalized["lengthEqual"] = json!(true);
+            assert!(dacl_comparison(&normalized));
+
+            let keys: Vec<String> = facts.as_object().ok_or("pure test object required")?.keys().cloned().collect();
+            for key in &keys {
+                let mut missing = facts.clone();
+                missing.as_object_mut().ok_or("pure test object required")?.remove(key);
+                assert!(!dacl_comparison(&missing));
+                for bad in [Value::Null, json!(0), json!(1), json!(0.0), json!("true"), json!([]), json!({})] {
+                    let mut frame = base.clone(); frame["comparison"][key.as_str()] = bad;
+                    assert_eq!(marker(&encode(&frame)?, id, &nonce), Marker::Invalid);
+                }
+                // strict_json must reject duplicate keys within the optional object too.
+                let body = serde_json::to_string(&base)?;
+                let member = format!("{}:{}", serde_json::to_string(key)?, facts[key.as_str()]);
+                let duplicate = body.replacen(&member, &format!("{member},{member}"), 1);
+                assert_ne!(body, duplicate);
+                assert_eq!(marker(&[PREFIX, duplicate.as_bytes(), b"\n"].concat(), id, &nonce), Marker::Invalid);
+            }
+            let mut extra = facts.clone(); extra["extra"] = json!("private-canary");
+            let mut wrong_role = facts.clone(); wrong_role["role"] = json!("private-canary");
+            let mut wrong_availability = facts.clone(); wrong_availability["savedShapeValid"] = json!(false);
+            let mut wrong_bytes = facts.clone(); wrong_bytes["bytesEqual"] = json!(true);
+            let mut wrong_control = facts.clone(); wrong_control["controlEqual"] = json!(true);
+            for bad in [Value::Null, json!(true), json!([]), json!({}), extra, wrong_role,
+                        wrong_availability, wrong_bytes, wrong_control] {
+                let mut frame = base.clone(); frame["comparison"] = bad;
+                let bytes = encode(&frame)?;
+                assert_eq!(marker(&bytes, id, &nonce), Marker::Invalid);
+                let result = summary(id, &nonce, 78, Some("private-canary"), &bytes);
+                assert_eq!(result["fixtureFailure"], json!({"status":"invalid"}));
+                assert_eq!(result["exitCode"], 78);
+                assert_eq!(result["ownerErrorCode"], "unknown_owner_error");
+                assert!(!result.to_string().contains("private-canary"));
+            }
+            for (key, wrong) in [("id", "short-alias"), ("stage", "setup"), ("code", "fixture_dacl_not_effective")] {
+                let mut frame = base.clone(); frame[key] = json!(wrong);
+                let frame_id = frame["id"].as_str().ok_or("pure test id required")?;
+                assert_eq!(marker(&encode(&frame)?, frame_id, &nonce), Marker::Invalid);
+            }
+            let mut exact = valid[..valid.len() - 1].to_vec(); exact.resize(1023, b' '); exact.push(b'\n');
+            assert_eq!(marker(&exact, id, &nonce), expected);
+            let mut over = exact; over.insert(PREFIX.len(), b' ');
+            for bytes in [over, [valid.as_slice(), valid.as_slice()].concat(),
+                          [b"injected ", valid.as_slice()].concat(), [valid.as_slice(), b"private-canary\n"].concat()] {
+                assert_eq!(marker(&bytes, id, &nonce), Marker::Invalid);
+                assert_eq!(summary(id, &nonce, -1073741819, None, &bytes)["exitCode"], -1073741819);
+            }
+            // Maximum-width closed DATA: both shapes valid; all equality facts false.
+            let mut widest = facts.clone();
+            for key in &keys {
+                if key != "role" { widest[key.as_str()] = json!(matches!(key.as_str(), "savedShapeValid" | "observedShapeValid")); }
+            }
+            assert!(dacl_comparison(&widest));
+            let mut frame = base.clone(); frame["comparison"] = widest;
+            let marker_bytes = encode(&frame)?;
+            assert!(marker_bytes.len() <= 1024);
+            assert!(OWNER_CODES.iter().all(|code| code.len() <= "snapshot_unavailable".len()));
+            assert!("unknown_owner_error".len() <= "snapshot_unavailable".len());
+            let result = summary(id, &nonce, i32::MIN, Some("snapshot_unavailable"), &marker_bytes);
+            let line = [b"MRK_WINDOWS_SNAPSHOT_EXIT_DIAGNOSTIC_V1 ".as_slice(), &serde_json::to_vec(&result)?, b"\n"].concat();
+            assert!(line.len() <= 1024);
+            assert_eq!(result["exitCode"].as_i64(), Some(i64::from(i32::MIN)));
+            Ok(())
+        }
+
+        #[test]
         fn closed_failure_marker_and_original_exit_summary() -> Result<(), Box<dyn std::error::Error>> {
             let nonce = "a".repeat(64);
             let id = "short-alias";
@@ -732,13 +886,13 @@ mod windows_snapshot_failure_diagnostics {
             for stage in STAGES {
                 for code in CODES {
                     let mut frame = base.clone(); frame["stage"] = json!(stage); frame["code"] = json!(code);
-                    assert_eq!(marker(&encode(&frame)?, id, &nonce), Marker::Valid { stage: *stage, code: *code });
+                    assert_eq!(marker(&encode(&frame)?, id, &nonce), Marker::Valid { stage: *stage, code: *code, comparison: None });
                 }
             }
             for name in CASES {
                 let mut frame = base.clone(); frame["id"] = json!(name);
                 assert_eq!(marker(&encode(&frame)?, name, &nonce),
-                    Marker::Valid { stage: "setup", code: "real_short_alias_unavailable" });
+                    Marker::Valid { stage: "setup", code: "real_short_alias_unavailable", comparison: None });
             }
             for (stage, code) in [("setup", "fixture_dacl_not_effective"),
                                   ("restoration", "dacl_restoration_not_confirmed")] {
@@ -757,9 +911,9 @@ mod windows_snapshot_failure_diagnostics {
             let opaque_prior = [TELEMETRY, b"{}\n"].concat();
             for count in 0..=3 {
                 let mut bytes = opaque_prior.repeat(count); bytes.extend_from_slice(&valid);
-                assert_eq!(marker(&bytes, id, &nonce), Marker::Valid { stage: "setup", code: "real_short_alias_unavailable" });
+                assert_eq!(marker(&bytes, id, &nonce), Marker::Valid { stage: "setup", code: "real_short_alias_unavailable", comparison: None });
                 bytes.extend_from_slice(&engine_line);
-                assert_eq!(marker(&bytes, id, &nonce), Marker::Valid { stage: "setup", code: "real_short_alias_unavailable" });
+                assert_eq!(marker(&bytes, id, &nonce), Marker::Valid { stage: "setup", code: "real_short_alias_unavailable", comparison: None });
             }
             let bad_values = [
                 ("schemaVersion", json!(true)), ("schemaVersion", json!("1")), ("schemaVersion", json!(1.0)),
@@ -793,12 +947,12 @@ mod windows_snapshot_failure_diagnostics {
             }
             let mut exact = valid[..valid.len() - 1].to_vec();
             exact.resize(1023, b' '); exact.push(b'\n');
-            assert_eq!(marker(&exact, id, &nonce), Marker::Valid { stage: "setup", code: "real_short_alias_unavailable" });
+            assert_eq!(marker(&exact, id, &nonce), Marker::Valid { stage: "setup", code: "real_short_alias_unavailable", comparison: None });
             let mut over_marker = exact.clone(); over_marker.insert(PREFIX.len(), b' ');
             let mut full = TELEMETRY.to_vec();
             full.resize(64 * 1024 - valid.len() - 1, b' '); full.push(b'\n'); full.extend_from_slice(&valid);
             assert_eq!(full.len(), 64 * 1024);
-            assert_eq!(marker(&full, id, &nonce), Marker::Valid { stage: "setup", code: "real_short_alias_unavailable" });
+            assert_eq!(marker(&full, id, &nonce), Marker::Valid { stage: "setup", code: "real_short_alias_unavailable", comparison: None });
             let invalid_streams = vec![
                 over_marker, [full.as_slice(), b"\n"].concat(), vec![b'x'; 64 * 1024 + 1],
                 [valid.as_slice(), valid.as_slice()].concat(), [b"injected ", valid.as_slice()].concat(),

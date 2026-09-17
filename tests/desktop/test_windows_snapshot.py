@@ -5,8 +5,9 @@ Native calls/exit are substituted or refused before entry; no DLL is loaded. Fak
 relative opens/mutations prove call ordering, not NTFS, ABI, ACL or reparse
 semantics. A substituted fail-stop proves retained references, not process/IO
 finality or successful native CloseHandle receipts. No filesystem fixtures.
-Focused leaves read bound fixture source and select only named pure reducers;
-neither imports the fixture module or executes its native observer/constructor.
+Focused leaves read bound fixture source and select named pure reducers. The
+ACL ordering leaf also selects two original methods with exclusively fake
+capabilities; no fixture module, native observer or constructor is imported/run.
 """
 from __future__ import annotations
 
@@ -277,6 +278,451 @@ def _shim(error: int = 0, **functions) -> native.Native:
 
 
 class WindowsSnapshotPureTests(unittest.TestCase):
+    def _dacl_reducers(self):
+        signatures = {"_dacl_policy": ("data",), "_dacl_comparison": ("saved", "observed", "role"),
+                      "_dacl_comparison_valid": ("value",), "_installed_deny_data_dacl": ("data",),
+                      "_failure_diagnostic": ("case", "nonce", "stage", "reason", "fixture_state",
+                                              "reader_state", "output_state", "comparison")}
+        source = (Path(__file__).resolve().parents[1] / "native_desktop_snapshot_windows.py").read_bytes()
+        self.assertLessEqual(len(source), 128 * 1024)
+        parsed = ast.parse(source, filename="reviewed-dacl-restoration-source")
+        selected = [node for node in parsed.body if getattr(node, "name", None) in signatures]
+        self.assertCountEqual([node.name for node in selected], signatures)
+        safe = {"type": type, "str": str, "dict": dict, "tuple": tuple, "bytes": bytes, "bool": bool,
+                "int": int, "len": len, "range": range, "any": any}
+        nodes = (ast.FunctionDef, ast.arguments, ast.arg, ast.Expr, ast.Constant, ast.Name, ast.Load, ast.Store,
+                 ast.Assign, ast.AugAssign, ast.For, ast.If, ast.IfExp, ast.Return, ast.Call, ast.Attribute,
+                 ast.Tuple, ast.List, ast.Dict, ast.Subscript, ast.Slice, ast.BoolOp, ast.BinOp, ast.UnaryOp,
+                 ast.Compare, ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
+        for definition in selected:
+            self.assertIs(type(definition), ast.FunctionDef)
+            self.assertFalse(definition.decorator_list or definition.returns or definition.type_comment
+                             or getattr(definition, "type_params", []))
+            args = definition.args
+            self.assertEqual(tuple(arg.arg for arg in args.args), signatures[definition.name])
+            self.assertFalse(args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg or args.kw_defaults)
+            self.assertTrue(all(arg.annotation is None and arg.type_comment is None for arg in args.args))
+            self.assertEqual([ast.literal_eval(value) for value in args.defaults],
+                             [None] if definition.name == "_failure_diagnostic" else [])
+            self.assertEqual(sum(isinstance(node, ast.FunctionDef) for node in ast.walk(definition)), 1)
+            for node in ast.walk(definition):
+                self.assertIsInstance(node, nodes)
+                if isinstance(node, ast.Name):
+                    self.assertFalse(node.id.startswith("__"))
+                if isinstance(node, ast.Attribute):
+                    self.assertIn(node.attr, ("from_bytes", "append", "encode"))
+                    if node.attr != "encode":
+                        self.assertIsInstance(node.value, ast.Name)
+                        self.assertEqual((node.value.id, node.attr),
+                                         ("int", "from_bytes") if node.attr == "from_bytes" else ("aces", "append"))
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    self.assertIn(node.func.id, {*safe, *signatures})
+        namespace = {"__builtins__": safe}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-dacl-pure-reducers", "exec",
+                     dont_inherit=True), namespace)
+        self.assertEqual(set(namespace), {"__builtins__", *signatures})
+        return namespace, parsed
+
+    def _dacl_bytes(self, *, aces=None, control=0x9004, revision=2, offset=20, capacity=None, tail=b""):
+        world = bytes.fromhex("010100000000000100000000")
+        if aces is None:
+            aces = (struct.pack("<BBHI", 1, 0, 20, 1) + world,
+                    struct.pack("<BBHI", 0, 0, 20, 0x1F01FF) + world)
+        header = struct.pack("<BBHIIII", 1, 0, control, 0, 0, 0, offset)
+        if not offset:
+            return header + tail
+        used = 8 + sum(map(len, aces))
+        capacity = used if capacity is None else capacity
+        return (header + b"\xa5" * (offset - 20) + struct.pack("<BBHHH", revision, 0, capacity, len(aces), 0)
+                + b"".join(aces) + b"\x5a" * (capacity - used) + tail)
+
+    def test_dacl_restoration_compares_complete_policy_not_placement(self):
+        reducers, _ = self._dacl_reducers()
+        parse, compare, scalar = (reducers[name] for name in ("_dacl_policy", "_dacl_comparison", "_dacl_comparison_valid"))
+        original = self._dacl_bytes()
+        policy = parse(original)
+        self.assertEqual(policy[:4], (0x9004, True, False, 2))
+        self.assertEqual(tuple(map(len, policy[4])), (20, 20))
+        for variant in (original, self._dacl_bytes(offset=24), self._dacl_bytes(offset=64, capacity=256),
+                        self._dacl_bytes(capacity=256, tail=b"unused capacity")):
+            facts, equal = compare(original, variant, "denied-directory")
+            self.assertIs(equal, True)
+            self.assertTrue(scalar(facts))
+            self.assertEqual(facts["lengthEqual"], len(original) == len(variant))
+            self.assertEqual(facts["bytesEqual"], original == variant)
+            self.assertTrue(all(value is True for key, value in facts.items()
+                                if key not in ("role", "lengthEqual", "bytesEqual")))
+        placed = self._dacl_bytes(offset=24)
+        alternate_gap = placed[:20] + b"\x11" * 4 + placed[24:]
+        facts, equal = compare(placed, alternate_gap, "denied-file")
+        self.assertTrue(equal and facts["lengthEqual"] and not facts["bytesEqual"])
+        for bit, field in ((0x1000, "protectedEqual"), (8, "defaultedEqual"),
+                           (0x100, "autoInheritanceEqual"), (0x400, "autoInheritanceEqual")):
+            facts, equal = compare(original, self._dacl_bytes(control=0x9004 ^ bit), "denied-file")
+            self.assertFalse(equal)
+            self.assertTrue(scalar(facts))
+            self.assertIs(facts["controlEqual"], False)
+            self.assertIs(facts[field], False)  # Including resulting 0x0400, never masked.
+        aces = policy[4]
+        variants = [(aces[::-1], "orderedAcesEqual"), (aces[:1], "orderedAcesEqual"),
+                    (aces + aces[:1], "orderedAcesEqual")]
+        for offset in (0, 1, 4, 10, 15, 16, 19):
+            changed = bytearray(aces[0]); changed[offset] ^= 1
+            variants.append(((bytes(changed), aces[1]), "orderedAcesEqual"))
+        for changed, field in variants:
+            facts, equal = compare(original, self._dacl_bytes(aces=changed), "denied-file")
+            self.assertFalse(equal)
+            self.assertTrue(facts["savedShapeValid"] and facts["observedShapeValid"] and scalar(facts))
+            self.assertIs(facts[field], False)
+        for flags in (1, 2, 4, 8, 16, 31):
+            changed = aces[0][:1] + bytes([flags]) + aces[0][2:]
+            facts, equal = compare(original, self._dacl_bytes(aces=(changed, aces[1])), "denied-file")
+            self.assertFalse(equal)
+            self.assertIs(facts["orderedAcesEqual"], False)
+        for count in (2, 15):
+            sid = bytes([1, count]) + b"\0\0\0\0\0\x05" + struct.pack("<" + "I" * count, *range(count))
+            ace = struct.pack("<BBHI", 0, 0, 8 + len(sid), 0x1F01FF) + sid
+            descriptor = self._dacl_bytes(aces=(ace,))
+            self.assertEqual(parse(descriptor)[4], (ace,))
+            self.assertTrue(compare(descriptor, self._dacl_bytes(aces=(ace,), offset=24, capacity=256), "denied-file")[1])
+        facts, equal = compare(original, self._dacl_bytes(revision=4), "denied-file")
+        self.assertFalse(equal)
+        self.assertIs(facts["aclRevisionEqual"], False)
+        self.assertIs(facts["orderedAcesEqual"], True)
+        states = [self._dacl_bytes(control=0x8000, offset=0), self._dacl_bytes(offset=0),
+                  self._dacl_bytes(aces=()), original]
+        for index, left in enumerate(states):
+            self.assertIsNotNone(parse(left))
+            for other, right in enumerate(states):
+                facts, equal = compare(left, right, "denied-file")
+                self.assertEqual(equal, index == other)
+                self.assertTrue(scalar(facts))
+        # Counted ACEs, not allocated bytes: lowering AceCount is a policy change,
+        # even when the former next ACE is now valid unused ACL capacity.
+        changed = bytearray(original); struct.pack_into("<H", changed, 24, 1)
+        self.assertIsNotNone(parse(bytes(changed)))
+        self.assertFalse(compare(original, bytes(changed), "denied-file")[1])
+
+    def test_dacl_restoration_rejects_malformed_and_unsupported_layouts(self):
+        reducers, _ = self._dacl_reducers()
+        parse, compare = reducers["_dacl_policy"], reducers["_dacl_comparison"]
+        original = self._dacl_bytes()
+
+        def changed(offset, replacement):
+            return original[:offset] + replacement + original[offset + len(replacement):]
+
+        invalid = [None, True, 1, "descriptor", bytearray(original), memoryview(original), original + bytes(16385),
+                   changed(0, b"\x02"), changed(1, b"\x01"), changed(21, b"\x01"), changed(26, b"\x01\x00")]
+        for control in (0, 0x1004, 0x9000, 0x8004 | 1, 0x8004 | 2, 0x8004 | 0x10,
+                        0x8004 | 0x20, 0x8004 | 0x40, 0x8004 | 0x80, 0x8004 | 0x200,
+                        0x8004 | 0x800, 0x8004 | 0x2000, 0x8004 | 0x4000):
+            invalid.append(changed(2, struct.pack("<H", control)))
+        for field in (4, 8, 12):  # No owner/group/SACL projection or hidden overlap.
+            for offset in (1, 4, 16, 20, 28, 0xFFFFFFFC):
+                invalid.append(changed(field, struct.pack("<I", offset)))
+        for offset in (4, 16, 21, 64, 0xFFFFFFFC):
+            invalid.append(changed(16, struct.pack("<I", offset)))
+        for revision in (0, 1, 3, 5, 255):
+            invalid.append(changed(20, bytes([revision])))
+        for size in (0, 4, 8, 28, 47, 49, 52, 65532):
+            invalid.append(changed(22, struct.pack("<H", size)))
+        for count in (3, 65535):
+            invalid.append(changed(24, struct.pack("<H", count)))
+        for offset in (28, 48):
+            for flag in (0x20, 0x40, 0x80, 0xFF):
+                invalid.append(changed(offset + 1, bytes([flag])))
+            for length in (0, 4, 16, 19, 21, 24, 65532):
+                invalid.append(changed(offset + 2, struct.pack("<H", length)))
+            for revision in (0, 2):
+                invalid.append(changed(offset + 8, bytes([revision])))
+            for count in (0, 2, 16, 255):
+                invalid.append(changed(offset + 9, bytes([count])))
+        sid = original[36:48]
+        for ace_type in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 17, 18, 19, 20, 21, 255):
+            # Even a bounded, aligned body is not an opaque supported ACE.
+            body = (struct.pack("<I", 3) + b"g" * 32 + sid if ace_type in (5, 6)
+                    else sid + b"artx\0\0\0\0" if ace_type in (9, 10, 11, 12) else sid)
+            ace = struct.pack("<BBHI", ace_type, 0, 8 + len(body), 1) + body
+            invalid.append(self._dacl_bytes(aces=(ace,)))
+        padded = bytearray(original[28:48] + b"\0" * 4); struct.pack_into("<H", padded, 2, 24)
+        invalid.append(self._dacl_bytes(aces=(bytes(padded),)))  # In-ACE surplus cannot be normalized.
+        invalid.extend(original[:end] for end in range(len(original)))
+        for value in invalid:
+            with self.subTest(kind=type(value).__name__, size=len(value) if isinstance(value, (bytes, bytearray)) else None):
+                self.assertIsNone(parse(value))
+                facts, equal = compare(original, value, "denied-file")
+                self.assertFalse(equal)
+                self.assertIs(facts["savedShapeValid"], True)
+                self.assertIs(facts["observedShapeValid"], False)
+                self.assertTrue(reducers["_dacl_comparison_valid"](facts))
+                self.assertTrue(all(facts[key] is None for key in ("presenceEqual", "nullEqual", "controlEqual",
+                    "protectedEqual", "defaultedEqual", "autoInheritanceEqual", "aclRevisionEqual", "orderedAcesEqual")))
+
+    def test_dacl_pair_admission_precedes_mutation_and_original_restore_counts(self):
+        reducers, parsed = self._dacl_reducers()
+        fixture = next(node for node in parsed.body if isinstance(node, ast.ClassDef) and node.name == "Fixture")
+        selected = [node for node in fixture.body if isinstance(node, ast.FunctionDef)
+                    and node.name in ("deny_data", "restore")]
+        self.assertEqual([node.name for node in selected], ["deny_data", "restore"])
+        # Execute original control flow ONLY with the sealed fake capabilities
+        # below. No fixture module/constructor, ctypes, native binding or path IO.
+        class Refused(Exception):
+            pass
+
+        def require(value, code):
+            if not value:
+                raise Refused(code)
+
+        safe = {"len": len, "str": str, "bytes": bytes, "bool": bool, "reversed": reversed}
+        namespace = {"__builtins__": safe, "require": require, "FixtureFailure": Refused,
+                     **{key: reducers[key] for key in ("_dacl_policy", "_dacl_comparison", "_installed_deny_data_dacl")}}
+        for definition in selected:
+            self.assertFalse(definition.decorator_list or definition.args.defaults or definition.args.kw_defaults)
+            self.assertEqual([arg.arg for arg in definition.args.args], ["self"])
+            self.assertIsNone(definition.returns.value)
+            self.assertFalse(any(isinstance(node, (ast.Import, ast.ImportFrom, ast.ClassDef, ast.Global, ast.Nonlocal))
+                                 for node in ast.walk(definition)))
+            for call in (node for node in ast.walk(definition) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                self.assertIn(call.func.id, {*safe, *namespace})
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-dacl-flow-with-fake-capabilities", "exec",
+                     dont_inherit=True), namespace)
+
+        class Buffer:
+            def __init__(self, size):
+                self.raw = bytes(size)
+            def __len__(self):
+                return len(self.raw)
+            def __getitem__(self, item):
+                return self.raw[item]
+
+        scalar = lambda value=0: SimpleNamespace(value=value)
+        test = self
+
+        class Project:
+            def __truediv__(self, relative):
+                test.assertIn(relative, ("read-denied/build.gradle", "list-denied"))
+                return relative  # A string label, not a filesystem-capable Path.
+
+        class Native:
+            def __init__(self, baselines, readbacks=None, failed_setter=None, failed_close=None, reported=None):
+                self.c = SimpleNamespace(create_string_buffer=Buffer, byref=lambda value: value,
+                                         c_int32=scalar, c_void_p=scalar)
+                self.U32 = self.U16 = scalar
+                self.a = SimpleNamespace(**{name: name for name in ("GetKernelObjectSecurity", "GetSecurityDescriptorControl",
+                    "CreateWellKnownSid", "InitializeAcl", "AddAccessDeniedAceEx", "AddAccessAllowedAceEx",
+                    "SetSecurityInfo", "GetSecurityDescriptorDacl")})
+                self.baselines = dict(zip((101, 102), baselines))
+                self.current = dict(self.baselines)
+                self.readbacks = readbacks or dict(self.baselines)
+                self.failed_setter, self.failed_close, self.reported = failed_setter, failed_close, reported or {}
+                self.held, self.retained_arenas, self.events, self.restore_calls = [], {}, [], set()
+            def open(self, path, access):
+                test.assertEqual(access, 0x60080)
+                handle = 101 + len(self.held)
+                self.held.append(handle); self.events.append(("open", handle))
+                return handle
+            def retain(self, label, items):
+                test.assertNotIn(label, self.retained_arenas)
+                self.retained_arenas[label] = items
+            def identity(self, handle):
+                test.assertIn(handle, self.held)
+                return (17, handle.to_bytes(16, "little"))
+            def call(self, function, args, keep=(), *, kind="boolean"):
+                if function == "GetKernelObjectSecurity":
+                    handle, flags, buffer, limit, needed = args
+                    test.assertEqual((flags, limit), (4, 16384))
+                    data = self.current[handle]
+                    buffer.raw = data[:limit] + bytes(max(0, limit - len(data)))
+                    needed.value = self.reported.get(handle, len(data)) if handle in self.restore_calls else len(data)
+                    self.events.append(("get", handle))
+                elif function == "GetSecurityDescriptorControl":
+                    saved, control, revision = args
+                    control.value, revision.value = int.from_bytes(saved.raw[2:4], "little"), saved.raw[0]
+                    self.events.append(("control", control.value))
+                elif function == "GetSecurityDescriptorDacl":
+                    saved, present, pointer, defaulted = args
+                    present.value, defaulted.value, pointer.value = 1, 0, saved
+                elif function == "CreateWellKnownSid":
+                    args[3].value = 12
+                elif function == "SetSecurityInfo":
+                    handle, object_type, security, owner, group, acl, sacl = args
+                    test.assertEqual((object_type, owner, group, sacl, kind), (1, None, None, None, "zero"))
+                    if isinstance(acl, SimpleNamespace):
+                        test.assertTrue(any(acl.value is items[0] for items in self.retained_arenas.values()))
+                        self.events.append(("restore", handle, security))
+                        if handle == self.failed_setter:
+                            raise Refused("mock_returned_setter_error")
+                        self.restore_calls.add(handle)
+                        self.current[handle] = self.readbacks[handle]
+                    else:
+                        self.events.append(("deny", handle, security))
+                        test.assertEqual(security, 4 | 0x80000000)
+                        self.current[handle] = test._dacl_bytes()
+                else:
+                    test.assertIn(function, ("InitializeAcl", "AddAccessDeniedAceEx", "AddAccessAllowedAceEx"))
+                return 0 if kind == "zero" else 1
+            def close(self, handle):
+                self.events.append(("close", handle))
+                if handle == self.failed_close:
+                    raise Refused("mock_consuming_close_unknown")
+                test.assertIn(handle, self.held)
+                self.held.remove(handle)
+            def close_all(self):
+                test.assertEqual(self.held, [])
+                self.events.append(("all-closed",))
+
+        def make(baselines, **options):
+            return SimpleNamespace(native=Native(baselines, **options), project=Project(), journal=[],
+                thread=None, alias=None, case="acl-type", restored=False, dacl_comparison=None,
+                checks={key: None for key in ("fileAccessDenied", "directoryAccessDenied", "accessibleSiblingRead",
+                                             "configDirectoryRefused", "daclRestored")})
+
+        for controls in ((0x8004, 0x9404), (0x9004, 0x8404), (0x8404, 0x8004), (0x9404, 0x9004)):
+            baselines = tuple(self._dacl_bytes(control=control) for control in controls)
+            readbacks = {handle: self._dacl_bytes(control=control, offset=24, capacity=256)
+                         for handle, control in zip((101, 102), controls)}
+            owner = make(baselines, readbacks=readbacks)
+            namespace["deny_data"](owner)
+            originals = tuple(record["baseline"] for record in owner.journal)
+            self.assertEqual(originals, baselines)
+            self.assertTrue(all(type(value) is bytes for value in originals))
+            events = owner.native.events
+            first_mutation = next(index for index, event in enumerate(events) if event[0] == "deny")
+            self.assertEqual([event for event in events[:first_mutation] if event[0] == "get"], [("get", 101), ("get", 102)])
+            self.assertEqual(len([event for event in events[:first_mutation] if event[0] == "control"]), 2)
+            self.assertEqual([record["changed"] for record in owner.journal], [True, True])
+            namespace["restore"](owner)
+            security = [4 | (0x80000000 if control & 0x1000 else 0x20000000) for control in controls]
+            self.assertEqual([event for event in events if event[0] == "restore"], [("restore", 102, security[1]), ("restore", 101, security[0])])
+            self.assertEqual([event for event in events if event[0] == "close"], [("close", 102), ("close", 101)])
+            self.assertEqual(owner.checks["daclRestored"], 2)
+            self.assertIs(type(owner.checks["daclRestored"]), int)
+            self.assertEqual((owner.journal, owner.native.held, owner.native.retained_arenas), ([], [], {}))
+            self.assertTrue(owner.restored)
+            self.assertIsNone(owner.dacl_comparison)
+            self.assertTrue(all(owner.checks[key] is None for key in owner.checks if key != "daclRestored"))
+
+        original = self._dacl_bytes(control=0x8404)
+        unsupported = [self._dacl_bytes(control=0x8000, offset=0), self._dacl_bytes(control=0x8404, offset=0), b"malformed"]
+        unsupported.extend(self._dacl_bytes(control=0x8404 | bit) for bit in (8, 0x100, 1, 2, 0x200, 0x4000))
+        for bad in unsupported:
+            for baselines in ((bad, original), (original, bad)):
+                owner = make(baselines)
+                with self.assertRaises(Refused):
+                    namespace["deny_data"](owner)
+                self.assertFalse(any(event[0] in ("deny", "restore") for event in owner.native.events))
+                self.assertFalse(owner.restored)
+                self.assertIsNone(owner.checks["daclRestored"])
+                self.assertTrue(all(record["changed"] is False for record in owner.journal))
+                if baselines[0] == original:
+                    self.assertEqual(owner.journal[0]["baseline"], original)
+                    self.assertEqual(owner.native.held, [101, 102])
+        owner = make((original, original))
+        namespace["deny_data"](owner)
+        owner.journal[1]["saved"].raw = self._dacl_bytes(control=0x8004) + bytes(16384 - len(original))
+        with self.assertRaisesRegex(Refused, "^saved_dacl_unsupported$"):
+            namespace["restore"](owner)
+        self.assertEqual(tuple(record["baseline"] for record in owner.journal), (original, original))
+        self.assertFalse(any(event[0] == "restore" for event in owner.native.events))
+        self.assertIsNone(owner.checks["daclRestored"])
+        for handle, role in ((101, "denied-file"), (102, "denied-directory")):
+            readbacks = {101: original, 102: original}
+            readbacks[handle] = self._dacl_bytes(control=0x8004)  # Only resulting auto-inherited differs.
+            owner = make((original, original), readbacks=readbacks)
+            namespace["deny_data"](owner)
+            with self.assertRaisesRegex(Refused, "^dacl_restoration_not_confirmed$"):
+                namespace["restore"](owner)
+            self.assertEqual(owner.dacl_comparison["role"], role)
+            self.assertIs(owner.dacl_comparison["autoInheritanceEqual"], False)
+            self.assertEqual(tuple(record["baseline"] for record in owner.journal), (original, original))
+            self.assertIsNone(owner.checks["daclRestored"])
+            self.assertFalse(owner.restored)
+            self.assertIn(handle, owner.native.held)
+        for options in ({"failed_setter": 102}, {"failed_close": 101}, {"reported": {102: 16385}}):
+            owner = make((original, original), **options)
+            namespace["deny_data"](owner)
+            with self.assertRaises(Refused):
+                namespace["restore"](owner)
+            self.assertIsNone(owner.checks["daclRestored"])
+            self.assertFalse(owner.restored)
+            self.assertTrue(owner.journal and owner.native.retained_arenas)
+            if "reported" in options:
+                self.assertIs(owner.dacl_comparison["observedShapeValid"], False)
+                self.assertIsNone(owner.dacl_comparison["lengthEqual"])
+                self.assertIsNone(owner.dacl_comparison["bytesEqual"])
+
+    def test_dacl_comparison_diagnostic_schema_and_budgets(self):
+        reducers, _ = self._dacl_reducers()
+        compare, scalar, reduce = (reducers[name] for name in ("_dacl_comparison", "_dacl_comparison_valid", "_failure_diagnostic"))
+        original = self._dacl_bytes(control=0x8404)
+        mismatch = self._dacl_bytes(control=0x8004)
+        facts, equal = compare(original, mismatch, "denied-directory")
+        self.assertFalse(equal)
+        arguments = {"case": "acl-type", "nonce": "a" * 64, "stage": "restoration",
+            "reason": "dacl_restoration_not_confirmed", "fixture_state": (True, True, True, True, True, False, True, False),
+            "reader_state": (1, True, True, False, True), "output_state": (False, 0, 0), "comparison": facts}
+        prefix = b"MRK_WINDOWS_SNAPSHOT_FAILURE_V1 "
+        raw = reduce(**arguments)
+        self.assertLessEqual(len(raw), 1024)
+        parsed = json.loads(raw[len(prefix):-1])
+        self.assertEqual(parsed["comparison"], facts)
+        self.assertEqual(set(parsed), {"schemaVersion", "scope", "id", "nonce", "stage", "code", "comparison"})
+        self.assertEqual(set(facts), {"role", "savedShapeValid", "observedShapeValid", "lengthEqual", "bytesEqual",
+            "presenceEqual", "nullEqual", "controlEqual", "protectedEqual", "defaultedEqual", "autoInheritanceEqual",
+            "aclRevisionEqual", "orderedAcesEqual"})
+        policy = tuple(key for key in facts if key not in ("role", "savedShapeValid", "observedShapeValid", "lengthEqual", "bytesEqual"))
+        for observed in (b"", b"invalid", bytes([2]) + original[1:], None, original + bytes(16385)):
+            unknown, equal = compare(original, observed, "denied-file")
+            self.assertFalse(equal)
+            self.assertTrue(scalar(unknown))
+            self.assertTrue(all(unknown[key] is None for key in policy))
+            frame = reduce(**{**arguments, "comparison": unknown})
+            self.assertEqual(json.loads(frame[len(prefix):-1])["comparison"], unknown)
+            for key in policy:
+                self.assertIsNone(reduce(**{**arguments, "comparison": {**unknown, key: True}}))
+        for saved, observed in ((b"", b""), (b"invalid", b"invalid"), (b"invalid", None), (b"", original)):
+            unknown, equal = compare(saved, observed, "denied-file")
+            self.assertFalse(equal)
+            self.assertTrue(scalar(unknown))
+            self.assertEqual(json.loads(reduce(**{**arguments, "comparison": unknown})[len(prefix):-1])["comparison"], unknown)
+        bad_objects = [None, [], True, {}, {**facts, "extra": "private-canary"}, {**facts, "role": "private-canary"}]
+        for key in facts:
+            bad_objects.append({name: value for name, value in facts.items() if name != key})
+            for value in (0, 1, 0.0, "true", [], {}, "private-canary"):
+                bad_objects.append({**facts, key: value})
+        bad_objects.extend(({**facts, "lengthEqual": None}, {**facts, "bytesEqual": True},
+                            {**facts, "savedShapeValid": False}, {**facts, "controlEqual": True}))
+        for malformed in bad_objects:
+            self.assertFalse(scalar(malformed))
+            if malformed is not None:  # None omits the optional object, never encodes JSON null.
+                self.assertIsNone(reduce(**{**arguments, "comparison": malformed}))
+        for key, value in (("case", "short-alias"), ("stage", "setup"), ("reason", "fixture_dacl_not_effective")):
+            self.assertIsNone(reduce(**{**arguments, key: value}))
+        for index in range(8):
+            changed = list(arguments["fixture_state"]); changed[index] = not changed[index]
+            self.assertIsNone(reduce(**{**arguments, "fixture_state": tuple(changed)}))
+        for reader in ((1, False, None, None, None), (1, True, False, False, True),
+                       (1, True, True, True, True), (1, True, True, False, False)):
+            self.assertIsNone(reduce(**{**arguments, "reader_state": reader}))
+        engine_error = b"Mobile Release Kit desktop engine rejected the request or transport.\n"
+        available = 65536 - len(raw) - len(engine_error)
+        self.assertEqual(reduce(**{**arguments, "output_state": (False, 3, available)}), raw)
+        self.assertIsNone(reduce(**{**arguments, "output_state": (False, 3, available + 1)}))
+        self.assertIsNone(reduce(**{**arguments, "output_state": (True, 0, 0)}))
+        # Literal maximum-width DATA, not the Rust reducer or any native process.
+        widest = {key: ("denied-directory" if key == "role" else False) for key in facts}
+        widest["savedShapeValid"] = widest["observedShapeValid"] = True
+        self.assertTrue(scalar(widest))
+        marker = reduce(**{**arguments, "comparison": widest})
+        self.assertLessEqual(len(marker), 1024)
+        summary = {"schemaVersion": 1, "scope": "windows-static-snapshot-native-v1", "id": "acl-type",
+            "exitCode": -2147483648, "ownerErrorCode": "snapshot_unavailable",
+            "fixtureFailure": {"status": "valid", "stage": "restoration", "code": "dacl_restoration_not_confirmed",
+                               "comparison": widest}}
+        outer = b"MRK_WINDOWS_SNAPSHOT_EXIT_DIAGNOSTIC_V1 " + json.dumps(summary, separators=(",", ":")).encode("ascii") + b"\n"
+        self.assertLessEqual(len(outer), 1024)
+        self.assertNotIn(b"private-canary", marker + outer)
+
     def _run(self, fake: _Fake, config_path=CONFIG, clock=None) -> dict:
         def factory(inventory):
             fake.inventory = inventory
@@ -790,43 +1236,9 @@ class WindowsSnapshotPureTests(unittest.TestCase):
             self.assertIs(check(data), False)
 
     def test_failure_diagnostic_is_closed_bounded_and_unknown_silent(self):
-        # Compile only this scalar reducer, never the fixture/emitter/observer.
+        # Only reviewed scalar definitions execute, never fixture/emitter/observer.
         name = "_failure_diagnostic"
-        signature = ("case", "nonce", "stage", "reason", "fixture_state", "reader_state", "output_state")
-        source = (Path(__file__).resolve().parents[1] / "native_desktop_snapshot_windows.py").read_bytes()
-        self.assertLessEqual(len(source), 128 * 1024)
-        parsed = ast.parse(source, filename="reviewed-failure-fixture-source")
-        selected = [node for node in parsed.body if getattr(node, "name", None) == name]
-        self.assertEqual(len(selected), 1)
-        definition = selected[0]
-        self.assertIs(type(definition), ast.FunctionDef)
-        self.assertFalse(definition.decorator_list or definition.returns or definition.type_comment
-                         or getattr(definition, "type_params", []))
-        args = definition.args
-        self.assertEqual(tuple(arg.arg for arg in args.args), signature)
-        self.assertFalse(args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg or args.defaults or args.kw_defaults)
-        self.assertTrue(all(arg.annotation is None and arg.type_comment is None for arg in args.args))
-        self.assertEqual(sum(isinstance(node, ast.FunctionDef) for node in ast.walk(definition)), 1)
-        safe = {"type": type, "str": str, "tuple": tuple, "bool": bool, "int": int, "len": len}
-        nodes = (ast.FunctionDef, ast.arguments, ast.arg, ast.Expr, ast.Constant, ast.Name, ast.Load, ast.Store,
-                 ast.Assign, ast.For, ast.If, ast.Return, ast.Call, ast.Attribute, ast.Tuple, ast.Subscript, ast.Slice,
-                 ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare, ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
-        for node in ast.walk(definition):
-            self.assertIsInstance(node, nodes)
-            if isinstance(node, ast.Name):
-                self.assertFalse(node.id.startswith("__"))
-            if isinstance(node, ast.Attribute):
-                self.assertEqual(node.attr, "encode")
-            if isinstance(node, ast.Call):
-                if isinstance(node.func, ast.Name):
-                    self.assertIn(node.func.id, safe)
-                else:
-                    self.assertIsInstance(node.func, ast.Attribute)
-                    self.assertEqual(node.func.attr, "encode")
-        namespace = {"__builtins__": safe}
-        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-failure-reducer", "exec",
-                     dont_inherit=True), namespace)
-        self.assertEqual(set(namespace), {"__builtins__", name})
+        namespace, parsed = self._dacl_reducers()
         reduce = namespace[name]
         fixture_state = (True, True, True, True, True, False, True, False)
         reader_state = (0, False, None, None, None)
@@ -846,7 +1258,7 @@ class WindowsSnapshotPureTests(unittest.TestCase):
                    "short_alias_access_denied", "short_alias_sharing_violation", "short_alias_not_supported",
                    "short_alias_invalid_parameter", "short_alias_name_collision", "short_alias_volume_disabled",
                    "short_alias_privilege_unavailable", "short_alias_other_refused",
-                   "saved_dacl_bound", "world_sid_bound", "fixture_dacl_denial_required", "fixture_dacl_not_effective",
+                   "saved_dacl_bound", "saved_dacl_unsupported", "world_sid_bound", "fixture_dacl_denial_required", "fixture_dacl_not_effective",
                    "dacl_restore_original_object", "saved_dacl_present", "dacl_restoration_not_confirmed",
                    "fixture_restoration_bound", "fixture_retained_arena_bound", "fixture_arena_bound",
                    "fixture_path_bound", "fixture_inherited_handle", "fixture_zero_file_id")

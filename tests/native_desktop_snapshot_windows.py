@@ -160,7 +160,100 @@ def _installed_deny_data_dacl(data):
     return True
 
 
-def _failure_diagnostic(case, nonce, stage, reason, fixture_state, reader_state, output_state):
+def _dacl_policy(data):
+    """DACL-only relative SD; ACL2/4, ordinary allow/deny ACEs, SID1 (1..15).
+
+    Owner/group/SACL/RM, other ACEs (including object/condition payloads),
+    reserved fields and in-ACE surplus are unsupported, never opaque policy.
+    Only outer placement/gaps and ACL capacity after AceCount are excluded.
+    """
+    if (type(data) is not bytes or not 20 <= len(data) <= 16384
+            or data[0] != 1 or data[1] or any(data[4:16])):
+        return None
+    control = int.from_bytes(data[2:4], "little")
+    offset = int.from_bytes(data[16:20], "little")
+    if not control & 0x8000 or control & ~0x950C:
+        return None
+    present = bool(control & 4)
+    if not present and (offset or control != 0x8000):
+        return None
+    if not offset:
+        return (control, present, present, None, ())  # Absent != present-null.
+    if offset < 20 or offset % 4 or offset > len(data) - 8:
+        return None
+    revision = data[offset]
+    size = int.from_bytes(data[offset + 2:offset + 4], "little")
+    count = int.from_bytes(data[offset + 4:offset + 6], "little")
+    if (revision not in (2, 4) or data[offset + 1] or any(data[offset + 6:offset + 8])
+            or size < 8 or size % 4 or size > len(data) - offset):
+        return None
+    cursor, end, aces = offset + 8, offset + size, []
+    for _ in range(count):
+        if cursor + 16 > end:
+            return None
+        length = int.from_bytes(data[cursor + 2:cursor + 4], "little")
+        subcount = data[cursor + 9]
+        if (data[cursor] not in (0, 1) or data[cursor + 1] & ~0x1F
+                or data[cursor + 8] != 1 or not 1 <= subcount <= 15
+                or length != 16 + 4 * subcount or length > end - cursor):
+            return None
+        aces.append(data[cursor:cursor + length])  # Entire ordered ACE, no projection.
+        cursor += length
+    return (control, True, False, revision, tuple(aces))
+
+
+def _dacl_comparison(saved, observed, role):
+    a, b = _dacl_policy(saved), _dacl_policy(observed)
+    complete = (type(saved) is bytes and len(saved) <= 16384
+                and type(observed) is bytes and len(observed) <= 16384)
+    valid = a is not None and b is not None
+    facts = {"role": role, "savedShapeValid": a is not None, "observedShapeValid": b is not None,
+             "lengthEqual": len(saved) == len(observed) if complete else None,
+             "bytesEqual": saved == observed if complete else None}
+    for key, index in (("presenceEqual", 1), ("nullEqual", 2), ("controlEqual", 0),
+                       ("aclRevisionEqual", 3), ("orderedAcesEqual", 4)):
+        facts[key] = a[index] == b[index] if valid else None
+    for key, mask in (("protectedEqual", 0x1000), ("defaultedEqual", 8), ("autoInheritanceEqual", 0x500)):
+        facts[key] = a[0] & mask == b[0] & mask if valid else None
+    return facts, valid and a == b
+
+
+def _dacl_comparison_valid(value):
+    policy = ("presenceEqual", "nullEqual", "controlEqual", "protectedEqual", "defaultedEqual",
+              "autoInheritanceEqual", "aclRevisionEqual", "orderedAcesEqual")
+    fields = ("role", "savedShapeValid", "observedShapeValid", "lengthEqual", "bytesEqual") + policy
+    if type(value) is not dict or len(value) != len(fields):
+        return False
+    for key in value:
+        if type(key) is not str or key not in fields:
+            return False
+    if (type(value["role"]) is not str or value["role"] not in ("denied-file", "denied-directory")
+            or type(value["savedShapeValid"]) is not bool or type(value["observedShapeValid"]) is not bool):
+        return False
+    valid = value["savedShapeValid"] and value["observedShapeValid"]
+    for key in ("lengthEqual", "bytesEqual") + policy:
+        if value[key] is not None and type(value[key]) is not bool:
+            return False
+    if ((value["lengthEqual"] is None) != (value["bytesEqual"] is None)
+            or (valid and value["lengthEqual"] is None)):
+        return False
+    for key in policy:
+        if (valid and type(value[key]) is not bool) or (not valid and value[key] is not None):
+            return False
+    if value["bytesEqual"] is True:
+        if value["lengthEqual"] is not True or value["savedShapeValid"] != value["observedShapeValid"]:
+            return False
+        if valid:
+            for key in policy:
+                if value[key] is not True:
+                    return False
+    if valid and value["controlEqual"] != (value["presenceEqual"] and value["protectedEqual"]
+                                           and value["defaultedEqual"] and value["autoInheritanceEqual"]):
+        return False
+    return True
+
+
+def _failure_diagnostic(case, nonce, stage, reason, fixture_state, reader_state, output_state, comparison=None):
     """Closed scalar reduction only; no exception rendering, IO or custody probe."""
     cases = ("ordinary-source", "ordinary-zip", "closed-gate", "link-children", "reparse-root",
              "reparse-ancestor", "short-alias", "case-alias", "case-collision", "subst-drive", "unc", "device", "ads",
@@ -205,14 +298,25 @@ def _failure_diagnostic(case, nonce, stage, reason, fixture_state, reader_state,
             "short_alias_access_denied", "short_alias_sharing_violation", "short_alias_not_supported",
             "short_alias_invalid_parameter", "short_alias_name_collision", "short_alias_volume_disabled",
             "short_alias_privilege_unavailable", "short_alias_other_refused",
-            "saved_dacl_bound", "world_sid_bound", "fixture_dacl_denial_required", "fixture_dacl_not_effective",
+            "saved_dacl_bound", "saved_dacl_unsupported", "world_sid_bound", "fixture_dacl_denial_required", "fixture_dacl_not_effective",
             "dacl_restore_original_object", "saved_dacl_present", "dacl_restoration_not_confirmed",
             "fixture_restoration_bound", "fixture_retained_arena_bound", "fixture_arena_bound",
             "fixture_path_bound", "fixture_inherited_handle", "fixture_zero_file_id"):
         reason = "fixture_failure"
-    # Every interpolated string is now a closed literal or the admitted hex nonce.
+    detail = ""
+    if comparison is not None:
+        if ((case, stage, reason) != ("acl-type", "restoration", "dacl_restoration_not_confirmed")
+                or not _dacl_comparison_valid(comparison)):
+            return None
+        detail = ',"comparison":{"role":"' + comparison["role"] + '"'
+        for key in ("savedShapeValid", "observedShapeValid", "lengthEqual", "bytesEqual", "presenceEqual", "nullEqual",
+                    "controlEqual", "protectedEqual", "defaultedEqual", "autoInheritanceEqual", "aclRevisionEqual", "orderedAcesEqual"):
+            value = comparison[key]
+            detail += ',"' + key + '":' + ("true" if value is True else "false" if value is False else "null")
+        detail += "}"
+    # Only fixed literals, hex nonce and already-computed closed scalar facts.
     raw = ('MRK_WINDOWS_SNAPSHOT_FAILURE_V1 {"schemaVersion":1,"scope":"windows-static-snapshot-native-v1","id":"'
-           + case + '","nonce":"' + nonce + '","stage":"' + stage + '","code":"' + reason + '"}\n').encode("ascii")
+           + case + '","nonce":"' + nonce + '","stage":"' + stage + '","code":"' + reason + '"' + detail + '}\n').encode("ascii")
     # A dispatch failure is followed by this unchanged genuine-engine line.
     # Reserve it even for setup failures, rather than creating an output overflow.
     engine_error = b"Mobile Release Kit desktop engine rejected the request or transport.\n"
@@ -1122,6 +1226,7 @@ class Fixture:
         self.trace = ReaderTrace(self)
         self.checks = dict.fromkeys(CHECKS[self.case])
         self.journal = []
+        self.dacl_comparison = None
         self.restored = False
         self.outside_ids = set()
         self.observed_entry_paths = {"android/app/build.gradle", "release/mobile-release.json", "walk-parent/build.gradle"}
@@ -1230,7 +1335,7 @@ class Fixture:
                 if type(arguments) is tuple and len(arguments) == 1:
                     reason = arguments[0]
             raw = _failure_diagnostic(self.case, self.descriptor["nonce"], stage, reason,
-                                      fixture_state, reader_state, (attempted, self.emitted, self.emitted_bytes))
+                                      fixture_state, reader_state, (attempted, self.emitted, self.emitted_bytes), self.dacl_comparison)
             if raw is None:
                 return
             self.emitted += 1
@@ -1432,8 +1537,7 @@ class Fixture:
                     handle = n.open(self.mutation_record["path"], access)
                     n.close(handle)
         elif self.case == "acl-type":
-            self.deny_data(self.project / "read-denied/build.gradle")
-            self.deny_data(self.project / "list-denied")
+            self.deny_data()
         elif self.case == "ending-metadata-case":
             self.file_record = self.held_mutation(self.project / "android/app/build.gradle", "time")
             self.file_record["basic"] = n.info(self.file_record["metadata"], 0, n.Basic)
@@ -1458,39 +1562,50 @@ class Fixture:
                 self.thread = threading.Thread(target=self.observe_oplock, name="fixed-snapshot-oplock-observer", daemon=False)
                 self.thread.start()
 
-    def deny_data(self, path: Path) -> None:
+    def deny_data(self) -> None:
         n, c = self.native, self.native.c
-        handle = n.open(path, 0x60080)  # Original READ_CONTROL/WRITE_DAC restore owner, before denial.
-        saved, needed = c.create_string_buffer(16 * 1024), n.U32()
-        arena_label = "dacl-" + str(len(self.journal))
-        n.retain(arena_label, (saved,))
-        n.call(n.a.GetKernelObjectSecurity, (handle, 4, saved, len(saved), c.byref(needed)), (saved, needed))
-        require(0 < needed.value <= len(saved), "saved_dacl_bound")
-        control, revision = n.U16(), n.U32()
-        n.call(n.a.GetSecurityDescriptorControl, (saved, c.byref(control), c.byref(revision)), (saved, control, revision))
-        record = {"kind": "dacl", "path": path, "handle": handle, "saved": saved, "length": needed.value,
-                  "protected": bool(control.value & 0x1000), "id": n.identity(handle), "changed": False,
-                  "arena": arena_label}
-        require(len(self.journal) < 16, "fixture_restoration_bound")
-        self.journal.append(record)
-        sid, size = c.create_string_buffer(68), n.U32(68)
-        n.call(n.a.CreateWellKnownSid, (1, None, sid, c.byref(size)), (sid, size))
-        require(0 < size.value <= 68, "world_sid_bound")
-        acl = c.create_string_buffer(256)
-        n.call(n.a.InitializeAcl, (acl, len(acl), 2), (acl,))
-        n.call(n.a.AddAccessDeniedAceEx, (acl, 2, 0, 1, sid), (acl, sid))
-        n.call(n.a.AddAccessAllowedAceEx, (acl, 2, 0, 0x1F01FF, sid), (acl, sid))
-        n.call(n.a.SetSecurityInfo, (handle, 1, 4 | 0x80000000, None, None, acl, None), (acl, saved), kind="zero")
-        record["changed"] = True
-        # Verify the installed protected policy through the original restore
-        # owner, not a CreateFileW backup-style open with different semantics.
-        # Actual ordinary-reader STATUS_ACCESS_DENIED observations remain
-        # mandatory in completed_open_error and the unchanged native reducer.
-        installed, installed_needed = c.create_string_buffer(16 * 1024), n.U32()
-        n.call(n.a.GetKernelObjectSecurity,
-               (handle, 4, installed, len(installed), c.byref(installed_needed)), (installed, installed_needed))
-        require(0 < installed_needed.value <= len(installed), "fixture_dacl_not_effective")
-        require(_installed_deny_data_dacl(installed[:installed_needed.value]), "fixture_dacl_not_effective")
+        records = []
+        for relative, role in (("read-denied/build.gradle", "denied-file"), ("list-denied", "denied-directory")):
+            path = self.project / relative
+            handle = n.open(path, 0x60080)  # Retained original READ_CONTROL/WRITE_DAC owner.
+            saved, needed = c.create_string_buffer(16 * 1024), n.U32()
+            arena_label = "dacl-" + str(len(self.journal))
+            n.retain(arena_label, (saved,))
+            n.call(n.a.GetKernelObjectSecurity, (handle, 4, saved, len(saved), c.byref(needed)), (saved, needed))
+            require(20 <= needed.value <= len(saved), "saved_dacl_bound")
+            baseline = bytes(saved.raw[:needed.value])
+            policy = _dacl_policy(baseline)
+            # SetSecurityInfo participates in automatic inheritance (0x0400 is
+            # resulting state, not a request). These candidates still need exact
+            # full-control readback; defaulted/request/other states are refused.
+            require(policy is not None and policy[0] in (0x8004, 0x9004, 0x8404, 0x9404)
+                    and not policy[2], "saved_dacl_unsupported")
+            control, revision = n.U16(), n.U32()
+            n.call(n.a.GetSecurityDescriptorControl, (saved, c.byref(control), c.byref(revision)), (saved, control, revision))
+            require(control.value == policy[0] and revision.value == 1, "saved_dacl_unsupported")
+            record = {"kind": "dacl", "path": path, "role": role, "handle": handle, "saved": saved,
+                      "baseline": baseline, "length": needed.value, "protected": bool(control.value & 0x1000),
+                      "id": n.identity(handle), "changed": False, "arena": arena_label}
+            require(len(self.journal) < 16, "fixture_restoration_bound")
+            self.journal.append(record)
+            records.append(record)
+        for record in records:  # BOTH immutable baselines were validated; no lazy second admission.
+            handle, saved = record["handle"], record["saved"]
+            sid, size = c.create_string_buffer(68), n.U32(68)
+            n.call(n.a.CreateWellKnownSid, (1, None, sid, c.byref(size)), (sid, size))
+            require(0 < size.value <= 68, "world_sid_bound")
+            acl = c.create_string_buffer(256)
+            n.call(n.a.InitializeAcl, (acl, len(acl), 2), (acl,))
+            n.call(n.a.AddAccessDeniedAceEx, (acl, 2, 0, 1, sid), (acl, sid))
+            n.call(n.a.AddAccessAllowedAceEx, (acl, 2, 0, 0x1F01FF, sid), (acl, sid))
+            n.call(n.a.SetSecurityInfo, (handle, 1, 4 | 0x80000000, None, None, acl, None), (acl, saved), kind="zero")
+            record["changed"] = True
+            # Policy readback is not an ordinary-reader access-denial witness.
+            installed, installed_needed = c.create_string_buffer(16 * 1024), n.U32()
+            n.call(n.a.GetKernelObjectSecurity,
+                   (handle, 4, installed, len(installed), c.byref(installed_needed)), (installed, installed_needed))
+            require(0 < installed_needed.value <= len(installed), "fixture_dacl_not_effective")
+            require(_installed_deny_data_dacl(installed[:installed_needed.value]), "fixture_dacl_not_effective")
 
     def observe_oplock(self) -> None:
         n = self.native
@@ -1747,6 +1862,7 @@ class Fixture:
             if kind == "dacl":
                 if record["changed"]:
                     require(n.identity(record["handle"]) == record["id"], "dacl_restore_original_object")
+                    require(bytes(record["saved"].raw[:record["length"]]) == record["baseline"], "saved_dacl_unsupported")
                     present, defaulted, acl = c.c_int32(), c.c_int32(), c.c_void_p()
                     n.call(n.a.GetSecurityDescriptorDacl, (record["saved"], c.byref(present), c.byref(acl), c.byref(defaulted)),
                            (record["saved"], present, acl, defaulted))
@@ -1755,8 +1871,10 @@ class Fixture:
                     n.call(n.a.SetSecurityInfo, (record["handle"], 1, security, None, None, acl, None), (record["saved"],), kind="zero")
                     observed, needed = c.create_string_buffer(16 * 1024), n.U32()
                     n.call(n.a.GetKernelObjectSecurity, (record["handle"], 4, observed, len(observed), c.byref(needed)), (observed, needed))
-                    require(needed.value == record["length"] and bytes(observed.raw[:needed.value]) == bytes(record["saved"].raw[:record["length"]]),
-                            "dacl_restoration_not_confirmed")
+                    readback = bytes(observed.raw[:needed.value]) if needed.value <= len(observed) else None
+                    self.dacl_comparison, equal = _dacl_comparison(record["baseline"], readback, record["role"])
+                    require(equal, "dacl_restoration_not_confirmed")
+                    self.dacl_comparison = None
                     restored_dacl += 1
                 n.close(record["handle"])
                 continue
