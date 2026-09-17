@@ -106,6 +106,11 @@ class DefaultCancellation:
         self._installation = "NOT_INSTALLED"
         self._restoration = "NOT_ATTEMPTED"
         self._activated = False
+        # Installed only by the dedicated native edit bootstrap. Passive/CLI
+        # imports neither load its module nor acquire any input descriptor.
+        self._edit_source: Any = None
+        self._edit_source_installed = False
+        self._edit_source_removed = False
         self._ledger = LifetimeLedger(self)
         self._diagnostic_error: BaseException | None = None
         # Compatibility/diagnostics only: modifying this mapping grants nothing.
@@ -228,6 +233,7 @@ class DefaultCancellation:
 
     def check(self) -> None:
         self._check_owner()
+        self._poll_edit_stop()
         # Pending component records are normal during work. Only the monotonic
         # abort bit, not ledger.verdict().fatal, vetoes an active operation.
         if _FORK_UNSAFE or self._ledger.fatal or self.handler_state == "UNKNOWN":
@@ -236,6 +242,29 @@ class DefaultCancellation:
             raise error
         if self.cancelled:
             raise KeyboardInterrupt
+
+    def _install_edit_source(self, source: Any) -> None:
+        from ._desktop_edit_control import EditInput
+        self._check_owner()
+        if (type(source) is not EditInput or self.owner_thread is not threading.main_thread()
+                or self._edit_source_installed or self._edit_source_removed):
+            raise self.restore_error("invalid edit cancellation source ownership")
+        source.bind(self)
+        self._edit_source_installed = True
+        self._edit_source = source
+
+    def _poll_edit_stop(self) -> None:
+        """Fixed cleanup may poll/latch, but must not call cancelled check()."""
+        self._check_owner()
+        if self._edit_source is not None:
+            self._edit_source.poll(self)
+
+    def _remove_edit_source(self, source: Any) -> None:
+        self._check_owner()
+        if self._edit_source is not source or self._edit_source_removed or not source.closed:
+            raise self.restore_error("edit cancellation source did not settle")
+        self._edit_source_removed = True
+        self._edit_source = None
 
     @contextmanager
     def deferred(self, *, check_on_exit: bool = True):

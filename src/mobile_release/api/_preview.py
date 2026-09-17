@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 from ..config import (CONFIGURATION_FIELD_PATHS, CONFIGURATION_OBJECT_KEYS,
-                      MAX_CONFIG_BYTES, configuration_field_context,
+                      MAX_CONFIG_BYTES, configuration_data_equal, configuration_field_context,
                       default_config_data, validate_config_data)
 from ..errors import ConfigurationError
 from ._catalog import requirement_descriptors
@@ -67,13 +67,7 @@ def _validate(data: dict[str, Any]) -> ValidateResult:
 def _same(first: Any, second: Any) -> bool:
     if first is _MISSING or second is _MISSING:
         return first is second
-    if type(first) is not type(second):
-        return False
-    if type(first) is dict:
-        return first.keys() == second.keys() and all(_same(value, second[key]) for key, value in first.items())
-    if type(first) is list:
-        return len(first) == len(second) and all(_same(a, b) for a, b in zip(first, second))
-    return first == second
+    return configuration_data_equal(first, second)
 
 
 def _summary(value: Any) -> ValueSummary:

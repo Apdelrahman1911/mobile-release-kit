@@ -3,7 +3,7 @@
 ## Status and scope
 
 The desktop application is **under development**. This branch introduces the
-read-only foundation, not a production release or a complete alternative to the
+passive foundation and gated configuration-save implementation, not a production release or a complete alternative to the
 CLI yet. A visible screen is not proof that its future operations are available.
 Unimplemented operations are explicitly disabled.
 
@@ -31,6 +31,7 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 | Project selection | Native directory selection, bound to a Rust-owned project ID | Trust in project scripts or repository contents |
 | Static snapshot | Bounded recognized text-file hints and configuration observations on supported POSIX filesystems | An atomic snapshot, Git source authority, successful build, signing or Store state |
 | Configuration | Guided in-memory drafts with core-owned schema/policy validation and contextual help | Saving a file, checking path existence, approving an app identity or release readiness |
+| Configuration save implementation (disabled) | Separate native owner, exact two-file preview/apply contract, guided confirmation and original-outcome handling | Enabled saving, native window/process qualification, general project initialization or Windows file transactions |
 | Environment | Static capability and missing-feature explanations | Running the full doctor, SDK version probes or native admission |
 | Credentials, metadata, GitHub, releases, artifacts, recovery | Guided navigation and honest unavailable states | Stored credentials, created workflows, completed operations, authenticated evidence or “no recovery needed” |
 
@@ -69,6 +70,16 @@ methods are:
 
 Exact additive preparation contracts, limits and the static-hint projection are
 documented in [desktop configuration preview](desktop-configuration-preview.md).
+
+Configuration saving does **not** expand this passive method list. Its separate
+finite owner and core transaction contract are documented in
+[configuration editing](desktop-configuration-edit.md) and the
+[Rust bridge contract](../desktop/src-tauri/runtime-contract.md#separately-gated-finite-configuration-edit).
+The new guided Save flow remains unavailable until native and runtime
+qualification gates are satisfied. Preparing an unchanged configuration can
+still require an explicit ignore-file update; only a native reviewed plan can
+declare a complete no-op. Known committed files, cleanup status and recovery
+requirements are shown separately, never collapsed into a generic “Saved.”
 
 These methods do not run Git, Gradle, Xcode, project hooks, native validation,
 credential acquisition, signing, Store requests or report-writing code. Do not

@@ -1,0 +1,721 @@
+//! Source-only, ignored real-child checks for the finite configuration owner.
+//! The normal/development/packaged edit gate is NOT enabled by these checks.
+//! No renderer, picker, subprocess controller, recovery, Store, or OS-fault
+//! simulation is involved. Ambiguous custody retains this runtime for hosted-VM
+//! disposal. Two separately invoked fixed self-panic cases may return with the
+//! edit gate still Unknown only after original OS-resource/unaffected-task proof.
+#![cfg(any(target_os = "linux", target_os = "macos"))]
+
+use super::*;
+use std::{fs, io::{Read, Write}, os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt}, path::Path,
+    sync::atomic::AtomicUsize};
+use serde::Serialize;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+const SCOPE: &str = "configuration-owner-hosted-v1";
+const LOSS_SCOPE: &str = "configuration-owner-management-loss-hosted-v1";
+const OBSERVATION: Duration = Duration::from_secs(45);
+const NOT_VERIFIED: &[&str] = &["production-runtime-custody", "production-save-enablement", "native-gui", "window-reload-crash",
+    "parent-death", "native-stuck-wait-close", "windows-filesystem", "stores", "mobile-builds", "installers"];
+const IGNORE: &[u8] = b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n";
+const NOOP_IGNORE: &[u8] = b"# fixed synthetic comment\r\n/.mobile-release/\r\n/.mobile-release-init-prepare/\r\n/.mobile-release-init/\r\n/.mobile-release-init-cleanup/\r\n";
+const UNRELATED: &[u8] = b"fixed synthetic unrelated content\n";
+static BATCH_CLAIMED: AtomicBool = AtomicBool::new(false);
+static RETAINED: Mutex<Option<Retention>> = Mutex::new(None);
+static FIXTURE_FILES: FixtureFiles = FixtureFiles {
+    opened: AtomicUsize::new(0), close_attempted: AtomicUsize::new(0),
+    close_settled: AtomicUsize::new(0), unknown: AtomicBool::new(false),
+};
+
+// Keeping original books is separate from claiming their resources settled.
+// Ambiguous custody never returns and drops the Tokio runtime. The fixed
+// expected-loss exception below requires complete original-resource proof.
+struct Retention { _owner: EditOwner, originals: Vec<Arc<Session>> }
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum Failure {
+    NotCompleted, HostedGuardRefused, SourceBindingMismatch, FixtureIo, FixtureCustodyUnknown,
+    NativeCommandRejected, UnexpectedStatus, ObservationTimeout,
+    OriginalCustodyUnknown, UnexpectedOutcome, PayloadMismatch, ReceiptIo,
+}
+type Check<T> = Result<T, Failure>;
+fn require(condition: bool, failure: Failure) -> Check<()> { if condition { Ok(()) } else { Err(failure) } }
+fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+fn environment(name: &str) -> Check<String> { std::env::var(name).map_err(|_| Failure::HostedGuardRefused) }
+
+// Only this single-entry fixture calls these synchronous file helpers. These
+// original-file receipts are separate from the native Session books. None are
+// reset: a failed/lost close return permanently prohibits more fixture IO,
+// receipt opens, native admission, and destruction of the retained runtime.
+struct FixtureFiles {
+    opened: AtomicUsize, close_attempted: AtomicUsize, close_settled: AtomicUsize, unknown: AtomicBool,
+}
+impl FixtureFiles {
+    fn all_settled(&self) -> bool {
+        let positive = self.opened.load(Ordering::SeqCst) == self.close_attempted.load(Ordering::SeqCst)
+            && self.close_attempted.load(Ordering::SeqCst) == self.close_settled.load(Ordering::SeqCst);
+        if !positive { self.unknown.store(true, Ordering::SeqCst); }
+        positive && !self.unknown.load(Ordering::SeqCst)
+    }
+    fn admit(&self) -> Check<()> { require(self.all_settled(), Failure::FixtureCustodyUnknown) }
+    fn acquired(&self) { self.opened.fetch_add(1, Ordering::SeqCst); }
+    fn close_original(&self, file: fs::File) -> Check<()> {
+        // Retire before consuming the original descriptor. Even EINTR/EBADF
+        // is Unknown: never retry, inspect its number, or assume Drop settled it.
+        self.close_attempted.fetch_add(1, Ordering::SeqCst);
+        let descriptor: std::os::fd::OwnedFd = file.into();
+        match nix::unistd::close(descriptor) {
+            Ok(()) => { self.close_settled.fetch_add(1, Ordering::SeqCst); self.admit() },
+            Err(_) => { self.unknown.store(true, Ordering::SeqCst); Err(Failure::FixtureCustodyUnknown) },
+        }
+    }
+}
+
+async fn retain_unknown_runtime() {
+    // Borrow inherited stderr; do not open another file or panic on a failed
+    // diagnostic write while an original descriptor may still be live.
+    let _ = std::io::stderr().write_all(b"hosted configuration custody unknown; retaining runtime for infrastructure disposal\n");
+    pending::<()>().await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Identity { device: u64, inode: u64, mode: u32, owner: u32 }
+impl Identity {
+    fn of(metadata: &fs::Metadata) -> Self {
+        Self { device: metadata.dev(), inode: metadata.ino(), mode: metadata.mode(), owner: metadata.uid() }
+    }
+}
+#[derive(PartialEq, Eq)]
+struct OriginalFile { identity: Identity, bytes: Vec<u8> }
+
+fn read_regular(path: &Path, limit: u64) -> Check<OriginalFile> {
+    FIXTURE_FILES.admit()?;
+    let named = fs::symlink_metadata(path).map_err(|_| Failure::FixtureIo)?;
+    require(named.is_file() && named.len() <= limit, Failure::FixtureIo)?;
+    let file = fs::OpenOptions::new().read(true).custom_flags(nix::libc::O_NOFOLLOW).open(path)
+        .map_err(|_| Failure::FixtureIo)?;
+    FIXTURE_FILES.acquired();
+    // Bound the descriptor read even if a selected file grows during inspection.
+    let mut reader = Read::take(file, limit + 1);
+    let mut bytes = Vec::new();
+    let read = reader.read_to_end(&mut bytes);
+    let file = reader.into_inner();
+    let opened = file.metadata();
+    FIXTURE_FILES.close_original(file)?;
+    require(read.is_ok() && bytes.len() as u64 == named.len(), Failure::FixtureIo)?;
+    let opened = opened.map_err(|_| Failure::FixtureIo)?;
+    let after = fs::symlink_metadata(path).map_err(|_| Failure::FixtureIo)?;
+    require(Identity::of(&named) == Identity::of(&opened) && Identity::of(&named) == Identity::of(&after)
+        && opened.len() == named.len() && after.len() == named.len(), Failure::FixtureIo)?;
+    Ok(OriginalFile { identity: Identity::of(&named), bytes })
+}
+
+fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Check<()> {
+    FIXTURE_FILES.admit()?;
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(path)
+        .map_err(|_| Failure::FixtureIo)?;
+    FIXTURE_FILES.acquired();
+    let wrote = file.write_all(bytes);
+    FIXTURE_FILES.close_original(file)?;
+    require(wrote.is_ok(), Failure::FixtureIo)
+}
+
+fn canonical_input(name: &str, exact: bool) -> Check<PathBuf> {
+    FIXTURE_FILES.admit()?;
+    let selected = PathBuf::from(environment(name)?);
+    require(selected.is_absolute(), Failure::HostedGuardRefused)?;
+    let canonical = selected.canonicalize().map_err(|_| Failure::HostedGuardRefused)?;
+    require(!exact || selected.as_os_str() == canonical.as_os_str(), Failure::HostedGuardRefused)?;
+    Ok(canonical)
+}
+
+// Each compiled critical source is compared with the exact checkout file before
+// opening any owner. Git cleanliness/SHA provenance is checked by the separate
+// reviewed hosted driver; these digests do not pretend to authenticate Git.
+struct Source { id: &'static str, relative: &'static str, compiled: &'static [u8] }
+const SOURCES: &[Source] = &[
+    Source { id: "fixture", relative: "desktop/src-tauri/src/edit_hosted_tests.rs", compiled: include_bytes!("edit_hosted_tests.rs") },
+    Source { id: "owner", relative: "desktop/src-tauri/src/edit_owner.rs", compiled: include_bytes!("edit_owner.rs") },
+    Source { id: "editProtocol", relative: "desktop/src-tauri/src/edit_protocol.rs", compiled: include_bytes!("edit_protocol.rs") },
+    Source { id: "runtime", relative: "desktop/src-tauri/src/runtime.rs", compiled: include_bytes!("runtime.rs") },
+    Source { id: "protocol", relative: "desktop/src-tauri/src/protocol.rs", compiled: include_bytes!("protocol.rs") },
+    Source { id: "errors", relative: "desktop/src-tauri/src/error.rs", compiled: include_bytes!("error.rs") },
+    Source { id: "library", relative: "desktop/src-tauri/src/lib.rs", compiled: include_bytes!("lib.rs") },
+    Source { id: "build", relative: "desktop/src-tauri/build.rs", compiled: include_bytes!("../build.rs") },
+    Source { id: "cargoManifest", relative: "desktop/src-tauri/Cargo.toml", compiled: include_bytes!("../Cargo.toml") },
+    Source { id: "cargoLock", relative: "desktop/src-tauri/Cargo.lock", compiled: include_bytes!("../Cargo.lock") },
+    Source { id: "bootstrap", relative: "desktop/config_edit_bootstrap.py", compiled: include_bytes!("../../config_edit_bootstrap.py") },
+    Source { id: "passiveBootstrap", relative: "desktop/engine_bootstrap.py", compiled: include_bytes!("../../engine_bootstrap.py") },
+    Source { id: "corePackage", relative: "src/mobile_release/__init__.py", compiled: include_bytes!("../../../src/mobile_release/__init__.py") },
+    Source { id: "engine", relative: "src/mobile_release/_desktop_edit_engine.py", compiled: include_bytes!("../../../src/mobile_release/_desktop_edit_engine.py") },
+    Source { id: "control", relative: "src/mobile_release/_desktop_edit_control.py", compiled: include_bytes!("../../../src/mobile_release/_desktop_edit_control.py") },
+    Source { id: "coreProtocol", relative: "src/mobile_release/_desktop_edit_protocol.py", compiled: include_bytes!("../../../src/mobile_release/_desktop_edit_protocol.py") },
+    Source { id: "configEdit", relative: "src/mobile_release/config_edit.py", compiled: include_bytes!("../../../src/mobile_release/config_edit.py") },
+    Source { id: "configPayloads", relative: "src/mobile_release/config_payloads.py", compiled: include_bytes!("../../../src/mobile_release/config_payloads.py") },
+    Source { id: "config", relative: "src/mobile_release/config.py", compiled: include_bytes!("../../../src/mobile_release/config.py") },
+    Source { id: "transaction", relative: "src/mobile_release/init_transaction.py", compiled: include_bytes!("../../../src/mobile_release/init_transaction.py") },
+    Source { id: "rootCustody", relative: "src/mobile_release/init_workspace_custody.py", compiled: include_bytes!("../../../src/mobile_release/init_workspace_custody.py") },
+    Source { id: "cancellation", relative: "src/mobile_release/cancellation.py", compiled: include_bytes!("../../../src/mobile_release/cancellation.py") },
+    Source { id: "buildInputs", relative: "src/mobile_release/build_inputs.py", compiled: include_bytes!("../../../src/mobile_release/build_inputs.py") },
+    Source { id: "coreErrors", relative: "src/mobile_release/errors.py", compiled: include_bytes!("../../../src/mobile_release/errors.py") },
+    Source { id: "preview", relative: "src/mobile_release/api/_preview.py", compiled: include_bytes!("../../../src/mobile_release/api/_preview.py") },
+    Source { id: "nativeFixture", relative: "tests/native_desktop_config.py", compiled: include_bytes!("../../../tests/native_desktop_config.py") },
+];
+
+struct Inputs { root: PathBuf, identity: Identity, bindings: Value }
+impl Inputs {
+    fn admit() -> Check<Self> {
+        FIXTURE_FILES.admit()?;
+        require(environment("MRK_DESKTOP_EDIT_HOSTED_CHECKS")? == "configuration-v1"
+            && environment("GITHUB_ACTIONS")? == "true"
+            && environment("RUNNER_ENVIRONMENT")? == "github-hosted"
+            && !cfg!(feature = "desktop-shell") && cfg!(debug_assertions), Failure::HostedGuardRefused)?;
+        let runner_os = if cfg!(target_os = "linux") { "Linux" } else { "macOS" };
+        require(environment("RUNNER_OS")? == runner_os, Failure::HostedGuardRefused)?;
+        let temporary = canonical_input("RUNNER_TEMP", false)?;
+        let root = canonical_input("MRK_DESKTOP_EDIT_TEST_ROOT", true)?;
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).canonicalize().map_err(|_| Failure::HostedGuardRefused)?;
+        let repository = manifest.parent().and_then(Path::parent).ok_or(Failure::HostedGuardRefused)?;
+        require(std::env::current_dir().map_err(|_| Failure::HostedGuardRefused)? == manifest
+            && root != temporary && root.starts_with(&temporary)
+            && !root.starts_with(repository) && !repository.starts_with(&root), Failure::HostedGuardRefused)?;
+        let metadata = fs::symlink_metadata(&root).map_err(|_| Failure::HostedGuardRefused)?;
+        let temp_metadata = fs::symlink_metadata(&temporary).map_err(|_| Failure::HostedGuardRefused)?;
+        let source_metadata = fs::symlink_metadata(&manifest).map_err(|_| Failure::HostedGuardRefused)?;
+        require(metadata.is_dir() && temp_metadata.is_dir() && metadata.mode() & 0o7777 == 0o700
+            && metadata.uid() == temp_metadata.uid() && metadata.uid() == source_metadata.uid()
+            && fs::read_dir(&root).map_err(|_| Failure::HostedGuardRefused)?.next().is_none(), Failure::HostedGuardRefused)?;
+        let source = canonical_input("MRK_DESKTOP_DEV_CORE", true)?;
+        require(source == repository.join("src") && source.is_dir(), Failure::HostedGuardRefused)?;
+        let python = canonical_input("MRK_DESKTOP_DEV_PYTHON", true)?;
+        require(!python.starts_with(&root) && !python.starts_with(repository), Failure::HostedGuardRefused)?;
+        let python_hash = hash(&read_regular(&python, 64 * 1024 * 1024)?.bytes);
+        let source_sha = environment("GITHUB_SHA")?;
+        require(matches!(source_sha.len(), 40 | 64)
+            && source_sha.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+            && environment("MRK_DESKTOP_EDIT_SOURCE_SHA")? == source_sha
+            && option_env!("GITHUB_SHA") == Some(source_sha.as_str()), Failure::SourceBindingMismatch)?;
+        let mut source_hashes = serde_json::Map::new();
+        for item in SOURCES {
+            let actual = read_regular(&repository.join(item.relative), 2 * 1024 * 1024)?;
+            let expected = hash(item.compiled);
+            require(hash(&actual.bytes) == expected, Failure::SourceBindingMismatch)?;
+            source_hashes.insert(item.id.to_owned(), json!(expected));
+        }
+        let bindings = json!({"sourceSha":source_sha, "host":std::env::consts::OS,
+            "target":crate::runtime::COMPILED_TARGET, "runtimeMode":"trusted-development-only",
+            "pythonSha256":python_hash, "sourceHashes":source_hashes,
+            "payloadHashes":{"draft":hash(&draft_bytes()?), "createConfig":hash(&create_bytes()?),
+                "createIgnore":hash(IGNORE), "noOpConfig":hash(&noop_bytes()?), "noOpIgnore":hash(NOOP_IGNORE),
+                "unrelated":hash(UNRELATED)}});
+        // The hosted driver supplies the canonical setup-Python executable.
+        // No process environment or runtime selection is changed by this test.
+        Ok(Self { root, identity: Identity::of(&metadata), bindings })
+    }
+    fn same_root(&self) -> Check<()> {
+        FIXTURE_FILES.admit()?;
+        let current = fs::symlink_metadata(&self.root).map_err(|_| Failure::FixtureIo)?;
+        require(current.is_dir() && Identity::of(&current) == self.identity, Failure::FixtureIo)
+    }
+}
+
+fn document() -> Value {
+    json!({"schemaVersion":1,"version":{"source":"release/version.properties","nameKey":"VERSION_NAME","buildKey":"BUILD_NUMBER"},
+        "source":{"candidateBranch":"main","productionBranch":"main"},
+        "android":{"enabled":true,"applicationId":"org.fixture.app","identityStatus":"unverified"},"ios":{"enabled":false},
+        "metadata":{"root":"release/store","androidLocales":["en-US"],"iosLocales":[]},
+        "services":{"androidFirebase":"disabled","iosFirebase":"disabled"},
+        "projectChecks":{"preflight":[],"androidArtifact":[],"iosArtifact":[]}})
+}
+fn draft_bytes() -> Check<Vec<u8>> { serde_json::to_vec(&document()).map_err(|_| Failure::PayloadMismatch) }
+fn create_bytes() -> Check<Vec<u8>> {
+    // This fixed ASCII fixture has the same object order as its Rust request.
+    let mut bytes = serde_json::to_vec_pretty(&document()).map_err(|_| Failure::PayloadMismatch)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+fn noop_bytes() -> Check<Vec<u8>> { let mut bytes = draft_bytes()?; bytes.extend_from_slice(b"\r\n"); Ok(bytes) }
+
+#[derive(Clone, Copy)]
+enum Case { Create, NoOp, Discard }
+impl Case {
+    fn name(self) -> &'static str { match self { Self::Create => "create", Self::NoOp => "no-op", Self::Discard => "discard-editing" } }
+    fn project(self) -> &'static str { match self { Self::Create => "project-config-create", Self::NoOp => "project-config-noop", Self::Discard => "project-config-discard" } }
+    fn frames(self) -> (usize, usize) { if matches!(self, Self::Discard) { (1, 2) } else { (3, 3) } }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ManagementLoss { Driver, Watchdog }
+impl ManagementLoss {
+    fn name(self) -> &'static str { match self { Self::Driver => "driver-loss", Self::Watchdog => "watchdog-loss" } }
+    fn task(self) -> &'static str { match self { Self::Driver => "driver", Self::Watchdog => "watchdog" } }
+    fn project(self) -> &'static str {
+        match self { Self::Driver => "project-config-driver-loss", Self::Watchdog => "project-config-watchdog-loss" }
+    }
+}
+
+fn inventory(root: &Path, expected: &[&str]) -> Check<()> {
+    FIXTURE_FILES.admit()?;
+    let mut names = Vec::new();
+    for entry in fs::read_dir(root).map_err(|_| Failure::FixtureIo)? {
+        let entry = entry.map_err(|_| Failure::FixtureIo)?;
+        require(names.len() < 16, Failure::PayloadMismatch)?;
+        names.push(entry.file_name().into_string().map_err(|_| Failure::PayloadMismatch)?);
+    }
+    names.sort();
+    let mut expected = expected.to_vec(); expected.sort();
+    require(names.iter().map(String::as_str).eq(expected), Failure::PayloadMismatch)
+}
+fn originals(root: &Path) -> Check<Vec<OriginalFile>> {
+    ["release/mobile-release.json", ".gitignore", "unrelated.txt"].iter()
+        .map(|name| read_regular(&root.join(name), 1024 * 1024)).collect()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Facts {
+    original_wait: bool, stdout_eof: bool, stderr_eof: bool,
+    stdin_closed: bool, stdout_closed: bool, stderr_closed: bool,
+    startup_joined: bool, io_joined: bool, driver_joined: bool, watchdog_joined: bool, manager_joined: bool,
+    request_frames: usize, response_frames: usize, stdout_bytes: usize, stderr_bytes: usize,
+    force_attempted: bool,
+}
+
+fn original_resource_facts(session: &Session, loss: Option<ManagementLoss>) -> Check<Facts> {
+    // These are the retained original books. Do not poll/join/close a resource
+    // again or replace a missing receipt with an is_finished/Drop observation.
+    // Actual manager join plus the complete original-resource proof makes its
+    // retained final observer pure; that observer is never joined by a fixture.
+    let book = session.resources.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let startup = session.startup.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let input = session.input.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let output = session.output.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let error = session.error.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let driver = session.driver.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let watchdog = session.watchdog.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let manager = session.manager.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let observer = session.observer.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let write = book.write_end.as_ref().ok_or(Failure::OriginalCustodyUnknown)?;
+    let out = book.out_end.as_ref().ok_or(Failure::OriginalCustodyUnknown)?;
+    let err = book.err_end.as_ref().ok_or(Failure::OriginalCustodyUnknown)?;
+    let lost_driver = loss == Some(ManagementLoss::Driver);
+    let lost_watchdog = loss == Some(ManagementLoss::Watchdog);
+    require(startup.attempted && startup.returned && !startup.failed && startup.child.is_none()
+        && book.inspection_joined && book.acquisition_joined && book.inspection.is_none() && book.acquisition.is_none()
+        && !book.inspection_join_failed && !book.acquisition_join_failed
+        && book.child.as_ref().is_some_and(|child| child.stdin.is_none() && child.stdout.is_none() && child.stderr.is_none())
+        && book.waited.as_ref().is_some_and(|status| status.success()) && !book.wait_failed
+        && book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none()
+        && !book.write_join_failed && !book.out_join_failed && !book.err_join_failed
+        && write.closed && !write.failed && out.eof && out.closed && !out.failed && err.eof && err.closed && !err.failed
+        && input.io.is_none() && input.close == Receipt::Settled
+        && output.io.is_none() && output.close == Receipt::Settled
+        && error.io.is_none() && error.close == Receipt::Settled
+        && book.driver_joined == !lost_driver && book.watchdog_joined == !lost_watchdog
+        && session.driver_joined.load(Ordering::SeqCst) == !lost_driver
+        && session.watchdog_joined.load(Ordering::SeqCst) == !lost_watchdog
+        && session.driver_join_failed.load(Ordering::SeqCst) == lost_driver
+        && session.watchdog_join_failed.load(Ordering::SeqCst) == lost_watchdog
+        && session.driver_join_panicked.load(Ordering::SeqCst) == lost_driver
+        && session.watchdog_join_panicked.load(Ordering::SeqCst) == lost_watchdog
+        && driver.is_some() == lost_driver && watchdog.is_some() == lost_watchdog
+        && book.manager_joined && manager.is_none() && !session.manager_join_failed.load(Ordering::SeqCst)
+        && !session.manager_join_panicked.load(Ordering::SeqCst) && observer.is_some()
+        && book.frames.is_some() && *session.pipes.borrow() == PipeAcquisition::Available
+        && session.driver_done.load(Ordering::SeqCst) && session.resource_unknown.load(Ordering::SeqCst) == loss.is_some()
+        && !session.fixture_driver_loss.load(Ordering::SeqCst) && !session.fixture_watchdog_loss.load(Ordering::SeqCst)
+        && !book.force_attempted && out.bytes > 0 && out.bytes <= wire::STDOUT_LIMIT
+        && err.bytes == 0 && err.frames == 0, Failure::OriginalCustodyUnknown)?;
+    Ok(Facts { original_wait:true, stdout_eof:out.eof, stderr_eof:err.eof,
+        stdin_closed:write.closed, stdout_closed:out.closed, stderr_closed:err.closed,
+        startup_joined:book.inspection_joined && book.acquisition_joined,
+        io_joined:book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none(),
+        driver_joined:book.driver_joined, watchdog_joined:book.watchdog_joined, manager_joined:book.manager_joined,
+        request_frames:write.frames, response_frames:out.frames, stdout_bytes:out.bytes, stderr_bytes:err.bytes,
+        force_attempted:book.force_attempted })
+}
+fn original_facts(session: &Session) -> Check<Facts> { original_resource_facts(session, None) }
+
+fn projection(status: &ConfigEditStatus, session: &str) -> Check<EditProjection> {
+    status.active.as_ref().filter(|p| p.session_id == session)
+        .or_else(|| status.last_terminal.as_ref().filter(|p| p.session_id == session))
+        .cloned().ok_or(Failure::UnexpectedStatus)
+}
+async fn observed(owner: &EditOwner, session: &str, desired: Phase) -> Check<EditProjection> {
+    let end = Instant::now() + OBSERVATION;
+    let mut revisions = owner.subscribe();
+    loop {
+        let status = owner.status().map_err(|_| Failure::OriginalCustodyUnknown)?;
+        let current = projection(&status, session)?;
+        require(!owner.disabled() && current.phase != Phase::Unknown && current.native_finality != NativeFinality::Unknown
+            && !current.late_settled, Failure::OriginalCustodyUnknown)?;
+        if current.phase == desired { return Ok(current); }
+        require(current.phase != Phase::Final, Failure::UnexpectedStatus)?;
+        if Instant::now() >= end { return Err(Failure::ObservationTimeout); }
+        tokio::select! {
+            result = revisions.changed() => { result.map_err(|_| Failure::UnexpectedStatus)?; },
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(end)) => return Err(Failure::ObservationTimeout),
+        }
+    }
+}
+
+struct Batch { owner: EditOwner, originals: Vec<Arc<Session>>, missing_original: bool, cases: Vec<Value> }
+impl Batch {
+    fn open(&mut self, project: &'static str, root: &Path) -> Check<Arc<Session>> {
+        FIXTURE_FILES.admit()?;
+        require(self.owner.can_exit() && !self.owner.disabled(), Failure::OriginalCustodyUnknown)?;
+        let result = self.owner.open("main", project.to_owned(), root.to_path_buf());
+        // Retain before checking even an errored admission result: registration
+        // may already have happened. The registry owns the original throughout.
+        let original = {
+            let registry = self.owner.inner.lock();
+            if registry.last.as_ref().is_some_and(|last| !self.originals.iter().any(|owner| owner.id == last.session_id)) {
+                self.missing_original = true;
+            }
+            registry.active.as_ref().map(|active| active.session.clone())
+        };
+        if let Some(original) = &original {
+            self.originals.push(original.clone());
+            let mut retained = RETAINED.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            retained.as_mut().ok_or(Failure::OriginalCustodyUnknown)?.originals.push(original.clone());
+        }
+        let admission = result.map_err(|_| Failure::NativeCommandRejected)?;
+        let original = match original { Some(original) => original, None => {
+            self.missing_original = true;
+            return Err(Failure::OriginalCustodyUnknown);
+        }};
+        let admitted = projection(&admission, &original.id)?;
+        require(admitted.phase == Phase::Opening && !admitted.apply_submitted, Failure::UnexpectedStatus)?;
+        Ok(original)
+    }
+    fn all_settled(&self) -> bool {
+        FIXTURE_FILES.all_settled() && !self.missing_original && self.owner.can_exit()
+            && self.originals.iter().all(|original| original_facts(original).is_ok())
+    }
+    async fn stop_original(&self) {
+        let id = self.owner.inner.lock().active.as_ref().map(|active| active.session.id.clone());
+        if let Some(id) = id {
+            let _ = self.owner.close("main", &id); // Idempotent original EOF only.
+            let _ = observed(&self.owner, &id, Phase::Final).await;
+        }
+    }
+}
+
+async fn exercise(batch: &mut Batch, inputs: &Inputs, case: Case) -> Check<()> {
+    inputs.same_root()?;
+    let root = inputs.root.join(case.name());
+    fs::DirBuilder::new().mode(0o700).create(&root).map_err(|_| Failure::FixtureIo)?;
+    let before = if matches!(case, Case::NoOp) {
+        fs::DirBuilder::new().mode(0o700).create(root.join("release")).map_err(|_| Failure::FixtureIo)?;
+        write_new(&root.join("release/mobile-release.json"), &noop_bytes()?, 0o640)?;
+        write_new(&root.join(".gitignore"), NOOP_IGNORE, 0o600)?;
+        write_new(&root.join("unrelated.txt"), UNRELATED, 0o600)?;
+        Some(originals(&root)?)
+    } else { None };
+    let original = batch.open(case.project(), &root)?;
+    let editing = observed(&batch.owner, &original.id, Phase::Editing).await?;
+    let checkout = editing.checkout.as_ref().ok_or(Failure::UnexpectedStatus)?;
+    require(checkout.base == if matches!(case, Case::NoOp) { document() } else { Value::Null }, Failure::UnexpectedOutcome)?;
+    if matches!(case, Case::Discard) {
+        batch.owner.close("main", &original.id).map_err(|_| Failure::NativeCommandRejected)?;
+    } else {
+        let admission = batch.owner.prepare("main", PrepareConfigEdit { session_id:original.id.clone(),
+            revision:checkout.revision.clone(), expected_base:checkout.base.clone(), draft:document(), draft_revision:1, baseline_generation:0 })
+            .map_err(|_| Failure::NativeCommandRejected)?;
+        require(projection(&admission, &original.id)?.phase == Phase::Preparing, Failure::UnexpectedStatus)?;
+        let reviewing = observed(&batch.owner, &original.id, Phase::Reviewing).await?;
+        let plan = reviewing.prepared.as_ref().ok_or(Failure::UnexpectedStatus)?;
+        require(plan.revision == checkout.revision && plan.draft_revision == 1 && plan.baseline_generation == 0, Failure::UnexpectedStatus)?;
+        if matches!(case, Case::Create) {
+            inventory(&root, &[])?; // Capture/Prepare did not stage either file.
+            require(plan.view.create_release_directory && plan.view.files.iter().all(|file| file.action == "create"), Failure::UnexpectedOutcome)?;
+        } else {
+            require(!plan.view.create_release_directory && plan.view.files.iter().all(|file| file.action == "preserve"), Failure::UnexpectedOutcome)?;
+            require(before.as_ref() == Some(&originals(&root)?), Failure::PayloadMismatch)?;
+        }
+        let admission = batch.owner.apply("main", &original.id, &plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+        require(projection(&admission, &original.id)?.apply_submitted, Failure::UnexpectedStatus)?;
+        if matches!(case, Case::Create) {
+            // This may observe Applying or Final; it may never queue frame four.
+            let duplicate = batch.owner.apply("main", &original.id, &plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+            require(projection(&duplicate, &original.id)?.apply_submitted, Failure::UnexpectedStatus)?;
+        }
+    }
+    let terminal = observed(&batch.owner, &original.id, Phase::Final).await?;
+    require(terminal.native_finality == NativeFinality::Settled && !terminal.late_settled && batch.owner.can_exit(), Failure::OriginalCustodyUnknown)?;
+    let facts = original_facts(&original)?;
+    require((facts.request_frames, facts.response_frames) == case.frames(), Failure::UnexpectedOutcome)?;
+    let core = terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+    let expected = match case {
+        Case::Create => core.effect == Effect::Committed && core.journal == Journal::Clean && core.reason == CoreReason::None && terminal.native_reason == Reason::None,
+        Case::NoOp => core.effect == Effect::Unchanged && core.journal == Journal::NotCreated && core.reason == CoreReason::None && terminal.native_reason == Reason::None,
+        Case::Discard => core.effect == Effect::NotStarted && core.journal == Journal::NotCreated
+            && matches!(core.reason, CoreReason::Cancelled | CoreReason::None) && terminal.native_reason == Reason::Discarded && !terminal.apply_submitted,
+    };
+    require(expected && core.resources == ResourceState::Settled, Failure::UnexpectedOutcome)?;
+    match case {
+        Case::Create => {
+            require(read_regular(&root.join("release/mobile-release.json"), 512 * 1024)?.bytes == create_bytes()?
+                && read_regular(&root.join(".gitignore"), 1024 * 1024)?.bytes == IGNORE, Failure::PayloadMismatch)?;
+            inventory(&root, &[".gitignore", "release"])?;
+            inventory(&root.join("release"), &["mobile-release.json"])?;
+        }
+        Case::NoOp => {
+            require(before.as_ref() == Some(&originals(&root)?), Failure::PayloadMismatch)?;
+            inventory(&root, &[".gitignore", "release", "unrelated.txt"])?;
+            inventory(&root.join("release"), &["mobile-release.json"])?;
+        }
+        Case::Discard => inventory(&root, &[])?,
+    }
+    let mut evidence = serde_json::to_value(&facts).map_err(|_| Failure::ReceiptIo)?;
+    evidence["name"] = json!(case.name());
+    evidence["outcome"] = json!(core);
+    evidence["nativeReason"] = json!(terminal.native_reason);
+    evidence["nativeFinality"] = json!(terminal.native_finality);
+    batch.cases.push(evidence);
+    Ok(())
+}
+
+fn management_loss_facts(batch: &Batch, original: &Arc<Session>, loss: ManagementLoss) -> Check<Value> {
+    FIXTURE_FILES.admit()?;
+    require(!batch.missing_original && batch.originals.len() == 1
+        && Arc::ptr_eq(&batch.originals[0], original), Failure::OriginalCustodyUnknown)?;
+    let facts = original_resource_facts(original, Some(loss))?;
+    require((facts.request_frames, facts.response_frames) == (1, 2), Failure::UnexpectedOutcome)?;
+    let registry_disabled = {
+        let registry = batch.owner.inner.lock();
+        require(registry.active.as_ref().is_some_and(|active| Arc::ptr_eq(&active.session, original) && active.unknown && active.terminal)
+            && registry.last.is_none() && !registry.stopping && !registry.exhausted
+            && registry.document_bound && !registry.document_lost
+            && !batch.owner.inner.poisoned.load(Ordering::SeqCst), Failure::OriginalCustodyUnknown)?;
+        registry.disabled
+    };
+    let status = batch.owner.status().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let current = projection(&status, &original.id)?;
+    let edit_permit_closed = !status.capability.available && status.capability.reason == EditAvailability::CleanupUnknown;
+    let native_can_exit = batch.owner.can_exit();
+    require(registry_disabled && batch.owner.disabled() && edit_permit_closed && !native_can_exit
+        && current.phase == Phase::Unknown && current.native_finality == NativeFinality::Unknown && !current.late_settled
+        && current.native_reason == Reason::CleanupUnknown && !current.apply_submitted && current.prepared.is_none()
+        && current.checkout.as_ref().is_some_and(|checkout| checkout.base == Value::Null)
+        && current.core_outcome.as_ref().is_some_and(|core| core.effect == Effect::NotStarted
+            && core.journal == Journal::NotCreated && core.resources == ResourceState::Settled
+            && matches!(core.reason, CoreReason::Cancelled | CoreReason::None)),
+        Failure::OriginalCustodyUnknown)?;
+    let mut evidence = serde_json::to_value(&facts).map_err(|_| Failure::ReceiptIo)?;
+    evidence["name"] = json!(loss.name());
+    evidence["nativePhase"] = json!(current.phase);
+    evidence["nativeFinality"] = json!(current.native_finality);
+    evidence["registryDisabled"] = json!(registry_disabled);
+    evidence["editPermitClosed"] = json!(edit_permit_closed);
+    evidence["nativeCanExit"] = json!(native_can_exit);
+    evidence["originalResourcesSettled"] = json!(true);
+    evidence["failedTask"] = json!(loss.task());
+    // The task-specific panicked/failed receipts checked above are written
+    // only after the original JoinHandle actually returns Err(error), with
+    // error.is_panic() && !error.is_cancelled(). Its Some handle is never repolled.
+    evidence["failedJoinKind"] = json!("panic");
+    evidence["failedTaskHandleRetained"] = json!(true);
+    Ok(evidence)
+}
+
+async fn observed_management_loss(batch: &Batch, original: &Arc<Session>, loss: ManagementLoss) -> Check<Value> {
+    let end = Instant::now() + OBSERVATION;
+    let mut revisions = batch.owner.subscribe();
+    loop {
+        FIXTURE_FILES.admit()?;
+        match management_loss_facts(batch, original, loss) {
+            Ok(evidence) => return Ok(evidence),
+            Err(Failure::OriginalCustodyUnknown | Failure::UnexpectedStatus) => {},
+            Err(code) => return Err(code),
+        }
+        if Instant::now() >= end { return Err(Failure::ObservationTimeout); }
+        // Read-only inspection of the same retained receipts can be retried;
+        // this never polls an original JoinHandle or opens a new OS observer.
+        tokio::select! {
+            result = revisions.changed() => { result.map_err(|_| Failure::UnexpectedStatus)?; },
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {},
+        }
+    }
+}
+
+async fn exercise_management_loss(batch: &mut Batch, inputs: &Inputs, loss: ManagementLoss) -> Check<Value> {
+    inputs.same_root()?;
+    let root = inputs.root.join(loss.name());
+    fs::DirBuilder::new().mode(0o700).create(&root).map_err(|_| Failure::FixtureIo)?;
+    let original = batch.open(loss.project(), &root)?;
+    let editing = observed(&batch.owner, &original.id, Phase::Editing).await?;
+    require(editing.checkout.as_ref().is_some_and(|checkout| checkout.base == Value::Null)
+        && !editing.apply_submitted && editing.prepared.is_none(), Failure::UnexpectedStatus)?;
+    inventory(&root, &[])?;
+    // Exactly one fixed quiescent self-panic, only after real Editing. There
+    // is no arbitrary task selector, task.abort(), fault controller, or second
+    // arm. The original loop consumes this latch; survivors never consume it.
+    let trigger = match loss {
+        ManagementLoss::Driver => &original.fixture_driver_loss,
+        ManagementLoss::Watchdog => &original.fixture_watchdog_loss,
+    };
+    trigger.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).map_err(|_| Failure::UnexpectedStatus)?;
+    original.wake.notify_waiters();
+    let _ = observed_management_loss(batch, &original, loss).await?;
+    inventory(&root, &[])?;
+    management_loss_facts(batch, &original, loss)
+}
+
+fn receipt_document(inputs: &Inputs, document: Value) -> Check<()> {
+    inputs.same_root()?;
+    let bytes = serde_json::to_vec(&document).map_err(|_| Failure::ReceiptIo)?;
+    require(bytes.len() <= 64 * 1024, Failure::ReceiptIo)?;
+    let temporary = inputs.root.join("receipt.pending");
+    write_new(&temporary, &bytes, 0o600).map_err(|code| match code {
+        Failure::FixtureCustodyUnknown => code,
+        _ => Failure::ReceiptIo,
+    })?;
+    fs::rename(temporary, inputs.root.join("receipt.json")).map_err(|_| Failure::ReceiptIo)
+}
+
+fn receipt(inputs: &Inputs, cases: &[Value], passed: bool, settled: bool, failure: Option<Failure>) -> Check<()> {
+    receipt_document(inputs, json!({"schemaVersion":1,"scope":SCOPE,
+        "status":if passed {"passed"} else {"failed"},"allOwnersSettled":settled,"failureCode":failure,
+        "bindings":inputs.bindings,"cases":cases,"notVerified":NOT_VERIFIED}))
+}
+
+fn loss_receipt(inputs: &Inputs, evidence: Option<Value>, passed: bool, failure: Option<Failure>) -> Check<()> {
+    // This schema deliberately has no allOwnersSettled field. Expected
+    // management Unknown is not normal finality or authorization to Save.
+    require(passed == evidence.is_some() && passed == failure.is_none(), Failure::ReceiptIo)?;
+    receipt_document(inputs, json!({"schemaVersion":1,"scope":LOSS_SCOPE,
+        "status":if passed {"passed"} else {"failed"},"failureCode":failure,
+        "bindings":inputs.bindings,"case":evidence,"notVerified":NOT_VERIFIED}))
+}
+
+async fn hosted_management_loss_original_resources(loss: ManagementLoss) {
+    if BATCH_CLAIMED.swap(true, Ordering::SeqCst) {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+        panic!("hosted configuration batch was already claimed");
+    }
+    let inputs = match Inputs::admit() {
+        Ok(inputs) => inputs,
+        Err(code) => {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted configuration admission refused: {code:?}");
+        },
+    };
+    if loss_receipt(&inputs, None, false, Some(Failure::NotCompleted)).is_err() {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+        panic!("hosted configuration loss receipt unavailable before native admission");
+    }
+    let owner = EditOwner::new(RuntimeConfig::packaged(inputs.root.clone()));
+    match RETAINED.lock() {
+        Ok(mut retained) => *retained = Some(Retention { _owner:owner.clone(), originals:Vec::new() }),
+        Err(_) => panic!("hosted configuration retention unavailable before native admission"),
+    }
+    owner.inner.fixture_authorized.store(true, Ordering::SeqCst);
+    if owner.initial_document("main").is_err() { panic!("hosted original document admission refused"); }
+    let mut batch = Batch { owner, originals:Vec::new(), missing_original:false, cases:Vec::new() };
+    let evidence = match exercise_management_loss(&mut batch, &inputs, loss).await {
+        Ok(evidence) => evidence,
+        Err(code) => {
+            // No finite failed-case escape after native admission unless the
+            // full expected-loss resource proof succeeded. Continue only the
+            // original owner's EOF/cleanup; missing proof retains everything.
+            batch.stop_original().await;
+            if FIXTURE_FILES.all_settled() { let _ = loss_receipt(&inputs, None, false, Some(code)); }
+            retain_unknown_runtime().await;
+            return;
+        },
+    };
+    if loss_receipt(&inputs, Some(evidence), true, None).is_err() {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+        panic!("hosted configuration loss receipt failed after original resource proof");
+    }
+    // This finite return is ONLY the negative fixture result: the native owner
+    // remains retained, disabled, Unknown, and unable to grant an exit/Save
+    // permit. All original OS resources and unaffected tasks are proven above;
+    // only its pure final observer may remain. No next case, owner, shutdown,
+    // retry, or root cleanup runs in this process. Infrastructure disposes it.
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable original-driver-loss hosted process"]
+async fn hosted_config_driver_loss_original_resources() {
+    hosted_management_loss_original_resources(ManagementLoss::Driver).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable original-watchdog-loss hosted process"]
+async fn hosted_config_watchdog_loss_original_resources() {
+    hosted_management_loss_original_resources(ManagementLoss::Watchdog).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable Linux/macOS configuration-owner hosted batch"]
+async fn hosted_config_edit_owner_original_resources() {
+    if BATCH_CLAIMED.swap(true, Ordering::SeqCst) {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+        panic!("hosted configuration batch was already claimed");
+    }
+    let inputs = match Inputs::admit() {
+        Ok(inputs) => inputs,
+        Err(code) => {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted configuration admission refused: {code:?}");
+        },
+    };
+    if receipt(&inputs, &[], false, false, Some(Failure::NotCompleted)).is_err() {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+        panic!("hosted configuration receipt unavailable before native admission");
+    }
+    let owner = EditOwner::new(RuntimeConfig::packaged(inputs.root.clone()));
+    match RETAINED.lock() {
+        Ok(mut retained) => *retained = Some(Retention { _owner:owner.clone(), originals:Vec::new() }),
+        Err(_) => panic!("hosted configuration retention unavailable before native admission"),
+    }
+    // This private cfg(test,development-runtime) seam is the ONLY gate override,
+    // after all hosted/source/root admission. Resolve/spawn remain genuine.
+    owner.inner.fixture_authorized.store(true, Ordering::SeqCst);
+    if owner.initial_document("main").is_err() { panic!("hosted original document admission refused"); }
+    let mut batch = Batch { owner, originals:Vec::new(), missing_original:false, cases:Vec::new() };
+    for case in [Case::Create, Case::NoOp, Case::Discard] {
+        let checked = exercise(&mut batch, &inputs, case).await;
+        if checked.is_err() || !batch.all_settled() || batch.owner.disabled() { batch.stop_original().await; }
+        let settled = batch.all_settled();
+        if !settled || batch.owner.disabled()
+            || matches!(checked, Err(Failure::OriginalCustodyUnknown | Failure::FixtureCustodyUnknown)) {
+            // Fixture uncertainty cannot be recorded by opening another receipt
+            // descriptor. Leave the prior conservative partial receipt intact.
+            if FIXTURE_FILES.all_settled() {
+                let _ = receipt(&inputs, &batch.cases, false, false, Some(Failure::OriginalCustodyUnknown));
+            }
+            // No retry, next native case, replacement owner, task abort, PID
+            // lookup, or Drop-as-finality. Infrastructure disposes the retained
+            // runtime/root if original custody cannot be positively established.
+            retain_unknown_runtime().await;
+            return;
+        }
+        if let Err(code) = checked {
+            let _ = receipt(&inputs, &batch.cases, false, true, Some(code));
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted configuration case failed after original settlement: {code:?}");
+        }
+        // A partial receipt never asserts finality for a subsequently admitted
+        // case. The final passing receipt is written only after the whole batch.
+        if receipt(&inputs, &batch.cases, false, false, Some(Failure::NotCompleted)).is_err() {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted configuration receipt failed after original settlement");
+        }
+    }
+    if batch.owner.shutdown().await.is_err() || !batch.all_settled() || batch.cases.len() != 3 {
+        if FIXTURE_FILES.all_settled() {
+            let _ = receipt(&inputs, &batch.cases, false, false, Some(Failure::OriginalCustodyUnknown));
+        }
+        retain_unknown_runtime().await;
+        return;
+    }
+    if receipt(&inputs, &batch.cases, true, true, None).is_err() {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+        panic!("hosted configuration final receipt failed after original settlement");
+    }
+}

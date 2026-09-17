@@ -1,6 +1,7 @@
-import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
+import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+export type NativeEditListen = (event: 'config-edit-state', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 export function bridgeMode(previewFlag: unknown, isNative: boolean): BridgeMode {
   if (previewFlag === '1') return 'preview';
@@ -16,7 +17,7 @@ export function apiError(error: unknown): ApiError {
   return { code: 'BridgeUnavailable', message: 'The desktop service did not return a usable response. No operation was confirmed.', retryable: false };
 }
 
-export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: NativeInvoke): DesktopApi {
+export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: NativeInvoke, listen?: NativeEditListen): DesktopApi {
   const call = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
     if (mode !== 'native') {
       throw { code: 'NativeBridgeRequired', message: 'Open the installed desktop application. Browser preview requires an explicit developer build flag.', retryable: false } satisfies ApiError;
@@ -33,5 +34,16 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     validate: (draft: JsonObject) => call<ValidationResult>('validate_config', { draft }),
     suggestConfig: (hints: SuggestionHints) => call<ConfigSuggestion>('suggest_config', { hints }),
     configPreview: (base: JsonObject | null, draft: JsonObject) => call<ConfigPreview>('preview_config', { base, draft }),
+    openConfigEdit: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId }),
+    prepareConfigEdit: ({ sessionId, revision, expectedBase, draft, draftRevision, baselineGeneration }) =>
+      call<ConfigEditStatus>('prepare_config_edit', { sessionId, revision, expectedBase, draft, draftRevision, baselineGeneration }),
+    applyConfigEdit: (sessionId, planToken) => call<ConfigEditStatus>('apply_config_edit', { sessionId, planToken }),
+    closeConfigEdit: (sessionId) => call<ConfigEditStatus>('close_config_edit', { sessionId }),
+    configEditStatus: () => call<ConfigEditStatus>('config_edit_status', {}),
+    subscribeConfigEdit: async (onStatus) => {
+      if (mode !== 'native' || !listen) throw { code: 'NativeBridgeRequired', message: 'Native edit status events are unavailable. Saving is disabled.', retryable: false } satisfies ApiError;
+      try { return await listen('config-edit-state', onStatus); }
+      catch (error) { throw apiError(error); }
+    },
   };
 }

@@ -40,6 +40,10 @@ const example: ProjectSnapshot = {
   issues: [],
 };
 
+const editUnavailable = async (): Promise<never> => {
+  throw { code: 'PreviewOnly', message: 'Browser preview has no native edit owner, save plan or finality. No save operation was performed.', retryable: false } satisfies ApiError;
+};
+
 export const previewApi: DesktopApi = {
   mode: 'preview',
   appInfo: async () => ({
@@ -59,4 +63,10 @@ export const previewApi: DesktopApi = {
   configPreview: async () => {
     throw { code: 'PreviewOnly', message: 'Core draft review is unavailable in browser preview. No configuration was reviewed.', retryable: false } satisfies ApiError;
   },
+  openConfigEdit: editUnavailable,
+  prepareConfigEdit: editUnavailable,
+  applyConfigEdit: editUnavailable,
+  closeConfigEdit: editUnavailable,
+  configEditStatus: editUnavailable,
+  subscribeConfigEdit: editUnavailable,
 };

@@ -1,5 +1,7 @@
 import { blockingAncestor, getValue, sameJson, setValue } from './catalog.ts';
 import { pathsOverlap } from './preparation.ts';
+import { isU32, normalEditResult } from './configEditProtocol.ts';
+import type { ConfigRecoveryAttention, ConfirmedConfigSave } from './configEdit.ts';
 import type { PreparationRequest } from './preparation.ts';
 import type { ApiError, ConfigPreview, ConfigSuggestion, JsonObject, JsonValue, ProjectReference, ProjectSnapshot, ValidationResult } from './types.ts';
 
@@ -17,17 +19,27 @@ export interface RemovedField {
   blocked: boolean;
 }
 
+export interface SavedDraftRevision {
+  sessionId: string;
+  statusRevision: number;
+  draftRevision: number;
+  baselineGeneration: number;
+  resultingBaselineGeneration: number | null;
+  result: 'saved' | 'unchanged';
+}
+
 export interface ProjectSession {
   project: ProjectReference;
   snapshot: ProjectSnapshot | null;
   snapshotRequest: number | null;
   snapshotError: ApiError | null;
+  snapshotPredatesSave: boolean;
   observedAt: number | null;
   observationGeneration: number;
   baseline: JsonObject | null;
   baselineGeneration: number;
   draft: JsonObject | null;
-  draftOrigin: 'observation' | 'empty' | 'suggestion' | null;
+  draftOrigin: 'observation' | 'empty' | 'suggestion' | 'saved' | null;
   revision: number;
   sourceChanged: boolean;
   validation: ValidationResult | null;
@@ -44,6 +56,8 @@ export interface ProjectSession {
   removedFields: RemovedField[];
   nextRemovalId: number;
   editError: ApiError | null;
+  lastSave: SavedDraftRevision | null;
+  saveRecoveryRequired: boolean;
 }
 
 export interface WorkspaceState {
@@ -74,10 +88,18 @@ export type WorkspaceAction =
   | { type: 'suggest-start'; projectId: string; binding: SuggestionRequest }
   | { type: 'suggest-done'; projectId: string; requestId: number; result: ConfigSuggestion }
   | { type: 'suggest-failed'; projectId: string; requestId: number; error: ApiError }
-  | { type: 'adopt-suggestion'; projectId: string; requestId: number };
+  | { type: 'adopt-suggestion'; projectId: string; requestId: number }
+  | { type: 'config-save-final'; projectId: string; receipt: ConfirmedConfigSave }
+  | { type: 'config-save-recovery'; projectId: string; attention: ConfigRecoveryAttention };
 
 export function isDirty(session: ProjectSession): boolean {
   return session.draft !== null && !sameJson(session.draft, session.baseline);
+}
+
+export function savedRevisionFresh(session: ProjectSession): boolean {
+  const saved = session.lastSave;
+  return saved !== null && saved.resultingBaselineGeneration !== null &&
+    saved.draftRevision === session.revision && saved.resultingBaselineGeneration === session.baselineGeneration;
 }
 
 export function validationFresh(session: ProjectSession): boolean {
@@ -142,13 +164,13 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       return { ...state, selectedId: action.project.id };
     }
     const session: ProjectSession = {
-      project: action.project, snapshot: null, snapshotRequest: null, snapshotError: null,
+      project: action.project, snapshot: null, snapshotRequest: null, snapshotError: null, snapshotPredatesSave: false,
       observedAt: null, observationGeneration: 0, baseline: null, baselineGeneration: 0,
       draft: null, draftOrigin: null, revision: 0, sourceChanged: false,
       validation: null, validatedRevision: null, validatedBaselineGeneration: null, validationRequest: null, validationError: null,
       review: null, reviewRequest: null, reviewError: null,
       suggestion: null, suggestionRequest: null, suggestionError: null,
-      removedFields: [], nextRemovalId: 1, editError: null,
+      removedFields: [], nextRemovalId: 1, editError: null, lastSave: null, saveRecoveryRequired: false,
     };
     return { selectedId: action.project.id, projects: { ...state.projects, [action.project.id]: session } };
   }
@@ -170,7 +192,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const keepDraft = session.draft !== null;
       const changed = !sameJson(session.baseline, incoming);
       next = {
-        ...session, snapshot: action.snapshot, snapshotRequest: null, snapshotError: null,
+        ...session, snapshot: action.snapshot, snapshotRequest: null, snapshotError: null, snapshotPredatesSave: false,
         observedAt: action.observedAt, sourceChanged: keepDraft && changed,
         observationGeneration: session.observationGeneration + 1,
         baseline: keepDraft ? session.baseline : incoming,
@@ -279,6 +301,51 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case 'adopt-suggestion':
       if (session.draft !== null || !suggestionFresh(session) || session.suggestion?.binding.id !== action.requestId) return state;
       next = { ...session, draft: structuredClone(session.suggestion.result.draft), draftOrigin: 'suggestion', revision: session.revision + 1, editError: null };
+      break;
+    case 'config-save-final': {
+      const { binding, projection, sessionId, planToken, statusRevision, result } = action.receipt;
+      const prepared = projection.prepared;
+      // This is a second local correlation check, not a native finality oracle.
+      // Only the controller's exact submitted receipt can advance a baseline.
+      if (binding.projectId !== action.projectId || projection.projectId !== action.projectId ||
+          !isU32(statusRevision) || !isU32(binding.startStatusRevision) || statusRevision <= binding.startStatusRevision ||
+          !isU32(binding.draftRevision) || !isU32(binding.baselineGeneration) ||
+          projection.sessionId !== sessionId || projection.ownerGeneration !== binding.windowGeneration ||
+          !projection.applySubmitted || !projection.checkout || !prepared || prepared.planToken !== planToken || prepared.revision !== projection.checkout.revision ||
+          prepared.draftRevision !== binding.draftRevision || prepared.baselineGeneration !== binding.baselineGeneration ||
+          !sameJson(projection.checkout.base, binding.expectedBase) || normalEditResult(projection) !== result ||
+          (session.lastSave !== null && (session.lastSave.sessionId === sessionId || session.lastSave.statusRevision >= statusRevision))) return state;
+      const matches = session.draft !== null && session.revision === binding.draftRevision &&
+        session.baselineGeneration === binding.baselineGeneration && sameJson(session.baseline, binding.expectedBase) && sameJson(session.draft, binding.draft);
+      const advance = matches && result === 'saved';
+      const baselineGeneration = advance ? session.baselineGeneration + 1 : session.baselineGeneration;
+      const lastSave: SavedDraftRevision = {
+        sessionId, statusRevision, draftRevision: binding.draftRevision, baselineGeneration: binding.baselineGeneration,
+        resultingBaselineGeneration: matches ? baselineGeneration : null, result,
+      };
+      // A successful older Apply is recorded, but cannot replace either a newer
+      // draft or a newer baseline, clear its dirtiness, or evict undo copies.
+      if (!matches) {
+        next = { ...session, lastSave, snapshotRequest: null, snapshotPredatesSave: true };
+        break;
+      }
+      next = {
+        ...session, lastSave, baseline: advance ? structuredClone(binding.draft) : session.baseline,
+        baselineGeneration, draftOrigin: advance ? 'saved' : session.draftOrigin,
+        snapshotRequest: null, snapshotPredatesSave: true, sourceChanged: false,
+        validation: null, validatedRevision: null, validatedBaselineGeneration: null, validationRequest: null, validationError: null,
+        review: null, reviewRequest: null, reviewError: null,
+        suggestion: null, suggestionRequest: null, suggestionError: null, editError: null,
+      };
+      break;
+    }
+    case 'config-save-recovery':
+      if (session.saveRecoveryRequired || action.attention.projectId !== action.projectId ||
+          action.attention.phase !== 'final' || action.attention.nativeFinality !== 'settled' ||
+          action.attention.coreOutcome?.journal !== 'recovery_required' || action.attention.coreOutcome.resources !== 'settled') return state;
+      // Affected-project attention survives refresh and draft discard. No GUI
+      // recovery or new owner is offered as a way to clear this native finding.
+      next = { ...session, saveRecoveryRequired: true };
       break;
   }
   return { ...state, projects: { ...state.projects, [action.projectId]: next } };

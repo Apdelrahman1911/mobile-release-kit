@@ -15,7 +15,7 @@ import stat
 import sys
 import unicodedata
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -43,6 +43,30 @@ class InitInterrupted(KeyboardInterrupt):
 
 class InitConflict(ValidationError):
     """An observed user/namespace change must not be adopted by automatic retry."""
+
+
+@dataclass(frozen=True)
+class InitApplyOutcome:
+    """Provisional original-transaction facts, never process finality.
+
+    A COMMITTED decision is irreversible even when a following fsync fails.
+    Only clean durability/cleanup, settled resources and reason=none may be a
+    successful save.  This type has no native imports on the passive path.
+    """
+
+    effect: str
+    journal: str
+    resources: str
+    reason: str
+
+
+class InitOperationFailure(BaseException):
+    """Exact typed native carrier; private primary is never serialized."""
+
+    def __init__(self, outcome: InitApplyOutcome, primary: BaseException | None = None):
+        super().__init__("configuration transaction did not complete")
+        self.outcome = outcome
+        self._primary = primary
 
 
 def _require(condition: bool, message: str) -> None:
@@ -137,37 +161,89 @@ def _alias(fd: int, name: str) -> None:
              "existing path has a case/Unicode alias")
 
 
-def _read(fd: int, name: str, limit: int = MAX_FILE_BYTES) -> tuple[dict[str, Any], bytes] | None:
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+@contextmanager
+def _descriptor(name: str, flags: int, mode: int = 0o600, *, dir_fd: int,
+                owner: InitWorkspace | None = None) -> Iterator[int]:
+    if owner is not None and owner._guard is not None:
+        with owner._descriptor(name, flags, mode, dir_fd=dir_fd) as handle:
+            yield handle
+        return
+    handle = os.open(name, flags, mode, dir_fd=dir_fd)
     try:
-        handle = os.open(name, flags, dir_fd=fd)
-    except FileNotFoundError:
-        return None
-    try:
-        before = os.fstat(handle)
-        _require(stat.S_ISREG(before.st_mode) and before.st_size <= limit,
-                 "input must be a bounded regular file, not a symbolic link or special file")
-        _require(not stat.S_IMODE(before.st_mode) & 0o7000, "special file permission bits are unsupported")
-        chunks, size = [], 0
-        while data := os.read(handle, min(1024**2, limit + 1 - size)):
-            chunks.append(data)
-            size += len(data)
-            _require(size <= limit, "input exceeded its byte bound")
-        _require(size == before.st_size and _raw_identity(before) == _raw_identity(os.fstat(handle)),
-                 "input changed during its bounded read")
-        data = b"".join(chunks)
-        return ({"device": before.st_dev, "inode": before.st_ino,
-                 "mode": stat.S_IMODE(before.st_mode), "size": size,
-                 "sha256": hashlib.sha256(data).hexdigest()}, data)
+        yield handle
     finally:
         os.close(handle)
 
 
-def _binding(fd: int, name: str, *, directory: bool = False, limit: int = MAX_FILE_BYTES) -> dict[str, Any] | None:
+def _read(fd: int, name: str, limit: int = MAX_FILE_BYTES, *,
+          owner: InitWorkspace | None = None) -> tuple[dict[str, Any], bytes] | None:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    opened = False
+    try:
+        with _descriptor(name, flags, dir_fd=fd, owner=owner) as handle:
+            opened = True
+            return _read_owned(handle, fd, name, limit, owner)
+    except FileNotFoundError:
+        if opened or owner is not None and owner._guard is not None and owner._guard.lifetime_ledger.fatal:
+            raise
+        return None
+
+
+def _read_owned(handle: int, fd: int, name: str, limit: int,
+                owner: InitWorkspace | None) -> tuple[dict[str, Any], bytes]:
+    # The descriptor's prearmed scope is outside this function; an exception in
+    # a terminal name/root check is not mistaken for absence at open.
+    if owner is not None:
+        owner._checkpoint()
+    before = os.fstat(handle)
+    _require(stat.S_ISREG(before.st_mode) and before.st_size <= limit,
+             "input must be a bounded regular file, not a symbolic link or special file")
+    _require(not stat.S_IMODE(before.st_mode) & 0o7000, "special file permission bits are unsupported")
+    if owner is not None and owner._guard is not None:
+        _require(before.st_nlink == 1, "desktop edit inputs must have one link")
+        named = _stat(fd, name)
+        _require(named is not None and _raw_identity(named) == _raw_identity(before)
+                 and named.st_nlink == 1, "input name changed during acquisition")
+    chunks, size = [], 0
+    while True:
+        if owner is not None:
+            owner._checkpoint()
+        data = os.read(handle, min(1024**2, limit + 1 - size))
+        if owner is not None:
+            owner._checkpoint()
+        if not data:
+            break
+        chunks.append(data)
+        size += len(data)
+        _require(size <= limit, "input exceeded its byte bound")
+    _require(size == before.st_size and _raw_identity(before) == _raw_identity(os.fstat(handle)),
+             "input changed during its bounded read")
+    if owner is not None and owner._guard is not None:
+        from .build_inputs import _file
+        named = _stat(fd, name)
+        _require(named is not None and _file(named) == _file(before)
+                 and _file(os.fstat(handle)) == _file(before), "input name changed during its read")
+        owner._root_check()
+        owner._last_read_facts = tuple(sorted(_file(before).items()))
+    data = b"".join(chunks)
+    binding = {"device": before.st_dev, "inode": before.st_ino,
+               "mode": stat.S_IMODE(before.st_mode), "size": size,
+               "sha256": hashlib.sha256(data).hexdigest()}
+    # A fully checked terminal read is a fact even if its subsequent descriptor
+    # close loses its return. Never erase the decision merely because _move or
+    # _install did not return to its caller.
+    if owner is not None and owner._terminal_read == (fd, name, binding):
+        owner._terminal_seen = name
+        owner._terminal_ambiguous = False
+    return binding, data
+
+
+def _binding(fd: int, name: str, *, directory: bool = False, limit: int = MAX_FILE_BYTES,
+             owner: InitWorkspace | None = None) -> dict[str, Any] | None:
     if directory:
         value = _stat(fd, name)
         return _dir_identity(value) if value else None
-    value = _read(fd, name, limit)
+    value = _read(fd, name, limit, owner=owner)
     return value[0] if value else None
 
 
@@ -175,20 +251,25 @@ def _fsync(fd: int) -> None:
     os.fsync(fd)
 
 
-def _write(fd: int, name: str, data: bytes, mode: int = 0o600, *, preserve_mode: bool = False) -> None:
+def _write(fd: int, name: str, data: bytes, mode: int = 0o600, *, preserve_mode: bool = False,
+           owner: InitWorkspace | None = None) -> None:
     _require(len(data) <= MAX_FILE_BYTES, "staged file exceeds its byte bound")
-    handle = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=fd)
-    try:
+    with _descriptor(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     mode, dir_fd=fd, owner=owner) as handle:
         view = memoryview(data)
         while view:
+            if owner is not None:
+                owner._checkpoint()
             size = os.write(handle, view[:1024**2])
             _require(size > 0, "staged write made no progress")
             view = view[size:]
         if preserve_mode:
             os.fchmod(handle, mode)
+        if owner is not None:
+            owner._checkpoint()
         _fsync(handle)
-    finally:
-        os.close(handle)
+        if owner is not None:
+            owner._checkpoint()
 
 
 def _rename_function() -> Any:
@@ -228,9 +309,160 @@ class InitWorkspace:
         self.parents: dict[str, dict[str, Any] | None] = {}
         self.root_identity: dict[str, int] = {}
         self.private_identity: dict[str, int] | None = None
+        self._private_facts: tuple[tuple[str, int], ...] | None = None
         self.observed_bytes = 0
+        self._guard: Any = None
+        self._scope: Any = None
+        self._slots: list[Any] = []
+        self._cleanup_mode = False
+        self._handoff_depth = 0
+        self._raw_observations: dict[str, tuple[tuple[str, int], ...] | None] = {}
+        self._parent_facts: dict[str, tuple[tuple[str, int], ...] | None] = {}
+        self._last_read_facts: tuple[tuple[str, int], ...] | None = None
+        self._captured: dict[str, ObservedFile] = {}
+        self._typed_claimed = False
+        self._creation = {"state": "NEW"}
+        self._install_started = False
+        self._installing = False
+        self._terminal_seen: str | None = None
+        self._terminal_ambiguous = False
+        self._terminal_read: tuple[int, str, dict[str, Any]] | None = None
+        self._terminal_durable = False
+        self._publishing_terminal: str | None = None
+        self._journal_clean = False
+        self._primary: BaseException | None = None
+        self._reason = "none"
+        self._unchanged = False
+        self._recovery_claimed = False
+        self._outcome = InitApplyOutcome("not_started", "not_created", "settled", "none")
+
+    @classmethod
+    def borrowed(cls, scope: Any) -> InitWorkspace:
+        # Native-only import: discovery/passive imports only need constants.
+        from .init_workspace_custody import LockedInitScope
+        _require(type(scope) is LockedInitScope, "a concrete original lock scope is required")
+        scope.check()
+        workspace = cls(scope.lease.root)
+        scope.claim_workspace(workspace)
+        workspace._guard, workspace._scope = scope.lease.guard, scope
+        workspace.fd = scope.fd
+        workspace.flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        workspace.root_identity = _dir_identity(os.fstat(workspace.fd))
+        return workspace
+
+    def _checkpoint(self) -> None:
+        if self._guard is None:
+            return
+        self._guard._check_owner()
+        if self._cleanup_mode or self._handoff_depth:
+            self._guard._poll_edit_stop()
+            _require(not self._guard.lifetime_ledger.fatal,
+                     "original resource ownership is uncertain; preserve the journal")
+        else:
+            self._guard.check()
+
+    @contextmanager
+    def _handoff(self) -> Iterator[None]:
+        guard = self._guard
+        self._handoff_depth += 1
+        try:
+            with (guard.deferred(check_on_exit=False) if guard is not None else nullcontext()):
+                yield
+        finally:
+            self._handoff_depth -= 1
+
+    @contextmanager
+    def _descriptor(self, name: str, flags: int, mode: int = 0o600, *, dir_fd: int) -> Iterator[int]:
+        self._checkpoint()
+        if self._guard is None:
+            with _descriptor(name, flags, mode, dir_fd=dir_fd) as handle:
+                yield handle
+            return
+        from .build_inputs import _FD, _fd_cleanup
+        slot = _FD(self._guard)
+        self._slots.append(slot)  # Prearm before os.open/result publication.
+        with _fd_cleanup(slot):
+            yield slot.open(name, flags, mode, dir_fd=dir_fd)
+
+    def settle_slots(self) -> None:
+        if self._guard is not None:
+            from .build_inputs import _attempt_all
+            _attempt_all(self._guard, [slot.close for slot in reversed(self._slots)])
+
+    def _read(self, fd: int, name: str, limit: int = MAX_FILE_BYTES):
+        return _read(fd, name, limit, owner=self)
+
+    def _binding(self, fd: int, name: str, *, directory: bool = False, limit: int = MAX_FILE_BYTES):
+        self._checkpoint()
+        return _binding(fd, name, directory=directory, limit=limit, owner=self)
+
+    def _write(self, fd: int, name: str, data: bytes, mode: int = 0o600, *, preserve_mode: bool = False):
+        self._checkpoint()
+        return _write(fd, name, data, mode, preserve_mode=preserve_mode, owner=self)
+
+    def _fsync(self, fd: int) -> None:
+        self._checkpoint()
+        _fsync(fd)
+        self._checkpoint()
+
+    def _mkdir(self, name: str, mode: int, *, dir_fd: int) -> None:
+        self._checkpoint()
+        if self._guard is None:
+            os.mkdir(name, mode, dir_fd=dir_fd)
+            return
+        from .build_inputs import _mkdir_private, _directory
+        record = self._creation if dir_fd == self.fd and name == PREPARING else {"state": "NEW"}
+        # Default interruption cannot fall between the original mkdir receipt
+        # and its original identity publication. Ambiguous acquisition is never
+        # followed by a pathname-based recovery/adoption attempt.
+        with self._handoff():
+            try:
+                _mkdir_private(name, dir_fd, self._guard, record)
+                with self._descriptor(name, self.flags, dir_fd=dir_fd) as child:
+                    if mode != 0o700:
+                        os.fchmod(child, mode)
+                    value = os.fstat(child)
+                    identity = _dir_identity(value)
+                    _require(identity == self._binding(dir_fd, name, directory=True),
+                             "created directory handoff changed")
+                    if record is self._creation:
+                        self.private_identity = identity
+                        self._private_facts = tuple(sorted(_directory(value).items()))
+            except BaseException as error:
+                if record["state"] == "CREATED":
+                    # A missing identity/return is not deletion authority.
+                    self._guard._abort(error)
+                raise
+        self._checkpoint()
+
+    def _unlink(self, name: str, *, dir_fd: int, directory: bool = False) -> None:
+        self._checkpoint()
+        with self._handoff():
+            (os.rmdir if directory else os.unlink)(name, dir_fd=dir_fd)
+        self._checkpoint()
+
+    def _control_rename(self, source_fd: int, source: str, destination_fd: int, destination: str) -> None:
+        self._checkpoint()
+        with self._handoff():
+            if self._guard is not None and not self._cleanup_mode:
+                self._guard.check()
+            self.rename(source_fd, source, destination_fd, destination)
+        self._checkpoint()
+
+    def _list(self, fd: int) -> list[str]:
+        self._checkpoint()
+        names = _list(fd)
+        self._checkpoint()
+        return names
+
+    def _alias(self, fd: int, name: str) -> None:
+        for index, item in enumerate(self._list(fd)):
+            if index % 256 == 0:
+                self._checkpoint()
+            _require(item == name or _key(item) != _key(name), "existing path has a case/Unicode alias")
 
     def __enter__(self) -> InitWorkspace:
+        _require(self._scope is None, "a borrowed workspace cannot acquire another root or lock")
         _require(sys.platform == "darwin" or sys.platform.startswith("linux"),
                  "apply/recover requires Linux/macOS local filesystem semantics")
         import fcntl
@@ -243,26 +475,34 @@ class InitWorkspace:
             self.root_identity = _dir_identity(os.fstat(self.fd))
             self._root_check()
         except BaseException as error:
-            os.close(self.fd)
-            self.fd = -1
+            handle, self.fd = self.fd, -1
+            os.close(handle)
             if isinstance(error, BlockingIOError):
                 raise ValidationError("init transaction: another init/recovery owns this project; wait for it to finish") from error
             raise
         return self
 
     def __exit__(self, *_args: Any) -> None:
+        if self._scope is not None:
+            self.settle_slots()  # Never close a borrowed root/lock description.
+            return
         if self.fd >= 0:
-            os.close(self.fd)
-            self.fd = -1
+            handle, self.fd = self.fd, -1
+            os.close(handle)
 
     def _root_check(self) -> None:
+        self._checkpoint()
+        if self._scope is not None:
+            self._scope.check()
+            _require(self.fd == self._scope.fd, "borrowed root descriptor changed")
+            return
         _require(_dir_identity(os.stat(self.root, follow_symlinks=False)) == self.root_identity,
                  "project root changed; preserve transaction state")
 
     def state(self) -> str | None:
         self._root_check()
         for name in STATE_NAMES:
-            _alias(self.fd, name)
+            self._alias(self.fd, name)
         found = [name for name in STATE_NAMES if _stat(self.fd, name) is not None]
         _require(len(found) <= 1, "inconsistent simultaneous transaction directories; preserve them")
         return found[0] if found else None
@@ -274,27 +514,29 @@ class InitWorkspace:
     @contextmanager
     def _private(self, name: str) -> Iterator[int]:
         self._root_check()
-        handle = os.open(name, self.flags, dir_fd=self.fd)
-        try:
+        with self._descriptor(name, self.flags, dir_fd=self.fd) as handle:
             value = os.fstat(handle)
             _require(value.st_uid == os.geteuid() and stat.S_IMODE(value.st_mode) == 0o700
                      and value.st_dev == self.root_identity["device"],
                      "journal must be a private, owned, same-filesystem directory")
             self._private_check(handle, name)
             yield handle
-        finally:
-            os.close(handle)
 
     def _private_check(self, fd: int, name: str) -> None:
         try:
             self._root_check()
-            _alias(self.fd, name)
+            self._alias(self.fd, name)
             value = os.fstat(fd)
             identity = _dir_identity(value)
             _require(value.st_uid == os.geteuid() and stat.S_IMODE(value.st_mode) == 0o700
-                     and identity == _binding(self.fd, name, directory=True)
+                     and identity == self._binding(self.fd, name, directory=True)
                      and (self.private_identity is None or identity == self.private_identity),
                      "private transaction namespace changed")
+            if self._guard is not None:
+                from .build_inputs import _directory
+                _require(self._private_facts is not None
+                         and tuple(sorted(_directory(value).items())) == self._private_facts,
+                         "original private directory facts changed")
         except (OSError, ValidationError) as error:
             raise InitConflict("init transaction: private namespace changed or cannot be verified; preserve all captured objects") from error
         self.private_identity = identity
@@ -302,49 +544,62 @@ class InitWorkspace:
     @contextmanager
     def _parent(self, path: str, *, planning: bool = False) -> Iterator[int | None]:
         self._root_check()
-        handle, opened, current, missing = self.fd, [], [], False
-        try:
+        handle, current, missing = self.fd, [], False
+        with ExitStack() as opened:
             for part in path.split("/")[:-1]:
+                self._checkpoint()
                 current.append(part)
                 relative = "/".join(current)
                 if not missing:
-                    _alias(handle, part)
+                    self._alias(handle, part)
                     value = _stat(handle, part)
                     identity = _dir_identity(value) if value else None
                     if identity:
                         _require(identity["device"] == self.root_identity["device"]
-                                 and not os.path.ismount(self.root / relative),
+                                 and (self._scope is not None or not os.path.ismount(self.root / relative)),
                                  "nested mount or different filesystem is unsupported")
                     if planning and relative not in self.parents:
                         self.parents[relative] = identity
+                    if self._guard is not None:
+                        from .build_inputs import _directory
+                        self._parent_facts[relative] = (
+                            tuple(sorted(_directory(value).items())) if value is not None else None)
                     _require(relative in self.parents and identity == self.parents[relative],
                              "destination ancestor changed or is unsafe")
                     if value is None:
                         missing = True
                     else:
-                        child = os.open(part, self.flags, dir_fd=handle)
-                        opened.append(child)
+                        child = opened.enter_context(self._descriptor(part, self.flags, dir_fd=handle))
                         _require(_dir_identity(os.fstat(child)) == identity, "ancestor changed while opening")
+                        if self._guard is not None:
+                            _require(tuple(sorted(_directory(os.fstat(child)).items())) == self._parent_facts[relative],
+                                     "original ancestor metadata changed while opening")
                         handle = child
                 elif planning and relative not in self.parents:
                     self.parents[relative] = None
+                    self._parent_facts[relative] = None
             if not missing:
-                _alias(handle, path.split("/")[-1])
+                self._alias(handle, path.split("/")[-1])
             yield None if missing else handle
-        finally:
-            for handle in reversed(opened):
-                os.close(handle)
 
     def observe(self, path: str, *, limit: int = MAX_FILE_BYTES) -> ObservedFile:
+        self._checkpoint()
         validate_paths([path])
+        self._last_read_facts = None
         with self._parent(path, planning=True) as parent:
-            value = _read(parent, path.split("/")[-1], min(limit, MAX_TOTAL_BYTES - self.observed_bytes)) if parent is not None else None
+            value = self._read(parent, path.split("/")[-1], min(limit, MAX_TOTAL_BYTES - self.observed_bytes)) if parent is not None else None
+            facts = self._last_read_facts if value is not None else None
         self.observed_bytes += value[0]["size"] if value else 0
-        return ObservedFile(path, value[0] if value else None, value[1] if value else None)
+        if self._guard is not None:
+            self._raw_observations[path] = facts
+        self._checkpoint()
+        result = ObservedFile(path, value[0] if value else None, value[1] if value else None)
+        self._captured[path] = result
+        return result
 
     def _current(self, path: str, *, directory: bool = False) -> dict[str, Any] | None:
         with self._parent(path) as parent:
-            return _binding(parent, path.split("/")[-1], directory=directory) if parent is not None else None
+            return self._binding(parent, path.split("/")[-1], directory=directory) if parent is not None else None
 
     def _namespace_check(self, *, changing: str | None = None) -> None:
         self._root_check()
@@ -355,26 +610,49 @@ class InitWorkspace:
 
     def _move(self, source_fd: int, source: str, destination_fd: int, destination: str,
               expected: dict[str, Any], *, directory: bool = False, directory_path: str | None = None) -> None:
+        self._checkpoint()
+        with self._handoff():
+            self._move_owned(source_fd, source, destination_fd, destination, expected,
+                             directory=directory, directory_path=directory_path)
+        self._checkpoint()
+
+    def _move_owned(self, source_fd: int, source: str, destination_fd: int, destination: str,
+                    expected: dict[str, Any], *, directory: bool,
+                    directory_path: str | None) -> None:
         self._namespace_check()
-        _require(_binding(source_fd, source, directory=directory) == expected, "move source changed")
+        _require(self._binding(source_fd, source, directory=directory) == expected, "move source changed")
         _require(_stat(destination_fd, destination) is None, "exclusive move destination appeared")
         failure: BaseException | None = None
         try:
+            if self._guard is not None and not self._cleanup_mode:
+                self._guard.check()  # Last stop check before the next effect.
+            if self._installing:
+                self._install_started = True
+            if self._publishing_terminal is not None:
+                self._terminal_ambiguous = True
             self.rename(source_fd, source, destination_fd, destination)
         except BaseException as error:
             failure = error
         captured = _stat(destination_fd, destination)
         if captured is not None and _stat(source_fd, source) is None:
             try:
-                _require(_binding(destination_fd, destination, directory=directory) == expected,
-                         "move captured a changed source")
+                if self._publishing_terminal is not None:
+                    self._terminal_read = (destination_fd, destination, expected)
+                try:
+                    _require(self._binding(destination_fd, destination, directory=directory) == expected,
+                             "move captured a changed source")
+                finally:
+                    self._terminal_read = None
                 if directory:
-                    handle = os.open(destination, self.flags, dir_fd=destination_fd)
-                    try:
-                        _require(not _list(handle), "moved directory gained unrelated contents")
-                    finally:
-                        os.close(handle)
+                    with self._descriptor(destination, self.flags, dir_fd=destination_fd) as handle:
+                        _require(not self._list(handle), "moved directory gained unrelated contents")
+                if self._publishing_terminal is not None:
+                    self._terminal_seen = self._publishing_terminal
             except BaseException:
+                if self._publishing_terminal is not None:
+                    # A genuine terminal decision is irreversible. Incomplete
+                    # proof is uncertainty, not authority to move it back.
+                    raise
                 # Restore the captured object, not an assumed precheck inode.
                 # If either location changed again, preserve both as a conflict.
                 self._namespace_check(changing=directory_path)
@@ -382,25 +660,33 @@ class InitWorkspace:
                     os.stat(destination, dir_fd=destination_fd, follow_symlinks=False)
                 ):
                     self.rename(destination_fd, destination, source_fd, source)
-                    _fsync(source_fd)
-                    _fsync(destination_fd)
+                    self._fsync(source_fd)
+                    self._fsync(destination_fd)
                 raise ValidationError("init transaction: source changed during move; captured user object preserved, reconcile before recovery")
         if failure is not None:
             raise failure
-        _require(captured is not None and _binding(destination_fd, destination, directory=directory) == expected,
+        _require(captured is not None and self._binding(destination_fd, destination, directory=directory) == expected,
                  "exclusive move did not produce its exact expected object")
         self._namespace_check(changing=directory_path)
-        _fsync(source_fd)
-        _fsync(destination_fd)
+        self._fsync(source_fd)
+        self._fsync(destination_fd)
 
     def _state_move(self, old: str, new: str) -> None:
+        self._checkpoint()
+        with self._handoff():
+            self._state_move_owned(old, new)
+        self._checkpoint()
+
+    def _state_move_owned(self, old: str, new: str) -> None:
         self._root_check()
-        expected = _binding(self.fd, old, directory=True)
+        expected = self._binding(self.fd, old, directory=True)
         _require(expected is not None, "transaction directory disappeared")
         _require(self.private_identity is None or expected == self.private_identity,
                  "transaction directory changed before handoff")
         failure: BaseException | None = None
         try:
+            if self._guard is not None and not self._cleanup_mode:
+                self._guard.check()
             self.rename(self.fd, old, self.fd, new)
         except BaseException as error:
             failure = error
@@ -414,15 +700,15 @@ class InitWorkspace:
             _require(_raw_identity(captured) == _raw_identity(os.stat(new, dir_fd=self.fd, follow_symlinks=False)),
                      "captured transaction object changed; preserve both namespaces")
             self.rename(self.fd, new, self.fd, old)
-            _fsync(self.fd)
+            self._fsync(self.fd)
             raise ValidationError("init transaction: journal namespace changed; captured object restored")
         if failure is not None:
             raise failure
-        _require(_binding(self.fd, new, directory=True) == expected, "transaction directory changed during handoff")
-        _fsync(self.fd)
+        _require(self._binding(self.fd, new, directory=True) == expected, "transaction directory changed during handoff")
+        self._fsync(self.fd)
 
     def _header(self, fd: int) -> dict[str, Any]:
-        item = _read(fd, "header.json", MAX_CONTROL_BYTES)
+        item = self._read(fd, "header.json", MAX_CONTROL_BYTES)
         _require(item is not None, "missing recovery header")
         header = _parse(item[1])
         _require(set(header) == {"schemaVersion", "transactionId", "root"}
@@ -444,7 +730,7 @@ class InitWorkspace:
 
     def _load(self, fd: int) -> dict[str, Any]:
         header = self._header(fd)
-        item = _read(fd, "plan.json", MAX_CONTROL_BYTES)
+        item = self._read(fd, "plan.json", MAX_CONTROL_BYTES)
         _require(item is not None, "missing READY plan; preserve journal, do not guess")
         plan = _parse(item[1])
         _require(set(plan) == {*header, "directories", "files"}
@@ -489,7 +775,7 @@ class InitWorkspace:
     def _terminal(self, fd: int, plan: dict[str, Any]) -> str | None:
         present = []
         for state, pending in (("COMMITTED", "commit.pending"), ("ROLLED_BACK", "rollback.pending")):
-            item, staged = _read(fd, state, MAX_CONTROL_BYTES), _read(fd, pending, MAX_CONTROL_BYTES)
+            item, staged = self._read(fd, state, MAX_CONTROL_BYTES), self._read(fd, pending, MAX_CONTROL_BYTES)
             _require((item is None) != (staged is None), "missing or duplicated terminal-marker location")
             _require((item or staged)[1] == self._marker(plan, state), "terminal marker binding differs")
             if item:
@@ -498,18 +784,28 @@ class InitWorkspace:
         return present[0] if present else None
 
     def _publish_terminal(self, fd: int, plan: dict[str, Any], state: str) -> None:
+        self._checkpoint()
         _require(self._terminal(fd, plan) is None, "transaction is already terminal")
         pending = "commit.pending" if state == "COMMITTED" else "rollback.pending"
-        identity = _binding(fd, pending)
+        identity = self._binding(fd, pending)
         assert identity is not None
-        self._move(fd, pending, fd, state, identity)
+        # This is a native handoff, not a whole-session cancellation deferral.
+        # The decision latches inside its verified read, before fsync/close.
+        with self._handoff():
+            self._publishing_terminal = state
+            try:
+                self._move(fd, pending, fd, state, identity)
+                self._terminal_durable = True
+            finally:
+                self._publishing_terminal = None
+        self._checkpoint()
 
     def _inventory(self, fd: int, plan: dict[str, Any]) -> None:
         allowed = {"header.json", "plan.json", "commit.pending", "rollback.pending", "COMMITTED", "ROLLED_BACK"}
         allowed |= {f"{prefix}-{i}" for i, e in enumerate(plan["files"]) if e["after"]
                     for prefix in ("new", "old") if prefix == "new" or e["before"]}
         allowed |= {f"directory-{i}" for i, e in enumerate(plan["directories"]) if e["after"]}
-        _require(set(_list(fd)) <= allowed, "unexpected journal contents; preserve them")
+        _require(set(self._list(fd)) <= allowed, "unexpected journal contents; preserve them")
 
     def _locations(self, fd: int, plan: dict[str, Any], *, final: str | None = None) -> None:
         self._inventory(fd, plan)
@@ -518,7 +814,7 @@ class InitWorkspace:
         for i, entry in enumerate(plan["directories"]):
             path, before, after = entry["path"], entry["before"], entry["after"]
             current = self._current(path, directory=True)
-            staged = _binding(fd, f"directory-{i}", directory=True) if after else None
+            staged = self._binding(fd, f"directory-{i}", directory=True) if after else None
             if before:
                 _require(current == before, "original destination directory changed")
                 self.parents[path] = before
@@ -526,11 +822,8 @@ class InitWorkspace:
                 _require((current == after and staged is None) or (current is None and staged == after),
                          "created directory has missing, duplicated or changed identity")
                 if staged:
-                    child = os.open(f"directory-{i}", self.flags, dir_fd=fd)
-                    try:
-                        _require(not _list(child), "staged directory has unexpected contents")
-                    finally:
-                        os.close(child)
+                    with self._descriptor(f"directory-{i}", self.flags, dir_fd=fd) as child:
+                        _require(not self._list(child), "staged directory has unexpected contents")
                 _require(final is None or (final == "new" and current == after) or (final == "old" and staged == after),
                          "directory set does not match final state")
                 self.parents[path] = current
@@ -540,7 +833,7 @@ class InitWorkspace:
             if after is None:
                 _require(current == before, "preserved input changed")
                 continue
-            staged, backup = _binding(fd, f"new-{i}"), _binding(fd, f"old-{i}")
+            staged, backup = self._binding(fd, f"new-{i}"), self._binding(fd, f"old-{i}")
             old = current == before and staged == after and backup is None
             between = bool(before) and current is None and staged == after and backup == before
             new = current == after and staged is None and backup == before
@@ -553,7 +846,7 @@ class InitWorkspace:
             if entry["after"] and self.parents[entry["path"]] is not None:
                 with self._parent(entry["path"] + "/placeholder") as parent:
                     assert parent is not None
-                    _require(all(entry["path"] + "/" + name in expected for name in _list(parent)),
+                    _require(all(entry["path"] + "/" + name in expected for name in self._list(parent)),
                              "created directory contains unrelated user content; preserve it")
 
     def _prepare(self, changes: list[tuple[ObservedFile, bytes | None]]) -> dict[str, Any]:
@@ -564,47 +857,47 @@ class InitWorkspace:
             _require(item.before is None or item.before["device"] == self.root_identity["device"],
                      "input belongs to another filesystem")
             _require(self._current(item.path) == item.before, "input changed after planning")
-        os.mkdir(PREPARING, 0o700, dir_fd=self.fd)
+        self._mkdir(PREPARING, 0o700, dir_fd=self.fd)
         with self._private(PREPARING) as fd:
             header = {"schemaVersion": 1, "transactionId": uuid.uuid4().hex, "root": self.root_identity}
-            _write(fd, "header.tmp", _json(header))
-            self.rename(fd, "header.tmp", fd, "header.json")
-            _fsync(fd)
-            _fsync(self.fd)
+            self._write(fd, "header.tmp", _json(header))
+            self._control_rename(fd, "header.tmp", fd, "header.json")
+            self._fsync(fd)
+            self._fsync(self.fd)
             # Exercise actual local filesystem semantics before touching destinations.
-            os.mkdir("probe-a", 0o700, dir_fd=fd)
-            os.mkdir("probe-b", 0o700, dir_fd=fd)
+            self._mkdir("probe-a", 0o700, dir_fd=fd)
+            self._mkdir("probe-b", 0o700, dir_fd=fd)
             try:
-                self.rename(fd, "probe-a", fd, "probe-b")
+                self._control_rename(fd, "probe-a", fd, "probe-b")
             except FileExistsError:
                 pass
             else:
                 raise ValidationError("init transaction: filesystem did not enforce exclusive rename")
-            self.rename(fd, "probe-a", fd, "probe-c")
-            os.rmdir("probe-c", dir_fd=fd)
-            os.rmdir("probe-b", dir_fd=fd)
+            self._control_rename(fd, "probe-a", fd, "probe-c")
+            self._unlink("probe-c", dir_fd=fd, directory=True)
+            self._unlink("probe-b", dir_fd=fd, directory=True)
             directories = []
             for i, path in enumerate(sorted(self.parents, key=lambda p: (p.count("/"), p))):
                 before, after = self.parents[path], None
                 if before is None:
-                    os.mkdir(f"directory-{i}", 0o755, dir_fd=fd)
-                    after = _binding(fd, f"directory-{i}", directory=True)
+                    self._mkdir(f"directory-{i}", 0o755, dir_fd=fd)
+                    after = self._binding(fd, f"directory-{i}", directory=True)
                 directories.append({"path": path, "before": before, "after": after})
             files = []
             for i, (item, payload) in enumerate(changes):
                 after = None
                 if payload is not None:
                     mode = item.before["mode"] if item.before else 0o644
-                    _write(fd, f"new-{i}", payload, mode, preserve_mode=item.before is not None)
-                    after = _binding(fd, f"new-{i}")
+                    self._write(fd, f"new-{i}", payload, mode, preserve_mode=item.before is not None)
+                    after = self._binding(fd, f"new-{i}")
                 files.append({"path": item.path, "before": item.before, "after": after})
             plan = {**header, "directories": directories, "files": files}
             _require(len(_json(plan)) <= MAX_CONTROL_BYTES, "recovery plan exceeds its byte bound")
-            _write(fd, "plan.tmp", _json(plan))
-            self.rename(fd, "plan.tmp", fd, "plan.json")
-            _write(fd, "commit.pending", self._marker(plan, "COMMITTED"))
-            _write(fd, "rollback.pending", self._marker(plan, "ROLLED_BACK"))
-            _fsync(fd)
+            self._write(fd, "plan.tmp", _json(plan))
+            self._control_rename(fd, "plan.tmp", fd, "plan.json")
+            self._write(fd, "commit.pending", self._marker(plan, "COMMITTED"))
+            self._write(fd, "rollback.pending", self._marker(plan, "ROLLED_BACK"))
+            self._fsync(fd)
             for item, _ in changes:
                 _require(self._current(item.path) == item.before, "input changed during staging")
             # Creation and recovery must accept exactly the same contract.
@@ -628,7 +921,7 @@ class InitWorkspace:
                 with self._parent(entry["path"]) as parent:
                     _require(parent is not None, "file parent is missing")
                     leaf = entry["path"].split("/")[-1]
-                    _require(_binding(parent, leaf) == entry["before"], "destination changed before installation")
+                    _require(self._binding(parent, leaf) == entry["before"], "destination changed before installation")
                     if entry["before"]:
                         self._move(parent, leaf, fd, f"old-{i}", entry["before"])
                     self._move(fd, f"new-{i}", parent, leaf, entry["after"])
@@ -636,6 +929,8 @@ class InitWorkspace:
         self._publish_terminal(fd, plan, "COMMITTED")
 
     def _rollback(self, fd: int, plan: dict[str, Any]) -> None:
+        _require(self._terminal_seen != "COMMITTED" and not self._terminal_ambiguous,
+                 "an irreversible or uncertain terminal decision cannot be rolled back")
         _require(self._terminal(fd, plan) is None, "a terminal transaction cannot be rolled back")
         self._locations(fd, plan)
         for i, entry in reversed(list(enumerate(plan["files"]))):
@@ -644,10 +939,10 @@ class InitWorkspace:
                     if parent is None:
                         continue
                     leaf = entry["path"].split("/")[-1]
-                    current = _binding(parent, leaf)
+                    current = self._binding(parent, leaf)
                     if current == entry["after"]:
                         self._move(parent, leaf, fd, f"new-{i}", entry["after"])
-                    if _binding(fd, f"old-{i}") is not None:
+                    if self._binding(fd, f"old-{i}") is not None:
                         self._move(fd, f"old-{i}", parent, leaf, entry["before"])
         for i, entry in reversed(list(enumerate(plan["directories"]))):
             if entry["after"] and self.parents[entry["path"]] is not None:
@@ -660,7 +955,7 @@ class InitWorkspace:
         self._publish_terminal(fd, plan, "ROLLED_BACK")
 
     def _preparing_inventory(self, fd: int) -> None:
-        names = set(_list(fd))
+        names = set(self._list(fd))
         def slot(name: str, prefix: str) -> bool:
             match = re.fullmatch(prefix + r"-(0|[1-9][0-9]{0,2})", name)
             return match is not None and int(match[1]) < MAX_FILES
@@ -675,16 +970,13 @@ class InitWorkspace:
             assert value is not None
             if slot(name, "directory") or name in PROBES:
                 _require(stat.S_ISDIR(value.st_mode), "unsafe preparation directory")
-                child = os.open(name, self.flags, dir_fd=fd)
-                try:
-                    _require(not _list(child), "preparation directory has unexpected contents")
-                finally:
-                    os.close(child)
+                with self._descriptor(name, self.flags, dir_fd=fd) as child:
+                    _require(not self._list(child), "preparation directory has unexpected contents")
             else:
                 _require(name in CONTROLS - {"COMMITTED", "ROLLED_BACK"}
                          or slot(name, "new"),
                          "unrecognized preparation content; no original backup is legal here")
-                item = _read(fd, name, MAX_CONTROL_BYTES if name in CONTROLS else MAX_FILE_BYTES)
+                item = self._read(fd, name, MAX_CONTROL_BYTES if name in CONTROLS else MAX_FILE_BYTES)
                 if name not in CONTROLS and item is not None:
                     staged_bytes += item[0]["size"]
                     _require(staged_bytes <= MAX_TOTAL_BYTES, "preparation byte bound exceeded")
@@ -692,7 +984,7 @@ class InitWorkspace:
 
     def _cleanup(self) -> None:
         with self._private(CLEANUP) as fd:
-            names = set(_list(fd))
+            names = set(self._list(fd))
             _require(len(names) <= 2 * MAX_FILES + len(CONTROLS) + len(PROBES), "cleanup inventory bound exceeded")
             # Capture before validating the phase/content, not afterward: a
             # later read must not adopt an intervening editor's replacement.
@@ -705,7 +997,7 @@ class InitWorkspace:
                 if directory:
                     binding = _dir_identity(value)
                 else:
-                    item = _read(fd, name, MAX_CONTROL_BYTES if name in CONTROLS else MAX_FILE_BYTES)
+                    item = self._read(fd, name, MAX_CONTROL_BYTES if name in CONTROLS else MAX_FILE_BYTES)
                     _require(item is not None, "cleanup entry disappeared")
                     binding = item[0]
                     observed_bytes += binding["size"]
@@ -717,7 +1009,7 @@ class InitWorkspace:
                 try:
                     self._private_check(fd, CLEANUP)
                     directory, expected = entries[name]
-                    _require(_binding(fd, name, directory=directory,
+                    _require(self._binding(fd, name, directory=directory,
                                       limit=MAX_CONTROL_BYTES if name in CONTROLS else MAX_FILE_BYTES) == expected,
                              "cleanup entry changed")
                 except (OSError, ValidationError) as error:
@@ -736,10 +1028,10 @@ class InitWorkspace:
                     states = names & {"COMMITTED", "ROLLED_BACK"}
                     _require(len(states) == 1, "contradictory cleanup terminal states")
                     state = next(iter(states))
-                    _require(_read(fd, state, MAX_CONTROL_BYTES)[1] == self._marker(plan, state),
+                    _require(self._read(fd, state, MAX_CONTROL_BYTES)[1] == self._marker(plan, state),
                              "cleanup terminal marker binding differs")
                     for state, pending in (("COMMITTED", "commit.pending"), ("ROLLED_BACK", "rollback.pending")):
-                        item = _read(fd, pending, MAX_CONTROL_BYTES)
+                        item = self._read(fd, pending, MAX_CONTROL_BYTES)
                         _require(not (item is not None and state in states), "duplicated cleanup marker")
                         _require(item is None or item[1] == self._marker(plan, state), "cleanup pending marker differs")
                     if data:
@@ -748,25 +1040,22 @@ class InitWorkspace:
                         for prefix, binding in (("new", entry["after"]), ("old", entry["before"])):
                             name = f"{prefix}-{i}"
                             if name in data:
-                                _require(binding is not None and _binding(fd, name) == binding,
+                                _require(binding is not None and self._binding(fd, name) == binding,
                                          "cleanup captured file changed; preserve it")
                     for i, entry in enumerate(plan["directories"]):
                         name = f"directory-{i}"
                         if name in data:
-                            _require(entry["after"] is not None and _binding(fd, name, directory=True) == entry["after"],
+                            _require(entry["after"] is not None and self._binding(fd, name, directory=True) == entry["after"],
                                      "cleanup directory identity changed")
-                            child = os.open(name, self.flags, dir_fd=fd)
-                            try:
-                                _require(not _list(child), "cleanup directory contains unrelated content")
-                            finally:
-                                os.close(child)
+                            with self._descriptor(name, self.flags, dir_fd=fd) as child:
+                                _require(not self._list(child), "cleanup directory contains unrelated content")
                 else:
                     _require(not data and len(names & {"COMMITTED", "ROLLED_BACK"}) == 1
                              and names <= {"COMMITTED", "ROLLED_BACK", "header.json"},
                              "invalid cleanup control suffix; preserve it")
                     header = self._header(fd)
                     state = next(iter(names & {"COMMITTED", "ROLLED_BACK"}))
-                    marker = _parse(_read(fd, state, MAX_CONTROL_BYTES)[1])
+                    marker = _parse(self._read(fd, state, MAX_CONTROL_BYTES)[1])
                     _require(set(marker) == {"schemaVersion", "transactionId", "planSha256", "state"}
                              and type(marker["schemaVersion"]) is int and marker["schemaVersion"] == 1
                              and marker["transactionId"] == header["transactionId"] and marker["state"] == state
@@ -781,20 +1070,124 @@ class InitWorkspace:
             # irreversible even after the final marker/header has been removed.
             for name in sorted(data):
                 if verify_entry(name):
-                    os.rmdir(name, dir_fd=fd)  # Empty only; never recursive.
+                    self._unlink(name, dir_fd=fd, directory=True)  # Empty only; never recursive.
                 else:
-                    os.unlink(name, dir_fd=fd)
-                _fsync(fd)
+                    self._unlink(name, dir_fd=fd)
+                self._fsync(fd)
             for name in ("header.tmp", "plan.tmp", "commit.pending", "rollback.pending",
                          "plan.json", "COMMITTED", "ROLLED_BACK", "header.json"):
                 if name in names:
                     _require(not verify_entry(name), "unsafe cleanup control")
-                    os.unlink(name, dir_fd=fd)
-                    _fsync(fd)
+                    self._unlink(name, dir_fd=fd)
+                    self._fsync(fd)
             self._private_check(fd, CLEANUP)
-            _require(not _list(fd), "cleanup directory gained unrelated content")
-            os.rmdir(CLEANUP, dir_fd=self.fd)
-        _fsync(self.fd)
+            _require(not self._list(fd), "cleanup directory gained unrelated content")
+            self._unlink(CLEANUP, dir_fd=self.fd, directory=True)
+        self._fsync(self.fd)
+        self._journal_clean = True
+
+    def current_outcome(self, reason: str = "none") -> InitApplyOutcome:
+        """Project facts held by this original workspace, including lost returns.
+
+        No additional IO, observer reopens, or exception-text interpretation is
+        performed. The outer scope/lease adds its own close evidence.
+        """
+        if self._reason == "none" and reason != "none":
+            self._reason = reason
+        if self._terminal_seen == "COMMITTED":
+            effect = "committed"
+        elif self._terminal_ambiguous:
+            effect = "unknown"
+        elif self._terminal_seen == "ROLLED_BACK" and self._install_started:
+            effect = "rolled_back"
+        elif self._unchanged:
+            effect = "unchanged"
+        else:
+            effect = "unknown" if self._install_started else "not_started"
+        creation = self._creation["state"]
+        if creation == "NEW":
+            journal = "not_created"
+        elif self._journal_clean or creation == "NO_EFFECT":
+            journal = "clean"
+        elif creation == "CREATED" and self.private_identity is not None:
+            journal = "recovery_required"
+        else:
+            journal = "unknown"
+        resources = "unknown" if self._guard is not None and self._guard.lifetime_ledger.fatal else "settled"
+        current_reason = self._reason
+        if current_reason == "none" and (effect == "unknown" or journal in {"unknown", "recovery_required"}
+                                         or resources == "unknown"):
+            current_reason = "custody_unknown" if resources == "unknown" else "filesystem_error"
+        self._outcome = InitApplyOutcome(effect, journal, resources, current_reason)
+        return self._outcome
+
+    def _fixed_recovery(self) -> None:
+        _require(not self._recovery_claimed, "original cleanup has already been attempted")
+        self._recovery_claimed = True
+        if self._creation["state"] != "CREATED" or self.private_identity is None:
+            return
+        _require(not self._terminal_ambiguous, "terminal publication is uncertain; preserve the journal")
+        _require(self._terminal_seen != "COMMITTED" or self._terminal_durable,
+                 "commit decision is known but durability is unconfirmed; preserve the journal")
+        self._cleanup_mode = True
+        try:
+            # Explicit cleanup mode is essential: ordinary guard.check() throws
+            # on cancellation even inside deferred(). No second recovery loop.
+            with self._guard.deferred(check_on_exit=False):
+                self._checkpoint()
+                self.recover()
+        finally:
+            self._cleanup_mode = False
+
+    def apply_typed(self, changes: list[tuple[ObservedFile, bytes | None]]) -> InitApplyOutcome:
+        """Native-only one-attempt facade; legacy CLI keeps its public API."""
+        if self._scope is None or self._guard is None or self._typed_claimed:
+            raise InitOperationFailure(InitApplyOutcome("not_started", "not_created", "settled", "invalid_params"))
+        self._typed_claimed = True
+        try:
+            self._checkpoint()
+            paths = ("release/mobile-release.json", ".gitignore")
+            limits = (512 * 1024, 1024 * 1024)
+            _require(type(changes) is list and len(changes) == 2, "invalid desktop change count")
+            for change, path, limit in zip(changes, paths, limits):
+                _require(type(change) is tuple and len(change) == 2, "invalid desktop change")
+                item, payload = change
+                original = self._captured.get(path)
+                _require(type(item) is ObservedFile and original is not None and item == original
+                         and item.path == path and (payload is None or type(payload) is bytes and len(payload) <= limit),
+                         "desktop changes do not match the original revision")
+            validate_paths(list(paths))
+            self.require_clean()
+            for item, _ in changes:
+                _require(self._current(item.path) == item.before, "input changed after revalidation")
+            if all(payload is None for _, payload in changes):
+                self._unchanged = True
+                return self.current_outcome()
+            # Capture/prepare do not bind ctypes symbols or perform fs probes.
+            self.rename = _rename_function()
+            plan = self._prepare(changes)
+            with self._private(READY) as fd:
+                self._installing = True
+                try:
+                    self._install(fd, plan)
+                finally:
+                    self._installing = False
+            self._fixed_recovery()  # Exactly committed cleanup, never a rebuild.
+        except BaseException as error:
+            if self._primary is None:
+                self._primary = error
+                self._reason = (error.outcome.reason if type(error) is InitOperationFailure else
+                                "cancelled" if isinstance(error, KeyboardInterrupt) else
+                                "stale_revision" if isinstance(error, InitConflict) else "filesystem_error")
+            if not self._recovery_claimed and not isinstance(error, InitConflict):
+                try:
+                    self._fixed_recovery()
+                except BaseException:
+                    # Preserve the first primary and actual irreversible facts.
+                    # Independent original handle closes still run in the scope.
+                    pass
+            raise InitOperationFailure(self.current_outcome(), self._primary) from None
+        return self.current_outcome()
 
     def recover(self) -> str:
         state = self.state()

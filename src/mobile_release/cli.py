@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from . import __version__
 from .android import validate_aab, validate_aab_structure
 from .config import ConfigurationError, default_config, load_config
+from .config_payloads import append_ignore_lines, serialize_config_data
 from .credentials import credential_findings
 from .build_inputs import finite_scratch, invocation_custody
 from .cancellation import CleanupScope
@@ -395,7 +396,7 @@ def _init_apply(args: argparse.Namespace, root: Path, proposed: dict[str, Any], 
     if not 1 <= len(sources) <= 64:
         raise ValidationError("workflow caller template directory must contain 1–64 callers")
     prepared: list[tuple[Path, bytes, str]] = [
-        (config_path, (json.dumps(proposed, indent=2, ensure_ascii=False) + "\n").encode("utf-8"), "configuration")
+        (config_path, serialize_config_data(proposed), "configuration")
     ]
     for source in sources:
         if source.is_symlink() or not source.is_file():
@@ -435,18 +436,7 @@ def _init_apply(args: argparse.Namespace, root: Path, proposed: dict[str, Any], 
         if observed[path].before is not None and not args.force:
             raise ValidationError(f"refusing to overwrite {label} observed during planning; use --force only after review")
     before_ignore = observed[gitignore].data or b""
-    try:
-        before_ignore.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ValidationError("root .gitignore must be UTF-8") from error
-    ignore_text = before_ignore
-    for line in IGNORE_LINES:
-        if line.encode() not in ignore_text.splitlines():
-            if ignore_text and not ignore_text.endswith(b"\n"):
-                ignore_text += b"\n"
-            ignore_text += line.encode() + b"\n"
-    if len(ignore_text) > 1024 * 1024:
-        raise ValidationError("root .gitignore including required ignore lines must fit within 1 MiB")
+    ignore_text = append_ignore_lines(before_ignore, IGNORE_LINES)
     desired = [(path, payload) for path, payload, _ in prepared]
     desired += [(path, None if observed[path].before is not None else b"") for path in metadata_paths]
     desired.append((gitignore, ignore_text))

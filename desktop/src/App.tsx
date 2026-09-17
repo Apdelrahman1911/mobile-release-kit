@@ -1,13 +1,17 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { desktopApi } from './api.ts';
 import { apiError } from './bridge.ts';
 import { emptyDraft } from './catalog.ts';
 import { methodReason } from './certainty.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from './drafts.ts';
+import type { WorkspaceAction } from './drafts.ts';
+import { editRetainsDraft, editStartReason } from './configEdit.ts';
+import { ConfigEditController } from './configEditController.ts';
 import { suggestionHints } from './preparation.ts';
 import type { ApiError, AppInfo, Catalog, DesktopApi, HelpContent, JsonValue, Page } from './types.ts';
 import { Badge, ConfirmDialog, ErrorNotice, HelpDialog, PageHeading } from './components/Common.tsx';
 import { DraftEditor } from './components/DraftEditor.tsx';
+import { ConfigSave } from './components/ConfigSave.tsx';
 import { Icon } from './components/Icon.tsx';
 import type { IconName } from './components/Icon.tsx';
 import { Dashboard } from './pages/Dashboard.tsx';
@@ -40,9 +44,25 @@ export function App() {
   const [page, setPage] = useState<Page>('dashboard');
   const [help, setHelp] = useState<HelpContent | null>(null);
   const [discardProject, setDiscardProject] = useState<string | null>(null);
-  const [workspace, dispatch] = useReducer(workspaceReducer, initialWorkspace);
+  const [workspace, setWorkspace] = useState(initialWorkspace);
   const workspaceRef = useRef(workspace);
-  workspaceRef.current = workspace;
+  const editControllerRef = useRef<ConfigEditController | null>(null);
+  // Keep the reducer's latest state synchronously visible to save admission.
+  // A React render/effect delay must not let an older review authorize Apply.
+  const dispatch = useCallback((action: WorkspaceAction) => {
+    const next = workspaceReducer(workspaceRef.current, action);
+    if (next === workspaceRef.current) return;
+    workspaceRef.current = next;
+    setWorkspace(next);
+    editControllerRef.current?.syncDraft();
+  }, []);
+  const [configEdit] = useState(() => new ConfigEditController({
+    project: (projectId) => Object.hasOwn(workspaceRef.current.projects, projectId) ? workspaceRef.current.projects[projectId] ?? null : null,
+    onConfirmedSave: (receipt) => dispatch({ type: 'config-save-final', projectId: receipt.binding.projectId, receipt }),
+    onRecoveryRequired: (attention) => dispatch({ type: 'config-save-recovery', projectId: attention.projectId, attention }),
+  }));
+  editControllerRef.current = configEdit;
+  const saveState = useSyncExternalStore(configEdit.subscribe, configEdit.getSnapshot, configEdit.getSnapshot);
   const requests = useRef(0);
   const bootGeneration = useRef(0);
   const main = useRef<HTMLElement>(null);
@@ -50,6 +70,8 @@ export function App() {
   const preview = mode === 'preview';
   const session = workspace.selectedId ? workspace.projects[workspace.selectedId] ?? null : null;
   const currentNavigation = navigation.find((item) => item.id === page) ?? navigation[0];
+  const nativeSaveAvailable = mode === 'native' && saveState.status?.capability.available === true &&
+    !saveState.observationIssue && !saveState.integrityFailed && !saveState.generationLost && !saveState.nativeBlocked;
 
   const bootstrap = useCallback(async () => {
     const generation = ++bootGeneration.current;
@@ -85,6 +107,9 @@ export function App() {
     return () => { bootGeneration.current += 1; };
   }, [bootstrap]);
 
+  useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
+  useEffect(() => () => configEdit.dispose(), [configEdit]);
+
   useEffect(() => {
     document.title = `${currentNavigation?.label ?? 'Dashboard'} · Mobile Release Kit${preview ? ' · Browser preview' : ''}`;
   }, [currentNavigation, preview]);
@@ -105,7 +130,7 @@ export function App() {
   const validateReason = methodReason(info, 'config.validate', mode);
   const reviewReason = methodReason(info, 'config.preview', mode);
   const suggestReason = methodReason(info, 'config.suggest', mode);
-  const chooseDisabled = loading || choosing || mode === 'unavailable';
+  const chooseDisabled = loading || choosing || mode === 'unavailable' || saveState.status?.capability.reason === 'shutdown';
 
   const loadSnapshot = async (projectId: string) => {
     if (!api || (refreshReason !== null && !preview)) return;
@@ -186,14 +211,17 @@ export function App() {
     validateReason={loading ? 'Engine capabilities are being loaded.' : validateReason}
     reviewReason={loading ? 'Engine capabilities are being loaded.' : reviewReason}
     suggestReason={loading ? 'Engine capabilities are being loaded.' : suggestReason}
+    saveReason={loading ? 'Application capabilities are being loaded.' : editStartReason(saveState, session)}
+    discardReason={session && editRetainsDraft(saveState, session.project.id) ? 'Keep this draft until the original native save session has settled. Close save review is separate from discarding draft data.' : null}
     onChoose={() => void chooseProject()} onEdit={edit} onValidate={() => void validate()}
     onReview={() => void review()} onSuggest={() => void suggest()}
+    onPrepareSave={() => { if (session && workspaceRef.current.selectedId === session.project.id) configEdit.start(session.project.id); }}
     onAdoptSuggestion={(requestId) => { if (session) dispatch({ type: 'adopt-suggestion', projectId: session.project.id, requestId }); }}
     onRemoveForbidden={(reviewId, paths) => { if (session) dispatch({ type: 'remove-forbidden', projectId: session.project.id, reviewId, paths }); }}
     onUndoRemoval={(removalId) => { if (session) dispatch({ type: 'undo-removal', projectId: session.project.id, removalId }); }}
     onForgetRemoval={(removalId) => { if (session) dispatch({ type: 'forget-removal', projectId: session.project.id, removalId }); }}
     onNewDraft={() => { if (session && catalog) dispatch({ type: 'new-draft', projectId: session.project.id, draft: emptyDraft(catalog.schema) }); }}
-    onDiscard={() => { if (session) setDiscardProject(session.project.id); }} onHelp={setHelp}
+    onDiscard={() => { if (session && !editRetainsDraft(configEdit.getSnapshot(), session.project.id)) setDiscardProject(session.project.id); }} onHelp={setHelp}
   />;
 
   return <div className="app-shell">
@@ -202,10 +230,10 @@ export function App() {
       <div className="brand"><span className="brand-mark"><Icon name="box" size={25} /></span><div>Mobile Release Kit<span>THE KIT FOR A CAREFUL LAUNCH</span></div></div>
       <div className="project-switcher"><label htmlFor="project-switch">CURRENT PROJECT</label><div className="project-switcher-control"><span className="project-switch-icon"><Icon name="folder" size={18} /></span><select id="project-switch" aria-label="Switch project; unsaved drafts are retained" value={workspace.selectedId ?? ''} onChange={(event) => dispatch({ type: 'switch', projectId: event.target.value })}><option value="" disabled>{choosing ? 'Opening project…' : 'Choose a project'}</option>{Object.values(workspace.projects).map((entry) => <option key={entry.project.id} value={entry.project.id}>{entry.project.name}{isDirty(entry) ? ' • unsaved' : ''}</option>)}</select><button type="button" className="icon-button" disabled={chooseDisabled} aria-label={preview ? 'Load example project' : 'Open another project folder'} onClick={() => void chooseProject()}><Icon name="plus" size={16} /></button></div></div>
       <nav aria-label="Workspace navigation">{(['workspace', 'release'] as const).map((group) => <div className="nav-group" key={group}><span className="nav-group-label">{group === 'workspace' ? 'WORKSPACE' : 'DELIVERY'}</span>{navigation.filter((entry) => entry.group === group).map((entry) => <button type="button" key={entry.id} className={`nav-item${entry.id === page ? ' active' : ''}`} aria-label={entry.label} aria-current={entry.id === page ? 'page' : undefined} onClick={() => navigate(entry.id)}><Icon name={entry.icon} size={19} /><span>{entry.label}</span>{entry.id === 'releases' && <span className="nav-soon">SOON</span>}</button>)}</div>)}</nav>
-      <div className="sidebar-footer"><div className="foundation-label"><span className="local-dot" />Read-only foundation</div><p>Thoughtful preparation.<br />No accidental releases.</p><div className="sidebar-version"><span>DESKTOP {info?.appVersion ?? 'Not loaded'}</span><Icon name="shield" size={14} /></div></div>
+      <div className="sidebar-footer"><div className="foundation-label"><span className="local-dot" />{nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting'}</div><p>Thoughtful preparation.<br />No accidental releases.</p><div className="sidebar-version"><span>DESKTOP {info?.appVersion ?? 'Not loaded'}</span><Icon name="shield" size={14} /></div></div>
     </aside>
     <div className="workspace">
-      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />No writes or release operations</span><Badge tone={preview ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : 'Read-only preparation'}</Badge></div></header>
+      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />No builds or release operations</span><Badge tone={preview || saveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : saveState.status?.active ? 'Native save session active' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting'}</Badge></div></header>
       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
       <main id="main-content" tabIndex={-1} ref={main}>
         {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Loading desktop capabilities and the core field catalogue…</span></div>}
@@ -213,6 +241,9 @@ export function App() {
         {catalogError && <ErrorNotice error={catalogError} title="The field catalogue could not be loaded" />}
         {chooseError && <ErrorNotice error={chooseError} title="The project could not be selected" />}
         {info?.runtime.state !== 'available' && info && !preview && <div className="notice notice-warning"><Icon name="info" /><div><strong>{info.runtime.state === 'disabled' ? 'The engine is disabled' : 'Bundled engine unavailable'}</strong><p>{info.runtime.reason ?? 'A trusted packaged runtime has not been supplied. The app will not select an ambient Python or a mock engine.'} Folder selection does not establish a project observation.</p></div></div>}
+        <ConfigSave state={saveState} projects={workspace.projects} catalog={catalog} selectedId={workspace.selectedId} detailed={page === 'settings' || page === 'metadata'}
+          onCheck={() => void configEdit.checkStatus()} onClose={() => configEdit.requestClose()} onApply={(binding) => configEdit.apply(binding)}
+          onShowProject={(projectId) => { dispatch({ type: 'switch', projectId }); navigate('settings'); }} onHelp={setHelp} />
         {page === 'dashboard' && <Dashboard session={session} info={info} preview={preview} chooseDisabled={chooseDisabled} refreshReason={loading ? 'Capabilities are loading.' : refreshReason} onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="A little clarity before the next release." description="Edit a practical, schema-driven draft. The bundled core provides every field, requirement, and validation rule." />{editor()}</>}
         {page === 'environment' && <Environment info={info} preview={preview} onRetry={() => void bootstrap()} loading={loading} />}
@@ -222,10 +253,13 @@ export function App() {
         {page === 'releases' && <Releases info={info} />}
         {page === 'artifacts' && <Artifacts info={info} />}
         {page === 'recovery' && <Recovery info={info} />}
-        <footer className="workspace-footer"><span><Icon name="shield" size={14} />Configuration is not verification.</span><span>{preview ? 'Illustration only · no engine connected' : 'Read-only desktop foundation · not a completed release product'}</span></footer>
+        <footer className="workspace-footer"><span><Icon name="shield" size={14} />Configuration is not verification.</span><span>{preview ? 'Illustration only · no engine connected' : 'Configuration desktop slice · not a completed release product'}</span></footer>
       </main>
     </div>
     <HelpDialog content={help} onClose={() => setHelp(null)} />
-    {discardProject && <ConfirmDialog onCancel={() => setDiscardProject(null)} onConfirm={() => { dispatch({ type: 'reset', projectId: discardProject }); setDiscardProject(null); }} />}
+    {discardProject && <ConfirmDialog onCancel={() => setDiscardProject(null)}
+      blockedReason={editRetainsDraft(saveState, discardProject) ? 'The original native save session is still active or unverified. Keep this draft; closing a save session is not draft deletion.' : null}
+      observationPredatesSave={workspace.projects[discardProject]?.snapshotPredatesSave ?? false}
+      onConfirm={() => { if (!editRetainsDraft(configEdit.getSnapshot(), discardProject)) dispatch({ type: 'reset', projectId: discardProject }); setDiscardProject(null); }} />}
   </div>;
 }

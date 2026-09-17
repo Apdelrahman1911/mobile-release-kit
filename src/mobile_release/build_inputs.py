@@ -162,21 +162,24 @@ def _exact_reserved_names(fd: int, reserved: set[str]) -> set[str]:
 
 
 def _private_is_ignored(content: bytes) -> bool:
-    # Git's leading spaces are meaningful. Do not strip them or split a single
-    # pattern at arbitrary Unicode line separators. Positive later patterns do
-    # not undo an exclusion; a later negation invalidates this sufficient proof.
-    try:
-        lines = content.decode("utf-8").split("\n")
-    except UnicodeError:
-        return False
-    excluded = False
-    for raw in lines:
-        line = raw[:-1] if raw.endswith("\r") else raw
-        if line in (".mobile-release/", "/.mobile-release/"):
-            excluded = True
-        elif line.startswith("!"):
-            excluded = False
-    return excluded
+    from .config_payloads import sufficient_ignore_rules
+    return sufficient_ignore_rules(content, (".mobile-release/",))
+
+
+def _init_pending_names_locked(fd: int) -> set[str]:
+    """Noncreating admission only; caller continuously owns the root flock."""
+    names = _exact_reserved_names(fd, {_PRIVATE, *INIT_STATES})
+    _need(not ({_name_key(name) for name in names} & {_name_key(name) for name in INIT_STATES}),
+          "pending init transaction must be resolved separately")
+    return names
+
+
+def _build_pending_names_locked(fd: int, *, recovery: bool = False) -> None:
+    """No second lock, status RPC, private reads or implicit recovery."""
+    names = _exact_reserved_names(fd, {_PENDING, _TERMINAL, _TERMINAL_STAGE})
+    if not recovery:
+        _need(not (names & {_PENDING, _TERMINAL, _TERMINAL_STAGE}),
+              "pending build-input state requires explicit recovery")
 
 
 def _same_object(current: Mapping[str, Any], expected: Mapping[str, Any],
@@ -381,9 +384,10 @@ def _attempt_all(guard: DefaultCancellation, actions: list[Any]) -> None:
 class _Directory:
     """Pinned no-follow absolute ancestry; no directory deletion authority."""
     def __init__(self, path: Path, guard: DefaultCancellation,
-                 *, system_root_aliases: bool = False) -> None:
+                 *, system_root_aliases: bool = False, edit_checkpoints: bool = False) -> None:
         self.path, self.lexical_path, self.guard = path, path, guard
         self.system_root_aliases = system_root_aliases
+        self.edit_checkpoints = edit_checkpoints
         self.slots: list[_FD] = []
         self.bindings: list[tuple[int | None, str, dict[str, int]]] = []
         self.physical_bindings: list[tuple[_FD, int, str, dict[str, int]]] = []
@@ -395,6 +399,7 @@ class _Directory:
         return self.slots[-1].number  # type: ignore[return-value]
 
     def _open(self, name: str, parent: int | None) -> tuple[_FD, os.stat_result]:
+        self._edit_checkpoint()
         slot = _FD(self.guard)
         self.slots.append(slot)
         number = slot.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
@@ -403,7 +408,16 @@ class _Directory:
         _need(_directory(os.stat(name, dir_fd=parent, follow_symlinks=False)) == binding,
               "directory changed during acquisition")
         self.bindings.append((parent, name, binding))
+        self._edit_checkpoint()
         return slot, observed
+
+    def _edit_checkpoint(self) -> None:
+        if self.edit_checkpoints:
+            if self.guard.depth:
+                self.guard._poll_edit_stop()  # Fixed original cleanup/handoff.
+                _need(not self.guard.lifetime_ledger.fatal, "edit root custody is uncertain")
+            else:
+                self.guard.check()
 
     def _physical_role(self, parent: int, role: Path | None, observed: os.stat_result) -> Path | None:
         if sys.platform != "darwin":
@@ -466,9 +480,11 @@ class _Directory:
     def check(self) -> None:
         _need(len(self.bindings) == len(self.slots), "directory acquisition is incomplete")
         for slot, (parent, name, binding) in zip(self.slots, self.bindings):
+            self._edit_checkpoint()
             _need(slot.number is not None and _directory(os.fstat(slot.number)) == binding
                   and _directory(os.stat(name, dir_fd=parent, follow_symlinks=False)) == binding,
                   "directory ancestry changed")
+            self._edit_checkpoint()
         for slot, parent, name, binding in self.physical_bindings:
             _need(slot.number is not None and _directory(os.fstat(slot.number)) == binding
                   and _directory(os.stat(name, dir_fd=parent, follow_symlinks=False)) == binding,
@@ -1773,16 +1789,11 @@ class _Project:
         except BlockingIOError:
             raise BuildInputError("build inputs: another owner holds this project") from None
         self.check()
-        names = _exact_reserved_names(self.fd, {_PRIVATE, *INIT_STATES})
-        _need(not ({_name_key(name) for name in names} & {_name_key(name) for name in INIT_STATES}),
-              "pending init transaction must be resolved separately")
+        names = _init_pending_names_locked(self.fd)
         if _PRIVATE in names:
             self._open_meta()
         if self.meta.number is not None:
-            names = _exact_reserved_names(self.meta.number, {_PENDING, _TERMINAL, _TERMINAL_STAGE})
-            if not self.recovery:
-                _need(not (names & {_PENDING, _TERMINAL, _TERMINAL_STAGE}),
-                  "pending build-input state requires explicit recovery")
+            _build_pending_names_locked(self.meta.number, recovery=self.recovery)
 
     def _open_meta(self) -> None:
         _need(_PRIVATE in _exact_reserved_names(self.fd, {_PRIVATE}), "private project directory is absent")

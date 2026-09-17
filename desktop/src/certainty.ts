@@ -1,4 +1,4 @@
-import { reviewFresh, validationFresh } from './drafts.ts';
+import { reviewFresh, savedRevisionFresh, validationFresh } from './drafts.ts';
 import type { ProjectSession } from './drafts.ts';
 import type { AppInfo, BridgeMode, Capabilities } from './types.ts';
 
@@ -8,6 +8,7 @@ export interface StatusLabel { label: string; tone: Tone }
 export function configurationStatus(session: ProjectSession | null, preview: boolean): StatusLabel {
   if (preview && session?.snapshot) return { label: 'Example only', tone: 'warning' };
   if (session?.snapshotError && session.snapshot) return { label: 'Stale observation', tone: 'warning' };
+  if (session?.snapshotPredatesSave && session.snapshot) return { label: 'Earlier static observation', tone: 'warning' };
   if (!session?.snapshot) return { label: 'Not assessed', tone: 'neutral' };
   if (session.snapshot.config.state === 'format-valid') return { label: 'Format-valid only', tone: 'info' };
   if (session.snapshot.config.state === 'invalid') return { label: 'Needs attention', tone: 'danger' };
@@ -18,6 +19,7 @@ export function configurationStatus(session: ProjectSession | null, preview: boo
 export function draftStatus(session: ProjectSession): StatusLabel {
   if (session.validationRequest) return { label: 'Validating format…', tone: 'info' };
   if (session.reviewRequest) return { label: 'Reviewing draft…', tone: 'info' };
+  if (savedRevisionFresh(session)) return { label: session.lastSave?.result === 'unchanged' ? 'No changes needed · not verified' : 'Saved revision · not verified', tone: 'info' };
   if (session.validation && validationFresh(session)) {
     return session.validation.valid && session.validation.state === 'format-valid'
       ? { label: 'Format-valid · not saved', tone: 'info' }

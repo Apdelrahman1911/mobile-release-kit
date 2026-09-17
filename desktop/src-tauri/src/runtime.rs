@@ -219,6 +219,25 @@ impl RuntimeConfig {
             Err(BridgeError::unavailable("Packaged execution is disabled until an immutable, nonblocking runtime-custody backend is qualified. A manifest digest alone cannot enable it."))
         }
     }
+    /// Separate fixed entry point for the finite configuration owner. Never
+    /// dispatch stateful work through the passive engine or its supervisor.
+    pub fn resolve_edit(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(feature = "development-runtime", debug_assertions))]
+        {
+            let mut runtime = self.development(end)?;
+            let bootstrap = runtime.cwd.join("config_edit_bootstrap.py");
+            anchored_path(&bootstrap)?;
+            if !fs::metadata(&bootstrap).map_err(|_| unavailable())?.is_file() { return Err(unavailable()); }
+            deadline(end)?;
+            runtime.bootstrap = bootstrap;
+            Ok(runtime)
+        }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        {
+            let _ = end;
+            Err(BridgeError::unavailable("Packaged configuration editing is disabled until its runtime custody and native owner are qualified."))
+        }
+    }
     /// Unqualified preparation helper only; no application command calls this,
     /// and its result intentionally contains no executable/bootstrap/core paths.
     pub fn inspect_bundle_for_packaging(&self, end: Instant) -> Result<BundleInspection, BridgeError> {

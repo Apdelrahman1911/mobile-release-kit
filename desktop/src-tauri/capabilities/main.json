@@ -1,8 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Only the seven passive application commands, including pure draft suggestion and preview. No shell, filesystem, opener, or remote authority.",
+  "description": "Fixed passive queries and finite configuration editing with native owner qualification. Listen/unlisten for owner status only; no event emission, general filesystem, shell, opener, or remote authority.",
   "windows": ["main"],
   "local": true,
-  "permissions": ["allow-app-info", "allow-choose-project", "allow-project-snapshot", "allow-catalog", "allow-validate-config", "allow-suggest-config", "allow-preview-config"]
+  "permissions": [
+    "allow-app-info", "allow-choose-project", "allow-project-snapshot", "allow-catalog",
+    "allow-validate-config", "allow-suggest-config", "allow-preview-config",
+    "allow-open-config-edit", "allow-prepare-config-edit", "allow-apply-config-edit",
+    "allow-close-config-edit", "allow-config-edit-status",
+    "core:event:allow-listen", "core:event:allow-unlisten"
+  ]
 }

@@ -1,18 +1,21 @@
-# Desktop M1 Rust bridge and runtime contract
+# Desktop Rust bridge and runtime contract
 
-This is a read-only foundation, not a shipping standalone runtime, Windows native
-release backend, or replacement for the audited CLI's ownership services.
+This is a passive foundation plus an independently gated configuration-edit
+implementation, not a shipping standalone runtime, Windows native release
+backend, or replacement for the audited CLI's ownership services.
 
 ## Current executable scope
 
-The seven renderer commands are `app_info`, `choose_project`,
+The seven passive renderer commands are `app_info`, `choose_project`,
 `project_snapshot {projectId}`, `catalog`, `validate_config {draft}`,
 `suggest_config {hints}`, and `preview_config {base, draft}`.
 Snapshot and draft validation return the core result without inventing verified
 facts or saving files. Project IDs refer to Rust-held native picker selections;
 renderer-provided roots/executables/command lines/method names are not admitted.
-There are no shell, filesystem, opener, build, Store, credential, or recovery
-commands/plugins. The sole local webview denies remote/new-window navigation.
+There are also five closed configuration-edit commands, described below; their
+native qualification gate remains disabled. There are no generic shell,
+filesystem, opener, build, Store, credential, or recovery commands/plugins.
+The sole local webview denies remote/new-window navigation.
 The CSP allows only local assets and Tauri IPC, not project-provided web content.
 
 **Production runtime execution is disabled, even when both compile-time hashes
@@ -141,8 +144,9 @@ optional/platform graph. Default features are empty; `desktop-shell` adds Tauri,
 rfd and tauri-build. Headless check does not require GTK/WebKit. `build.rs` uses
 only std bookkeeping in a headless build, but serde/tokio proc macros and
 transitive build scripts still require independent source/execution review.
-Optional tauri-build generates allow/deny permissions for only the seven named
-commands, and the main local capability grants exactly their allow permissions.
+Optional tauri-build generates allow/deny permissions for only the twelve named
+commands. The main local capability grants their allow permissions plus event
+listen/unlisten, not renderer event emission or general filesystem access.
 
 In-memory protocol, path-name and stop-latch unit tests contain no child, native
 SDK, filesystem fixtures, network, or app launch. They do not establish native
@@ -151,3 +155,63 @@ compilation/test, native query/fault tests, shell launch, packaging and installe
 must follow the independent check plan; real supervisor/native work stays on
 reviewed disposable hosted runners. No test or compilation is implied by source
 authoring or Cargo lockfile generation.
+
+## Separately gated finite configuration edit
+
+The native edit owner is separate from passive queries. Its fixed renderer
+commands consume complete closed argument objects; extra keys and raw bodies
+reject rather than becoming alternate authority:
+
+| Command | Arguments |
+| --- | --- |
+| `open_config_edit` | `{projectId}` |
+| `prepare_config_edit` | `{sessionId, revision, expectedBase, draft, draftRevision, baselineGeneration}` |
+| `apply_config_edit` | `{sessionId, planToken}` |
+| `close_config_edit` | `{sessionId}` |
+| `config_edit_status` | `{}` |
+
+Each returns the same versioned, bounded status as `config-edit-state`. The
+renderer subscribes before reading initial status and orders observations by
+native revision, not arrival time. Events are best-effort observations, not
+authority. Missing invoke results never authorize a retry of Open/Prepare/Apply.
+The registry retains the original operation independently of renderer promises.
+
+One original native document owns at most one edit session. Reload, subsequent
+navigation, destruction or observed web-content-process termination permanently
+invalidates that document under the same registry lock used for admission.
+Only the original finished-load event, after native crash observation is
+installed, can bind it. Document loss requests STOP; later documents can read
+status but cannot Close/Prepare/Apply or acquire a replacement generation.
+Already accepted Apply may commit, and its actual outcome must be preserved.
+Native lifecycle behavior is a separate qualification from pure state tests.
+
+The dedicated child captures the selected original root once, prepares once,
+then applies or discards once. No project scripts, SDK, Git, credentials or Store
+calls run. Only `release/mobile-release.json`, root `.gitignore`, and (if absent)
+the `release` directory may be part of the reviewed transaction. The original
+lease uses short common-lock scopes, never a lock across human review. Both
+initialization and build-input pending namespaces are checked. Original bytes,
+inodes and ancestor bindings cannot be replaced by renderer snapshots; a complete
+no-op preserves bytes and identity. See the exact [core adapter contract](../../docs/desktop-configuration-edit.md).
+
+Active phases have 30-second deadlines, human review an absolute 15-minute
+lifetime, and cleanup one 10-second allowance. The sole stdin writer's EOF is
+cooperative STOP, not rollback or child-finality proof. Known core effect,
+journal state, resource settlement and primary reason remain independent of the
+native wait/EOF/close/join facts. Success requires all applicable original facts;
+Unknown is absorbing and retains owners instead of dropping them to manufacture
+completion. A settled recovery-required journal blocks its project, even after
+another project's terminal result replaces the last status.
+
+Confirmed quit starts both passive and edit shutdowns and waits for both; a
+failure in one never skips the other. The status relay is joined before normal
+exit. An uncertain owner prevents normal exit; no PID discovery, broad process
+cleanup or assumed rollback is provided. Unsaved newer renderer drafts are not
+replaced by an older successful save, and native quit confirmation remains
+independent of renderer state.
+
+`NATIVE_EDIT_QUALIFIED` stays false. The ignored hosted fixture has only a private
+test-build authorization after its fixed environment/source/root checks; it
+cannot enable production constructors. Core inert tests, three initial actual-
+owner cases, compilation, or a passing negative fault assertion alone cannot
+qualify saving, native document lifecycle, Windows custody or installed runtimes.

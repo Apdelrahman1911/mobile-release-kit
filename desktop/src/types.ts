@@ -182,6 +182,61 @@ export interface AppInfo {
 }
 
 export type BridgeMode = 'native' | 'preview' | 'unavailable';
+
+// Dedicated native edit owner, not methods on the passive query service.
+// Tokens are opaque 32-lowercase-hex strings; all counters are bounded u32.
+export type EditAvailability = 'available' | 'unsupported_platform' | 'runtime_unqualified' | 'cleanup_unknown' | 'shutdown';
+export type NativeEditReason = 'none' | 'discarded' | 'cancelled' | 'active_timeout' | 'review_expired' | 'caller_lost' | 'window_lost' | 'shutdown' | 'runtime_unavailable' | 'spawn_failed' | 'protocol_error' | 'io_error' | 'output_limit' | 'cleanup_unknown';
+export type CoreEditReason = 'none' | 'invalid_params' | 'invalid_config' | 'ignore_conflict' | 'stale_revision' | 'pending_state' | 'busy' | 'cancelled' | 'filesystem_error' | 'custody_unknown' | 'unsupported_platform';
+export interface CoreEditOutcome {
+  effect: 'not_started' | 'unchanged' | 'rolled_back' | 'committed' | 'unknown';
+  journal: 'not_created' | 'clean' | 'recovery_required' | 'unknown';
+  resources: 'settled' | 'unknown';
+  reason: CoreEditReason;
+}
+export type FixedIgnoreLine = '.mobile-release/' | '.mobile-release-init-prepare/' | '.mobile-release-init/' | '.mobile-release-init-cleanup/';
+export interface PreparedConfigView {
+  schemaVersion: 1;
+  files: [
+    { path: 'release/mobile-release.json'; action: 'create' | 'replace' | 'preserve'; beforeBytes: number | null; afterBytes: number },
+    { path: '.gitignore'; action: 'create' | 'append' | 'preserve'; beforeBytes: number | null; afterBytes: number },
+  ];
+  createReleaseDirectory: boolean;
+  rewritesConfigFormatting: boolean;
+  ignoreAdditions: FixedIgnoreLine[];
+  preview: ConfigPreview;
+}
+export interface ConfigEditProjection {
+  projectId: string;
+  sessionId: string;
+  ownerGeneration: string;
+  phase: 'opening' | 'editing' | 'preparing' | 'reviewing' | 'applying' | 'finalizing' | 'final' | 'unknown';
+  reviewRemainingMs: number;
+  checkout: { revision: string; base: JsonObject | null } | null;
+  prepared: { revision: string; planToken: string; draftRevision: number; baselineGeneration: number; view: PreparedConfigView } | null;
+  applySubmitted: boolean;
+  coreOutcome: CoreEditOutcome | null;
+  nativeReason: NativeEditReason;
+  nativeFinality: 'pending' | 'settled' | 'unknown';
+  lateSettled: boolean;
+}
+export interface ConfigEditStatus {
+  schemaVersion: 1;
+  windowGeneration: string;
+  statusRevision: number;
+  capability: { available: boolean; reason: EditAvailability };
+  active: ConfigEditProjection | null;
+  lastTerminal: ConfigEditProjection | null;
+}
+export interface PrepareConfigEditRequest {
+  sessionId: string;
+  revision: string;
+  expectedBase: JsonObject | null;
+  draft: JsonObject;
+  draftRevision: number;
+  baselineGeneration: number;
+}
+
 export interface DesktopApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
@@ -191,6 +246,13 @@ export interface DesktopApi {
   validate(draft: JsonObject): Promise<ValidationResult>;
   suggestConfig(hints: SuggestionHints): Promise<ConfigSuggestion>;
   configPreview(base: JsonObject | null, draft: JsonObject): Promise<ConfigPreview>;
+  openConfigEdit(projectId: string): Promise<ConfigEditStatus>;
+  prepareConfigEdit(request: PrepareConfigEditRequest): Promise<ConfigEditStatus>;
+  applyConfigEdit(sessionId: string, planToken: string): Promise<ConfigEditStatus>;
+  closeConfigEdit(sessionId: string): Promise<ConfigEditStatus>;
+  configEditStatus(): Promise<ConfigEditStatus>;
+  // Payloads are validated before any renderer state/authority is advanced.
+  subscribeConfigEdit(onStatus: (status: unknown) => void): Promise<() => void>;
 }
 
 export type Page = 'dashboard' | 'settings' | 'environment' | 'credentials' | 'metadata' | 'github' | 'releases' | 'artifacts' | 'recovery';

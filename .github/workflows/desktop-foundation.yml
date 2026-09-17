@@ -6,8 +6,15 @@ on:
     paths:
       - desktop/**
       - tests/desktop/**
+      - tests/native_desktop_config.py
       - src/mobile_release/api/**
       - src/mobile_release/_desktop_engine.py
+      - src/mobile_release/_desktop_edit_*.py
+      - src/mobile_release/config_edit.py
+      - src/mobile_release/config_payloads.py
+      - src/mobile_release/init_workspace_custody.py
+      - src/mobile_release/cancellation.py
+      - src/mobile_release/build_inputs.py
       - src/mobile_release/__init__.py
       - src/mobile_release/config.py
       - src/mobile_release/discovery.py
@@ -34,7 +41,7 @@ concurrency:
 
 jobs:
   passive-native:
-    name: Passive IPC / ${{ matrix.platform }}
+    name: Desktop boundary / ${{ matrix.platform }}
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -47,7 +54,7 @@ jobs:
           - platform: windows
             os: windows-2025
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
       MRK_DESKTOP_PLATFORM: ${{ matrix.platform }}
       MRK_DESKTOP_HOSTED_CHECKS: passive-v1
@@ -84,12 +91,22 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14.7'
-      - name: Select fixed frontend compiler (native shell jobs only)
-        if: matrix.platform != 'linux'
+      - name: Select fixed frontend compiler
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24.20.0'
           package-manager-cache: false
+      - name: Install Linux native shell compilation prerequisites
+        if: matrix.platform == 'linux'
+        timeout-minutes: 8
+        shell: bash
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev
+          dpkg-query -W -f='${Package} ${Version}\n' libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev
       - name: Prepare bounded synthetic inputs and source bindings
         id: prepare
         shell: bash
@@ -121,6 +138,33 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py native'
+      - name: Verify configuration IPC and original-resource settlement
+        if: matrix.platform != 'windows'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py config-owner'
+      - name: Verify original native cleanup after controlled management-task failure
+        if: matrix.platform != 'windows'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py config-task-loss'
+      - name: Verify core transactions before the last retained terminal-fault control
+        if: matrix.platform != 'windows'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py config-core'
       - name: Retain only allowlisted synthetic evidence
         if: always() && steps.prepare.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -132,6 +176,15 @@ jobs:
             ${{ steps.prepare.outputs.root }}/compile-checks.json
             ${{ steps.prepare.outputs.root }}/native-checks.json
             ${{ steps.prepare.outputs.root }}/native/receipt.json
+            ${{ steps.prepare.outputs.root }}/config-owner-checks.json
+            ${{ steps.prepare.outputs.root }}/config-owner/receipt.json
+            ${{ steps.prepare.outputs.root }}/config-task-loss-checks.json
+            ${{ steps.prepare.outputs.root }}/config-driver-loss/receipt.json
+            ${{ steps.prepare.outputs.root }}/config-watchdog-loss/receipt.json
+            ${{ steps.prepare.outputs.root }}/config-core-checks.json
+            ${{ steps.prepare.outputs.root }}/config-ordinary.json
+            ${{ steps.prepare.outputs.root }}/config-committed-fsync.json
+            ${{ steps.prepare.outputs.root }}/config-committed-close.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 1

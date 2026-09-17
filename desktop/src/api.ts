@@ -1,4 +1,5 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { bridgeMode, createNativeApi } from './bridge.ts';
 import type { DesktopApi } from './types.ts';
 
@@ -9,5 +10,6 @@ export async function desktopApi(): Promise<DesktopApi> {
     return previewApi;
   }
   const mode = bridgeMode(undefined, isTauri());
-  return createNativeApi(mode === 'native' ? 'native' : 'unavailable', invoke);
+  return createNativeApi(mode === 'native' ? 'native' : 'unavailable', invoke,
+    (event, onStatus) => listen<unknown>(event, ({ payload }) => onStatus(payload)));
 }

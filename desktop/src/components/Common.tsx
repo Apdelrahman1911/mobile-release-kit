@@ -40,13 +40,15 @@ export function HelpDialog({ content, onClose }: { content: HelpContent | null; 
   </dialog>;
 }
 
-export function ConfirmDialog({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }) {
+export function ConfirmDialog({ onCancel, onConfirm, blockedReason = null, observationPredatesSave = false }: { onCancel: () => void; onConfirm: () => void; blockedReason?: string | null; observationPredatesSave?: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   useEffect(() => { const element = dialog.current; element?.showModal(); return () => element?.close(); }, []);
   return <dialog ref={dialog} className="confirm-dialog" aria-labelledby={titleId} onCancel={onCancel}>
-    <div className="dialog-content"><h2 id={titleId}>Discard this in-memory draft?</h2><p>This project’s draft, review and retained undo copies will be discarded. Its latest static observation will become the draft and comparison baseline. That observation is not a current file revision. No files will change.</p>
-      <div className="button-row"><button autoFocus className="button secondary" onClick={onCancel}>Keep editing</button><button className="button danger" onClick={onConfirm}>Discard draft</button></div>
+    <div className="dialog-content"><h2 id={titleId}>Discard this in-memory draft?</h2><p>This project’s draft, review and retained undo copies will be discarded. Its latest static observation will become the draft and comparison baseline. That observation is not a current file revision. This action does not write files or close a native save session.</p>
+      {observationPredatesSave && <p className="review-caution">That observation predates the last settled save check. Cancel and refresh first if you want a newer observation; this action does not fetch one.</p>}
+      {blockedReason && <p className="review-caution" role="alert">{blockedReason}</p>}
+      <div className="button-row"><button autoFocus className="button secondary" onClick={onCancel}>Keep editing</button><button className="button danger" disabled={blockedReason !== null} onClick={onConfirm}>Discard draft</button></div>
     </div>
   </dialog>;
 }

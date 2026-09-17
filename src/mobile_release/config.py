@@ -442,6 +442,25 @@ def validate_config_data(data: Any) -> None:
         raise ConfigurationError("configuration contains an invalid value type") from error
 
 
+def configuration_data_equal(first: Any, second: Any) -> bool:
+    """Compare admitted JSON without object-order or bool/number coercion.
+
+    Callers apply their finite JSON bounds before this pure recursive helper.
+    File formatting/identity is a separate observation, never inferred here.
+    """
+    if type(first) is not type(second):
+        return False
+    if type(first) is dict:
+        return first.keys() == second.keys() and all(
+            configuration_data_equal(value, second[key]) for key, value in first.items()
+        )
+    if type(first) is list:
+        return len(first) == len(second) and all(
+            configuration_data_equal(a, b) for a, b in zip(first, second)
+        )
+    return first == second
+
+
 _FIELD_MISSING = object()
 
 

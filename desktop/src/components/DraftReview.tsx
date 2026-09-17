@@ -47,6 +47,6 @@ export function DraftReview({ session, catalog, onRemoveForbidden, onHelp }: Rev
     <details className="context-details"><summary>{fresh ? 'Inspect all field contexts' : 'Inspect earlier field contexts'} ({result.fields.length})</summary><ul>{result.fields.map((field) => <li key={field.path}><div className="context-detail-title"><code>{field.path}</code><Badge tone={field.state === 'forbidden' || field.state === 'unknown' ? 'warning' : 'neutral'}>{field.state}</Badge><span>{field.present ? 'Present' : 'Not set'}</span></div><p>{field.reason}</p></li>)}</ul></details>
     <div className="review-section-heading"><h3>{result.validation.valid ? 'Format-valid only' : 'Format validation needs attention'}</h3><Badge tone={result.validation.valid ? 'info' : 'danger'}>{result.validation.state}</Badge></div>
     <Issues issues={result.validation.issues} />
-    <div className="subtle-note"><Icon name="lock" size={15} />Values and commands remain draft text. No native tools, credentials, Git, Store state or release readiness were verified. Save and all mutation actions remain unavailable.</div>
+    <div className="subtle-note"><Icon name="lock" size={15} />Values and commands remain draft text. No native tools, credentials, Git, Store state or release readiness were verified. This pure review cannot authorize saving.</div>
   </section>;
 }

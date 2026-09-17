@@ -6,6 +6,7 @@ the fixed caller inventory rather than executing hosted admission on the VPS.
 from __future__ import annotations
 
 import ast
+from copy import deepcopy
 from contextlib import redirect_stdout
 import importlib.util
 import io
@@ -22,7 +23,126 @@ helper = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(helper)
 
 
+def owner_report() -> dict:
+    cases = []
+    for name, effect, journal, reason, requests, responses in (
+        ("create", "committed", "clean", "none", 3, 3),
+        ("no-op", "unchanged", "not_created", "none", 3, 3),
+        ("discard-editing", "not_started", "not_created", "discarded", 1, 2),
+    ):
+        cases.append({"name": name, "outcome": {"effect": effect, "journal": journal, "resources": "settled", "reason": "none"},
+                      "nativeReason": reason, "nativeFinality": "settled", "requestFrames": requests, "responseFrames": responses,
+                      "stdoutBytes": 4096, "stderrBytes": 0, "forceAttempted": False,
+                      **dict.fromkeys(helper.CONFIG_OWNER_FINALITY, True)})
+    return {"schemaVersion": 1, "scope": "configuration-owner-hosted-v1", "status": "passed", "allOwnersSettled": True,
+            "failureCode": None, "notVerified": list(helper.CONFIG_OWNER_NOT_VERIFIED), "cases": cases,
+            "bindings": {"sourceSha": "1" * 40, "host": "linux", "target": helper.TARGETS["linux"],
+                         "runtimeMode": "trusted-development-only", "pythonSha256": "2" * 64,
+                         "sourceHashes": dict.fromkeys(helper.CONFIG_OWNER_SOURCES, "3" * 64),
+                         "payloadHashes": dict.fromkeys(("draft", "createConfig", "createIgnore", "noOpConfig", "noOpIgnore", "unrelated"), "4" * 64)}}
+
+
+def validate_owner(report: dict) -> dict:
+    return helper.validate_config_owner_receipt(report, source_sha="1" * 40, platform="linux",
+        source_hashes=dict.fromkeys(helper.CONFIG_OWNER_SOURCES, "3" * 64), python_hash="2" * 64)
+
+
+def loss_report(kind: str) -> dict:
+    positive = owner_report()
+    case = {"name": kind, "nativePhase": "unknown", "nativeFinality": "unknown", "registryDisabled": True,
+            "editPermitClosed": True, "nativeCanExit": False, "originalResourcesSettled": True,
+            "failedTask": kind.removesuffix("-loss"), "failedJoinKind": "panic", "failedTaskHandleRetained": True,
+            "requestFrames": 1, "responseFrames": 2, "stdoutBytes": 4096, "stderrBytes": 0, "forceAttempted": False,
+            **dict.fromkeys(helper.CONFIG_OWNER_FINALITY, True)}
+    case["driverJoined" if kind == "driver-loss" else "watchdogJoined"] = False
+    return {"schemaVersion": 1, "scope": "configuration-owner-management-loss-hosted-v1", "status": "passed",
+            "failureCode": None, "bindings": positive["bindings"], "case": case, "notVerified": positive["notVerified"]}
+
+
+def validate_loss(report: dict, kind: str) -> dict:
+    return helper.validate_config_loss_receipt(report, kind, source_sha="1" * 40, platform="linux",
+        source_hashes=dict.fromkeys(helper.CONFIG_OWNER_SOURCES, "3" * 64), python_hash="2" * 64)
+
+
 class FixedCompilerHelperTests(unittest.TestCase):
+    def test_task_loss_requires_native_settlement_without_normal_management_success(self):
+        for kind in ("driver-loss", "watchdog-loss"):
+            report = loss_report(kind)
+            self.assertIs(validate_loss(report, kind), report)
+            failed_join = "driverJoined" if kind == "driver-loss" else "watchdogJoined"
+            for changes in [{field: False} for field in helper.CONFIG_OWNER_FINALITY if field != failed_join] + [
+                {failed_join: True}, {"failedJoinKind": "cancelled"}, {"failedTaskHandleRetained": False},
+                {"originalResourcesSettled": False}, {"registryDisabled": False}, {"editPermitClosed": False},
+                {"nativeCanExit": True}, {"nativePhase": "final"}, {"nativeFinality": "settled"},
+                {"requestFrames": 2}, {"responseFrames": 1}, {"stdoutBytes": 0}, {"stderrBytes": 1},
+                {"forceAttempted": True}, {"managerJoined": 1}, {"unknownReceipt": True},
+            ]:
+                failed = deepcopy(report)
+                failed["case"].update(changes)
+                with self.subTest(kind=kind, changed=changes), self.assertRaises(helper.CheckFailure):
+                    validate_loss(failed, kind)
+            for changes in ({"allOwnersSettled": True}, {"allOwnersSettled": False}, {"failureCode": "not_completed"},
+                            {"case": None}, {"status": "failed"}, {"notVerified": []}, {"schemaVersion": True}):
+                with self.subTest(kind=kind, top=changes), self.assertRaises(helper.CheckFailure):
+                    validate_loss({**report, **changes}, kind)
+            failed = deepcopy(report)
+            failed["bindings"]["sourceSha"] = "0" * 40
+            with self.assertRaises(helper.CheckFailure):
+                validate_loss(failed, kind)
+
+    def test_config_owner_original_facts_cannot_be_replaced_by_summary_success(self):
+        report = owner_report()
+        self.assertIs(validate_owner(report), report)
+        for changes in [{field: False} for field in helper.CONFIG_OWNER_FINALITY] + [
+            {"requestFrames": 4}, {"responseFrames": 4}, {"forceAttempted": True}, {"nativeFinality": "unknown"},
+            {"stderrBytes": 1}, {"stdoutBytes": 0}, {"stdoutBytes": True}, {"stdoutBytes": 12 * 1024 * 1024 + 1},
+            {"unexpectedReceipt": True},
+        ]:
+            failed = deepcopy(report)
+            failed["cases"][0].update(changes)
+            with self.subTest(changes=changes), self.assertRaises(helper.CheckFailure):
+                validate_owner(failed)
+        for changed in ({"effect": "unknown"}, {"journal": "recovery_required"}, {"resources": "unknown"},
+                        {"reason": "cancelled"}, {"reason": {"raw": "not accepted"}}):
+            failed = deepcopy(report)
+            failed["cases"][0]["outcome"].update(changed)
+            with self.subTest(outcome=changed), self.assertRaises(helper.CheckFailure):
+                validate_owner(failed)
+        report["cases"][2]["outcome"]["reason"] = "cancelled"
+        self.assertIs(validate_owner(report), report)  # Settled explicit discard, not Saved.
+
+    def test_config_owner_receipt_is_complete_source_bound_and_narrowly_scoped(self):
+        original = owner_report()
+        for changes in ({"status": "failed"}, {"allOwnersSettled": False}, {"allOwnersSettled": 1},
+                        {"schemaVersion": True}, {"failureCode": "not_completed"}, {"cases": original["cases"][:-1]},
+                        {"notVerified": []}, {"scope": "production-save-enablement"}, {"extra": True}):
+            with self.subTest(changes=changes), self.assertRaises(helper.CheckFailure):
+                validate_owner({**original, **changes})
+        for changes in ({"sourceSha": "0" * 40}, {"pythonSha256": "0" * 64}, {"sourceHashes": {}},
+                        {"host": "macos"}, {"target": helper.TARGETS["windows"]}, {"runtimeMode": "production"},
+                        {"payloadHashes": {}}):
+            failed = deepcopy(original)
+            failed["bindings"].update(changes)
+            with self.subTest(bindings=changes), self.assertRaises(helper.CheckFailure):
+                validate_owner(failed)
+        failed = deepcopy(original)
+        failed["cases"][0], failed["cases"][1] = failed["cases"][1], failed["cases"][0]
+        with self.assertRaises(helper.CheckFailure):
+            validate_owner(failed)
+
+    def test_native_config_reports_do_not_launder_retained_uncertainty(self):
+        for partition in helper.CONFIG_PARTITIONS:
+            report = {"suite": "desktop-config-native", "partition": partition, "status": "passed", "reason": "none",
+                      "completed": list(helper.CONFIG_CASES[partition]), "failedAt": None,
+                      "retained": partition != "ordinary", "uncertaintyLatched": partition == "committed-close",
+                      "injection": helper.CONFIG_INJECTIONS[partition]}
+            self.assertIs(helper.validate_config_receipt(report, partition), report)
+            for changed in ({"retained": not report["retained"]}, {"uncertaintyLatched": not report["uncertaintyLatched"]},
+                            {"status": "failed"}, {"completed": report["completed"][:-1]}, {"allOwnersSettled": True},
+                            {"injection": "genuine-os-close-failure"}):
+                with self.subTest(partition=partition, changed=changed), self.assertRaises(helper.CheckFailure):
+                    helper.validate_config_receipt({**report, **changed}, partition)
+
     def test_fixed_command_shape_capture_and_metadata_output_are_preserved(self):
         argv = ["/never-executed/tool", "private-argument-canary"]
         environment = {"PRIVATE_CANARY": "not-a-log-value"}

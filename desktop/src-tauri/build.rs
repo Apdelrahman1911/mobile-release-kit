@@ -25,9 +25,14 @@ fn main() {
     println!("cargo:rustc-env=MRK_COMPILED_TARGET={target}");
     #[cfg(feature = "desktop-shell")]
     {
-        let commands = ["app_info", "choose_project", "project_snapshot", "catalog", "validate_config", "suggest_config", "preview_config"];
+        const COMMANDS: &[&str] = &[
+            "app_info", "choose_project", "project_snapshot", "catalog",
+            "validate_config", "suggest_config", "preview_config",
+            "open_config_edit", "prepare_config_edit", "apply_config_edit",
+            "close_config_edit", "config_edit_status",
+        ];
         let attributes = tauri_build::Attributes::new()
-            .app_manifest(tauri_build::AppManifest::new().commands(&commands));
+            .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));
         if let Err(error) = tauri_build::try_build(attributes) {
             panic!("Tauri context generation failed: {error}");
         }

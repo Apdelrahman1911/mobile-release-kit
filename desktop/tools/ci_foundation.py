@@ -1,4 +1,4 @@
-"""Fixed desktop compiler/passive-IPC checks on disposable hosted runners only.
+"""Fixed desktop compiler/native boundary checks on disposable hosted runners only.
 
 Not the release-kit verification controller, a release workflow, an installer,
 or a general command runner. Never invoke this on a shared development machine.
@@ -25,6 +25,9 @@ RUST = "1.98.0"
 PYTHON = "3.14.7"
 NODE = "v24.20.0"
 NATIVE_TEST = "supervisor::hosted_tests::passive_hosted_contract"
+CONFIG_OWNER_TEST = "edit_owner::hosted_tests::hosted_config_edit_owner_original_resources"
+CONFIG_DRIVER_LOSS_TEST = "edit_owner::hosted_tests::hosted_config_driver_loss_original_resources"
+CONFIG_WATCHDOG_LOSS_TEST = "edit_owner::hosted_tests::hosted_config_watchdog_loss_original_resources"
 TARGETS = {
     "linux": "x86_64-unknown-linux-gnu",
     "macos": "aarch64-apple-darwin",
@@ -37,11 +40,68 @@ NATIVE_CASES = (
     "stdout_limit", "stderr_limit", "delay_exit", "busy-abandon", "operation-timeout",
     "shutdown-active", "controlled-startup", "controlled-io-join",
 )
+CONFIG_PARTITIONS = ("ordinary", "committed-fsync", "committed-close")
+CONFIG_CASES = {
+    "ordinary": (
+        "create", "save", "no-op", "ignore-append", "ignore-conflict", "invalid-existing",
+        "single-link-admission", "stale-config-bytes", "stale-config-inode", "stale-ignore-after-prepare",
+        "stale-release", "absent-release-appeared", "stale-root", "init-0", "init-1", "init-2",
+        "build-pending", "build-terminal", "build-stage", "init-alias", "malformed-private-mode",
+        "contention-init", "contention-build", "idle-review-unlocked", "precommit-publication-injection",
+        "legacy-public-commit", "legacy-public-rollback",
+    ),
+    "committed-fsync": ("committed-fsync-injection",),
+    "committed-close": ("committed-close-return-injection",),
+}
+CONFIG_INJECTIONS = {
+    "ordinary": "precommit-publication",
+    "committed-fsync": "postdecision-pre-fsync",
+    "committed-close": "postcommit-cancellation-and-positive-scope-close-return-loss",
+}
+CONFIG_OWNER_SOURCES = {
+    "fixture": "desktop/src-tauri/src/edit_hosted_tests.rs",
+    "owner": "desktop/src-tauri/src/edit_owner.rs",
+    "editProtocol": "desktop/src-tauri/src/edit_protocol.rs",
+    "runtime": "desktop/src-tauri/src/runtime.rs",
+    "protocol": "desktop/src-tauri/src/protocol.rs",
+    "errors": "desktop/src-tauri/src/error.rs",
+    "library": "desktop/src-tauri/src/lib.rs",
+    "build": "desktop/src-tauri/build.rs",
+    "cargoManifest": "desktop/src-tauri/Cargo.toml",
+    "cargoLock": "desktop/src-tauri/Cargo.lock",
+    "bootstrap": "desktop/config_edit_bootstrap.py",
+    "passiveBootstrap": "desktop/engine_bootstrap.py",
+    "corePackage": "src/mobile_release/__init__.py",
+    "engine": "src/mobile_release/_desktop_edit_engine.py",
+    "control": "src/mobile_release/_desktop_edit_control.py",
+    "coreProtocol": "src/mobile_release/_desktop_edit_protocol.py",
+    "configEdit": "src/mobile_release/config_edit.py",
+    "configPayloads": "src/mobile_release/config_payloads.py",
+    "config": "src/mobile_release/config.py",
+    "transaction": "src/mobile_release/init_transaction.py",
+    "rootCustody": "src/mobile_release/init_workspace_custody.py",
+    "cancellation": "src/mobile_release/cancellation.py",
+    "buildInputs": "src/mobile_release/build_inputs.py",
+    "coreErrors": "src/mobile_release/errors.py",
+    "preview": "src/mobile_release/api/_preview.py",
+    "nativeFixture": "tests/native_desktop_config.py",
+}
+CONFIG_OWNER_NOT_VERIFIED = (
+    "production-runtime-custody", "production-save-enablement", "native-gui", "window-reload-crash",
+    "parent-death", "native-stuck-wait-close", "windows-filesystem", "stores", "mobile-builds", "installers",
+)
+CONFIG_OWNER_FINALITY = (
+    "originalWait", "stdoutEof", "stderrEof", "stdinClosed", "stdoutClosed", "stderrClosed",
+    "startupJoined", "ioJoined", "driverJoined", "watchdogJoined", "managerJoined",
+)
 TOOL_CHECKS = frozenset({
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
     "node-version", "npm-locked-no-scripts", "headless-test-compile-only",
     "typescript-no-emit", "vite-assets", "tauri-debug-compile-only", "passive-native-contract",
+    "config-core-ordinary", "config-core-committed-fsync", "config-core-committed-close",
+    "config-owner-native-contract",
+    "config-driver-loss-native-contract", "config-watchdog-loss-native-contract",
 })
 
 
@@ -177,11 +237,145 @@ def native_receipt(context: dict) -> dict:
     return receipt
 
 
-def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | None = None) -> None:
+def validate_config_receipt(receipt: object, partition: str) -> dict:
+    require(partition in CONFIG_PARTITIONS and isinstance(receipt, dict), "Unexpected configuration receipt")
+    require(set(receipt) == {"suite", "partition", "status", "reason", "completed", "failedAt", "retained",
+                             "uncertaintyLatched", "injection"}, "Configuration receipt fields differ")
+    require(receipt["suite"] == "desktop-config-native" and receipt["partition"] == partition
+            and receipt["status"] == "passed" and receipt["reason"] == "none" and receipt["failedAt"] is None,
+            "Configuration fixture did not pass; preserve outputs")
+    require(isinstance(receipt["completed"], list) and tuple(receipt["completed"]) == CONFIG_CASES[partition]
+            and receipt["injection"] == CONFIG_INJECTIONS[partition], "Configuration case inventory differs")
+    require(receipt["retained"] is (partition != "ordinary")
+            and receipt["uncertaintyLatched"] is (partition == "committed-close"),
+            "Configuration fixture retention/uncertainty differs")
+    return receipt
+
+
+def config_receipt(context: dict, partition: str) -> dict:
+    require(partition in CONFIG_PARTITIONS, "Unknown configuration partition")
+    path = Path(context["root"]) / f"config-{partition}.json"
+    ordinary(path)
+    require(0 < path.stat().st_size <= 16 * 1024, "Configuration receipt exceeded its bound")
+    with path.open("rb") as stream:
+        data = stream.read(16 * 1024 + 1)
+    require(len(data) <= 16 * 1024, "Configuration receipt changed")
+    return validate_config_receipt(json.loads(data), partition)
+
+
+def validate_config_owner_bindings(bindings: object, *, source_sha: str, platform: str,
+                                    source_hashes: dict[str, str], python_hash: str) -> None:
+    require(platform in {"linux", "macos"} and isinstance(bindings, dict)
+            and set(bindings) == {"sourceSha", "host", "target", "runtimeMode", "pythonSha256", "sourceHashes", "payloadHashes"}
+            and bindings["sourceSha"] == source_sha and bindings["host"] == platform
+            and bindings["target"] == TARGETS[platform] and bindings["runtimeMode"] == "trusted-development-only"
+            and bindings["pythonSha256"] == python_hash and bindings["sourceHashes"] == source_hashes,
+            "Configuration owner source/runtime bindings differ")
+    payloads = bindings["payloadHashes"]
+    require(isinstance(payloads, dict) and set(payloads) == {"draft", "createConfig", "createIgnore", "noOpConfig", "noOpIgnore", "unrelated"}
+            and all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) for value in payloads.values()),
+            "Configuration owner payload bindings differ")
+
+
+def validate_config_owner_receipt(receipt: object, *, source_sha: str, platform: str,
+                                  source_hashes: dict[str, str], python_hash: str) -> dict:
+    require(platform in {"linux", "macos"} and isinstance(receipt, dict), "Unexpected configuration owner receipt")
+    require(set(receipt) == {"schemaVersion", "scope", "status", "allOwnersSettled", "failureCode", "bindings", "cases", "notVerified"}
+            and type(receipt["schemaVersion"]) is int and receipt["schemaVersion"] == 1
+            and receipt["scope"] == "configuration-owner-hosted-v1" and receipt["status"] == "passed"
+            and receipt["allOwnersSettled"] is True and receipt["failureCode"] is None,
+            "Configuration original ownership is unconfirmed; preserve outputs")
+    require(receipt["notVerified"] == list(CONFIG_OWNER_NOT_VERIFIED), "Configuration owner scope differs")
+    validate_config_owner_bindings(receipt["bindings"], source_sha=source_sha, platform=platform,
+                                    source_hashes=source_hashes, python_hash=python_hash)
+    cases = receipt["cases"]
+    require(isinstance(cases, list) and len(cases) == 3, "Configuration owner case inventory differs")
+    fields = {"name", "outcome", "nativeReason", "nativeFinality", "requestFrames", "responseFrames", "stdoutBytes", "stderrBytes", "forceAttempted", *CONFIG_OWNER_FINALITY}
+    for case, name, effect, journal, native_reason, requests, responses in zip(
+        cases, ("create", "no-op", "discard-editing"), ("committed", "unchanged", "not_started"),
+        ("clean", "not_created", "not_created"), ("none", "none", "discarded"), (3, 3, 1), (3, 3, 2), strict=True,
+    ):
+        require(isinstance(case, dict) and set(case) == fields and case["name"] == name
+                and case["nativeReason"] == native_reason and case["nativeFinality"] == "settled"
+                and all(case[field] is True for field in CONFIG_OWNER_FINALITY)
+                and case["forceAttempted"] is False, "Configuration original resource receipt differs")
+        require(all(type(case[field]) is int for field in ("requestFrames", "responseFrames", "stdoutBytes", "stderrBytes"))
+                and case["requestFrames"] == requests and case["responseFrames"] == responses
+                and 0 < case["stdoutBytes"] <= 12 * 1024 * 1024 and case["stderrBytes"] == 0,
+                "Configuration frame/output accounting differs")
+        outcome = case["outcome"]
+        require(isinstance(outcome, dict) and set(outcome) == {"effect", "journal", "resources", "reason"}
+                and outcome["effect"] == effect and outcome["journal"] == journal and outcome["resources"] == "settled"
+                and outcome["reason"] in (("none", "cancelled") if name == "discard-editing" else ("none",)),
+                "Configuration owner effect/finality differs")
+    return receipt
+
+
+def validate_config_loss_receipt(receipt: object, kind: str, *, source_sha: str, platform: str,
+                                 source_hashes: dict[str, str], python_hash: str) -> dict:
+    require(kind in ("driver-loss", "watchdog-loss") and isinstance(receipt, dict), "Unexpected management-loss receipt")
+    require(set(receipt) == {"schemaVersion", "scope", "status", "failureCode", "bindings", "case", "notVerified"}
+            and type(receipt["schemaVersion"]) is int and receipt["schemaVersion"] == 1
+            and receipt["scope"] == "configuration-owner-management-loss-hosted-v1"
+            and receipt["status"] == "passed" and receipt["failureCode"] is None
+            and receipt["notVerified"] == list(CONFIG_OWNER_NOT_VERIFIED), "Management-loss fixture did not pass; preserve outputs")
+    validate_config_owner_bindings(receipt["bindings"], source_sha=source_sha, platform=platform,
+                                    source_hashes=source_hashes, python_hash=python_hash)
+    case = receipt["case"]
+    fields = {"name", "nativePhase", "nativeFinality", "registryDisabled", "editPermitClosed", "nativeCanExit",
+              "originalResourcesSettled", "failedTask", "failedJoinKind", "failedTaskHandleRetained",
+              "requestFrames", "responseFrames", "stdoutBytes", "stderrBytes", "forceAttempted", *CONFIG_OWNER_FINALITY}
+    require(isinstance(case, dict) and set(case) == fields and case["name"] == kind
+            and case["nativePhase"] == "unknown" and case["nativeFinality"] == "unknown"
+            and case["registryDisabled"] is True and case["editPermitClosed"] is True and case["nativeCanExit"] is False
+            and case["originalResourcesSettled"] is True and case["failedTask"] == kind.removesuffix("-loss")
+            and case["failedJoinKind"] == "panic" and case["failedTaskHandleRetained"] is True
+            and case["forceAttempted"] is False, "Management uncertainty or original native settlement differs")
+    # Only the injected management task lacks a normal return. Its actual panic
+    # JoinError remains retained; every independent resource-bearing task joined.
+    require(case["driverJoined"] is (kind != "driver-loss") and case["watchdogJoined"] is (kind != "watchdog-loss")
+            and all(case[field] is True for field in CONFIG_OWNER_FINALITY if field not in {"driverJoined", "watchdogJoined"}),
+            "Management-loss original task receipts differ")
+    require(all(type(case[field]) is int for field in ("requestFrames", "responseFrames", "stdoutBytes", "stderrBytes"))
+            and case["requestFrames"] == 1 and case["responseFrames"] == 2
+            and 0 < case["stdoutBytes"] <= 12 * 1024 * 1024 and case["stderrBytes"] == 0,
+            "Management-loss original frame accounting differs")
+    return receipt
+
+
+def config_owner_receipt(context: dict) -> dict:
+    path = Path(context["root"]) / "config-owner/receipt.json"
+    ordinary(path)
+    require(0 < path.stat().st_size <= 64 * 1024, "Configuration owner receipt exceeded its bound")
+    with path.open("rb") as stream:
+        data = stream.read(64 * 1024 + 1)
+    require(len(data) <= 64 * 1024, "Configuration owner receipt changed")
+    source = Path(context["source"])
+    return validate_config_owner_receipt(json.loads(data), source_sha=context["sourceSha"], platform=context["platform"],
+        source_hashes={name: hash_file(source / relative) for name, relative in CONFIG_OWNER_SOURCES.items()},
+        python_hash=hash_file(Path(context["python"])))
+
+
+def config_loss_receipt(context: dict, kind: str) -> dict:
+    require(kind in ("driver-loss", "watchdog-loss"), "Unknown management-loss partition")
+    path = Path(context["root"]) / ("config-" + kind) / "receipt.json"
+    ordinary(path)
+    require(0 < path.stat().st_size <= 64 * 1024, "Management-loss receipt exceeded its bound")
+    with path.open("rb") as stream:
+        data = stream.read(64 * 1024 + 1)
+    require(len(data) <= 64 * 1024, "Management-loss receipt changed")
+    source = Path(context["source"])
+    return validate_config_loss_receipt(json.loads(data), kind, source_sha=context["sourceSha"], platform=context["platform"],
+        source_hashes={name: hash_file(source / relative) for name, relative in CONFIG_OWNER_SOURCES.items()},
+        python_hash=hash_file(Path(context["python"])))
+
+
+def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | None = None,
+                  scope: str = "passive-development-foundation-only") -> None:
     # Only called after the fixed phase and final source check actually succeed.
     # Missing files on failed/skipped phases cannot become passing evidence.
     write_json(Path(context["root"]) / f"{name}-checks.json", {
-        "schemaVersion": 1, "scope": "passive-development-foundation-only", "phase": name,
+        "schemaVersion": 1, "scope": scope, "phase": name,
         "status": "passed", "sourceSha": context["sourceSha"], "platform": context["platform"],
         "rust": {"release": RUST, "target": TARGETS[context["platform"]]}, "node": node,
         "checks": [{"check": check, "exitCode": 0} for check in checks],
@@ -202,7 +396,8 @@ def prepare(platform: str) -> None:
         require(not (ancestor / ".npmrc").exists(), "Ambient npm project configuration is not admitted")
     root = Path(tempfile.mkdtemp(prefix="mrk-desktop-foundation-", dir=temp))
     no_cargo_configuration((root,))
-    for name in ("home", "cargo", "rustup", "tmp", "target", "native", "appdata", "localappdata", "npm-cache"):
+    for name in ("home", "cargo", "rustup", "tmp", "target", "native", "config-owner", "config-driver-loss", "config-watchdog-loss",
+                 "appdata", "localappdata", "npm-cache"):
         (root / name).mkdir(mode=0o700)
     for name in ("npmrc-user", "npmrc-global", "gitconfig-empty"):
         (root / name).touch(mode=0o600, exist_ok=False)
@@ -248,7 +443,11 @@ def prepare(platform: str) -> None:
         "bootstrapSha256": hash_file(source / "desktop/engine_bootstrap.py"),
         "cargoLockSha256": hash_file(source / "desktop/src-tauri/Cargo.lock"),
         "npmLockSha256": hash_file(source / "desktop/package-lock.json"),
-        "notQualified": ["production-runtime", "native-GUI", "Windows-filesystem", "installers", "release-operations"],
+        "configBootstrapSha256": hash_file(source / "desktop/config_edit_bootstrap.py"),
+        "configFixtureSha256": hash_file(source / "tests/native_desktop_config.py"),
+        "configOwnerFixtureSha256": hash_file(source / "desktop/src-tauri/src/edit_hosted_tests.rs"),
+        "notQualified": ["production-runtime", "native-GUI", "native-document-lifecycle", "configuration-saving",
+                         "Windows-filesystem", "installers", "release-operations"],
     })
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
         output.write(f"root={root}\n")
@@ -289,6 +488,9 @@ def phase(name: str, platform: str) -> None:
     context = load_context(platform)
     root, source = Path(context["root"]), Path(context["source"])
     environment = clean_environment(root)
+    # The owner fixture binds its compiled source to this exact event commit.
+    # Compile and test must use the same value; no None/ambient/latest fallback.
+    environment["GITHUB_SHA"] = context["sourceSha"]
     manifest = source / "desktop/src-tauri/Cargo.toml"
     source_unchanged(context)
     no_cargo_configuration((root, *root.parents))
@@ -296,29 +498,27 @@ def phase(name: str, platform: str) -> None:
         run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
             check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
         cargo, _ = tools(context, environment)
-        features = "development-runtime" if platform == "linux" else "desktop-shell,development-runtime"
+        features = "desktop-shell,development-runtime"
         # Metadata filters acquisition to this platform and active feature graph.
         with (root / "metadata.json").open("x", encoding="utf-8") as output:
             run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
                  "--features", features, "--filter-platform", TARGETS[platform],
                  "--manifest-path", str(manifest)], check="locked-platform-metadata", cwd=root,
                 env=environment, timeout=600, output=output)
-        observed_node = None
-        if platform != "linux":
-            node = shutil.which("node")
-            require(node is not None, "Selected Node unavailable")
-            observed_node = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=15, capture=True)
-            require(observed_node == NODE, "Selected Node version differs")
-            npm = (Path(node).parent / "node_modules/npm/bin/npm-cli.js" if platform == "windows" else
-                   Path(node).parent.parent / "lib/node_modules/npm/bin/npm-cli.js")
-            ordinary(npm)
-            run([node, "--max-old-space-size=768", str(npm), "ci", "--ignore-scripts", "--no-audit", "--no-fund",
-                 "--userconfig", str(root / "npmrc-user"), "--globalconfig", str(root / "npmrc-global"),
-                 "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/"],
-                check="npm-locked-no-scripts", cwd=source / "desktop", env=environment, timeout=300)
+        node = shutil.which("node")
+        require(node is not None, "Selected Node unavailable")
+        observed_node = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=15, capture=True)
+        require(observed_node == NODE, "Selected Node version differs")
+        npm = (Path(node).parent / "node_modules/npm/bin/npm-cli.js" if platform == "windows" else
+               Path(node).parent.parent / "lib/node_modules/npm/bin/npm-cli.js")
+        ordinary(npm)
+        run([node, "--max-old-space-size=768", str(npm), "ci", "--ignore-scripts", "--no-audit", "--no-fund",
+             "--userconfig", str(root / "npmrc-user"), "--globalconfig", str(root / "npmrc-global"),
+             "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/"],
+            check="npm-locked-no-scripts", cwd=source / "desktop", env=environment, timeout=300)
         source_unchanged(context)
         phase_receipt(context, name, ["rust-toolchain-install", "rust-version-target", "locked-platform-metadata"]
-                      + (["node-version", "npm-locked-no-scripts"] if platform != "linux" else []), node=observed_node)
+                      + ["node-version", "npm-locked-no-scripts"], node=observed_node)
         return
     cargo, _ = tools(context, environment)
     common = ["--locked", "--offline", "--jobs", "1", "--no-default-features",
@@ -326,24 +526,21 @@ def phase(name: str, platform: str) -> None:
     if name == "compile":
         run([cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"],
             check="headless-test-compile-only", cwd=root, env=environment, timeout=600)
-        observed_node = None
-        if platform != "linux":
-            node = shutil.which("node")
-            require(node is not None, "Node unavailable after setup")
-            observed_node = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=15, capture=True)
-            require(observed_node == NODE, "Selected Node version changed")
-            desktop = source / "desktop"
-            run([node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"],
-                check="typescript-no-emit", cwd=desktop, env=environment, timeout=60)
-            run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
-                 str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
-                check="vite-assets", cwd=desktop, env=environment, timeout=90)
-            run([cargo, "build", *common, "--features", "desktop-shell,development-runtime",
-                 "--bin", "mobile-release-kit-desktop"], check="tauri-debug-compile-only", cwd=root, env=environment, timeout=1500)
+        node = shutil.which("node")
+        require(node is not None, "Node unavailable after setup")
+        observed_node = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=15, capture=True)
+        require(observed_node == NODE, "Selected Node version changed")
+        desktop = source / "desktop"
+        run([node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"],
+            check="typescript-no-emit", cwd=desktop, env=environment, timeout=60)
+        run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
+             str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
+            check="vite-assets", cwd=desktop, env=environment, timeout=90)
+        run([cargo, "build", *common, "--features", "desktop-shell,development-runtime",
+             "--bin", "mobile-release-kit-desktop"], check="tauri-debug-compile-only", cwd=root, env=environment, timeout=1500)
         source_unchanged(context)
         phase_receipt(context, name, ["rust-version-target", "headless-test-compile-only"]
-                      + (["node-version", "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"]
-                         if platform != "linux" else []), node=observed_node)
+                      + ["node-version", "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"], node=observed_node)
     elif name == "native":
         environment.update(MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
                            MRK_DESKTOP_TEST_ROOT=str(root / "native"), MRK_DESKTOP_TEST_CORE_ZIP=str(root / "core.zip"),
@@ -354,9 +551,82 @@ def phase(name: str, platform: str) -> None:
         source_unchanged(context)
         native_receipt(context)
         phase_receipt(context, name, ["rust-version-target", NATIVE_TEST, "native-receipt-acceptance"])
+    elif name == "config-owner":
+        require(platform in {"linux", "macos"}, "POSIX configuration fixtures are not Windows support")
+        native_receipt(context)
+        environment.update(MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
+                           MRK_DESKTOP_EDIT_TEST_ROOT=str(root / "config-owner"),
+                           MRK_DESKTOP_EDIT_HOSTED_CHECKS="configuration-v1", MRK_DESKTOP_EDIT_SOURCE_SHA=context["sourceSha"],
+                           GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+                           RUNNER_OS="Linux" if platform == "linux" else "macOS",
+                           RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
+        run([cargo, "test", *common, "--lib", "--features", "development-runtime", CONFIG_OWNER_TEST,
+             "--", "--exact", "--ignored", "--test-threads=1"], check="config-owner-native-contract", cwd=root, env=environment, timeout=180)
+        source_unchanged(context)
+        config_owner_receipt(context)
+        phase_receipt(context, name, [CONFIG_OWNER_TEST, "configuration-original-resource-receipt-acceptance"],
+                      scope="configuration-owner-native-only-not-desktop-enablement")
+    elif name == "config-task-loss":
+        require(platform in {"linux", "macos"}, "POSIX configuration fixtures are not Windows support")
+        native_receipt(context)
+        config_owner_receipt(context)
+        environment.update(MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
+                           MRK_DESKTOP_EDIT_HOSTED_CHECKS="configuration-v1", MRK_DESKTOP_EDIT_SOURCE_SHA=context["sourceSha"],
+                           GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+                           RUNNER_OS="Linux" if platform == "linux" else "macOS",
+                           RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
+        environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "config-driver-loss")
+        run([cargo, "test", *common, "--lib", "--features", "development-runtime", CONFIG_DRIVER_LOSS_TEST,
+             "--", "--exact", "--ignored", "--test-threads=1"], check="config-driver-loss-native-contract", cwd=root, env=environment, timeout=90)
+        config_loss_receipt(context, "driver-loss")
+        # The original prior subprocess has exited/waited and its underlying
+        # native resources are proved settled. Its management Unknown/root is
+        # retained; the next process receives a different exclusive fixture root.
+        environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "config-watchdog-loss")
+        run([cargo, "test", *common, "--lib", "--features", "development-runtime", CONFIG_WATCHDOG_LOSS_TEST,
+             "--", "--exact", "--ignored", "--test-threads=1"], check="config-watchdog-loss-native-contract", cwd=root, env=environment, timeout=90)
+        config_loss_receipt(context, "watchdog-loss")
+        source_unchanged(context)
+        phase_receipt(context, name, [CONFIG_DRIVER_LOSS_TEST, CONFIG_WATCHDOG_LOSS_TEST, "native-resources-settled-management-unknown"],
+                      scope="controlled-management-loss-only-not-normal-owner-settlement")
+    elif name == "config-core":
+        require(platform in {"linux", "macos"}, "POSIX configuration fixtures are not Windows support")
+        native_receipt(context)
+        config_owner_receipt(context)
+        config_loss_receipt(context, "driver-loss")
+        config_loss_receipt(context, "watchdog-loss")
+        environment.update(MRK_DESKTOP_CONFIG_NATIVE="1", GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+                           RUNNER_OS="Linux" if platform == "linux" else "macOS",
+                           RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
+        fixture = [context["python"], "-I", "-S", "-B", str(source / "tests/native_desktop_config.py"),
+                   "--task-root", str(root), "--case"]
+        # Each return includes the original interpreter's wait. Validate its
+        # complete positive settlement contract before admitting the next one.
+        with (root / "config-ordinary.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "ordinary"], check="config-core-ordinary", cwd=root, env=environment, timeout=90, output=output)
+        config_receipt(context, "ordinary")
+        with (root / "config-committed-fsync.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "committed-fsync"], check="config-core-committed-fsync", cwd=root, env=environment, timeout=45, output=output)
+        config_receipt(context, "committed-fsync")
+        with (root / "config-committed-close.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "committed-close"], check="config-core-committed-close", cwd=root, env=environment, timeout=45, output=output)
+        config_receipt(context, "committed-close")
+        # This last control deliberately retains uncertainty. No further native
+        # fixture/owner is started, and no retaining root is adopted for cleanup.
+        source_unchanged(context)
+        phase_receipt(context, name, ["config-core-ordinary", "config-core-committed-fsync", "config-core-committed-close"],
+                      scope="configuration-core-native-only-not-desktop-enablement")
     else:
         require(name == "clean", "Unknown fixed phase")
         native_receipt(context)
+        retained = False
+        if platform in {"linux", "macos"}:
+            config_owner_receipt(context)
+            config_loss_receipt(context, "driver-loss")
+            config_loss_receipt(context, "watchdog-loss")
+            for partition in CONFIG_PARTITIONS:
+                config_receipt(context, partition)
+            retained = True  # Management-loss roots stay retained even after proved native settlement.
         # Only fresh outputs whose absence prepare() required. No dependency or
         # file outside this exact job root/fresh checkout is selected for removal.
         for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/gen"):
@@ -364,13 +634,20 @@ def phase(name: str, platform: str) -> None:
             require(not output.is_symlink(), "Generated output became a link")
             if output.exists():
                 shutil.rmtree(output)
-        shutil.rmtree(root)
-        print("Removed settled task-owned compiler, dependency and fixture outputs.")
+        if retained:
+            for name in ("cargo", "rustup", "target", "npm-cache", "tmp", "home", "appdata", "localappdata"):
+                output = root / name
+                require(output.is_dir() and not output.is_symlink(), "Task-owned compiler directory differs")
+                shutil.rmtree(output)
+            print("Removed settled compiler/dependency outputs; retained fixture journals/uncertainty for hosted VM disposal.")
+        else:
+            shutil.rmtree(root)
+            print("Removed settled task-owned compiler, dependency and fixture outputs.")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("prepare", "acquire", "compile", "native", "clean"))
+    parser.add_argument("phase", choices=("prepare", "acquire", "compile", "native", "config-owner", "config-task-loss", "config-core", "clean"))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)
