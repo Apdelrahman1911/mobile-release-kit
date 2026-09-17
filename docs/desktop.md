@@ -36,10 +36,21 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 | Environment | Static capability and missing-feature explanations | Running the full doctor, SDK version probes or native admission |
 | Credentials, metadata, releases, artifacts, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
 
-Windows can use portable catalog/validation and pure suggestion/preview services. Its safe snapshot reader
-and native Android ownership backend require a separate Win32 handle/Job Object
-implementation; a POSIX fallback or `pathlib` check-before-open is not sufficient.
-Native Windows build support remains required before product completion.
+Windows can use the portable passive services. Its original-parent static reader
+is staged in source but **disabled pending independent ABI/native W1–W6
+qualification**. The initial target is native x64 Windows on ordinary local NTFS:
+bounded ordinary or verbatim drive paths, exact long-name/case observations,
+accessible non-reparse directories and single-link files. Unsupported roots,
+case-sensitive directories, sharing conflicts or insufficient access refuse;
+there is no POSIX, full-path or weaker-sharing fallback.
+
+Acquisition uses documented `NtCreateFile`, one captured volume root, then one
+component relative to each retained original parent with `OBJ_DONT_REPARSE`.
+Name/metadata equality only vetoes admission; share-read-only does not prevent
+attribute-only reparse/case changes. Partial results remain non-atomic static
+observations, not ACL ownership or selection-to-request custody. Windows native
+build/process ownership, configuration Save and packaged-runtime custody are
+separate closed gates; this reader does not implement or enable them.
 
 The UI distinguishes *configured*, *format-valid*, *observed hint*, *unknown*,
 *partial*, *stale*, *unavailable*, *native-verified*, and *service-verified*.

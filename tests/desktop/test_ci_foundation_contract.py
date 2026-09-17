@@ -10,8 +10,12 @@ from copy import deepcopy
 from contextlib import redirect_stdout
 import importlib.util
 import io
+import hashlib
+import json
 from pathlib import Path
+import stat
 import subprocess
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -620,6 +624,327 @@ class FixedCompilerHelperTests(unittest.TestCase):
         constants = [item.value for item in install.args[0].elts if isinstance(item, ast.Constant)]
         self.assertEqual(constants, ["toolchain", "install", "--profile", "minimal", "--no-self-update"])
         self.assertTrue(any(isinstance(item, ast.Name) and item.id == "RUST" for item in install.args[0].elts))
+
+
+def windows_test_checks(name: str) -> dict:
+    """Synthetic consumer data only; these values are never native evidence."""
+    yes = lambda fields: dict.fromkeys(fields.split(), True)
+    if name in {"ordinary-source", "ordinary-zip"}:
+        return {**yes("genuineCore configExact androidExact iosExact versionNotDisclosed"), "unicodeOpens": 1,
+                "spelling": "verbatim" if name.endswith("zip") else "ordinary"}
+    if name in {"reparse-root", "reparse-ancestor"}:
+        return {"junctionTag": 0xA0000003, "unsafeControlMatched": True, "rootRefused": True, "reparseRestored": 1}
+    if name in {"short-alias", "case-alias"}:
+        return {**yes("aliasObserved spellingDiffers sameObject"), "aliasAcquired": 1, "aliasReadBytes": 0}
+    if name in {"unc", "device", "ads"}:
+        return {"readerFfiEntries": 0, "readerInstances": 0, "unsafePathRefused": True}
+    if name in {"root-reparse-race", "config-reparse-race", "walk-reparse-race"}:
+        return {**yes("parentIdSame mutationSucceeded originalRelativeEntry entryBeforeDeadline unsafeControlMatched "
+                      "sharingWriteDenied sharingDeleteDenied reparseRestored"), "mutationAccess": 256, "mutationTag": 0xA0000003,
+                "outsideAcquired": 0, "outsideReadBytes": 0, "preparatoryDeletes": int(name.startswith("walk"))}
+    if name in {"disappear", "config-disappear"}:
+        return yes("entryObserved actualMissingReturn changedIssue missingNotTrusted")
+    return {
+        "closed-gate": {},
+        "link-children": {"fileSymlinkTag": 0xA000000C, "directorySymlinkTag": 0xA000000C, "junctionTag": 0xA0000003,
+                          "hardlinkCount": 2, "hardlinkIdMatch": True, "excludedReparses": 3, "hardlinkReadBytes": 0, "restoredLinks": 4},
+        "case-collision": {"enabledFlags": 1, "distinctIds": True, "collisionFiles": 2, "collisionDirectoryBatches": 0, "caseRestored": True},
+        "subst-drive": {**yes("aliasInitiallyAbsent localNonSystemToken subtreeMappingObserved mappingRemoved"), "rootOpens": 0},
+        "case-mode-race": {**yes("parentIdSame originalRelativeEntry entryBeforeDeadline missingNotTrusted caseRestored"),
+                           "mutationAccess": 256, "enabledFlags": 1},
+        "acl-type": {**yes("fileAccessDenied directoryAccessDenied accessibleSiblingRead configDirectoryRefused"), "daclRestored": 2},
+        "read-eof-size": {**yes("emptyEof invalidUtf8Refused shortFinalRead multichunkEof exactLimitEof"),
+                          "oversizeReadBytes": 0, "largestRequest": 65536, "largestReturn": 65536},
+        "entry-limit": {"returnedRecords": 10000, "chargedEntries": 10000, "overBudgetChildOpens": 0, "entryLimitIssue": True},
+        "candidate-limit": {"chargedCandidates": 128, "refusedExtraCandidate": True, "sourceFileLimitIssue": True},
+        "aggregate-limit": {"chargedBytes": 8388608, "extraByteRead": 0, "capNotEof": True, "byteLimitIssue": True},
+        "depth-path-limit": {"deepestAdmitted": 12, "depth13Opens": 0, "oversizedPathOpens": 0, **yes("depthIssue pathIssue siblingRead")},
+        "replace": {**yes("entryObserved originalIdDiffers changedIssue"), "replacementReadBytes": 0},
+        "ending-metadata-case": yes("genuineFileEof writeMetadataChanged fileChangeVeto genuineDirectoryEof caseFlagsChanged "
+                                    "directoryCaseVeto attributesRestored"),
+        "drive-map-change": {**yes("aliasInitiallyAbsent localNonSystemToken initialVolumeMapping endingSubtreeMapping changedIssue mappingRemoved"),
+                             "laterProjectOpens": 0},
+        "oplock-release": yes("grantPending originalReaderEntered breakSignalled completionKnown blockedBeforeRelease holderCloseReturned "
+                              "observerJoined eventCloseReturned originalReaderReturned"),
+        "oplock-withhold": {**yes("grantPending originalReaderEntered breakSignalled completionKnown originalProcessStopped"),
+                            "readerReturnedBeforeStop": False, "holderReleasedBeforeStop": False},
+        "pending-failstop": {"originalParentHeld": True, "realFsctlEntry": True, "afterCallMarker": False, "originalExitCode": 70},
+    }[name]
+
+
+def windows_report() -> dict:
+    """Never serialized to disk, run as a fixture, or reported as native success."""
+    sdk = {"version": "10.0.26100.0", "headers": [{"path": path, "size": 1, "sha256": "2" * 64}
+                                                  for path in helper.WINDOWS_SDK_HEADERS]}
+    bindings = {"sourceSha": "1" * 40, "sourceTree": "2" * 40, "target": "x86_64-pc-windows-msvc",
+                "pythonVersion": "3.14.7", "rustVersion": "1.98.0", "runId": "123", "attempt": "1", "job": "windows-snapshot",
+                "image": "synthetic-not-a-run", "architecture": "X64", "coreZipSha256": "3" * 64, "coreInventorySha256": "4" * 64,
+                "sources": [{"path": path, "sha256": "5" * 64, "size": 1} for path in helper.WINDOWS_SNAPSHOT_SOURCES],
+                "pythonSha256": "6" * 64, "compiledTestSha256": "7" * 64, "compileInvocationSha256": "8" * 64, "sdk": sdk}
+    report = {"schemaVersion": 1, "scope": "windows-static-snapshot-native-v1", "status": "passed", "failureCode": None,
+              "bindings": bindings, "groups": [], "allOwnersSettled": True, "allFixtureResourcesSettled": True,
+              "allFixturesRestored": True, "cleanupDisposition": "proven-settled", "notVerified": list(helper.WINDOWS_SNAPSHOT_NOT_VERIFIED)}
+    errors = {"closed-gate": "platform_unavailable", "reparse-root": "unsafe_path", "reparse-ancestor": "unsafe_path",
+              "root-reparse-race": "unsafe_path", "short-alias": "unsafe_path", "case-alias": "unsafe_path",
+              "subst-drive": "snapshot_unavailable", "unc": "unsafe_path", "device": "unsafe_path", "ads": "unsafe_path",
+              "oplock-withhold": "query_timeout", "pending-failstop": "engine_failed"}
+    required = {"entry-limit": ["snapshot.entry-limit"], "candidate-limit": ["snapshot.file-limit"],
+                "aggregate-limit": ["snapshot.byte-limit"], "depth-path-limit": ["snapshot.depth-limit", "snapshot.path-limit"],
+                "read-eof-size": ["snapshot.encoding", "snapshot.file-size"]}
+    unavailable = {"config-reparse-race", "case-mode-race", "acl-type", "config-disappear", "drive-map-change"}
+    for group_id, names in helper.WINDOWS_SNAPSHOT_GROUPS:
+        group = {"id": group_id, "controls": []}
+        report["groups"].append(group)
+        for name in names:
+            abnormal, uninstrumented = name in {"oplock-withhold", "pending-failstop"}, name == "closed-gate"
+            positive = name in {"ordinary-source", "ordinary-zip", "oplock-release"}
+            error = errors.get(name)
+            result = {"return": "error" if error else "ok", "code": error, "configState": None if error else
+                      "unavailable" if name in unavailable else "format-valid", "partial": None if error else not positive,
+                      "scan": None if error else {"entries": 10, "sourceFiles": 3, "sourceBytes": 100, "excludedEntries": 0},
+                      "issueCodes": [] if error or positive else required.get(name, ["snapshot.changed"]),
+                      "dtoSha256": None if error else "a" * 64}
+            original = {"id": "query-1", **dict.fromkeys(helper.WINDOWS_ORIGINAL_FLAGS, True), "waitExitCode": 70 if name == "pending-failstop"
+                        else 1 if abnormal else 0, "exitSuccess": not abnormal, "stdoutBytes": 0 if abnormal else 1000, "stderrBytes": 0,
+                        "unknownLatched": False, "disabled": False, "errorCode": error}
+            reader = {"state": "uninstrumented" if uninstrumented else "prefix" if abnormal else "complete",
+                      "calls": [] if uninstrumented else [{"api": api, "entered": 0, "returned": 0, "completed": 0, "errors": 0}
+                                                          for api in helper.WINDOWS_READER_APIS],
+                      **dict.fromkeys(helper.WINDOWS_READER_COUNTERS, None if uninstrumented else 0),
+                      "eventSha256": None if uninstrumented else "b" * 64,
+                      "closeDisposition": "uninstrumented" if uninstrumented else "not-observed-after-abnormal-exit" if abnormal else "returned-once"}
+            if not uninstrumented and name not in {"unc", "device", "ads"}:
+                # Internally possible counter data, not a measured native run.
+                completed = {"GetCurrentProcess": 1, "IsWow64Process2": 1, "QueryDosDeviceW": 1}
+                if name != "subst-drive":
+                    completed.update(NtCreateFile=2, GetHandleInformation=2, GetFileType=1,
+                                     GetFileInformationByHandleEx=6, GetVolumeInformationByHandleW=1,
+                                     GetFinalPathNameByHandleW=1, ReadFile=2, CloseHandle=0 if abnormal else 2)
+                    reader.update(acquired=2, closeAttempts=0 if abnormal else 2, closeSucceeded=0 if abnormal else 2,
+                                  live=2 if abnormal else 0, maxLive=2, maxBufferBytes=65536,
+                                  rootOpens=1, relativeOpens=1, metadataChecks=1, identitiesMatched=1,
+                                  readCalls=2, readBytes=1, readEof=1, directoryCalls=2, directoryRecords=1, directoryEof=1)
+                for call in reader["calls"]:
+                    count = completed.get(call["api"], 0)
+                    call.update(entered=count, returned=count, completed=count,
+                                errors=1 if call["api"] == "GetFileInformationByHandleEx" and name != "subst-drive" else 0)
+                    if abnormal and call["api"] == ("NtCreateFile" if name == "oplock-withhold" else "DeviceIoControl"):
+                        call["entered"] += 1
+                if name == "oplock-withhold":
+                    reader["relativeOpens"] += 1
+                reader["eventCount"] = sum(call["completed"] for call in reader["calls"]) + reader["acquired"]
+            fixture = {"state": "uninstrumented" if uninstrumented else "prefix" if abnormal else "complete",
+                       **dict.fromkeys(helper.WINDOWS_FIXTURE_COUNTERS, None if uninstrumented else 0),
+                       "pending": "completed" if name in {"oplock-release", "oplock-withhold"} else "retained" if abnormal else "none",
+                       "thread": "joined" if name == "oplock-release" else "not-observed" if name == "oplock-withhold" else "none",
+                       "event": "retained" if abnormal else "closed" if name == "oplock-release" else "none",
+                       "restored": None if abnormal or uninstrumented else True,
+                       "resourcesSettledBy": "uninstrumented" if uninstrumented else "original-process" if abnormal else "returned-closes",
+                       "data": None if uninstrumented else {"entries": 6, "bytes": 100, "maxDepth": 3, "manifestSha256": "c" * 64,
+                            "after": {"entries": 6, "bytes": 100, "maxDepth": 3, "inventorySha256": "c" * 64}},
+                       "profile": None if uninstrumented else {"pointerBytes": 8, "processMachine": 0, "nativeMachine": 34404,
+                           "filesystem": "NTFS", "pythonSha256": bindings["pythonSha256"], "ctypesSha256": "d" * 64,
+                           "dlls": [{"name": dll, "sha256": "e" * 64, "size": 1} for dll in ("kernel32.dll", "ntdll.dll", "advapi32.dll")],
+                           "layoutSha256": "f" * 64, "sdkSha256": hashlib.sha256(helper.canonical_json(sdk)).hexdigest()},
+                       "checks": windows_test_checks(name)}
+            if not uninstrumented:
+                fixture.update(acquired=2, closeAttempts=0 if abnormal else 2, closeSucceeded=0 if abnormal else 2,
+                               live=2 if abnormal else 0, maxLive=2, maxArenaBytes=128)
+            charged = {"entry-limit": ("entries", "chargedEntries"), "candidate-limit": ("sourceFiles", "chargedCandidates"),
+                       "aggregate-limit": ("sourceBytes", "chargedBytes")}.get(name)
+            if charged:
+                result["scan"][charged[0]] = fixture["checks"][charged[1]]
+                fixture["data"].update(entries=10003 if name == "entry-limit" else 300,
+                                       bytes=8388708 if name == "aggregate-limit" else 1000)
+                fixture["data"]["after"].update(entries=fixture["data"]["entries"], bytes=fixture["data"]["bytes"])
+            evidence = {"closed-gate": "uninstrumented-public-refusal", "oplock-withhold": "original-process-oplock-stop",
+                        "pending-failstop": "instrumented-pending-classifier-exit"}.get(name, "native-static-reader")
+            group["controls"].append({"id": name, "coreMode": "zip" if name == "ordinary-zip" else "source",
+                "bootstrapMode": "ordinary" if uninstrumented else "windows-snapshot", "evidenceKind": evidence, "result": result,
+                "reader": reader, "fixture": fixture, "original": original, "elapsedMs": 10, "failureCode": None})
+    return report
+
+
+class WindowsConsumerTests(unittest.TestCase):
+    def test_closed_receipt_requires_complete_ordered_native_scope_and_exact_bindings(self):
+        report = windows_report()
+        validate = lambda value: helper.validate_windows_snapshot_receipt(value, bindings=report["bindings"])
+        with patch.object(helper, "run", side_effect=AssertionError("pure consumer called a tool")), \
+             patch.object(helper, "hash_file", side_effect=AssertionError("pure consumer read a native input")):
+            self.assertIs(validate(report), report)
+        self.assertEqual(tuple(len(group["controls"]) for group in report["groups"]), (3, 10, 4, 6, 5, 3))
+        self.assertEqual(sum(len(group["controls"]) for group in report["groups"]), 31)
+        for change in ({"schemaVersion": True}, {"status": "failed"}, {"status": "failed-retained"}, {"failureCode": "timeout"},
+                       {"scope": "passive-hosted-v2"}, {"allOwnersSettled": 1}, {"allFixtureResourcesSettled": False},
+                       {"allFixturesRestored": False}, {"cleanupDisposition": "retain"}, {"notVerified": []}, {"extra": True}):
+            with self.subTest(change=change), self.assertRaises(helper.CheckFailure):
+                validate({**report, **change})
+        for inventory in (report["groups"][:-1], report["groups"][::-1], [*report["groups"], report["groups"][-1]]):
+            with self.subTest(groups=len(inventory)), self.assertRaises(helper.CheckFailure):
+                validate({**report, "groups": inventory})
+        for group_index, group in enumerate(report["groups"]):
+            for change in (group["controls"][:-1], group["controls"][::-1], [*group["controls"], group["controls"][-1]]):
+                bad = deepcopy(report); bad["groups"][group_index]["controls"] = change
+                with self.subTest(group=group["id"]), self.assertRaises(helper.CheckFailure): validate(bad)
+        for field in report["bindings"]:
+            bad = deepcopy(report); bad["bindings"].pop(field)
+            with self.subTest(binding=field), self.assertRaises(helper.CheckFailure): validate(bad)
+
+    def test_each_native_predicate_rejects_mutation_extra_fields_and_bool_count_aliases(self):
+        for group in windows_report()["groups"]:
+            for control in group["controls"]:
+                name, checks = control["id"], control["fixture"]["checks"]
+                helper.validate_windows_checks(name, checks)
+                with self.subTest(name=name, extra=True), self.assertRaises(helper.CheckFailure):
+                    helper.validate_windows_checks(name, {**checks, "passed": True})
+                for field, value in checks.items():
+                    changed = not value if type(value) is bool else True if type(value) is int else "unrelated"
+                    with self.subTest(name=name, field=field), self.assertRaises(helper.CheckFailure):
+                        helper.validate_windows_checks(name, {**checks, field: changed})
+        for name in ("root-reparse-race", "config-reparse-race", "walk-reparse-race"):
+            for change in ({"mutationAccess": 0x40000000}, {"outsideAcquired": 1}, {"outsideReadBytes": 1}):
+                with self.subTest(name=name, change=change), self.assertRaises(helper.CheckFailure):
+                    helper.validate_windows_checks(name, {**windows_test_checks(name), **change})
+
+    def test_original_returns_unknown_and_inprocess_cleanup_cannot_be_fabricated(self):
+        report = windows_report()
+        for group in report["groups"]:
+            for control in group["controls"]:
+                name, original = control["id"], control["original"]
+                for field in helper.WINDOWS_ORIGINAL_FLAGS:
+                    for value in (False, 1):
+                        with self.subTest(name=name, field=field, value=value), self.assertRaises(helper.CheckFailure):
+                            helper.validate_windows_original(name, {**original, field: value}, control["result"]["code"])
+                for change in ({"unknownLatched": True}, {"disabled": True}, {"waitExitCode": True}, {"errorCode": "wrong"}):
+                    with self.subTest(name=name, change=change), self.assertRaises(helper.CheckFailure):
+                        helper.validate_windows_original(name, {**original, **change}, control["result"]["code"])
+        for control in report["groups"][-1]["controls"][1:]:
+            for change in ({"resourcesSettledBy": "returned-closes"}, {"restored": True}, {"event": "closed"}, {"thread": "joined"},
+                           {"acquired": 0, "live": 0, "maxLive": 0, "maxArenaBytes": 0}, {"live": 1}, {"maxArenaBytes": 35},
+                           {"closeFailed": 1}):
+                with self.subTest(name=control["id"], change=change), self.assertRaises(helper.CheckFailure):
+                    helper.validate_windows_fixture(control["id"], {**control["fixture"], **change}, report["bindings"])
+            for after in (None, {}, {"entries": 12001, "bytes": 1, "maxDepth": 1, "inventorySha256": "c" * 64},
+                          {"entries": 3, "bytes": 33554433, "maxDepth": 1, "inventorySha256": "c" * 64},
+                          {"entries": 2, "bytes": 1, "maxDepth": 1, "inventorySha256": "c" * 64}):
+                changed = deepcopy(control["fixture"]); changed["data"]["after"] = after
+                with self.subTest(name=control["id"], payload_after=after), self.assertRaises(helper.CheckFailure):
+                    helper.validate_windows_fixture(control["id"], changed, report["bindings"])
+            changed = deepcopy(control["fixture"]); changed["data"]["entries"] = 2
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_windows_fixture(control["id"], changed, report["bindings"])
+            for change in ({"live": 0}, {"relativeOpens": 0}, {"identitiesMatched": 0}, {"closeFailed": 1}):
+                with self.subTest(name=control["id"], reader_prefix=change), self.assertRaises(helper.CheckFailure):
+                    helper.validate_windows_reader(control["id"], {**control["reader"], **change})
+            changed = deepcopy(control["reader"])
+            pending_api = "NtCreateFile" if control["id"] == "oplock-withhold" else "DeviceIoControl"
+            for call in changed["calls"]:
+                if call["api"] == pending_api:
+                    call["returned"] = call["completed"] = call["entered"]
+            with self.subTest(name=control["id"], unmatched_entry=False), self.assertRaises(helper.CheckFailure):
+                helper.validate_windows_reader(control["id"], changed)
+        ordinary = report["groups"][0]["controls"][0]
+        for change in ({"closeFailed": 1}, {"live": 1}, {"outsideReads": 1}, {"outsideAcquired": 1},
+                       {"maxBufferBytes": 65537}, {"readBytes": 8388609}, {"closeDisposition": "not-observed-after-abnormal-exit"},
+                       {"acquired": 0, "closeAttempts": 0, "closeSucceeded": 0, "maxLive": 0}, {"readCalls": 0},
+                       {"directoryCalls": 0}, {"metadataChecks": 0}, {"eventCount": 0}):
+            with self.subTest(reader=change), self.assertRaises(helper.CheckFailure):
+                helper.validate_windows_reader("ordinary-source", {**ordinary["reader"], **change})
+        for api in ("NtCreateFile", "CloseHandle", "ReadFile", "GetFileInformationByHandleEx"):
+            changed = deepcopy(ordinary["reader"])
+            for call in changed["calls"]:
+                if call["api"] == api:
+                    call.update(entered=0, returned=0, completed=0, errors=0)
+            with self.subTest(missing_api=api), self.assertRaises(helper.CheckFailure):
+                helper.validate_windows_reader("ordinary-source", changed)
+        uninstrumented = report["groups"][0]["controls"][2]
+        with self.assertRaises(helper.CheckFailure):
+            helper.validate_windows_reader("closed-gate", {**uninstrumented["reader"], "acquired": 0})
+
+    def test_outcomes_and_actual_issue_codes_are_case_specific(self):
+        for group in windows_report()["groups"]:
+            for control in group["controls"]:
+                name, result = control["id"], control["result"]
+                with self.subTest(name=name), self.assertRaises(helper.CheckFailure):
+                    helper.validate_windows_result(name, {**result, "code": "unrelated_transport_failure"})
+                if result["partial"] is True:
+                    with self.subTest(name=name, partial=False), self.assertRaises(helper.CheckFailure):
+                        helper.validate_windows_result(name, {**result, "partial": False})
+                if name in {"entry-limit", "candidate-limit", "aggregate-limit", "depth-path-limit", "read-eof-size"}:
+                    with self.subTest(name=name, wrong_issue=True), self.assertRaises(helper.CheckFailure):
+                        helper.validate_windows_result(name, {**result, "issueCodes": ["snapshot.changed"]})
+        for name, field in (("entry-limit", "entries"), ("candidate-limit", "sourceFiles"), ("aggregate-limit", "sourceBytes")):
+            report = windows_report()
+            control = next(control for group in report["groups"] for control in group["controls"] if control["id"] == name)
+            control["result"]["scan"][field] -= 1
+            with self.subTest(name=name, contradictory_charge=True), self.assertRaises(helper.CheckFailure):
+                helper.validate_windows_snapshot_receipt(report, bindings=report["bindings"])
+
+    def test_json_duplicate_truncation_overflow_depth_and_nonfinite_inputs_refuse(self):
+        self.assertEqual(helper.bounded_json(b'{"fixed":1}\n', 32), {"fixed": 1})
+        for raw in (b'{"x":1,"x":2}', b'{"x":NaN}', b'{"x":Infinity}', b'{"x":1.0}', b'{}{}', b'\xff',
+                    b'{' + b' ' * 40, b'[' * 18 + b'0' + b']' * 18):
+            with self.subTest(raw=raw), self.assertRaises(helper.CheckFailure): helper.bounded_json(raw, 40)
+
+    def test_push_dispatch_scopes_are_disjoint_and_sha_bound_without_host_execution(self):
+        env = {"MRK_DESKTOP_HOSTED_CHECKS": "windows-snapshot-v1", "RUNNER_OS": "Windows", "RUNNER_ARCH": "X64",
+               "GITHUB_SHA": "1" * 40, "GITHUB_EVENT_NAME": "push", "GITHUB_REF": "refs/heads/verify/desktop-windows-snapshot"}
+        with patch.dict(helper.os.environ, env, clear=True): self.assertEqual(helper.admitted_scope("windows"), "windows-snapshot-v1")
+        for change in ({"GITHUB_REF": "refs/heads/feature/desktop-application"}, {"GITHUB_EVENT_NAME": "pull_request"},
+                       {"RUNNER_ARCH": "ARM64"}, {"GITHUB_SHA": "latest"}, {"MRK_DESKTOP_HOSTED_CHECKS": "passive-v1"}):
+            with self.subTest(change=change), patch.dict(helper.os.environ, {**env, **change}, clear=True), self.assertRaises(helper.CheckFailure):
+                helper.admitted_scope("windows")
+        manual = {**env, "GITHUB_EVENT_NAME": "workflow_dispatch", "MRK_DESKTOP_DISPATCH_SCOPE": "windows-snapshot",
+                  "MRK_DESKTOP_EXPECTED_SHA": "1" * 40}
+        with patch.dict(helper.os.environ, manual, clear=True): self.assertEqual(helper.admitted_scope("windows"), "windows-snapshot-v1")
+        for change in ({"MRK_DESKTOP_EXPECTED_SHA": "2" * 40}, {"MRK_DESKTOP_DISPATCH_SCOPE": "foundation"}):
+            with patch.dict(helper.os.environ, {**manual, **change}, clear=True), self.assertRaises(helper.CheckFailure):
+                helper.admitted_scope("windows")
+        with patch.dict(helper.os.environ, env, clear=True), self.assertRaises(helper.CheckFailure): helper.admitted_scope("linux")
+        tree = ast.parse(HELPER.read_text(encoding="utf-8"))
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "run" and any(keyword.arg == "check" and isinstance(keyword.value, ast.Constant)
+                     and keyword.value.value == "windows-snapshot-native-contract" for keyword in node.keywords)]
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertEqual(next(keyword.value.value for keyword in call.keywords if keyword.arg == "timeout"), 300)
+        self.assertEqual([item.value for item in call.args[0].elts if isinstance(item, ast.Constant)],
+                         ["test", "--lib", "--features", "development-runtime", "--", "--exact", "--ignored", "--test-threads=1"])
+        self.assertEqual(helper.WINDOWS_SNAPSHOT_PHASES, {"prepare", "acquire", "compile", "windows-snapshot", "clean"})
+
+    def test_original_cargo_output_selects_one_libtest_without_binary_scan_or_execution(self):
+        anchor = Path(Path.cwd().anchor)
+        target = anchor / "not-created" / "target"
+        artifact = {"reason": "compiler-artifact", "executable": str(target / "a.exe"),
+                    "target": {"name": "mobile_release_desktop", "kind": ["lib"]}, "profile": {"test": True},
+                    "features": ["development-runtime"]}
+        done = {"reason": "build-finished", "success": True}
+        encode = lambda values: b"\n".join(json.dumps(value).encode() for value in values)
+        with patch.object(helper, "run", side_effect=AssertionError("parser executed a tool")), \
+             patch.object(helper, "hash_file", side_effect=AssertionError("parser read an executable")):
+            self.assertEqual(helper.compiled_windows_test(encode([artifact, done]), target_root=target), target / "a.exe")
+            for values in ([done], [artifact], [artifact, artifact, done], [artifact, {**done, "success": False}],
+                           [{**artifact, "features": ["desktop-shell", "development-runtime"]}, done],
+                           [{**artifact, "executable": str(anchor / "outside" / "a.exe")}, done],
+                           [{**artifact, "target": {"name": "other", "kind": ["bin"]}}, done]):
+                with self.subTest(values=values), self.assertRaises(helper.CheckFailure):
+                    helper.compiled_windows_test(encode(values), target_root=target)
+            for path in (str(target / ".." / "outside.exe"), str(target) + "/./a.exe", str(target / "a.exe:alternate.exe"),
+                         str(target / "a.exe") + "\0", "relative.exe", {}, 1, True):
+                with self.subTest(path=path), self.assertRaises(helper.CheckFailure):
+                    helper.compiled_windows_test(encode([{**artifact, "executable": path}, done]), target_root=target)
+        normal = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_file_attributes=0)
+        redirected = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_file_attributes=0x400)
+        # Mocked metadata only: the check never creates a link/directory/file.
+        for observations in ([redirected], [normal, redirected]):
+            with patch.object(helper.Path, "lstat", side_effect=observations), patch.object(helper, "ordinary") as leaf:
+                with self.assertRaises(helper.CheckFailure):
+                    helper.ordinary_windows_executable(str(target / "debug" / "a.exe"), target_root=target)
+                leaf.assert_not_called()
+        with patch.object(helper.Path, "lstat", side_effect=[normal, normal]), patch.object(helper, "ordinary") as leaf:
+            self.assertEqual(helper.ordinary_windows_executable(str(target / "debug" / "a.exe"), target_root=target),
+                             target / "debug" / "a.exe")
+            leaf.assert_called_once_with(target / "debug" / "a.exe")
 
 
 if __name__ == "__main__":

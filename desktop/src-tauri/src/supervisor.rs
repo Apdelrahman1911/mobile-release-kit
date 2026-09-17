@@ -509,10 +509,15 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let endpoint = owner.endpoint();
     #[cfg(all(test, feature = "development-runtime"))]
     let inspection_gate = inner.test.inspection.clone();
+    #[cfg(all(windows, test, feature = "development-runtime"))]
+    let windows_bootstrap = lock(&inner.test.windows_bootstrap).clone();
     resources.inspection = Some(tokio::task::spawn_blocking(move || {
         #[cfg(all(test, feature = "development-runtime"))]
         inspection_gate.wait();
-        config.resolve(endpoint)
+        let runtime = config.resolve(endpoint)?;
+        #[cfg(all(windows, test, feature = "development-runtime"))]
+        let runtime = hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?;
+        Ok(runtime)
     }));
     let inspected = join_slot(&mut resources.inspection).await;
     #[cfg(all(test, feature = "development-runtime"))]
@@ -584,7 +589,11 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             match child.try_wait() {
                 Ok(Some(status)) => {
                     #[cfg(all(test, feature = "development-runtime"))]
-                    { let mut observed = lock(&owner.observation); observed.waited = true; observed.exit_success = Some(status.success()); }
+                    {
+                        let mut observed = lock(&owner.observation); observed.waited = true; observed.exit_success = Some(status.success());
+                        #[cfg(windows)]
+                        { observed.windows_exit_code = status.code(); }
+                    }
                     resources.waited = Some(status);
                 }
                 Ok(None) => { if child.start_kill().is_err() { owner.fail(BridgeError::cleanup_unknown()); } }
@@ -610,7 +619,11 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         match event {
             Event::Wait(Ok(status)) => {
                 #[cfg(all(test, feature = "development-runtime"))]
-                { let mut observed = lock(&owner.observation); observed.waited = true; observed.exit_success = Some(status.success()); }
+                {
+                    let mut observed = lock(&owner.observation); observed.waited = true; observed.exit_success = Some(status.success());
+                    #[cfg(windows)]
+                    { observed.windows_exit_code = status.code(); }
+                }
                 if !status.success() { owner.fail(BridgeError::new("engine_failed", "The isolated core exited unsuccessfully.")); }
                 resources.waited = Some(status);
             }

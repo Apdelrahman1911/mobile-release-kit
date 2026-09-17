@@ -2,12 +2,13 @@ name: Desktop foundation verification
 
 on:
   push:
-    branches: [feature/desktop-application]
+    branches: [feature/desktop-application, verify/desktop-windows-snapshot]
     paths:
       - desktop/**
       - tests/desktop/**
       - tests/native_desktop_config.py
       - tests/native_desktop_config_eof.py
+      - tests/native_desktop_snapshot_windows.py
       - src/mobile_release/api/**
       - src/mobile_release/_desktop_engine.py
       - src/mobile_release/_desktop_edit_*.py
@@ -22,6 +23,7 @@ on:
       - src/mobile_release/config.py
       - src/mobile_release/discovery.py
       - src/mobile_release/credential_requirements.py
+      - src/mobile_release/credential_policy.py
       - src/mobile_release/errors.py
       - src/mobile_release/init_transaction.py
       - src/mobile_release/metadata.py
@@ -30,6 +32,12 @@ on:
       - .github/workflows/desktop-foundation.yml
   workflow_dispatch:
     inputs:
+      scope:
+        description: Fixed verification scope (no release or Store operation)
+        required: true
+        type: choice
+        default: foundation
+        options: [foundation, windows-snapshot]
       expected_sha:
         description: Exact reviewed commit on the selected ref (verification only)
         required: true
@@ -45,6 +53,9 @@ concurrency:
 jobs:
   passive-native:
     name: Desktop boundary / ${{ matrix.platform }}
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/feature/desktop-application') ||
+      (github.event_name == 'workflow_dispatch' && inputs.scope == 'foundation')
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -61,6 +72,8 @@ jobs:
     env:
       MRK_DESKTOP_PLATFORM: ${{ matrix.platform }}
       MRK_DESKTOP_HOSTED_CHECKS: passive-v1
+      MRK_DESKTOP_DISPATCH_SCOPE: ${{ inputs.scope }}
+      MRK_DESKTOP_EXPECTED_SHA: ${{ inputs.expected_sha }}
       NODE_DISABLE_COMPILE_CACHE: '1'
     steps:
       - name: Require disposable hosting and exact-source selection
@@ -216,6 +229,101 @@ jobs:
           retention-days: 14
           compression-level: 1
       - name: Remove settled task-owned disposable outputs
+        if: success()
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py clean'
+
+  windows-snapshot:
+    name: Windows static snapshot / original native boundaries
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-windows-snapshot') ||
+      (github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-snapshot')
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      MRK_DESKTOP_PLATFORM: windows
+      MRK_DESKTOP_HOSTED_CHECKS: windows-snapshot-v1
+      MRK_DESKTOP_DISPATCH_SCOPE: ${{ inputs.scope }}
+      MRK_DESKTOP_EXPECTED_SHA: ${{ inputs.expected_sha }}
+    steps:
+      - name: Require the reviewed Windows-only source and disposable host
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Windows && "$RUNNER_ARCH" == X64 ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$MRK_DESKTOP_DISPATCH_SCOPE" == windows-snapshot ]]
+            [[ "$MRK_DESKTOP_EXPECTED_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_DESKTOP_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-windows-snapshot ]]
+          fi
+      - name: Check out exact candidate without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select fixed native Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Prepare bounded synthetic Windows inputs and source bindings
+        id: prepare
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py prepare'
+      - name: Acquire only locked headless Windows compiler inputs
+        timeout-minutes: 15
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
+      - name: Compile only the original-owner headless tests
+        timeout-minutes: 15
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
+      - name: Verify the fixed Windows snapshot controls with original ownership
+        timeout-minutes: 6
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-snapshot'
+      - name: Retain only bounded synthetic Windows evidence
+        if: always() && steps.prepare.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-windows-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.prepare.outputs.root }}/public-bindings.json
+            ${{ steps.prepare.outputs.root }}/acquire-checks.json
+            ${{ steps.prepare.outputs.root }}/compile-checks.json
+            ${{ steps.prepare.outputs.root }}/windows-snapshot-checks.json
+            ${{ steps.prepare.outputs.root }}/windows-snapshot/receipt.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+      - name: Remove only proven-settled task-owned disposable outputs
         if: success()
         shell: bash
         env:

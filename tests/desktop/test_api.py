@@ -221,6 +221,7 @@ class ApiPureTests(unittest.TestCase):
 
     def test_windows_refuses_snapshot_without_any_filesystem_attempt(self):
         with patch.object(sys, "platform", "win32"), \
+             patch.object(snapshot, "_WINDOWS_SNAPSHOT_QUALIFIED", False), \
              patch.object(os, "open", side_effect=AssertionError("filesystem open")):
             caps = execute("capabilities", {})
             self.assertEqual(caps["hostPlatform"], "windows")
@@ -289,7 +290,7 @@ class ApiPureTests(unittest.TestCase):
         self.assertNotIsInstance(caught.exception, OSError)
 
 
-@unittest.skipUnless(snapshot.snapshot_available(), "Requires the static POSIX ordinary-file reader; not Windows evidence")
+@unittest.skipUnless(snapshot.posix_snapshot_available(), "Requires the static POSIX ordinary-file reader; not Windows evidence")
 class InertSnapshotTests(unittest.TestCase):
     def test_static_snapshot_never_executes_and_labels_unknown_freshness(self):
         with tempfile.TemporaryDirectory(prefix="mrk-desktop-api-") as temporary:

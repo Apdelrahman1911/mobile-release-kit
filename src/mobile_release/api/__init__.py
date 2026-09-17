@@ -38,7 +38,7 @@ def capabilities() -> CapabilitiesResult:
         "hostPlatform": host, "mode": "read-only-foundation",
         "methods": [
             {"method": name, "available": name != "project.snapshot" or snapshot_available(),
-             "reason": ("Requires the reviewed POSIX static reader; Windows filesystem snapshots are unavailable."
+             "reason": ("Static snapshots are unavailable on this profile; the staged Windows reader awaits independent ABI/native qualification."
                         if name == "project.snapshot" and not snapshot_available()
                         else "Implemented passive API; no native, signing or Store verification.")}
             for name in METHODS
@@ -50,7 +50,8 @@ def capabilities() -> CapabilitiesResult:
             "Static hints and format-valid configuration do not establish release readiness.",
             "No configuration is saved and no project, Git or native tool is executed.",
             "No credential values, Store services, release evidence or recovery journals are inspected.",
-            "Windows static filesystem reads and native release execution remain unavailable pending reviewed backends.",
+            "The staged Windows original-parent snapshot reader remains disabled pending independent ABI/native W1-W6 qualification.",
+            "Windows build/process ownership, configuration writes and packaged-runtime custody have separate closed gates.",
             "A native desktop bridge and packaged standalone runtime require their own verification.",
         ],
     }

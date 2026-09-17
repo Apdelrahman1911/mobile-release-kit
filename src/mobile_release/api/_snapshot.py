@@ -1,9 +1,9 @@
-"""Finite passive project observations through retained POSIX directory handles.
+"""Finite passive observations and shared policy/DTO assembly.
 
 Only the selected root is admitted. No repository inference, project execution,
 credential probing or arbitrary file-content export occurs here. Independent
-reads are NOT an atomic snapshot or hostile-same-user containment. Windows is
-deliberately unavailable until a separate handle/reparse implementation is reviewed.
+reads are NOT an atomic snapshot or hostile-same-user containment. The staged
+original-parent Windows reader remains disabled pending independent qualification.
 """
 from __future__ import annotations
 
@@ -54,9 +54,11 @@ _EXCLUDED = {name.casefold() for name in IGNORED_PARTS} | {
     "private", "secrets", "credentials",
 }
 _SOURCE_NAMES = {"build.gradle", "build.gradle.kts", "project.pbxproj", "project.yml"}
+# Source presence is not ABI/native evidence. No environment/request opt-in.
+_WINDOWS_SNAPSHOT_QUALIFIED = False
 
 
-def snapshot_available() -> bool:
+def posix_snapshot_available() -> bool:
     return (
         (sys.platform.startswith("linux") or sys.platform == "darwin")
         and os.name == "posix"
@@ -64,6 +66,15 @@ def snapshot_available() -> bool:
         and os.open in os.supports_dir_fd and os.stat in os.supports_dir_fd
         and os.scandir in os.supports_fd
     )
+
+
+def windows_snapshot_available() -> bool:
+    # Capability discovery never imports ctypes, probes a DLL or opens a path.
+    return _WINDOWS_SNAPSHOT_QUALIFIED and sys.platform == "win32" and os.name == "nt"
+
+
+def snapshot_available() -> bool:
+    return posix_snapshot_available() or windows_snapshot_available()
 
 
 def _safe_component(name: str) -> bool:
@@ -424,8 +435,11 @@ def _bound_hints(value: object, inventory: _Inventory) -> object:
 
 
 def project_snapshot(root: object, config_path: object = "release/mobile-release.json") -> SnapshotResult:
-    if not snapshot_available():
-        raise ApiError("platform_unavailable", "Static filesystem snapshots require the reviewed POSIX reader; Windows is not yet supported")
+    if windows_snapshot_available():
+        from ._snapshot_windows import project_snapshot as windows_snapshot
+        return windows_snapshot(root, config_path)
+    if not posix_snapshot_available():
+        raise ApiError("platform_unavailable", "Static filesystem snapshots are unavailable on this profile; the staged Windows reader is not qualified")
     selected_root = validate_root(root)
     selected_config = validate_config_path(config_path)
     observed_at = datetime.now(timezone.utc).isoformat()
@@ -433,6 +447,11 @@ def project_snapshot(root: object, config_path: object = "release/mobile-release
     with _root_handles(selected_root, inventory) as descriptor:
         config = _config(descriptor, selected_config, inventory)
         _walk(descriptor, (), inventory, selected_config)
+    return _assemble_snapshot(selected_root, observed_at, inventory, config)
+
+
+def _assemble_snapshot(selected_root: str, observed_at: str, inventory: _Inventory,
+                       config: ConfigObservation) -> SnapshotResult:
     try:
         hints = parse_project_sources(inventory.sources, inventory.directories)
         bounded = _bound_hints(hints, inventory)
