@@ -16,6 +16,7 @@ import copy
 import importlib
 import json
 import os
+import stat
 import struct
 import sys
 import unittest
@@ -278,6 +279,135 @@ def _shim(error: int = 0, **functions) -> native.Native:
 
 
 class WindowsSnapshotPureTests(unittest.TestCase):
+    def test_fixture_ordinary_bytes_reads_observed_size_and_preserves_custody(self):
+        source = (Path(__file__).resolve().parents[1] / "native_desktop_snapshot_windows.py").read_bytes()
+        self.assertLessEqual(len(source), 128 * 1024)
+        parsed = ast.parse(source, filename="reviewed-fixture-sized-read-source")
+        selected = [node for node in parsed.body if getattr(node, "name", None) == "ordinary_bytes"]
+        self.assertEqual(len(selected), 1)
+        definition = selected[0]
+        self.assertIs(type(definition), ast.FunctionDef)
+        self.assertFalse(definition.decorator_list or definition.type_comment or getattr(definition, "type_params", []))
+        self.assertEqual([arg.arg for arg in definition.args.args], ["path", "limit"])
+        self.assertEqual([arg.arg for arg in definition.args.kwonlyargs], ["single_link"])
+        self.assertFalse(definition.args.posonlyargs or definition.args.vararg or definition.args.kwarg or definition.args.defaults)
+        self.assertEqual([ast.literal_eval(value) for value in definition.args.kw_defaults], [True])
+        self.assertEqual([arg.annotation.id for arg in (*definition.args.args, *definition.args.kwonlyargs)], ["Path", "int", "bool"])
+        self.assertEqual(definition.returns.id, "bytes")
+        allowed_nodes = (ast.FunctionDef, ast.arguments, ast.arg, ast.Assign, ast.Expr, ast.With, ast.withitem,
+                         ast.Return, ast.Call, ast.Name, ast.Attribute, ast.Constant, ast.Load, ast.Store,
+                         ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare, ast.operator, ast.unaryop,
+                         ast.boolop, ast.cmpop)
+        calls = {("path", "lstat"), ("path", "open"), ("stream", "read"),
+                 ("stream", "fileno"), ("os", "fstat"), ("stat", "S_ISREG")}
+        for node in ast.walk(definition):
+            self.assertIsInstance(node, allowed_nodes)
+            if isinstance(node, ast.Name):
+                self.assertFalse(node.id.startswith("__"))
+            if isinstance(node, ast.Attribute):
+                self.assertIsInstance(node.value, ast.Name)
+                self.assertIn((node.value.id, node.attr), calls | {
+                    (who, field) for who in ("before", "after")
+                    for field in ("st_mode", "st_nlink", "st_size", "st_ino", "st_mtime_ns")})
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    self.assertIn(node.func.id, ("require", "getattr", "len"))
+                else:
+                    self.assertIsInstance(node.func, ast.Attribute)
+                    self.assertIn((node.func.value.id, node.func.attr), calls)
+
+        class Refused(Exception):
+            pass
+
+        class Injected(Exception):
+            pass
+
+        def require(ok, reason):
+            if not ok:
+                raise Refused(reason)
+
+        namespace = {"__builtins__": {"getattr": getattr, "len": len, "int": int, "bool": bool, "bytes": bytes},
+                     "Path": object, "require": require, "stat": SimpleNamespace(S_ISREG=stat.S_ISREG)}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-fixture-sized-read-fake-capabilities",
+                     "exec", dont_inherit=True), namespace)
+
+        def exercise(*, size=1, data=b"x", limit=8 * 1024 * 1024, before=None, after=None,
+                     single_link=True, failure=None, refusal=None):
+            events = []
+            original = {"st_mode": stat.S_IFREG | 0o600, "st_nlink": 1, "st_size": size,
+                        "st_ino": 41, "st_mtime_ns": 1234, "st_file_attributes": 0}
+            original.update(before or {})
+            final = {**original, **(after or {})}
+
+            class Stream:
+                def __enter__(self):
+                    events.append(("enter",))
+                    return self
+
+                def __exit__(self, *_error):
+                    events.append(("close",))
+                    if failure == "close":
+                        raise Injected("close")
+                    return False
+
+                def read(self, count):
+                    events.append(("read", count))
+                    if failure == "read":
+                        raise Injected("read")
+                    return data[:count]
+
+                def fileno(self):
+                    events.append(("fileno",))
+                    return 23
+
+            stream = Stream()
+
+            class FakePath:
+                def lstat(self):
+                    events.append(("lstat",))
+                    return SimpleNamespace(**original)
+
+                def open(self, mode):
+                    events.append(("open", mode))
+                    return stream
+
+            def fstat(fd):
+                events.append(("fstat", fd))
+                if failure == "fstat":
+                    raise Injected("fstat")
+                return SimpleNamespace(**final)
+
+            namespace["os"] = SimpleNamespace(fstat=fstat)
+            if refusal or failure:
+                with self.assertRaisesRegex(Refused if refusal else Injected, refusal or failure):
+                    namespace["ordinary_bytes"](FakePath(), limit, single_link=single_link)
+            else:
+                self.assertEqual(namespace["ordinary_bytes"](FakePath(), limit, single_link=single_link), data)
+            expected = [("lstat",)]
+            if refusal != "ordinary_data_required":
+                expected += [("open", "rb"), ("enter",), ("read", original["st_size"] + 1)]
+                if failure != "read":
+                    expected += [("fileno",), ("fstat", 23)]
+                expected += [("close",)]
+            self.assertEqual(events, expected)
+
+        for options in ({"size": 0, "data": b""}, {}, {"size": 8, "data": b"abcdefgh", "limit": 8},
+                        {"single_link": False, "before": {"st_nlink": 2}}):
+            with self.subTest(positive=options):
+                exercise(**options)
+        for original in ({"st_size": -2}, {"st_size": -1}, {"st_size": 8 * 1024 * 1024 + 1},
+                         {"st_mode": stat.S_IFDIR | 0o700}, {"st_file_attributes": 0x400}, {"st_nlink": 2}):
+            with self.subTest(unsafe=original):
+                exercise(before=original, refusal="ordinary_data_required")
+        for options in ({"data": b"xy"}, {"data": b""}, {"size": 0, "data": b"x"},
+                        {"size": 8, "data": b"abcdefghi", "limit": 8},
+                        {"after": {"st_size": 2}}, {"after": {"st_ino": 42}}, {"after": {"st_mtime_ns": 1235}}):
+            with self.subTest(changed=options):
+                exercise(**options, refusal="data_input_changed")
+        for failure in ("read", "fstat", "close"):
+            with self.subTest(failure=failure):
+                exercise(failure=failure)
+
     def _dacl_reducers(self):
         signatures = {"_dacl_policy": ("data",), "_dacl_comparison": ("saved", "observed", "role"),
                       "_dacl_comparison_valid": ("value",), "_installed_deny_data_dacl": ("data",),

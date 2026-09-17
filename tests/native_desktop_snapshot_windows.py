@@ -443,9 +443,9 @@ def strict(data: bytes, limit: int) -> dict | list:
 def ordinary_bytes(path: Path, limit: int, *, single_link: bool = True) -> bytes:
     before = path.lstat()
     require(stat.S_ISREG(before.st_mode) and not getattr(before, "st_file_attributes", 0) & 0x400
-            and (not single_link or before.st_nlink == 1) and before.st_size <= limit, "ordinary_data_required")
+            and (not single_link or before.st_nlink == 1) and 0 <= before.st_size <= limit, "ordinary_data_required")
     with path.open("rb") as stream:
-        data = stream.read(limit + 1)
+        data = stream.read(before.st_size + 1)
         after = os.fstat(stream.fileno())
     require(len(data) == before.st_size == after.st_size and before.st_ino == after.st_ino
             and before.st_mtime_ns == after.st_mtime_ns, "data_input_changed")
