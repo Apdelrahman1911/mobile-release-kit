@@ -554,7 +554,7 @@ mod owned_gtk {
             }
         });
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        topology::tag(&parent, &call);
+        topology::tag(parent.upcast_ref(), &call);
         if owner.interrupted() { call.changed(); return; }
         if let Some(mut facts) = call.facts() { facts.showing = true; }
         DIALOG.with(|book| { if let Some(entry) = book.borrow().as_ref().filter(|entry| entry.id == owner.id) { entry.object.show(); } });
