@@ -1362,8 +1362,7 @@ mod windows_snapshot {
             "walk-reparse-race" => builder.file("project/walk-parent/build.gradle", b"// enumerated original placeholder\n")?,
             "acl-type" => {
                 builder.directory("project/release/mobile-release.json")?;
-                builder.file("project/read-denied/build.gradle", b"// denied file control\n")?;
-                builder.file("project/list-denied/build.gradle", b"// denied directory control\n")?;
+                builder.directory("project/read-denied")?; // Both denied leaves start absent.
                 builder.file("project/sibling/build.gradle", b"// accessible sibling\n")?;
             },
             "read-eof-size" => {
@@ -1733,7 +1732,7 @@ mod windows_snapshot {
             "unc" | "device" | "ads" => "unsafePathRefused",
             "root-reparse-race" | "config-reparse-race" | "walk-reparse-race" => "parentIdSame mutationSucceeded originalRelativeEntry entryBeforeDeadline unsafeControlMatched sharingWriteDenied sharingDeleteDenied reparseRestored",
             "case-mode-race" => "parentIdSame originalRelativeEntry entryBeforeDeadline missingNotTrusted caseRestored",
-            "acl-type" => "fileAccessDenied directoryAccessDenied accessibleSiblingRead configDirectoryRefused",
+            "acl-type" => "fileAccessDenied directoryAccessDenied accessibleSiblingRead configDirectoryRefused initialAbsenceRestored",
             "read-eof-size" => "emptyEof invalidUtf8Refused shortFinalRead multichunkEof exactLimitEof",
             "entry-limit" => "entryLimitIssue", "candidate-limit" => "refusedExtraCandidate sourceFileLimitIssue",
             "aggregate-limit" => "capNotEof byteLimitIssue", "depth-path-limit" => "depthIssue pathIssue siblingRead",
@@ -1764,7 +1763,8 @@ mod windows_snapshot {
                 equal("outsideReadBytes", json!(0)); equal("preparatoryDeletes", json!(if name == "walk-reparse-race" {1} else {0}));
             },
             "case-mode-race" => { equal("mutationAccess", json!(256)); equal("enabledFlags", json!(1)); },
-            "acl-type" => equal("daclRestored", json!(2)), "read-eof-size" => equal("oversizeReadBytes", json!(0)),
+            "acl-type" => { equal("denialPoliciesConfirmed", json!(2)); equal("createdObjectsRemoved", json!(2)); },
+            "read-eof-size" => equal("oversizeReadBytes", json!(0)),
             "entry-limit" => { equal("chargedEntries", json!(10000)); equal("overBudgetChildOpens", json!(0)); },
             "candidate-limit" => equal("chargedCandidates", json!(128)), "aggregate-limit" => equal("extraByteRead", json!(0)),
             "depth-path-limit" => { equal("depth13Opens", json!(0)); equal("oversizedPathOpens", json!(0)); },

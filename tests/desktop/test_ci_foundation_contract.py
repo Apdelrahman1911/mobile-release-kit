@@ -652,7 +652,8 @@ def windows_test_checks(name: str) -> dict:
         "subst-drive": {**yes("aliasInitiallyAbsent localNonSystemToken subtreeMappingObserved mappingRemoved"), "rootOpens": 0},
         "case-mode-race": {**yes("parentIdSame originalRelativeEntry entryBeforeDeadline missingNotTrusted caseRestored"),
                            "mutationAccess": 256, "enabledFlags": 1},
-        "acl-type": {**yes("fileAccessDenied directoryAccessDenied accessibleSiblingRead configDirectoryRefused"), "daclRestored": 2},
+        "acl-type": {**yes("fileAccessDenied directoryAccessDenied accessibleSiblingRead configDirectoryRefused initialAbsenceRestored"),
+                     "denialPoliciesConfirmed": 2, "createdObjectsRemoved": 2},
         "read-eof-size": {**yes("emptyEof invalidUtf8Refused shortFinalRead multichunkEof exactLimitEof"),
                           "oversizeReadBytes": 0, "largestRequest": 65536, "largestReturn": 65536},
         "entry-limit": {"returnedRecords": 10000, "chargedEntries": 10000, "overBudgetChildOpens": 0, "entryLimitIssue": True},
@@ -766,6 +767,28 @@ def windows_report() -> dict:
 
 
 class WindowsConsumerTests(unittest.TestCase):
+    def test_created_denial_receipt_requires_policy_removal_and_original_absence(self):
+        name = "acl-type"
+        checks = windows_test_checks(name)
+        original_predicates = {"fileAccessDenied", "directoryAccessDenied", "accessibleSiblingRead", "configDirectoryRefused"}
+        added = {"denialPoliciesConfirmed", "createdObjectsRemoved", "initialAbsenceRestored"}
+        self.assertEqual(set(checks), original_predicates | added)
+        helper.validate_windows_checks(name, checks)
+        old = {key: checks[key] for key in original_predicates}
+        old["daclRestored"] = 2
+        for fields in (old, {**checks, "daclRestored": 2}, {key: value for key, value in checks.items() if key not in added}):
+            with self.subTest(fields=tuple(fields)), self.assertRaises(helper.CheckFailure):
+                helper.validate_windows_checks(name, fields)
+        for field in added:
+            invalid = (False, 1, "true", None) if field == "initialAbsenceRestored" else (True, 1, 3, 2.0, "2", None)
+            for value in invalid:
+                with self.subTest(field=field, value=value), self.assertRaises(helper.CheckFailure):
+                    helper.validate_windows_checks(name, {**checks, field: value})
+        report = windows_report()
+        report["groups"][3]["controls"][0]["fixture"]["checks"] = old
+        with self.assertRaises(helper.CheckFailure):
+            helper.validate_windows_snapshot_receipt(report, bindings=report["bindings"])
+
     def test_closed_receipt_requires_complete_ordered_native_scope_and_exact_bindings(self):
         report = windows_report()
         validate = lambda value: helper.validate_windows_snapshot_receipt(value, bindings=report["bindings"])

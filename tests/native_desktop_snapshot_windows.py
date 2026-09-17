@@ -53,7 +53,8 @@ CHECKS = {
     "device": ("readerFfiEntries", "readerInstances", "unsafePathRefused"),
     "ads": ("readerFfiEntries", "readerInstances", "unsafePathRefused"),
     "case-mode-race": ("parentIdSame", "mutationAccess", "enabledFlags", "originalRelativeEntry", "entryBeforeDeadline", "missingNotTrusted", "caseRestored"),
-    "acl-type": ("fileAccessDenied", "directoryAccessDenied", "accessibleSiblingRead", "configDirectoryRefused", "daclRestored"),
+    "acl-type": ("fileAccessDenied", "directoryAccessDenied", "accessibleSiblingRead", "configDirectoryRefused",
+                 "denialPoliciesConfirmed", "createdObjectsRemoved", "initialAbsenceRestored"),
     "read-eof-size": ("emptyEof", "invalidUtf8Refused", "shortFinalRead", "multichunkEof", "exactLimitEof", "oversizeReadBytes", "largestRequest", "largestReturn"),
     "entry-limit": ("returnedRecords", "chargedEntries", "overBudgetChildOpens", "entryLimitIssue"),
     "candidate-limit": ("chargedCandidates", "refusedExtraCandidate", "sourceFileLimitIssue"),
@@ -624,16 +625,23 @@ class FixtureNative:
         class Standard(c.Structure):
             _fields_ = [("AllocationSize", c.c_int64), ("EndOfFile", c.c_int64), ("NumberOfLinks", U32),
                         ("DeletePending", c.c_ubyte), ("Directory", c.c_ubyte)]
+        class Security(c.Structure):
+            _fields_ = [("nLength", U32), ("lpSecurityDescriptor", VOID), ("bInheritHandle", BOOL)]
         self.Overlapped, self.Id, self.Tag, self.Basic, self.Standard = Overlapped, Id, Tag, Basic, Standard
+        self.Security = Security
         layout = {"Overlapped": [c.sizeof(Overlapped), c.alignment(Overlapped), [getattr(Overlapped, x).offset for x, _ in Overlapped._fields_]],
                   "Id": [c.sizeof(Id), Id.FileId.offset], "Tag": [c.sizeof(Tag), Tag.ReparseTag.offset],
                   "Basic": [c.sizeof(Basic), Basic.LastWriteTime.offset, Basic.FileAttributes.offset],
-                  "Standard": [c.sizeof(Standard), Standard.NumberOfLinks.offset, Standard.Directory.offset]}
+                  "Standard": [c.sizeof(Standard), Standard.NumberOfLinks.offset, Standard.Directory.offset],
+                  "Security": [c.sizeof(Security), c.alignment(Security),
+                               [getattr(Security, x).offset for x, _ in Security._fields_]]}
         require(layout == {"Overlapped": [32, 8, [0, 8, 16, 20, 24]], "Id": [24, 8], "Tag": [8, 4],
-                           "Basic": [40, 16, 32], "Standard": [24, 16, 21]}, "fixture_structure_abi")
+                           "Basic": [40, 16, 32], "Standard": [24, 16, 21],
+                           "Security": [24, 8, [0, 8, 16]]}, "fixture_structure_abi")
         kernel = {
             "GetCurrentProcess": ([], HANDLE), "IsWow64Process2": ([HANDLE, c.POINTER(U16), c.POINTER(U16)], BOOL),
             "CreateFileW": ([WCHAR, U32, U32, VOID, U32, U32, HANDLE], HANDLE),
+            "CreateDirectoryW": ([WCHAR, VOID], BOOL),
             "CreateEventW": ([VOID, BOOL, BOOL, WCHAR], HANDLE), "CloseHandle": ([HANDLE], BOOL),
             "GetHandleInformation": ([HANDLE, c.POINTER(U32)], BOOL),
             "GetFileInformationByHandleEx": ([HANDLE, c.c_int32, VOID, U32], BOOL),
@@ -657,14 +665,7 @@ class FixtureNative:
             "OpenProcessToken": ([HANDLE, U32, c.POINTER(HANDLE)], BOOL),
             "GetTokenInformation": ([HANDLE, U32, VOID, U32, c.POINTER(U32)], BOOL),
             "IsWellKnownSid": ([VOID, U32], BOOL),
-            "CreateWellKnownSid": ([U32, VOID, VOID, c.POINTER(U32)], BOOL),
-            "InitializeAcl": ([VOID, U32, U32], BOOL),
-            "AddAccessDeniedAceEx": ([VOID, U32, U32, U32, VOID], BOOL),
-            "AddAccessAllowedAceEx": ([VOID, U32, U32, U32, VOID], BOOL),
             "GetKernelObjectSecurity": ([HANDLE, U32, VOID, U32, c.POINTER(U32)], BOOL),
-            "GetSecurityDescriptorDacl": ([VOID, c.POINTER(BOOL), c.POINTER(VOID), c.POINTER(BOOL)], BOOL),
-            "GetSecurityDescriptorControl": ([VOID, c.POINTER(U16), c.POINTER(U32)], BOOL),
-            "SetSecurityInfo": ([HANDLE, U32, U32, VOID, VOID, VOID, VOID], U32),
         }
         for dll, signatures in ((self.k, kernel), (self.a, advapi)):
             for name, (args, result) in signatures.items():
@@ -766,13 +767,24 @@ class FixtureNative:
                 raise
 
     def open(self, path: Path | str, access: int = READ_ATTRIBUTES, *, flags: int = BACKUP | NOFOLLOW,
-             creation: int = 3, sharing: int = 7) -> int:
+             creation: int = 3, sharing: int = 7, security=None) -> int:
         require(len(str(path).encode("utf-16-le")) <= 8192 * 2, "fixture_path_bound")
-        handle = self.call(self.k.CreateFileW, (str(path), access, sharing, None, creation, flags, None), kind="handle")
+        attributes = self.c.byref(security) if security is not None else None
+        handle = self.call(self.k.CreateFileW, (str(path), access, sharing, attributes, creation, flags, None),
+                           (security,), kind="handle")
         flags_value = self.U32(0xFFFFFFFF)
         self.call(self.k.GetHandleInformation, (handle, self.c.byref(flags_value)), (flags_value,))
         require(not flags_value.value & 1, "fixture_inherited_handle")
         return handle
+
+    def absent(self, path: Path) -> None:
+        ordinary_directory(path.parent)  # A missing parent is not leaf absence.
+        try:
+            self.open(path)
+        except NativeFailure as error:
+            require(error.api == "CreateFileW" and error.code == 2, "fixture_leaf_absence_required")
+        else:
+            raise FixtureFailure("fixture_leaf_absence_required")  # Retain any unexpected occupant handle.
 
     def close(self, handle: int) -> None:
         with self.lock:
@@ -1564,48 +1576,38 @@ class Fixture:
 
     def deny_data(self) -> None:
         n, c = self.native, self.native.c
-        records = []
-        for relative, role in (("read-denied/build.gradle", "denied-file"), ("list-denied", "denied-directory")):
-            path = self.project / relative
-            handle = n.open(path, 0x60080)  # Retained original READ_CONTROL/WRITE_DAC owner.
-            saved, needed = c.create_string_buffer(16 * 1024), n.U32()
-            arena_label = "dacl-" + str(len(self.journal))
-            n.retain(arena_label, (saved,))
-            n.call(n.a.GetKernelObjectSecurity, (handle, 4, saved, len(saved), c.byref(needed)), (saved, needed))
-            require(20 <= needed.value <= len(saved), "saved_dacl_bound")
-            baseline = bytes(saved.raw[:needed.value])
-            policy = _dacl_policy(baseline)
-            # SetSecurityInfo participates in automatic inheritance (0x0400 is
-            # resulting state, not a request). These candidates still need exact
-            # full-control readback; defaulted/request/other states are refused.
-            require(policy is not None and policy[0] in (0x8004, 0x9004, 0x8404, 0x9404)
-                    and not policy[2], "saved_dacl_unsupported")
-            control, revision = n.U16(), n.U32()
-            n.call(n.a.GetSecurityDescriptorControl, (saved, c.byref(control), c.byref(revision)), (saved, control, revision))
-            require(control.value == policy[0] and revision.value == 1, "saved_dacl_unsupported")
-            record = {"kind": "dacl", "path": path, "role": role, "handle": handle, "saved": saved,
-                      "baseline": baseline, "length": needed.value, "protected": bool(control.value & 0x1000),
-                      "id": n.identity(handle), "changed": False, "arena": arena_label}
-            require(len(self.journal) < 16, "fixture_restoration_bound")
-            self.journal.append(record)
-            records.append(record)
-        for record in records:  # BOTH immutable baselines were validated; no lazy second admission.
-            handle, saved = record["handle"], record["saved"]
-            sid, size = c.create_string_buffer(68), n.U32(68)
-            n.call(n.a.CreateWellKnownSid, (1, None, sid, c.byref(size)), (sid, size))
-            require(0 < size.value <= 68, "world_sid_bound")
-            acl = c.create_string_buffer(256)
-            n.call(n.a.InitializeAcl, (acl, len(acl), 2), (acl,))
-            n.call(n.a.AddAccessDeniedAceEx, (acl, 2, 0, 1, sid), (acl, sid))
-            n.call(n.a.AddAccessAllowedAceEx, (acl, 2, 0, 0x1F01FF, sid), (acl, sid))
-            n.call(n.a.SetSecurityInfo, (handle, 1, 4 | 0x80000000, None, None, acl, None), (acl, saved), kind="zero")
-            record["changed"] = True
-            # Policy readback is not an ordinary-reader access-denial witness.
-            installed, installed_needed = c.create_string_buffer(16 * 1024), n.U32()
-            n.call(n.a.GetKernelObjectSecurity,
-                   (handle, 4, installed, len(installed), c.byref(installed_needed)), (installed, installed_needed))
-            require(0 < installed_needed.value <= len(installed), "fixture_dacl_not_effective")
-            require(_installed_deny_data_dacl(installed[:installed_needed.value]), "fixture_dacl_not_effective")
+        targets = ((self.project / "read-denied/build.gradle", False), (self.project / "list-denied", True))
+        require(len(self.journal) + 2 <= 16, "fixture_restoration_bound")
+        for path, _ in targets:
+            n.absent(path)  # BOTH original absences precede any exclusive creation.
+        world = bytes.fromhex("010100000000000100000000")
+        acl = (struct.pack("<BBHHH", 2, 0, 48, 2, 0) + struct.pack("<BBHI", 1, 0, 20, 1) + world
+               + struct.pack("<BBHI", 0, 0, 20, 0x1F01FF) + world)
+        descriptor = c.create_string_buffer(struct.pack("<BBHIIII", 1, 0, 0x9004, 0, 0, 0, 20) + acl, 68)
+        attributes = n.Security(c.sizeof(n.Security), c.cast(descriptor, c.c_void_p), 0)
+        n.retain("created-denial", (descriptor, attributes))
+        self.checks["denialPoliciesConfirmed"] = 0
+        for path, directory in targets:
+            if directory:
+                # No returned handle: only the following verified open can own it.
+                n.call(n.k.CreateDirectoryW, (str(path), c.byref(attributes)), (descriptor, attributes))
+            handle = n.open(path, 0x20080, creation=3 if directory else 1, sharing=7,
+                            security=None if directory else attributes)
+            standard, tag = n.info(handle, 1, n.Standard), n.info(handle, 9, n.Tag)
+            require(standard.Directory == int(directory) and not standard.DeletePending
+                    and bool(tag.FileAttributes & 0x10) == directory and not tag.FileAttributes & 0x400
+                    and (directory or (standard.NumberOfLinks == 1 and standard.EndOfFile == 0)),
+                    "fixture_created_denial_type")
+            identity = n.identity(handle)
+            installed, needed = c.create_string_buffer(16 * 1024), n.U32()
+            n.call(n.a.GetKernelObjectSecurity, (handle, 4, installed, len(installed), c.byref(needed)), (installed, needed))
+            require(20 <= needed.value <= len(installed), "fixture_dacl_not_effective")
+            readback = bytes(installed.raw[:needed.value])
+            policy = _dacl_policy(readback)
+            require(policy is not None and policy[0] in (0x9004, 0x9404)
+                    and _installed_deny_data_dacl(readback), "fixture_dacl_not_effective")
+            self.journal.append({"kind": "created-denial", "path": path, "handle": handle, "id": identity})
+            self.checks["denialPoliciesConfirmed"] += 1  # Not a reader-denial witness.
 
     def observe_oplock(self) -> None:
         n = self.native
@@ -1833,7 +1835,7 @@ class Fixture:
             require(self.holder not in n.held and self.checks["holderCloseReturned"] is True, "oplock_holder_close_required")
             n.close(self.event)
             self.checks["eventCloseReturned"] = True
-        restored_links, restored_reparse, restored_dacl = 0, 0, 0
+        restored_links, restored_reparse, removed_created = 0, 0, 0
         for record in reversed(self.journal):
             kind = record["kind"]
             if kind == "short-alias":
@@ -1859,24 +1861,12 @@ class Fixture:
                 n.delete(record["path"], record["id"])
                 restored_links += 1
                 continue
-            if kind == "dacl":
-                if record["changed"]:
-                    require(n.identity(record["handle"]) == record["id"], "dacl_restore_original_object")
-                    require(bytes(record["saved"].raw[:record["length"]]) == record["baseline"], "saved_dacl_unsupported")
-                    present, defaulted, acl = c.c_int32(), c.c_int32(), c.c_void_p()
-                    n.call(n.a.GetSecurityDescriptorDacl, (record["saved"], c.byref(present), c.byref(acl), c.byref(defaulted)),
-                           (record["saved"], present, acl, defaulted))
-                    require(present.value == 1, "saved_dacl_present")
-                    security = 4 | (0x80000000 if record["protected"] else 0x20000000)
-                    n.call(n.a.SetSecurityInfo, (record["handle"], 1, security, None, None, acl, None), (record["saved"],), kind="zero")
-                    observed, needed = c.create_string_buffer(16 * 1024), n.U32()
-                    n.call(n.a.GetKernelObjectSecurity, (record["handle"], 4, observed, len(observed), c.byref(needed)), (observed, needed))
-                    readback = bytes(observed.raw[:needed.value]) if needed.value <= len(observed) else None
-                    self.dacl_comparison, equal = _dacl_comparison(record["baseline"], readback, record["role"])
-                    require(equal, "dacl_restoration_not_confirmed")
-                    self.dacl_comparison = None
-                    restored_dacl += 1
+            if kind == "created-denial":
+                require(n.identity(record["handle"]) == record["id"], "fixture_created_denial_identity")
+                n.delete(record["path"], record["id"])  # Original sharing=7 holder spans the delete-handle check/close.
                 n.close(record["handle"])
+                n.absent(record["path"])  # Only after both consuming closes; pending/access-denied is not absent.
+                removed_created += 1
                 continue
             require(n.identity(record["metadata"]) == record["id"], "restore_original_object")
             if record["changed"]:
@@ -1912,7 +1902,8 @@ class Fixture:
         elif self.case in ("case-collision", "case-mode-race"):
             self.checks["caseRestored"] = True
         elif self.case == "acl-type":
-            self.checks["daclRestored"] = restored_dacl
+            self.checks["createdObjectsRemoved"] = removed_created
+            self.checks["initialAbsenceRestored"] = removed_created == 2
         elif self.case == "ending-metadata-case":
             self.checks["attributesRestored"] = True
         n.close_all()

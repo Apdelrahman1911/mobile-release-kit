@@ -6,7 +6,7 @@ relative opens/mutations prove call ordering, not NTFS, ABI, ACL or reparse
 semantics. A substituted fail-stop proves retained references, not process/IO
 finality or successful native CloseHandle receipts. No filesystem fixtures.
 Focused leaves read bound fixture source and select named pure reducers. The
-ACL ordering leaf also selects two original methods with exclusively fake
+ACL ordering leaf also selects named original methods with exclusively fake
 capabilities; no fixture module, native observer or constructor is imported/run.
 """
 from __future__ import annotations
@@ -458,198 +458,372 @@ class WindowsSnapshotPureTests(unittest.TestCase):
                 self.assertTrue(all(facts[key] is None for key in ("presenceEqual", "nullEqual", "controlEqual",
                     "protectedEqual", "defaultedEqual", "autoInheritanceEqual", "aclRevisionEqual", "orderedAcesEqual")))
 
-    def test_dacl_pair_admission_precedes_mutation_and_original_restore_counts(self):
+    def test_created_denial_requires_absence_and_original_delete_custody(self):
         reducers, parsed = self._dacl_reducers()
-        fixture = next(node for node in parsed.body if isinstance(node, ast.ClassDef) and node.name == "Fixture")
-        selected = [node for node in fixture.body if isinstance(node, ast.FunctionDef)
-                    and node.name in ("deny_data", "restore")]
-        self.assertEqual([node.name for node in selected], ["deny_data", "restore"])
-        # Execute original control flow ONLY with the sealed fake capabilities
-        # below. No fixture module/constructor, ctypes, native binding or path IO.
+        classes = {node.name: node for node in parsed.body if isinstance(node, ast.ClassDef)}
+        names = {"Fixture": {"deny_data", "restore", "_finish", "completed_open_error"},
+                 "FixtureNative": {"open", "absent", "close", "identity", "delete"}}
+        selected = [node for owner, methods in names.items() for node in classes[owner].body
+                    if isinstance(node, ast.FunctionDef) and node.name in methods]
+        self.assertCountEqual([node.name for node in selected], set.union(*names.values()))
+        checks = next(node.value for node in parsed.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "CHECKS" for target in node.targets))
+        # Original methods, exclusively sealed fake capabilities: no fixture
+        # constructor/module, ctypes/DLL, real path operation, IO or process exit.
         class Refused(Exception):
             pass
-
+        class Unknown(BaseException):
+            pass
+        class NativeError(Refused):
+            def __init__(self, api_name, code):
+                self.api, self.code = api_name, code
+                super().__init__("mock_native_error")
         def require(value, code):
             if not value:
                 raise Refused(code)
 
-        safe = {"len": len, "str": str, "bytes": bytes, "bool": bool, "reversed": reversed}
+        test, active = self, [None]
+        paths = ("read-denied/build.gradle", "list-denied")
+        class Label:
+            def __init__(self, value):
+                self.value = value
+            def __str__(self):
+                return self.value
+            @property
+            def parent(self):
+                return "read-denied" if self.value == paths[0] else "@project"
+        class Project:
+            def __truediv__(self, relative):
+                test.assertIn(relative, paths)
+                return Label(relative)
+        def ordinary_directory(parent):
+            test.assertIn(parent, ("read-denied", "@project"))
+            active[0].events.append(("parent", parent))
+            if active[0].options.get("missing_parent") == parent:
+                raise Refused("mock_parent_missing")
+        def no_io(*_args):
+            raise AssertionError("inactive fixture branch acquired an IO capability")
+
+        safe = {name: value for name, value in (("len", len), ("str", str), ("bytes", bytes), ("bool", bool),
+                ("int", int), ("tuple", tuple), ("dict", dict), ("set", set), ("list", list), ("type", type), ("any", any),
+                ("all", all), ("sum", sum), ("range", range), ("getattr", getattr), ("reversed", reversed),
+                ("Exception", Exception), ("BaseException", BaseException))}
         namespace = {"__builtins__": safe, "require": require, "FixtureFailure": Refused,
-                     **{key: reducers[key] for key in ("_dacl_policy", "_dacl_comparison", "_installed_deny_data_dacl")}}
+                     "NativeFailure": NativeError, "Path": Label, "READ_ATTRIBUTES": 0x80,
+                     "DELETE": 0x10000, "BACKUP": 0x02000000, "NOFOLLOW": 0x00200000,
+                     "ordinary_directory": ordinary_directory, "ordinary_bytes": no_io, "strict": no_io,
+                     "canonical": lambda value: json.dumps(value, sort_keys=True).encode("ascii"),
+                     "struct": SimpleNamespace(pack=struct.pack), "CHECKS": ast.literal_eval(checks),
+                     **{key: reducers[key] for key in ("_dacl_policy", "_installed_deny_data_dacl")}}
         for definition in selected:
-            self.assertFalse(definition.decorator_list or definition.args.defaults or definition.args.kw_defaults)
-            self.assertEqual([arg.arg for arg in definition.args.args], ["self"])
-            self.assertIsNone(definition.returns.value)
+            self.assertFalse(definition.decorator_list)
             self.assertFalse(any(isinstance(node, (ast.Import, ast.ImportFrom, ast.ClassDef, ast.Global, ast.Nonlocal))
                                  for node in ast.walk(definition)))
             for call in (node for node in ast.walk(definition) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
-                self.assertIn(call.func.id, {*safe, *namespace})
-        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-dacl-flow-with-fake-capabilities", "exec",
+                self.assertIn(call.func.id, {*safe, *namespace, "read"})
+            self.assertFalse(any(isinstance(node, ast.Attribute) and node.attr == "SetSecurityInfo"
+                                 for node in ast.walk(definition)))
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-created-denial-fake-flow", "exec",
                      dont_inherit=True), namespace)
 
         class Buffer:
-            def __init__(self, size):
-                self.raw = bytes(size)
+            def __init__(self, value, size=None):
+                self.raw = bytes(value) if type(value) is int else value
+                if size is not None:
+                    test.assertLessEqual(len(self.raw), size)
+                    self.raw += bytes(size - len(self.raw))
             def __len__(self):
                 return len(self.raw)
-            def __getitem__(self, item):
-                return self.raw[item]
-
+        class Attributes:
+            def __init__(self, length, descriptor, inherit):
+                self.nLength, self.lpSecurityDescriptor, self.bInheritHandle = length, descriptor, inherit
         scalar = lambda value=0: SimpleNamespace(value=value)
-        test = self
-
-        class Project:
-            def __truediv__(self, relative):
-                test.assertIn(relative, ("read-denied/build.gradle", "list-denied"))
-                return relative  # A string label, not a filesystem-capable Path.
+        def sizeof(value):
+            return 24 if value is Attributes or isinstance(value, Attributes) else len(value) if isinstance(value, Buffer) else 4
 
         class Native:
-            def __init__(self, baselines, readbacks=None, failed_setter=None, failed_close=None, reported=None):
-                self.c = SimpleNamespace(create_string_buffer=Buffer, byref=lambda value: value,
-                                         c_int32=scalar, c_void_p=scalar)
-                self.U32 = self.U16 = scalar
-                self.a = SimpleNamespace(**{name: name for name in ("GetKernelObjectSecurity", "GetSecurityDescriptorControl",
-                    "CreateWellKnownSid", "InitializeAcl", "AddAccessDeniedAceEx", "AddAccessAllowedAceEx",
-                    "SetSecurityInfo", "GetSecurityDescriptorDacl")})
-                self.baselines = dict(zip((101, 102), baselines))
-                self.current = dict(self.baselines)
-                self.readbacks = readbacks or dict(self.baselines)
-                self.failed_setter, self.failed_close, self.reported = failed_setter, failed_close, reported or {}
-                self.held, self.retained_arenas, self.events, self.restore_calls = [], {}, [], set()
-            def open(self, path, access):
-                test.assertEqual(access, 0x60080)
-                handle = 101 + len(self.held)
-                self.held.append(handle); self.events.append(("open", handle))
-                return handle
+            open, absent, close, identity, delete = (namespace[name] for name in ("open", "absent", "close", "identity", "delete"))
+            def __init__(self, **options):
+                self.options, self.events, self.nodes = options, [], {}
+                self.c = SimpleNamespace(create_string_buffer=Buffer, byref=lambda value: value, c_void_p="VOID",
+                                         cast=lambda value, kind: value, sizeof=sizeof, c_int32=scalar)
+                self.Security, self.U32, self.Standard, self.Tag, self.Id = Attributes, scalar, "Standard", "Tag", "Id"
+                self.k = SimpleNamespace(**{name: name for name in ("CreateFileW", "CreateDirectoryW", "GetHandleInformation",
+                                                                   "SetFileInformationByHandle", "CloseHandle")})
+                self.a = SimpleNamespace(GetKernelObjectSecurity="GetKernelObjectSecurity")
+                self.held, self.os_handles, self.retained_arenas = {}, {}, {}
+                self.lock, self.reader_settled, self.serial = nullcontext(), False, 100
+                self.counts = dict.fromkeys(("acquired", "closeAttempts", "closeSucceeded", "closeFailed", "live", "maxLive"), 0)
+                for path in options.get("occupied", ()):
+                    self.nodes[path] = self.node(path)
+            def node(self, path):
+                return SimpleNamespace(path=path, directory=path == paths[1], identity=paths.index(path) + 1, pending=False)
             def retain(self, label, items):
                 test.assertNotIn(label, self.retained_arenas)
                 self.retained_arenas[label] = items
-            def identity(self, handle):
-                test.assertIn(handle, self.held)
-                return (17, handle.to_bytes(16, "little"))
+            def security(self, attributes):
+                descriptor, kept = self.retained_arenas["created-denial"]
+                test.assertIs(attributes, kept)
+                test.assertEqual((attributes.nLength, attributes.bInheritHandle), (24, 0))
+                test.assertIs(attributes.lpSecurityDescriptor, descriptor)
+                test.assertEqual(descriptor.raw, test._dacl_bytes())
+                test.assertEqual(len(descriptor.raw), 68)
             def call(self, function, args, keep=(), *, kind="boolean"):
-                if function == "GetKernelObjectSecurity":
+                if function == "CreateDirectoryW":
+                    path, attributes = args
+                    test.assertEqual((path, kind), (paths[1], "boolean"))
+                    self.security(attributes)
+                    test.assertEqual(keep, self.retained_arenas["created-denial"])
+                    self.events.append(("create", path))
+                    if path in self.nodes or self.options.get("collision") == path:
+                        raise NativeError(function, 183)
+                    self.nodes[path] = self.node(path)
+                elif function == "CreateFileW":
+                    path, access, sharing, attributes, creation, flags, template = args
+                    test.assertIn(path, paths)
+                    test.assertEqual((sharing, flags, template, kind), (7, 0x02200000, None, "handle"))
+                    self.events.append(("open", path, access, creation))
+                    if creation == 1:
+                        test.assertEqual((path, access), (paths[0], 0x20080))
+                        self.security(attributes)
+                        test.assertEqual(keep, (attributes,))
+                        self.events.append(("create", path))
+                        if path in self.nodes or self.options.get("collision") == path:
+                            raise NativeError(function, 80)
+                        self.nodes[path] = self.node(path)
+                    else:
+                        test.assertEqual(creation, 3)
+                        test.assertIsNone(attributes)
+                    if access == 0x80 and self.options.get("absence_error"):
+                        api_name, code = self.options["absence_error"]
+                        raise NativeError(api_name, code)
+                    if path not in self.nodes:
+                        self.events.append(("missing", path))
+                        raise NativeError(function, 2)
+                    if access == 0x20080 and path == paths[1] and self.options.get("directory_open_failure"):
+                        raise NativeError(function, 5)
+                    node = self.nodes[path]
+                    if node.pending:
+                        raise NativeError(function, 5)
+                    role = "delete" if access == 0x10080 else "creator" if access == 0x20080 else "probe"
+                    if role == "delete":
+                        test.assertTrue(self.reader_settled)
+                        test.assertTrue(any(record[0] is node and record[1] == "creator"
+                                            for handle, record in self.os_handles.items() if handle in self.held))
+                        self.events.append(("delete-open", path, tuple(self.held)))
+                        if self.options.get("swap_delete") == path:
+                            node = self.node(path); node.identity += 1000
+                    self.serial += 1
+                    self.held[self.serial] = self.serial
+                    self.os_handles[self.serial] = (node, role)
+                    self.counts["acquired"] += 1
+                    self.counts["live"] = len(self.held)
+                    self.counts["maxLive"] = max(self.counts["maxLive"], len(self.held))
+                    return self.serial
+                elif function == "GetHandleInformation":
+                    test.assertIn(args[0], self.held)
+                    if self.options.get("handle_information_error"):
+                        raise NativeError(function, 2)
+                    args[1].value = self.options.get("inherited_handle", 0)
+                elif function == "GetKernelObjectSecurity":
                     handle, flags, buffer, limit, needed = args
                     test.assertEqual((flags, limit), (4, 16384))
-                    data = self.current[handle]
+                    test.assertIn(handle, self.held)
+                    path = self.os_handles[handle][0].path
+                    data = self.options.get("readbacks", {}).get(path, test._dacl_bytes())
                     buffer.raw = data[:limit] + bytes(max(0, limit - len(data)))
-                    needed.value = self.reported.get(handle, len(data)) if handle in self.restore_calls else len(data)
-                    self.events.append(("get", handle))
-                elif function == "GetSecurityDescriptorControl":
-                    saved, control, revision = args
-                    control.value, revision.value = int.from_bytes(saved.raw[2:4], "little"), saved.raw[0]
-                    self.events.append(("control", control.value))
-                elif function == "GetSecurityDescriptorDacl":
-                    saved, present, pointer, defaulted = args
-                    present.value, defaulted.value, pointer.value = 1, 0, saved
-                elif function == "CreateWellKnownSid":
-                    args[3].value = 12
-                elif function == "SetSecurityInfo":
-                    handle, object_type, security, owner, group, acl, sacl = args
-                    test.assertEqual((object_type, owner, group, sacl, kind), (1, None, None, None, "zero"))
-                    if isinstance(acl, SimpleNamespace):
-                        test.assertTrue(any(acl.value is items[0] for items in self.retained_arenas.values()))
-                        self.events.append(("restore", handle, security))
-                        if handle == self.failed_setter:
-                            raise Refused("mock_returned_setter_error")
-                        self.restore_calls.add(handle)
-                        self.current[handle] = self.readbacks[handle]
-                    else:
-                        self.events.append(("deny", handle, security))
-                        test.assertEqual(security, 4 | 0x80000000)
-                        self.current[handle] = test._dacl_bytes()
+                    needed.value = self.options.get("reported", {}).get(path, len(data))
+                    self.events.append(("policy", path))
+                elif function == "SetFileInformationByHandle":
+                    handle, info, flag, size = args
+                    node, role = self.os_handles[handle]
+                    test.assertEqual((role, info, flag.value, size), ("delete", 4, 1, 4))
+                    self.events.append(("disposition", node.path))
+                    if self.options.get("delete_unknown") == node.path:
+                        raise Unknown()
+                    if self.options.get("delete_failure") == node.path:
+                        raise NativeError(function, 145)  # Nonempty directory/returned refusal is not cleanup.
+                    node.pending = True
+                elif function == "CloseHandle":
+                    handle = args[0]
+                    test.assertNotIn(handle, self.held)  # Original method retired before sole close.
+                    node, role = self.os_handles[handle]
+                    self.events.append(("close", node.path, role, handle))
+                    if self.options.get("close_failure") == (node.path, role):
+                        raise NativeError(function, 6)
+                    del self.os_handles[handle]
+                    if node.pending and not any(record[0] is node for record in self.os_handles.values()):
+                        if self.options.get("remain_pending") != node.path:
+                            del self.nodes[node.path]
                 else:
-                    test.assertIn(function, ("InitializeAcl", "AddAccessDeniedAceEx", "AddAccessAllowedAceEx"))
-                return 0 if kind == "zero" else 1
-            def close(self, handle):
-                self.events.append(("close", handle))
-                if handle == self.failed_close:
-                    raise Refused("mock_consuming_close_unknown")
+                    raise AssertionError("unexpected fake native API")
+                return 1
+            def info(self, handle, info, cls):
                 test.assertIn(handle, self.held)
-                self.held.remove(handle)
+                node, role = self.os_handles[handle]
+                self.events.append(("info", node.path, cls))
+                if cls == "Id":
+                    identity = 0 if self.options.get("zero_identity") == node.path else node.identity
+                    if self.reader_settled and role == "creator" and self.options.get("changed_original") == node.path:
+                        identity += 1000
+                    return SimpleNamespace(VolumeSerialNumber=17, FileId=identity.to_bytes(16, "little"))
+                if cls == "Standard":
+                    values = {"Directory": int(node.directory), "DeletePending": 0, "NumberOfLinks": 1, "EndOfFile": 0}
+                    values.update(self.options.get("standard", {}).get(node.path, {}))
+                    return SimpleNamespace(**values)
+                test.assertEqual(cls, "Tag")
+                return SimpleNamespace(FileAttributes=self.options.get("attributes", {}).get(node.path, 0x10 if node.directory else 0x20))
+            def abort(self, arena):
+                self.events.append(("abort",))
+                raise Unknown()
             def close_all(self):
-                test.assertEqual(self.held, [])
+                test.assertEqual((self.held, self.os_handles), ({}, {}))
                 self.events.append(("all-closed",))
 
-        def make(baselines, **options):
-            return SimpleNamespace(native=Native(baselines, **options), project=Project(), journal=[],
-                thread=None, alias=None, case="acl-type", restored=False, dacl_comparison=None,
-                checks={key: None for key in ("fileAccessDenied", "directoryAccessDenied", "accessibleSiblingRead",
-                                             "configDirectoryRefused", "daclRestored")})
+        def make(**options):
+            n = Native(**options); active[0] = n
+            owner = SimpleNamespace(native=n, project=Project(), journal=[], thread=None, alias=None, case="acl-type",
+                restored=False, dacl_comparison=None, checks=dict.fromkeys(namespace["CHECKS"]["acl-type"]),
+                request_root="project", request_config=CONFIG, project_nt=r"\Device\HarddiskVolume7\project")
+            reader = {**dict.fromkeys(("live", "closeFailed", "violations", "outsideReads", "outsideDescent", "outsideAcquired",
+                                     "aliasMetadataAcquired"), 0), "acquired": 3, "closeAttempts": 3, "closeSucceeded": 3,
+                      "calls": [{"entered": 1, "returned": 1, "completed": 1}]}
+            scan = {"entries": 3, "sourceFiles": 1, "sourceBytes": 1, "excludedEntries": 0}
+            owner.trace = SimpleNamespace(snapshot=lambda: reader, counts={"readBytes": 1},
+                inventory=SimpleNamespace(counts=scan, sources={"sibling/build.gradle": "x"}),
+                reads={"sibling/build.gradle": {"eof": 1}}, config_opened=False,
+                entry_kinds={owner.project_nt + "\\release\\mobile-release.json": True},
+                handles={17: {"path": "project"}, 18: {"path": "project\\read-denied"}},
+                role=lambda path: path.removeprefix("project\\").replace("\\", "/"))
+            result = {"root": "project", "observedAt": "synthetic-not-native", "observationScope": "single-request-non-atomic",
+                "config": {"path": CONFIG, "state": "unavailable", "data": None, "issues": []},
+                "discovery": {"state": "unverified", "partial": True, "hints": {}, "scan": scan, "limits": {}},
+                "assurance": {"basis": "static-text", "projectCodeExecuted": False, "toolsProbed": False,
+                              "credentialsRead": False, "gitObserved": False, "storeContacted": False,
+                              "writesPerformed": False, "releaseReadiness": "unknown"},
+                "issues": [{"code": "snapshot.unreadable"}]}
+            def restore():
+                n.reader_settled = True
+                n.events.append(("reader-finality",))
+                namespace["restore"](owner)
+            owner.restore, owner.emit = restore, lambda state: n.events.append(("emit", state))
+            owner.diagnose_failure = lambda stage, error: n.events.append(("diagnostic", stage))
+            return owner, reader, result
+        def denials(owner):
+            for parent, name in ((18, "build.gradle"), (17, "list-denied")):
+                namespace["completed_open_error"](owner, SimpleNamespace(parent=parent, name=name), 0xC0000022, "denied")
+        def finish(owner, result):
+            namespace["_finish"](owner, result, None, SimpleNamespace(LIMITS={}))
 
-        for controls in ((0x8004, 0x9404), (0x9004, 0x8404), (0x8404, 0x8004), (0x9404, 0x9004)):
-            baselines = tuple(self._dacl_bytes(control=control) for control in controls)
-            readbacks = {handle: self._dacl_bytes(control=control, offset=24, capacity=256)
-                         for handle, control in zip((101, 102), controls)}
-            owner = make(baselines, readbacks=readbacks)
+        for controls in ((0x9004, 0x9404), (0x9404, 0x9004)):
+            owner, reader, result = make(readbacks={path: self._dacl_bytes(control=control, offset=24, capacity=256)
+                                                   for path, control in zip(paths, controls)})
             namespace["deny_data"](owner)
-            originals = tuple(record["baseline"] for record in owner.journal)
-            self.assertEqual(originals, baselines)
-            self.assertTrue(all(type(value) is bytes for value in originals))
+            self.assertEqual(owner.checks["denialPoliciesConfirmed"], 2)
+            self.assertTrue(all(value is None for key, value in owner.checks.items() if key != "denialPoliciesConfirmed"))
             events = owner.native.events
-            first_mutation = next(index for index, event in enumerate(events) if event[0] == "deny")
-            self.assertEqual([event for event in events[:first_mutation] if event[0] == "get"], [("get", 101), ("get", 102)])
-            self.assertEqual(len([event for event in events[:first_mutation] if event[0] == "control"]), 2)
-            self.assertEqual([record["changed"] for record in owner.journal], [True, True])
-            namespace["restore"](owner)
-            security = [4 | (0x80000000 if control & 0x1000 else 0x20000000) for control in controls]
-            self.assertEqual([event for event in events if event[0] == "restore"], [("restore", 102, security[1]), ("restore", 101, security[0])])
-            self.assertEqual([event for event in events if event[0] == "close"], [("close", 102), ("close", 101)])
-            self.assertEqual(owner.checks["daclRestored"], 2)
-            self.assertIs(type(owner.checks["daclRestored"]), int)
-            self.assertEqual((owner.journal, owner.native.held, owner.native.retained_arenas), ([], [], {}))
+            first_create = next(index for index, event in enumerate(events) if event[0] == "create")
+            self.assertEqual([event for event in events[:first_create] if event[0] == "missing"], [("missing", path) for path in paths])
+            for status in (0, 0xC0000034, 0xC0000043, 5):
+                for parent, name in ((18, "build.gradle"), (17, "list-denied")):
+                    namespace["completed_open_error"](owner, SimpleNamespace(parent=parent, name=name), status, "denied")
+                self.assertIsNone(owner.checks["fileAccessDenied"])
+                self.assertIsNone(owner.checks["directoryAccessDenied"])
+            denials(owner)
+            finish(owner, result)
+            self.assertEqual(owner.checks, {**dict.fromkeys(("fileAccessDenied", "directoryAccessDenied", "accessibleSiblingRead",
+                "configDirectoryRefused", "initialAbsenceRestored"), True), "denialPoliciesConfirmed": 2, "createdObjectsRemoved": 2})
+            self.assertEqual((owner.journal, owner.native.nodes, owner.native.retained_arenas), ([], {}, {}))
             self.assertTrue(owner.restored)
-            self.assertIsNone(owner.dacl_comparison)
-            self.assertTrue(all(owner.checks[key] is None for key in owner.checks if key != "daclRestored"))
+            self.assertEqual(owner.native.counts["acquired"], 4)
+            for path, original in ((paths[1], 102), (paths[0], 101)):
+                delete = next(event for event in events if event[:2] == ("delete-open", path))
+                self.assertIn(original, delete[2])
+                tail = [event[0] if event[0] != "close" else event[2] for event in events[events.index(delete):]
+                        if len(event) > 1 and event[1] == path and event[0] in ("disposition", "close", "missing")]
+                self.assertEqual(tail, ["disposition", "delete", "creator", "missing"])
+            self.assertEqual(events[-1], ("emit", "complete"))
 
-        original = self._dacl_bytes(control=0x8404)
-        unsupported = [self._dacl_bytes(control=0x8000, offset=0), self._dacl_bytes(control=0x8404, offset=0), b"malformed"]
-        unsupported.extend(self._dacl_bytes(control=0x8404 | bit) for bit in (8, 0x100, 1, 2, 0x200, 0x4000))
-        for bad in unsupported:
-            for baselines in ((bad, original), (original, bad)):
-                owner = make(baselines)
-                with self.assertRaises(Refused):
-                    namespace["deny_data"](owner)
-                self.assertFalse(any(event[0] in ("deny", "restore") for event in owner.native.events))
-                self.assertFalse(owner.restored)
-                self.assertIsNone(owner.checks["daclRestored"])
-                self.assertTrue(all(record["changed"] is False for record in owner.journal))
-                if baselines[0] == original:
-                    self.assertEqual(owner.journal[0]["baseline"], original)
-                    self.assertEqual(owner.native.held, [101, 102])
-        owner = make((original, original))
-        namespace["deny_data"](owner)
-        owner.journal[1]["saved"].raw = self._dacl_bytes(control=0x8004) + bytes(16384 - len(original))
-        with self.assertRaisesRegex(Refused, "^saved_dacl_unsupported$"):
-            namespace["restore"](owner)
-        self.assertEqual(tuple(record["baseline"] for record in owner.journal), (original, original))
-        self.assertFalse(any(event[0] == "restore" for event in owner.native.events))
-        self.assertIsNone(owner.checks["daclRestored"])
-        for handle, role in ((101, "denied-file"), (102, "denied-directory")):
-            readbacks = {101: original, 102: original}
-            readbacks[handle] = self._dacl_bytes(control=0x8004)  # Only resulting auto-inherited differs.
-            owner = make((original, original), readbacks=readbacks)
-            namespace["deny_data"](owner)
-            with self.assertRaisesRegex(Refused, "^dacl_restoration_not_confirmed$"):
-                namespace["restore"](owner)
-            self.assertEqual(owner.dacl_comparison["role"], role)
-            self.assertIs(owner.dacl_comparison["autoInheritanceEqual"], False)
-            self.assertEqual(tuple(record["baseline"] for record in owner.journal), (original, original))
-            self.assertIsNone(owner.checks["daclRestored"])
+        for options in ({"occupied": (paths[0],)}, {"occupied": (paths[1],)}, {"missing_parent": "read-denied"},
+                        {"occupied": (paths[0],), "handle_information_error": True},
+                        *({"absence_error": pair} for pair in (("CreateFileW", 3), ("CreateFileW", 5), ("CreateFileW", 32),
+                                                              ("GetHandleInformation", 2)))):
+            owner, _, _ = make(**options)
+            with self.subTest(options=options), self.assertRaises(Refused):
+                namespace["deny_data"](owner)
+            self.assertFalse(any(event[0] in ("create", "disposition", "close") for event in owner.native.events))
+        bad_policy = [b"malformed", self._dacl_bytes(control=0x8004), self._dacl_bytes(control=0x8404),
+                      self._dacl_bytes(control=0x9504), self._dacl_bytes(control=0x940C), self._dacl_bytes(aces=())]
+        setup_errors = [{"collision": path} for path in paths] + [{"directory_open_failure": True}, {"inherited_handle": 1},
+            {"zero_identity": paths[1]}, {"attributes": {paths[1]: 0x410}}, {"standard": {paths[1]: {"Directory": 0}}},
+            {"standard": {paths[0]: {"EndOfFile": 1}}}, {"standard": {paths[0]: {"NumberOfLinks": 2}}},
+            {"standard": {paths[1]: {"DeletePending": 1}}}, {"reported": {paths[1]: 16385}}]
+        setup_errors.extend({"readbacks": {path: data}} for path in paths for data in bad_policy)
+        for options in setup_errors:
+            owner, _, _ = make(**options)
+            with self.subTest(options=options), self.assertRaises(Refused):
+                namespace["deny_data"](owner)
+            self.assertFalse(any(event[0] in ("disposition", "close") for event in owner.native.events))
             self.assertFalse(owner.restored)
-            self.assertIn(handle, owner.native.held)
-        for options in ({"failed_setter": 102}, {"failed_close": 101}, {"reported": {102: 16385}}):
-            owner = make((original, original), **options)
-            namespace["deny_data"](owner)
-            with self.assertRaises(Refused):
-                namespace["restore"](owner)
-            self.assertIsNone(owner.checks["daclRestored"])
+            self.assertIsNone(owner.checks["createdObjectsRemoved"])
+            if options == {"directory_open_failure": True}:
+                self.assertIn(paths[1], owner.native.nodes)
+                self.assertEqual(len(owner.native.held), 1)  # No invented CreateDirectoryW handle.
+                self.assertEqual(len(owner.journal), 1)
+        for field, value in (("live", 1), ("closeFailed", 1), ("violations", 1), ("closeSucceeded", 2),
+                             ("calls", [{"entered": 1, "returned": 0, "completed": 0}]),
+                             ("calls", [{"entered": 1, "returned": 1, "completed": 0}])):
+            owner, reader, result = make()
+            namespace["deny_data"](owner); denials(owner); reader[field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(Refused):
+                finish(owner, result)
+            self.assertFalse(owner.native.reader_settled)
+            self.assertFalse(any(event[0] in ("delete-open", "disposition", "close") for event in owner.native.events))
+        for options in ({"changed_original": paths[1]}, {"swap_delete": paths[1]}, {"delete_failure": paths[1]},
+                        {"delete_unknown": paths[1]}, {"close_failure": (paths[1], "delete")},
+                        {"close_failure": (paths[1], "creator")}, {"remain_pending": paths[1]}):
+            owner, _, result = make(**options)
+            namespace["deny_data"](owner); denials(owner)
+            with self.subTest(options=options), self.assertRaises((Refused, Unknown)):
+                finish(owner, result)
             self.assertFalse(owner.restored)
+            self.assertIsNone(owner.checks["createdObjectsRemoved"])
+            self.assertIsNone(owner.checks["initialAbsenceRestored"])
             self.assertTrue(owner.journal and owner.native.retained_arenas)
-            if "reported" in options:
-                self.assertIs(owner.dacl_comparison["observedShapeValid"], False)
-                self.assertIsNone(owner.dacl_comparison["lengthEqual"])
-                self.assertIsNone(owner.dacl_comparison["bytesEqual"])
+            events = owner.native.events
+            self.assertNotIn(("emit", "complete"), events)
+            self.assertEqual(len([event for event in events if event[0] == "missing"]), 2)
+            if "close_failure" in options:
+                self.assertEqual(events[-1], ("abort",))  # No probe after uncertain consuming close.
+            if "changed_original" in options or "swap_delete" in options:
+                self.assertFalse(any(event[0] == "disposition" for event in events))
+
+    def test_created_denial_declares_attributes_and_preserves_closed_scope(self):
+        _, parsed = self._dacl_reducers()
+        fixture_native = next(node for node in parsed.body if isinstance(node, ast.ClassDef) and node.name == "FixtureNative")
+        init = next(node for node in fixture_native.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+        security = next(node for node in init.body if isinstance(node, ast.ClassDef) and node.name == "Security")
+        fields = security.body[0].value.elts
+        self.assertEqual([(ast.literal_eval(pair.elts[0]), pair.elts[1].id) for pair in fields],
+                         [("nLength", "U32"), ("lpSecurityDescriptor", "VOID"), ("bInheritHandle", "BOOL")])
+        kernel = next(node.value for node in init.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "kernel" for target in node.targets))
+        declarations = {ast.literal_eval(key): value for key, value in zip(kernel.keys, kernel.values)}
+        for name, arguments, result in (("CreateDirectoryW", ["WCHAR", "VOID"], "BOOL"),
+                                       ("CreateFileW", ["WCHAR", "U32", "U32", "VOID", "U32", "U32", "HANDLE"], "HANDLE")):
+            declaration = declarations[name]
+            self.assertEqual(([arg.id for arg in declaration.elts[0].elts], declaration.elts[1].id), (arguments, result))
+        guard = next(node for node in ast.walk(init) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                     and node.func.id == "require" and isinstance(node.args[-1], ast.Constant)
+                     and node.args[-1].value == "fixture_structure_abi")
+        self.assertEqual(ast.literal_eval(guard.args[0].comparators[0])["Security"], [24, 8, [0, 8, 16]])
+        checks = next(node.value for node in parsed.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "CHECKS" for target in node.targets))
+        self.assertEqual(ast.literal_eval(checks)["acl-type"], ("fileAccessDenied", "directoryAccessDenied", "accessibleSiblingRead",
+                         "configDirectoryRefused", "denialPoliciesConfirmed", "createdObjectsRemoved", "initialAbsenceRestored"))
+        groups = next(node.value for node in parsed.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "GROUPS" for target in node.targets))
+        self.assertEqual(tuple(len(names) for _, names in ast.literal_eval(groups)), (3, 10, 4, 6, 5, 3))
 
     def test_dacl_comparison_diagnostic_schema_and_budgets(self):
         reducers, _ = self._dacl_reducers()
