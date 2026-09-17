@@ -627,7 +627,11 @@ mod windows_snapshot_failure_diagnostics {
         "normalized_alias_veto_required", "fixture_native_unavailable", "fixture_failure",
         "short_alias_access_denied", "short_alias_sharing_violation", "short_alias_not_supported",
         "short_alias_invalid_parameter", "short_alias_name_collision", "short_alias_volume_disabled",
-        "short_alias_privilege_unavailable", "short_alias_other_refused"];
+        "short_alias_privilege_unavailable", "short_alias_other_refused",
+        "saved_dacl_bound", "world_sid_bound", "fixture_dacl_denial_required", "fixture_dacl_not_effective",
+        "dacl_restore_original_object", "saved_dacl_present", "dacl_restoration_not_confirmed",
+        "fixture_restoration_bound", "fixture_retained_arena_bound", "fixture_arena_bound",
+        "fixture_path_bound", "fixture_inherited_handle", "fixture_zero_file_id"];
     // Frozen original supervisor / API dispatch / snapshot codes, not arbitrary
     // protocol-forwarded strings and not BridgeError Display/Debug/message.
     const OWNER_CODES: &[&str] = &["runtime_unavailable", "protocol_error", "invalid_request", "shutting_down",
@@ -735,6 +739,16 @@ mod windows_snapshot_failure_diagnostics {
                 let mut frame = base.clone(); frame["id"] = json!(name);
                 assert_eq!(marker(&encode(&frame)?, name, &nonce),
                     Marker::Valid { stage: "setup", code: "real_short_alias_unavailable" });
+            }
+            for (stage, code) in [("setup", "fixture_dacl_not_effective"),
+                                  ("restoration", "dacl_restoration_not_confirmed")] {
+                let mut frame = base.clone(); frame["id"] = json!("acl-type");
+                frame["stage"] = json!(stage); frame["code"] = json!(code);
+                let result = summary("acl-type", &nonce, 78, Some("engine_failed"), &encode(&frame)?);
+                assert_eq!(result["exitCode"], 78);
+                assert_eq!(result["ownerErrorCode"], "engine_failed");
+                assert_eq!(result["fixtureFailure"], json!({"status":"valid","stage":stage,"code":code}));
+                assert!(!result.to_string().contains(&nonce));
             }
             let mut engine_line = ENGINE_REJECTION.to_vec(); engine_line.push(b'\n');
             for absent in [&b""[..], &engine_line, &b"private-canary-no-marker\n"[..]] {

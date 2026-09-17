@@ -767,11 +767,20 @@ class WindowsSnapshotPureTests(unittest.TestCase):
                    "normalized_alias_veto_required", "fixture_native_unavailable", "fixture_failure",
                    "short_alias_access_denied", "short_alias_sharing_violation", "short_alias_not_supported",
                    "short_alias_invalid_parameter", "short_alias_name_collision", "short_alias_volume_disabled",
-                   "short_alias_privilege_unavailable", "short_alias_other_refused")
+                   "short_alias_privilege_unavailable", "short_alias_other_refused",
+                   "saved_dacl_bound", "world_sid_bound", "fixture_dacl_denial_required", "fixture_dacl_not_effective",
+                   "dacl_restore_original_object", "saved_dacl_present", "dacl_restoration_not_confirmed",
+                   "fixture_restoration_bound", "fixture_retained_arena_bound", "fixture_arena_bound",
+                   "fixture_path_bound", "fixture_inherited_handle", "fixture_zero_file_id")
         for stage in ("setup", "reader", "reduction", "restoration"):
             for reason in reasons:
                 marker = reduce(**{**arguments, "stage": stage, "reason": reason})
                 self.assertEqual(json.loads(marker[len(prefix):-1]), {**expected, "stage": stage, "code": reason})
+        for stage, reason in (("setup", "fixture_dacl_not_effective"),
+                              ("restoration", "dacl_restoration_not_confirmed")):
+            marker = reduce(**{**arguments, "case": "acl-type", "stage": stage, "reason": reason})
+            self.assertEqual(json.loads(marker[len(prefix):-1]),
+                             {**expected, "id": "acl-type", "stage": stage, "code": reason})
         # Literal-only roster extraction, not module execution or a native fixture.
         groups = [node for node in parsed.body if isinstance(node, ast.Assign)
                   and any(isinstance(target, ast.Name) and target.id == "GROUPS" for target in node.targets)]

@@ -176,7 +176,11 @@ def _failure_diagnostic(case, nonce, stage, reason, fixture_state, reader_state,
             "normalized_alias_veto_required", "fixture_native_unavailable",
             "short_alias_access_denied", "short_alias_sharing_violation", "short_alias_not_supported",
             "short_alias_invalid_parameter", "short_alias_name_collision", "short_alias_volume_disabled",
-            "short_alias_privilege_unavailable", "short_alias_other_refused"):
+            "short_alias_privilege_unavailable", "short_alias_other_refused",
+            "saved_dacl_bound", "world_sid_bound", "fixture_dacl_denial_required", "fixture_dacl_not_effective",
+            "dacl_restore_original_object", "saved_dacl_present", "dacl_restoration_not_confirmed",
+            "fixture_restoration_bound", "fixture_retained_arena_bound", "fixture_arena_bound",
+            "fixture_path_bound", "fixture_inherited_handle", "fixture_zero_file_id"):
         reason = "fixture_failure"
     # Every interpolated string is now a closed literal or the admitted hex nonce.
     raw = ('MRK_WINDOWS_SNAPSHOT_FAILURE_V1 {"schemaVersion":1,"scope":"windows-static-snapshot-native-v1","id":"'
