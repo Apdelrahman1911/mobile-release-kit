@@ -27,7 +27,7 @@ jobs:
           ENV: /dev/null
           # Literal public source, not caller/context code. The short heredoc
           # adds its final LF; env-i does not pass this variable to Python.
-          # Embedded collector SHA256: 403207053709b7fc93a432adb4af88ce5e8f1570fd122d843b5c2e4320ec5d7e
+          # Embedded collector SHA256: 75ea4290eb780aaa144bf20b7dc5aa2ed5044bcc1fad0b62bc28d4fe4d807d11
           # Bound read policy SHA256: 1f0172048d1ea48ce91fa459a32b23b7a5f3be2cf89c0eb2ba88a60349e32488
           MRK_H0_PROGRAM: |-
             """H0: bounded public DATA candidate, never builder or host admission."""
@@ -89,11 +89,68 @@ jobs:
             }
             
             
+            CANDIDATE_GUARD_STATUS = {
+                "GAP_COUNT": 32,
+                "PATH_ABSOLUTE": 33,
+                "PATH_CANONICAL": 34,
+                "PATH_LENGTH": 35,
+                "CACHE_IDENTITY": 36,
+                "CACHE_SIZE_512M": 37,
+                "CACHE_SIZE_256K": 38,
+                "CACHE_SIZE_4M": 39,
+                "CACHE_SIZE_256M": 40,
+                "FILE_TYPE": 41,
+                "FILE_SIZE_512M": 42,
+                "FILE_SIZE_256K": 43,
+                "FILE_SIZE_4M": 44,
+                "FILE_SIZE_256M": 45,
+                "OPEN_IDENTITY": 46,
+                "READ_ROOM": 47,
+                "READ_FILE_BOUND": 48,
+                "READ_TOTAL_BOUND": 49,
+                "READ_METADATA_BOUND": 50,
+                "READ_SUPPORT_BOUND": 51,
+                "READ_EXACT_OR_PSEUDO": 52,
+                "FINAL_FD_IDENTITY": 53,
+                "FINAL_PATH_IDENTITY": 54,
+                "ALIAS_LSTAT_SIZE": 55,
+                "ALIAS_METADATA_RESERVE": 56,
+                "ALIAS_TOTAL_RESERVE": 57,
+                "ALIAS_READLINK_SIZE": 58,
+                "ALIAS_IDENTITY": 59,
+                "MEASURE_ERRNO": 60,
+                "PROVIDER_PATH_LENGTH": 61,
+                "PROVIDER_PATH_CANONICAL": 62,
+                "PROVIDER_PATH_CHARSET": 63,
+                "SUPPORT_PATH_COUNT": 64,
+                "PACKAGE_VERSION": 65,
+                "PACKAGE_ARCHITECTURE": 66,
+                "RUNNER_ENTRY_COUNT": 67,
+                "RUNNER_FD_IDENTITY": 68,
+                "RUNNER_PATH_IDENTITY": 69,
+            }
+            
+            SIZE_GUARD_TAG = {
+                ("CACHE", 536870912): "CACHE_SIZE_512M",
+                ("CACHE", 262144): "CACHE_SIZE_256K",
+                ("CACHE", 4194304): "CACHE_SIZE_4M",
+                ("CACHE", 268435456): "CACHE_SIZE_256M",
+                ("FILE", 536870912): "FILE_SIZE_512M",
+                ("FILE", 262144): "FILE_SIZE_256K",
+                ("FILE", 4194304): "FILE_SIZE_4M",
+                ("FILE", 268435456): "FILE_SIZE_256M",
+            }
+            
+            
             def failure_status(phase, error):
-                """Classify only the boundary and exception family, never its contents."""
+                """Classify boundary, family and our closed tag; never exception text."""
                 if type(phase) is not str:
                     return 70
                 if isinstance(error, Refused):
+                    if phase == "CANDIDATES" and type(error) is Refused:
+                        tag = error.__dict__.get("guard_tag")
+                        if type(tag) is str:
+                            return CANDIDATE_GUARD_STATUS.get(tag, 96)
                     reason = "GUARD"
                 elif isinstance(error, OSError):
                     reason = "IO"
@@ -102,6 +159,23 @@ jobs:
                 else:
                     reason = "INTERNAL"
                 return FAILURE_STATUS.get((phase, reason), 70)
+            
+            
+            def guard(ok, tag):
+                if not ok:
+                    error = Refused()
+                    error.guard_tag = tag
+                    raise error
+                return ok
+            
+            
+            def size_guard(ok, kind, cap):
+                if ok:
+                    return ok
+                tag = None
+                if type(kind) is str and type(cap) is int:
+                    tag = SIZE_GUARD_TAG.get((kind, cap))
+                return guard(ok, tag)
             
             
             def need(ok):
@@ -124,7 +198,7 @@ jobs:
             def gap(code, ref):
                 item = [code, ref]
                 if item not in GAPS:
-                    need(len(GAPS) < 256)
+                    guard(len(GAPS) < 256, "GAP_COUNT")
                     GAPS.append(item)
             
             
@@ -136,7 +210,9 @@ jobs:
             
             def parent(path):
                 global META, BODY
-                need(path.startswith("/") and os.path.normpath(path) == path and len(path) <= 512)
+                need(guard(path.startswith("/"), "PATH_ABSOLUTE")
+                     and guard(os.path.normpath(path) == path, "PATH_CANONICAL")
+                     and guard(len(path) <= 512, "PATH_LENGTH"))
                 # Only this kernel-defined self alias is admitted; never scan processes/FDs.
                 if path.startswith("/proc/self/"):
                     need(path in ("/proc/self/cgroup", "/proc/self/mountinfo"))
@@ -183,15 +259,17 @@ jobs:
                 global BODY, META, SUPPORT
                 if path in CACHE:
                     row, raw = CACHE[path]
-                    need(ident(at(path)) == row["stat"] and row["stat"]["bytes"] <= cap)
+                    need(guard(ident(at(path)) == row["stat"], "CACHE_IDENTITY")
+                         and size_guard(row["stat"]["bytes"] <= cap, "CACHE", cap))
                     return row, raw
                 pfd, name = parent(path)
                 fd = None
                 try:
                     before = os.stat(name, dir_fd=pfd, follow_symlinks=False)
-                    need(stat.S_ISREG(before.st_mode) and before.st_size <= cap)
+                    need(guard(stat.S_ISREG(before.st_mode), "FILE_TYPE")
+                         and size_guard(before.st_size <= cap, "FILE", cap))
                     fd = os.open(name, F, dir_fd=pfd)
-                    need(ident(os.fstat(fd)) == ident(before))
+                    guard(ident(os.fstat(fd)) == ident(before), "OPEN_IDENTITY")
                     digest, raw, total = hashlib.sha256(), bytearray(), 0
                     pseudo = path.startswith(("/proc/", "/sys/fs/cgroup/"))
                     while True:
@@ -202,7 +280,7 @@ jobs:
                         room = min(cap - total, 3 * 2**30 - BODY,
                                    8 * 2**20 - META if metadata else cap,
                                    2 * 2**30 - SUPPORT if support else cap)
-                        need(room > 0)
+                        guard(room > 0, "READ_ROOM")
                         chunk = os.read(fd, min(65536, room, cap if pseudo else before.st_size - total))
                         if not chunk:
                             break
@@ -210,12 +288,17 @@ jobs:
                         BODY += len(chunk)
                         META += len(chunk) if metadata else 0
                         SUPPORT += len(chunk) if support else 0
-                        need(total <= cap and BODY <= 3 * 2**30 and META <= 8 * 2**20 and SUPPORT <= 2 * 2**30)
+                        need(guard(total <= cap, "READ_FILE_BOUND")
+                             and guard(BODY <= 3 * 2**30, "READ_TOTAL_BOUND")
+                             and guard(META <= 8 * 2**20, "READ_METADATA_BOUND")
+                             and guard(SUPPORT <= 2 * 2**30, "READ_SUPPORT_BOUND"))
                         digest.update(chunk)
                         if metadata:
                             raw.extend(chunk)
-                    need(total == before.st_size or pseudo)
-                    need(ident(before) == ident(os.fstat(fd)) == ident(at(path)))
+                    guard(total == before.st_size or pseudo, "READ_EXACT_OR_PSEUDO")
+                    before_identity, fd_identity = ident(before), ident(os.fstat(fd))
+                    need(guard(before_identity == fd_identity, "FINAL_FD_IDENTITY")
+                         and guard(fd_identity == ident(at(path)), "FINAL_PATH_IDENTITY"))
                     row = {"path": path, "kind": "regular", "stat": ident(before), "sha256": digest.hexdigest(), "aliasTarget": None, "readBytes": total}
                     CACHE[path] = (row, bytes(raw))
                     return CACHE[path]
@@ -235,7 +318,9 @@ jobs:
                     if stat.S_ISLNK(before.st_mode):
                         # Linux readlink bodies fit one 4096-byte reservation. A needed
                         # target is returned only when independently in the fixed read set.
-                        need(before.st_size <= 512 and META + 4096 <= 8 * 2**20 and BODY + 4096 <= 3 * 2**30)
+                        need(guard(before.st_size <= 512, "ALIAS_LSTAT_SIZE")
+                             and guard(META + 4096 <= 8 * 2**20, "ALIAS_METADATA_RESERVE")
+                             and guard(BODY + 4096 <= 3 * 2**30, "ALIAS_TOTAL_RESERVE"))
                         fd, name = parent(path)
                         try:
                             link = os.readlink(name, dir_fd=fd)
@@ -243,15 +328,15 @@ jobs:
                             os.close(fd)
                         META += len(os.fsencode(link))
                         BODY += len(os.fsencode(link))
-                        need(len(os.fsencode(link)) <= 512)
+                        guard(len(os.fsencode(link)) <= 512, "ALIAS_READLINK_SIZE")
                         dest = os.path.normpath(os.path.join(os.path.dirname(path), link))
                         if dest in aliases:
                             target = dest
-                    need(ident(before) == ident(at(path)))
+                    guard(ident(before) == ident(at(path)), "ALIAS_IDENTITY")
                     kind = "alias" if stat.S_ISLNK(before.st_mode) else "directory" if stat.S_ISDIR(before.st_mode) else "nonordinary"
                     return {"path": path, "kind": kind, "stat": ident(before), "sha256": None, "aliasTarget": target, "readBytes": 0}
                 except OSError as exc:
-                    need(exc.errno in (errno.ENOENT, errno.EACCES, errno.EPERM, errno.ENOTDIR, errno.ELOOP))
+                    guard(exc.errno in (errno.ENOENT, errno.EACCES, errno.EPERM, errno.ENOTDIR, errno.ELOOP), "MEASURE_ERRNO")
                     return {"path": path, "kind": "unavailable", "stat": None, "sha256": None, "aliasTarget": None, "readBytes": 0}
             
             
@@ -415,9 +500,11 @@ jobs:
                                 name = new + name[len(old):]
                                 break
                         if any(name.startswith(root) for root in P["supportRoots"]):
-                            need(len(name) <= 256 and os.path.normpath(name) == name and re.fullmatch(r"/[A-Za-z0-9_./+@=-]+", name))
+                            need(guard(len(name) <= 256, "PROVIDER_PATH_LENGTH")
+                                 and guard(os.path.normpath(name) == name, "PROVIDER_PATH_CANONICAL")
+                                 and guard(re.fullmatch(r"/[A-Za-z0-9_./+@=-]+", name), "PROVIDER_PATH_CHARSET"))
                             paths.add(name)
-                            need(len(paths) <= 4096)
+                            guard(len(paths) <= 4096, "SUPPORT_PATH_COUNT")
                 support = []
                 for path in sorted(paths - set(P["tools"])):
                     row = measure(path, support=True, aliases=paths)
@@ -433,7 +520,9 @@ jobs:
                     fields = dict(line.split(": ", 1) for line in stanza.splitlines() if not line.startswith(" ") and ": " in line)
                     if fields.get("Package") in packages and fields.get("Status") == "install ok installed":
                         vals = [fields.get("Version", ""), fields.get("Architecture", "")]
-                        need(all(re.fullmatch(r"[A-Za-z0-9_.+:~=-]{1,96}", v) for v in vals))
+                        need(all(guard(re.fullmatch(r"[A-Za-z0-9_.+:~=-]{1,96}", v),
+                                       "PACKAGE_VERSION" if i == 0 else "PACKAGE_ARCHITECTURE")
+                                 for i, v in enumerate(vals)))
                         versions[fields["Package"] + ":" + vals[1]] = {"version": vals[0], "architecture": vals[1]}
                 runner, version = [], None
                 try:
@@ -442,9 +531,11 @@ jobs:
                         before, names = os.fstat(fd), []
                         with os.scandir(fd) as entries:
                             for entry in entries:
-                                need(len(names) < 8)
+                                guard(len(names) < 8, "RUNNER_ENTRY_COUNT")
                                 names.append(entry.name)
-                        need(ident(before) == ident(os.fstat(fd)) == ident(at("/home/runner/runners")))
+                        before_identity, fd_identity = ident(before), ident(os.fstat(fd))
+                        need(guard(before_identity == fd_identity, "RUNNER_FD_IDENTITY")
+                             and guard(fd_identity == ident(at("/home/runner/runners")), "RUNNER_PATH_IDENTITY"))
                         if len(names) == 1 and re.fullmatch(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", names[0]):
                             if stat.S_ISDIR(os.stat(names[0], dir_fd=fd, follow_symlinks=False).st_mode):
                                 version = names[0]
@@ -671,7 +762,7 @@ jobs:
           [[ $UID == "$EUID" && $EUID -gt 0 && -d /tmp && ! -L /tmp ]] || fail
           [[ ${MRK_H0_PROGRAM+x} == x ]] || fail
           readonly MRK_H0_PROGRAM
-          [[ ${#MRK_H0_PROGRAM} -eq 43968 ]] || fail
+          [[ ${#MRK_H0_PROGRAM} -eq 47205 ]] || fail
           S="/tmp/mrk-builder-host-observe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           readonly S
           [[ ! -e $S && ! -L $S ]] || fail
@@ -725,7 +816,46 @@ jobs:
           printf 'MRK-H0 OBSERVER-WAIT %s\n' "$rc"
           if [[ $rc -ne 0 ]]; then
             # Closed failure labels only; unknown/timeout/signal codes stay generic.
+            GUARD_LABEL=
             case "$rc" in
+              32) GUARD_LABEL=GAP_COUNT ;;
+              33) GUARD_LABEL=PATH_ABSOLUTE ;;
+              34) GUARD_LABEL=PATH_CANONICAL ;;
+              35) GUARD_LABEL=PATH_LENGTH ;;
+              36) GUARD_LABEL=CACHE_IDENTITY ;;
+              37) GUARD_LABEL=CACHE_SIZE_512M ;;
+              38) GUARD_LABEL=CACHE_SIZE_256K ;;
+              39) GUARD_LABEL=CACHE_SIZE_4M ;;
+              40) GUARD_LABEL=CACHE_SIZE_256M ;;
+              41) GUARD_LABEL=FILE_TYPE ;;
+              42) GUARD_LABEL=FILE_SIZE_512M ;;
+              43) GUARD_LABEL=FILE_SIZE_256K ;;
+              44) GUARD_LABEL=FILE_SIZE_4M ;;
+              45) GUARD_LABEL=FILE_SIZE_256M ;;
+              46) GUARD_LABEL=OPEN_IDENTITY ;;
+              47) GUARD_LABEL=READ_ROOM ;;
+              48) GUARD_LABEL=READ_FILE_BOUND ;;
+              49) GUARD_LABEL=READ_TOTAL_BOUND ;;
+              50) GUARD_LABEL=READ_METADATA_BOUND ;;
+              51) GUARD_LABEL=READ_SUPPORT_BOUND ;;
+              52) GUARD_LABEL=READ_EXACT_OR_PSEUDO ;;
+              53) GUARD_LABEL=FINAL_FD_IDENTITY ;;
+              54) GUARD_LABEL=FINAL_PATH_IDENTITY ;;
+              55) GUARD_LABEL=ALIAS_LSTAT_SIZE ;;
+              56) GUARD_LABEL=ALIAS_METADATA_RESERVE ;;
+              57) GUARD_LABEL=ALIAS_TOTAL_RESERVE ;;
+              58) GUARD_LABEL=ALIAS_READLINK_SIZE ;;
+              59) GUARD_LABEL=ALIAS_IDENTITY ;;
+              60) GUARD_LABEL=MEASURE_ERRNO ;;
+              61) GUARD_LABEL=PROVIDER_PATH_LENGTH ;;
+              62) GUARD_LABEL=PROVIDER_PATH_CANONICAL ;;
+              63) GUARD_LABEL=PROVIDER_PATH_CHARSET ;;
+              64) GUARD_LABEL=SUPPORT_PATH_COUNT ;;
+              65) GUARD_LABEL=PACKAGE_VERSION ;;
+              66) GUARD_LABEL=PACKAGE_ARCHITECTURE ;;
+              67) GUARD_LABEL=RUNNER_ENTRY_COUNT ;;
+              68) GUARD_LABEL=RUNNER_FD_IDENTITY ;;
+              69) GUARD_LABEL=RUNNER_PATH_IDENTITY ;;
               80) printf 'MRK-H0 OBSERVER-FAILURE BOOTSTRAP_CONTEXT GUARD\n' ;;
               81) printf 'MRK-H0 OBSERVER-FAILURE BOOTSTRAP_CONTEXT IO\n' ;;
               82) printf 'MRK-H0 OBSERVER-FAILURE BOOTSTRAP_CONTEXT DATA_PARSE\n' ;;
@@ -760,6 +890,9 @@ jobs:
               111) printf 'MRK-H0 OBSERVER-FAILURE WRITE INTERNAL\n' ;;
               *) : ;;
             esac
+            if [[ -n $GUARD_LABEL ]]; then
+              printf 'MRK-H0 OBSERVER-FAILURE CANDIDATES GUARD %s\n' "$GUARD_LABEL"
+            fi
             printf 'MRK-H0 ERROR OBSERVER_RETAINED\n'
             exit "$rc"
           fi
@@ -839,7 +972,7 @@ jobs:
           import stat
           import sys
           
-          COLLECTOR_SHA256 = "403207053709b7fc93a432adb4af88ce5e8f1570fd122d843b5c2e4320ec5d7e"
+          COLLECTOR_SHA256 = "75ea4290eb780aaa144bf20b7dc5aa2ed5044bcc1fad0b62bc28d4fe4d807d11"
           POLICY_SHA256 = "1f0172048d1ea48ce91fa459a32b23b7a5f3be2cf89c0eb2ba88a60349e32488"
           SHAPES = {'ci-shape.json': ['schema', 'scope', 'locations', 'census', 'originalCiSnapshotCharge', 'originalObserver', 'return'], 'fit-gaps.json': ['schema', 'scope', 'storageBoundary', 'observedGaps', 'launchGaps'], 'host-candidate-files.json': ['schema', 'scope', 'tools', 'support', 'aliases', 'providers', 'packageVersions', 'runnerVersionDirectory', 'runner'], 'host-facts.json': ['schema', 'scope', 'policySha256', 'run', 'uid', 'gid', 'kernel', 'osRelease', 'metadata', 'filesystemsPresent', 'memory', 'procSelfAlias']}
           ENVIRONMENT = ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TZ', 'ImageOS', 'ImageVersion', 'GITHUB_WORKSPACE', 'RUNNER_TEMP', 'GITHUB_ENV', 'GITHUB_OUTPUT', 'GITHUB_PATH', 'GITHUB_STEP_SUMMARY', 'GITHUB_EVENT_PATH', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_EVENT_NAME', 'RUNNER_ENVIRONMENT', 'GITHUB_REF']
