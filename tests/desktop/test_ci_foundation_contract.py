@@ -973,32 +973,69 @@ class WindowsConsumerTests(unittest.TestCase):
 class WindowsCleanupMetadataTests(unittest.TestCase):
     """Actual cleanup control flow with fake capabilities; no real file removal."""
 
-    def fixture(self, *, inventory_change=None, recheck_change=None, prerequisite=False):
+    def fixture(self, *, inventory_change=None, recheck_change=None, prerequisite=False,
+                hardlinks=False, member_change=None, duplicate=False, after_unlink_change=None, failure=None):
         events = []
         root, first, nested, second = "/inert", "/inert/first", "/inert/nested", "/inert/nested/second"
+        singleton = "/inert/singleton"
         def metadata(inode, *, directory=False):
             return {"st_mode": (stat.S_IFDIR if directory else stat.S_IFREG) | 0o700,
                     "st_file_attributes": 0, "st_nlink": 1, "st_dev": 7, "st_ino": inode,
-                    "st_size": 4, "st_mtime_ns": 100}
+                    "st_size": 4, "st_mtime_ns": 100, "st_ctime_ns": 200}
         values = {root: metadata(10, directory=True), first: metadata(11),
                   nested: metadata(12, directory=True), second: metadata(13)}
+        children = {root: (first, nested), nested: (second,)}
+        if hardlinks:
+            values[first]["st_nlink"] = 2
+            values[second] = dict(values[first])
+            values[singleton] = metadata(14)
+            # Keep the unrelated group BETWEEN the two cross-directory aliases.
+            children[root] = (first, singleton, nested)
+        values[second].update(member_change or {})
+        if duplicate:
+            children[nested] = (second, second)
         reads = {}
 
+        def fail(*operation):
+            if failure == operation:
+                raise OSError("private-cleanup-error /inert/private-name")
+
         class FakePath:
+            facts = values
+            observations = []
+            successful_unlinks = []
+            removed_directories = []
             def __init__(self, value):
                 self.value = value
                 self.parts = tuple(value.split("/"))
+            def __str__(self):
+                return self.value
             def lstat(self):
                 events.append(("lstat", self.value))
                 reads[self.value] = reads.get(self.value, 0) + 1
+                fail("lstat", self.value, reads[self.value])
                 result = dict(values[self.value])
                 if self.value == first:
                     result.update((inventory_change if reads[self.value] == 1 else recheck_change) or {})
+                self.observations.append((self.value, reads[self.value], dict(result)))
                 return SimpleNamespace(**result)
             def unlink(self):
                 events.append(("unlink", self.value))
+                fail("unlink", self.value)
+                original = values[self.value]
+                identity = (original["st_dev"], original["st_ino"])
+                for facts in values.values():
+                    if stat.S_ISREG(facts["st_mode"]) and (facts["st_dev"], facts["st_ino"]) == identity:
+                        facts["st_nlink"] -= 1
+                        facts["st_ctime_ns"] += 1
+                values[self.value.rpartition("/")[0]]["st_mtime_ns"] += 1
+                self.successful_unlinks.append(self.value)
+                if self.value == first:
+                    values[second].update(after_unlink_change or {})
             def rmdir(self):
                 events.append(("rmdir", self.value))
+                fail("rmdir", self.value)
+                self.removed_directories.append(self.value)
 
         class Entry:
             def __init__(self, path):
@@ -1013,9 +1050,15 @@ class WindowsCleanupMetadataTests(unittest.TestCase):
                 self.path = path
             def __enter__(self):
                 events.append(("scan", self.path.value))
-                return iter(Entry(value) for value in {root: (first, nested), nested: (second,)}[self.path.value])
+                fail("scan-open", self.path.value)
+                def entries():
+                    for value in children[self.path.value]:
+                        yield Entry(value)
+                    fail("scan-next", self.path.value)
+                return entries()
             def __exit__(self, *args):
                 events.append(("scan-close", self.path.value))
+                fail("scan-close", self.path.value)
 
         def receipt(context):
             self.assertEqual(context, {"root": root})
@@ -1068,6 +1111,117 @@ class WindowsCleanupMetadataTests(unittest.TestCase):
                     self.invoke(fixture)
                 self.assertIn(("scan-close", "/inert/nested"), fixture[0])
                 self.assertFalse(any(kind in ("unlink", "rmdir") for kind, _ in fixture[0]))
+
+    def test_windows_cleanup_closes_interleaved_original_hardlink_groups(self):
+        fixture = self.fixture(hardlinks=True)
+        events, paths = fixture[:2]
+        self.invoke(fixture)
+        removals = [("unlink", "/inert/first"), ("unlink", "/inert/singleton"),
+                    ("unlink", "/inert/nested/second"), ("rmdir", "/inert/nested"), ("rmdir", "/inert")]
+        self.assertEqual([item for item in events if item[0] in ("unlink", "rmdir")], removals)
+        self.assertEqual(paths.successful_unlinks, [path for kind, path in removals if kind == "unlink"])
+        self.assertEqual(paths.removed_directories, ["/inert/nested", "/inert"])
+        first_unlink = events.index(removals[0])
+        self.assertEqual(events[0], ("receipt", "/inert"))
+        self.assertFalse(any(kind == "cached-stat" for kind, _ in events))
+        self.assertEqual([item for item in events[:first_unlink] if item[0] == "scan-close"],
+                         [("scan-close", "/inert"), ("scan-close", "/inert/nested")])
+        self.assertFalse(any(kind.startswith("scan") for kind, _ in events[first_unlink:]))
+        rechecks = [(path, facts["st_nlink"], facts["st_ctime_ns"])
+                    for path, ordinal, facts in paths.observations if ordinal == 2 and stat.S_ISREG(facts["st_mode"])]
+        self.assertEqual(rechecks, [("/inert/first", 2, 200), ("/inert/singleton", 1, 200),
+                                    ("/inert/nested/second", 1, 201)])
+        self.assertTrue(all(facts["st_nlink"] == 0 for facts in paths.facts.values() if stat.S_ISREG(facts["st_mode"])))
+        for index, (kind, path) in enumerate(events):
+            if kind in ("unlink", "rmdir"):
+                self.assertEqual(events[index - 1], ("lstat", path))
+
+    def test_windows_cleanup_refuses_unclosed_or_unusable_whole_inventory(self):
+        unclosed = "Windows task cleanup hardlink group is not closed inside the original root"
+        disagree = "Windows task cleanup hardlink metadata disagrees"
+        unusable = "Windows task cleanup inventory has an unusable file identity"
+        bad_links = "Windows task cleanup inventory has an invalid link count"
+        cases = [
+            ({"inventory_change": {"st_nlink": 3}, "member_change": {"st_nlink": 3}}, unclosed),
+            ({"duplicate": True}, "Windows task cleanup inventory repeated a path"),
+            ({"member_change": {"st_nlink": 3}}, disagree),
+            ({"member_change": {"st_size": 5}}, disagree),
+            ({"member_change": {"st_mtime_ns": 101}}, disagree),
+            ({"inventory_change": {"st_ino": 0}, "member_change": {"st_ino": 0}}, unusable),
+            ({"member_change": {"st_ino": None}}, unusable),
+            ({"member_change": {"st_ino": True}}, unusable),
+            ({"member_change": {"st_dev": -1}}, unusable),
+            ({"inventory_change": {"st_nlink": True}}, bad_links),
+            ({"inventory_change": {"st_nlink": 2.0}}, bad_links),
+            ({"inventory_change": {"st_nlink": 500001}}, bad_links),
+            ({"failure": ("lstat", "/inert", 1)}, "Windows cleanup inventory directory metadata failed"),
+            ({"failure": ("lstat", "/inert/nested/second", 1)}, "Windows cleanup inventory entry metadata failed"),
+        ]
+        cases.extend(({"failure": (stage, "/inert/nested")}, "Windows cleanup inventory enumeration failed")
+                     for stage in ("scan-open", "scan-next", "scan-close"))
+        for options, diagnostic in cases:
+            with self.subTest(options=options):
+                fixture = self.fixture(hardlinks=True, **options)
+                with self.assertRaises(helper.CheckFailure) as caught:
+                    self.invoke(fixture)
+                self.assertEqual(str(caught.exception), diagnostic)
+                self.assertNotIn("/inert", str(caught.exception))
+                self.assertNotIn("private-cleanup-error", str(caught.exception))
+                if "failure" in options:
+                    self.assertTrue(caught.exception.__suppress_context__)
+                self.assertEqual(fixture[0][0], ("receipt", "/inert"))
+                self.assertFalse(any(kind in ("unlink", "rmdir", "cached-stat") for kind, _ in fixture[0]))
+                self.assertEqual(fixture[1].successful_unlinks, [])
+                self.assertEqual(fixture[1].removed_directories, [])
+
+    def test_windows_cleanup_stops_on_late_alias_change_without_rollback(self):
+        for changed in ({"st_nlink": 2}, {"st_nlink": 0}, {"st_dev": 8}, {"st_ino": 99},
+                        {"st_size": 5}, {"st_mtime_ns": 101}):
+            with self.subTest(changed=changed):
+                fixture = self.fixture(hardlinks=True, after_unlink_change=changed)
+                with self.assertRaises(helper.CheckFailure) as caught:
+                    self.invoke(fixture)
+                diagnostic = ("Windows task cleanup remaining link count changed" if "st_nlink" in changed
+                              else "Windows task cleanup file identity changed")
+                self.assertEqual(str(caught.exception), diagnostic)
+                self.assertEqual(fixture[1].successful_unlinks, ["/inert/first", "/inert/singleton"])
+                self.assertEqual([item for item in fixture[0] if item[0] in ("unlink", "rmdir")],
+                                 [("unlink", "/inert/first"), ("unlink", "/inert/singleton")])
+                self.assertEqual(fixture[0][-1], ("lstat", "/inert/nested/second"))
+                self.assertEqual(fixture[1].removed_directories, [])
+                self.assertNotIn("/inert", str(caught.exception))
+
+    def test_windows_cleanup_stops_on_original_io_failure_without_retry(self):
+        all_files = ["/inert/first", "/inert/singleton", "/inert/nested/second"]
+        unlink_failure = "Windows task cleanup original unlink failed; remaining outputs retained"
+        cases = (
+            (("unlink", "/inert/first"), [], unlink_failure),
+            (("unlink", "/inert/nested/second"), all_files[:2], unlink_failure),
+            (("lstat", "/inert/nested/second", 2), all_files[:2], "Windows cleanup before-unlink metadata failed"),
+            (("lstat", "/inert/nested", 3), all_files, "Windows cleanup final directory metadata failed"),
+            (("rmdir", "/inert/nested"), all_files,
+             "Windows task cleanup original directory removal failed; remaining outputs retained"),
+        )
+        for failure, successful, diagnostic in cases:
+            with self.subTest(failure=failure):
+                fixture = self.fixture(hardlinks=True, failure=failure)
+                with self.assertRaises(helper.CheckFailure) as caught:
+                    self.invoke(fixture)
+                self.assertEqual(str(caught.exception), diagnostic)
+                self.assertTrue(caught.exception.__suppress_context__)
+                self.assertNotIn("/inert", str(caught.exception))
+                self.assertNotIn("private-cleanup-error", str(caught.exception))
+                self.assertEqual(fixture[1].successful_unlinks, successful)
+                self.assertEqual(fixture[1].removed_directories, [])
+                self.assertEqual(fixture[0][-1], failure[:2])
+                attempts = [item for item in fixture[0] if item[0] in ("unlink", "rmdir")]
+                expected = [("unlink", path) for path in successful]
+                if failure[0] in ("unlink", "rmdir"):
+                    expected.append(failure)
+                self.assertEqual(attempts, expected)
+                # A failed original unlink never performs the fake success update.
+                if failure[0] == "unlink":
+                    self.assertEqual(fixture[1].facts[failure[1]]["st_nlink"], 2 if not successful else 1)
 
 
 if __name__ == "__main__":
