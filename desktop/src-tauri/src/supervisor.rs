@@ -3,8 +3,9 @@
 //!
 //! An independent watchdog includes blocking runtime inspection and spawn time.
 //! Renderer cancellation only drops a reply receiver, never these owner tasks.
+//! One final observer owns the original driver/watchdog joins before retirement.
 //! After the one cleanup allowance, uncertainty is reported and ownership is
-//! retained; an existing driver may settle later but cannot turn it into success.
+//! retained; late positive settlement cannot restore successful admission.
 use std::{collections::BTreeMap, future::pending, process::ExitStatus, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
 #[cfg(all(feature = "development-runtime", debug_assertions))]
 use std::process::Stdio;
@@ -21,6 +22,9 @@ const ACTIVE_LIMIT: usize = 2;
 #[cfg(all(test, feature = "development-runtime"))]
 #[path = "hosted_tests.rs"]
 mod hosted_tests;
+#[cfg(test)]
+#[path = "passive_management_tests.rs"]
+mod management_tests;
 
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     // No user callback/serialization runs while these small bookkeeping locks
@@ -40,7 +44,8 @@ struct Inner {
 struct Owner {
     key: u64, id: String, state: Mutex<OwnerState>, resources: AsyncMutex<Resources>,
     stop: watch::Sender<bool>, changed: Notify, permit: Mutex<Option<OwnedSemaphorePermit>>,
-    driver: Mutex<Option<JoinHandle<()>>>, watchdog: Mutex<Option<JoinHandle<()>>>,
+    driver: AsyncMutex<Option<JoinHandle<DriverEnd>>>, watchdog: AsyncMutex<Option<JoinHandle<WatchdogEnd>>>,
+    observer: AsyncMutex<Option<JoinHandle<()>>>,
     #[cfg(all(test, feature = "development-runtime"))]
     observation: Arc<Mutex<hosted_tests::Observation>>,
 }
@@ -48,6 +53,64 @@ struct OwnerState {
     endpoint: Instant, cleanup_endpoint: Option<Instant>, error: Option<BridgeError>,
     terminal: bool, unknown: bool,
     reply: Option<oneshot::Sender<Result<Value, BridgeError>>>,
+    driver_join: ManagementJoin, watchdog_join: ManagementJoin,
+    driver_end: Option<DriverEnd>, watchdog_end: Option<WatchdogEnd>,
+}
+
+// These are private original-return receipts, not task-body success flags.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManagementJoin { Pending, Returned, Missing, Cancelled, Panicked, Failed, InvalidReturn }
+impl ManagementJoin {
+    fn original_result(self) -> bool {
+        matches!(self, Self::Returned | Self::Cancelled | Self::Panicked | Self::Failed)
+    }
+    fn error(error: &tokio::task::JoinError) -> Self {
+        if error.is_cancelled() { Self::Cancelled } else if error.is_panic() { Self::Panicked } else { Self::Failed }
+    }
+}
+enum DriverEnd { Ready(Result<Value, BridgeError>), RetainedUnknown }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WatchdogEnd {
+    DriverObserved(ManagementJoin),
+    CleanupExpired { endpoint: Instant, observed_at: Instant },
+}
+
+impl OwnerState {
+    fn new(endpoint: Instant, reply: Option<oneshot::Sender<Result<Value, BridgeError>>>) -> Self {
+        Self { endpoint, cleanup_endpoint: None, error: None, terminal: false, unknown: false, reply,
+            driver_join: ManagementJoin::Pending, watchdog_join: ManagementJoin::Pending,
+            driver_end: None, watchdog_end: None }
+    }
+    fn fail_at(&mut self, error: BridgeError, now: Instant) {
+        if self.terminal { return; }
+        if self.error.is_none() { self.error = Some(error); }
+        if self.cleanup_endpoint.is_none() { self.cleanup_endpoint = Some(now.min(self.endpoint) + CLEANUP_TIME); }
+    }
+    fn management_ready(&self) -> bool {
+        self.driver_join == ManagementJoin::Returned && self.watchdog_join == ManagementJoin::Returned
+            && matches!(self.driver_end, Some(DriverEnd::Ready(_))) && self.watchdog_end.is_some()
+    }
+    fn accepts_watchdog(&self, end: WatchdogEnd) -> bool {
+        match end {
+            // The returned observation is captured inside the original watchdog,
+            // so a later driver join cannot legitimize an unexplained early return.
+            WatchdogEnd::DriverObserved(observed) => observed.original_result() && observed == self.driver_join,
+            WatchdogEnd::CleanupExpired { endpoint, observed_at } => self.unknown
+                && self.cleanup_endpoint == Some(endpoint) && observed_at >= endpoint,
+        }
+    }
+    fn retirement_result(&mut self, now: Instant, stopping: bool) -> Option<Result<Value, BridgeError>> {
+        // The caller holds registry -> state while sampling the real clock and
+        // shutdown latch. This small decision also admits fixed-value tests of
+        // simultaneous-ready joins/deadlines without replacing the product clock.
+        if self.terminal || !self.management_ready() { return None; }
+        if stopping { self.fail_at(BridgeError::shutdown(), now); }
+        if now >= self.endpoint { self.fail_at(BridgeError::timeout(), now); }
+        if self.cleanup_endpoint.is_some_and(|endpoint| now >= endpoint) { self.unknown = true; }
+        let Some(DriverEnd::Ready(result)) = self.driver_end.take() else { return None; };
+        Some(if self.unknown { Err(BridgeError::cleanup_unknown()) }
+            else { match &self.error { Some(error) => Err(error.clone()), None => result } })
+    }
 }
 #[derive(Default)]
 struct Resources {
@@ -66,10 +129,7 @@ impl Owner {
     fn fail(&self, error: BridgeError) {
         let mut state = lock(&self.state);
         if state.terminal { return; }
-        if state.error.is_none() { state.error = Some(error); }
-        if state.cleanup_endpoint.is_none() {
-            state.cleanup_endpoint = Some(Instant::now().min(state.endpoint) + CLEANUP_TIME);
-        }
+        state.fail_at(error, Instant::now());
         drop(state);
         self.stop.send_replace(true);
         self.changed.notify_waiters();
@@ -81,27 +141,64 @@ impl Owner {
         if state.terminal { return; }
         inner.disabled.store(true, Ordering::SeqCst);
         state.unknown = true;
-        if state.error.is_none() { state.error = Some(BridgeError::cleanup_unknown()); }
-        if state.cleanup_endpoint.is_none() { state.cleanup_endpoint = Some(Instant::now().min(state.endpoint) + CLEANUP_TIME); }
+        state.fail_at(BridgeError::cleanup_unknown(), Instant::now());
         if let Some(reply) = state.reply.take() { let _ = reply.send(Err(BridgeError::cleanup_unknown())); }
         drop(state);
         self.stop.send_replace(true);
         inner.changed.notify_waiters();
         self.changed.notify_waiters();
     }
-    fn finish(&self, inner: &Inner, result: Result<Value, BridgeError>) {
+    fn advance_clock(&self, inner: &Inner, now: Instant) -> Option<Instant> {
         let mut state = lock(&self.state);
-        if state.terminal { return; }
-        if Instant::now() >= state.endpoint && state.error.is_none() { state.error = Some(BridgeError::timeout()); }
-        let result = match &state.error { Some(error) => Err(error.clone()), None => result };
-        state.terminal = true;
-        if let Some(reply) = state.reply.take() { let _ = reply.send(result); }
+        if state.terminal { return None; }
+        let timed_out = now >= state.endpoint && state.error.is_none();
+        if timed_out { state.fail_at(BridgeError::timeout(), now); }
+        let endpoint = state.cleanup_endpoint.unwrap_or(state.endpoint);
+        let expired = state.cleanup_endpoint.is_some() && now >= endpoint;
+        let newly_unknown = expired && !state.unknown;
         drop(state);
+        if timed_out { self.stop.send_replace(true); self.changed.notify_waiters(); }
+        if newly_unknown { self.unknown(inner); }
+        if expired { None } else { Some(endpoint) }
+    }
+    fn retire(self: &Arc<Self>, inner: &Inner) -> bool {
+        // The short lock order is registry -> state -> permit. Shutdown/admission
+        // share the registry lock; no synchronous guard crosses an await.
+        let mut owners = lock(&inner.owners);
+        let mut state = lock(&self.state);
+        if state.terminal { return false; }
+        if !owners.get(&self.key).is_some_and(|original| Arc::ptr_eq(original, self)) { return false; }
+        // If joins and a timer are ready together, selection order grants no
+        // success window beyond either original endpoint.
+        let Some(result) = state.retirement_result(Instant::now(), inner.stopping.load(Ordering::SeqCst)) else { return false; };
+        if state.unknown { inner.disabled.store(true, Ordering::SeqCst); }
+        state.terminal = true;
+        let reply = state.reply.take();
         lock(&self.permit).take();
-        lock(&inner.owners).remove(&self.key);
+        owners.remove(&self.key);
+        drop(state);
+        drop(owners);
+        // Deliberate end of the management join chain: all original native and
+        // required management operations are settled. Only bounded data delivery,
+        // notifications and drops remain; no observer-of-observer is required.
+        if let Some(reply) = reply { let _ = reply.send(result); }
         inner.changed.notify_waiters();
         self.changed.notify_waiters();
+        true
     }
+}
+
+struct FinalObserverGuard { inner: Arc<Inner>, owner: Arc<Owner>, retired: bool }
+impl FinalObserverGuard {
+    fn retired(mut self) {
+        // Consume the whole guard so async-move captures its Drop ownership,
+        // not just a copy of this bool. Only the observer's actual retirement
+        // return may disarm it; losing even an unpolled future still fails closed.
+        self.retired = true;
+    }
+}
+impl Drop for FinalObserverGuard {
+    fn drop(&mut self) { if !self.retired { self.owner.unknown(&self.inner); } }
 }
 
 impl Supervisor {
@@ -121,6 +218,8 @@ impl Supervisor {
 
     pub async fn query(&self, method: Method, params: Value) -> Result<Value, BridgeError> {
         let endpoint = Instant::now() + OPERATION_TIME;
+        let executor = tokio::runtime::Handle::try_current()
+            .map_err(|_| BridgeError::unavailable("The asynchronous query owner is unavailable."))?;
         if self.disabled() { return Err(BridgeError::cleanup_unknown()); }
         if self.stopping() { return Err(BridgeError::shutdown()); }
         let permit = self.inner.permits.clone().try_acquire_owned()
@@ -132,12 +231,18 @@ impl Supervisor {
         let (reply, receiver) = oneshot::channel();
         let (stop, _) = watch::channel(false);
         let owner = Arc::new(Owner {
-            key, id, state: Mutex::new(OwnerState { endpoint, cleanup_endpoint: None, error: None, terminal: false, unknown: false, reply: Some(reply) }),
+            key, id, state: Mutex::new(OwnerState::new(endpoint, Some(reply))),
             resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(),
-            permit: Mutex::new(Some(permit)), driver: Mutex::new(None), watchdog: Mutex::new(None),
+            permit: Mutex::new(Some(permit)), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
             #[cfg(all(test, feature = "development-runtime"))]
             observation: Arc::new(Mutex::new(hosted_tests::Observation::default())),
         });
+        // All are fresh, uncontended slots. No await/caller cancellation point
+        // divides registration; runnable work cannot enter an incomplete roster.
+        let resources = owner.resources.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        let mut driver = owner.driver.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        let mut watchdog_slot = owner.watchdog.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        let mut observer = owner.observer.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
         {
             let mut owners = lock(&self.inner.owners);
             // Serialize registration with shutdown's stop-and-inventory boundary.
@@ -145,14 +250,41 @@ impl Supervisor {
             if self.disabled() { return Err(BridgeError::cleanup_unknown()); }
             owners.insert(key, owner.clone());
         }
+        // Construct before spawning, not inside the observer's first poll. This
+        // also covers partial registration and an unpolled observer's loss.
+        let guard = FinalObserverGuard { inner: self.inner.clone(), owner: owner.clone(), retired: false };
         #[cfg(all(test, feature = "development-runtime"))]
         self.inner.test.register(owner.clone());
         let watch_owner = owner.clone();
         let watch_inner = self.inner.clone();
-        *lock(&owner.watchdog) = Some(tokio::spawn(async move { watchdog(watch_inner, watch_owner).await; }));
+        #[cfg(all(test, feature = "development-runtime"))]
+        let watchdog_return = self.inner.test.watchdog_return.clone();
+        *watchdog_slot = Some(executor.spawn(async move {
+            let end = watchdog(watch_inner, watch_owner).await;
+            #[cfg(all(test, feature = "development-runtime"))]
+            watchdog_return.wait().await;
+            end
+        }));
         let drive_owner = owner.clone();
         let drive_inner = self.inner.clone();
-        *lock(&owner.driver) = Some(tokio::spawn(async move { drive(drive_inner, drive_owner, bytes).await; }));
+        #[cfg(all(test, feature = "development-runtime"))]
+        let driver_return = self.inner.test.driver_return.clone();
+        *driver = Some(executor.spawn(async move {
+            let end = drive(drive_inner, drive_owner, bytes).await;
+            #[cfg(all(test, feature = "development-runtime"))]
+            if matches!(&end, DriverEnd::Ready(_)) { driver_return.wait().await; }
+            end
+        }));
+        let final_owner = owner.clone();
+        let final_inner = self.inner.clone();
+        *observer = Some(executor.spawn(async move {
+            observe_management(final_inner, final_owner).await;
+            guard.retired();
+        }));
+        drop(observer);
+        drop(watchdog_slot);
+        drop(driver);
+        drop(resources);
         // No owner/task cancellation on receiver abandonment. The registry retains
         // Child, IO tasks, startup handles and permits until actual settlement.
         receiver.await.unwrap_or_else(|_| {
@@ -187,22 +319,109 @@ impl Supervisor {
     }
 }
 
-async fn watchdog(inner: Arc<Inner>, owner: Arc<Owner>) {
+async fn watchdog(inner: Arc<Inner>, owner: Arc<Owner>) -> WatchdogEnd {
     loop {
         let changed = owner.changed.notified();
-        let (terminal, failure, endpoint) = {
+        let observed_at = Instant::now();
+        let deadline = owner.advance_clock(&inner, observed_at);
+        {
             let state = lock(&owner.state);
-            (state.terminal, state.error.is_some(), state.cleanup_endpoint.unwrap_or(state.endpoint))
-        };
-        if terminal { return; }
-        if Instant::now() >= endpoint {
-            if failure { owner.unknown(&inner); return; }
-            owner.fail(BridgeError::timeout());
-            continue;
+            if state.driver_join.original_result() { return WatchdogEnd::DriverObserved(state.driver_join); }
+            if let Some(endpoint) = state.cleanup_endpoint {
+                if observed_at >= endpoint && state.unknown { return WatchdogEnd::CleanupExpired { endpoint, observed_at }; }
+            }
         }
         tokio::select! {
             _ = changed => {},
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(endpoint)) => {}
+            _ = clock_wait(deadline) => {},
+        }
+    }
+}
+
+async fn clock_wait(endpoint: Option<Instant>) {
+    match endpoint {
+        Some(endpoint) => tokio::time::sleep_until(tokio::time::Instant::from_std(endpoint)).await,
+        None => pending().await,
+    }
+}
+
+enum ManagementEvent {
+    Driver(Result<DriverEnd, tokio::task::JoinError>),
+    Watchdog(Result<WatchdogEnd, tokio::task::JoinError>),
+    Changed,
+}
+
+async fn observe_management(inner: Arc<Inner>, owner: Arc<Owner>) {
+    // Slots, not the native resource book, are held by the sole management joiner.
+    // A blocked original inspection/spawn/wait cannot hold this observer's clock.
+    let mut driver = owner.driver.lock().await;
+    let mut watchdog = owner.watchdog.lock().await;
+    {
+        let mut state = lock(&owner.state);
+        if driver.is_none() { state.driver_join = ManagementJoin::Missing; }
+        if watchdog.is_none() { state.watchdog_join = ManagementJoin::Missing; }
+    }
+    if driver.is_none() || watchdog.is_none() { owner.unknown(&inner); }
+    loop {
+        let changed = owner.changed.notified();
+        let deadline = owner.advance_clock(&inner, Instant::now());
+        let (driver_pending, watchdog_pending, ready) = {
+            let state = lock(&owner.state);
+            (state.driver_join == ManagementJoin::Pending, state.watchdog_join == ManagementJoin::Pending, state.management_ready())
+        };
+        if ready && owner.retire(&inner) { return; }
+        if !driver_pending && !watchdog_pending {
+            owner.unknown(&inner);
+            // Failed originals and their books remain retained. No replacement
+            // cleaner, no repoll of an already consumed join, no expired spin.
+            pending::<()>().await;
+        }
+        let event = tokio::select! {
+            result = join_slot(&mut driver), if driver_pending => ManagementEvent::Driver(result),
+            result = join_slot(&mut watchdog), if watchdog_pending => ManagementEvent::Watchdog(result),
+            _ = changed => ManagementEvent::Changed,
+            _ = clock_wait(deadline) => ManagementEvent::Changed,
+        };
+        match event {
+            ManagementEvent::Driver(result) => {
+                match result {
+                    Ok(end) => {
+                        let mut state = lock(&owner.state);
+                        state.driver_join = ManagementJoin::Returned;
+                        if let DriverEnd::Ready(Err(error)) = &end { state.fail_at(error.clone(), Instant::now()); }
+                        state.driver_end = Some(end);
+                        drop(state);
+                        #[cfg(all(test, feature = "development-runtime"))]
+                        { lock(&owner.observation).driver_joined = true; }
+                        driver.take();
+                    }
+                    Err(error) => {
+                        lock(&owner.state).driver_join = ManagementJoin::error(&error);
+                        owner.unknown(&inner); // Keep the consumed failed handle, never await it again.
+                    }
+                }
+                owner.changed.notify_waiters();
+            }
+            ManagementEvent::Watchdog(result) => {
+                match result {
+                    Ok(end) => {
+                        let mut state = lock(&owner.state);
+                        let accepted = state.accepts_watchdog(end);
+                        state.watchdog_join = if accepted { ManagementJoin::Returned } else { ManagementJoin::InvalidReturn };
+                        state.watchdog_end = Some(end);
+                        drop(state);
+                        #[cfg(all(test, feature = "development-runtime"))]
+                        { lock(&owner.observation).watchdog_joined = true; }
+                        if accepted { watchdog.take(); } else { owner.unknown(&inner); }
+                    }
+                    Err(error) => {
+                        lock(&owner.state).watchdog_join = ManagementJoin::error(&error);
+                        owner.unknown(&inner);
+                    }
+                }
+                owner.changed.notify_waiters();
+            }
+            ManagementEvent::Changed => {},
         }
     }
 }
@@ -280,12 +499,11 @@ async fn wait_original(child: &mut Option<Child>) -> std::io::Result<ExitStatus>
 
 enum Event { Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
 
-async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) {
+async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEnd {
     let mut resources = owner.resources.lock().await;
     if owner.failed() || Instant::now() >= owner.endpoint() {
         owner.fail(BridgeError::timeout());
-        owner.finish(&inner, Err(BridgeError::timeout()));
-        return;
+        return DriverEnd::Ready(Err(BridgeError::timeout()));
     }
     let config = inner.runtime.clone();
     let endpoint = owner.endpoint();
@@ -301,13 +519,16 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) {
     if inspected.is_ok() { lock(&owner.observation).inspection_joined = true; }
     let runtime = match inspected {
         Ok(Ok(runtime)) => { resources.inspection.take(); runtime },
-        Ok(Err(error)) => { resources.inspection.take(); owner.finish(&inner, Err(error)); return; }
-        Err(_) => { owner.unknown(&inner); return; }
+        Ok(Err(error)) => {
+            resources.inspection.take();
+            owner.fail(error.clone()); // Original detection, not later management-return scheduling.
+            return DriverEnd::Ready(Err(error));
+        }
+        Err(_) => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }
     };
     if owner.failed() || Instant::now() >= owner.endpoint() {
         owner.fail(BridgeError::timeout());
-        owner.finish(&inner, Err(BridgeError::timeout()));
-        return;
+        return DriverEnd::Ready(Err(BridgeError::timeout()));
     }
     // Blocking startup cannot starve the independent deadline watchdog. Its
     // original result/Child remains in this retained acquisition handle.
@@ -318,14 +539,19 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) {
     if acquired.is_ok() { lock(&owner.observation).acquisition_joined = true; }
     resources.child = match acquired {
         Ok(Ok(child)) => { resources.acquisition.take(); Some(child) },
-        Ok(Err(_)) => { resources.acquisition.take(); owner.finish(&inner, Err(BridgeError::unavailable("The selected isolated core could not start."))); return; }
-        Err(_) => { owner.unknown(&inner); return; }
+        Ok(Err(_)) => {
+            resources.acquisition.take();
+            let error = BridgeError::unavailable("The selected isolated core could not start.");
+            owner.fail(error.clone());
+            return DriverEnd::Ready(Err(error));
+        }
+        Err(_) => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }
     };
     #[cfg(all(test, feature = "development-runtime"))]
     { lock(&owner.observation).spawned = true; }
     let (stdin, stdout, stderr) = match resources.child.as_mut() {
         Some(child) => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
-        None => { owner.unknown(&inner); return; }
+        None => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }
     };
     let (faults, mut fault_rx) = mpsc::channel(4);
     if let Some(stdin) = stdin { resources.writer = Some(tokio::spawn(write_request(stdin, bytes, owner.stop.subscribe(), faults.clone()))); }
@@ -354,7 +580,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) {
             resources.kill_attempted = true;
             // Only this exact retained, unreaped Child. No PID/group discovery,
             // external reaper, repeated signal, or kill-on-drop authority.
-            let child = match resources.child.as_mut() { Some(child) => child, None => { owner.unknown(&inner); return; } };
+            let child = match resources.child.as_mut() { Some(child) => child, None => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; } };
             match child.try_wait() {
                 Ok(Some(status)) => {
                     #[cfg(all(test, feature = "development-runtime"))]
@@ -362,7 +588,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) {
                     resources.waited = Some(status);
                 }
                 Ok(None) => { if child.start_kill().is_err() { owner.fail(BridgeError::cleanup_unknown()); } }
-                Err(_) => { owner.unknown(&inner); return; }
+                Err(_) => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }
             }
         }
         let wait_pending = resources.waited.is_none();
@@ -388,7 +614,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) {
                 if !status.success() { owner.fail(BridgeError::new("engine_failed", "The isolated core exited unsuccessfully.")); }
                 resources.waited = Some(status);
             }
-            Event::Wait(Err(_)) => { owner.unknown(&inner); return; }
+            Event::Wait(Err(_)) => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }
             Event::Write(Ok(end)) => {
                 #[cfg(all(test, feature = "development-runtime"))]
                 { let mut observed = lock(&owner.observation); observed.writer_joined = true; observed.writer_complete = end.complete; }
@@ -423,10 +649,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) {
         }
     }
     if resources.failed_writer.is_some() || resources.failed_stdout.is_some() || resources.failed_stderr.is_some() {
-        owner.unknown(&inner); return;
+        owner.unknown(&inner); return DriverEnd::RetainedUnknown;
     }
     let eofs = resources.out_end.as_ref().is_some_and(|end| end.eof) && resources.err_end.as_ref().is_some_and(|end| end.eof);
-    if !eofs { owner.unknown(&inner); return; }
+    if !eofs { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }
     if !resources.write_end.is_some_and(|end| end.complete) {
         owner.fail(BridgeError::new("io_error", "The original request writer did not complete."));
     }
@@ -441,7 +667,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) {
     resources.child.take();
     let result = match output { Some(output) => protocol::decode_response(&output.bytes, &owner.id), None => Err(BridgeError::protocol()) };
     if let Err(error) = &result { owner.fail(error.clone()); }
-    owner.finish(&inner, result);
+    DriverEnd::Ready(result)
 }
 
 #[cfg(test)]
@@ -454,9 +680,9 @@ mod tests {
         drop(receiver);
         Owner {
             key: 1, id: "query-1".into(),
-            state: Mutex::new(OwnerState { endpoint: Instant::now() + OPERATION_TIME, cleanup_endpoint: None, error: None, terminal: false, unknown: false, reply: None }),
+            state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
             resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(),
-            permit: Mutex::new(None), driver: Mutex::new(None), watchdog: Mutex::new(None),
+            permit: Mutex::new(None), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
             #[cfg(all(test, feature = "development-runtime"))]
             observation: Arc::new(Mutex::new(hosted_tests::Observation::default())),
         }

@@ -43,6 +43,7 @@ NATIVE_CASES = (
     "truncated", "extra_frames", "wrong_id", "nonzero_exit", "pipe_pressure",
     "stdout_limit", "stderr_limit", "delay_exit", "busy-abandon", "operation-timeout",
     "shutdown-active", "controlled-startup", "controlled-io-join",
+    "controlled-management-returns", "controlled-management-late",
 )
 CONFIG_PARTITIONS = ("ordinary", "committed-fsync", "committed-close")
 CONFIG_CASES = {
@@ -224,6 +225,61 @@ def no_cargo_configuration(directories: tuple[Path, ...]) -> None:
             require(not path.exists() and not path.is_symlink(), "Ambient Cargo configuration is not admitted")
 
 
+def validate_native_receipt(receipt: object, *, source_sha: str, platform: str, core_zip_hash: str) -> dict:
+    require(platform in TARGETS and isinstance(receipt, dict), "Unexpected native receipt")
+    require(type(receipt.get("schemaVersion")) is int and receipt.get("schemaVersion") == 1
+            and receipt.get("scope") == "passive-hosted-v2"
+            and receipt.get("status") == "passed" and receipt.get("allOwnersSettled") is True,
+            "Native ownership is not confirmed settled; preserve outputs")
+    bindings = receipt.get("bindings", {})
+    require(isinstance(bindings, dict) and bindings.get("sourceSha") == source_sha
+            and bindings.get("target") == TARGETS[platform] and bindings.get("coreZipSha256") == core_zip_hash,
+            "Native receipt source/target differs")
+    cases = receipt.get("cases", [])
+    require(isinstance(cases, list) and all(isinstance(case, dict) for case in cases)
+            and tuple(case.get("case") for case in cases) == NATIVE_CASES
+            and all(case.get("passed") is True for case in cases), "Fixed native batch was not fully verified")
+    # Keep the original 21 cases' acceptance predicates. Only the two new v2
+    # records add this closed management-return contract; notes alone cannot
+    # replace the original native/IO/management observations and retirement.
+    case_fields = {"case", "passed", "failureCode", "elapsedMs", "evidenceKind", "results", "notes", "owners",
+                   "registeredOwners", "disabled"}
+    native_flags = ("inspection_joined", "acquisition_joined", "spawned", "waited", "exit_success",
+                    "writer_joined", "writer_complete", "stdout_eof", "stderr_eof", "stdout_joined", "stderr_joined",
+                    "driver_joined", "watchdog_joined")
+    checkpoint_notes = (
+        {"nativeSettledBeforeManagementReturns", "driverReturnHeldBeforeReply", "watchdogReturnHeldBeforeReply"},
+        {"nativeSettledBeforeWatchdogReturn", "originalCleanupEndpointUnchanged", "retainedWhileUnknown",
+         "newQueryRefused", "lateJoinPreservedFailure"},
+    )
+    for case, late, notes in zip(cases[-2:], (False, True), checkpoint_notes, strict=True):
+        require(set(case) == case_fields and case["failureCode"] is None
+                and case["evidenceKind"] == "scheduling-control-not-os-fault"
+                and case["disabled"] is late and type(case["registeredOwners"]) is int and case["registeredOwners"] == 0,
+                "Native management case or retirement differs")
+        require(type(case["elapsedMs"]) is int and case["elapsedMs"] >= (2000 if late else 0),
+                "Native management cleanup allowance differs")
+        expected_result = {"return": "error", "code": "cleanup_unknown"} if late else {"return": "ok"}
+        require(case["results"] == [expected_result], "Native management result differs")
+        require(isinstance(case["notes"], dict) and set(case["notes"]) == notes
+                and all(case["notes"][field] is True for field in notes), "Native management checkpoint facts differ")
+        owners = case["owners"]
+        require(isinstance(owners, list) and len(owners) == 1 and isinstance(owners[0], dict),
+                "Native management original owner inventory differs")
+        owner = owners[0]
+        require(set(owner) == {"id", "terminal", "unknownLatched", "permitRetained", "native"}
+                and owner["id"] == "query-1" and owner["terminal"] is True
+                and owner["permitRetained"] is False and owner["unknownLatched"] is late,
+                "Native management original owner finality differs")
+        native = owner["native"]
+        require(isinstance(native, dict) and set(native) == {*native_flags, "stdout_bytes", "stderr_bytes"}
+                and all(native[field] is True for field in native_flags), "Native management original returns are incomplete")
+        require(type(native["stdout_bytes"]) is int and 0 < native["stdout_bytes"] <= 4 * 1024 * 1024
+                and type(native["stderr_bytes"]) is int and 0 <= native["stderr_bytes"] <= 64 * 1024,
+                "Native management output accounting differs")
+    return receipt
+
+
 def native_receipt(context: dict) -> dict:
     path = Path(context["root"]) / "native/receipt.json"
     ordinary(path)
@@ -232,19 +288,8 @@ def native_receipt(context: dict) -> dict:
     with path.open("rb") as stream:
         data = stream.read(size + 1)
     require(len(data) == size, "Native receipt changed")
-    receipt = json.loads(data)
-    require(receipt.get("schemaVersion") == 1 and receipt.get("scope") == "passive-hosted-v1"
-            and receipt.get("status") == "passed" and receipt.get("allOwnersSettled") is True,
-            "Native ownership is not confirmed settled; preserve outputs")
-    bindings = receipt.get("bindings", {})
-    require(bindings.get("sourceSha") == context["sourceSha"]
-            and bindings.get("target") == TARGETS[context["platform"]]
-            and bindings.get("coreZipSha256") == hash_file(Path(context["root"]) / "core.zip"),
-            "Native receipt source/target differs")
-    cases = receipt.get("cases", [])
-    require(isinstance(cases, list) and tuple(case.get("case") for case in cases) == NATIVE_CASES
-            and all(case.get("passed") is True for case in cases), "Fixed native batch was not fully verified")
-    return receipt
+    return validate_native_receipt(json.loads(data), source_sha=context["sourceSha"], platform=context["platform"],
+        core_zip_hash=hash_file(Path(context["root"]) / "core.zip"))
 
 
 def validate_config_receipt(receipt: object, partition: str) -> dict:

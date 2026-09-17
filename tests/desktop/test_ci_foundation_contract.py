@@ -23,6 +23,42 @@ helper = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(helper)
 
 
+NATIVE_CASE_NAMES = (
+    "core-capabilities", "core-catalog", "core-zip-catalog", "core-valid-draft",
+    "core-invalid-draft", "core-service-error", "core-snapshot", "malformed",
+    "truncated", "extra_frames", "wrong_id", "nonzero_exit", "pipe_pressure",
+    "stdout_limit", "stderr_limit", "delay_exit", "busy-abandon", "operation-timeout",
+    "shutdown-active", "controlled-startup", "controlled-io-join",
+    "controlled-management-returns", "controlled-management-late",
+)
+
+
+def native_report(platform: str = "linux") -> dict:
+    """Inert consumer data, never evidence of a hosted/native invocation."""
+    # The old 21 retain their existing case-name/passed consumer predicates.
+    cases = [{"case": name, "passed": True} for name in NATIVE_CASE_NAMES[:-2]]
+    for late, name, notes in zip((False, True), NATIVE_CASE_NAMES[-2:], (
+        ("nativeSettledBeforeManagementReturns", "driverReturnHeldBeforeReply", "watchdogReturnHeldBeforeReply"),
+        ("nativeSettledBeforeWatchdogReturn", "originalCleanupEndpointUnchanged", "retainedWhileUnknown",
+         "newQueryRefused", "lateJoinPreservedFailure"),
+    ), strict=True):
+        native = {**dict.fromkeys(("inspection_joined", "acquisition_joined", "spawned", "waited", "exit_success",
+            "writer_joined", "writer_complete", "stdout_eof", "stderr_eof", "stdout_joined", "stderr_joined",
+            "driver_joined", "watchdog_joined"), True), "stdout_bytes": 4096, "stderr_bytes": 0}
+        cases.append({"case": name, "passed": True, "failureCode": None, "elapsedMs": 2000 if late else 100,
+            "evidenceKind": "scheduling-control-not-os-fault", "notes": dict.fromkeys(notes, True),
+            "results": [{"return": "error", "code": "cleanup_unknown"}] if late else [{"return": "ok"}],
+            "owners": [{"id": "query-1", "terminal": True, "unknownLatched": late, "permitRetained": False, "native": native}],
+            "registeredOwners": 0, "disabled": late})
+    return {"schemaVersion": 1, "scope": "passive-hosted-v2", "status": "passed", "allOwnersSettled": True,
+            "failureCode": None, "cases": cases,
+            "bindings": {"sourceSha": "1" * 40, "target": helper.TARGETS[platform], "coreZipSha256": "2" * 64}}
+
+
+def validate_native(report: object, platform: str = "linux") -> dict:
+    return helper.validate_native_receipt(report, source_sha="1" * 40, platform=platform, core_zip_hash="2" * 64)
+
+
 def owner_report() -> dict:
     cases = []
     for name, effect, journal, reason, requests, responses in (
@@ -137,6 +173,162 @@ def validate_transaction_eof(report: dict) -> dict:
 
 
 class FixedCompilerHelperTests(unittest.TestCase):
+    def test_passive_management_requires_v2_complete_roster_and_existing_bindings(self):
+        self.assertEqual(helper.NATIVE_CASES, NATIVE_CASE_NAMES)
+        for platform in ("linux", "macos", "windows"):
+            report = native_report(platform)
+            with self.subTest(platform=platform):
+                self.assertIs(validate_native(report, platform), report)
+        report = native_report()
+        for invalid in (None, [], "passed"):
+            with self.subTest(invalid=invalid), self.assertRaises(helper.CheckFailure):
+                validate_native(invalid)
+        for changed in ({"scope": "passive-hosted-v1"}, {"scope": "production-enablement"}, {"schemaVersion": True},
+                        {"status": "failed"}, {"allOwnersSettled": False}, {"allOwnersSettled": 1}, {"bindings": []}):
+            with self.subTest(top=changed), self.assertRaises(helper.CheckFailure):
+                validate_native({**report, **changed})
+        cases = report["cases"]
+        for inventory in (cases[:-2], cases[:-1], cases[1:], [*cases[:-2], cases[-1]], list(reversed(cases)),
+                          [*cases[:-1], cases[-2]], [*cases, cases[-1]], [*cases[:-2], cases[-1], cases[-2]], [None] * 23):
+            with self.subTest(inventory=inventory), self.assertRaises(helper.CheckFailure):
+                validate_native({**report, "cases": inventory})
+        for index in range(len(cases)):
+            for value in (False, 1, None):
+                failed = deepcopy(report)
+                failed["cases"][index]["passed"] = value
+                with self.subTest(case=index, passed=value), self.assertRaises(helper.CheckFailure):
+                    validate_native(failed)
+        for field, value in (("sourceSha", "0" * 40), ("target", helper.TARGETS["windows"]), ("coreZipSha256", "0" * 64)):
+            failed = deepcopy(report)
+            failed["bindings"][field] = value
+            with self.subTest(binding=field), self.assertRaises(helper.CheckFailure):
+                validate_native(failed)
+            del failed["bindings"][field]
+            with self.subTest(missing_binding=field), self.assertRaises(helper.CheckFailure):
+                validate_native(failed)
+
+    def test_passive_management_checkpoint_notes_are_exact_typed_and_case_specific(self):
+        report = native_report()
+        for index in (-2, -1):
+            notes = report["cases"][index]["notes"]
+            for field in notes:
+                for value in (False, 1, "true", None):
+                    failed = deepcopy(report)
+                    failed["cases"][index]["notes"][field] = value
+                    with self.subTest(case=index, field=field, value=value), self.assertRaises(helper.CheckFailure):
+                        validate_native(failed)
+                failed = deepcopy(report)
+                del failed["cases"][index]["notes"][field]
+                with self.subTest(case=index, missing=field), self.assertRaises(helper.CheckFailure):
+                    validate_native(failed)
+            other_notes = report["cases"][-1 if index == -2 else -2]["notes"]
+            for changed in ({}, None, [], {**notes, "unrecognizedFact": True}, other_notes):
+                failed = deepcopy(report)
+                failed["cases"][index]["notes"] = changed
+                with self.subTest(case=index, notes=changed), self.assertRaises(helper.CheckFailure):
+                    validate_native(failed)
+
+    def test_passive_management_results_and_retirement_are_not_interchangeable(self):
+        report = native_report()
+        for index in (-2, -1):
+            case = report["cases"][index]
+            late = index == -1
+            other_results = report["cases"][-1 if index == -2 else -2]["results"]
+            mutations = [{"results": []}, {"results": {}}, {"results": other_results},
+                {"results": [*case["results"], {"return": "ok"}]}, {"results": [{"return": "error"}]},
+                {"results": [{"return": "error", "code": "shutting_down"}]},
+                {"results": [{**case["results"][0], "extra": True}]},
+                {"disabled": not late}, {"disabled": int(late)}, {"disabled": None},
+                {"registeredOwners": 1}, {"registeredOwners": False}, {"registeredOwners": 0.0},
+                {"elapsedMs": True}, {"elapsedMs": 2000.0}, {"elapsedMs": -1},
+                {"failureCode": "not_completed"}, {"evidenceKind": "actual-passive-child"},
+                {"evidenceKind": "genuine-os-fault"}, {"extra": True}]
+            if late:
+                mutations.append({"elapsedMs": 1999})  # The real existing two-second allowance, not a note.
+            for changed in mutations:
+                failed = deepcopy(report)
+                failed["cases"][index].update(changed)
+                with self.subTest(case=index, changed=changed), self.assertRaises(helper.CheckFailure):
+                    validate_native(failed)
+            for field in case:
+                failed = deepcopy(report)
+                del failed["cases"][index][field]
+                with self.subTest(case=index, missing=field), self.assertRaises(helper.CheckFailure):
+                    validate_native(failed)
+
+    def test_passive_management_requires_one_original_with_sticky_late_failure(self):
+        report = native_report()
+        for index in (-2, -1):
+            owner = report["cases"][index]["owners"][0]
+            late = index == -1
+            for owners in ([], [owner, owner], {}, None, [None]):
+                failed = deepcopy(report)
+                failed["cases"][index]["owners"] = owners
+                with self.subTest(case=index, owners=owners), self.assertRaises(helper.CheckFailure):
+                    validate_native(failed)
+            for changed in ({"id": "query-2"}, {"id": None}, {"terminal": False}, {"terminal": 1},
+                            {"permitRetained": True}, {"permitRetained": 0},
+                            {"unknownLatched": not late}, {"unknownLatched": int(late)}, {"unknownLatched": None}, {"extra": True}):
+                failed = deepcopy(report)
+                failed["cases"][index]["owners"][0].update(changed)
+                with self.subTest(case=index, owner=changed), self.assertRaises(helper.CheckFailure):
+                    validate_native(failed)
+            for field in owner:
+                failed = deepcopy(report)
+                del failed["cases"][index]["owners"][0][field]
+                with self.subTest(case=index, missing=field), self.assertRaises(helper.CheckFailure):
+                    validate_native(failed)
+
+    def test_passive_management_native_and_management_returns_are_all_required(self):
+        report = native_report()
+        for index in (-2, -1):
+            native = report["cases"][index]["owners"][0]["native"]
+            for field, original in native.items():
+                for value in (False, 1, None) if type(original) is bool else ():
+                    failed = deepcopy(report)
+                    failed["cases"][index]["owners"][0]["native"][field] = value
+                    with self.subTest(case=index, field=field, value=value), self.assertRaises(helper.CheckFailure):
+                        validate_native(failed)
+                failed = deepcopy(report)
+                del failed["cases"][index]["owners"][0]["native"][field]
+                with self.subTest(case=index, missing=field), self.assertRaises(helper.CheckFailure):
+                    validate_native(failed)
+            for changed in ({"stdout_bytes": 0}, {"stdout_bytes": 4 * 1024 * 1024 + 1}, {"stdout_bytes": True},
+                            {"stdout_bytes": 4096.0}, {"stderr_bytes": -1}, {"stderr_bytes": 64 * 1024 + 1},
+                            {"stderr_bytes": False}, {"stderr_bytes": 0.0}, {"extra": True}):
+                failed = deepcopy(report)
+                failed["cases"][index]["owners"][0]["native"].update(changed)
+                with self.subTest(case=index, native=changed), self.assertRaises(helper.CheckFailure):
+                    validate_native(failed)
+            for invalid in (None, [], {}):
+                failed = deepcopy(report)
+                failed["cases"][index]["owners"][0]["native"] = invalid
+                with self.subTest(case=index, native=invalid), self.assertRaises(helper.CheckFailure):
+                    validate_native(failed)
+        for case in report["cases"][-2:]:
+            case["owners"][0]["native"].update(stdout_bytes=4 * 1024 * 1024, stderr_bytes=64 * 1024)
+        self.assertIs(validate_native(report), report)  # Preserve the original passive reader bounds.
+
+    def test_passive_management_keeps_existing_native_invocation(self):
+        report = native_report()
+        with patch.object(helper, "run", side_effect=AssertionError("pure validation called a tool")), \
+             patch.object(helper, "hash_file", side_effect=AssertionError("pure validation read a file")):
+            self.assertIs(validate_native(report), report)
+        self.assertEqual(helper.NATIVE_TEST, "supervisor::hosted_tests::passive_hosted_contract")
+        tree = ast.parse(HELPER.read_text(encoding="utf-8"))
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                 and node.func.id == "run" and any(keyword.arg == "check" and isinstance(keyword.value, ast.Constant)
+                     and keyword.value.value == "passive-native-contract" for keyword in node.keywords)]
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertEqual(next(keyword.value.value for keyword in call.keywords if keyword.arg == "timeout"), 300)
+        constants = [item.value for item in call.args[0].elts if isinstance(item, ast.Constant)]
+        self.assertEqual(constants, ["test", "--lib", "--features", "development-runtime", "--", "--exact", "--ignored", "--test-threads=1"])
+        self.assertTrue(any(isinstance(item, ast.Name) and item.id == "NATIVE_TEST" for item in call.args[0].elts))
+        wrapper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "native_receipt")
+        self.assertTrue(any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                            and node.func.id == "validate_native_receipt" for node in ast.walk(wrapper)))
+
     def test_transaction_eof_requires_original_eof_settlement_and_distinct_commit_outcomes(self):
         report = transaction_eof_report()
         self.assertIs(validate_transaction_eof(report), report)

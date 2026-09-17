@@ -2,7 +2,7 @@
 //! One fixed batch; original process facts are observed, never synthesized.
 //! Scheduling gates are explicitly not OS stuck-spawn/wait/close qualification.
 use super::*;
-use std::{fs, path::{Path, PathBuf}, sync::Condvar};
+use std::{fs, future::Future, path::{Path, PathBuf}, sync::Condvar, task::Poll};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -41,7 +41,7 @@ impl Default for JoinGate {
 }
 impl JoinGate {
     fn close(&self) { self.open.send_replace(false); }
-    async fn wait(&self) {
+    pub(super) async fn wait(&self) {
         let mut open = self.open.subscribe();
         if *open.borrow() { return; }
         self.entered.store(true, Ordering::SeqCst);
@@ -56,12 +56,16 @@ impl JoinGate {
 #[derive(Default)]
 pub(super) struct Hooks {
     pub inspection: Arc<BlockingGate>, pub stdout_join: Arc<JoinGate>,
+    pub driver_return: Arc<JoinGate>, pub watchdog_return: Arc<JoinGate>,
     owners: Mutex<Vec<Arc<Owner>>>,
 }
 impl Hooks {
     pub(super) fn register(&self, owner: Arc<Owner>) { lock(&self.owners).push(owner); }
     fn owners(&self) -> Vec<Arc<Owner>> { lock(&self.owners).clone() }
-    fn release(&self) { self.inspection.release(); self.stdout_join.release(); }
+    fn release(&self) {
+        self.inspection.release(); self.stdout_join.release();
+        self.driver_return.release(); self.watchdog_return.release();
+    }
 }
 
 pub(super) async fn observed_read<R: AsyncRead + Unpin>(reader: R, limit: usize, faults: mpsc::Sender<BridgeError>,
@@ -132,7 +136,7 @@ impl Inputs {
 struct Receipt { path: PathBuf, bindings: Value, cases: Vec<Value> }
 impl Receipt {
     fn write(&self, state: &str, code: Option<&str>) -> Check<()> {
-        let bytes = serde_json::to_vec(&json!({"schemaVersion":1, "scope":"passive-hosted-v1",
+        let bytes = serde_json::to_vec(&json!({"schemaVersion":1, "scope":"passive-hosted-v2",
             "status":state, "allOwnersSettled":state == "passed", "failureCode":code, "bindings":self.bindings, "cases":self.cases,
             "notVerified":["native-gui", "production-runtime-custody", "native-stuck-wait-close", "windows-filesystem", "installers", "mobile-builds", "stores"]}))
             .map_err(|_| "receipt_encoding")?;
@@ -223,8 +227,9 @@ impl Case {
         let all_finished = || {
             self.supervisor.can_exit() && self.supervisor.inner.permits.available_permits() == ACTIVE_LIMIT
                 && owners.iter().all(|owner| lock(&owner.state).terminal
-                    && lock(&owner.driver).as_ref().is_some_and(JoinHandle::is_finished)
-                    && lock(&owner.watchdog).as_ref().is_some_and(JoinHandle::is_finished))
+                    && lock(&owner.state).driver_join == ManagementJoin::Returned
+                    && lock(&owner.state).watchdog_join == ManagementJoin::Returned
+                    && owner.observer.try_lock().is_ok_and(|slot| slot.as_ref().is_some_and(JoinHandle::is_finished)))
                 && self.callers.iter().flatten().all(JoinHandle::is_finished)
         };
         if until(Duration::from_secs(3), all_finished).await.is_err() {
@@ -232,18 +237,21 @@ impl Case {
             if until(Duration::from_secs(3), all_finished).await.is_err() { return false; }
         }
         for owner in &owners {
-            // These are the retained ORIGINAL JoinHandles, not replacement waits.
-            let mut driver = lock(&owner.driver).take();
-            let mut watchdog = lock(&owner.watchdog).take();
-            let driver_ok = match driver.as_mut() { Some(task) => task.await.is_ok(), None => false };
-            let watchdog_ok = match watchdog.as_mut() { Some(task) => task.await.is_ok(), None => false };
-            if !driver_ok || !watchdog_ok {
-                *lock(&owner.driver) = driver; *lock(&owner.watchdog) = watchdog;
-                return false;
+            // Product code alone consumed driver/watchdog. Read its actual
+            // receipts, then join only the original final observer's now-data-
+            // only tail before changing this fixture's development inputs.
+            let mut observer = owner.observer.lock().await;
+            let observer_ok = match observer.as_mut() { Some(task) => task.await.is_ok(), None => false };
+            if !observer_ok { return false; }
+            observer.take();
+            drop(observer);
+            {
+                let state = lock(&owner.state);
+                let observed = lock(&owner.observation);
+                if !state.terminal || state.driver_join != ManagementJoin::Returned
+                    || state.watchdog_join != ManagementJoin::Returned
+                    || !observed.driver_joined || !observed.watchdog_joined { return false; }
             }
-            let mut observed = lock(&owner.observation);
-            observed.driver_joined = true; observed.watchdog_joined = true;
-            drop(observed);
             let resources = owner.resources.lock().await;
             if resources.inspection.is_some() || resources.acquisition.is_some() || resources.child.is_some()
                 || resources.writer.is_some() || resources.stdout.is_some() || resources.stderr.is_some()
@@ -312,8 +320,86 @@ fn draft() -> Value {
         "projectChecks":{"preflight":[],"androidArtifact":[],"iosArtifact":[]}})
 }
 
+fn native_ready_before_management(owner: &Owner) -> Check<()> {
+    let observed = lock(&owner.observation);
+    require(observed.inspection_joined && observed.acquisition_joined && observed.spawned
+        && observed.waited && observed.exit_success == Some(true) && observed.writer_complete
+        && observed.writer_joined && observed.stdout_eof && observed.stderr_eof
+        && observed.stdout_joined && observed.stderr_joined, "management_gate_missing_original_native_facts")
+}
+
+fn management_still_pending(case: &Case, index: usize, owner: &Arc<Owner>, driver: ManagementJoin) -> Check<()> {
+    // Same registry -> state -> permit lock order as the actual retirement.
+    let owners = lock(&case.supervisor.inner.owners);
+    let state = lock(&owner.state);
+    require(owners.len() == 1 && owners.get(&owner.key).is_some_and(|original| Arc::ptr_eq(original, owner))
+        && !state.terminal && !state.unknown && state.error.is_none()
+        && state.reply.is_some() && state.driver_join == driver && state.watchdog_join == ManagementJoin::Pending
+        && lock(&owner.permit).is_some() && case.supervisor.inner.permits.available_permits() == ACTIVE_LIMIT - 1
+        && case.callers.get(index).and_then(Option::as_ref).is_some_and(|task| !task.is_finished()),
+        "management_return_accepted_before_original_join")
+}
+
+async fn exercise_management(case: &mut Case) -> Check<()> {
+    let late = case.name == "controlled-management-late";
+    let gates = &case.supervisor.inner.test;
+    if !late { gates.driver_return.close(); }
+    gates.watchdog_return.close(); // Fixed before original owner admission.
+    let index = case.start(Method::Capabilities, json!({}));
+    if !late {
+        until(Duration::from_secs(4), || case.supervisor.inner.test.driver_return.entered.load(Ordering::SeqCst)).await?;
+        let owner = case.owner("query-1")?;
+        native_ready_before_management(&owner)?;
+        management_still_pending(case, index, &owner, ManagementJoin::Pending)?;
+        case.notes["nativeSettledBeforeManagementReturns"] = json!(true);
+        case.notes["driverReturnHeldBeforeReply"] = json!(true);
+        case.supervisor.inner.test.driver_return.release();
+    }
+    until(Duration::from_secs(4), || case.supervisor.inner.test.watchdog_return.entered.load(Ordering::SeqCst)).await?;
+    let owner = case.owner("query-1")?;
+    native_ready_before_management(&owner)?;
+    management_still_pending(case, index, &owner, ManagementJoin::Returned)?;
+    if !late {
+        case.notes["watchdogReturnHeldBeforeReply"] = json!(true);
+        case.supervisor.inner.test.watchdog_return.release();
+        let returned = value(case.result(index).await?)?;
+        return require(returned["mode"] == "read-only-foundation", "management_case_core_result");
+    }
+
+    case.notes["nativeSettledBeforeWatchdogReturn"] = json!(true);
+    let mut shutdown = Box::pin(case.supervisor.shutdown());
+    let first_poll = std::future::poll_fn(|cx| Poll::Ready(shutdown.as_mut().poll(cx))).await;
+    require(first_poll.is_pending(), "management_shutdown_was_not_pending")?;
+    let original_endpoint = lock(&owner.state).cleanup_endpoint.ok_or("management_cleanup_endpoint_missing")?;
+    require(shutdown.await.is_err_and(|error| error.code == "cleanup_unknown"), "management_shutdown_did_not_expire")?;
+    // The observing shutdown ceiling may wake first; wait for the actual owner
+    // decision, without changing or granting another original cleanup endpoint.
+    until(Duration::from_secs(1), || lock(&owner.state).unknown).await?;
+    require(Instant::now() >= original_endpoint && case.supervisor.disabled()
+        && !case.supervisor.can_exit() && *owner.stop.borrow()
+        && lock(&case.supervisor.inner.owners).get(&owner.key).is_some_and(|original| Arc::ptr_eq(original, &owner))
+        && lock(&owner.permit).is_some() && case.supervisor.inner.permits.available_permits() == ACTIVE_LIMIT - 1,
+        "management_late_return_not_retained")?;
+    {
+        let state = lock(&owner.state);
+        require(!state.terminal && state.unknown && state.cleanup_endpoint == Some(original_endpoint)
+            && state.driver_join == ManagementJoin::Returned && state.watchdog_join == ManagementJoin::Pending
+            && state.error.as_ref().is_some_and(|error| error.code == "shutting_down"), "management_late_state_changed")?;
+    }
+    rejection(case.result(index).await?, "cleanup_unknown")?;
+    require(case.supervisor.shutdown().await.is_err_and(|error| error.code == "cleanup_unknown"), "management_repeat_shutdown_changed")?;
+    rejection(case.supervisor.query(Method::Capabilities, json!({})).await, "cleanup_unknown")?;
+    require(lock(&owner.state).cleanup_endpoint == Some(original_endpoint), "management_cleanup_endpoint_renewed")?;
+    case.notes["originalCleanupEndpointUnchanged"] = json!(true);
+    case.notes["retainedWhileUnknown"] = json!(true);
+    case.notes["newQueryRefused"] = json!(true);
+    // Common settle releases every gate before its original-tail accounting.
+    Ok(())
+}
+
 async fn exercise(case: &mut Case) -> Check<()> {
     match case.name {
+        "controlled-management-returns" | "controlled-management-late" => exercise_management(case).await,
         "core-capabilities" => {
             let index = case.start(Method::Capabilities, json!({}));
             let result = value(case.result(index).await?)?;
@@ -448,6 +534,7 @@ async fn passive_hosted_contract() {
         ("delay_exit", Some("delay_exit")), ("busy-abandon", Some("wait_release")),
         ("operation-timeout", Some("stalled_input")), ("shutdown-active", Some("wait_release")),
         ("controlled-startup", Some("echo")), ("controlled-io-join", Some("echo")),
+        ("controlled-management-returns", None), ("controlled-management-late", None),
     ];
     for (name, mode) in cases {
         let mut case = match Case::new(&inputs, name, mode, name == "core-zip-catalog") {
@@ -469,9 +556,14 @@ async fn passive_hosted_contract() {
             checked = require(case.supervisor.inner.test.owners().iter().all(|owner|
                 lock(&owner.state).error.is_none() && lock(&owner.observation).exit_success == Some(true)), "abandoned_owner_did_not_finish_normally");
         }
-        if checked.is_ok() && name.starts_with("controlled-") {
+        if checked.is_ok() && matches!(name, "controlled-startup" | "controlled-io-join" | "controlled-management-late") {
             checked = require(case.supervisor.disabled() && case.supervisor.can_exit()
                 && case.supervisor.inner.test.owners().iter().all(|owner| { let state = lock(&owner.state); state.unknown && state.terminal && state.error.is_some() }), "late_settlement_cleared_failure");
+            if checked.is_ok() && name == "controlled-management-late" { case.notes["lateJoinPreservedFailure"] = json!(true); }
+        }
+        if checked.is_ok() && name == "controlled-management-returns" {
+            checked = require(!case.supervisor.disabled() && case.supervisor.can_exit()
+                && case.supervisor.inner.test.owners().iter().all(|owner| { let state = lock(&owner.state); !state.unknown && state.terminal && state.error.is_none() }), "management_healthy_retirement_changed");
         }
         receipt.cases.push(case.evidence(checked.is_ok(), checked.err()));
         if let Err(code) = checked { let _ = receipt.write("failed", Some(code)); panic!("hosted passive check failed after settlement: {code}"); }

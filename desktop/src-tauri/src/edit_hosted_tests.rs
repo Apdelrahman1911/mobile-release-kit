@@ -7,7 +7,7 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use super::*;
-use std::{fs, io::{Read, Write}, os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt}, path::Path,
+use std::{fs, io::{Read, Write}, os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt}, path::Path,
     sync::{Condvar, atomic::{AtomicU32, AtomicUsize}}};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -43,6 +43,8 @@ enum Failure {
     NotCompleted, HostedGuardRefused, SourceBindingMismatch, FixtureIo, FixtureCustodyUnknown,
     NativeCommandRejected, UnexpectedStatus, ObservationTimeout,
     OriginalCustodyUnknown, UnexpectedOutcome, PayloadMismatch, ReceiptIo,
+    EofSeedModeMismatch, EofPreparedOriginalsMismatch, EofOriginalsMismatch, EofPayloadMismatch,
+    EofMetadataMismatch, EofUnrelatedMismatch, EofReplacementInodeMismatch,
 }
 type Check<T> = Result<T, Failure>;
 fn require(condition: bool, failure: Failure) -> Check<()> { if condition { Ok(()) } else { Err(failure) } }
@@ -322,8 +324,12 @@ fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Check<()> {
         .map_err(|_| Failure::FixtureIo)?;
     FIXTURE_FILES.acquired();
     let wrote = file.write_all(bytes);
+    // Creation modes are filtered by the inherited umask (077 in hosted CI).
+    // Set exact fixture permissions through this original, holding both
+    // operation results until its one consuming close; close Unknown wins.
+    let permissions = file.set_permissions(fs::Permissions::from_mode(mode));
     FIXTURE_FILES.close_original(file)?;
-    require(wrote.is_ok(), Failure::FixtureIo)
+    require(wrote.is_ok() && permissions.is_ok(), Failure::FixtureIo)
 }
 
 fn canonical_input(name: &str, exact: bool) -> Check<PathBuf> {
@@ -1422,7 +1428,7 @@ async fn exercise_eof(batch: &mut Batch, inputs: &Inputs, case: EofCase) -> Chec
     write_new(&root.join(".gitignore"), EOF_IGNORE_BASE, 0o600)?;
     write_new(&root.join("unrelated.txt"), UNRELATED, 0o600)?;
     let before = originals(&root)?;
-    require(before.iter().map(|file| file.identity.mode & 0o7777).eq([0o640, 0o600, 0o600]), Failure::PayloadMismatch)?;
+    require(before.iter().map(|file| file.identity.mode & 0o7777).eq([0o640, 0o600, 0o600]), Failure::EofSeedModeMismatch)?;
 
     let schedule = Arc::new(Schedule { eof: Some(case), ..Schedule::default() });
     {
@@ -1447,7 +1453,7 @@ async fn exercise_eof(batch: &mut Batch, inputs: &Inputs, case: EofCase) -> Chec
         && plan.view.files[0].path == "release/mobile-release.json" && plan.view.files[0].action == "replace"
         && plan.view.files[1].path == ".gitignore" && plan.view.files[1].action == "append",
         Failure::UnexpectedOutcome)?;
-    require(before == originals(&root)?, Failure::PayloadMismatch)?;
+    require(before == originals(&root)?, Failure::EofPreparedOriginalsMismatch)?;
     inventory(&root, &[".gitignore", "release", "unrelated.txt"])?;
     inventory(&root.join("release"), &["mobile-release.json"])?;
     let admission = batch.owner.apply("main", &original.id, &plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
@@ -1502,9 +1508,12 @@ async fn exercise_eof(batch: &mut Batch, inputs: &Inputs, case: EofCase) -> Chec
     let modes_preserved = before.iter().zip(&after).all(|(old, new)| old.identity.mode == new.identity.mode
         && old.identity.device == new.identity.device && old.identity.owner == new.identity.owner);
     let unrelated_preserved = before[2] == after[2];
-    require(originals_preserved == !committed && payloads_installed == committed && modes_preserved && unrelated_preserved
-        && (!committed || before[0].identity.inode != after[0].identity.inode && before[1].identity.inode != after[1].identity.inode),
-        Failure::PayloadMismatch)?;
+    require(originals_preserved == !committed, Failure::EofOriginalsMismatch)?;
+    require(payloads_installed == committed, Failure::EofPayloadMismatch)?;
+    require(modes_preserved, Failure::EofMetadataMismatch)?;
+    require(unrelated_preserved, Failure::EofUnrelatedMismatch)?;
+    require(!committed || before[0].identity.inode != after[0].identity.inode && before[1].identity.inode != after[1].identity.inode,
+        Failure::EofReplacementInodeMismatch)?;
     inventory(&root, &[".gitignore", "release", "unrelated.txt"])?;
     inventory(&root.join("release"), &["mobile-release.json"])?;
     let fixture_files_settled = FIXTURE_FILES.all_settled();
@@ -1578,7 +1587,7 @@ async fn hosted_config_transaction_eof_original_resources() {
         if let Err(code) = checked {
             let _ = eof_receipt(&inputs, &batch.cases, false, true, Some(code));
             if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
-            panic!("hosted configuration EOF case failed after settlement: {code:?}");
+            panic!("hosted configuration EOF case {} failed after settlement: {code:?}", case.name());
         }
         if eof_receipt(&inputs, &batch.cases, false, false, Some(Failure::NotCompleted)).is_err() {
             if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
