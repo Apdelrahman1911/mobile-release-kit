@@ -94,7 +94,7 @@ function Proposal({ result }: { result: GitHubSetupProposed }) {
   </section>;
 }
 
-export function GitHub({ info, session, state, controller, loading, onReload, onNavigate, nativeReview }: {
+export function GitHub({ info, session, state, controller, loading, onReload, onNavigate, nativeReview, connectionView }: {
   info: AppInfo | null;
   session: ProjectSession | null;
   state: GitHubSetupState;
@@ -103,6 +103,7 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
   onReload: () => void;
   onNavigate: (page: Page) => void;
   nativeReview: ReactNode;
+  connectionView: ReactNode;
 }) {
   const [inputHelpOpen, setInputHelpOpen] = useState({ repository: false, sha: false, snapshot: false });
   const helpOpened = (field: keyof typeof inputHelpOpen, open: boolean) => setInputHelpOpen((current) => current[field] === open ? current : { ...current, [field]: open });
@@ -112,8 +113,8 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
   const snapshotHelp = state.help?.inputs.find((entry) => entry.id === 'suppliedSnapshot');
   return <>
     <PageHeading eyebrow="GITHUB" title="Review the setup. Keep authority separate." description="Preview four caller files and a core-sourced checklist. Local installation needs its own fresh native review and confirmation; remote GitHub setup remains unavailable." />
-    <section className="card connect-card"><div className="github-visual"><Icon name="github" size={45} /></div><div><Badge>Not connected</Badge><h2>A proposal is not repository access.</h2><p>Account login, repository setup, secret provisioning and guarded dispatch remain unavailable. This passive preview does not contact GitHub.</p><DisabledAction label="Connect GitHub" icon="github" reason={futureReason(info?.capabilities, 'github.authenticate', 'Publisher-registered GitHub App login and the secure token vault are not implemented.')} /></div></section>
-    <div className="notice notice-info"><Icon name="shield" /><div><strong>GitHub not contacted · remote authority unavailable</strong><p>Remote repository state, toolkit ref existence, template compatibility and release readiness remain unknown. A passive proposal never authorizes local writes or a release. Separate local operation outcomes are shown below.</p></div></div>
+    {connectionView}
+    <div className="notice notice-info"><Icon name="shield" /><div><strong>Passive setup preview · remote authority unavailable</strong><p>This preview does not contact GitHub. Remote repository state, toolkit ref existence, template compatibility and release readiness remain unknown from a preview. A passive proposal never authorizes local writes or a release. Separate local operation outcomes are shown below.</p></div></div>
     <form className="card github-form" onSubmit={(event) => { event.preventDefault(); void controller.propose(); }}>
       <SectionHeading title="Preview setup from your draft" description="Toolkit inputs are separate from the application’s source identity. No account or commit is preselected."><Badge>{state.pending ? 'Preparing preview…' : 'In-memory only'}</Badge></SectionHeading>
       <div className="github-draft">

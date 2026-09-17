@@ -1,5 +1,6 @@
 import type { AssetSessionApi } from './assetSessionTypes.ts';
 import type { GitHubWorkflowEditApi } from './githubWorkflowEditTypes.ts';
+import type { GitHubConnectionHelp } from './githubConnectionTypes.ts';
 
 // Closed passive service contracts. Python owns field policy and assurance.
 export type JsonPrimitive = string | number | boolean | null;
@@ -108,6 +109,7 @@ export interface Catalog {
   credentialGuide: CredentialGuide | null;
   metadata: MetadataRules | null;
   githubSetup: GitHubSetupHelp;
+  githubConnection: GitHubConnectionHelp | null;
   assurance: Assurance;
 }
 

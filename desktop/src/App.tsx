@@ -8,6 +8,7 @@ import type { WorkspaceAction } from './drafts.ts';
 import { configurationOwnerReason, editRetainsDraft, editStartReason } from './configEdit.ts';
 import { ConfigEditController } from './configEditController.ts';
 import { GitHubSetupController } from './githubSetupController.ts';
+import { GitHubConnectionController } from './githubConnectionController.ts';
 import { workflowOwnerReason, workflowRetainsDraft } from './githubWorkflowEdit.ts';
 import { GitHubWorkflowEditController } from './githubWorkflowEditController.ts';
 import { AssetSessionController } from './assetSessionController.ts';
@@ -18,6 +19,7 @@ import { Badge, ConfirmDialog, ErrorNotice, HelpDialog, PageHeading } from './co
 import { DraftEditor } from './components/DraftEditor.tsx';
 import { ConfigSave } from './components/ConfigSave.tsx';
 import { GitHubWorkflowApply } from './components/GitHubWorkflowApply.tsx';
+import { GitHubConnection } from './components/GitHubConnection.tsx';
 import { Icon } from './components/Icon.tsx';
 import type { IconName } from './components/Icon.tsx';
 import { Dashboard } from './pages/Dashboard.tsx';
@@ -55,13 +57,23 @@ export function App() {
   const workspaceRef = useRef(workspace);
   const editControllerRef = useRef<ConfigEditController | null>(null);
   const githubControllerRef = useRef<GitHubSetupController | null>(null);
+  const connectionControllerRef = useRef<GitHubConnectionController | null>(null);
+  const connectionHelpGeneration = useRef<object>({});
   const workflowControllerRef = useRef<GitHubWorkflowEditController | null>(null);
   const assetControllerRef = useRef<AssetSessionController | null>(null);
   // Keep the reducer's latest state synchronously visible to save admission.
   // A React render/effect delay must not let an older review authorize Apply.
   const dispatch = useCallback((action: WorkspaceAction) => {
-    const next = workspaceReducer(workspaceRef.current, action);
-    if (next === workspaceRef.current) return;
+    const previous = workspaceRef.current;
+    const next = workspaceReducer(previous, action);
+    if (next === previous) return;
+    if (next.selectedId !== previous.selectedId) {
+      // Retire before publishing the project change; even away-and-back cannot
+      // adopt an older catalogue reply. No native document/session is invented.
+      connectionHelpGeneration.current = {};
+      connectionControllerRef.current?.setHelp(null);
+      connectionControllerRef.current?.setContext(null);
+    }
     workspaceRef.current = next;
     assetControllerRef.current?.syncProject();
     setWorkspace(next);
@@ -83,6 +95,10 @@ export function App() {
   }, () => workflowControllerRef.current?.syncContext()));
   githubControllerRef.current = githubSetup;
   const githubState = useSyncExternalStore(githubSetup.subscribe, githubSetup.getSnapshot, githubSetup.getSnapshot);
+  // Guidance is reachable now, but there is deliberately no native port.
+  const [githubConnection] = useState(() => new GitHubConnectionController());
+  connectionControllerRef.current = githubConnection;
+  const connectionState = useSyncExternalStore(githubConnection.subscribe, githubConnection.getSnapshot, githubConnection.getSnapshot);
   const [workflowEdit] = useState(() => new GitHubWorkflowEditController({
     selectedProject: () => {
       const current = workspaceRef.current;
@@ -114,6 +130,10 @@ export function App() {
 
   const bootstrap = useCallback(async () => {
     const generation = ++bootGeneration.current;
+    const helpGeneration = {};
+    connectionHelpGeneration.current = helpGeneration;
+    githubConnection.setHelp(null);
+    githubConnection.setContext(null);
     githubSetup.beginConnection();
     setLoading(true);
     setBootError(null);
@@ -132,6 +152,7 @@ export function App() {
           if (generation === bootGeneration.current) {
             if (!githubSetup.admitHelp(result.githubSetup)) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
             setCatalog(result);
+            if (helpGeneration === connectionHelpGeneration.current) githubConnection.setHelp(result.githubConnection);
           }
         } catch (error) {
           if (generation === bootGeneration.current) { setCatalog(null); githubSetup.helpUnavailable(); setCatalogError(apiError(error)); }
@@ -145,16 +166,17 @@ export function App() {
     } finally {
       if (generation === bootGeneration.current) setLoading(false);
     }
-  }, [githubSetup]);
+  }, [githubSetup, githubConnection]);
 
   useEffect(() => {
     void bootstrap();
-    return () => { bootGeneration.current += 1; };
+    return () => { bootGeneration.current += 1; connectionHelpGeneration.current = {}; githubConnection.setHelp(null); };
   }, [bootstrap]);
 
   useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
   useEffect(() => () => configEdit.dispose(), [configEdit]);
   useEffect(() => () => githubSetup.dispose(), [githubSetup]);
+  useEffect(() => () => githubConnection.dispose(), [githubConnection]);
   useEffect(() => { if (api) void workflowEdit.connect(api); }, [api, workflowEdit]);
   useEffect(() => () => workflowEdit.dispose(), [workflowEdit]);
   useEffect(() => { if (api) void assetSession.connect(api); }, [api, assetSession]);
@@ -305,7 +327,9 @@ export function App() {
         {page === 'environment' && <Environment info={info} preview={preview} onRetry={() => void bootstrap()} loading={loading} />}
         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} onHelp={setHelp} />}
         {page === 'metadata' && <Metadata catalog={catalog}>{editor(true)}</Metadata>}
-        {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} nativeReview={workflowPanel(true)} />}
+        {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} nativeReview={workflowPanel(true)}
+          connectionView={<><GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp} />
+            {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}</>} />}
         {page === 'releases' && <Releases info={info} />}
         {page === 'artifacts' && <Artifacts info={info} />}
         {page === 'recovery' && <Recovery info={info} />}

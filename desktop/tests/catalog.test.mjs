@@ -4,6 +4,8 @@ import test from 'node:test';
 import help from '../../src/mobile_release/api/data/field-help.json' with { type: 'json' };
 import schema from '../../src/mobile_release/api/data/project.schema.json' with { type: 'json' };
 import githubSetupResource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
+import githubConnectionResource from '../../src/mobile_release/api/data/github-connection-v1.json' with { type: 'json' };
+import credentialGuideResource from '../../src/mobile_release/api/data/credential-guide-v1.json' with { type: 'json' };
 import { emptyDraft, fieldsFor, getValue, localeRequirements, setValue } from '../src/catalog.ts';
 import { apiError, bridgeMode, createNativeApi } from '../src/bridge.ts';
 import { methodReason } from '../src/certainty.ts';
@@ -50,6 +52,41 @@ test('native bridge uses only closed command names and Rust-owned project identi
   assert.equal('initialize' in api, false);
   assert.equal('import' in api, false);
   assert.equal('shell' in api, false);
+});
+
+test('connection help is nullable additive catalogue data, never a new native route', async () => {
+  const original = { schemaVersion: 1, schema: {}, fields: [], credentials: [], metadata: null,
+    githubSetup: githubSetupResource.help, assurance: {} };
+  const malformed = structuredClone(githubConnectionResource);
+  malformed.inputs[1].requiredness = 'optional';
+  const unknownField = { ...githubConnectionResource, connection: 'not observed' };
+  for (const credentialGuide of [undefined, null, credentialGuideResource]) {
+    for (const help of [undefined, null, {}, malformed, unknownField, githubConnectionResource]) {
+      const reply = { ...original, ...(credentialGuide === undefined ? {} : { credentialGuide }),
+        ...(help === undefined ? {} : { githubConnection: help }) };
+      const calls = [];
+      const api = createNativeApi('native', async (command, args) => { calls.push({ command, args }); return reply; });
+      const result = await api.catalog();
+      assert.deepEqual(result.githubSetup, original.githubSetup);
+      assert.deepEqual(result.schema, original.schema);
+      assert.deepEqual(result.credentialGuide, credentialGuide ?? null);
+      assert.deepEqual(calls, [{ command: 'catalog', args: undefined }]);
+      assert.equal('githubConnectionStatus' in api, false);
+      assert.equal('connectGitHub' in api, false);
+      if (help === githubConnectionResource) {
+        assert.deepEqual(result.githubConnection, help);
+        result.githubConnection.inputs[0].label = 'Changed local copy';
+        assert.notEqual(help.inputs[0].label, 'Changed local copy');
+      } else assert.equal(result.githubConnection, null);
+    }
+  }
+  for (const guides of [{}, { credentialGuide: null }, { githubConnection: null },
+    { credentialGuide: credentialGuideResource, githubConnection: githubConnectionResource }]) {
+    for (const invalid of [{ unrecognized: true }, { schemaVersion: 2 }, { githubSetup: null }]) {
+      const api = createNativeApi('native', async () => ({ ...original, ...guides, ...invalid }));
+      await assert.rejects(api.catalog(), (error) => error.code === 'GitHubSetupHelpUnavailable');
+    }
+  }
 });
 
 test('unknown errors do not expose raw bridge values; no capability means no operation', () => {

@@ -249,10 +249,11 @@ export function parseGitHubSetupHelp(value: unknown): GitHubSetupHelp | null {
 
 export function parseCatalogGitHubSetup(value: unknown): GitHubSetupHelp | null {
   try {
-    // Admit only the original envelope or its explicit credential-guide extension.
-    // The independent guide parser cannot supply GitHub proposal authority.
+    // Admit only the original envelope and the four explicit combinations of
+    // its two optional guides. Neither independent guide grants Setup authority.
     const envelope = ['schemaVersion', 'schema', 'fields', 'credentials', 'metadata', 'githubSetup', 'assurance'];
-    return (keys(value, envelope) || keys(value, [...envelope, 'credentialGuide'])) && value.schemaVersion === 1
+    return (keys(value, envelope) || keys(value, [...envelope, 'credentialGuide']) ||
+      keys(value, [...envelope, 'githubConnection']) || keys(value, [...envelope, 'credentialGuide', 'githubConnection'])) && value.schemaVersion === 1
       ? parseGitHubSetupHelp(value.githubSetup) : null;
   } catch { return null; }
 }

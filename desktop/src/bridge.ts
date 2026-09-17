@@ -7,6 +7,7 @@ import type { AssetStatus } from './assetSessionTypes.ts';
 import { parseGitHubWorkflowEditStatus, workflowEditError, workflowEditRequestFits } from './githubWorkflowEditProtocol.ts';
 import type { GitHubWorkflowEditCommand } from './githubWorkflowEditProtocol.ts';
 import type { GitHubWorkflowEditStatus } from './githubWorkflowEditTypes.ts';
+import { parseGitHubConnectionHelp } from './githubConnectionProtocol.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status', onStatus: (status: unknown) => void) => Promise<() => void>;
@@ -61,7 +62,8 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       const result = await call<Catalog>('catalog');
       const githubSetup = parseCatalogGitHubSetup(result);
       if (!githubSetup) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
-      return { ...result, githubSetup: structuredClone(githubSetup), credentialGuide: parseCatalogCredentialGuide(result) };
+      return { ...result, githubSetup: structuredClone(githubSetup), credentialGuide: parseCatalogCredentialGuide(result),
+        githubConnection: parseGitHubConnectionHelp(result.githubConnection) };
     },
     validate: (draft: JsonObject) => call<ValidationResult>('validate_config', { draft }),
     suggestConfig: (hints: SuggestionHints) => call<ConfigSuggestion>('suggest_config', { hints }),

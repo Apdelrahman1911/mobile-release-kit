@@ -431,6 +431,34 @@ class GitHubSetupHelp(TypedDict):
     guidance: list[GitHubSetupGuidance]
 
 
+class GitHubConnectionInputHelp(TypedDict):
+    id: Literal["repository", "token"]
+    label: str
+    requiredness: Literal["required", "conditional"]
+    what: str
+    why: str
+    where: str
+    format: str
+    failure: str
+
+
+class GitHubConnectionGuidance(TypedDict):
+    id: Literal["authentication", "permissions", "session-memory", "repository-identity",
+                "automation-observation", "remote-changes", "revocation"]
+    label: str
+    what: str
+    why: str
+    where: str
+    format: str
+    failure: str
+
+
+class GitHubConnectionHelp(TypedDict):
+    schemaVersion: Literal[1]
+    inputs: list[GitHubConnectionInputHelp]
+    guidance: list[GitHubConnectionGuidance]
+
+
 class MethodCapability(TypedDict):
     method: str
     available: bool
@@ -461,6 +489,7 @@ class CatalogResult(TypedDict):
     credentialGuide: CredentialGuide | None
     metadata: dict[str, Any]
     githubSetup: GitHubSetupHelp
+    githubConnection: GitHubConnectionHelp | None
     assurance: Assurance
 
 

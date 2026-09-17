@@ -22,6 +22,7 @@ mod asset_source;
 mod asset_session;
 pub mod edit_protocol;
 pub mod github_workflow_edit_protocol;
+pub mod github_connection_protocol;
 pub mod edit_owner;
 #[cfg(feature = "desktop-shell")]
 pub mod shell;

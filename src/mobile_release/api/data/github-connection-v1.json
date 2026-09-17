@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "inputs": [
+    {
+      "id": "repository", "label": "Application repository", "requiredness": "required",
+      "what": "The one GitHub OWNER/REPO whose account access and four workflow metadata records you want to observe.",
+      "why": "This application repository is separate from the toolkit repository used by local workflow templates. No Git remote or project file is consulted.",
+      "where": "Use the owner and repository name shown on your application's GitHub repository page. Do not paste a URL or a credential.",
+      "format": "Exactly OWNER/REPO, at most 140 ASCII bytes; the existing core repository grammar applies. No branch, URL, host override or trailing slash.",
+      "failure": "Invalid input is refused. A missing or inaccessible repository is not proof that it does not exist. Changing the target retires the original session; no automatic reconnection occurs."
+    },
+    {
+      "id": "token", "label": "Advanced session-only user token", "requiredness": "conditional",
+      "what": "A future qualified native connection may accept an explicitly supplied user token for read-only GitHub observations. This source-preparation increment does not collect one.",
+      "why": "The preferred publisher App/device login is not configured. An advanced token would be an independent, explicitly consented session-only route, not a credential asset or persistent secret.",
+      "where": "GitHub Settings > Developer settings > Personal access tokens > Fine-grained tokens. Select only the application repository and minimal Metadata/Actions read permissions. Never paste the token into a repository field, chat, config or file.",
+      "format": "When separately enabled: nonempty printable ASCII without whitespace, at most 4096 bytes, entered only into the native gated password field. No trimming, prefix-based trust, file import or plaintext persistence.",
+      "failure": "Unqualified runtime, unavailable help or missing native ownership disables entry before collection. Unauthorized requires explicit new authentication after settlement. Forbidden can reflect token, organization or SSO policy; do not automatically escalate permissions."
+    }
+  ],
+  "guidance": [
+    {
+      "id": "authentication", "label": "Account observation is not release readiness",
+      "what": "An authenticated account observation says which GitHub account answered the supplied read. Repository access is a separate fact.",
+      "why": "Account login, local Apply and workflow listing do not authorize release, dispatch or remote setup. Broad powers of a supplied token would not be exercised here.",
+      "where": "Read the account and repository sections separately. Preferred device login needs a publisher-registered GitHub App and a separately qualified native browser boundary.",
+      "format": "One original native document/session, one explicit application repository and one original observation at a time. No ambient gh login, environment token, credential helper or browser fallback.",
+      "failure": "Unqualified, runtime-unavailable, publisher-unconfigured and not-connected are distinct from failed authentication. Busy blocks new Connect/Refresh, never retained Status or immediate exact-session Disconnect."
+    },
+    {
+      "id": "permissions", "label": "Reported roles are not effective grants",
+      "what": "Pull, push and admin are reported repository-role observations: allowed, denied or unknown.",
+      "why": "These flags do not prove effective token permissions, organization approval, environment access or authorization of a future mutation.",
+      "where": "Review the selected repository and GitHub token settings manually. The existing core credential/environment checklist remains unknown/manual and is not reimplemented here.",
+      "format": "Use only Metadata/Actions read access for this proposed route. No secret, variable, protection, runner or repository Actions settings are queried.",
+      "failure": "401 means unauthorized; 403 is forbidden, possibly organization/SSO policy; 404 means not-found-or-inaccessible. None is converted into a verified absence or an automatic request for wider scope."
+    },
+    {
+      "id": "session-memory", "label": "Session-only lifetime and original settlement",
+      "what": "The proposed native route retains a credential only in private session memory, never in the public status, draft, history, logs or a credential asset.",
+      "why": "No persistence is required for a consented session-only connection. Absence of a qualified keyring never permits plaintext storage.",
+      "where": "Use Disconnect to retire local admission. Project/target/document changes, expiry and shutdown also require the native owner to stop its original consumers.",
+      "format": "Proposed ceiling: 60 minutes from acceptance, shortened by known expiry. Status reads, refreshes and navigation do not renew it. Display timestamps are not deadline authority.",
+      "failure": "Expired or cancelled facts are stale. Cleanup-unknown blocks further requests and cannot be cleared by late success. Dropping a Promise, disposing a view or requesting Disconnect is not proof of native settlement or memory erasure."
+    },
+    {
+      "id": "repository-identity", "label": "Bind the original immutable identities",
+      "what": "Account, repository and remote workflow IDs are canonical positive decimal strings, not lossy JavaScript numbers.",
+      "why": "A renamed, replaced or recreated target must not silently inherit the original observation or credential admission.",
+      "where": "The future original owner retains account/repository IDs and brackets repository identity. The pure core projector only checks supplied data; it cannot certify the transport or custody.",
+      "format": "At most five fixed HTTPS GETs, two 100-workflow pages, 256 KiB per body and 1 MiB combined, with no redirect/retry or returned-URL following. No network transport is activated by this increment.",
+      "failure": "Target-changed refuses new identity adoption. Network-unavailable, TLS-failed, response-invalid and response-limit are fixed local failures, never raw response text or a suggestion to disable TLS."
+    },
+    {
+      "id": "automation-observation", "label": "Workflow metadata is not local-file verification",
+      "what": "The four core-owned workflow IDs may be listed, not-listed or unknown, with active, disabled or unknown remote state.",
+      "why": "Not-listed means only not returned by a complete bounded Actions listing. It says nothing about Git file absence, YAML compatibility, approvals or release readiness.",
+      "where": "Compare this section with Local workflow files without merging their claims. Repository Actions settings/policy, environments, secrets, variables, protections and runners remain unobserved.",
+      "format": "Exactly four rows in the existing core roster order. Incomplete coverage cannot report not-listed. Duplicate/changing listings become limited/unknown, not a complete snapshot.",
+      "failure": "Rate-limited has no automatic retry. After a lost reply, inspect original Status rather than repeating Connect/Refresh. A later explicit read requires actual original settlement and native cooldown admission."
+    },
+    {
+      "id": "remote-changes", "label": "Remote setup remains unavailable",
+      "what": "G1 is read-only: it neither edits remote repositories nor dispatches workflows. Local workflow Apply is a separate transaction and never means pushed.",
+      "why": "Remote mutation requires its own plan, exact immutable target, fresh preconditions, confirmation, original one-use owner and reconciliation. Authentication does not supply those gates.",
+      "where": "Keep Local workflow files, GitHub connection/observations and Remote setup visually separate. Existing protected-environment and Store guards remain unchanged.",
+      "format": "Remote mutation and dispatch remain false; template compatibility and release readiness remain unknown. No secret values, workflow content, logs or arbitrary URLs are requested or displayed.",
+      "failure": "There is no force, retry-write, latest-run adoption or secret-readback fallback. Ambiguous future writes must reconcile their original operation, not repeat it."
+    },
+    {
+      "id": "revocation", "label": "Local Disconnect is not remote revocation",
+      "what": "Disconnect requests local retirement and cancellation of the exact original session, even while an observation is busy.",
+      "why": "Remote grants remain controlled by GitHub. Starting a new login does not revoke an older token or grant.",
+      "where": "For manual revocation, use GitHub Settings > Developer settings > Personal access tokens, or the relevant authorized GitHub App settings. No general browser opener is added here.",
+      "format": "Status remains readable without renewing lifetime. Release of private material follows actual native settlement; unknown cleanup retains ownership.",
+      "failure": "Never assume successful cancellation or erasure from a click, closed view or lost reply. Keep cleanup-unknown visible and do not start another connection to repair it."
+    }
+  ]
+}

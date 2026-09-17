@@ -2,10 +2,12 @@ import fieldHelp from '../../src/mobile_release/api/data/field-help.json' with {
 import projectSchema from '../../src/mobile_release/api/data/project.schema.json' with { type: 'json' };
 import githubSetupResource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
 import credentialGuideResource from '../../src/mobile_release/api/data/credential-guide-v1.json' with { type: 'json' };
+import githubConnectionResource from '../../src/mobile_release/api/data/github-connection-v1.json' with { type: 'json' };
 import { githubSetupError, parseGitHubSetupHelp } from './githubSetupProtocol.ts';
 import { parseCredentialGuide } from './credentialGuide.ts';
 import { assetError } from './assetSessionProtocol.ts';
 import { workflowEditError } from './githubWorkflowEditProtocol.ts';
+import { parseGitHubConnectionHelp } from './githubConnectionProtocol.ts';
 import type { ApiError, Assurance, Catalog, DesktopApi, FieldHelp, JsonObject, ProjectSnapshot } from './types.ts';
 
 // Inert, explicit browser-design fixture. Nothing here is a project observation.
@@ -22,6 +24,7 @@ if (!githubSetup) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' })
 
 const catalog: Catalog = {
   credentialGuide: parseCredentialGuide(credentialGuideResource),
+  githubConnection: parseGitHubConnectionHelp(githubConnectionResource),
   // TypeScript adds optional `undefined` properties when inferring heterogeneous
   // JSON arrays. The exact core-owned JSON resource cannot contain undefined.
   schemaVersion: 1, schema: projectSchema as unknown as JsonObject, fields: fieldHelp as FieldHelp[],
