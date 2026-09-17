@@ -1520,8 +1520,7 @@ class Fixture:
                 self.checks["configExact"] = config["data"] == expected
                 hints = discovery["hints"]
                 self.checks["androidExact"] = hints.get("android") == {
-                    "module": ":android:app", "buildFile": "android/app/build.gradle", "applicationId": "org.fixture.app",
-                    "namespace": None, "debugApplicationIdSuffix": None}
+                    "module": ":android:app", "buildFile": "android/app/build.gradle", "applicationId": "org.fixture.app"}
                 self.checks["iosExact"] = hints.get("ios") == {
                     "projects": ["ios/Fixture.xcodeproj"], "workspaces": [], "schemes": [], "bundleIds": ["org.fixture.ios"],
                     "generatedProjectSources": [], "bundleId": "org.fixture.ios", "project": "ios/Fixture.xcodeproj"}

@@ -1056,7 +1056,7 @@ mod windows_snapshot {
         Ok(())
     }
     fn android() -> Value { json!({"module":":android:app","buildFile":"android/app/build.gradle",
-        "applicationId":"org.fixture.app","namespace":null,"debugApplicationIdSuffix":null}) }
+        "applicationId":"org.fixture.app"}) }
     fn ios() -> Value { json!({"projects":["ios/Fixture.xcodeproj"],"workspaces":[],"schemes":[],
         "bundleIds":["org.fixture.ios"],"generatedProjectSources":[],"bundleId":"org.fixture.ios","project":"ios/Fixture.xcodeproj"}) }
     fn result(case: &Case, outcome: &Query, reader: &Value) -> Check<Value> {
@@ -1387,10 +1387,16 @@ mod windows_snapshot {
         require(actual.len() == rules.len() && actual.keys().all(|field| rules.contains_key(field.as_str())), "windows_checks_roster")?;
         for (field, rule) in rules {
             let value = &value[field];
-            match rule {
-                Rule::Equal(expected) => require(value == &expected, "windows_required_native_predicate")?,
-                Rule::Range(min, max) => { require(number(value, max)? >= min, "windows_required_native_count")?; },
+            let checked = match rule {
+                Rule::Equal(expected) => require(value == &expected, "windows_required_native_predicate"),
+                Rule::Range(min, max) => number(value, max).and_then(|count| require(count >= min, "windows_required_native_count")),
+            };
+            if checked.is_err() {
+                // Both names come from the compiled-in case/rule roster, never
+                // an observed value, native pathname, buffer or credential.
+                eprintln!("Windows snapshot rejected fixed check: control={name}, field={field}");
             }
+            checked?;
         }
         Ok(())
     }
@@ -1543,6 +1549,7 @@ mod windows_snapshot {
         if receipt.write("running", None).is_err() { panic!("Windows receipt unavailable before original native work"); }
         for (index, (group, names)) in GROUPS.iter().enumerate() {
             for name in *names {
+                eprintln!("Windows snapshot fixed control: {group}/{name}");
                 if begin.elapsed() >= Duration::from_secs(300) {
                     let _ = receipt.write("failed-retained", Some("windows_batch_allowance"));
                     panic!("Windows snapshot batch observation allowance exceeded; task root retained");

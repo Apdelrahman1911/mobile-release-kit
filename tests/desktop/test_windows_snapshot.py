@@ -559,7 +559,9 @@ class WindowsSnapshotPureTests(unittest.TestCase):
         parser.assert_called_once()
         self.assertEqual(parser.call_args.args[0], sources)
         self.assertEqual(parser.call_args.args[1], {"App.xcodeproj", "App.xcworkspace"})
-        self.assertEqual(result["discovery"]["hints"]["android"]["applicationId"], "org.fixture.app")
+        self.assertEqual(result["discovery"]["hints"]["android"], {
+            "module": ":app", "buildFile": "app/build.gradle.kts", "applicationId": "org.fixture.app",
+        })
         self.assertEqual(result["discovery"]["hints"]["ios"]["bundleId"], "org.fixture.ios")
         self.assertEqual(result["config"]["state"], "format-valid")
         opened = {spec.name for spec in fake.specs}
@@ -568,6 +570,17 @@ class WindowsSnapshotPureTests(unittest.TestCase):
         self.assertNotIn("private-canary", json.dumps(result))
         self.assertNotIn("9.9.9", json.dumps(result["discovery"]))
         self.assertFalse(result["discovery"]["partial"])
+
+        # The public DTO omits absent optional hints; it must not omit an
+        # actually observed value. This is the same shared sanitizer exercised
+        # by the genuine hosted source/ZIP fixtures, not a native qualification.
+        explicit = _Fake()
+        explicit.config()
+        explicit.add("app/build.gradle.kts", GRADLE + b'namespace = "org.fixture.code"\napplicationIdSuffix = ".debug"\n')
+        self.assertEqual(self._run(explicit)["discovery"]["hints"]["android"], {
+            "module": ":app", "buildFile": "app/build.gradle.kts", "applicationId": "org.fixture.app",
+            "namespace": "org.fixture.code", "debugApplicationIdSuffix": ".debug",
+        })
 
     def test_original_reads_require_bounds_and_eof(self):
         fake = _Fake()
