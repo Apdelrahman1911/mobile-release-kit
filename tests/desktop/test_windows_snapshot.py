@@ -1,11 +1,11 @@
-"""Eighteen inert Windows reader contracts, not Windows qualification.
+"""Inert Windows reader contracts, not Windows qualification.
 
 Only dictionaries, synthetic handle numbers and bounded byte buffers are used.
 Native calls/exit are substituted or refused before entry; no DLL is loaded. Fake
 relative opens/mutations prove call ordering, not NTFS, ABI, ACL or reparse
 semantics. A substituted fail-stop proves retained references, not process/IO
 finality or successful native CloseHandle receipts. No filesystem fixtures.
-Two leaves read bound fixture source and select only their named pure reducers;
+Focused leaves read bound fixture source and select only named pure reducers;
 neither imports the fixture module or executes its native observer/constructor.
 """
 from __future__ import annotations
@@ -649,6 +649,68 @@ class WindowsSnapshotPureTests(unittest.TestCase):
             self.assertEqual(len(closed), len(set(closed)))
             self.assertEqual(fake._owned, [])
 
+    def test_short_alias_selection_and_returned_failure_classification(self):
+        # Only these two reviewed scalar definitions execute. Neither the
+        # fixture module nor its DLL/handle/setter/restore code is imported.
+        source = (Path(__file__).resolve().parents[1] / "native_desktop_snapshot_windows.py").read_bytes()
+        self.assertLessEqual(len(source), 128 * 1024)
+        parsed = ast.parse(source, filename="reviewed-short-alias-fixture-source")
+        signatures = {"_short_alias_selection": ("exact_name", "observed_name"),
+                      "_short_alias_error_reason": ("api", "code")}
+        selected = [node for node in parsed.body if getattr(node, "name", None) in signatures]
+        self.assertEqual(len(selected), 2)
+        safe = {"type": type, "str": str, "int": int, "len": len}
+        nodes = (ast.FunctionDef, ast.arguments, ast.arg, ast.Expr, ast.Constant, ast.Name, ast.Load, ast.Store,
+                 ast.Assign, ast.For, ast.If, ast.Return, ast.Call, ast.Attribute, ast.Tuple, ast.Dict,
+                 ast.Subscript, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
+                 ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
+        for definition in selected:
+            self.assertIs(type(definition), ast.FunctionDef)
+            self.assertFalse(definition.decorator_list or definition.returns or definition.type_comment
+                             or getattr(definition, "type_params", []))
+            args = definition.args
+            self.assertEqual(tuple(arg.arg for arg in args.args), signatures[definition.name])
+            self.assertFalse(args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg or args.defaults or args.kw_defaults)
+            self.assertTrue(all(arg.annotation is None and arg.type_comment is None for arg in args.args))
+            self.assertEqual(sum(isinstance(node, ast.FunctionDef) for node in ast.walk(definition)), 1)
+            for node in ast.walk(definition):
+                self.assertIsInstance(node, nodes)
+                if isinstance(node, ast.Name):
+                    self.assertFalse(node.id.startswith("__"))
+                if isinstance(node, ast.Attribute):
+                    self.assertIsInstance(node.value, ast.Name)
+                    self.assertIn((node.value.id, node.attr), {("observed_name", "split"), ("reasons", "get")})
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    self.assertIn(node.func.id, safe)
+        namespace = {"__builtins__": safe}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-short-alias-reducers", "exec",
+                     dont_inherit=True), namespace)
+        self.assertEqual(set(namespace), {"__builtins__", *signatures})
+        select, classify = (namespace[name] for name in signatures)
+        exact = "LongSnapshotDirectory"
+        self.assertEqual(select(exact, exact), "absent")
+        for name in ("LONGSN~1", "MRKSNP~1", "FOO.BAR", "a"):
+            self.assertEqual(select(exact, name), "existing")
+        for name in (None, 1, b"MRKSNP~1", "", ".", "..", "A.", ".A", "A.B.C", "NINECHARS",
+                     "A.LONG", "A/B", "A\\B", "A:B", "A B", "\u00e9", exact.lower(), "A" * 8192):
+            self.assertIsNone(select(exact, name))
+        self.assertIsNone(select("DifferentDirectory", "MRKSNP~1"))
+        expected = {5: "short_alias_access_denied", 32: "short_alias_sharing_violation",
+                    50: "short_alias_not_supported", 87: "short_alias_invalid_parameter",
+                    183: "short_alias_name_collision", 305: "short_alias_volume_disabled",
+                    1314: "short_alias_privilege_unavailable"}
+        for api_name in ("CreateFileW", "GetHandleInformation", "GetFileInformationByHandleEx",
+                         "GetShortPathNameW", "SetFileShortNameW"):
+            for code, reason in expected.items():
+                self.assertEqual(classify(api_name, code), reason)
+            self.assertEqual(classify(api_name, 123), "short_alias_other_refused")
+            self.assertIsNone(classify(api_name, 997))
+        self.assertEqual(classify("ReadFile", 5), "fixture_native_unavailable")
+        for code in (None, True, "5", 5.0, -1, 1 << 32):
+            self.assertIsNone(classify("SetFileShortNameW", code))
+        for api_name in (None, 1, b"SetFileShortNameW"):
+            self.assertIsNone(classify(api_name, 5))
+
     def test_failure_diagnostic_is_closed_bounded_and_unknown_silent(self):
         # Compile only this scalar reducer, never the fixture/emitter/observer.
         name = "_failure_diagnostic"
@@ -702,7 +764,10 @@ class WindowsSnapshotPureTests(unittest.TestCase):
                     "nonce": "a" * 64, "stage": "setup", "code": "real_short_alias_unavailable"}
         self.assertEqual(json.loads(raw[len(prefix):-1]), expected)
         reasons = ("short_alias_bound", "real_short_alias_unavailable", "real_alias_required",
-                   "normalized_alias_veto_required", "fixture_native_unavailable", "fixture_failure")
+                   "normalized_alias_veto_required", "fixture_native_unavailable", "fixture_failure",
+                   "short_alias_access_denied", "short_alias_sharing_violation", "short_alias_not_supported",
+                   "short_alias_invalid_parameter", "short_alias_name_collision", "short_alias_volume_disabled",
+                   "short_alias_privilege_unavailable", "short_alias_other_refused")
         for stage in ("setup", "reader", "reduction", "restoration"):
             for reason in reasons:
                 marker = reduce(**{**arguments, "stage": stage, "reason": reason})
@@ -784,9 +849,13 @@ class WindowsSnapshotPureTests(unittest.TestCase):
         self.assertEqual(write.args[0].value, 2)
         self.assertEqual(write.args[1].id, "raw")
         for call in (node for node in ast.walk(emitter) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
-            self.assertIn(call.func.id, {"type", "len", name})
-        self.assertFalse(any(isinstance(node, ast.Attribute) and node.attr in ("api", "code", "snapshot", "join", "restore")
+            self.assertIn(call.func.id, {"type", "len", name, "_short_alias_error_reason"})
+        self.assertFalse(any(isinstance(node, ast.Attribute) and node.attr in ("snapshot", "join", "restore")
                              for node in ast.walk(emitter)))
+        native_labels = [node for node in ast.walk(emitter) if isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Name) and node.func.id == "_short_alias_error_reason"]
+        self.assertEqual(len(native_labels), 1)
+        self.assertEqual([(arg.value.id, arg.attr) for arg in native_labels[0].args], [("error", "api"), ("error", "code")])
         guarded = next(node for node in emitter.body if isinstance(node, ast.Try))
         self.assertEqual(guarded.body[1].targets[0].attr, "diagnostic_attempted")
         self.assertIs(guarded.body[1].value.value, True)

@@ -97,6 +97,41 @@ def require(value: bool, code: str) -> None:
         raise FixtureFailure(code)
 
 
+def _short_alias_selection(exact_name, observed_name):
+    """Classify one actual getter result, never synthesize a native observation."""
+    if (type(exact_name) is not str or exact_name != "LongSnapshotDirectory"
+            or type(observed_name) is not str):
+        return None
+    if observed_name == exact_name:
+        return "absent"
+    if not 1 <= len(observed_name) <= 12:
+        return None
+    parts = observed_name.split(".")
+    if not 1 <= len(parts) <= 2 or not 1 <= len(parts[0]) <= 8:
+        return None
+    if len(parts) == 2 and not 1 <= len(parts[1]) <= 3:
+        return None
+    for part in parts:
+        for character in part:
+            if character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_~":
+                return None
+    return "existing"
+
+
+def _short_alias_error_reason(api, code):
+    """Fixed labels for already returned setup/restore calls, not policy probes."""
+    if type(api) is not str or type(code) is not int or not 0 <= code < 1 << 32 or code == 997:
+        return None
+    if api not in ("CreateFileW", "GetHandleInformation", "GetFileInformationByHandleEx",
+                   "GetShortPathNameW", "SetFileShortNameW"):
+        return "fixture_native_unavailable"
+    reasons = {5: "short_alias_access_denied", 32: "short_alias_sharing_violation",
+               50: "short_alias_not_supported", 87: "short_alias_invalid_parameter",
+               183: "short_alias_name_collision", 305: "short_alias_volume_disabled",
+               1314: "short_alias_privilege_unavailable"}
+    return reasons.get(code, "short_alias_other_refused")
+
+
 def _failure_diagnostic(case, nonce, stage, reason, fixture_state, reader_state, output_state):
     """Closed scalar reduction only; no exception rendering, IO or custody probe."""
     cases = ("ordinary-source", "ordinary-zip", "closed-gate", "link-children", "reparse-root",
@@ -138,7 +173,10 @@ def _failure_diagnostic(case, nonce, stage, reason, fixture_state, reader_state,
         return None
     if type(reason) is not str or reason not in (
             "short_alias_bound", "real_short_alias_unavailable", "real_alias_required",
-            "normalized_alias_veto_required", "fixture_native_unavailable"):
+            "normalized_alias_veto_required", "fixture_native_unavailable",
+            "short_alias_access_denied", "short_alias_sharing_violation", "short_alias_not_supported",
+            "short_alias_invalid_parameter", "short_alias_name_collision", "short_alias_volume_disabled",
+            "short_alias_privilege_unavailable", "short_alias_other_refused"):
         reason = "fixture_failure"
     # Every interpolated string is now a closed literal or the admitted hex nonce.
     raw = ('MRK_WINDOWS_SNAPSHOT_FAILURE_V1 {"schemaVersion":1,"scope":"windows-static-snapshot-native-v1","id":"'
@@ -472,6 +510,7 @@ class FixtureNative:
             "CreateSymbolicLinkW": ([WCHAR, WCHAR, U32], c.c_ubyte),
             "CreateHardLinkW": ([WCHAR, WCHAR, VOID], BOOL),
             "GetShortPathNameW": ([WCHAR, c.POINTER(c.c_wchar), U32], U32),
+            "SetFileShortNameW": ([HANDLE, WCHAR], BOOL),
             "QueryDosDeviceW": ([WCHAR, c.POINTER(c.c_wchar), U32], U32),
             "DefineDosDeviceW": ([U32, WCHAR, WCHAR], BOOL),
             "GetVolumeInformationByHandleW": ([HANDLE, c.POINTER(c.c_wchar), U32, c.POINTER(U32), c.POINTER(U32), c.POINTER(U32), c.POINTER(c.c_wchar), U32], BOOL),
@@ -629,6 +668,12 @@ class FixtureNative:
         result = self.identity(handle)
         self.close(handle)
         return result
+
+    def short_name(self, path: Path) -> str:
+        buffer = self.c.create_unicode_buffer(8192)
+        count = self.call(self.k.GetShortPathNameW, (str(path), buffer, 8192), (buffer,), kind="count")
+        require(0 < count < 8192, "short_alias_bound")
+        return Path(buffer.value).name
 
     def read_control(self, path: Path, expected: bytes, *, follow: bool = False) -> tuple[int, bytes]:
         handle = self.open(path, 0x100081, flags=BACKUP | (0 if follow else NOFOLLOW))
@@ -1143,7 +1188,11 @@ class Fixture:
                              n.pending_arena is None, n.pending_complete, self.thread is None, self.thread_joined)
             reason = None
             if type(error) is NativeFailure:
-                reason = "fixture_native_unavailable"  # Never read its API/code/native attributes.
+                reason = "fixture_native_unavailable"
+                if self.case == "short-alias" and stage in ("setup", "restoration"):
+                    reason = _short_alias_error_reason(error.api, error.code)
+                    if reason is None:
+                        return  # Pending/invalid native state has no diagnostic permission.
             elif type(error) is FixtureFailure:
                 arguments = error.args
                 if type(arguments) is tuple and len(arguments) == 1:
@@ -1197,6 +1246,36 @@ class Fixture:
         record = {"kind": kind, "path": path, "writer": writer, "metadata": metadata, "id": identity, "changed": False}
         self.journal.append(record)
         return record
+
+    def short_alias(self, path: Path) -> str:
+        """Retain the original object; add only its missing, fixed genuine alias."""
+        n = self.native
+        require(len(self.journal) < 16, "fixture_restoration_bound")
+        metadata = n.open(path, READ_ATTRIBUTES)
+        identity = n.identity(metadata)
+        tag = n.info(metadata, 9, n.Tag)
+        require(bool(tag.FileAttributes & 0x10) and not tag.FileAttributes & 0x400,
+                "short_alias_ordinary_directory")
+        observed = n.short_name(path)
+        selection = _short_alias_selection(path.name, observed)
+        require(selection is not None, "real_short_alias_unavailable")
+        # Absence and original custody are recorded BEFORE any alias mutation.
+        record = {"kind": "short-alias", "path": path, "metadata": metadata, "id": identity,
+                  "originalAbsent": selection == "absent", "originalName": observed, "changed": False}
+        self.journal.append(record)
+        if selection == "absent":
+            # DELETE is required by the modern API, but must never be held across
+            # the product's intentionally no-FILE_SHARE_DELETE reader admission.
+            setter = n.open(path, DELETE | READ_ATTRIBUTES)
+            require(n.identity(setter) == identity, "short_alias_setter_identity")
+            n.call(n.k.SetFileShortNameW, (setter, "MRKSNP~1"))
+            record["changed"] = True  # The original call has actually returned success.
+            observed = n.short_name(path)
+            require(observed == "MRKSNP~1" and n.identity(metadata) == identity,
+                    "real_short_alias_unavailable")
+            n.close(setter)  # Sole positive close is required before any product open.
+        self.alias_object_id = identity
+        return observed
 
     def junction(self, path: Path, target: Path) -> dict:
         record = self.held_mutation(path, "junction")
@@ -1276,16 +1355,11 @@ class Fixture:
         elif self.case in ("short-alias", "case-alias"):
             exact = self.project / ("LongSnapshotDirectory" if self.case == "short-alias" else "CaseExact")
             if self.case == "short-alias":
-                buffer = n.c.create_unicode_buffer(8192)
-                count = n.call(n.k.GetShortPathNameW, (str(exact), buffer, 8192), (buffer,), kind="count")
-                require(0 < count < 8192, "short_alias_bound")
-                alias_name = Path(buffer.value).name
-                require(alias_name != exact.name and re.fullmatch(r"[A-Za-z0-9_~.]{1,12}", alias_name) is not None,
-                        "real_short_alias_unavailable")
+                alias_name = self.short_alias(exact)
             else:
                 alias_name = "caseexact"
+                self.alias_object_id = n.path_identity(exact)
             alias = exact.parent / alias_name
-            self.alias_object_id = n.path_identity(exact)
             self.checks["sameObject"] = n.path_identity(alias) == self.alias_object_id
             self.checks["aliasObserved"] = True
             self.checks["spellingDiffers"] = alias_name != exact.name
@@ -1613,6 +1687,25 @@ class Fixture:
         restored_links, restored_reparse, restored_dacl = 0, 0, 0
         for record in reversed(self.journal):
             kind = record["kind"]
+            if kind == "short-alias":
+                # _finish proved every original reader call/close before restore.
+                # This is a NEW registered setter, never reuse of an uncertain one.
+                require(n.identity(record["metadata"]) == record["id"], "short_alias_restore_identity")
+                if record["changed"]:
+                    require(record["originalAbsent"] is True and n.short_name(record["path"]) == "MRKSNP~1",
+                            "short_alias_restore_owned_name")
+                    setter = n.open(record["path"], DELETE | READ_ATTRIBUTES)
+                    require(n.identity(setter) == record["id"], "short_alias_restore_setter_identity")
+                    n.call(n.k.SetFileShortNameW, (setter, ""))
+                    require(n.short_name(record["path"]) == record["originalName"]
+                            and n.identity(record["metadata"]) == record["id"], "short_alias_restore_absence")
+                    n.close(setter)
+                    record["changed"] = False
+                else:
+                    require(record["originalAbsent"] is False
+                            and n.short_name(record["path"]) == record["originalName"], "short_alias_existing_preserved")
+                n.close(record["metadata"])
+                continue
             if kind == "delete-link":
                 n.delete(record["path"], record["id"])
                 restored_links += 1

@@ -624,7 +624,10 @@ mod windows_snapshot_failure_diagnostics {
         "oplock-release", "oplock-withhold", "pending-failstop"];
     const STAGES: &[&str] = &["setup", "reader", "reduction", "restoration"];
     const CODES: &[&str] = &["short_alias_bound", "real_short_alias_unavailable", "real_alias_required",
-        "normalized_alias_veto_required", "fixture_native_unavailable", "fixture_failure"];
+        "normalized_alias_veto_required", "fixture_native_unavailable", "fixture_failure",
+        "short_alias_access_denied", "short_alias_sharing_violation", "short_alias_not_supported",
+        "short_alias_invalid_parameter", "short_alias_name_collision", "short_alias_volume_disabled",
+        "short_alias_privilege_unavailable", "short_alias_other_refused"];
     // Frozen original supervisor / API dispatch / snapshot codes, not arbitrary
     // protocol-forwarded strings and not BridgeError Display/Debug/message.
     const OWNER_CODES: &[&str] = &["runtime_unavailable", "protocol_error", "invalid_request", "shutting_down",
