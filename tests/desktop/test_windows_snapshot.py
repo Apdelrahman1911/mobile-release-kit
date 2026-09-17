@@ -1,12 +1,12 @@
-"""Seventeen inert Windows reader contracts, not Windows qualification.
+"""Eighteen inert Windows reader contracts, not Windows qualification.
 
 Only dictionaries, synthetic handle numbers and bounded byte buffers are used.
 Native calls/exit are substituted or refused before entry; no DLL is loaded. Fake
 relative opens/mutations prove call ordering, not NTFS, ABI, ACL or reparse
 semantics. A substituted fail-stop proves retained references, not process/IO
 finality or successful native CloseHandle receipts. No filesystem fixtures.
-One leaf reads bound fixture source and selects only three pure reducers; it
-never imports the fixture module or executes its native observer/constructor.
+Two leaves read bound fixture source and select only their named pure reducers;
+neither imports the fixture module or executes its native observer/constructor.
 """
 from __future__ import annotations
 
@@ -648,6 +648,176 @@ class WindowsSnapshotPureTests(unittest.TestCase):
             self.assertCountEqual(closed, fake.handles)
             self.assertEqual(len(closed), len(set(closed)))
             self.assertEqual(fake._owned, [])
+
+    def test_failure_diagnostic_is_closed_bounded_and_unknown_silent(self):
+        # Compile only this scalar reducer, never the fixture/emitter/observer.
+        name = "_failure_diagnostic"
+        signature = ("case", "nonce", "stage", "reason", "fixture_state", "reader_state", "output_state")
+        source = (Path(__file__).resolve().parents[1] / "native_desktop_snapshot_windows.py").read_bytes()
+        self.assertLessEqual(len(source), 128 * 1024)
+        parsed = ast.parse(source, filename="reviewed-failure-fixture-source")
+        selected = [node for node in parsed.body if getattr(node, "name", None) == name]
+        self.assertEqual(len(selected), 1)
+        definition = selected[0]
+        self.assertIs(type(definition), ast.FunctionDef)
+        self.assertFalse(definition.decorator_list or definition.returns or definition.type_comment
+                         or getattr(definition, "type_params", []))
+        args = definition.args
+        self.assertEqual(tuple(arg.arg for arg in args.args), signature)
+        self.assertFalse(args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg or args.defaults or args.kw_defaults)
+        self.assertTrue(all(arg.annotation is None and arg.type_comment is None for arg in args.args))
+        self.assertEqual(sum(isinstance(node, ast.FunctionDef) for node in ast.walk(definition)), 1)
+        safe = {"type": type, "str": str, "tuple": tuple, "bool": bool, "int": int, "len": len}
+        nodes = (ast.FunctionDef, ast.arguments, ast.arg, ast.Expr, ast.Constant, ast.Name, ast.Load, ast.Store,
+                 ast.Assign, ast.For, ast.If, ast.Return, ast.Call, ast.Attribute, ast.Tuple, ast.Subscript, ast.Slice,
+                 ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare, ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
+        for node in ast.walk(definition):
+            self.assertIsInstance(node, nodes)
+            if isinstance(node, ast.Name):
+                self.assertFalse(node.id.startswith("__"))
+            if isinstance(node, ast.Attribute):
+                self.assertEqual(node.attr, "encode")
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    self.assertIn(node.func.id, safe)
+                else:
+                    self.assertIsInstance(node.func, ast.Attribute)
+                    self.assertEqual(node.func.attr, "encode")
+        namespace = {"__builtins__": safe}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-failure-reducer", "exec",
+                     dont_inherit=True), namespace)
+        self.assertEqual(set(namespace), {"__builtins__", name})
+        reduce = namespace[name]
+        fixture_state = (True, True, True, True, True, False, True, False)
+        reader_state = (0, False, None, None, None)
+        arguments = {"case": "short-alias", "nonce": "a" * 64, "stage": "setup",
+                     "reason": "real_short_alias_unavailable", "fixture_state": fixture_state,
+                     "reader_state": reader_state, "output_state": (False, 0, 0)}
+        prefix = b"MRK_WINDOWS_SNAPSHOT_FAILURE_V1 "
+        raw = reduce(**arguments)
+        self.assertTrue(raw.startswith(prefix) and raw.endswith(b"\n") and raw.isascii())
+        self.assertEqual(raw.count(b"\n"), 1)
+        self.assertLessEqual(len(raw), 1024)
+        expected = {"schemaVersion": 1, "scope": "windows-static-snapshot-native-v1", "id": "short-alias",
+                    "nonce": "a" * 64, "stage": "setup", "code": "real_short_alias_unavailable"}
+        self.assertEqual(json.loads(raw[len(prefix):-1]), expected)
+        reasons = ("short_alias_bound", "real_short_alias_unavailable", "real_alias_required",
+                   "normalized_alias_veto_required", "fixture_native_unavailable", "fixture_failure")
+        for stage in ("setup", "reader", "reduction", "restoration"):
+            for reason in reasons:
+                marker = reduce(**{**arguments, "stage": stage, "reason": reason})
+                self.assertEqual(json.loads(marker[len(prefix):-1]), {**expected, "stage": stage, "code": reason})
+        # Literal-only roster extraction, not module execution or a native fixture.
+        groups = [node for node in parsed.body if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == "GROUPS" for target in node.targets)]
+        self.assertEqual(len(groups), 1)
+        cases = tuple(case for _group, cases in ast.literal_eval(groups[0].value) for case in cases)
+        self.assertEqual(len(cases), 31)
+        for case in cases:
+            marker = reduce(**{**arguments, "case": case})
+            self.assertEqual(json.loads(marker[len(prefix):-1]), {**expected, "id": case})
+
+        class Unrenderable:
+            def __str__(self):
+                raise AssertionError("must not render a diagnostic argument")
+            __repr__ = __str__
+            def __eq__(self, other):
+                raise AssertionError("must not compare an unknown diagnostic argument")
+
+        class NonExactString(str):
+            def __eq__(self, other):
+                raise AssertionError("must require exact strings before comparison")
+
+        poison = Unrenderable()
+        for reason in (None, "private-canary/path\nsecret", b"private-canary", poison,
+                       NonExactString("short_alias_bound"), ["short_alias_bound"]):
+            marker = reduce(**{**arguments, "reason": reason})
+            self.assertEqual(json.loads(marker[len(prefix):-1]), {**expected, "code": "fixture_failure"})
+            self.assertNotIn(b"private-canary", marker)
+        for key, values in (
+                ("case", (None, "private-canary", "short-alias\n", NonExactString("short-alias"), poison)),
+                ("nonce", (None, "A" * 64, "a" * 63, "a" * 65, "g" * 64, "\u00e9" * 64, poison)),
+                ("stage", (None, "admission", "complete", "setup\n", NonExactString("setup"), poison))):
+            for value in values:
+                self.assertIsNone(reduce(**{**arguments, key: value}))
+        for index in range(8):
+            for value in (not fixture_state[index], None, 0, 1, "clear", poison):
+                changed = list(fixture_state); changed[index] = value
+                self.assertIsNone(reduce(**{**arguments, "fixture_state": tuple(changed)}))
+        for state in (None, [], {}, fixture_state[:-1], (*fixture_state, True)):
+            self.assertIsNone(reduce(**{**arguments, "fixture_state": state}))
+        attached = (1, True, True, False, True)
+        for state in (reader_state, attached):
+            self.assertEqual(reduce(**{**arguments, "reader_state": state}), raw)
+        for state in (None, [], (0, False), (True, False, None, None, None),
+                      (1, False, None, None, None), (2, False, None, None, None),
+                      (0, False, True, None, None), (0, False, None, False, None), (0, False, None, None, True),
+                      (0, True, True, False, True), (1, 1, True, False, True), (2, True, True, False, True),
+                      (1, True, False, False, True), (1, True, None, False, True), (1, True, 1, False, True),
+                      (1, True, True, True, True), (1, True, True, None, True), (1, True, True, 0, True),
+                      (1, True, True, False, False), (1, True, True, False, None), (1, True, True, False, 1)):
+            self.assertIsNone(reduce(**{**arguments, "reader_state": state}))
+        # Already classified pending completion / already joined observer only;
+        # the helper never performs completion or a join to reach these tuples.
+        for state in ((True, True, True, True, False, True, True, False),
+                      (True, True, True, True, False, True, False, True)):
+            self.assertEqual(reduce(**{**arguments, "fixture_state": state, "reader_state": attached}), raw)
+        for state in (None, [], (False, 0), (True, 0, 0), (None, 0, 0), (0, 0, 0),
+                      (False, -1, 0), (False, 4, 0), (False, True, 0), (False, 1.0, 0),
+                      (False, 0, -1), (False, 0, 65537), (False, 0, False), (False, 0, 0.0)):
+            self.assertIsNone(reduce(**{**arguments, "output_state": state}))
+        engine_error = b"Mobile Release Kit desktop engine rejected the request or transport.\n"
+        available = 65536 - len(raw) - len(engine_error)
+        self.assertEqual(reduce(**{**arguments, "output_state": (False, 3, available)}), raw)
+        self.assertIsNone(reduce(**{**arguments, "output_state": (False, 3, available + 1)}))
+
+        # Inspect, but NEVER compile/execute, the effectful diagnostic seam.
+        fixture = next(node for node in parsed.body if isinstance(node, ast.ClassDef) and node.name == "Fixture")
+        methods = {node.name: node for node in fixture.body if isinstance(node, ast.FunctionDef)}
+        emitter = methods["diagnose_failure"]
+        self.assertFalse(any(isinstance(node, (ast.With, ast.For, ast.While, ast.Await)) for node in ast.walk(emitter)))
+        attribute_calls = [node.func for node in ast.walk(emitter)
+                           if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)]
+        self.assertEqual([(call.value.id, call.attr) for call in attribute_calls], [("os", "write")])
+        write = next(node for node in ast.walk(emitter) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and node.func.attr == "write")
+        self.assertEqual(write.args[0].value, 2)
+        self.assertEqual(write.args[1].id, "raw")
+        for call in (node for node in ast.walk(emitter) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            self.assertIn(call.func.id, {"type", "len", name})
+        self.assertFalse(any(isinstance(node, ast.Attribute) and node.attr in ("api", "code", "snapshot", "join", "restore")
+                             for node in ast.walk(emitter)))
+        guarded = next(node for node in emitter.body if isinstance(node, ast.Try))
+        self.assertEqual(guarded.body[1].targets[0].attr, "diagnostic_attempted")
+        self.assertIs(guarded.body[1].value.value, True)
+        self.assertEqual(guarded.handlers[0].type.id, "BaseException")
+        self.assertIsInstance(guarded.handlers[0].body[0], ast.Return)
+        self.assertEqual(methods["__init__"].body[-2].targets[0].attr, "diagnostic_ready")
+        self.assertIs(methods["__init__"].body[-2].value.value, True)
+        self.assertEqual(methods["__init__"].body[-1].targets[0].attr, "diagnostic_attempted")
+        self.assertIs(methods["__init__"].body[-1].value.value, False)
+        for method, stage in (("finish", "reduction"), ("_finish", "restoration")):
+            calls = [node for node in ast.walk(methods[method]) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and node.func.attr == "diagnose_failure"]
+            self.assertEqual([call.args[0].value for call in calls], [stage])
+        main = next(node for node in parsed.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        dispatch = next(node for node in ast.walk(main) if isinstance(node, ast.FunctionDef) and node.name == "dispatch")
+        refusals = [node for node in ast.walk(dispatch) if isinstance(node, ast.ExceptHandler)
+                    and isinstance(node.type, ast.Attribute) and node.type.attr == "ApiError"]
+        self.assertEqual(len(refusals), 1)
+        self.assertEqual(refusals[0].body[-3].value.func.attr, "finish")
+        self.assertEqual(refusals[0].body[-2].targets[0].id, "validated_refusal")
+        self.assertEqual(refusals[0].body[-2].value.id, "error")
+        self.assertIsInstance(refusals[0].body[-1], ast.Raise)
+        self.assertIsNone(refusals[0].body[-1].exc)
+        guarded_refusals = [node for node in ast.walk(dispatch) if isinstance(node, ast.If)
+                            and isinstance(node.test, ast.Compare) and isinstance(node.test.left, ast.Name)
+                            and node.test.left.id == "error"]
+        self.assertEqual(len(guarded_refusals), 1)
+        self.assertIsInstance(guarded_refusals[0].test.ops[0], ast.IsNot)
+        self.assertEqual(guarded_refusals[0].test.comparators[0].id, "validated_refusal")
+        self.assertEqual(guarded_refusals[0].body[0].value.func.attr, "diagnose_failure")
+        self.assertEqual(guarded_refusals[0].body[0].value.args[0].value, "reader")
 
     def test_normalized_name_and_case_are_only_vetoes(self):
         for spelling in ("Build.Gradle", "BUILD~1.GRA", r"\Device\HarddiskVolume8\build.gradle", ""):

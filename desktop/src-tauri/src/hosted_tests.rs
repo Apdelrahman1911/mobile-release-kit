@@ -605,6 +605,229 @@ async fn passive_hosted_contract() {
     if receipt.write("passed", None).is_err() { panic!("hosted passive final receipt failed after settlement"); }
 }
 
+// Pure log-only decoding. This module never observes a process, grants cleanup,
+// parses success telemetry, or adds a row/field to the accepted-prefix receipt.
+mod windows_snapshot_failure_diagnostics {
+    use super::{protocol, Value};
+    use serde_json::json;
+
+    const PREFIX: &[u8] = b"MRK_WINDOWS_SNAPSHOT_FAILURE_V1 ";
+    const TAG: &[u8] = b"MRK_WINDOWS_SNAPSHOT_FAILURE";
+    const TELEMETRY: &[u8] = b"MRK_WINDOWS_SNAPSHOT_V1 ";
+    const ENGINE_REJECTION: &[u8] = b"Mobile Release Kit desktop engine rejected the request or transport.";
+    const SCOPE: &str = "windows-static-snapshot-native-v1";
+    const CASES: &[&str] = &["ordinary-source", "ordinary-zip", "closed-gate", "link-children", "reparse-root",
+        "reparse-ancestor", "short-alias", "case-alias", "case-collision", "subst-drive", "unc", "device", "ads",
+        "root-reparse-race", "config-reparse-race", "walk-reparse-race", "case-mode-race", "acl-type",
+        "read-eof-size", "entry-limit", "candidate-limit", "aggregate-limit", "depth-path-limit",
+        "replace", "disappear", "config-disappear", "ending-metadata-case", "drive-map-change",
+        "oplock-release", "oplock-withhold", "pending-failstop"];
+    const STAGES: &[&str] = &["setup", "reader", "reduction", "restoration"];
+    const CODES: &[&str] = &["short_alias_bound", "real_short_alias_unavailable", "real_alias_required",
+        "normalized_alias_veto_required", "fixture_native_unavailable", "fixture_failure"];
+    // Frozen original supervisor / API dispatch / snapshot codes, not arbitrary
+    // protocol-forwarded strings and not BridgeError Display/Debug/message.
+    const OWNER_CODES: &[&str] = &["runtime_unavailable", "protocol_error", "invalid_request", "shutting_down",
+        "query_timeout", "cleanup_unknown", "busy", "unavailable", "output_limit", "io_error", "engine_failed",
+        "unknown_method", "invalid_params", "unsafe_path", "platform_unavailable", "snapshot_unavailable"];
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Marker { Absent, Invalid, Valid { stage: &'static str, code: &'static str } }
+
+    fn closed(value: &str, allowed: &[&'static str]) -> Option<&'static str> {
+        allowed.iter().copied().find(|candidate| *candidate == value)
+    }
+
+    fn marker(bytes: &[u8], id: &str, nonce: &str) -> Marker {
+        if bytes.len() > 64 * 1024 { return Marker::Invalid; }
+        if !bytes.windows(TAG.len()).any(|window| window == TAG) { return Marker::Absent; }
+        if closed(id, CASES).is_none() || nonce.len() != 64
+            || !nonce.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || bytes.last() != Some(&b'\n') { return Marker::Invalid; }
+        let mut body = None;
+        let mut preceding = 0usize;
+        let mut engine_rejection = false;
+        for line in bytes[..bytes.len() - 1].split(|b| *b == b'\n') {
+            if let Some(value) = line.strip_prefix(PREFIX) {
+                if body.is_some() || engine_rejection || line.len() + 1 > 1024
+                    || value.windows(TAG.len()).any(|window| window == TAG) { return Marker::Invalid; }
+                body = Some(value);
+            } else if line.windows(TAG.len()).any(|window| window == TAG) {
+                return Marker::Invalid; // Embedded/wrong-version markers are not a new frame.
+            } else if body.is_none() && line.starts_with(TELEMETRY) && preceding < 3 {
+                preceding += 1; // Opaque prior frames only; do NOT validate their native evidence here.
+            } else if body.is_some() && !engine_rejection && line == ENGINE_REJECTION {
+                engine_rejection = true;
+            } else {
+                return Marker::Invalid; // No leading/trailing junk, blank lines, retries or injected lines.
+            }
+        }
+        let Some(body) = body else { return Marker::Invalid; };
+        if !body.is_ascii() || body.contains(&b'\r') { return Marker::Invalid; }
+        let Ok(value) = protocol::strict_json(body) else { return Marker::Invalid; };
+        let Some(fields) = value.as_object() else { return Marker::Invalid; };
+        if fields.len() != 6 || !["schemaVersion", "scope", "id", "nonce", "stage", "code"].iter()
+            .all(|field| fields.contains_key(*field))
+            || value["schemaVersion"].as_u64() != Some(1) || value["scope"].as_str() != Some(SCOPE)
+            || value["id"].as_str() != Some(id) || value["nonce"].as_str() != Some(nonce) {
+            return Marker::Invalid;
+        }
+        let Some(stage) = value["stage"].as_str().and_then(|value| closed(value, STAGES)) else { return Marker::Invalid; };
+        let Some(code) = value["code"].as_str().and_then(|value| closed(value, CODES)) else { return Marker::Invalid; };
+        Marker::Valid { stage, code }
+    }
+
+    fn summary(id: &str, nonce: &str, exit: i32, owner_code: Option<&str>, stderr: &[u8]) -> Value {
+        let fixed_id = closed(id, CASES).unwrap_or("unknown_control");
+        let owner_code = owner_code.map(|code| closed(code, OWNER_CODES).unwrap_or("unknown_owner_error"));
+        let failure = match marker(stderr, id, nonce) {
+            Marker::Absent => json!({"status":"absent"}),
+            Marker::Invalid => json!({"status":"invalid"}),
+            Marker::Valid { stage, code } => json!({"status":"valid","stage":stage,"code":code}),
+        };
+        json!({"schemaVersion":1,"scope":SCOPE,"id":fixed_id,"exitCode":exit,
+            "ownerErrorCode":owner_code,"fixtureFailure":failure})
+    }
+
+    #[cfg(windows)]
+    pub(super) fn log_exit(id: &str, nonce: &str, exit: i32, owner_code: Option<&str>, stderr: &[u8]) {
+        if let Ok(body) = serde_json::to_vec(&summary(id, nonce, exit, owner_code, stderr)) {
+            let mut line = b"MRK_WINDOWS_SNAPSHOT_EXIT_DIAGNOSTIC_V1 ".to_vec();
+            line.extend_from_slice(&body);
+            line.push(b'\n');
+            if line.len() <= 1024 {
+                // One best-effort write. Failure/partial output cannot replace the
+                // original windows_original_exit_differs or trigger another case.
+                let _ = std::io::Write::write(&mut std::io::stderr(), &line);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn closed_failure_marker_and_original_exit_summary() -> Result<(), Box<dyn std::error::Error>> {
+            let nonce = "a".repeat(64);
+            let id = "short-alias";
+            let base = json!({"schemaVersion":1,"scope":SCOPE,"id":id,"nonce":nonce,
+                "stage":"setup","code":"real_short_alias_unavailable"});
+            let encode = |value: &Value| -> Result<Vec<u8>, serde_json::Error> {
+                let mut bytes = PREFIX.to_vec();
+                bytes.extend_from_slice(&serde_json::to_vec(value)?);
+                bytes.push(b'\n');
+                Ok(bytes)
+            };
+            let valid = encode(&base)?;
+            assert!(valid.len() <= 1024);
+            assert_eq!(CASES.len(), 31);
+            for stage in STAGES {
+                for code in CODES {
+                    let mut frame = base.clone(); frame["stage"] = json!(stage); frame["code"] = json!(code);
+                    assert_eq!(marker(&encode(&frame)?, id, &nonce), Marker::Valid { stage: *stage, code: *code });
+                }
+            }
+            for name in CASES {
+                let mut frame = base.clone(); frame["id"] = json!(name);
+                assert_eq!(marker(&encode(&frame)?, name, &nonce),
+                    Marker::Valid { stage: "setup", code: "real_short_alias_unavailable" });
+            }
+            let mut engine_line = ENGINE_REJECTION.to_vec(); engine_line.push(b'\n');
+            for absent in [&b""[..], &engine_line, &b"private-canary-no-marker\n"[..]] {
+                assert_eq!(marker(absent, id, &nonce), Marker::Absent);
+            }
+            let opaque_prior = [TELEMETRY, b"{}\n"].concat();
+            for count in 0..=3 {
+                let mut bytes = opaque_prior.repeat(count); bytes.extend_from_slice(&valid);
+                assert_eq!(marker(&bytes, id, &nonce), Marker::Valid { stage: "setup", code: "real_short_alias_unavailable" });
+                bytes.extend_from_slice(&engine_line);
+                assert_eq!(marker(&bytes, id, &nonce), Marker::Valid { stage: "setup", code: "real_short_alias_unavailable" });
+            }
+            let bad_values = [
+                ("schemaVersion", json!(true)), ("schemaVersion", json!("1")), ("schemaVersion", json!(1.0)),
+                ("schemaVersion", json!(2)), ("scope", json!("private-canary")), ("scope", Value::Null),
+                ("id", json!("case-alias")), ("id", json!("private-canary\nshort-alias")), ("id", json!(0)),
+                ("nonce", json!("b".repeat(64))), ("nonce", json!("A".repeat(64))), ("nonce", json!(false)),
+                ("stage", json!("admission")), ("stage", json!("complete")), ("stage", json!(["setup"])),
+                ("code", json!("private-canary")), ("code", json!({"message":"private-canary"})),
+                ("code", Value::Null), ("extra", json!("private-canary")),
+            ];
+            for (key, bad) in bad_values {
+                let mut frame = base.clone(); frame[key] = bad;
+                let bytes = encode(&frame)?;
+                assert_eq!(marker(&bytes, id, &nonce), Marker::Invalid);
+                let result = summary(id, &nonce, 78, Some("private-canary"), &bytes);
+                assert_eq!(result["fixtureFailure"], json!({"status":"invalid"}));
+                assert!(!result.to_string().contains("private-canary"));
+            }
+            for key in ["schemaVersion", "scope", "id", "nonce", "stage", "code"] {
+                let mut frame = base.clone();
+                frame.as_object_mut().ok_or("pure test object required")?.remove(key);
+                assert_eq!(marker(&encode(&frame)?, id, &nonce), Marker::Invalid);
+                let mut duplicate = PREFIX.to_vec();
+                let body = serde_json::to_vec(&base)?;
+                duplicate.extend_from_slice(&body[..body.len() - 1]);
+                duplicate.extend_from_slice(format!(",{}:{}}}\n", serde_json::to_string(key)?, base[key]).as_bytes());
+                assert_eq!(marker(&duplicate, id, &nonce), Marker::Invalid);
+            }
+            for frame in [json!([]), json!(null), json!(true)] {
+                assert_eq!(marker(&encode(&frame)?, id, &nonce), Marker::Invalid);
+            }
+            let mut exact = valid[..valid.len() - 1].to_vec();
+            exact.resize(1023, b' '); exact.push(b'\n');
+            assert_eq!(marker(&exact, id, &nonce), Marker::Valid { stage: "setup", code: "real_short_alias_unavailable" });
+            let mut over_marker = exact.clone(); over_marker.insert(PREFIX.len(), b' ');
+            let mut full = TELEMETRY.to_vec();
+            full.resize(64 * 1024 - valid.len() - 1, b' '); full.push(b'\n'); full.extend_from_slice(&valid);
+            assert_eq!(full.len(), 64 * 1024);
+            assert_eq!(marker(&full, id, &nonce), Marker::Valid { stage: "setup", code: "real_short_alias_unavailable" });
+            let invalid_streams = vec![
+                over_marker, [full.as_slice(), b"\n"].concat(), vec![b'x'; 64 * 1024 + 1],
+                [valid.as_slice(), valid.as_slice()].concat(), [b"injected ", valid.as_slice()].concat(),
+                [b"private-canary\n", valid.as_slice()].concat(), [valid.as_slice(), b"private-canary\n"].concat(),
+                [valid.as_slice(), b"\n"].concat(), valid[..valid.len() - 1].to_vec(),
+                [&valid[..valid.len() - 1], b"\r\n"].concat(),
+                [valid.as_slice(), opaque_prior.as_slice()].concat(),
+                [opaque_prior.repeat(4).as_slice(), valid.as_slice()].concat(),
+                [engine_line.as_slice(), valid.as_slice()].concat(),
+                [valid.as_slice(), engine_line.as_slice(), engine_line.as_slice()].concat(),
+                [TELEMETRY, b"{\"injected\":\"", PREFIX, b"{}\"}\n"].concat(),
+                [TAG, b"_V2 {}\n"].concat(), [TAG, b"_V1 "].concat(), [PREFIX, b"{not-json}\n"].concat(),
+            ];
+            for bytes in invalid_streams {
+                assert_eq!(marker(&bytes, id, &nonce), Marker::Invalid);
+                let result = summary(id, &nonce, -1073741819, Some("private-canary"), &bytes);
+                assert_eq!(result["fixtureFailure"], json!({"status":"invalid"}));
+                assert_eq!(result["ownerErrorCode"], "unknown_owner_error");
+                assert!(!result.to_string().contains("private-canary"));
+            }
+            for bad_nonce in ["", "short", &"A".repeat(64), &"0".repeat(63)] {
+                assert_eq!(marker(&valid, id, bad_nonce), Marker::Invalid);
+            }
+            for exit in [i32::MIN, -1073741819, -1, 0, 70, 78, i32::MAX] {
+                let result = summary(id, &nonce, exit, None, &valid);
+                assert_eq!(result["exitCode"].as_i64(), Some(i64::from(exit)));
+                assert!(result["ownerErrorCode"].is_null());
+                assert_eq!(result["id"], id);
+                assert_eq!(result["fixtureFailure"], json!({"status":"valid","stage":"setup","code":"real_short_alias_unavailable"}));
+                assert!(!result.to_string().contains(&nonce));
+            }
+            for code in OWNER_CODES {
+                let result = summary(id, &nonce, 78, Some(code), &[]);
+                assert_eq!(result["ownerErrorCode"], *code);
+                assert_eq!(result["fixtureFailure"], json!({"status":"absent"}));
+            }
+            let result = summary("private-canary", &nonce, 78, Some("private-canary"), &valid);
+            assert_eq!(result["id"], "unknown_control");
+            assert_eq!(result["ownerErrorCode"], "unknown_owner_error");
+            assert_eq!(result["fixtureFailure"], json!({"status":"invalid"}));
+            assert!(!result.to_string().contains("private-canary"));
+            Ok(())
+        }
+    }
+}
+
 // The Windows static-reader batch deliberately shares Case/start/result/settle
 // and the original passive owner. This module has no process/task controller,
 // Windows FFI, owner abort, PID discovery, deadline override or cleanup fallback.
@@ -1165,8 +1388,13 @@ mod windows_snapshot {
             && !unknown && !case.supervisor.disabled(), "windows_original_not_settled")?;
         let abnormal = matches!(case.name, "oplock-withhold" | "pending-failstop");
         let exit = observed.windows_exit_code.ok_or("windows_original_exit_code_missing")?;
-        require(observed.exit_success == Some(!abnormal) && (exit != 0) == abnormal
-            && (case.name != "pending-failstop" || exit == 70), "windows_original_exit_differs")?;
+        let exit_check = require(observed.exit_success == Some(!abnormal) && (exit != 0) == abnormal
+            && (case.name != "pending-failstop" || exit == 70), "windows_original_exit_differs");
+        if exit_check.is_err() && !abnormal {
+            windows_snapshot_failure_diagnostics::log_exit(case.name, &case.nonce, exit,
+                error_value.as_deref(), &observed.windows_stderr);
+        }
+        exit_check?;
         require(abnormal || observed.stdout_bytes > 0, "windows_original_response_missing")?;
         let facts = json!({"id":"query-1","inspectionJoined":observed.inspection_joined,"acquisitionJoined":observed.acquisition_joined,
             "spawned":observed.spawned,"waited":observed.waited,"waitExitCode":exit,"exitSuccess":observed.exit_success,

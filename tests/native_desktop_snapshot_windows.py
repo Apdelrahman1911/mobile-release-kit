@@ -97,6 +97,60 @@ def require(value: bool, code: str) -> None:
         raise FixtureFailure(code)
 
 
+def _failure_diagnostic(case, nonce, stage, reason, fixture_state, reader_state, output_state):
+    """Closed scalar reduction only; no exception rendering, IO or custody probe."""
+    cases = ("ordinary-source", "ordinary-zip", "closed-gate", "link-children", "reparse-root",
+             "reparse-ancestor", "short-alias", "case-alias", "case-collision", "subst-drive", "unc", "device", "ads",
+             "root-reparse-race", "config-reparse-race", "walk-reparse-race", "case-mode-race", "acl-type",
+             "read-eof-size", "entry-limit", "candidate-limit", "aggregate-limit", "depth-path-limit",
+             "replace", "disappear", "config-disappear", "ending-metadata-case", "drive-map-change",
+             "oplock-release", "oplock-withhold", "pending-failstop")
+    if (type(case) is not str or case not in cases or type(nonce) is not str or len(nonce) != 64
+            or type(stage) is not str or stage not in ("setup", "reader", "reduction", "restoration")):
+        return None
+    for character in nonce:
+        if character not in "0123456789abcdef":
+            return None
+    # Ready; entered/wait/pinned clear; pending absent/completed; observer absent/joined.
+    if type(fixture_state) is not tuple or len(fixture_state) != 8:
+        return None
+    for flag in fixture_state:
+        if type(flag) is not bool:
+            return None
+    if (fixture_state[:4] != (True, True, True, True)
+            or fixture_state[4:6] not in ((True, False), (False, True))
+            or fixture_state[6:8] not in ((True, False), (False, True))):
+        return None
+    # An incremented instance count with no attached object is NOT clear custody.
+    if (type(reader_state) is not tuple or len(reader_state) != 5
+            or type(reader_state[0]) is not int or type(reader_state[1]) is not bool):
+        return None
+    if reader_state[1] is False:
+        if (reader_state[0] != 0 or reader_state[2] is not None
+                or reader_state[3] is not None or reader_state[4] is not None):
+            return None
+    elif (reader_state[0] != 1 or reader_state[2] is not True
+            or reader_state[3] is not False or reader_state[4] is not True):
+        return None
+    if (type(output_state) is not tuple or len(output_state) != 3 or output_state[0] is not False
+            or type(output_state[1]) is not int or not 0 <= output_state[1] < 4
+            or type(output_state[2]) is not int or not 0 <= output_state[2] <= 64 * 1024):
+        return None
+    if type(reason) is not str or reason not in (
+            "short_alias_bound", "real_short_alias_unavailable", "real_alias_required",
+            "normalized_alias_veto_required", "fixture_native_unavailable"):
+        reason = "fixture_failure"
+    # Every interpolated string is now a closed literal or the admitted hex nonce.
+    raw = ('MRK_WINDOWS_SNAPSHOT_FAILURE_V1 {"schemaVersion":1,"scope":"windows-static-snapshot-native-v1","id":"'
+           + case + '","nonce":"' + nonce + '","stage":"' + stage + '","code":"' + reason + '"}\n').encode("ascii")
+    # A dispatch failure is followed by this unchanged genuine-engine line.
+    # Reserve it even for setup failures, rather than creating an output overflow.
+    engine_error = b"Mobile Release Kit desktop engine rejected the request or transport.\n"
+    if len(raw) > 1024 or output_state[2] + len(raw) + len(engine_error) > 64 * 1024:
+        return None
+    return raw
+
+
 def _reparse_witness_state(expected):
     """Three setup identities, initially with no exclusion evidence; no IO."""
     roles = {"linked-file/build.gradle": (False, 0xA000000C),
@@ -1058,6 +1112,51 @@ class Fixture:
                     require(not entry.is_symlink() and not getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0) & 0x400,
                             "outside_fixture_link")
                     stack.append(Path(entry.path))
+        # A failed constructor never publishes a diagnostically usable fixture.
+        self.diagnostic_ready = True
+        self.diagnostic_attempted = False
+
+    def diagnose_failure(self, stage: str, error: BaseException) -> None:
+        """One best-effort write from retained scalar facts; never a close receipt."""
+        try:
+            attempted = self.diagnostic_attempted
+            self.diagnostic_attempted = True  # Latch even silence/serialization/write failure.
+            if attempted is not False or self.diagnostic_ready is not True:
+                return
+            n, trace = self.native, self.trace
+            # No lock, snapshot, constructor, join or probe may make these clear.
+            if (n.entered is not None or n.wait_entered is not None or n.pinned is not None
+                    or (n.pending_arena is not None and n.pending_complete is not True)
+                    or (self.thread is not None and self.thread_joined is not True)):
+                return
+            reader = trace.native
+            if reader is None:
+                if type(trace.instances) is not int or trace.instances != 0:
+                    return
+                reader_state = (trace.instances, False, None, None, None)
+            else:
+                if (type(trace.instances) is not int or trace.instances != 1 or reader._entered is not None
+                        or reader._poisoned is not False or reader._pinned is not None):
+                    return
+                reader_state = (trace.instances, True, True, reader._poisoned, True)
+            fixture_state = (self.diagnostic_ready, n.entered is None, n.wait_entered is None, n.pinned is None,
+                             n.pending_arena is None, n.pending_complete, self.thread is None, self.thread_joined)
+            reason = None
+            if type(error) is NativeFailure:
+                reason = "fixture_native_unavailable"  # Never read its API/code/native attributes.
+            elif type(error) is FixtureFailure:
+                arguments = error.args
+                if type(arguments) is tuple and len(arguments) == 1:
+                    reason = arguments[0]
+            raw = _failure_diagnostic(self.case, self.descriptor["nonce"], stage, reason,
+                                      fixture_state, reader_state, (attempted, self.emitted, self.emitted_bytes))
+            if raw is None:
+                return
+            self.emitted += 1
+            self.emitted_bytes += len(raw)  # Reserve the existing allowance before the sole attempt.
+            os.write(2, raw)  # No retry, even on a partial write. Original failure/status wins.
+        except BaseException:
+            return
 
     def emit(self, phase: str, *, prefix: bool = False) -> None:
         # Only a known-complete checkpoint or a PRE-entry witness. Never call
@@ -1576,6 +1675,13 @@ class Fixture:
         self.restored = True
 
     def finish(self, result: dict | None, error_code: str | None, policy) -> None:
+        try:
+            self._finish(result, error_code, policy)
+        except Exception as error:
+            self.diagnose_failure("reduction", error)
+            raise
+
+    def _finish(self, result: dict | None, error_code: str | None, policy) -> None:
         """Reduce only genuine DTO/collector/native observations; never fabricate IO."""
         trace, case = self.trace, self.case
         reader = trace.snapshot()
@@ -1705,7 +1811,11 @@ class Fixture:
             self.checks["laterProjectOpens"] = self.later_project_opens
         # No complete telemetry is emitted on a setup/collector/cleanup failure.
         # The original engine exits nonzero and Rust retains the case instead.
-        self.restore()
+        try:
+            self.restore()
+        except Exception as error:
+            self.diagnose_failure("restoration", error)
+            raise
         require(set(self.checks) == set(CHECKS[case]) and all(value is not None for value in self.checks.values()),
                 "native_predicate_not_observed")
         require(self.native.counts["acquired"] == self.native.counts["closeAttempts"] == self.native.counts["closeSucceeded"]
@@ -1727,32 +1837,53 @@ def main() -> int:
         require(Path(module.__file__) == core / relative, "genuine_core_origin")
     require(policy._WINDOWS_SNAPSHOT_QUALIFIED is False and api.snapshot_available() is False, "public_gate_must_stay_closed")
     fixture = Fixture(descriptor, inputs, root, data)
-    fixture.prepare()
+    try:
+        fixture.prepare()
+    except Exception as error:
+        fixture.diagnose_failure("setup", error)
+        raise
     original_factory, original_dispatch = windows._new_native, api.project_snapshot
     called = False
     def dispatch(selected_root: object, config_path: object = "release/mobile-release.json"):
         nonlocal called
-        require(not called and type(selected_root) is str and selected_root == fixture.input_root
-                and config_path == "release/mobile-release.json", "fixed_snapshot_request_required")
-        called = True
-        windows._new_native = lambda inventory: fixture.trace.attach(windows, native_api, inventory)
-        result, code = None, None
+        validated_refusal = None
         try:
+            require(not called and type(selected_root) is str and selected_root == fixture.input_root
+                    and config_path == "release/mobile-release.json", "fixed_snapshot_request_required")
+            called = True
+            windows._new_native = lambda inventory: fixture.trace.attach(windows, native_api, inventory)
+            result, code = None, None
             try:
-                result = windows.project_snapshot(fixture.request_root, fixture.request_config)
-            except api.ApiError as error:
-                code = error.code
-                fixture.finish(None, code, policy)
-                raise  # Preserve the original genuine API refusal and engine transport.
-            fixture.finish(result, None, policy)
-            return result
-        finally:
-            windows._new_native = original_factory
-            require(policy._WINDOWS_SNAPSHOT_QUALIFIED is False and api.snapshot_available() is False, "public_gate_changed")
+                try:
+                    result = windows.project_snapshot(fixture.request_root, fixture.request_config)
+                except api.ApiError as error:
+                    code = error.code
+                    fixture.finish(None, code, policy)
+                    validated_refusal = error
+                    raise  # Preserve the original genuine API refusal and engine transport.
+                fixture.finish(result, None, policy)
+                return result
+            finally:
+                windows._new_native = original_factory
+                try:
+                    require(policy._WINDOWS_SNAPSHOT_QUALIFIED is False and api.snapshot_available() is False, "public_gate_changed")
+                except Exception as error:
+                    fixture.diagnose_failure("reduction", error)
+                    raise
+        except Exception as error:
+            # A genuine ApiError with successful finish is the required refusal,
+            # not a fixture failure. Nested finish catches have already latched.
+            if error is not validated_refusal:
+                fixture.diagnose_failure("reader", error)
+            raise
     api.project_snapshot = dispatch
     try:
         status = _desktop_engine.main()  # Original one-shot protocol, pipe custody and bounded response.
-        require(called, "fixed_snapshot_not_requested")
+        try:
+            require(called, "fixed_snapshot_not_requested")
+        except Exception as error:
+            fixture.diagnose_failure("reduction", error)
+            raise
         return status
     finally:
         api.project_snapshot = original_dispatch
