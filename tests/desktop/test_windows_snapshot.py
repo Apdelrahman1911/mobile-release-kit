@@ -1,13 +1,16 @@
-"""Sixteen inert Windows reader contracts, not Windows qualification.
+"""Seventeen inert Windows reader contracts, not Windows qualification.
 
 Only dictionaries, synthetic handle numbers and bounded byte buffers are used.
 Native calls/exit are substituted or refused before entry; no DLL is loaded. Fake
 relative opens/mutations prove call ordering, not NTFS, ABI, ACL or reparse
 semantics. A substituted fail-stop proves retained references, not process/IO
 finality or successful native CloseHandle receipts. No filesystem fixtures.
+One leaf reads bound fixture source and selects only three pure reducers; it
+never imports the fixture module or executes its native observer/constructor.
 """
 from __future__ import annotations
 
+import ast
 import copy
 import importlib
 import json
@@ -18,6 +21,7 @@ import unittest
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -455,6 +459,195 @@ class WindowsSnapshotPureTests(unittest.TestCase):
         result = self._run(fake)
         self.assertIn("snapshot.changed", {issue["code"] for issue in result["issues"]})
         self.assertFalse(any(event[0] == "read" for event in fake.trace))
+
+    def test_reparse_witnesses_require_fixed_identity_and_original_refusal(self):
+        # Only these unannotated/default-free definitions enter the inert
+        # namespace. No fixture module, require(), constructor or native seam.
+        signatures = {
+            "_reparse_witness_state": ("expected",),
+            "_reparse_witness_entry": ("state", "relative", "parent", "name", "file_id", "directory", "attributes", "tag"),
+            "_reparse_witness_refusal": ("state", "relative", "name", "directory", "entered_parent", "completed_parent",
+                                         "owned", "classified", "status", "category"),
+        }
+        source = (Path(__file__).resolve().parents[1] / "native_desktop_snapshot_windows.py").read_bytes()
+        self.assertLessEqual(len(source), 128 * 1024)
+        parsed = ast.parse(source, filename="reviewed-reparse-fixture-source")
+        selected = [node for node in parsed.body if getattr(node, "name", None) in signatures]
+        self.assertCountEqual([node.name for node in selected], signatures)
+        safe = {"ValueError": ValueError, "type": type, "dict": dict, "tuple": tuple, "bytes": bytes,
+                "bool": bool, "int": int, "len": len, "set": set, "any": any}
+        methods = {"get", "items", "rsplit", "pop", "discard", "add"}
+        nodes = (ast.FunctionDef, ast.arguments, ast.arg, ast.Expr, ast.Constant, ast.Name, ast.Load, ast.Store,
+                 ast.Assign, ast.For, ast.If, ast.IfExp, ast.Return, ast.Raise, ast.Call, ast.Attribute, ast.Tuple,
+                 ast.Set, ast.Dict, ast.Subscript, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
+                 ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
+        for definition in selected:
+            self.assertIs(type(definition), ast.FunctionDef)
+            self.assertFalse(definition.decorator_list or definition.returns or definition.type_comment
+                             or getattr(definition, "type_params", []))
+            args = definition.args
+            self.assertEqual(tuple(arg.arg for arg in args.args), signatures[definition.name])
+            self.assertFalse(args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg
+                             or args.defaults or args.kw_defaults)
+            self.assertTrue(all(arg.annotation is None and arg.type_comment is None for arg in args.args))
+            self.assertEqual(sum(isinstance(node, ast.FunctionDef) for node in ast.walk(definition)), 1)
+            for node in ast.walk(definition):
+                self.assertIsInstance(node, nodes)
+                if isinstance(node, ast.Name):
+                    self.assertFalse(node.id.startswith("__"))
+                if isinstance(node, ast.Attribute):
+                    self.assertIn(node.attr, methods)
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name):
+                        self.assertIn(node.func.id, safe)
+                    else:
+                        self.assertIsInstance(node.func, ast.Attribute)
+                        self.assertIn(node.func.attr, methods)
+        namespace = {"__builtins__": safe}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-reparse-reducers", "exec",
+                     dont_inherit=True), namespace)
+        self.assertEqual(set(namespace), {"__builtins__", *signatures})
+        make = namespace["_reparse_witness_state"]
+        observe = namespace["_reparse_witness_entry"]
+        refuse = namespace["_reparse_witness_refusal"]
+        expected = {
+            "linked-file/build.gradle": ((17, b"f" * 16), False, 0xA000000C),
+            "linked-dir": ((17, b"d" * 16), True, 0xA000000C),
+            "junction-dir": ((17, b"j" * 16), True, 0xA0000003),
+        }
+        parent = (100, 1, (17, b"p" * 16))
+        file_parent = (104, 2, (17, b"q" * 16))
+
+        def entry_args(role, advertised=True):
+            identity, directory, tag = expected[role]
+            return {"relative": role, "parent": file_parent if role.startswith("linked-file/") else parent,
+                    "name": role.rsplit("/", 1)[-1], "file_id": identity[1], "directory": directory,
+                    "attributes": (0x10 if directory else 0x20) | (0x400 if advertised else 0),
+                    "tag": tag if advertised else None}
+
+        def refusal_args(role):
+            entry = entry_args(role, False)
+            return {"relative": role, "name": entry["name"], "directory": entry["directory"],
+                    "entered_parent": entry["parent"], "completed_parent": entry["parent"],
+                    "owned": True, "classified": True, "status": 0xC000050B, "category": "unsafe"}
+
+        state = make(expected)
+        self.assertEqual((state["entries"], state["credited"], state["invalid"]), ({}, set(), set()))
+        for role in expected:
+            self.assertTrue(observe(state, **entry_args(role)))
+            self.assertTrue(observe(state, **entry_args(role)))
+        self.assertEqual(state["credited"], set(expected))
+        for refused_role in expected:
+            state = make(expected)
+            for role in expected:
+                self.assertEqual(observe(state, **entry_args(role, role != refused_role)), role != refused_role)
+            self.assertEqual(len(state["credited"]), 2)
+            self.assertTrue(refuse(state, **refusal_args(refused_role)))
+            self.assertTrue(refuse(state, **refusal_args(refused_role)))
+            self.assertEqual(state["credited"], set(expected))  # Three identities, not three events.
+        state = make(expected)
+        for unrelated in ("other-link", "hardlinked/build.gradle", "@root"):
+            self.assertFalse(observe(state, **{**entry_args("linked-dir"), "relative": unrelated}))
+            self.assertFalse(refuse(state, **{**refusal_args("linked-dir"), "relative": unrelated}))
+        self.assertEqual((state["entries"], state["credited"]), ({}, set()))
+
+        bad_setups = [{key: value for key, value in expected.items() if key != "junction-dir"},
+                      {**expected, "other": expected["linked-dir"]}]
+        for identity, directory, tag in (((0, b"f" * 16), False, 0xA000000C),
+                ((17, b"\0" * 16), False, 0xA000000C), ((17, b"f"), False, 0xA000000C),
+                ((17, b"d" * 16), False, 0xA000000C), ((17, b"f" * 16), True, 0xA000000C),
+                ((17, b"f" * 16), False, 0xA0000003)):
+            bad_setups.append({**expected, "linked-file/build.gradle": (identity, directory, tag)})
+        for malformed in bad_setups:
+            with self.assertRaises(ValueError):
+                make(malformed)
+
+        bad_entries = ({"file_id": b"x" * 16}, {"directory": True}, {"name": "BUILD.GRADLE"},
+                       {"tag": 0xA0000003}, {"attributes": True}, {"attributes": 0x20},
+                       {"attributes": 0x20, "tag": None},
+                       {"parent": None}, {"parent": (0, 2, (17, b"q" * 16))},
+                       {"parent": (104, 0, (17, b"q" * 16))},
+                       {"parent": (104, 2, (18, b"q" * 16))},
+                       {"parent": (104, 2, (17, b"\0" * 16))},
+                       {"parent": (104, 3, (17, b"q" * 16))},
+                       {"parent": (104, 2, (17, b"r" * 16))})
+        role = "linked-file/build.gradle"
+        for changed in bad_entries:
+            state = make(expected)
+            observe(state, **entry_args(role))
+            with self.assertRaises(ValueError):
+                observe(state, **{**entry_args(role), **changed})
+            self.assertNotIn(role, state["entries"])
+            self.assertNotIn(role, state["credited"])
+            self.assertIn(role, state["invalid"])
+            with self.assertRaises(ValueError):
+                observe(state, **entry_args(role))  # A matching later sample cannot revive a conflict.
+            with self.assertRaises(ValueError):
+                refuse(state, **refusal_args(role))
+        bad_refusals = ({"status": 0}, {"status": 0x103}, {"status": 0xC0000034}, {"status": 0xC0000022},
+                        {"category": "unavailable"}, {"name": "other.gradle"}, {"directory": True},
+                        {"owned": False}, {"classified": False}, {"entered_parent": None},
+                        {"completed_parent": None}, {"entered_parent": parent},
+                        {"completed_parent": (104, 3, (17, b"q" * 16))},
+                        {"entered_parent": (104, 3, (17, b"q" * 16)),
+                         "completed_parent": (104, 3, (17, b"q" * 16))})
+        for changed in bad_refusals:
+            state = make(expected)
+            observe(state, **entry_args(role, False))
+            with self.assertRaises(ValueError):
+                refuse(state, **{**refusal_args(role), **changed})
+            self.assertNotIn(role, state["entries"])
+            self.assertNotIn(role, state["credited"])
+            with self.assertRaises(ValueError):
+                refuse(state, **refusal_args(role))
+        for advertised in (None, True):
+            state = make(expected)
+            if advertised is not None:
+                observe(state, **entry_args(role))
+            with self.assertRaises(ValueError):
+                refuse(state, **refusal_args(role))  # Missing/advertised is not an unflagged candidate.
+            self.assertFalse(state["credited"])
+
+        # Actual shared collector, only existing in-memory adapters. These two
+        # routes model ordering, not measured NTFS statuses or the failed run.
+        for advertised in (True, False):
+            fake = _Fake()
+            fake.config()
+            blocked = []
+            for relative, (_identity, directory, tag) in expected.items():
+                node = fake.add(relative, None if directory else b"unread-link-canary")
+                blocked.append(node)
+                if directory:
+                    fake.add(relative + "/build.gradle", b"unread-outside-canary")
+                if advertised:
+                    node.meta = replace(node.meta, attributes=node.meta.attributes | 0x400, reparse_tag=tag)
+                else:
+                    fake.open_errors[node.path] = "unsafe"
+            sibling = fake.add("sibling/build.gradle", GRADLE)
+            result = self._run(fake)
+            self.assertTrue(result["discovery"]["partial"])
+            required = "snapshot.link-excluded" if advertised else "snapshot.unsafe-file"
+            self.assertIn(required, {item["code"] for item in result["issues"]})
+            reads = [fake.handles[event[1]] for event in fake.trace if event[0] == "read"]
+            self.assertTrue(any(node is sibling for node in reads))
+            self.assertFalse(any(node.data in (b"unread-link-canary", b"unread-outside-canary") for node in reads))
+            self.assertFalse(any(node is blocked_node for node in fake.handles.values() for blocked_node in blocked))
+            attempts = []
+            for spec, owned in zip(fake.specs, fake.open_lifetimes):
+                if spec.parent is None:
+                    continue
+                path = fake.handles[spec.parent].path.rstrip("\\") + "\\" + spec.name
+                if path in {node.path for node in blocked}:
+                    attempts.append(path)
+                    self.assertIn(spec.parent, owned)
+                    self.assertEqual(spec.attributes, 0x1000)
+                    self.assertNotIn("\\", spec.name)
+                    self.assertNotIn("/", spec.name)
+            self.assertCountEqual(attempts, [] if advertised else [node.path for node in blocked])
+            closed = [event[1] for event in fake.trace if event[0] == "close"]
+            self.assertCountEqual(closed, fake.handles)
+            self.assertEqual(len(closed), len(set(closed)))
+            self.assertEqual(fake._owned, [])
 
     def test_normalized_name_and_case_are_only_vetoes(self):
         for spelling in ("Build.Gradle", "BUILD~1.GRA", r"\Device\HarddiskVolume8\build.gradle", ""):

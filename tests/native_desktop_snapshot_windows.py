@@ -97,6 +97,83 @@ def require(value: bool, code: str) -> None:
         raise FixtureFailure(code)
 
 
+def _reparse_witness_state(expected):
+    """Three setup identities, initially with no exclusion evidence; no IO."""
+    roles = {"linked-file/build.gradle": (False, 0xA000000C),
+             "linked-dir": (True, 0xA000000C), "junction-dir": (True, 0xA0000003)}
+    if type(expected) is not dict or set(expected) != set(roles):
+        raise ValueError("reparse_setup_roster")
+    identities = set()
+    for role, value in expected.items():
+        if type(value) is not tuple or len(value) != 3:
+            raise ValueError("reparse_setup_shape")
+        identity, directory, tag = value
+        if (type(identity) is not tuple or len(identity) != 2
+                or type(identity[0]) is not int or not 0 < identity[0] < 1 << 64
+                or type(identity[1]) is not bytes or len(identity[1]) != 16 or not any(identity[1])
+                or type(directory) is not bool or type(tag) is not int
+                or (directory, tag) != roles[role] or identity in identities):
+            raise ValueError("reparse_setup_identity_kind_tag")
+        identities.add(identity)
+    return {"expected": dict(expected), "entries": {}, "credited": set(), "invalid": set()}
+
+
+def _reparse_witness_entry(state, relative, parent, name, file_id, directory, attributes, tag):
+    """Reduce one decoded entry from its original parent, not a pathname probe."""
+    expected = state["expected"].get(relative)
+    if expected is None:
+        return False
+    identity, expected_directory, expected_tag = expected
+    parent_valid = (type(parent) is tuple and len(parent) == 3
+        and type(parent[0]) is int and 0 < parent[0] < (1 << 64) - 1
+        and type(parent[1]) is int and parent[1] > 0
+        and type(parent[2]) is tuple and len(parent[2]) == 2
+        and type(parent[2][0]) is int and parent[2][0] == identity[0]
+        and type(parent[2][1]) is bytes and len(parent[2][1]) == 16 and any(parent[2][1]))
+    fields_valid = (name == relative.rsplit("/", 1)[-1]
+        and type(file_id) is bytes and file_id == identity[1]
+        and type(directory) is bool and directory is expected_directory
+        and type(attributes) is int and 0 <= attributes < 1 << 32)
+    advertised = fields_valid and bool(attributes & 0x400)
+    tag_valid = (type(tag) is int and tag == expected_tag) if advertised else tag is None
+    entry = (parent, name, file_id, directory, advertised, tag)
+    previous = state["entries"].get(relative)
+    if (relative in state["invalid"] or not parent_valid or not fields_valid or not tag_valid
+            or (previous is not None and previous != entry)):
+        # A later conflict cannot leave the older identity or credit usable.
+        state["entries"].pop(relative, None)
+        state["credited"].discard(relative)
+        state["invalid"].add(relative)
+        raise ValueError("reparse_entry_conflict")
+    state["entries"][relative] = entry
+    if advertised:
+        state["credited"].add(relative)
+    return advertised
+
+
+def _reparse_witness_refusal(state, relative, name, directory, entered_parent, completed_parent,
+                             owned, classified, status, category):
+    """Credit only that unflagged candidate's classified original relative refusal.
+
+    The failed open supplies no child handle/current tag. This is not a new
+    identity observation or a continuous namespace/mutation guarantee.
+    """
+    if relative not in state["expected"]:
+        return False
+    entry = state["entries"].get(relative)
+    if (relative in state["invalid"] or entry is None or entry[4] is not False
+            or name != entry[1] or type(directory) is not bool or directory is not entry[3]
+            or entered_parent != entry[0] or completed_parent != entered_parent
+            or owned is not True or classified is not True
+            or type(status) is not int or status != 0xC000050B or category != "unsafe"):
+        state["entries"].pop(relative, None)
+        state["credited"].discard(relative)
+        state["invalid"].add(relative)
+        raise ValueError("reparse_refusal_not_original")
+    state["credited"].add(relative)
+    return True
+
+
 def canonical(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")
 
@@ -689,7 +766,9 @@ class ReaderTrace:
                 observed = trace.calls[api]
                 raw = []
                 spec = keep[0] if completion == "open" else None
+                entered_parent, entered_relative = None, "@root"
                 def entered(*actual):
+                    nonlocal entered_parent, entered_relative
                     # The original _invoke already owns self/_b/arguments/keep
                     # and original parents here. No pre-open metadata veto.
                     require(time.monotonic() < inventory.deadline, "real_entry_after_reader_deadline")
@@ -721,6 +800,10 @@ class ReaderTrace:
                             require(spec.parent in self._owned and spec.parent in trace.handles
                                     and native_api.valid_component(spec.name), "original_relative_parent_missing")
                             trace.counts["relativeOpens"] += 1
+                            if fixture.reparse_witnesses is not None:
+                                parent = trace.handles[spec.parent]
+                                entered_parent = (spec.parent, parent["generation"], parent["id"])
+                                entered_relative = trace.role(parent["path"].rstrip("\\") + "\\" + spec.name)
                         if trace.over_budget_batch:
                             trace.after_over_budget_opens += 1
                         fixture.real_entry(self, spec)
@@ -745,7 +828,20 @@ class ReaderTrace:
                         observed["completed"] += 1
                         observed["errors"] += 1
                         if spec is not None:
-                            fixture.completed_open_error(spec, raw[0] & 0xFFFFFFFF, error.category)
+                            status = raw[0] & 0xFFFFFFFF
+                            fixture.completed_open_error(spec, status, error.category)
+                            if fixture.reparse_witnesses is not None:
+                                # Only this post-classification callback can
+                                # credit a refusal; no parent/child is reopened.
+                                parent = trace.handles.get(spec.parent)
+                                completed_parent = (None if parent is None else
+                                    (spec.parent, parent["generation"], parent["id"]))
+                                _reparse_witness_refusal(fixture.reparse_witnesses, entered_relative,
+                                    spec.name, spec.directory, entered_parent, completed_parent,
+                                    spec.parent in self._owned,
+                                    completion == "open" and api == "NtCreateFile" and self._entered is None
+                                    and not self._poisoned and self._pinned is None,
+                                    status, error.category)
                     trace.event("completed-error", api, error.category)
                     raise
                 if raw:
@@ -826,9 +922,10 @@ class ReaderTrace:
                             require(len(trace.entries) < 64 or path in trace.entries, "selected_entry_bound")
                             trace.entries[path] = entry.file_id
                             trace.entry_kinds[path] = entry.directory
-                        if entry.attributes & 0x400:
-                            fixture.excluded_reparses.add((path, entry.file_id))
-                            require(len(fixture.excluded_reparses) <= 64, "selected_reparse_witness_bound")
+                        if fixture.reparse_witnesses is not None:
+                            _reparse_witness_entry(fixture.reparse_witnesses, relative,
+                                (handle, record["generation"], record["id"]), entry.name,
+                                entry.file_id, entry.directory, entry.attributes, entry.reparse_tag)
                 fixture.after_directory(self, handle, result)
                 return result
 
@@ -898,7 +995,7 @@ class Fixture:
         self.outside_ids = set()
         self.observed_entry_paths = {"android/app/build.gradle", "release/mobile-release.json", "walk-parent/build.gradle"}
         self.unicode_opens = 0
-        self.excluded_reparses = set()
+        self.reparse_witnesses = None
         self.collision_batches = 0
         self.mapping_changed = False
         self.mapping_queries = 0
@@ -1009,6 +1106,7 @@ class Fixture:
         tag = self.native.info(record["metadata"], 9, self.native.Tag)
         require(tag.FileAttributes & 0x400 and tag.ReparseTag == MOUNT_TAG
                 and self.native.identity(record["metadata"]) == record["id"], "fixture_junction_observation")
+        record["reparse"] = (record["id"], bool(tag.FileAttributes & 0x10), tag.ReparseTag)
         return record
 
     def mapping(self, target: str) -> None:
@@ -1037,6 +1135,7 @@ class Fixture:
             self.checks["genuineCore"] = True  # Full source/ZIP inventory was compared before import.
             self.checks["spelling"] = "verbatim" if self.case == "ordinary-zip" else "ordinary"
         elif self.case == "link-children":
+            reparse_setup = {}
             file_link, directory_link = self.project / "linked-file/build.gradle", self.project / "linked-dir"
             n.call(n.k.CreateSymbolicLinkW, (str(file_link), str(self.outside / "file-canary"), 2))
             n.call(n.k.CreateSymbolicLinkW, (str(directory_link), str(self.outside / "symlink-dir"), 3))
@@ -1046,9 +1145,13 @@ class Fixture:
                 require(tag.FileAttributes & 0x400 and tag.ReparseTag == SYMLINK_TAG, "real_symlink_required")
                 self.checks[field] = tag.ReparseTag
                 identity = n.identity(handle)
+                relative = "linked-file/build.gradle" if path == file_link else "linked-dir"
+                reparse_setup[relative] = (identity, bool(tag.FileAttributes & 0x10), tag.ReparseTag)
                 n.close(handle)
                 self.journal.append({"kind": "delete-link", "path": path, "id": identity, "changed": True})
-            self.junction(self.project / "junction-dir", self.outside / "junction-dir")
+            junction = self.junction(self.project / "junction-dir", self.outside / "junction-dir")
+            reparse_setup["junction-dir"] = junction["reparse"]
+            self.reparse_witnesses = _reparse_witness_state(reparse_setup)
             self.checks["junctionTag"] = MOUNT_TAG
             hardlink = self.project / "hardlinked/build.gradle"
             n.call(n.k.CreateHardLinkW, (str(hardlink), str(self.outside / "hardlink-canary"), None))
@@ -1536,7 +1639,7 @@ class Fixture:
         def read(role: str, key: str) -> int:
             return trace.reads.get(role, {}).get(key, 0)
         if case == "link-children":
-            self.checks["excludedReparses"] = len(self.excluded_reparses)
+            self.checks["excludedReparses"] = len(self.reparse_witnesses["credited"])
             self.checks["hardlinkReadBytes"] = read("hardlinked/build.gradle", "bytes")
             require("hardlinked/build.gradle" not in sources and reader["aliasMetadataAcquired"] >= 1,
                     "hardlink_metadata_veto_required")
