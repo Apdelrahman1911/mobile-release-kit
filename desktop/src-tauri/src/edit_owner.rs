@@ -235,6 +235,14 @@ impl EditOwner {
     pub fn stopping(&self) -> bool { self.inner.lock().stopping }
     pub fn disabled(&self) -> bool { let r = self.inner.lock(); r.disabled || self.inner.poisoned.load(Ordering::SeqCst) || r.exhausted }
     pub fn can_exit(&self) -> bool { self.inner.lock().active.is_none() }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn session_gtk_idle(&self, stopping: bool) -> Result<serde_json::Value, &'static str> {
+        let r = self.inner.lock();
+        if self.inner.fixture_authorized.load(Ordering::SeqCst) || self.inner.poisoned.load(Ordering::SeqCst)
+            || r.disabled || r.exhausted || !r.document_bound || r.document_lost || r.stopping != stopping
+            || r.active.is_some() || r.last.is_some() || !r.blocked_projects.is_empty() { return Err("sg1_edit_not_fresh_idle"); }
+        Ok(serde_json::json!({"documentBound":true,"documentLost":false,"authorized":false,"sessions":0,"children":0,"stopping":stopping}))
+    }
 
     pub fn initial_document(&self, window: &str) -> Result<(), BridgeError> {
         if window != "main" { return Err(invalid_owner()); }

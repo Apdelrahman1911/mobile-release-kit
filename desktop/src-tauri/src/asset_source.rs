@@ -12,6 +12,10 @@ pub(crate) const DESCRIPTOR_LIMIT: usize = 512;
 pub(crate) struct DirectoryIdentity { dev: u64, ino: u64, mode: u32, uid: u32, gid: u32 }
 impl DirectoryIdentity {
     pub(crate) fn same_object(self, other: Self) -> bool { self.dev == other.dev && self.ino == other.ino }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn fixture_value(self) -> serde_json::Value {
+        serde_json::json!({"device":self.dev.to_string(),"inode":self.ino.to_string(),"mode":self.mode,"owner":self.uid})
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FileIdentity { common: DirectoryIdentity, nlink: u64, size: u64, mtime: (i64, i64), ctime: (i64, i64) }
@@ -48,14 +52,41 @@ mod linux {
     enum OriginalState { Reserved, Acquiring, Owned, NoHandle, Closing, Closed, Unknown }
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Identity { Directory(DirectoryIdentity), File(FileIdentity) }
+    // Observation only. These cells neither own descriptors nor influence the
+    // production custody state. Fixed counters are recorded at the real calls.
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
+    #[derive(Default)]
+    struct FixtureTrace { sequence: std::cell::Cell<u32>, failed: std::cell::Cell<bool>, reads: std::cell::Cell<u32>, eof: std::cell::Cell<Option<(u32, usize)>> }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
+    impl FixtureTrace {
+        fn next(&self) -> u32 {
+            let next = self.sequence.get().checked_add(1).filter(|n| *n <= 8192);
+            match next { Some(n) => { self.sequence.set(n); n }, None => { self.failed.set(true); 0 } }
+        }
+    }
+    macro_rules! fixture_mark {
+        ($book:expr, $index:expr, $event:expr) => {
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
+            { $book.slots[$index].trace[$event].set($book.trace.next()); }
+        };
+    }
     struct Descriptor {
         state: OriginalState, fd: Option<OwnedFd>, parent: Option<usize>, name: Vec<u8>, identity: Option<Identity>,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
+        trace: [std::cell::Cell<u32>; 7],
     }
     struct LeafProbe { parent: usize, name: Vec<u8>, identity: FileIdentity }
 
-    pub(crate) struct SourceBook { slots: Vec<Descriptor>, probes: Vec<LeafProbe>, begun: bool, terminal: bool }
+    pub(crate) struct SourceBook {
+        slots: Vec<Descriptor>, probes: Vec<LeafProbe>, begun: bool, terminal: bool,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
+        trace: FixtureTrace,
+    }
     impl SourceBook {
-        pub(crate) fn new() -> Self { Self { slots: Vec::new(), probes: Vec::new(), begun: false, terminal: false } }
+        pub(crate) fn new() -> Self { Self { slots: Vec::new(), probes: Vec::new(), begun: false, terminal: false,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
+            trace: FixtureTrace::default(),
+        } }
         pub(crate) fn settled(&self) -> bool {
             self.terminal && self.slots.iter().all(|slot| matches!(slot.state, OriginalState::Closed | OriginalState::NoHandle) && slot.fd.is_none())
         }
@@ -71,7 +102,11 @@ mod linux {
             if self.slots.len() >= self.slots.capacity() || self.slots.len() >= DESCRIPTOR_LIMIT { return Err(Reason::Capacity); }
             let name = copy_bytes(name)?;
             let index = self.slots.len();
-            self.slots.push(Descriptor { state: OriginalState::Reserved, fd: None, parent, name, identity: None });
+            self.slots.push(Descriptor { state: OriginalState::Reserved, fd: None, parent, name, identity: None,
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
+                trace: std::array::from_fn(|_| std::cell::Cell::new(0)),
+            });
+            fixture_mark!(self, index, 0);
             Ok(index)
         }
         fn fd(&self, index: usize) -> Result<&OwnedFd, Reason> { self.slots.get(index).and_then(|slot| slot.fd.as_ref()).ok_or(Reason::CleanupUnknown) }
@@ -80,7 +115,8 @@ mod linux {
         }
         fn adopt(&mut self, index: usize, result: nix::Result<OwnedFd>) -> Result<(), Reason> {
             match result {
-                Ok(fd) => { self.slots[index].fd = Some(fd); self.slots[index].state = OriginalState::Owned; Ok(()) }
+                Ok(fd) => { self.slots[index].fd = Some(fd); self.slots[index].state = OriginalState::Owned;
+                    fixture_mark!(self, index, 2); Ok(()) }
                 Err(_) => { self.slots[index].state = OriginalState::NoHandle; Err(Reason::SourceRefused) }
             }
         }
@@ -91,6 +127,7 @@ mod linux {
             checkpoint(stop)?;
             let before = directory_identity(&before)?;
             self.slots[index].state = OriginalState::Acquiring;
+            fixture_mark!(self, index, 1);
             let result = fcntl::open(Path::new("/"), directory_flags(), Mode::empty());
             self.adopt(index, result)?; // Adopt before observing late STOP.
             checkpoint(stop)?;
@@ -100,7 +137,8 @@ mod linux {
             let after = stat::stat(Path::new("/")).map_err(|_| Reason::SourceRefused)?;
             checkpoint(stop)?;
             if before != directory_identity(&opened)? || before != directory_identity(&after)? { return Err(Reason::SourceChanged); }
-            self.slots[index].identity = Some(Identity::Directory(before)); Ok(index)
+            self.slots[index].identity = Some(Identity::Directory(before));
+            fixture_mark!(self, index, 3); Ok(index)
         }
         fn child(&mut self, parent: usize, name: &[u8], file: bool, stop: &mut dyn FnMut() -> bool) -> Result<usize, Reason> {
             checkpoint(stop)?;
@@ -110,6 +148,7 @@ mod linux {
             let expected = if file { Identity::File(file_identity(&before)?) } else { Identity::Directory(directory_identity(&before)?) };
             if file && !private_file(before.st_mode) { return Err(Reason::SourceRefused); }
             self.slots[index].state = OriginalState::Acquiring;
+            fixture_mark!(self, index, 1);
             let flags = if file { OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK } else { directory_flags() };
             let result = fcntl::openat(self.fd(parent)?, OsStr::from_bytes(name), flags, Mode::empty());
             self.adopt(index, result)?;
@@ -120,7 +159,8 @@ mod linux {
             let after = stat::fstatat(self.fd(parent)?, OsStr::from_bytes(name), AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|_| Reason::SourceRefused)?;
             checkpoint(stop)?;
             if identity(&opened, file)? != expected || identity(&after, file)? != expected { return Err(Reason::SourceChanged); }
-            self.slots[index].identity = Some(expected); Ok(index)
+            self.slots[index].identity = Some(expected);
+            fixture_mark!(self, index, 3); Ok(index)
         }
         fn chain(&mut self, components: &[&[u8]], stop: &mut dyn FnMut() -> bool) -> Result<Vec<usize>, Reason> {
             let mut indices = Vec::new(); indices.try_reserve_exact(components.len() + 1).map_err(|_| Reason::Capacity)?;
@@ -149,6 +189,7 @@ mod linux {
                 } else { stat::stat(Path::new("/")) }.map_err(|_| Reason::SourceChanged)?;
                 checkpoint(stop)?;
                 if identity(&entry, file)? != expected { return Err(Reason::SourceChanged); }
+                fixture_mark!(self, index, 4);
             }
             Ok(())
         }
@@ -162,9 +203,15 @@ mod linux {
                         // Retire the stored OwnedFd before the consuming call.
                         // Never retry even EINTR or reconstruct a numeric fd.
                         slot.state = OriginalState::Closing;
+                        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
+                        slot.trace[5].set(self.trace.next());
                         match slot.fd.take() {
                             Some(fd) => match unistd::close(fd) {
-                                Ok(()) => slot.state = OriginalState::Closed,
+                                Ok(()) => {
+                                    slot.state = OriginalState::Closed;
+                                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
+                                    slot.trace[6].set(self.trace.next());
+                                },
                                 Err(_) => { slot.state = OriginalState::Unknown; known = false; }
                             },
                             None => { slot.state = OriginalState::Unknown; known = false; }
@@ -181,6 +228,32 @@ mod linux {
             // Independent original closes run despite another close's failure.
             if !self.close_all() { return Err(Reason::CleanupUnknown); }
             checkpoint(stop)?; result
+        }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
+        pub(crate) fn fixture_facts(&self) -> Option<serde_json::Value> {
+            // Read closed observations only. No fd/path is reopened, duplicated
+            // or returned; FileBook counts never stand in for these originals.
+            if self.trace.failed.get() { return None; }
+            if self.not_started() {
+                return (!self.terminal && self.trace.sequence.get() == 0 && self.trace.reads.get() == 0 && self.trace.eof.get().is_none())
+                    .then(|| serde_json::json!({"notStarted":true,"originals":[],"reads":0,"eof":null}));
+            }
+            if !self.settled() || !self.probes.is_empty() || self.slots.len() > 40 { return None; }
+            let mut originals = Vec::new();
+            let mut previous_close = u32::MAX;
+            for (index, slot) in self.slots.iter().enumerate() {
+                let order: [u32; 7] = std::array::from_fn(|i| slot.trace[i].get());
+                if slot.state != OriginalState::Closed || slot.fd.is_some() || order[0] == 0
+                    || !order.windows(2).all(|pair| pair[0] < pair[1]) || order[6] >= previous_close { return None; }
+                previous_close = order[5]; // Reverse, nonoverlapping consuming close attempts.
+                let (common, size) = match slot.identity? {
+                    Identity::Directory(id) => (id, None), Identity::File(id) => (id.common, Some(id.size)),
+                };
+                if slot.parent.is_some_and(|parent| parent >= index) { return None; }
+                originals.push(serde_json::json!({"slot":index,"parent":slot.parent,"identity":common.fixture_value(),"size":size,"order":order}));
+            }
+            let eof = self.trace.eof.get().map(|(ordinal, bytes)| serde_json::json!({"ordinal":ordinal,"bytes":bytes}));
+            Some(serde_json::json!({"notStarted":false,"originals":originals,"reads":self.trace.reads.get(),"eof":eof}))
         }
     }
     fn copy_bytes(bytes: &[u8]) -> Result<Vec<u8>, Reason> {
@@ -265,6 +338,15 @@ mod linux {
                 checkpoint(stop)?;
                 let end = capacity.min(used.saturating_add(1024 * 1024));
                 let read = unistd::read(book.fd(leaf)?, &mut bytes[used..end]).map_err(|_| Reason::SourceRefused)?;
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime"))]
+                {
+                    let reads = book.trace.reads.get().checked_add(1).filter(|n| *n <= 4096);
+                    match reads { Some(n) => book.trace.reads.set(n), None => book.trace.failed.set(true) }
+                    if read == 0 {
+                        if book.trace.eof.get().is_some() { book.trace.failed.set(true); }
+                        book.trace.eof.set(Some((book.trace.next(), used)));
+                    }
+                }
                 checkpoint(stop)?;
                 if read == 0 { if used != size { return Err(Reason::SourceChanged); } break; }
                 used = used.checked_add(read).ok_or(Reason::SourceChanged)?;

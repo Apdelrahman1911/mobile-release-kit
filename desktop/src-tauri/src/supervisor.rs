@@ -22,6 +22,8 @@ const ACTIVE_LIMIT: usize = 2;
 #[cfg(all(test, feature = "development-runtime"))]
 #[path = "hosted_tests.rs"]
 mod hosted_tests;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use hosted_tests::session_gtk_probe;
 #[cfg(test)]
 #[path = "passive_management_tests.rs"]
 mod management_tests;

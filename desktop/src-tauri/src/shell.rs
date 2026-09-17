@@ -10,11 +10,38 @@ use crate::{
     error::BridgeError,
 };
 
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "session_gtk_qualification.rs"]
+pub(crate) mod qualification;
+macro_rules! fixture_command {
+    ($state:expr, $kind:ident, $observed:ident, $error:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let $observed = match &$state.fixture {
+            Some(context) => Some(context.command(qualification::Command::$kind).map_err(|_| $error)?),
+            None => None,
+        };
+    };
+}
+macro_rules! fixture_result {
+    ($observed:ident, $method:ident, $result:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(observed) = $observed { observed.$method($result); }
+    };
+}
+macro_rules! gtk_fixture {
+    ($call:expr, $kind:ident, $detail:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        $call.fixture_event(qualification::EventKind::$kind, $detail);
+    };
+}
+
 const MAIN_WINDOW: &str = "main";
 const EDIT_EVENT: &str = "config-edit-state";
 const ASSET_EVENT: &str = "asset-session-state";
 
 struct ShellState {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fixture: Option<Arc<qualification::Qualification>>,
     bridge: Arc<DesktopBridge>, document: DocumentBinding,
     #[cfg(not(target_os = "linux"))] picker: Arc<AtomicBool>,
     #[cfg(not(target_os = "linux"))] closing: AtomicBool,
@@ -26,21 +53,36 @@ struct ShellState {
 struct RelayBook { handle: Option<tauri::async_runtime::JoinHandle<()>>, settled: bool }
 
 #[tauri::command]
-async fn app_info(state: State<'_, ShellState>) -> Result<AppInfo, BridgeError> { Ok(state.bridge.app_info().await) }
+async fn app_info(state: State<'_, ShellState>) -> Result<AppInfo, BridgeError> {
+    fixture_command!(state, AppInfo, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let result = Ok(state.bridge.app_info().await);
+    fixture_result!(observed, info, &result);
+    result
+}
 #[tauri::command]
-async fn catalog(state: State<'_, ShellState>) -> Result<Value, BridgeError> { state.bridge.catalog().await }
+async fn catalog(state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Catalog, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let result = state.bridge.catalog().await;
+    fixture_result!(observed, value, &result);
+    result
+}
 #[tauri::command(rename_all = "camelCase")]
 async fn project_snapshot(project_id: String, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     state.bridge.project_snapshot(project_id).await
 }
 #[tauri::command]
-async fn validate_config(draft: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> { state.bridge.validate_config(draft).await }
+async fn validate_config(draft: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action.")); state.bridge.validate_config(draft).await }
 #[tauri::command]
-async fn suggest_config(hints: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> { state.bridge.suggest_config(hints).await }
+async fn suggest_config(hints: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action.")); state.bridge.suggest_config(hints).await }
 #[tauri::command]
-async fn preview_config(base: Value, draft: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> { state.bridge.preview_config(base, draft).await }
+async fn preview_config(base: Value, draft: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action.")); state.bridge.preview_config(base, draft).await }
 #[tauri::command]
 async fn propose_github_setup(request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let input = crate::github_commands::proposal(request_body(&request)?)?;
     not_closing(&state)?;
     state.bridge.propose_github_setup(input).await
@@ -73,6 +115,7 @@ fn not_closing(state: &ShellState) -> Result<(), BridgeError> {
 // No renderer-receipt acknowledgment is claimed or required.
 #[tauri::command]
 async fn open_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::open(request_body(&request)?)?;
     not_closing(&state)?;
@@ -80,6 +123,7 @@ async fn open_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, st
 }
 #[tauri::command]
 async fn prepare_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::prepare(request_body(&request)?)?;
     not_closing(&state)?;
@@ -87,6 +131,7 @@ async fn prepare_config_edit(webview: Webview, request: tauri::ipc::Request<'_>,
 }
 #[tauri::command]
 async fn apply_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::apply(request_body(&request)?)?;
     not_closing(&state)?;
@@ -94,6 +139,7 @@ async fn apply_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, s
 }
 #[tauri::command]
 async fn close_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::close(request_body(&request)?)?;
     // The original document may stop during quit. Document loss already sends
@@ -102,9 +148,14 @@ async fn close_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, s
 }
 #[tauri::command]
 async fn config_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
-    edit_window(&webview)?;
-    edit_commands::status(request_body(&request)?)?;
-    state.bridge.edits.status()
+    fixture_command!(state, EditStatus, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let result = async {
+        edit_window(&webview)?;
+        edit_commands::status(request_body(&request)?)?;
+        state.bridge.edits.status()
+    }.await;
+    fixture_result!(observed, edit, &result);
+    result
 }
 
 fn asset_window(webview: &Webview) -> Result<(), AssetError> {
@@ -116,22 +167,43 @@ fn asset_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, Ass
 
 #[tauri::command]
 async fn vault_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
-    asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?; Ok(state.document.status())
+    fixture_command!(state, AssetStatus, observed, AssetError::new(Reason::Unqualified));
+    let result = async {
+        asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?; Ok(state.document.status())
+    }.await;
+    fixture_result!(observed, asset, &result);
+    result
 }
 #[tauri::command]
 async fn vault_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
-    asset_window(&webview)?; asset_commands::open(asset_body(&request)?)?; state.document.open_session()
+    fixture_command!(state, Open, observed, AssetError::new(Reason::Unqualified));
+    let result = async {
+        asset_window(&webview)?; asset_commands::open(asset_body(&request)?)?; state.document.open_session()
+    }.await;
+    fixture_result!(observed, asset, &result);
+    result
 }
 #[tauri::command]
 async fn asset_context(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
-    asset_window(&webview)?; let args = asset_commands::context(asset_body(&request)?)?; state.document.context(args)
+    fixture_command!(state, Context, observed, AssetError::new(Reason::Unqualified));
+    let result = async {
+        asset_window(&webview)?; let args = asset_commands::context(asset_body(&request)?)?; state.document.context(args)
+    }.await;
+    fixture_result!(observed, asset, &result);
+    result
 }
 #[tauri::command]
 async fn asset_choose(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
-    asset_window(&webview)?; let args = asset_commands::choose(asset_body(&request)?)?; state.document.choose(app, args)
+    fixture_command!(state, Choose, observed, AssetError::new(Reason::Unqualified));
+    let result = async {
+        asset_window(&webview)?; let args = asset_commands::choose(asset_body(&request)?)?; state.document.choose(app, args)
+    }.await;
+    fixture_result!(observed, asset, &result);
+    result
 }
 #[tauri::command]
 async fn credential_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, CommandError> {
+    fixture_command!(state, Forbidden, observed, CommandError::from(AssetError::new(Reason::Unqualified)));
     asset_window(&webview)?; let args = asset_commands::prepare(asset_body(&request)?)?;
     let id = state.document.prepare(args)?;
     let document = state.document.clone(); drop(state); drop(request);
@@ -141,22 +213,27 @@ async fn credential_prepare(webview: Webview, request: tauri::ipc::Request<'_>, 
 }
 #[tauri::command]
 async fn vault_prepare_delete(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
     asset_window(&webview)?; let args = asset_commands::delete(asset_body(&request)?)?; state.document.prepare_delete(args)
 }
 #[tauri::command]
 async fn vault_commit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
     asset_window(&webview)?; let token = asset_commands::preview_token(asset_body(&request)?)?; state.document.commit(token)
 }
 #[tauri::command]
 async fn vault_bind(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
     asset_window(&webview)?; let token = asset_commands::preview_token(asset_body(&request)?)?; state.document.bind(token)
 }
 #[tauri::command]
 async fn vault_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
     asset_window(&webview)?; let id = asset_commands::discard(asset_body(&request)?)?; state.document.discard(id)
 }
 #[tauri::command]
 async fn vault_lock(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<AssetStatus, AssetError> {
+    fixture_command!(state, Forbidden, observed, AssetError::new(Reason::Unqualified));
     asset_window(&webview)?; asset_commands::lock(asset_body(&request)?)?; state.document.lock_session()
 }
 
@@ -188,11 +265,16 @@ async fn choose_project(state: State<'_, ShellState>) -> Result<Option<Project>,
 #[cfg(target_os = "linux")]
 #[tauri::command]
 async fn choose_project(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Option<Project>, AssetError> {
-    asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?;
-    let id = state.document.choose_project(app)?;
-    // Only an observer of the retained original operation; no path or native
-    // handle belongs to this invoke future, even if the renderer disappears.
-    state.document.project_result(id).await
+    fixture_command!(state, Project, observed, AssetError::new(Reason::Unqualified));
+    let result = async {
+        asset_window(&webview)?; asset_commands::status(asset_body(&request)?)?;
+        let id = state.document.choose_project(app)?;
+        // Only an observer of the retained original operation; no path or native
+        // handle belongs to this invoke future, even if the renderer disappears.
+        state.document.project_result(id).await
+    }.await;
+    fixture_result!(observed, project, &result);
+    result
 }
 
 fn trusted_document(url: &tauri::Url) -> bool {
@@ -243,7 +325,11 @@ async fn settle_relay(app: &tauri::AppHandle) -> bool {
     // cannot detach it. Even Err positively joins this data-only relay; it does
     // not change the independently established native/core result.
     let Some(handle) = book.handle.as_mut() else { return false; };
-    let _ = handle.await;
+    let joined = handle.await;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(context) = &state.fixture { context.relay_joined(joined.is_ok()); }
+    #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    let _ = joined;
     book.handle.take(); book.settled = true; true
 }
 
@@ -258,6 +344,10 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tau
             // can_exit polls only an already-ended original quit coordinator.
             if document.can_exit() {
                 if !settle_relay(&app).await || !document.can_exit() { return; }
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(context) = &app.state::<ShellState>().fixture {
+                    if context.seal().await.is_err() { context.refuse(); return; }
+                }
                 app.state::<ShellState>().exit_ready.store(true, Ordering::SeqCst);
                 app.exit(0); return;
             }
@@ -337,6 +427,8 @@ mod owned_gtk {
     struct NativeDialog {
         id: u32, object: Object, filter: Option<gtk::FileFilter>,
         response: Option<gtk::glib::SignalHandlerId>, destroy: Option<gtk::glib::SignalHandlerId>,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        topology: Option<topology::DialogMetadata>,
     }
     impl Object {
         fn close(&self) { match self { Self::File(dialog) => dialog.close(), Self::Message(dialog) => dialog.close() } }
@@ -348,17 +440,20 @@ mod owned_gtk {
 
     fn destroyed(weak: &Weak<GuiCall>) {
         let Some(call) = weak.upgrade() else { return; };
+        gtk_fixture!(call, DestroyEnter, 1);
         let unexpected = if let Some(mut facts) = call.facts() {
             let unexpected = !facts.response && call.owner().is_some_and(|owner| !owner.stopped());
             facts.destroyed = true; facts.showing = false; unexpected
         } else { true };
         if unexpected { call.failed(Reason::SourceRefused); }
+        gtk_fixture!(call, DestroyLeave, 1);
         call.changed();
     }
-    fn native_path(dialog: &gtk::FileChooserDialog) -> Result<PathBuf, Reason> {
+    fn native_path(dialog: &gtk::FileChooserDialog, _call: &GuiCall) -> Result<PathBuf, Reason> {
         // Exactly one accepted-response filename() call. Before any additional
         // application path copy, enforce native byte/component bounds. Neither
         // this hint nor its basename is ever returned as an asset DTO.
+        gtk_fixture!(_call, Filename, 1);
         let path = dialog.filename().ok_or(Reason::SourceRefused)?;
         crate::asset_source::path_hint(&path)?; Ok(path)
     }
@@ -366,6 +461,8 @@ mod owned_gtk {
 
     fn construct(app: tauri::AppHandle, call: Arc<GuiCall>, choice: DialogChoice) {
         if !gtk::is_initialized_main_thread() { not_created(&call, Reason::Unqualified); return; }
+        gtk_fixture!(call, ConstructEnter, match choice { DialogChoice::Project => 1,
+            DialogChoice::File(FileKind::AndroidKeystore) => 2, DialogChoice::Quit => 3, _ => 4 });
         let Some(owner) = call.owner() else { not_created(&call, Reason::CleanupUnknown); return; };
         if owner.interrupted() { not_created(&call, Reason::UserCancelled); return; }
         if DIALOG.with(|book| book.borrow().is_some()) { not_created(&call, Reason::Busy); return; }
@@ -392,8 +489,12 @@ mod owned_gtk {
         // Adopt the late returned object BEFORE any STOP check/configuration.
         // A cancellation during its constructor cannot lose its destruction
         // obligation. No callback captures a strong dialog or application cycle.
-        DIALOG.with(|book| *book.borrow_mut() = Some(NativeDialog { id: owner.id, object, filter: None, response: None, destroy: None }));
+        DIALOG.with(|book| *book.borrow_mut() = Some(NativeDialog { id: owner.id, object, filter: None, response: None, destroy: None,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            topology: None,
+        }));
         if let Some(mut facts) = call.facts() { facts.created = true; facts.constructing = false; }
+        gtk_fixture!(call, Adopted, 1);
         DIALOG.with(|book| {
             let mut book = book.borrow_mut();
             let Some(entry) = book.as_mut().filter(|entry| entry.id == owner.id) else { call.failed(Reason::CleanupUnknown); return; };
@@ -418,6 +519,8 @@ mod owned_gtk {
                     }
                     entry.response = Some(dialog.connect_response(move |dialog, response| {
                         let Some(call) = response_call.upgrade() else { return; };
+                        gtk_fixture!(call, ResponseEnter, match response { gtk::ResponseType::Accept => 1,
+                            gtk::ResponseType::Cancel => 2, gtk::ResponseType::DeleteEvent => 3, _ => 4 });
                         // Latch the actual response/endpoint under the real
                         // admission lock BEFORE calling filename(), without
                         // holding that lock over any GTK API.
@@ -426,7 +529,8 @@ mod owned_gtk {
                             gtk::ResponseType::Cancel | gtk::ResponseType::DeleteEvent => NativeResponse::Decline,
                             _ => NativeResponse::Other,
                         };
-                        if call.begin_response(response, false) == Some(true) { call.selected_path(native_path(dialog)); }
+                        if call.begin_response(response, false) == Some(true) { call.selected_path(native_path(dialog, &call)); }
+                        gtk_fixture!(call, ResponseLeave, 1);
                     }));
                     entry.destroy = Some(dialog.connect_destroy(move |_| destroyed(&destroy_call)));
                 }
@@ -434,26 +538,33 @@ mod owned_gtk {
                     dialog.set_title("Quit and discard unsaved drafts?"); dialog.set_destroy_with_parent(true);
                     entry.response = Some(dialog.connect_response(move |_, response| {
                         if let Some(call) = response_call.upgrade() {
+                            gtk_fixture!(call, ResponseEnter, match response { gtk::ResponseType::Ok => 1,
+                                gtk::ResponseType::Cancel => 2, gtk::ResponseType::DeleteEvent => 3, _ => 4 });
                             let response = match response {
                                 gtk::ResponseType::Ok => NativeResponse::Accept,
                                 gtk::ResponseType::Cancel | gtk::ResponseType::DeleteEvent => NativeResponse::Decline,
                                 _ => NativeResponse::Other,
                             };
                             let _ = call.begin_response(response, true);
+                            gtk_fixture!(call, ResponseLeave, 1);
                         }
                     }));
                     entry.destroy = Some(dialog.connect_destroy(move |_| destroyed(&destroy_call)));
                 }
             }
         });
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        topology::tag(&parent, &call);
         if owner.interrupted() { call.changed(); return; }
         if let Some(mut facts) = call.facts() { facts.showing = true; }
         DIALOG.with(|book| { if let Some(entry) = book.borrow().as_ref().filter(|entry| entry.id == owner.id) { entry.object.show(); } });
+        gtk_fixture!(call, Show, 1);
         call.presented(); call.changed();
     }
 
     fn close_after_response(call: Arc<GuiCall>, id: u32) {
         if !gtk::is_initialized_main_thread() { call.failed(Reason::CleanupUnknown); return; }
+        gtk_fixture!(call, CloseEnter, 1);
         // Entry into this non-main-origin queued closure is the response-unwind
         // barrier. close() itself is only a request, NEVER destruction proof.
         let destroyed = call.facts().is_some_and(|facts| facts.destroyed);
@@ -464,10 +575,13 @@ mod owned_gtk {
             });
         }
         if let Some(mut facts) = call.facts() { facts.close_ack = true; }
+        gtk_fixture!(call, CloseAck, 1);
+        gtk_fixture!(call, CloseLeave, 1);
         call.changed();
     }
     fn release_after_destroy(call: Arc<GuiCall>, id: u32) {
         if !gtk::is_initialized_main_thread() { call.failed(Reason::CleanupUnknown); return; }
+        gtk_fixture!(call, ReleaseEnter, 1);
         if !call.facts().is_some_and(|facts| facts.destroyed && facts.close_ack) { call.failed(Reason::CleanupUnknown); return; }
         let original = DIALOG.with(|book| {
             let mut book = book.borrow_mut();
@@ -476,9 +590,205 @@ mod owned_gtk {
         let Some(mut original) = original else { call.failed(Reason::CleanupUnknown); return; };
         if let Some(handler) = original.response.take() { original.object.disconnect(handler); }
         if let Some(handler) = original.destroy.take() { original.object.disconnect(handler); }
+        gtk_fixture!(call, HandlersDetached, 1);
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let had_topology = original.topology.is_some();
         drop(original); // Original dialog/filter/handler refs, on their thread.
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        topology::retire(&call, id, had_topology);
         if let Some(mut facts) = call.facts() { facts.released = true; }
+        gtk_fixture!(call, Released, u32::from(DIALOG.with(|book| book.borrow().is_none())));
+        gtk_fixture!(call, ReleaseLeave, 1);
         call.changed();
+    }
+
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) mod topology {
+        use super::*;
+        use crate::shell::qualification::{Qualification, TopologyTags};
+        type Check<T> = Result<T, &'static str>;
+        fn need(ok: bool, reason: &'static str) -> Check<()> { if ok { Ok(()) } else { Err(reason) } }
+
+        // Weak registrations only. Retired is a scalar tombstone, never a new
+        // acquisition opportunity. No extra retained strong Gtk/Atk owner.
+        struct MainMetadata {
+            window: gtk::glib::WeakRef<gtk::Window>, accessible: gtk::glib::WeakRef<gtk::atk::Object>,
+            context: Weak<Qualification>, id: String,
+        }
+        enum MainBook { Empty, Bound(MainMetadata), Retired }
+        thread_local! { static MAIN: RefCell<MainBook> = const { RefCell::new(MainBook::Empty) }; }
+        pub(super) struct DialogMetadata {
+            accessible: gtk::glib::WeakRef<gtk::atk::Object>, call: Weak<GuiCall>,
+            context: Weak<Qualification>, tags: TopologyTags,
+        }
+
+        // These data-only witnesses have no constructor outside this actual
+        // original-object observer. Q cannot supply loose IDs/true in lieu of it.
+        pub(in crate::shell) struct Tagged(TopologyTags);
+        impl Tagged { pub(in crate::shell) fn into_tags(self) -> TopologyTags { self.0 } }
+        pub(in crate::shell) struct Checked { tags: TopologyTags, at_ns: u64 }
+        impl Checked { pub(in crate::shell) fn into_parts(self) -> (TopologyTags, u64) { (self.tags, self.at_ns) } }
+        pub(in crate::shell) struct Retired { operation: u32, main_retired: bool }
+        impl Retired { pub(in crate::shell) fn into_parts(self) -> (u32, bool) { (self.operation, self.main_retired) } }
+
+        fn window(object: &Object) -> gtk::Window {
+            match object { Object::File(d) => d.clone().upcast(), Object::Message(d) => d.clone().upcast() }
+        }
+        fn same_window(object: &Object, original: &gtk::Window) -> bool {
+            match object { Object::File(d) => d.upcast_ref::<gtk::Window>() == original,
+                Object::Message(d) => d.upcast_ref::<gtk::Window>() == original }
+        }
+        fn live(call: &Arc<GuiCall>, q: &Arc<Qualification>, n: u32, showing: bool) -> Check<()> {
+            need(gtk::is_initialized_main_thread(), "sg1_topology_thread")?;
+            let owner = call.owner().ok_or("sg1_topology_original_work")?;
+            need(owner.id == n && Arc::ptr_eq(&owner.gui, call) && !owner.interrupted()
+                && call.fixture_context().is_some_and(|actual| Arc::ptr_eq(&actual, q)), "sg1_topology_original_context")?;
+            let facts = call.facts().ok_or("sg1_topology_facts")?;
+            need(facts.created && !facts.constructing && facts.showing == showing && !facts.not_created
+                && !facts.response && !facts.destroyed && !facts.released && !facts.close_queued
+                && facts.refusal.is_none(), "sg1_topology_live_original")
+        }
+        fn id_is(accessible: &gtk::atk::Object, expected: Option<&str>) -> Check<()> {
+            let property = accessible.find_property("accessible-id").ok_or("sg1_accessible_id_missing")?;
+            let flags = property.flags();
+            need(property.value_type() == gtk::glib::Type::STRING
+                && flags.contains(gtk::glib::ParamFlags::READABLE | gtk::glib::ParamFlags::WRITABLE)
+                && !flags.contains(gtk::glib::ParamFlags::CONSTRUCT_ONLY), "sg1_accessible_id_property")?;
+            let value = accessible.property_value("accessible-id");
+            let actual = value.get::<Option<&str>>().map_err(|_| "sg1_accessible_id_type")?;
+            // Initial foreign IDs remain untouched; do not retain/copy their
+            // arbitrary text. Exact readback bounds all subsequent scalar IDs.
+            need(match expected { None => actual.is_none_or(str::is_empty),
+                Some(id) => id.len() <= 80 && id.is_ascii() && actual == Some(id) }, "sg1_accessible_id_changed")
+        }
+        fn original_main(q: &Arc<Qualification>, tags: &TopologyTags, first: bool) -> Check<Option<(gtk::Window, gtk::atk::Object)>> {
+            MAIN.with(|book| {
+                let book = book.try_borrow().map_err(|_| "sg1_topology_main_borrow")?;
+                match &*book {
+                    MainBook::Empty if first => Ok(None),
+                    MainBook::Bound(main) if !first => {
+                        need(main.id == tags.main_id() && main.context.upgrade().is_some_and(|actual| Arc::ptr_eq(&actual, q)), "sg1_topology_main_context")?;
+                        Ok(Some((main.window.upgrade().ok_or("sg1_topology_main_lost")?,
+                            main.accessible.upgrade().ok_or("sg1_topology_main_accessible_lost")?)))
+                    },
+                    _ => Err("sg1_topology_main_reused"),
+                }
+            }) // Only local ref acquisition here; no GTK property/getter API under this borrow.
+        }
+
+        pub(super) fn tag(parent: &gtk::Window, call: &Arc<GuiCall>) {
+            let Some(q) = call.fixture_context() else { return; }; // Ordinary run is untouched.
+            let result: Check<Tagged> = (|| {
+                let n = call.owner().ok_or("sg1_topology_original_work")?.id;
+                live(call, &q, n, false)?;
+                let tags = q.topology_begin(n)?;
+                let observed = {
+                    // Exactly one short local clone of the already-owned
+                    // dialog lets ALL GTK property/getter calls run without
+                    // DIALOG's RefCell borrow (notify callbacks can reenter).
+                    let dialog = DIALOG.with(|book| {
+                        let book = book.try_borrow().map_err(|_| "sg1_topology_dialog_borrow")?;
+                        let entry = book.as_ref().filter(|e| e.id == n && e.topology.is_none()).ok_or("sg1_topology_dialog_original")?;
+                        Ok::<_, &'static str>(window(&entry.object))
+                    })?;
+                    let prior = original_main(&q, &tags, n == 1)?;
+                    let main_accessible = parent.accessible().ok_or("sg1_topology_main_accessible")?;
+                    let dialog_accessible = dialog.accessible().ok_or("sg1_topology_dialog_accessible")?;
+                    let transient = dialog.transient_for().ok_or("sg1_topology_no_transient")?;
+                    need(transient == *parent && dialog != *parent && main_accessible != dialog_accessible, "sg1_topology_native_originals")?;
+                    if let Some((original, accessible)) = &prior {
+                        need(original == parent && accessible == &main_accessible, "sg1_topology_main_substituted")?;
+                    }
+                    id_is(&main_accessible, if n == 1 { None } else { Some(tags.main_id()) })?;
+                    id_is(&dialog_accessible, None)?; // Check BOTH initial values before either write.
+                    if n == 1 { main_accessible.set_property("accessible-id", tags.main_id()); }
+                    dialog_accessible.set_property("accessible-id", tags.dialog_id());
+                    id_is(&main_accessible, Some(tags.main_id()))?; id_is(&dialog_accessible, Some(tags.dialog_id()))?;
+                    live(call, &q, n, false)?;
+                    let metadata = DialogMetadata { accessible: dialog_accessible.downgrade(), call: Arc::downgrade(call),
+                        context: Arc::downgrade(&q), tags: tags.clone() };
+                    DIALOG.with(|book| {
+                        let mut book = book.try_borrow_mut().map_err(|_| "sg1_topology_dialog_borrow")?;
+                        let entry = book.as_mut().filter(|e| e.id == n && e.topology.is_none()).ok_or("sg1_topology_dialog_changed")?;
+                        need(same_window(&entry.object, &dialog), "sg1_topology_dialog_substituted")?;
+                        entry.topology = Some(metadata); Ok::<_, &'static str>(())
+                    })?;
+                    if n == 1 {
+                        let metadata = MainMetadata { window: parent.downgrade(), accessible: main_accessible.downgrade(),
+                            context: Arc::downgrade(&q), id: tags.main_id().to_owned() };
+                        MAIN.with(|book| {
+                            let mut book = book.try_borrow_mut().map_err(|_| "sg1_topology_main_borrow")?;
+                            need(matches!(&*book, MainBook::Empty), "sg1_topology_main_reused")?;
+                            *book = MainBook::Bound(metadata); Ok::<_, &'static str>(())
+                        })?;
+                    }
+                    Tagged(tags)
+                }; // Actually drop dialog clone, accessibles, transient and all upgraded refs BEFORE event.
+                Ok(observed)
+            })();
+            if result.and_then(|observed| q.topology_tagged(observed)).is_err() { q.refuse(); }
+            // A partial tag is NOT rolled back/retried. Real constructor,
+            // response/STOP and disposal continue through their original paths.
+        }
+
+        pub(in crate::shell) fn inspect(weak: Weak<Qualification>, n: u32) {
+            let Some(q) = weak.upgrade() else { return; };
+            let result: Check<Checked> = (|| {
+                q.topology_check_ready(n)?;
+                let observed = {
+                    let (dialog, original_accessible, call, context, tags) = DIALOG.with(|book| {
+                        let book = book.try_borrow().map_err(|_| "sg1_topology_dialog_borrow")?;
+                        let entry = book.as_ref().filter(|e| e.id == n).ok_or("sg1_topology_dialog_original")?;
+                        let metadata = entry.topology.as_ref().ok_or("sg1_topology_untagged")?;
+                        Ok::<_, &'static str>((window(&entry.object), metadata.accessible.upgrade().ok_or("sg1_topology_accessible_lost")?,
+                            metadata.call.upgrade().ok_or("sg1_topology_call_lost")?, metadata.context.upgrade().ok_or("sg1_topology_context_lost")?,
+                            metadata.tags.clone()))
+                    })?;
+                    need(tags.operation() == n && Arc::ptr_eq(&context, &q), "sg1_topology_check_context")?;
+                    live(&call, &q, n, true)?;
+                    let (main, original_main_accessible) = original_main(&q, &tags, false)?.ok_or("sg1_topology_main_missing")?;
+                    let main_accessible = main.accessible().ok_or("sg1_topology_main_accessible")?;
+                    let dialog_accessible = dialog.accessible().ok_or("sg1_topology_dialog_accessible")?;
+                    let transient = dialog.transient_for().ok_or("sg1_topology_no_transient")?;
+                    need(transient == main && dialog != main && main_accessible != dialog_accessible
+                        && main_accessible == original_main_accessible && dialog_accessible == original_accessible, "sg1_topology_check_originals")?;
+                    id_is(&main_accessible, Some(tags.main_id()))?; id_is(&dialog_accessible, Some(tags.dialog_id()))?;
+                    live(&call, &q, n, true)?;
+                    Checked { tags, at_ns: q.topology_clock()? }
+                }; // No extra Gtk/Atk wrapper, Value or weak registration survives to completion publication.
+                Ok(observed)
+            })();
+            if result.and_then(|observed| q.topology_checked(observed)).is_err() { q.refuse(); }
+            // Successful completion publication is the final memory operation;
+            // it is not a response-unwind/destroy/coordinator-join substitute.
+        }
+
+        pub(super) fn retire(call: &Arc<GuiCall>, n: u32, had_metadata: bool) {
+            // Caller has ALREADY dropped the actual original NativeDialog,
+            // including its weak accessible/call/context metadata, off-borrow.
+            let Some(q) = call.fixture_context() else { return; };
+            if !had_metadata || q.topology_retire_ready(n).is_err() { q.refuse(); }
+            let result: Check<Retired> = (|| {
+                need(gtk::is_initialized_main_thread(), "sg1_topology_retire_thread")?;
+                let clear = n == 5 || q.topology_failed();
+                let (removed, main_retired) = MAIN.with(|book| {
+                    let mut book = book.try_borrow_mut().map_err(|_| "sg1_topology_main_borrow")?;
+                    match &*book {
+                        MainBook::Bound(main) => need(main.context.upgrade().is_some_and(|actual| Arc::ptr_eq(&actual, &q)), "sg1_topology_retire_context")?,
+                        MainBook::Empty if q.topology_failed() => {},
+                        _ => return Err("sg1_topology_retire_repeated"),
+                    }
+                    if clear {
+                        let removed = match std::mem::replace(&mut *book, MainBook::Retired) { MainBook::Bound(main) => Some(main), _ => None };
+                        Ok((removed, true))
+                    } else { Ok((None, false)) }
+                })?;
+                drop(removed); // Really g_weak_ref_clear BOTH extracted main refs BEFORE Retired, not merely TLS=None.
+                need(had_metadata, "sg1_topology_retire_untagged")?;
+                Ok(Retired { operation: n, main_retired })
+            })();
+            if result.and_then(|observed| q.topology_retired(observed)).is_err() { q.refuse(); }
+        }
     }
 
     pub(crate) async fn run_owned_dialog(app: &tauri::AppHandle, owner: &Arc<OriginalWork>, choice: DialogChoice) -> Result<Option<PathBuf>, Reason> {
@@ -496,6 +806,7 @@ mod owned_gtk {
             if facts.dispatched || facts.created { return Err(Reason::CleanupUnknown); }
             facts.dispatched = true;
         }
+        gtk_fixture!(call, ConstructDispatch, 1);
         let construct_call = call.clone(); let construct_app = app.clone();
         if window.run_on_main_thread(move || construct(construct_app, construct_call, choice)).is_err() {
             // Scheduling failure is not positive not-created evidence. Keep the
@@ -523,6 +834,7 @@ mod owned_gtk {
                 if gtk::is_initialized_main_thread() { call.failed(Reason::CleanupUnknown); }
                 else {
                     let call = call.clone(); let failure = call.clone(); let id = owner.id;
+                    gtk_fixture!(call, CloseDispatch, 1);
                     if window.run_on_main_thread(move || close_after_response(call, id)).is_err() { failure.failed(Reason::CleanupUnknown); }
                 }
             }
@@ -530,6 +842,7 @@ mod owned_gtk {
                 if gtk::is_initialized_main_thread() { call.failed(Reason::CleanupUnknown); }
                 else {
                     let call = call.clone(); let failure = call.clone(); let id = owner.id;
+                    gtk_fixture!(call, ReleaseDispatch, 1);
                     if window.run_on_main_thread(move || release_after_destroy(call, id)).is_err() { failure.failed(Reason::CleanupUnknown); }
                 }
             }
@@ -541,7 +854,9 @@ mod owned_gtk {
     }
 }
 
-pub fn run() {
+pub fn run() { run_builder(builder()); }
+
+fn builder() -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder.on_web_content_process_terminate(|webview| {
@@ -549,24 +864,45 @@ pub fn run() {
             if let Some(state) = webview.try_state::<ShellState>() { state.document.lost(); }
         }
     });
-    let application = builder
+    builder
         .setup(|app| {
             let resources = app.path().resource_dir()?;
             let bridge = Arc::new(DesktopBridge::new(resources));
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let fixture = app.try_state::<Arc<qualification::Qualification>>().map(|q| q.inner().clone());
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let document = if let Some(context) = &fixture {
+                let state = app.state::<Mutex<Option<qualification::FixtureAdmission>>>();
+                let permit = state.lock().map_err(|_| "SG1 permit lock poisoned")?.take().ok_or("SG1 permit missing")?;
+                let document = DocumentBinding::for_fixture(bridge.clone(), permit)?;
+                context.attach(bridge.clone())?; document
+            } else { DocumentBinding::new(bridge.clone()) };
+            #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
             let document = DocumentBinding::new(bridge.clone());
             let (relay_stop, stop_receiver) = watch::channel(false);
             app.manage(ShellState {
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                fixture: fixture.clone(),
                 bridge: bridge.clone(), document: document.clone(),
                 #[cfg(not(target_os = "linux"))] picker: Arc::new(AtomicBool::new(false)),
                 #[cfg(not(target_os = "linux"))] closing: AtomicBool::new(false),
                 exit_ready: AtomicBool::new(false), relay_stop, relay: AsyncMutex::new(RelayBook { handle: None, settled: false }),
                 #[cfg(target_os = "linux")] exit_observer: Mutex::new(None),
             });
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let navigation_fixture = fixture.clone();
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let page_fixture = fixture.clone();
             let navigation = document.clone();
             let page = document.clone();
             let window = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
                 .title("Mobile Release Kit").inner_size(1280.0, 840.0).min_inner_size(920.0, 640.0)
-                .on_navigation(move |url| navigation.navigation(trusted_document(url)))
+                .on_navigation(move |url| {
+                    let trusted = trusted_document(url); let allowed = navigation.navigation(trusted);
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if let Some(q) = &navigation_fixture { q.lifecycle(qualification::EventKind::Navigation, u32::from(trusted && allowed)); }
+                    allowed
+                })
                 .on_page_load(move |_, payload| {
                     let trusted = trusted_document(payload.url());
                     #[cfg(target_os = "macos")]
@@ -580,6 +916,11 @@ pub fn run() {
                         tauri::webview::PageLoadEvent::Started => lifetime.started(trusted),
                         tauri::webview::PageLoadEvent::Finished => lifetime.finished(trusted),
                     });
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if let Some(q) = &page_fixture { q.lifecycle(match payload.event() {
+                        tauri::webview::PageLoadEvent::Started => qualification::EventKind::LoadStarted,
+                        tauri::webview::PageLoadEvent::Finished => qualification::EventKind::LoadFinished,
+                    }, u32::from(trusted)); }
                 })
                 .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                 .build()?;
@@ -587,14 +928,24 @@ pub fn run() {
             {
                 use webkit2gtk::WebViewExt;
                 let install = document.clone();
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                let install_fixture = fixture.clone();
                 // This may run inline, so hold no lifetime/owner lock across
                 // with_webview. Outer Ok only means the callback was scheduled.
                 if window.with_webview(move |platform| {
                     let terminated = install.clone();
-                    let _signal_id = platform.inner().connect_web_process_terminated(move |_, _| terminated.lost());
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    let terminated_fixture = install_fixture.clone();
+                    let _signal_id = platform.inner().connect_web_process_terminated(move |_, _| {
+                        terminated.lost();
+                        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                        if let Some(q) = &terminated_fixture { q.lifecycle(qualification::EventKind::DocumentLost, 0); }
+                    });
                     // GLib retains the handler with the original webview. All
                     // termination reasons invalidate; the ID is not a lease.
                     install.hook_installed();
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if let Some(q) = &install_fixture { q.lifecycle(qualification::EventKind::HookInstalled, 1); }
                 }).is_err() { document.lost(); }
             }
             #[cfg(not(target_os = "linux"))]
@@ -614,6 +965,8 @@ pub fn run() {
                 *book = Some(handle); drop(book);
                 let _ = start.send(());
             }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(context) = &fixture { context.start(app.handle().clone())?; }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -626,25 +979,41 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() != MAIN_WINDOW { return; }
             if let tauri::WindowEvent::Destroyed = event {
-                if let Some(state) = window.try_state::<ShellState>() { state.document.lost(); }
+                if let Some(state) = window.try_state::<ShellState>() {
+                    state.document.lost();
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if let Some(q) = &state.fixture { q.lifecycle(qualification::EventKind::DocumentLost, 0); }
+                }
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<ShellState>();
                 if state.exit_ready.load(Ordering::SeqCst) { return; }
                 api.prevent_close();
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(q) = &state.fixture { if !q.close_prevented() { return; } }
                 request_shutdown(window.app_handle());
             }
         })
-        .build(tauri::generate_context!());
+}
+
+fn run_builder(builder: tauri::Builder<tauri::Wry>) {
+    let application = builder.build(tauri::generate_context!());
     let application = match application {
         Ok(application) => application,
         Err(_) => { eprintln!("The native desktop application could not initialize."); return; }
     };
     application.run(|app, event| {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if matches!(event, tauri::RunEvent::Exit) {
+            let state = app.state::<ShellState>();
+            if let Some(q) = &state.fixture { q.actual_exit(state.exit_ready.load(Ordering::SeqCst)); }
+        }
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             let state = app.state::<ShellState>();
             if state.exit_ready.load(Ordering::SeqCst) { return; }
             api.prevent_exit();
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(q) = &state.fixture { q.refuse(); return; }
             request_shutdown(app);
         }
     });

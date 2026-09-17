@@ -572,3 +572,56 @@ async fn passive_hosted_contract() {
     std::env::set_var("MRK_DESKTOP_DEV_CORE", &inputs.source); // All work settled.
     if receipt.write("passed", None).is_err() { panic!("hosted passive final receipt failed after settlement"); }
 }
+
+/// SG1 observes only the two real frontend bootstrap originals. No held gate,
+/// synthetic core, edit authorization, new query or replacement join lives here.
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) mod session_gtk_probe {
+    use super::*;
+    pub(crate) struct Probe { supervisor: Supervisor, tails: Mutex<Vec<u64>>, failed: AtomicBool }
+    struct Tail<'a> { probe: &'a Probe, done: bool }
+    impl Drop for Tail<'_> { fn drop(&mut self) { if !self.done { self.probe.failed.store(true, Ordering::SeqCst); } } }
+    fn native(owner: &Owner) -> bool {
+        let o = lock(&owner.observation);
+        o.inspection_joined && o.acquisition_joined && o.spawned && o.waited && o.exit_success == Some(true)
+            && o.writer_joined && o.writer_complete && o.stdout_eof && o.stderr_eof && o.stdout_joined && o.stderr_joined
+            && o.stdout_bytes > 0 && o.stdout_bytes <= protocol::RESPONSE_LIMIT && o.stderr_bytes <= protocol::STDERR_LIMIT
+            && o.driver_joined && o.watchdog_joined
+    }
+    impl Probe {
+        pub(crate) fn attach(supervisor: &Supervisor) -> Check<Self> {
+            require(supervisor.can_exit() && !supervisor.disabled() && !supervisor.stopping()
+                && supervisor.inner.test.owners().is_empty(), "sg1_passive_not_fresh")?;
+            Ok(Self { supervisor:supervisor.clone(), tails:Mutex::new(Vec::with_capacity(2)), failed:AtomicBool::new(false) })
+        }
+        async fn facts(&self, stopping: bool) -> Check<Value> {
+            require(!self.failed.load(Ordering::SeqCst) && self.supervisor.can_exit() && !self.supervisor.disabled()
+                && self.supervisor.stopping() == stopping && self.supervisor.inner.permits.available_permits() == ACTIVE_LIMIT,
+                "sg1_passive_registry")?;
+            let originals = self.supervisor.inner.test.owners();
+            require(originals.len() == 2, "sg1_passive_roster")?;
+            let mut facts = Vec::with_capacity(2);
+            for original in originals {
+                {
+                    let state = lock(&original.state);
+                    require(state.terminal && !state.unknown && state.error.is_none()
+                        && state.driver_join == ManagementJoin::Returned && state.watchdog_join == ManagementJoin::Returned
+                        && lock(&original.permit).is_none() && native(&original), "sg1_passive_original_unsettled")?;
+                }
+                if !lock(&self.tails).contains(&original.key) {
+                    let mut guard = Tail { probe:self, done:false };
+                    let mut slot = original.observer.lock().await;
+                    let task = slot.as_mut().ok_or("sg1_passive_tail_missing")?;
+                    require(matches!(tokio::time::timeout(Duration::from_secs(2), task).await, Ok(Ok(()))), "sg1_passive_tail_unknown")?;
+                    slot.take(); // Positive await of THIS retained original, once.
+                    lock(&self.tails).push(original.key); guard.done = true;
+                }
+                facts.push(json!({"key":original.key.to_string(),"native":lock(&original.observation).clone(),"observerJoin":"ok"}));
+            }
+            require(lock(&self.tails).len() == 2, "sg1_passive_tail_roster")?;
+            Ok(json!({"stopping":stopping,"disabled":false,"registeredOwners":0,"originals":facts}))
+        }
+        pub(crate) async fn bootstrap(&self) -> Check<Value> { self.facts(false).await }
+        pub(crate) async fn final_facts(&self) -> Check<Value> { self.facts(true).await }
+    }
+}

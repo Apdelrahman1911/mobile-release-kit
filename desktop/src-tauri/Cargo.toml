@@ -17,6 +17,12 @@ name = "mobile-release-kit-desktop"
 path = "src/main.rs"
 required-features = ["desktop-shell"]
 
+[[test]]
+name = "session-gtk-qualification"
+path = "tests/session_gtk_qualification.rs"
+harness = false
+required-features = ["desktop-shell", "development-runtime"]
+
 [features]
 default = []
 desktop-shell = ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk", "dep:gtk"]
@@ -33,6 +39,9 @@ rfd = { version = "=0.15.4", optional = true, default-features = false, features
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "=0.30.1", default-features = false, features = ["fs"] }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dev-dependencies]
+nix = { version = "=0.30.1", default-features = false, features = ["time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "=0.18.2", optional = true, default-features = false, features = [] }

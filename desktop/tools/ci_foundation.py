@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -36,6 +37,35 @@ COMPILE_CHECKS = {
     "compile": ("rust-version-target", "headless-test-compile-only", "node-version",
                 "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"),
 }
+GTK_COMPILE_SCOPE = "session-gtk-compile-v1"
+GTK_COMPILE_EVIDENCE_SCOPE = "desktop-session-gtk-compile-only-v1"
+GTK_COMPILE_WORKFLOW = ".github/workflows/desktop-session-gtk-compile.yml"
+GTK_COMPILE_REF = "refs/heads/verify/desktop-session-gtk-compile"
+GTK_COMPILE_FEATURES = ("desktop-shell", "development-runtime")
+GTK_COMPILE_CHECKS = {
+    "acquire": COMPILE_CHECKS["acquire"],
+    "compile": ("rust-version-target", "node-version", "gtk-python-syntax-only",
+                "gtk-js-syntax-only", "gtk-c-pkg-config", "gtk-c-compile-only",
+                "vite-assets", "gtk-integration-compile-only"),
+}
+COMPILE_PROFILES = {
+    COMPILE_SCOPE: {"workflow": COMPILE_WORKFLOW, "ref": COMPILE_REF,
+                    "evidence": COMPILE_EVIDENCE_SCOPE, "checks": COMPILE_CHECKS},
+    GTK_COMPILE_SCOPE: {"workflow": GTK_COMPILE_WORKFLOW, "ref": GTK_COMPILE_REF,
+                        "evidence": GTK_COMPILE_EVIDENCE_SCOPE, "checks": GTK_COMPILE_CHECKS},
+}
+GTK_COMPILE_SOURCES = (
+    "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock",
+    "desktop/src-tauri/src/asset_session.rs", "desktop/src-tauri/src/asset_source.rs",
+    "desktop/src-tauri/src/edit_owner.rs", "desktop/src-tauri/src/hosted_tests.rs",
+    "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/src/supervisor.rs",
+    "desktop/src-tauri/src/session_gtk_qualification.rs",
+    "desktop/src-tauri/src/session_gtk_qualification/native_contract.rs",
+    "desktop/src-tauri/tests/session_gtk_qualification.rs",
+    "desktop/src-tauri/tests/session_gtk_recipe.js",
+    "desktop/native/session_gtk_input_linux.c", "desktop/tools/qualify_session_gtk.py",
+    "desktop/tools/ci_foundation.py", GTK_COMPILE_WORKFLOW,
+)
 EMPTY_NATIVE_DIRECTORIES = (
     "native", "config-owner", "config-driver-loss", "config-watchdog-loss", "config-stop",
     "config-terminal-deadline", "config-startup-stop", "config-transaction-eof",
@@ -132,6 +162,8 @@ TOOL_CHECKS = frozenset({
     "config-driver-loss-native-contract", "config-watchdog-loss-native-contract",
     "config-stop-native-contract", "config-terminal-deadline-native-contract", "config-startup-stop-native-contract",
     "config-transaction-eof-native-contract",
+    "gtk-python-syntax-only", "gtk-js-syntax-only", "gtk-c-pkg-config",
+    "gtk-c-compile-only", "gtk-integration-compile-only",
 })
 
 
@@ -146,13 +178,24 @@ def require(condition: bool, message: str) -> None:
 
 def admit_phase(scope: str, phase: str) -> None:
     """Closed scope selection, before context, tools, or native dispatch."""
-    require(scope in {BOUNDARY_SCOPE, COMPILE_SCOPE}, "Unknown desktop verification scope")
-    if scope == COMPILE_SCOPE:
+    require(scope == BOUNDARY_SCOPE or scope in COMPILE_PROFILES, "Unknown desktop verification scope")
+    if scope in COMPILE_PROFILES:
         require(phase in COMPILE_PHASES, "Compiler-only scope cannot execute a native phase")
 
 
-def compile_workflow_binding(environment: dict[str, str]) -> dict[str, str]:
+def admit_platform(scope: str, platform: str) -> None:
+    require(platform in TARGETS, "Unknown desktop verification platform")
+    require(scope != GTK_COMPILE_SCOPE or platform == "linux", "SG1 compilation requires Linux")
+
+
+def compile_profile(scope: str) -> dict:
+    require(type(scope) is str and scope in COMPILE_PROFILES, "Unknown compiler-only profile")
+    return COMPILE_PROFILES[scope]
+
+
+def compile_workflow_binding(environment: dict[str, str], scope: str = COMPILE_SCOPE) -> dict[str, str]:
     """Pure binding to the actual fixed verification workflow, not a caller path."""
+    profile = compile_profile(scope)
     sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
     run_id, attempt = environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
     require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None
@@ -160,32 +203,46 @@ def compile_workflow_binding(environment: dict[str, str]) -> dict[str, str]:
             "Compiler workflow source identity differs")
     require(all(re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None for value in (run_id, attempt)),
             "Compiler workflow run identity differs")
-    require(environment.get("GITHUB_REF") == COMPILE_REF
+    require(environment.get("GITHUB_REF") == profile["ref"]
             and environment.get("GITHUB_WORKFLOW_SHA") == sha
-            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{COMPILE_WORKFLOW}@{COMPILE_REF}",
+            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{profile['workflow']}@{profile['ref']}",
             "Compiler workflow/ref binding differs")
     event = environment.get("GITHUB_EVENT_NAME")
     require(event == "push" or event == "workflow_dispatch" and environment.get("MRK_EXPECTED_SHA") == sha,
             "Compiler workflow event or exact dispatch source differs")
-    return {"workflowPath": COMPILE_WORKFLOW, "workflowSha": sha,
+    return {"workflowPath": profile["workflow"], "workflowSha": sha,
             "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
             "runId": run_id, "attempt": attempt}
 
 
+def same_compile_json(value: object, expected: object) -> bool:
+    """JSON equality with exact types; booleans/floats cannot stand in for ints."""
+    if type(value) is not type(expected):
+        return False
+    if type(expected) is dict:
+        return value.keys() == expected.keys() and all(same_compile_json(value[key], item) for key, item in expected.items())
+    if type(expected) is list:
+        return len(value) == len(expected) and all(same_compile_json(a, b) for a, b in zip(value, expected))
+    return value == expected
+
+
 def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
     """A compile receipt licenses only compiler-output cleanup, not native finality."""
-    require(phase in COMPILE_CHECKS and context.get("executionScope") == COMPILE_SCOPE,
-            "Compiler receipt scope differs")
+    profile = compile_profile(context.get("executionScope", ""))
+    admit_platform(context["executionScope"], context.get("platform", ""))
+    require(phase in profile["checks"] and context.get("workflowPath") == profile["workflow"],
+            "Compiler receipt scope or workflow differs")
     require(type(value) is dict, "Missing compiler phase receipt")
     binding_names = ("sourceSha", "platform", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")
     expected = {
-        "schemaVersion": 1, "scope": COMPILE_EVIDENCE_SCOPE, "phase": phase, "status": "passed",
+        "schemaVersion": 1, "scope": profile["evidence"], "phase": phase, "status": "passed",
         **{name: context[name] for name in binding_names},
         "rust": {"release": RUST, "target": TARGETS[context["platform"]]}, "node": NODE,
-        "checks": [{"check": name, "exitCode": 0} for name in COMPILE_CHECKS[phase]],
+        "checks": [{"check": name, "exitCode": 0} for name in profile["checks"][phase]],
     }
-    require(type(value.get("schemaVersion")) is int and value == expected
-            and all(type(row.get("exitCode")) is int for row in value.get("checks", [])),
+    if context["executionScope"] == GTK_COMPILE_SCOPE:
+        expected.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
+    require(same_compile_json(value, expected),
             "Compiler phase receipt is incomplete or its original source/checks differ")
     return value
 
@@ -228,6 +285,19 @@ def hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def gtk_compile_binding(source: Path) -> dict:
+    """Named SG1 compiler inputs, not an installed/native qualification freeze."""
+    sources = []
+    for relative in GTK_COMPILE_SOURCES:
+        path = source / relative
+        ordinary(path)
+        size = path.stat().st_size
+        require(0 < size <= 1024 * 1024, "SG1 compiler input exceeds its bound")
+        sources.append({"path": relative, "size": size, "sha256": hash_file(path)})
+    return {"features": list(GTK_COMPILE_FEATURES), "testTarget": "session-gtk-qualification",
+            "execution": "no-run", "sources": sources}
+
+
 def write_json(path: Path, value: object) -> None:
     with path.open("x", encoding="utf-8", newline="\n") as stream:
         json.dump(value, stream, sort_keys=True, separators=(",", ":"))
@@ -261,12 +331,13 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
 def admitted_host() -> str:
     require(os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, COMPILE_SCOPE},
+            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, *COMPILE_PROFILES},
             "This fixed check requires an explicitly admitted disposable hosted job")
     platform = os.environ.get("MRK_DESKTOP_PLATFORM", "")
     require(platform in TARGETS and platform == {
         "linux": "linux", "darwin": "macos", "win32": "windows",
     }.get(sys.platform), "Unexpected host platform")
+    admit_platform(os.environ["MRK_DESKTOP_HOSTED_CHECKS"], platform)
     require(sys.version.split()[0] == PYTHON, "Unexpected selected Python version")
     selected = Path(os.environ["MRK_PYTHON"]).resolve(strict=True)
     require(selected == Path(sys.executable).resolve(strict=True), "Python setup output differs")
@@ -698,18 +769,23 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
         "rust": {"release": RUST, "target": TARGETS[context["platform"]]}, "node": node,
         "checks": [{"check": check, "exitCode": 0} for check in checks],
     }
-    if context.get("executionScope") == COMPILE_SCOPE:
-        require(name in COMPILE_CHECKS and scope == "passive-development-foundation-only",
+    if context.get("executionScope") in COMPILE_PROFILES:
+        profile = compile_profile(context["executionScope"])
+        require(name in profile["checks"] and scope == "passive-development-foundation-only",
                 "Compiler-only phase cannot produce native evidence")
-        value.update(scope=COMPILE_EVIDENCE_SCOPE,
+        value.update(scope=profile["evidence"],
                      **{key: context[key] for key in ("workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")})
+        if context["executionScope"] == GTK_COMPILE_SCOPE:
+            value.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
         validate_compile_receipt(value, context, name)
     write_json(Path(context["root"]) / f"{name}-checks.json", value)
 
 
 def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, "prepare")
-    binding = compile_workflow_binding(os.environ) if scope == COMPILE_SCOPE else {}
+    admit_platform(scope, platform)
+    profile = compile_profile(scope) if scope in COMPILE_PROFILES else None
+    binding = compile_workflow_binding(os.environ, scope) if profile else {}
     source = Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True)
     temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
     sha = os.environ["GITHUB_SHA"]
@@ -756,18 +832,21 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
             member.external_attr = (stat.S_IFREG | 0o644) << 16
             archive.writestr(member, data, compress_type=zipfile.ZIP_DEFLATED)
             inventory.append({"path": name, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
-    context = {"root": str(root), "source": str(source), "sourceSha": sha, "platform": platform,
+    context = {"root": str(root), "source": str(source), "sourceSha": sha, "sourceTree": tree, "platform": platform,
                "executionScope": scope,
                "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                "git": git, "rustup": rustup, "python": str(Path(sys.executable).resolve(strict=True))}
     context.update(binding)
-    workflow = COMPILE_WORKFLOW if scope == COMPILE_SCOPE else ".github/workflows/desktop-foundation.yml"
-    if scope == COMPILE_SCOPE:
+    workflow = profile["workflow"] if profile else ".github/workflows/desktop-foundation.yml"
+    if profile:
         context["workflowSha256"] = hash_file(source / workflow)
+    if scope == GTK_COMPILE_SCOPE:
+        require(len(inventory) == 67, "SG1 requires its complete reviewed 67-file core")
+        context["sg1"] = gtk_compile_binding(source)
     source_unchanged(context)
     write_json(root / "context.json", context)
     public = {
-        "scope": COMPILE_EVIDENCE_SCOPE if scope == COMPILE_SCOPE else "passive-development-foundation-only", "sourceSha": sha, "sourceTree": tree,
+        "scope": profile["evidence"] if profile else "passive-development-foundation-only", "sourceSha": sha, "sourceTree": tree,
         "workflowSha256": hash_file(source / workflow),
         "runId": context["runId"], "attempt": context["attempt"], "platform": platform,
         "image": os.environ.get("ImageOS", "") + "/" + os.environ.get("ImageVersion", ""),
@@ -785,9 +864,12 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         "notQualified": ["production-runtime", "native-GUI", "native-document-lifecycle", "configuration-saving",
                          "Windows-filesystem", "installers", "release-operations"],
     }
-    if scope == COMPILE_SCOPE:
+    if profile:
         public.update(binding)
         public["notQualified"].append("test-execution")
+    if scope == GTK_COMPILE_SCOPE:
+        public["sg1"] = context["sg1"]
+        public["notQualified"].extend(("SG1-native-qualification", "installed-API-loader-writer-admission"))
     write_json(root / "public-bindings.json", public)
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
         output.write(f"root={root}\n")
@@ -795,6 +877,7 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
 
 
 def load_context(platform: str, scope: str = BOUNDARY_SCOPE) -> dict:
+    admit_platform(scope, platform)
     root = Path(os.environ["MRK_DESKTOP_CI_ROOT"])
     require(root.is_absolute() and root.name.startswith("mrk-desktop-foundation-")
             and root.parent == Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
@@ -805,11 +888,17 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE) -> dict:
             and context["sourceSha"] == os.environ["GITHUB_SHA"]
             and context["runId"] == os.environ["GITHUB_RUN_ID"]
             and context["attempt"] == os.environ["GITHUB_RUN_ATTEMPT"], "Task context differs")
-    if scope == COMPILE_SCOPE:
-        binding = compile_workflow_binding(os.environ)
+    if scope in COMPILE_PROFILES:
+        profile = compile_profile(scope)
+        binding = compile_workflow_binding(os.environ, scope)
         require(all(context.get(key) == value for key, value in binding.items())
-                and context.get("workflowSha256") == hash_file(Path(context["source"]) / COMPILE_WORKFLOW),
+                and context.get("workflowSha256") == hash_file(Path(context["source"]) / profile["workflow"]),
                 "Compiler task workflow binding changed")
+        if scope == GTK_COMPILE_SCOPE:
+            require(type(context.get("sourceTree")) is str
+                    and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+                    and context.get("sg1") == gtk_compile_binding(Path(context["source"])),
+                    "SG1 compiler source binding changed")
     return context
 
 
@@ -831,9 +920,9 @@ def tools(context: dict, environment: dict[str, str]) -> tuple[str, str]:
 
 def clean_compile(context: dict) -> None:
     """Only positively completed compiler work; no fabricated native receipts."""
-    require(context.get("executionScope") == COMPILE_SCOPE, "Wrong compiler cleanup scope")
+    profile = compile_profile(context.get("executionScope", ""))
     root, source = Path(context["root"]), Path(context["source"])
-    for phase_name in COMPILE_CHECKS:
+    for phase_name in profile["checks"]:
         path = root / f"{phase_name}-checks.json"
         ordinary(path)
         require(0 < path.stat().st_size <= 16384, "Compiler phase receipt exceeds its bound")
@@ -869,8 +958,65 @@ def clean_compile(context: dict) -> None:
     print("Removed settled compiler-only outputs; preserved exactly three public receipts. No native qualification.")
 
 
+def gtk_compiler_tools() -> tuple[str, str]:
+    # Fixed system compiler tools on the admitted Ubuntu runner. No environment
+    # supplied compiler, package-config path or actor execution is accepted.
+    paths = [Path(name).resolve(strict=True) for name in ("/usr/bin/cc", "/usr/bin/pkg-config")]
+    for path in paths:
+        ordinary(path)
+    return str(paths[0]), str(paths[1])
+
+
+GTK_PYTHON_SYNTAX = (
+    "import sys\n"
+    "with open(sys.argv[1], 'rb') as f: data = f.read(1048577)\n"
+    "if not 0 < len(data) <= 1048576: raise ValueError('syntax input bound')\n"
+    "compile(data, '<SG1 outer syntax only>', 'exec', dont_inherit=True)\n"
+)
+
+
+def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[str, str]) -> str:
+    """Fixed Linux integration/C compilation. NEVER executes a produced binary."""
+    require(context.get("executionScope") == GTK_COMPILE_SCOPE and context.get("platform") == "linux",
+            "Wrong SG1 compiler profile")
+    root, source = Path(context["root"]), Path(context["source"])
+    desktop = source / "desktop"
+    node = shutil.which("node")
+    require(node is not None, "Node unavailable after setup")
+    observed_node = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=15, capture=True)
+    require(observed_node == NODE, "Selected Node version changed")
+    # Fail fast on inert syntax/C compilation before the expensive Rust graph.
+    # compile() constructs a code object only; it does not import/execute O and
+    # creates no pycache. Node --check similarly never evaluates the recipe.
+    run([context["python"], "-I", "-S", "-B", "-c", GTK_PYTHON_SYNTAX,
+         str(desktop / "tools/qualify_session_gtk.py")],
+        check="gtk-python-syntax-only", cwd=root, env=environment, timeout=15)
+    run([node, "--check", str(desktop / "src-tauri/tests/session_gtk_recipe.js")],
+        check="gtk-js-syntax-only", cwd=root, env=environment, timeout=15)
+    cc, pkg_config = gtk_compiler_tools()
+    flags = run([pkg_config, "--cflags", "--libs", "dbus-1", "glib-2.0", "atspi-2"],
+                check="gtk-c-pkg-config", cwd=root, env=environment, timeout=15, capture=True)
+    require(0 < len(flags.encode("utf-8")) <= 16384, "GTK compiler flags exceed their bound")
+    compiler_flags = shlex.split(flags)
+    require(len(compiler_flags) <= 128 and all(
+        flag == "-pthread" or flag.startswith(("-I/", "-L/", "-l", "-D"))
+        for flag in compiler_flags), "Unexpected GTK compiler flag")
+    run([cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror=implicit-function-declaration",
+         "-Werror=incompatible-pointer-types", str(desktop / "native/session_gtk_input_linux.c"),
+         "-o", str(root / "target/session-gtk-input"), *compiler_flags],
+        check="gtk-c-compile-only", cwd=root, env=environment, timeout=60)
+    run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
+         str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
+        check="vite-assets", cwd=desktop, env=environment, timeout=90)
+    run([cargo, "test", *common, "--test", "session-gtk-qualification", "--no-run", "--features",
+         ",".join(GTK_COMPILE_FEATURES)], check="gtk-integration-compile-only", cwd=root,
+        env=environment, timeout=1500)
+    return observed_node
+
+
 def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, name)
+    admit_platform(scope, platform)
     context = load_context(platform, scope)
     root, source = Path(context["root"]), Path(context["source"])
     environment = clean_environment(root)
@@ -880,7 +1026,7 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     manifest = source / "desktop/src-tauri/Cargo.toml"
     source_unchanged(context)
     no_cargo_configuration((root, *root.parents))
-    if name == "clean" and scope == COMPILE_SCOPE:
+    if name == "clean" and scope in COMPILE_PROFILES:
         clean_compile(context)
         return
     if name == "acquire":
@@ -912,6 +1058,12 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     cargo, _ = tools(context, environment)
     common = ["--locked", "--offline", "--jobs", "1", "--no-default-features",
               "--target", TARGETS[platform], "--manifest-path", str(manifest), "--target-dir", str(root / "target")]
+    if name == "compile" and scope == GTK_COMPILE_SCOPE:
+        observed_node = compile_gtk(context, cargo, common, environment)
+        source_unchanged(context)
+        require(context["sg1"] == gtk_compile_binding(source), "SG1 compiler inputs changed during compilation")
+        phase_receipt(context, name, list(GTK_COMPILE_CHECKS["compile"]), node=observed_node)
+        return
     if name == "compile":
         run([cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"],
             check="headless-test-compile-only", cwd=root, env=environment, timeout=600)

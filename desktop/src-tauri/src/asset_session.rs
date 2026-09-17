@@ -22,6 +22,15 @@ const RECORD_METADATA_BYTES: usize = 1024 * 1024;
 // Never inferred from crate presence, a renderer boolean, or R1 DTO passes.
 const NATIVE_QUALIFIED: bool = false;
 
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+use crate::shell::qualification::{EventKind as FixtureEvent, FixtureAdmission, Qualification};
+macro_rules! fixture_event {
+    ($owner:expr, $kind:ident, $detail:expr) => {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        $owner.fixture_event(FixtureEvent::$kind, $detail);
+    };
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 struct Token(String);
@@ -167,7 +176,13 @@ impl OriginalWork {
             Poll::Ready(result) => {
                 let normal = result.is_ok();
                 book.receipt = if normal { JoinReceipt::Returned } else { JoinReceipt::Failed };
-                book.handle.take(); Some(normal)
+                book.handle.take();
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(context) = self.fixture() {
+                    let source = self.source.try_lock().ok().and_then(|source| source.fixture_facts());
+                    context.original_joined(self.id, normal, source);
+                }
+                Some(normal)
             }
         }
     }
@@ -185,6 +200,12 @@ impl OriginalWork {
             && self.gui.facts().is_some_and(|facts| facts.created && !facts.not_created && facts.response
                 && facts.declined && !facts.accepted && facts.refusal.is_none()
                 && facts.destroyed && facts.released && facts.close_ack)
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn fixture(&self) -> Option<Arc<Qualification>> { self.gui.document.upgrade()?.fixture.as_ref()?.upgrade() }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn fixture_event(&self, kind: FixtureEvent, detail: u32) {
+        if let Some(context) = self.fixture() { context.event(kind, self.id, detail); }
     }
     fn retain_retirement(&self, retirement: Retirement) -> Result<(), Retirement> {
         let Ok(mut holding) = self.retirement.try_lock() else { return Err(retirement); };
@@ -209,6 +230,12 @@ pub(crate) struct GuiFacts {
     pub(crate) refusal: Option<Reason>,
 }
 impl GuiCall {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn fixture_context(&self) -> Option<Arc<Qualification>> { self.owner()?.fixture() }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn fixture_event(&self, kind: FixtureEvent, detail: u32) {
+        if let Some(owner) = self.owner() { owner.fixture_event(kind, detail); }
+    }
     pub(crate) fn owner(&self) -> Option<Arc<OriginalWork>> { self.owner.upgrade() }
     pub(crate) fn facts(&self) -> Option<MutexGuard<'_, GuiFacts>> { self.facts.lock().ok() }
     pub(crate) fn changed(&self) { self.wake.notify_one(); }
@@ -330,16 +357,37 @@ fn quit_question_admitted(state: &DocumentState) -> bool {
         && !state.session && !state.lock_pending && assets_can_exit_locked(state)
         && state.quit.as_ref().is_none_or(|quit| quit.normally_declined())
 }
-struct Inner { state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32> }
+struct Inner {
+    state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fixture: Option<Weak<Qualification>>,
+}
 #[derive(Clone)]
 pub(crate) struct DocumentBinding { inner: Arc<Inner> }
 
 impl DocumentBinding {
     pub(crate) fn new(bridge: Arc<DesktopBridge>) -> Self {
         let (changes, _) = watch::channel(0);
-        Self { inner: Arc::new(Inner { bridge, changes, state: Mutex::new(DocumentState { lifetime: DocumentLifetime::default(), revision: 0,
+        Self { inner: Arc::new(Inner { bridge, changes,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            fixture: None,
+            state: Mutex::new(DocumentState { lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None }) }) }
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn for_fixture(bridge: Arc<DesktopBridge>, permit: FixtureAdmission) -> Result<Self, &'static str> {
+        let mut document = Self::new(bridge);
+        let context = permit.consume()?;
+        Arc::get_mut(&mut document.inner).ok_or("sg1_new_document_not_exclusive")?.fixture = Some(Arc::downgrade(&context));
+        context.bind_original(document.clone())?;
+        Ok(document)
+    }
+    fn native_qualified(&self) -> bool {
+        if NATIVE_QUALIFIED { return true; }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) { return context.permits(self); }
+        false
     }
     fn lock(&self) -> MutexGuard<'_, DocumentState> {
         match self.inner.state.lock() {
@@ -406,7 +454,7 @@ impl DocumentBinding {
         if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
         if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
         if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
-        if !NATIVE_QUALIFIED { return Err(AssetError::new(Reason::Unqualified)); }
+        if !self.native_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
         if session && !state.session { return Err(AssetError::new(Reason::Closed)); } Ok(())
     }
     fn registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Result<T, AssetError> {
@@ -473,7 +521,7 @@ impl DocumentBinding {
         let capability_reason = if state.unknown { Reason::CleanupUnknown } else if state.stopping { Reason::Shutdown }
             else if state.lost_observed { Reason::DocumentLost }
             else if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { Reason::UnsupportedPlatform }
-            else if !NATIVE_QUALIFIED { Reason::Unqualified } else if redacted { Reason::Closed } else { Reason::None };
+            else if !self.native_qualified() { Reason::Unqualified } else if redacted { Reason::Closed } else { Reason::None };
         let operation = state.slot.as_ref().map(|slot| OperationStatus { operation_id: slot.owner.id, operation: slot.operation,
             phase: slot.phase, reason: slot.reason, source: slot.source, settlement: slot.settlement,
             selection_token: if redacted { None } else { slot.selection.clone() },
@@ -506,6 +554,13 @@ impl DocumentBinding {
         state.session = true; self.bump(&mut state); Ok(self.snapshot(&state))
     }
     pub(crate) fn context(&self, args: commands::Context<'_>) -> Result<AssetStatus, AssetError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) {
+            if !context.context_input(args.project_id) || !args.draft.as_object().is_some_and(|draft| draft.is_empty())
+                || args.platform != Platform::Android || args.stage != Stage::Candidate || args.purpose != Purpose::Signing {
+                context.refuse(); return Err(AssetError::new(Reason::Unqualified));
+            }
+        }
         let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?;
         let (registry_generation, project) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id))?;
         let Some(revision) = state.next_context.checked_add(1) else { self.exhaust(&mut state); return Err(AssetError::new(Reason::CleanupUnknown)); };
@@ -579,6 +634,8 @@ enum Job {
 }
 
 async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Reason> {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let fixture_kind = match &job { ChildJob::Probe { .. } => 1, ChildJob::Tokens => 2, ChildJob::Capture { .. } => 3 };
     let mut book = owner.child.lock().await;
     if book.handle.is_some() || !matches!(book.receipt, JoinReceipt::New | JoinReceipt::Returned) { return Err(Reason::CleanupUnknown); }
     if owner.interrupted() { return Err(Reason::UserCancelled); }
@@ -589,11 +646,13 @@ async fn child(owner: &Arc<OriginalWork>, job: ChildJob) -> Result<ChildEnd, Rea
         if enter.blocking_recv().is_err() { return ChildEnd::Refused(Reason::UserCancelled); }
         execute_child(&worker, job)
     }));
+    fixture_event!(owner, ChildRegistered, fixture_kind);
     // No blocking child can enter RNG/native work before its ORIGINAL handle
     // and resource slots above exist. Dropping an invoke never touches them.
     if start.send(()).is_err() { owner.stop(); }
     let result = match book.handle.as_mut() { Some(handle) => handle.await, None => { book.receipt = JoinReceipt::Failed; return Err(Reason::CleanupUnknown); } };
     book.handle.take(); // Only after this original join returned.
+    fixture_event!(owner, ChildJoined, fixture_kind * 2 + u32::from(result.is_ok()));
     match result { Ok(result) => { book.receipt = JoinReceipt::Returned; Ok(result) }, Err(_) => { book.receipt = JoinReceipt::Failed; Err(Reason::CleanupUnknown) } }
 }
 fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
@@ -605,7 +664,11 @@ fn execute_child(owner: &Arc<OriginalWork>, job: ChildJob) -> ChildEnd {
             let captured = match owner.source.lock() { Ok(mut book) => asset_source::capture(&mut book, path, &roots, kind, &mut stop), Err(_) => Err(Reason::CleanupUnknown) };
             match captured {
                 Ok(captured) => match credential_format::inspect(kind, &captured.bytes, &mut stop) {
-                    Ok(observation) => ChildEnd::Captured(Material { captured, observation }), Err(_) => ChildEnd::Refused(Reason::UserCancelled),
+                    Ok(observation) => {
+                        fixture_event!(owner, HeaderObserved, u32::from(kind == credential_format::FileKind::AndroidKeystore
+                            && observation.is_observed() && captured.bytes == [0xfe,0xed,0xfe,0xed,0,0,0,2,0,0,0,0]));
+                        ChildEnd::Captured(Material { captured, observation })
+                    }, Err(_) => ChildEnd::Refused(Reason::UserCancelled),
                 },
                 Err(reason) => ChildEnd::Refused(reason),
             }
@@ -676,6 +739,7 @@ impl DocumentBinding {
         // Remember the actual native decline before stop_quit changes STOP.
         // A programmatic post-STOP close or rejected late OK is never Cancel.
         (facts.accepted, facts.declined) = admitted_response(response, original, owner.interrupted(), quit);
+        fixture_event!(owner, ResponseDecision, u32::from(facts.accepted) + 2 * u32::from(facts.declined));
         if facts.accepted { facts.accepted_at = Some(now); owner.set_endpoint(Some(now + WORK)); }
         let read_one_path = facts.accepted && !quit;
         if quit {
@@ -686,6 +750,7 @@ impl DocumentBinding {
                 state.quit_accepted = true; state.stopping = true; invalidate_all(&mut state);
                 if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::Shutdown, now); }
                 stop_quit(&mut state, now);
+                fixture_event!(owner, QuitStop, 1);
             } else { stop_quit(&mut state, now); }
         } else if let Some(slot) = state.slot.as_mut().filter(|slot| Arc::ptr_eq(&slot.owner, owner)) {
             if read_one_path {
@@ -887,6 +952,7 @@ impl DocumentBinding {
                 slot.kind = Some(payload.kind); slot.source = SourceState::Captured;
                 slot.candidate = Some(Candidate { payload, record_id: tokens.record, existing: slot.target.clone() });
                 slot.selection = Some(tokens.selection); slot.phase = Phase::Selected; slot.settlement = Settlement::Known;
+                fixture_event!(slot.owner, CandidatePublished, 1);
             }
             Staged::Prepared { result, tokens } => {
                 if !tokens_distinct(&tokens) { slot.stop(Reason::SourceRefused, Instant::now()); return; }
@@ -939,6 +1005,7 @@ impl DocumentBinding {
                 Ok(project) => {
                     invalidate_all(state);
                     slot.project = Some(project); slot.source = SourceState::NotRun; slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+                    fixture_event!(slot.owner, ProjectPublished, 1);
                     // Registry generation is part of every old context tuple.
                     // Keep its bounded bytes only until this off-lock retirement.
                 }
@@ -1046,12 +1113,19 @@ impl DocumentBinding {
             }
             run_job(document, worker, job).await;
         }));
+        fixture_event!(owner, CoordinatorRegistered, 0);
         // The original handle, GUI acquisition facts and child/resource slots
         // exist before this sender can be used. The caller releases the actual
         // DocumentBinding lock before opening the start barrier.
         self.bump(state); Ok(start)
     }
     pub(crate) fn choose(&self, app: tauri::AppHandle, args: commands::Choose<'_>) -> Result<AssetStatus, AssetError> {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) {
+            if args.kind != Kind::AndroidKeystore || args.replacement.is_some() {
+                context.refuse(); return Err(AssetError::new(Reason::Unqualified));
+            }
+        }
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?; idle(&state)?;
         if args.kind.file().is_none() { return Err(AssetError::new(Reason::UnsupportedFormat)); }
         let context = self.current_context(&mut state, args.context_revision)?;
@@ -1437,6 +1511,7 @@ impl DocumentBinding {
             if enter.await.is_err() { worker.gui.not_created(Reason::UserCancelled); return; }
             run_quit(document, worker, app).await;
         }));
+        fixture_event!(owner, CoordinatorRegistered, 1);
         self.bump(&mut state); drop(book); drop(state); drop(previous); let _ = start.send(());
     }
 }
@@ -1486,6 +1561,79 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     // the original relay before setting exit_ready. No task self-join, inline
     // GTK dispatch or body-ended flag is substituted for those joins.
 }
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod fixture_observation {
+    use super::*;
+    // Private equality only: no extra payload/GTK/FD owner and no serialization
+    // of material, selection tokens, pointer values or original deadlines.
+    #[derive(PartialEq, Eq)]
+    pub(crate) struct Selection {
+        owner: u32, payload: usize, context: usize, token: String, record: String,
+        context_revision: u32, registry_generation: u32, review: Instant,
+    }
+    impl DocumentBinding {
+        pub(crate) fn same_original(&self, other: &Self) -> bool { Arc::ptr_eq(&self.inner, &other.inner) }
+        pub(crate) fn fixture_bootstrap(&self) -> bool {
+            let state = self.lock(); state.lifetime.original_bound() && !state.unknown && !state.stopping && !state.session
+                && state.next_operation == 0 && state.slot.is_none() && state.quit.is_none()
+        }
+        pub(crate) fn fixture_picker_preserved(&self) -> bool {
+            let state = self.lock();
+            !state.unknown && !state.stopping && !state.quit_pending && !state.retiring && !state.session && state.quit.is_none()
+                && state.lifetime.original_bound() && state.next_operation == 1 && state.slot.as_ref().is_some_and(|slot|
+                    slot.owner.id == 1 && slot.phase == Phase::Picking && slot.review_end.is_none() && slot.cleanup_end.is_none()
+                        && slot.owner.endpoint().is_none() && !slot.owner.stopped()
+                        && slot.owner.gui.facts().is_some_and(|f| f.created && f.showing && !f.response && !f.destroyed && !f.released)
+                        && slot.owner.source.try_lock().is_ok_and(|book| book.not_started()))
+        }
+        pub(crate) fn fixture_cancelled(&self) -> bool {
+            self.reconcile(); let state = self.lock();
+            !state.unknown && !state.stopping && !state.quit_pending && state.quit.is_none() && state.next_operation == 1
+                && state.slot.as_ref().is_some_and(|slot| slot.owner.id == 1 && slot.phase == Phase::Idle && slot.reason == Reason::UserCancelled
+                    && slot.owner.resources_settled() && slot.project.is_none())
+                && self.inner.bridge.native_roster().is_ok_and(|roster| roster.roots.is_empty())
+        }
+        pub(crate) fn fixture_project(&self) -> Option<(Project, serde_json::Value)> {
+            self.reconcile(); let state = self.lock(); let slot = state.slot.as_ref()?;
+            if state.unknown || state.stopping || state.quit_pending || state.next_operation != 2
+                || slot.owner.id != 2 || slot.phase != Phase::Idle || !slot.owner.resources_settled() { return None; }
+            let roster = self.inner.bridge.native_roster().ok()?;
+            if roster.roots.len() != 1 { return None; }
+            Some((slot.project.clone()?, roster.roots[0].identity.fixture_value()))
+        }
+        pub(crate) fn fixture_selection(&self) -> Option<Selection> {
+            self.reconcile(); let state = self.lock(); let slot = state.slot.as_ref()?;
+            if state.unknown || state.stopping || state.quit_pending || state.retiring || !state.session || !state.lifetime.original_bound()
+                || slot.owner.id != 3 || slot.phase != Phase::Selected || slot.source != SourceState::Captured
+                || slot.settlement != Settlement::Known || !slot.owner.resources_settled() || slot.owner.stopped()
+                || slot.cleanup_end.is_some() || !state.records.is_empty() || !state.assignments.is_empty() { return None; }
+            let context = state.context.as_ref()?;
+            if !slot.context.as_ref().is_some_and(|bound| Arc::ptr_eq(bound, context)) { return None; }
+            let candidate = slot.candidate.as_ref()?; let material = candidate.payload.material.as_ref()?;
+            if candidate.payload.kind != Kind::AndroidKeystore || !material.observation.is_observed()
+                || material.captured.bytes != [0xfe,0xed,0xfe,0xed,0,0,0,2,0,0,0,0] || candidate.existing.is_some() { return None; }
+            let review = slot.review_end?; if Instant::now() >= review { return None; }
+            Some(Selection { owner:slot.owner.id, payload:Arc::as_ptr(&candidate.payload) as usize,
+                context:Arc::as_ptr(context) as usize, token:slot.selection.as_ref()?.0.clone(), record:candidate.record_id.0.clone(),
+                context_revision:context.revision, registry_generation:context.registry_generation, review })
+        }
+        pub(crate) fn fixture_cancel_preserved(&self, before: &Selection) -> bool {
+            if self.fixture_selection().as_ref() != Some(before) { return false; }
+            let state = self.lock(); !state.quit_pending && !state.quit_accepted && state.next_operation == 4
+                && state.quit.as_ref().is_some_and(|quit| quit.id == 4 && quit.normally_declined() && quit.resources_settled())
+                && !self.inner.bridge.supervisor.stopping() && !self.inner.bridge.edits.stopping()
+        }
+        pub(crate) fn fixture_final(&self) -> bool {
+            let state = self.lock(); !state.unknown && !state.exhausted && state.lifetime.original_bound() && !state.lost_observed
+                && state.next_operation == 5 && state.stopping && state.quit_accepted && !state.session && !state.lock_pending
+                && assets_can_exit_locked(&state) && state.quit.as_ref().is_some_and(|quit| quit.id == 5 && quit.resources_settled()
+                    && quit.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none()))
+        }
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use fixture_observation::Selection as FixtureSelection;
 
 #[cfg(test)]
 mod tests {
