@@ -265,7 +265,7 @@ impl RuntimeConfig {
             previous = Some(&item.path);
             if item.path == "core.zip" && item.sha256 != manifest.core_sha256 { return Err(unavailable()); }
         }
-        for required in [PYTHON_RESOURCE, "engine_bootstrap.py", "core.zip"] {
+        for required in [PYTHON_RESOURCE, "engine_bootstrap.py", "config_edit_bootstrap.py", "core.zip"] {
             if !files.contains(required) { return Err(unavailable()); }
         }
         exact_inventory(&self.bundle_root, &files, end)?;

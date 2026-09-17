@@ -28,6 +28,9 @@ NATIVE_TEST = "supervisor::hosted_tests::passive_hosted_contract"
 CONFIG_OWNER_TEST = "edit_owner::hosted_tests::hosted_config_edit_owner_original_resources"
 CONFIG_DRIVER_LOSS_TEST = "edit_owner::hosted_tests::hosted_config_driver_loss_original_resources"
 CONFIG_WATCHDOG_LOSS_TEST = "edit_owner::hosted_tests::hosted_config_watchdog_loss_original_resources"
+CONFIG_STOP_TEST = "edit_owner::hosted_tests::hosted_config_stop_original_resources"
+CONFIG_TERMINAL_DEADLINE_TEST = "edit_owner::hosted_tests::hosted_config_terminal_deadline_original_resources"
+CONFIG_STARTUP_STOP_TEST = "edit_owner::hosted_tests::hosted_config_startup_stop_original_resources"
 TARGETS = {
     "linux": "x86_64-unknown-linux-gnu",
     "macos": "aarch64-apple-darwin",
@@ -102,6 +105,7 @@ TOOL_CHECKS = frozenset({
     "config-core-ordinary", "config-core-committed-fsync", "config-core-committed-close",
     "config-owner-native-contract",
     "config-driver-loss-native-contract", "config-watchdog-loss-native-contract",
+    "config-stop-native-contract", "config-terminal-deadline-native-contract", "config-startup-stop-native-contract",
 })
 
 
@@ -343,6 +347,90 @@ def validate_config_loss_receipt(receipt: object, kind: str, *, source_sha: str,
     return receipt
 
 
+def validate_config_delta_receipt(receipt: object, kind: str, *, source_sha: str, platform: str,
+                                  source_hashes: dict[str, str], python_hash: str) -> dict:
+    require(kind in {"stop", "terminal-deadline", "startup-stop"} and isinstance(receipt, dict),
+            "Unexpected configuration lifecycle receipt")
+    stopping = kind == "stop"
+    fields = {"schemaVersion", "scope", "status", "failureCode", "bindings", "notVerified"}
+    fields.update({"allOwnersSettled", "cases"} if stopping else {"case"})
+    require(set(receipt) == fields and type(receipt["schemaVersion"]) is int and receipt["schemaVersion"] == 1
+            and receipt["scope"] == ("configuration-owner-stop-hosted-v1" if stopping else
+                                     "configuration-owner-clock-retention-hosted-v1")
+            and receipt["status"] == "passed" and receipt["failureCode"] is None
+            and receipt["notVerified"] == list(CONFIG_OWNER_NOT_VERIFIED),
+            "Configuration lifecycle fixture did not pass its exact scope")
+    validate_config_owner_bindings(receipt["bindings"], source_sha=source_sha, platform=platform,
+                                    source_hashes=source_hashes, python_hash=python_hash)
+    common = {"name", "evidenceKind", "nativePhase", "nativeFinality", "nativeReason", "applySubmitted",
+              "outcome", "terminalSeq", "requestFrames", "responseFrames", "stdoutBytes", "stderrBytes",
+              "forceAttempted", *CONFIG_OWNER_FINALITY}
+    if stopping:
+        require(receipt["allOwnersSettled"] is True and isinstance(receipt["cases"], list)
+                and len(receipt["cases"]) == 2, "Configuration stop case inventory differs")
+        for case, name, evidence, reason, applying, prefix in zip(
+            receipt["cases"], ("discard-reviewing", "partial-apply-eof"),
+            ("actual-config-child", "fixed-prefix-scheduling-control"), ("discarded", "cancelled"),
+            (False, True), (0, 1), strict=True,
+        ):
+            require(isinstance(case, dict) and set(case) == common | {"preparedCorrelation", "prefixBytes", "applySuffixStarted"}
+                    and case["name"] == name and case["evidenceKind"] == evidence
+                    and case["nativePhase"] == "final" and case["nativeFinality"] == "settled"
+                    and case["nativeReason"] == reason and case["applySubmitted"] is applying
+                    and all(case[field] is True for field in CONFIG_OWNER_FINALITY)
+                    and case["preparedCorrelation"] is True and case["applySuffixStarted"] is False
+                    and case["forceAttempted"] is False, "Configuration stop original custody differs")
+            require(all(type(case[field]) is int for field in
+                        ("requestFrames", "responseFrames", "stdoutBytes", "stderrBytes", "prefixBytes", "terminalSeq"))
+                    and case["requestFrames"] == 2 and case["responseFrames"] == 3
+                    and 0 < case["stdoutBytes"] <= 12 * 1024 * 1024 and case["stderrBytes"] == 0
+                    and case["terminalSeq"] == 1 and case["prefixBytes"] == prefix
+                    and case["outcome"] == {"effect": "not_started", "journal": "not_created", "resources": "settled", "reason": "cancelled"},
+                    "Configuration partial-input or prepared-EOF outcome differs")
+    else:
+        terminal = kind == "terminal-deadline"
+        case = receipt["case"]
+        additional = {"registryDisabled", "editPermitClosed", "editAvailability", "nativeCanExit",
+                      "originalResourcesSettled", "lateSettled", "retainedBeforeRelease", "cleanupStartUnchanged",
+                      "cleanupElapsedMs", "scheduledActiveDeadline", "inspectionJoined", "acquisitionNotAdmitted",
+                      "pipeAcquisition", "controlEntered", "controlReleased", "shutdownObserved"}
+        require(isinstance(case, dict) and set(case) == common | additional and case["name"] == kind
+                and case["evidenceKind"] == "scheduling-control-not-os-fault"
+                and case["nativePhase"] == "unknown" and case["nativeFinality"] == "unknown"
+                and case["nativeReason"] == ("active_timeout" if terminal else "discarded")
+                and case["applySubmitted"] is terminal and case["forceAttempted"] is False
+                and case["editAvailability"] == ("shutdown" if terminal else "cleanup_unknown"),
+                "Configuration clock control cannot claim normal owner success")
+        require(all(case[field] is True for field in (
+                    "registryDisabled", "editPermitClosed", "nativeCanExit", "originalResourcesSettled", "lateSettled",
+                    "retainedBeforeRelease", "cleanupStartUnchanged", "inspectionJoined", "controlEntered", "controlReleased"))
+                and case["scheduledActiveDeadline"] is terminal and case["shutdownObserved"] is terminal
+                and case["acquisitionNotAdmitted"] is (not terminal)
+                and case["pipeAcquisition"] == ("available" if terminal else "absent"),
+                "Configuration retained-to-late-settlement facts differ")
+        # The childless case proves positive inspection/STOP refusal/Absent and
+        # original IO/management joins. No wait, close, EOF or acquisition join
+        # is invented for endpoints that were never acquired.
+        for field in CONFIG_OWNER_FINALITY:
+            require(case[field] is (terminal or field in {"ioJoined", "driverJoined", "watchdogJoined", "managerJoined"}),
+                    "Configuration original wait/EOF/close or no-acquisition facts differ")
+        require(all(type(case[field]) is int for field in
+                    ("requestFrames", "responseFrames", "stdoutBytes", "stderrBytes", "cleanupElapsedMs"))
+                and 10_000 <= case["cleanupElapsedMs"] <= 60_000
+                and case["requestFrames"] == (3 if terminal else 0)
+                and case["responseFrames"] == (3 if terminal else 0) and case["stderrBytes"] == 0,
+                "Configuration clock or frame accounting differs")
+        if terminal:
+            require(0 < case["stdoutBytes"] <= 12 * 1024 * 1024
+                    and type(case["terminalSeq"]) is int and case["terminalSeq"] == 2
+                    and case["outcome"] == {"effect": "committed", "journal": "clean", "resources": "settled", "reason": "none"},
+                    "Configuration late committed result was lost or replaced")
+        else:
+            require(case["stdoutBytes"] == 0 and case["terminalSeq"] is None and case["outcome"] is None,
+                    "Never-started configuration owner fabricated a core result")
+    return receipt
+
+
 def config_owner_receipt(context: dict) -> dict:
     path = Path(context["root"]) / "config-owner/receipt.json"
     ordinary(path)
@@ -366,6 +454,20 @@ def config_loss_receipt(context: dict, kind: str) -> dict:
     require(len(data) <= 64 * 1024, "Management-loss receipt changed")
     source = Path(context["source"])
     return validate_config_loss_receipt(json.loads(data), kind, source_sha=context["sourceSha"], platform=context["platform"],
+        source_hashes={name: hash_file(source / relative) for name, relative in CONFIG_OWNER_SOURCES.items()},
+        python_hash=hash_file(Path(context["python"])))
+
+
+def config_delta_receipt(context: dict, kind: str) -> dict:
+    require(kind in {"stop", "terminal-deadline", "startup-stop"}, "Unknown configuration lifecycle partition")
+    path = Path(context["root"]) / ("config-" + kind) / "receipt.json"
+    ordinary(path)
+    require(0 < path.stat().st_size <= 64 * 1024, "Configuration lifecycle receipt exceeded its bound")
+    with path.open("rb") as stream:
+        data = stream.read(64 * 1024 + 1)
+    require(len(data) <= 64 * 1024, "Configuration lifecycle receipt changed")
+    source = Path(context["source"])
+    return validate_config_delta_receipt(json.loads(data), kind, source_sha=context["sourceSha"], platform=context["platform"],
         source_hashes={name: hash_file(source / relative) for name, relative in CONFIG_OWNER_SOURCES.items()},
         python_hash=hash_file(Path(context["python"])))
 
@@ -397,6 +499,7 @@ def prepare(platform: str) -> None:
     root = Path(tempfile.mkdtemp(prefix="mrk-desktop-foundation-", dir=temp))
     no_cargo_configuration((root,))
     for name in ("home", "cargo", "rustup", "tmp", "target", "native", "config-owner", "config-driver-loss", "config-watchdog-loss",
+                 "config-stop", "config-terminal-deadline", "config-startup-stop",
                  "appdata", "localappdata", "npm-cache"):
         (root / name).mkdir(mode=0o700)
     for name in ("npmrc-user", "npmrc-global", "gitconfig-empty"):
@@ -438,6 +541,9 @@ def prepare(platform: str) -> None:
         "workflowSha256": hash_file(source / ".github/workflows/desktop-foundation.yml"),
         "runId": context["runId"], "attempt": context["attempt"], "platform": platform,
         "image": os.environ.get("ImageOS", "") + "/" + os.environ.get("ImageVersion", ""),
+        # Version only (never hostname): future kernel-bound runtime admission
+        # must use actual native observations, not infer a kernel from ImageOS.
+        "kernelRelease": os.uname().release if platform in {"linux", "macos"} else None,
         "architecture": os.environ["RUNNER_ARCH"], "python": PYTHON, "expectedRust": RUST,
         "coreZipSha256": hash_file(root / "core.zip"), "coreFiles": inventory,
         "bootstrapSha256": hash_file(source / "desktop/engine_bootstrap.py"),
@@ -589,12 +695,44 @@ def phase(name: str, platform: str) -> None:
         source_unchanged(context)
         phase_receipt(context, name, [CONFIG_DRIVER_LOSS_TEST, CONFIG_WATCHDOG_LOSS_TEST, "native-resources-settled-management-unknown"],
                       scope="controlled-management-loss-only-not-normal-owner-settlement")
+    elif name == "config-owner-delta":
+        require(platform in {"linux", "macos"}, "POSIX configuration fixtures are not Windows support")
+        native_receipt(context)
+        config_owner_receipt(context)
+        config_loss_receipt(context, "driver-loss")
+        config_loss_receipt(context, "watchdog-loss")
+        environment.update(MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
+                           MRK_DESKTOP_EDIT_HOSTED_CHECKS="configuration-v1", MRK_DESKTOP_EDIT_SOURCE_SHA=context["sourceSha"],
+                           GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+                           RUNNER_OS="Linux" if platform == "linux" else "macOS",
+                           RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
+        environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "config-stop")
+        run([cargo, "test", *common, "--lib", "--features", "development-runtime", CONFIG_STOP_TEST,
+             "--", "--exact", "--ignored", "--test-threads=1"], check="config-stop-native-contract", cwd=root, env=environment, timeout=60)
+        config_delta_receipt(context, "stop")
+        # Each original subprocess must return and its actual resource facts
+        # must pass before the next fixed process/root is admitted. The clock
+        # cases retain sticky Unknown, not ordinary successful-save finality.
+        environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "config-terminal-deadline")
+        run([cargo, "test", *common, "--lib", "--features", "development-runtime", CONFIG_TERMINAL_DEADLINE_TEST,
+             "--", "--exact", "--ignored", "--test-threads=1"], check="config-terminal-deadline-native-contract", cwd=root, env=environment, timeout=90)
+        config_delta_receipt(context, "terminal-deadline")
+        environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "config-startup-stop")
+        run([cargo, "test", *common, "--lib", "--features", "development-runtime", CONFIG_STARTUP_STOP_TEST,
+             "--", "--exact", "--ignored", "--test-threads=1"], check="config-startup-stop-native-contract", cwd=root, env=environment, timeout=60)
+        config_delta_receipt(context, "startup-stop")
+        source_unchanged(context)
+        phase_receipt(context, name, [CONFIG_STOP_TEST, CONFIG_TERMINAL_DEADLINE_TEST, CONFIG_STARTUP_STOP_TEST,
+                                     "original-resource-clock-and-stop-receipt-acceptance"],
+                      scope="configuration-clock-and-stop-controls-only-not-desktop-enablement")
     elif name == "config-core":
         require(platform in {"linux", "macos"}, "POSIX configuration fixtures are not Windows support")
         native_receipt(context)
         config_owner_receipt(context)
         config_loss_receipt(context, "driver-loss")
         config_loss_receipt(context, "watchdog-loss")
+        for kind in ("stop", "terminal-deadline", "startup-stop"):
+            config_delta_receipt(context, kind)
         environment.update(MRK_DESKTOP_CONFIG_NATIVE="1", GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
                            RUNNER_OS="Linux" if platform == "linux" else "macOS",
                            RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
@@ -624,6 +762,8 @@ def phase(name: str, platform: str) -> None:
             config_owner_receipt(context)
             config_loss_receipt(context, "driver-loss")
             config_loss_receipt(context, "watchdog-loss")
+            for kind in ("stop", "terminal-deadline", "startup-stop"):
+                config_delta_receipt(context, kind)
             for partition in CONFIG_PARTITIONS:
                 config_receipt(context, partition)
             retained = True  # Management-loss roots stay retained even after proved native settlement.
@@ -647,7 +787,7 @@ def phase(name: str, platform: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("prepare", "acquire", "compile", "native", "config-owner", "config-task-loss", "config-core", "clean"))
+    parser.add_argument("phase", choices=("prepare", "acquire", "compile", "native", "config-owner", "config-task-loss", "config-owner-delta", "config-core", "clean"))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)

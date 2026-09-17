@@ -156,6 +156,15 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py config-task-loss'
+      - name: Verify original EOF cancellation and nonrenewable lifecycle deadlines
+        if: matrix.platform != 'windows'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py config-owner-delta'
       - name: Verify core transactions before the last retained terminal-fault control
         if: matrix.platform != 'windows'
         timeout-minutes: 5
@@ -181,6 +190,10 @@ jobs:
             ${{ steps.prepare.outputs.root }}/config-task-loss-checks.json
             ${{ steps.prepare.outputs.root }}/config-driver-loss/receipt.json
             ${{ steps.prepare.outputs.root }}/config-watchdog-loss/receipt.json
+            ${{ steps.prepare.outputs.root }}/config-owner-delta-checks.json
+            ${{ steps.prepare.outputs.root }}/config-stop/receipt.json
+            ${{ steps.prepare.outputs.root }}/config-terminal-deadline/receipt.json
+            ${{ steps.prepare.outputs.root }}/config-startup-stop/receipt.json
             ${{ steps.prepare.outputs.root }}/config-core-checks.json
             ${{ steps.prepare.outputs.root }}/config-ordinary.json
             ${{ steps.prepare.outputs.root }}/config-committed-fsync.json

@@ -31,6 +31,7 @@ MAX_PATH_PARTS = 16
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_CORE_BYTES = 32 * 1024 * 1024
+BOOTSTRAPS = ("engine_bootstrap.py", "config_edit_bootstrap.py")
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 
 
@@ -148,9 +149,13 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
     executable = python / ("python.exe" if "windows" in target else "bin/python3")
     _ordinary(executable)
     _root(executable.parent)
-    # Reserve the two payload files and final manifest before writing output.
+    # Both fixed entry points and the core ZIP are payload. Merely shipping the
+    # passive bootstrap would leave a future qualified edit owner unusable.
+    # None of these packaging assets enables either native execution gate.
+    generated_payloads = len(BOOTSTRAPS) + 1
+    # Reserve every generated payload and the final manifest before any write.
     # This is only publisher preparation, not runtime-custody admission.
-    if len(files(runtime, reserve_entries=3)) > MAX_FILES - 2:
+    if len(files(runtime, reserve_entries=generated_payloads + 1)) > MAX_FILES - generated_payloads:
         raise PreparationError("Python payload leaves no room for core resources")
     package = _root(source / "src/mobile_release")
     candidates = files(package)
@@ -166,9 +171,13 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
     version = re.search(rb'^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$', source_map["mobile_release/__init__.py"], re.M)
     if version is None:
         raise PreparationError("Core version must be an explicit package version")
-    bootstrap = read_checked(_root(source / "desktop") / "engine_bootstrap.py", limit=64 * 1024)
-    with (runtime / "engine_bootstrap.py").open("xb") as stream:
-        stream.write(bootstrap)
+    desktop = _root(source / "desktop")
+    # Admit every fixed source before creating output. A missing edit bootstrap
+    # must not leave a deceptively complete passive-only prepared directory.
+    bootstraps = [(name, read_checked(desktop / name, limit=64 * 1024)) for name in BOOTSTRAPS]
+    for name, content in bootstraps:
+        with (runtime / name).open("xb") as stream:
+            stream.write(content)
     with zipfile.ZipFile(runtime / "core.zip", "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for name, content in core:
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))

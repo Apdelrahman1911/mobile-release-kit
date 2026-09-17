@@ -2,19 +2,21 @@
 //! The normal/development/packaged edit gate is NOT enabled by these checks.
 //! No renderer, picker, subprocess controller, recovery, Store, or OS-fault
 //! simulation is involved. Ambiguous custody retains this runtime for hosted-VM
-//! disposal. Two separately invoked fixed self-panic cases may return with the
-//! edit gate still Unknown only after original OS-resource/unaffected-task proof.
+//! disposal. Fixed self-panic and clock-retention cases may return with the edit
+//! gate still Unknown only after their distinct original-resource/task proofs.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use super::*;
 use std::{fs, io::{Read, Write}, os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt}, path::Path,
-    sync::atomic::AtomicUsize};
+    sync::{Condvar, atomic::{AtomicU32, AtomicUsize}}};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const SCOPE: &str = "configuration-owner-hosted-v1";
 const LOSS_SCOPE: &str = "configuration-owner-management-loss-hosted-v1";
+const STOP_SCOPE: &str = "configuration-owner-stop-hosted-v1";
+const CLOCK_SCOPE: &str = "configuration-owner-clock-retention-hosted-v1";
 const OBSERVATION: Duration = Duration::from_secs(45);
 const NOT_VERIFIED: &[&str] = &["production-runtime-custody", "production-save-enablement", "native-gui", "window-reload-crash",
     "parent-death", "native-stuck-wait-close", "windows-filesystem", "stores", "mobile-builds", "installers"];
@@ -44,6 +46,131 @@ type Check<T> = Result<T, Failure>;
 fn require(condition: bool, failure: Failure) -> Check<()> { if condition { Ok(()) } else { Err(failure) } }
 fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 fn environment(name: &str) -> Check<String> { std::env::var(name).map_err(|_| Failure::HostedGuardRefused) }
+
+// These finite per-Session scheduling controls never replace a native result,
+// move an original resource to a fixture task, or exist in a production build.
+// Gates follow the already-reviewed passive fixture pattern, without its core.
+struct AsyncGate { open: watch::Sender<bool>, armed: AtomicBool, entered: AtomicBool }
+impl Default for AsyncGate {
+    fn default() -> Self {
+        let (open, _) = watch::channel(true);
+        Self { open, armed: AtomicBool::new(false), entered: AtomicBool::new(false) }
+    }
+}
+impl AsyncGate {
+    fn hold(&self) -> Check<()> {
+        require(!self.armed.swap(true, Ordering::SeqCst), Failure::UnexpectedStatus)?;
+        self.open.send_replace(false);
+        Ok(())
+    }
+    async fn wait(&self) {
+        let mut open = self.open.subscribe();
+        self.entered.store(true, Ordering::SeqCst);
+        loop {
+            if *open.borrow_and_update() { return; }
+            if open.changed().await.is_err() { return; }
+        }
+    }
+    fn release(&self) { self.open.send_replace(true); }
+}
+
+#[derive(Default)]
+struct BlockingGate { closed: Mutex<bool>, changed: Condvar, armed: AtomicBool, entered: AtomicBool }
+impl BlockingGate {
+    fn hold(&self) -> Check<()> {
+        require(!self.armed.swap(true, Ordering::SeqCst), Failure::UnexpectedStatus)?;
+        *self.closed.lock().map_err(|_| Failure::UnexpectedStatus)? = true;
+        Ok(())
+    }
+    fn wait(&self) {
+        let mut closed = self.closed.lock().unwrap_or_else(|error| error.into_inner());
+        self.entered.store(true, Ordering::SeqCst);
+        while *closed { closed = self.changed.wait(closed).unwrap_or_else(|error| error.into_inner()); }
+    }
+    fn release(&self) {
+        *self.closed.lock().unwrap_or_else(|error| error.into_inner()) = false;
+        self.changed.notify_all();
+    }
+}
+
+pub(super) struct Schedule {
+    prefix: AsyncGate, terminal: AsyncGate, inspection: BlockingGate,
+    prefix_bytes: AtomicUsize, apply_suffix_started: AtomicBool,
+    accepted_sequence: AtomicU32, held_terminal: Mutex<Option<(u32, wire::CoreEditOutcome)>>,
+    inspection_returned: AtomicBool, acquisition_refused: AtomicBool, failed: AtomicBool,
+}
+impl Default for Schedule {
+    fn default() -> Self {
+        Self { prefix: AsyncGate::default(), terminal: AsyncGate::default(), inspection: BlockingGate::default(),
+            prefix_bytes: AtomicUsize::new(0), apply_suffix_started: AtomicBool::new(false),
+            accepted_sequence: AtomicU32::new(u32::MAX), held_terminal: Mutex::new(None),
+            inspection_returned: AtomicBool::new(false), acquisition_refused: AtomicBool::new(false), failed: AtomicBool::new(false) }
+    }
+}
+impl Schedule {
+    pub(super) async fn write_original(&self, writer: &mut ChildStdin, bytes: &[u8], ordinal: usize) -> std::io::Result<()> {
+        if ordinal == 3 && self.prefix.armed.load(Ordering::SeqCst) {
+            if bytes.first() != Some(&b'{') || bytes.len() < 2 {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "fixed Apply prefix unavailable"));
+            }
+            writer.write_all(&bytes[..1]).await?; // Positive ORIGINAL write before the milestone.
+            self.prefix_bytes.fetch_add(1, Ordering::SeqCst);
+            self.prefix.wait().await;
+            self.apply_suffix_started.store(true, Ordering::SeqCst);
+            writer.write_all(&bytes[1..]).await
+        } else { writer.write_all(bytes).await }
+    }
+    pub(super) async fn before_frame(&self, frame: &ChildFrame) {
+        if let ChildFrame::Terminal(sequence, terminal) = frame {
+            if self.terminal.armed.load(Ordering::SeqCst) {
+                match self.held_terminal.lock() {
+                    Ok(mut held) if held.is_none() => *held = Some((*sequence, terminal.outcome())),
+                    _ => { self.failed.store(true, Ordering::SeqCst); },
+                }
+                // No registry/resource-book mutex is acquired here. This is
+                // the same original reader, before its original frame send.
+                self.terminal.wait().await;
+            }
+        }
+    }
+    pub(super) fn accepted_terminal(&self, sequence: u32) {
+        // Called only in the actual correlated terminal acceptance branch.
+        if self.accepted_sequence.compare_exchange(u32::MAX, sequence, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            self.failed.store(true, Ordering::SeqCst);
+        }
+    }
+    pub(super) fn inspected(&self, success: bool) {
+        if success && self.inspection.armed.load(Ordering::SeqCst) {
+            self.inspection_returned.store(true, Ordering::SeqCst);
+            self.inspection.wait(); // Inside the ORIGINAL blocking inspection task.
+        }
+    }
+    pub(super) fn refused_acquisition(&self) { self.acquisition_refused.store(true, Ordering::SeqCst); }
+    fn sequence(&self) -> Option<u32> {
+        match self.accepted_sequence.load(Ordering::SeqCst) { u32::MAX => None, value => Some(value) }
+    }
+    fn release(&self) { self.prefix.release(); self.terminal.release(); self.inspection.release(); }
+    fn released(&self) -> bool {
+        *self.prefix.open.borrow() && *self.terminal.open.borrow()
+            && self.inspection.closed.lock().map(|closed| !*closed).unwrap_or(false)
+    }
+}
+
+// STOP precedes release, including error/unwind paths: releasing a held partial
+// Apply before cancellation could otherwise authorize its suffix. This guard
+// never waits, aborts or takes native handles; the original owner still cleans.
+struct GateGuard { owner: EditOwner, schedule: Arc<Schedule>, released: bool }
+impl GateGuard {
+    fn new(owner: &EditOwner, schedule: Arc<Schedule>) -> Self { Self { owner: owner.clone(), schedule, released: false } }
+    fn release(&mut self) {
+        if self.released { return; }
+        let id = self.owner.inner.lock().active.as_ref().map(|active| active.session.id.clone());
+        if let Some(id) = id { let _ = self.owner.close("main", &id); }
+        self.schedule.release();
+        self.released = true;
+    }
+}
+impl Drop for GateGuard { fn drop(&mut self) { self.release(); } }
 
 // Only this single-entry fixture calls these synchronous file helpers. These
 // original-file receipts are separate from the native Session books. None are
@@ -326,6 +453,7 @@ fn original_resource_facts(session: &Session, loss: Option<ManagementLoss>) -> C
         && book.frames.is_some() && *session.pipes.borrow() == PipeAcquisition::Available
         && session.driver_done.load(Ordering::SeqCst) && session.resource_unknown.load(Ordering::SeqCst) == loss.is_some()
         && !session.fixture_driver_loss.load(Ordering::SeqCst) && !session.fixture_watchdog_loss.load(Ordering::SeqCst)
+        && !session.fixture_schedule.failed.load(Ordering::SeqCst)
         && !book.force_attempted && out.bytes > 0 && out.bytes <= wire::STDOUT_LIMIT
         && err.bytes == 0 && err.frames == 0, Failure::OriginalCustodyUnknown)?;
     Ok(Facts { original_wait:true, stdout_eof:out.eof, stderr_eof:err.eof,
@@ -337,6 +465,56 @@ fn original_resource_facts(session: &Session, loss: Option<ManagementLoss>) -> C
         force_attempted:book.force_attempted })
 }
 fn original_facts(session: &Session) -> Check<Facts> { original_resource_facts(session, None) }
+
+fn no_acquisition_facts(session: &Session) -> Check<Facts> {
+    // Separate proof, NOT a relaxed spawned-child checker. The positive
+    // original refusal branch and inspection join establish no acquisition;
+    // empty slots alone would not. Absent endpoints keep false EOF/close facts.
+    let book = session.resources.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let startup = session.startup.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let input = session.input.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let output = session.output.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let error = session.error.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let driver = session.driver.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let watchdog = session.watchdog.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let manager = session.manager.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let observer = session.observer.try_lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+    let write = book.write_end.as_ref().ok_or(Failure::OriginalCustodyUnknown)?;
+    let out = book.out_end.as_ref().ok_or(Failure::OriginalCustodyUnknown)?;
+    let err = book.err_end.as_ref().ok_or(Failure::OriginalCustodyUnknown)?;
+    require(session.fixture_schedule.inspection_returned.load(Ordering::SeqCst)
+        && session.fixture_schedule.acquisition_refused.load(Ordering::SeqCst)
+        && !session.fixture_schedule.failed.load(Ordering::SeqCst)
+        && book.inspection_joined && book.inspection.is_none() && !book.inspection_join_failed
+        && book.acquisition.is_none() && !book.acquisition_joined && !book.acquisition_join_failed
+        && !startup.attempted && !startup.returned && !startup.failed && startup.child.is_none()
+        && book.child.is_none() && book.waited.is_none() && !book.wait_failed && !book.force_attempted
+        && book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none()
+        && !book.write_join_failed && !book.out_join_failed && !book.err_join_failed
+        && write.frames == 0 && !write.closed && !write.failed
+        && out.frames == 0 && out.bytes == 0 && !out.eof && !out.closed && !out.failed
+        && err.frames == 0 && err.bytes == 0 && !err.eof && !err.closed && !err.failed
+        && input.io.is_none() && input.close == Receipt::New
+        && output.io.is_none() && output.close == Receipt::New
+        && error.io.is_none() && error.close == Receipt::New
+        && book.driver_joined && book.watchdog_joined && book.manager_joined
+        && session.driver_joined.load(Ordering::SeqCst) && session.watchdog_joined.load(Ordering::SeqCst)
+        && !session.driver_join_failed.load(Ordering::SeqCst) && !session.watchdog_join_failed.load(Ordering::SeqCst)
+        && !session.driver_join_panicked.load(Ordering::SeqCst) && !session.watchdog_join_panicked.load(Ordering::SeqCst)
+        && !session.manager_join_failed.load(Ordering::SeqCst) && !session.manager_join_panicked.load(Ordering::SeqCst)
+        && driver.is_none() && watchdog.is_none() && manager.is_none() && observer.is_some()
+        && book.frames.is_some() && *session.pipes.borrow() == PipeAcquisition::Absent
+        && session.driver_done.load(Ordering::SeqCst) && !session.resource_unknown.load(Ordering::SeqCst)
+        && !session.fixture_driver_loss.load(Ordering::SeqCst) && !session.fixture_watchdog_loss.load(Ordering::SeqCst),
+        Failure::OriginalCustodyUnknown)?;
+    Ok(Facts { original_wait:book.waited.is_some(), stdout_eof:out.eof, stderr_eof:err.eof,
+        stdin_closed:write.closed, stdout_closed:out.closed, stderr_closed:err.closed,
+        startup_joined:book.inspection_joined && book.acquisition_joined,
+        io_joined:book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none(),
+        driver_joined:book.driver_joined, watchdog_joined:book.watchdog_joined, manager_joined:book.manager_joined,
+        request_frames:write.frames, response_frames:out.frames, stdout_bytes:out.bytes, stderr_bytes:err.bytes,
+        force_attempted:book.force_attempted })
+}
 
 fn projection(status: &ConfigEditStatus, session: &str) -> Check<EditProjection> {
     status.active.as_ref().filter(|p| p.session_id == session)
@@ -718,4 +896,378 @@ async fn hosted_config_edit_owner_original_resources() {
         if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
         panic!("hosted configuration final receipt failed after original settlement");
     }
+}
+
+fn stop_receipt(inputs: &Inputs, cases: &[Value], passed: bool, settled: bool, failure: Option<Failure>) -> Check<()> {
+    require(!passed || settled && cases.len() == 2 && failure.is_none(), Failure::ReceiptIo)?;
+    receipt_document(inputs, json!({"schemaVersion":1,"scope":STOP_SCOPE,
+        "status":if passed {"passed"} else {"failed"},"allOwnersSettled":settled,"failureCode":failure,
+        "bindings":inputs.bindings,"cases":cases,"notVerified":NOT_VERIFIED}))
+}
+
+fn clock_receipt(inputs: &Inputs, evidence: Option<Value>, passed: bool, failure: Option<Failure>) -> Check<()> {
+    require(passed == evidence.is_some() && passed == failure.is_none(), Failure::ReceiptIo)?;
+    // Deliberately no allOwnersSettled: verified late resource settlement does
+    // not turn native Unknown into normal owner/Save success.
+    receipt_document(inputs, json!({"schemaVersion":1,"scope":CLOCK_SCOPE,
+        "status":if passed {"passed"} else {"failed"},"failureCode":failure,
+        "bindings":inputs.bindings,"case":evidence,"notVerified":NOT_VERIFIED}))
+}
+
+async fn delta_inputs(clock: bool) -> Option<Inputs> {
+    if BATCH_CLAIMED.swap(true, Ordering::SeqCst) {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return None; }
+        panic!("hosted configuration batch was already claimed");
+    }
+    let inputs = match Inputs::admit() {
+        Ok(inputs) => inputs,
+        Err(code) => {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return None; }
+            panic!("hosted configuration delta admission refused: {code:?}");
+        },
+    };
+    let initial = if clock { clock_receipt(&inputs, None, false, Some(Failure::NotCompleted)) }
+        else { stop_receipt(&inputs, &[], false, false, Some(Failure::NotCompleted)) };
+    if initial.is_err() {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return None; }
+        panic!("hosted configuration delta receipt unavailable before native admission");
+    }
+    Some(inputs)
+}
+
+fn delta_batch(inputs: &Inputs) -> Check<Batch> {
+    let owner = EditOwner::new(RuntimeConfig::packaged(inputs.root.clone()));
+    {
+        let mut retained = RETAINED.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+        require(retained.is_none(), Failure::OriginalCustodyUnknown)?;
+        *retained = Some(Retention { _owner:owner.clone(), originals:Vec::new() });
+    }
+    owner.inner.fixture_authorized.store(true, Ordering::SeqCst);
+    owner.initial_document("main").map_err(|_| Failure::NativeCommandRejected)?;
+    Ok(Batch { owner, originals:Vec::new(), missing_original:false, cases:Vec::new() })
+}
+
+async fn until(allowance: Duration, mut condition: impl FnMut() -> Check<bool>) -> Check<()> {
+    let end = Instant::now() + allowance; // Observer margin, never an owner clock.
+    loop {
+        if condition()? { return Ok(()); }
+        if Instant::now() >= end { return Err(Failure::ObservationTimeout); }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+async fn prepared_review(batch: &mut Batch, root: &Path, project: &'static str) -> Check<(Arc<Session>, Prepared)> {
+    let original = batch.open(project, root)?;
+    let editing = observed(&batch.owner, &original.id, Phase::Editing).await?;
+    let checkout = editing.checkout.as_ref().ok_or(Failure::UnexpectedStatus)?;
+    require(checkout.base == Value::Null, Failure::UnexpectedOutcome)?;
+    let admission = batch.owner.prepare("main", PrepareConfigEdit { session_id:original.id.clone(),
+        revision:checkout.revision.clone(), expected_base:checkout.base.clone(), draft:document(), draft_revision:1, baseline_generation:0 })
+        .map_err(|_| Failure::NativeCommandRejected)?;
+    require(projection(&admission, &original.id)?.phase == Phase::Preparing, Failure::UnexpectedStatus)?;
+    let reviewing = observed(&batch.owner, &original.id, Phase::Reviewing).await?;
+    let plan = reviewing.prepared.ok_or(Failure::UnexpectedStatus)?;
+    require(plan.revision == checkout.revision && plan.draft_revision == 1 && plan.baseline_generation == 0
+        && plan.view.create_release_directory && plan.view.files.iter().all(|file| file.action == "create"), Failure::UnexpectedOutcome)?;
+    inventory(root, &[])?;
+    Ok((original, plan))
+}
+
+#[derive(Clone, Copy)]
+enum StopCase { Review, PartialApply }
+impl StopCase {
+    fn name(self) -> &'static str { match self { Self::Review => "discard-reviewing", Self::PartialApply => "partial-apply-eof" } }
+    fn project(self) -> &'static str {
+        match self { Self::Review => "project-config-discard-reviewing", Self::PartialApply => "project-config-partial-apply" }
+    }
+}
+
+async fn exercise_stop(batch: &mut Batch, inputs: &Inputs, case: StopCase) -> Check<()> {
+    inputs.same_root()?;
+    let root = inputs.root.join(case.name());
+    fs::DirBuilder::new().mode(0o700).create(&root).map_err(|_| Failure::FixtureIo)?;
+    let (original, plan) = prepared_review(batch, &root, case.project()).await?;
+    let partial = matches!(case, StopCase::PartialApply);
+    if partial {
+        let mut guard = GateGuard::new(&batch.owner, original.fixture_schedule.clone());
+        original.fixture_schedule.prefix.hold()?;
+        let admission = batch.owner.apply("main", &original.id, &plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+        require(projection(&admission, &original.id)?.apply_submitted, Failure::UnexpectedStatus)?;
+        until(OBSERVATION, || {
+            require(!original.fixture_schedule.failed.load(Ordering::SeqCst), Failure::UnexpectedStatus)?;
+            Ok(original.fixture_schedule.prefix.entered.load(Ordering::SeqCst))
+        }).await?;
+        require(original.fixture_schedule.prefix_bytes.load(Ordering::SeqCst) == 1
+            && !original.fixture_schedule.apply_suffix_started.load(Ordering::SeqCst), Failure::UnexpectedOutcome)?;
+        batch.owner.close("main", &original.id).map_err(|_| Failure::NativeCommandRejected)?;
+        guard.release(); // Sticky original STOP is set before opening the gate.
+    } else {
+        batch.owner.close("main", &original.id).map_err(|_| Failure::NativeCommandRejected)?;
+    }
+    let _ = batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+    let _ = batch.owner.close("main", &original.id).map_err(|_| Failure::NativeCommandRejected)?;
+    let terminal = observed(&batch.owner, &original.id, Phase::Final).await?;
+    require(terminal.native_finality == NativeFinality::Settled && !terminal.late_settled
+        && terminal.apply_submitted == partial && batch.owner.can_exit(), Failure::OriginalCustodyUnknown)?;
+    let facts = original_facts(&original)?;
+    require((facts.request_frames, facts.response_frames) == (2, 3), Failure::UnexpectedOutcome)?;
+    let core = terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+    let reason = if partial { Reason::Cancelled } else { Reason::Discarded };
+    require(core.effect == Effect::NotStarted && core.journal == Journal::NotCreated
+        && core.resources == ResourceState::Settled && core.reason == CoreReason::Cancelled
+        && terminal.native_reason == reason, Failure::UnexpectedOutcome)?;
+    let correlation = terminal.prepared.as_ref().is_some_and(|retained| retained.plan_token == plan.plan_token
+        && retained.revision == plan.revision && retained.draft_revision == 1 && retained.baseline_generation == 0)
+        && terminal.checkout.as_ref().is_some_and(|checkout| checkout.revision == plan.revision && checkout.base == Value::Null)
+        && original.fixture_schedule.sequence() == Some(1);
+    let prefix = original.fixture_schedule.prefix_bytes.load(Ordering::SeqCst);
+    let suffix = original.fixture_schedule.apply_suffix_started.load(Ordering::SeqCst);
+    require(correlation && prefix == (if partial { 1 } else { 0 }) && !suffix && original.fixture_schedule.released(), Failure::UnexpectedOutcome)?;
+    inventory(&root, &[])?;
+    let mut evidence = serde_json::to_value(&facts).map_err(|_| Failure::ReceiptIo)?;
+    evidence["name"] = json!(case.name());
+    evidence["evidenceKind"] = json!(if partial { "fixed-prefix-scheduling-control" } else { "actual-config-child" });
+    evidence["nativePhase"] = json!(terminal.phase);
+    evidence["nativeFinality"] = json!(terminal.native_finality);
+    evidence["nativeReason"] = json!(terminal.native_reason);
+    evidence["applySubmitted"] = json!(terminal.apply_submitted);
+    evidence["outcome"] = json!(core);
+    evidence["terminalSeq"] = json!(original.fixture_schedule.sequence());
+    evidence["preparedCorrelation"] = json!(correlation);
+    evidence["prefixBytes"] = json!(prefix);
+    evidence["applySuffixStarted"] = json!(suffix);
+    batch.cases.push(evidence);
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ClockCase { TerminalDeadline, StartupStop }
+impl ClockCase {
+    fn name(self) -> &'static str { match self { Self::TerminalDeadline => "terminal-deadline", Self::StartupStop => "startup-stop" } }
+    fn project(self) -> &'static str {
+        match self { Self::TerminalDeadline => "project-config-terminal-deadline", Self::StartupStop => "project-config-startup-stop" }
+    }
+    fn reason(self) -> Reason { match self { Self::TerminalDeadline => Reason::ActiveTimeout, Self::StartupStop => Reason::Discarded } }
+    fn facts(self, original: &Session) -> Check<Facts> {
+        match self { Self::TerminalDeadline => original_facts(original), Self::StartupStop => no_acquisition_facts(original) }
+    }
+}
+
+fn original_clock(batch: &Batch, original: &Arc<Session>) -> Check<(Option<Instant>, Option<Instant>)> {
+    let registry = batch.owner.inner.lock();
+    let active = registry.active.as_ref().ok_or(Failure::UnexpectedStatus)?;
+    require(Arc::ptr_eq(&active.session, original), Failure::OriginalCustodyUnknown)?;
+    Ok((active.phase_end, active.cleanup_start))
+}
+
+async fn exercise_clock(batch: &mut Batch, inputs: &Inputs, case: ClockCase) -> Check<Value> {
+    inputs.same_root()?;
+    let root = inputs.root.join(case.name());
+    fs::DirBuilder::new().mode(0o700).create(&root).map_err(|_| Failure::FixtureIo)?;
+    let terminal_case = matches!(case, ClockCase::TerminalDeadline);
+    let (original, mut guard, trigger) = if terminal_case {
+        let (original, plan) = prepared_review(batch, &root, case.project()).await?;
+        let guard = GateGuard::new(&batch.owner, original.fixture_schedule.clone());
+        original.fixture_schedule.terminal.hold()?;
+        let admission = batch.owner.apply("main", &original.id, &plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+        require(projection(&admission, &original.id)?.apply_submitted, Failure::UnexpectedStatus)?;
+        let (active, cleanup) = original_clock(batch, &original)?;
+        require(cleanup.is_none(), Failure::UnexpectedStatus)?;
+        let endpoint = active.ok_or(Failure::UnexpectedStatus)?;
+        until(OBSERVATION, || Ok(original.fixture_schedule.terminal.entered.load(Ordering::SeqCst))).await?;
+        require(Instant::now() < endpoint && !original.fixture_schedule.failed.load(Ordering::SeqCst), Failure::UnexpectedStatus)?;
+        {
+            let held = original.fixture_schedule.held_terminal.lock().map_err(|_| Failure::UnexpectedStatus)?;
+            let (sequence, core) = held.as_ref().ok_or(Failure::UnexpectedStatus)?;
+            require(*sequence == 2 && core.effect == Effect::Committed && core.journal == Journal::Clean
+                && core.resources == ResourceState::Settled && core.reason == CoreReason::None, Failure::UnexpectedOutcome)?;
+        }
+        (original, guard, endpoint) // The scheduled Apply endpoint, not observer wake time.
+    } else {
+        let schedule = Arc::new(Schedule::default());
+        let guard = GateGuard::new(&batch.owner, schedule.clone());
+        schedule.inspection.hold()?;
+        {
+            let mut next = batch.owner.inner.fixture_next_schedule.lock().map_err(|_| Failure::UnexpectedStatus)?;
+            require(next.is_none(), Failure::UnexpectedStatus)?;
+            *next = Some(schedule.clone()); // Consumed in Session construction, before tasks.
+        }
+        let original = batch.open(case.project(), &root)?;
+        require(Arc::ptr_eq(&original.fixture_schedule, &schedule), Failure::UnexpectedStatus)?;
+        until(OBSERVATION, || Ok(schedule.inspection.entered.load(Ordering::SeqCst))).await?;
+        require(schedule.inspection_returned.load(Ordering::SeqCst), Failure::UnexpectedStatus)?;
+        let before = Instant::now();
+        let admission = batch.owner.close("main", &original.id).map_err(|_| Failure::NativeCommandRejected)?;
+        let after = Instant::now();
+        require(projection(&admission, &original.id)?.native_reason == Reason::Discarded, Failure::UnexpectedStatus)?;
+        let (_, cleanup) = original_clock(batch, &original)?;
+        let start = cleanup.ok_or(Failure::UnexpectedStatus)?;
+        require(start >= before && start <= after, Failure::UnexpectedStatus)?;
+        (original, guard, start)
+    };
+    until(OBSERVATION, || {
+        let registry = batch.owner.inner.lock();
+        let active = registry.active.as_ref().ok_or(Failure::UnexpectedStatus)?;
+        require(Arc::ptr_eq(&active.session, &original), Failure::OriginalCustodyUnknown)?;
+        Ok(active.unknown)
+    }).await?;
+    let cleanup_elapsed = Instant::now().saturating_duration_since(trigger).as_millis();
+    require(cleanup_elapsed >= FINALIZATION.as_millis() && cleanup_elapsed <= 60_000, Failure::UnexpectedStatus)?;
+    {
+        let registry = batch.owner.inner.lock();
+        let active = registry.active.as_ref().ok_or(Failure::UnexpectedStatus)?;
+        require(registry.disabled && registry.last.is_none() && !registry.stopping && !registry.exhausted
+            && !batch.owner.inner.poisoned.load(Ordering::SeqCst)
+            && Arc::ptr_eq(&active.session, &original) && active.unknown
+            && active.cleanup_start == Some(trigger) && active.phase_end.is_none()
+            && active.projection.phase == Phase::Unknown && active.projection.native_finality == NativeFinality::Unknown
+            && !active.projection.late_settled && active.projection.core_outcome.is_none()
+            && active.projection.native_reason == case.reason() && *original.stop.borrow(), Failure::UnexpectedStatus)?;
+    }
+    require(batch.owner.disabled() && !batch.owner.can_exit(), Failure::OriginalCustodyUnknown)?;
+    // All these observations occur AFTER Unknown. shutdown therefore takes
+    // its immediate error path, never a wait that could strand the held gate.
+    for _ in 0..2 {
+        let _ = batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+        let _ = batch.owner.close("main", &original.id).map_err(|_| Failure::NativeCommandRejected)?;
+    }
+    let shutdown_observed = if terminal_case {
+        require(batch.owner.shutdown().await.is_err_and(|error| error.code == "cleanup_unknown"), Failure::UnexpectedStatus)?;
+        true
+    } else { false };
+    require(original_clock(batch, &original)? == (None, Some(trigger)), Failure::UnexpectedStatus)?;
+    let retained_status = batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+    let expected_availability = if terminal_case { EditAvailability::Shutdown } else { EditAvailability::CleanupUnknown };
+    require(!retained_status.capability.available && retained_status.capability.reason == expected_availability
+        && batch.owner.disabled() && !batch.owner.can_exit(), Failure::OriginalCustodyUnknown)?;
+    guard.release(); // Only now may the original held operation actually return.
+    until(OBSERVATION, || Ok(batch.owner.can_exit())).await?;
+    require(FIXTURE_FILES.all_settled() && !batch.missing_original && batch.originals.len() == 1
+        && Arc::ptr_eq(&batch.originals[0], &original), Failure::OriginalCustodyUnknown)?;
+    let facts = case.facts(&original)?;
+    let status = batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+    let current = projection(&status, &original.id)?;
+    let registry_disabled = {
+        let registry = batch.owner.inner.lock();
+        require(registry.active.is_none() && registry.last.as_ref().is_some_and(|last| last.session_id == original.id)
+            && registry.stopping == shutdown_observed && !registry.exhausted && registry.document_bound && !registry.document_lost
+            && !batch.owner.inner.poisoned.load(Ordering::SeqCst), Failure::OriginalCustodyUnknown)?;
+        registry.disabled
+    };
+    require(registry_disabled && batch.owner.disabled() && batch.owner.can_exit() && status.active.is_none()
+        && !status.capability.available && status.capability.reason == expected_availability
+        && current.phase == Phase::Unknown && current.native_finality == NativeFinality::Unknown && current.late_settled
+        && current.native_reason == case.reason() && current.apply_submitted == terminal_case
+        && original.fixture_schedule.released() && !original.fixture_schedule.failed.load(Ordering::SeqCst), Failure::OriginalCustodyUnknown)?;
+    if terminal_case {
+        let core = current.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        require(core.effect == Effect::Committed && core.journal == Journal::Clean && core.resources == ResourceState::Settled
+            && core.reason == CoreReason::None && original.fixture_schedule.sequence() == Some(2)
+            && (facts.request_frames, facts.response_frames) == (3, 3)
+            && !original.fixture_schedule.acquisition_refused.load(Ordering::SeqCst), Failure::UnexpectedOutcome)?;
+        require(read_regular(&root.join("release/mobile-release.json"), 512 * 1024)?.bytes == create_bytes()?
+            && read_regular(&root.join(".gitignore"), 1024 * 1024)?.bytes == IGNORE, Failure::PayloadMismatch)?;
+        inventory(&root, &[".gitignore", "release"])?;
+        inventory(&root.join("release"), &["mobile-release.json"])?;
+    } else {
+        require(current.core_outcome.is_none() && current.checkout.is_none() && current.prepared.is_none()
+            && original.fixture_schedule.sequence().is_none(), Failure::UnexpectedOutcome)?;
+        inventory(&root, &[])?;
+    }
+    let mut evidence = serde_json::to_value(&facts).map_err(|_| Failure::ReceiptIo)?;
+    evidence["name"] = json!(case.name());
+    evidence["evidenceKind"] = json!("scheduling-control-not-os-fault");
+    evidence["nativePhase"] = json!(current.phase);
+    evidence["nativeFinality"] = json!(current.native_finality);
+    evidence["nativeReason"] = json!(current.native_reason);
+    evidence["applySubmitted"] = json!(current.apply_submitted);
+    evidence["outcome"] = json!(current.core_outcome);
+    evidence["terminalSeq"] = json!(original.fixture_schedule.sequence());
+    evidence["registryDisabled"] = json!(registry_disabled);
+    evidence["editPermitClosed"] = json!(!status.capability.available);
+    evidence["editAvailability"] = json!(status.capability.reason);
+    evidence["nativeCanExit"] = json!(batch.owner.can_exit());
+    evidence["originalResourcesSettled"] = json!(true); // case.facts() above, never absence alone.
+    evidence["lateSettled"] = json!(current.late_settled);
+    evidence["retainedBeforeRelease"] = json!(true);
+    evidence["cleanupStartUnchanged"] = json!(true);
+    evidence["cleanupElapsedMs"] = json!(cleanup_elapsed);
+    evidence["scheduledActiveDeadline"] = json!(terminal_case);
+    evidence["inspectionJoined"] = json!(true); // Both exact original fact checkers require it.
+    evidence["acquisitionNotAdmitted"] = json!(original.fixture_schedule.acquisition_refused.load(Ordering::SeqCst));
+    evidence["pipeAcquisition"] = json!(if terminal_case { "available" } else { "absent" });
+    evidence["controlEntered"] = json!(if terminal_case { original.fixture_schedule.terminal.entered.load(Ordering::SeqCst) }
+        else { original.fixture_schedule.inspection.entered.load(Ordering::SeqCst) });
+    evidence["controlReleased"] = json!(original.fixture_schedule.released());
+    evidence["shutdownObserved"] = json!(shutdown_observed);
+    Ok(evidence)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable original-config-STOP hosted process"]
+async fn hosted_config_stop_original_resources() {
+    let Some(inputs) = delta_inputs(false).await else { return; };
+    let mut batch = delta_batch(&inputs).unwrap_or_else(|code| panic!("hosted configuration STOP setup refused before native work: {code:?}"));
+    for case in [StopCase::Review, StopCase::PartialApply] {
+        let checked = exercise_stop(&mut batch, &inputs, case).await;
+        if checked.is_err() || !batch.all_settled() || batch.owner.disabled() { batch.stop_original().await; }
+        let settled = batch.all_settled();
+        if !settled || batch.owner.disabled() || matches!(checked, Err(Failure::OriginalCustodyUnknown | Failure::FixtureCustodyUnknown)) {
+            if FIXTURE_FILES.all_settled() { let _ = stop_receipt(&inputs, &batch.cases, false, false, Some(Failure::OriginalCustodyUnknown)); }
+            retain_unknown_runtime().await;
+            return;
+        }
+        if let Err(code) = checked {
+            let _ = stop_receipt(&inputs, &batch.cases, false, true, Some(code));
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted configuration STOP case failed after settlement: {code:?}");
+        }
+        if stop_receipt(&inputs, &batch.cases, false, false, Some(Failure::NotCompleted)).is_err() {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted configuration STOP progress receipt failed after settlement");
+        }
+    }
+    if batch.owner.shutdown().await.is_err() || !batch.all_settled() || batch.cases.len() != 2 {
+        if FIXTURE_FILES.all_settled() { let _ = stop_receipt(&inputs, &batch.cases, false, false, Some(Failure::OriginalCustodyUnknown)); }
+        retain_unknown_runtime().await;
+        return;
+    }
+    if stop_receipt(&inputs, &batch.cases, true, true, None).is_err() {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+        panic!("hosted configuration STOP final receipt failed after settlement");
+    }
+}
+
+async fn hosted_clock_original_resources(case: ClockCase) {
+    let Some(inputs) = delta_inputs(true).await else { return; };
+    let mut batch = delta_batch(&inputs).unwrap_or_else(|code| panic!("hosted configuration clock setup refused before native work: {code:?}"));
+    let evidence = match exercise_clock(&mut batch, &inputs, case).await {
+        Ok(evidence) => evidence,
+        Err(code) => {
+            // exercise_clock's guard already requested original STOP and
+            // released all gates. No proof means no finite native-case escape.
+            batch.stop_original().await;
+            if FIXTURE_FILES.all_settled() { let _ = clock_receipt(&inputs, None, false, Some(code)); }
+            retain_unknown_runtime().await;
+            return;
+        },
+    };
+    if clock_receipt(&inputs, Some(evidence), true, None).is_err() {
+        if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+        panic!("hosted configuration clock receipt failed after original resource proof");
+    }
+    // The original resource-bearing tasks really joined. The data-only retained
+    // owner stays disabled/Unknown; no next owner, shutdown or root cleanup.
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable original-terminal-deadline hosted process"]
+async fn hosted_config_terminal_deadline_original_resources() {
+    hosted_clock_original_resources(ClockCase::TerminalDeadline).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable original-startup-STOP hosted process"]
+async fn hosted_config_startup_stop_original_resources() {
+    hosted_clock_original_resources(ClockCase::StartupStop).await;
 }

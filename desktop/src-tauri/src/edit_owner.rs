@@ -19,6 +19,19 @@ const REVIEW: Duration = Duration::from_secs(15 * 60);
 const SOFT_STOP: Duration = Duration::from_secs(8);
 const FINALIZATION: Duration = Duration::from_secs(10);
 
+// Value-only clock decisions shared by the real lock-held admission/expiry
+// paths and inert boundary tests. No alternate clock source or owner exists.
+fn claim_phase(review_end: Instant, now: Instant) -> Option<Instant> {
+    (now < review_end).then(|| now + ACTIVE)
+}
+fn phase_deadline(review_end: Instant, phase_end: Option<Instant>, applying: bool) -> Option<Instant> {
+    if applying { phase_end } else { Some(phase_end.map_or(review_end, |end| end.min(review_end))) }
+}
+fn expired_phase(review_end: Instant, phase_end: Option<Instant>, applying: bool, now: Instant) -> Option<(Instant, Reason)> {
+    let end = phase_deadline(review_end, phase_end, applying)?;
+    (now >= end).then_some((end, if !applying && end == review_end { Reason::ReviewExpired } else { Reason::ActiveTimeout }))
+}
+
 #[derive(Clone)]
 pub struct EditOwner { inner: Arc<Inner> }
 struct Inner {
@@ -26,6 +39,8 @@ struct Inner {
     poisoned: AtomicBool,
     #[cfg(all(test, feature = "development-runtime"))]
     fixture_authorized: AtomicBool,
+    #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+    fixture_next_schedule: Mutex<Option<Arc<hosted_tests::Schedule>>>,
 }
 struct Registry {
     generation: String, window: Option<String>, document_bound: bool, document_lost: bool,
@@ -57,6 +72,8 @@ struct Session {
     fixture_driver_loss: AtomicBool,
     #[cfg(all(test, feature = "development-runtime"))]
     fixture_watchdog_loss: AtomicBool,
+    #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+    fixture_schedule: Arc<hosted_tests::Schedule>,
     resource_unknown: AtomicBool, startup: Mutex<Startup>, resources: AsyncMutex<Resources>,
     input: Arc<AsyncMutex<Pipe<ChildStdin>>>, output: Arc<AsyncMutex<Pipe<ChildStdout>>>,
     error: Arc<AsyncMutex<Pipe<ChildStderr>>>, driver: AsyncMutex<Option<JoinHandle<()>>>,
@@ -164,14 +181,11 @@ impl Inner {
         let r = self.lock();
         let a = r.active.as_ref().filter(|a| a.session.id == id)?;
         if a.cleanup_start.is_some() { return None; }
-        if a.projection.apply_submitted { a.phase_end }
-        else { Some(a.phase_end.map_or(a.review_end, |end| end.min(a.review_end))) }
+        phase_deadline(a.review_end, a.phase_end, a.projection.apply_submitted)
     }
     fn expire_locked(&self, r: &mut Registry, id: &str, now: Instant) {
         let expired = r.active.as_ref().filter(|a| a.session.id == id && a.cleanup_start.is_none()).and_then(|a| {
-            let applying = a.projection.apply_submitted;
-            let end = if applying { a.phase_end? } else { a.phase_end.map_or(a.review_end, |end| end.min(a.review_end)) };
-            (now >= end).then_some((end, if !applying && end == a.review_end { Reason::ReviewExpired } else { Reason::ActiveTimeout }))
+            expired_phase(a.review_end, a.phase_end, a.projection.apply_submitted, now)
         });
         if let Some((end, reason)) = expired { self.trigger_locked(r, id, reason, end); }
     }
@@ -199,6 +213,8 @@ impl EditOwner {
         Self { inner: Arc::new(Inner { runtime, changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, feature = "development-runtime"))]
             fixture_authorized: AtomicBool::new(false),
+            #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+            fixture_next_schedule: Mutex::new(None),
             registry: Mutex::new(Registry { generation, window: None, document_bound: false, document_lost: false,
                 revision: 0, exhausted: false, stopping: false, disabled, active: None, last: None, blocked_projects: BTreeSet::new() }) }) }
     }
@@ -254,6 +270,8 @@ impl EditOwner {
             fixture_driver_loss: AtomicBool::new(false),
             #[cfg(all(test, feature = "development-runtime"))]
             fixture_watchdog_loss: AtomicBool::new(false),
+            #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+            fixture_schedule: self.inner.fixture_next_schedule.lock().map_err(|_| edit_unknown())?.take().unwrap_or_default(),
             startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(frame_rx), ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())),
             error: Arc::new(AsyncMutex::new(Pipe::default())), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None),
@@ -292,14 +310,14 @@ impl EditOwner {
             let generation = r.generation.clone();
             let a = r.active.as_mut().filter(|a| a.session.id == args.session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
             if a.projection.phase != Phase::Editing || a.prepare_counters.is_some() || !a.opened { return Err(invalid_owner()); }
-            if now >= a.review_end {
+            let Some(phase_end) = claim_phase(a.review_end, now) else {
                 let at = a.review_end; self.inner.trigger_locked(&mut r, &args.session_id, Reason::ReviewExpired, at); return Err(invalid_owner());
-            }
+            };
             // Wrong revisions do not revise an original checkout or renew time.
             if a.projection.checkout.as_ref().map(|c| c.revision.as_str()) != Some(args.revision.as_str()) { return Err(invalid_owner()); }
             a.prepare_counters = Some((args.draft_revision, args.baseline_generation));
             a.claimed_seq = 1;
-            a.phase_end = Some(now + ACTIVE);
+            a.phase_end = Some(phase_end);
             a.projection.phase = Phase::Preparing;
             let session = a.session.clone();
             self.inner.bump(&mut r);
@@ -326,11 +344,13 @@ impl EditOwner {
             let generation = r.generation.clone();
             let a = r.active.as_mut().filter(|a| a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
             if a.projection.phase != Phase::Reviewing || !a.prepared || a.projection.prepared.as_ref().map(|p| p.plan_token.as_str()) != Some(plan_token) { return Err(invalid_owner()); }
-            if now >= a.review_end { let at = a.review_end; self.inner.trigger_locked(&mut r, session_id, Reason::ReviewExpired, at); return Err(invalid_owner()); }
+            let Some(phase_end) = claim_phase(a.review_end, now) else {
+                let at = a.review_end; self.inner.trigger_locked(&mut r, session_id, Reason::ReviewExpired, at); return Err(invalid_owner());
+            };
             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
             a.projection.phase = Phase::Applying;
             a.claimed_seq = 2;
-            a.phase_end = Some(now + ACTIVE);
+            a.phase_end = Some(phase_end);
             let session = a.session.clone();
             self.inner.bump(&mut r);
             (session, self.inner.snapshot(&r)?)
@@ -475,10 +495,14 @@ async fn write_requests(inner: Arc<Inner>, owner: Arc<Session>) -> WriteEnd {
         // A blocked/partial write never delays the independently sticky STOP.
         // Cancelling write_all discards its partial frame, then closes the sole
         // original writer once; the child cannot apply an incomplete request.
+        #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+        let write = owner.fixture_schedule.write_original(writer, &bytes, sent);
+        #[cfg(not(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos"))))]
+        let write = writer.write_all(&bytes);
         let complete = tokio::select! {
             biased;
             _ = stop.changed() => false,
-            result = writer.write_all(&bytes) => {
+            result = write => {
                 if result.is_err() { failed = true; }
                 result.is_ok()
             },
@@ -544,9 +568,13 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                         count += 1;
                         let parsed = if count <= 3 { wire::decode(&frame, &owner.id) } else { Err(BridgeError::protocol()) };
                         match parsed {
-                            Ok(parsed) => if frames.try_send(parsed).is_err() {
-                                failed = true; discard = true;
-                                inner.trigger(&owner.id, Reason::ProtocolError, Instant::now()); inner.unknown(&owner.id);
+                            Ok(parsed) => {
+                                #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+                                owner.fixture_schedule.before_frame(&parsed).await;
+                                if frames.try_send(parsed).is_err() {
+                                    failed = true; discard = true;
+                                    inner.trigger(&owner.id, Reason::ProtocolError, Instant::now()); inner.unknown(&owner.id);
+                                }
                             },
                             Err(_) => {
                                 failed = true; discard = true;
@@ -616,6 +644,8 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
                     a.projection.core_outcome = Some(core);
                     a.terminal = true;
                     terminal = true;
+                    #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+                    owner.fixture_schedule.accepted_terminal(seq);
                 }
             }
         }
@@ -648,7 +678,7 @@ fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
                 if unknown { None } else { Some(start + FINALIZATION) }
             } else { Some(start + SOFT_STOP) }
         } else {
-            let end = if applying { phase.unwrap_or(review) } else { phase.map_or(review, |end| end.min(review)) };
+            let end = phase_deadline(review, phase, applying).unwrap_or(review);
             if now >= end {
                 inner.expire(&owner.id, now); // Recheck the live serialized phase.
                 continue;
@@ -762,7 +792,14 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     }
     let endpoint = match endpoint { Some(end) => end, None => return };
     let runtime = inner.runtime.clone();
-    book.inspection = Some(tokio::task::spawn_blocking(move || runtime.resolve_edit(endpoint)));
+    #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+    let schedule = owner.fixture_schedule.clone();
+    book.inspection = Some(tokio::task::spawn_blocking(move || {
+        let result = runtime.resolve_edit(endpoint);
+        #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+        schedule.inspected(result.is_ok());
+        result
+    }));
     let inspected = join_with_clock(&mut book.inspection, inner, owner).await;
     let runtime = match inspected {
         Ok(result) => {
@@ -777,6 +814,8 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     inner.expire(&owner.id, now);
     let stopped = *owner.stop.borrow();
     if stopped || inner.deadline(&owner.id).is_none_or(|end| now >= end) {
+        #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
+        owner.fixture_schedule.refused_acquisition();
         inner.trigger(&owner.id, Reason::Cancelled, Instant::now());
         return;
     }
@@ -1125,3 +1164,45 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
 #[cfg(all(test, feature = "development-runtime"))]
 #[path = "edit_hosted_tests.rs"]
 mod hosted_tests;
+
+#[cfg(test)]
+mod clock_tests {
+    use super::{ACTIVE, FINALIZATION, REVIEW, SOFT_STOP, Reason, claim_phase, expired_phase, phase_deadline};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn review_claim_and_deadline_boundaries() {
+        // Inert same-clock values only: no owner, entropy, channels, runtime,
+        // environment, filesystem, subprocess or 15-minute elapsed-time claim.
+        assert_eq!((ACTIVE.as_secs(), REVIEW.as_secs(), SOFT_STOP.as_secs(), FINALIZATION.as_secs()), (30, 900, 8, 10));
+        let registered = Instant::now();
+        let review = registered + REVIEW;
+        assert_eq!(phase_deadline(review, Some(registered + ACTIVE), false), Some(registered + ACTIVE));
+        assert_eq!(phase_deadline(review, None, false), Some(review));
+        let before = review - Duration::from_nanos(1);
+        let claimed = claim_phase(review, before).expect("claim strictly before original review endpoint");
+        assert_eq!(claimed, before + ACTIVE);
+        assert_eq!(phase_deadline(review, Some(claimed), false), Some(review)); // Preparing remains capped.
+        assert_eq!(phase_deadline(review, Some(claimed), true), Some(claimed)); // Accepted Apply is not capped.
+        assert_eq!(claim_phase(review, review), None);
+        assert_eq!(claim_phase(review, review + ACTIVE), None);
+        assert_eq!(expired_phase(review, Some(claimed), true, review), None);
+        assert_eq!(expired_phase(review, Some(claimed), true, claimed), Some((claimed, Reason::ActiveTimeout)));
+        // Repeated decisions cannot renew the caller's original review value.
+        assert_eq!(phase_deadline(review, None, false), Some(registered + REVIEW));
+    }
+
+    #[test]
+    fn expiry_uses_original_scheduled_endpoint() {
+        let registered = Instant::now();
+        let review = registered + REVIEW;
+        let active = registered + ACTIVE;
+        assert_eq!(expired_phase(review, Some(active), false, active - Duration::from_nanos(1)), None);
+        assert_eq!(expired_phase(review, Some(active), false, active), Some((active, Reason::ActiveTimeout)));
+        assert_eq!(expired_phase(review, Some(active), false, active + FINALIZATION), Some((active, Reason::ActiveTimeout)));
+        assert_eq!(expired_phase(review, None, false, review), Some((review, Reason::ReviewExpired)));
+        assert_eq!(expired_phase(review, None, false, review + FINALIZATION), Some((review, Reason::ReviewExpired)));
+        assert_eq!(expired_phase(review, Some(review + ACTIVE), false, review), Some((review, Reason::ReviewExpired)));
+        assert_eq!(expired_phase(review, None, true, review + ACTIVE), None);
+    }
+}

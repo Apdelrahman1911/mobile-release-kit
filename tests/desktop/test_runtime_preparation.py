@@ -81,6 +81,7 @@ class RuntimePreparationTests(unittest.TestCase):
             (package / "_desktop_engine.py").write_bytes(b"# inert source; never imported\n")
             (source / "desktop").mkdir()
             (source / "desktop/engine_bootstrap.py").write_bytes(b"# inert bootstrap; never executed\n")
+            (source / "desktop/config_edit_bootstrap.py").write_bytes(b"# inert edit bootstrap; never executed\n")
             manifests = []
             for name in ("first", "second"):
                 runtime = base / name
@@ -95,7 +96,7 @@ class RuntimePreparationTests(unittest.TestCase):
                 self.assertEqual(result["manifestSha256"], hashlib.sha256(encoded).hexdigest())
                 manifest = json.loads(encoded)
                 self.assertEqual([item["path"] for item in manifest["files"]],
-                                 ["core.zip", "engine_bootstrap.py", "python/bin/python3"])
+                                 ["config_edit_bootstrap.py", "core.zip", "engine_bootstrap.py", "python/bin/python3"])
                 for item in manifest["files"]:
                     data = (runtime / item["path"]).read_bytes()
                     self.assertEqual((item["size"], item["sha256"]),
@@ -118,7 +119,31 @@ class RuntimePreparationTests(unittest.TestCase):
             binary_dir = runtime / "python/bin"
             binary_dir.mkdir(parents=True)
             (binary_dir / "python3").write_bytes(b"inert, not executable")
-            with patch.object(preparation, "MAX_FILES", 2):
+            # One supplied Python file plus three generated payloads requires
+            # four slots; the manifest is separately reserved, not a payload.
+            with patch.object(preparation, "MAX_FILES", 3):
                 with self.assertRaises(preparation.PreparationError):
                     preparation.prepare(source, runtime, "x86_64-unknown-linux-gnu")
             self.assertEqual({entry.name for entry in runtime.iterdir()}, {"python"})
+
+    def test_missing_edit_bootstrap_preserves_inputs_before_any_output_write(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "source"
+            package = source / "src/mobile_release"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_bytes(b'__version__ = "0.3.0"\n')
+            (package / "_desktop_engine.py").write_bytes(b"# inert protocol source\n")
+            (source / "desktop").mkdir()
+            passive = source / "desktop/engine_bootstrap.py"
+            passive.write_bytes(b"# inert passive bootstrap\n")
+            runtime = base / "runtime"
+            binary_dir = runtime / "python/bin"
+            binary_dir.mkdir(parents=True)
+            executable = binary_dir / "python3"
+            executable.write_bytes(b"inert, not executable")
+            with self.assertRaises(FileNotFoundError):
+                preparation.prepare(source, runtime, "x86_64-unknown-linux-gnu")
+            self.assertEqual({entry.name for entry in runtime.iterdir()}, {"python"})
+            self.assertEqual(executable.read_bytes(), b"inert, not executable")
+            self.assertEqual(passive.read_bytes(), b"# inert passive bootstrap\n")

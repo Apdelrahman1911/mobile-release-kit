@@ -1899,8 +1899,10 @@ name = "mobile-release-kit-desktop"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.3.4",
+ "mrk-linux-mount-observation",
  "nix",
  "rfd",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
@@ -1908,6 +1910,15 @@ dependencies = [
  "tauri-build",
  "tokio",
  "webkit2gtk",
+]
+
+[[package]]
+name = "mrk-linux-mount-observation"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "linux-raw-sys",
+ "rustix",
 ]
 
 [[package]]

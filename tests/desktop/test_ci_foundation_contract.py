@@ -64,7 +64,120 @@ def validate_loss(report: dict, kind: str) -> dict:
         source_hashes=dict.fromkeys(helper.CONFIG_OWNER_SOURCES, "3" * 64), python_hash="2" * 64)
 
 
+def delta_report(kind: str) -> dict:
+    positive = owner_report()
+    report = {key: positive[key] for key in ("schemaVersion", "status", "failureCode", "bindings", "notVerified")}
+    if kind == "stop":
+        report.update(scope="configuration-owner-stop-hosted-v1", allOwnersSettled=True, cases=[])
+        for name, reason, applying, evidence, prefix in (
+            ("discard-reviewing", "discarded", False, "actual-config-child", 0),
+            ("partial-apply-eof", "cancelled", True, "fixed-prefix-scheduling-control", 1),
+        ):
+            report["cases"].append({"name": name, "evidenceKind": evidence, "nativePhase": "final", "nativeFinality": "settled",
+                "nativeReason": reason, "applySubmitted": applying,
+                "outcome": {"effect": "not_started", "journal": "not_created", "resources": "settled", "reason": "cancelled"},
+                "terminalSeq": 1, "requestFrames": 2, "responseFrames": 3, "stdoutBytes": 4096, "stderrBytes": 0,
+                "forceAttempted": False, "preparedCorrelation": True, "prefixBytes": prefix, "applySuffixStarted": False,
+                **dict.fromkeys(helper.CONFIG_OWNER_FINALITY, True)})
+        return report
+    terminal = kind == "terminal-deadline"
+    case = {"name": kind, "evidenceKind": "scheduling-control-not-os-fault", "nativePhase": "unknown", "nativeFinality": "unknown",
+            "nativeReason": "active_timeout" if terminal else "discarded", "applySubmitted": terminal,
+            "outcome": {"effect": "committed", "journal": "clean", "resources": "settled", "reason": "none"} if terminal else None,
+            "terminalSeq": 2 if terminal else None, "requestFrames": 3 if terminal else 0, "responseFrames": 3 if terminal else 0,
+            "stdoutBytes": 4096 if terminal else 0, "stderrBytes": 0, "forceAttempted": False,
+            "registryDisabled": True, "editPermitClosed": True, "editAvailability": "shutdown" if terminal else "cleanup_unknown",
+            "nativeCanExit": True, "originalResourcesSettled": True, "lateSettled": True, "retainedBeforeRelease": True,
+            "cleanupStartUnchanged": True, "cleanupElapsedMs": 10000, "scheduledActiveDeadline": terminal, "inspectionJoined": True,
+            "acquisitionNotAdmitted": not terminal, "pipeAcquisition": "available" if terminal else "absent",
+            "controlEntered": True, "controlReleased": True, "shutdownObserved": terminal,
+            **{field: terminal or field in {"ioJoined", "driverJoined", "watchdogJoined", "managerJoined"}
+               for field in helper.CONFIG_OWNER_FINALITY}}
+    return {**report, "scope": "configuration-owner-clock-retention-hosted-v1", "case": case}
+
+
+def validate_delta(report: dict, kind: str) -> dict:
+    return helper.validate_config_delta_receipt(report, kind, source_sha="1" * 40, platform="linux",
+        source_hashes=dict.fromkeys(helper.CONFIG_OWNER_SOURCES, "3" * 64), python_hash="2" * 64)
+
+
 class FixedCompilerHelperTests(unittest.TestCase):
+    def test_prepared_eof_and_partial_apply_cannot_claim_accepted_apply(self):
+        report = delta_report("stop")
+        self.assertIs(validate_delta(report, "stop"), report)
+        for index in (0, 1):
+            for changed in [{field: False} for field in helper.CONFIG_OWNER_FINALITY] + [
+                {"requestFrames": 3}, {"responseFrames": 2}, {"terminalSeq": True}, {"prefixBytes": True},
+                {"preparedCorrelation": False}, {"applySuffixStarted": True}, {"forceAttempted": True},
+                {"applySubmitted": index == 0}, {"nativePhase": "unknown"}, {"nativeFinality": "unknown"},
+                {"stdoutBytes": 0}, {"stderrBytes": 1}, {"evidenceKind": "genuine-os-short-write"},
+                {"outcome": {"effect": "committed", "journal": "clean", "resources": "settled", "reason": "none"}},
+            ]:
+                failed = deepcopy(report)
+                failed["cases"][index].update(changed)
+                with self.subTest(case=index, changed=changed), self.assertRaises(helper.CheckFailure):
+                    validate_delta(failed, "stop")
+
+    def test_clock_receipts_keep_unknown_and_actual_late_original_settlement(self):
+        for kind in ("terminal-deadline", "startup-stop"):
+            report = delta_report(kind)
+            self.assertIs(validate_delta(report, kind), report)
+            truth_fields = ("registryDisabled", "editPermitClosed", "nativeCanExit", "originalResourcesSettled", "lateSettled",
+                            "retainedBeforeRelease", "cleanupStartUnchanged", "inspectionJoined", "controlEntered", "controlReleased")
+            for changed in [{field: False} for field in truth_fields] + [
+                {"nativePhase": "final"}, {"nativeFinality": "settled"}, {"nativeReason": "none"},
+                {"editAvailability": "available"}, {"forceAttempted": True}, {"cleanupElapsedMs": 9999},
+                {"cleanupElapsedMs": 60001}, {"cleanupElapsedMs": True}, {"cleanupElapsedMs": 10000.0},
+                {"stderrBytes": 1}, {"responseFrames": True}, {"evidenceKind": "genuine-os-fault"},
+            ]:
+                failed = deepcopy(report)
+                failed["case"].update(changed)
+                with self.subTest(kind=kind, changed=changed), self.assertRaises(helper.CheckFailure):
+                    validate_delta(failed, kind)
+            for field in (*helper.CONFIG_OWNER_FINALITY, "scheduledActiveDeadline", "acquisitionNotAdmitted", "shutdownObserved"):
+                failed = deepcopy(report)
+                failed["case"][field] = not report["case"][field]
+                with self.subTest(kind=kind, field=field), self.assertRaises(helper.CheckFailure):
+                    validate_delta(failed, kind)
+
+    def test_startup_absence_and_late_committed_result_are_not_interchangeable(self):
+        for kind, changes in (
+            ("startup-stop", ({"outcome": {}}, {"terminalSeq": 0}, {"requestFrames": 1}, {"stdoutBytes": 1}, {"pipeAcquisition": "available"})),
+            ("terminal-deadline", ({"outcome": None}, {"terminalSeq": None}, {"terminalSeq": True}, {"stdoutBytes": 0},
+                                   {"pipeAcquisition": "absent"}, {"outcome": {"effect": "unknown", "journal": "clean", "resources": "settled", "reason": "none"}})),
+        ):
+            for changed in changes:
+                failed = delta_report(kind)
+                failed["case"].update(changed)
+                with self.subTest(kind=kind, changed=changed), self.assertRaises(helper.CheckFailure):
+                    validate_delta(failed, kind)
+
+    def test_lifecycle_receipts_are_closed_source_bound_and_not_product_qualification(self):
+        for kind in ("stop", "terminal-deadline", "startup-stop"):
+            report = delta_report(kind)
+            for changed in ({"schemaVersion": True}, {"status": "failed"}, {"failureCode": "not_completed"},
+                            {"scope": "production-save-enablement"}, {"notVerified": []}, {"extra": True}):
+                with self.subTest(kind=kind, top=changed), self.assertRaises(helper.CheckFailure):
+                    validate_delta({**report, **changed}, kind)
+            for field, value in (("sourceSha", "0" * 40), ("pythonSha256", "0" * 64), ("sourceHashes", {}),
+                                 ("target", helper.TARGETS["windows"]), ("runtimeMode", "production")):
+                failed = deepcopy(report)
+                failed["bindings"][field] = value
+                with self.subTest(kind=kind, binding=field), self.assertRaises(helper.CheckFailure):
+                    validate_delta(failed, kind)
+            if kind == "stop":
+                for cases in (report["cases"][:1], list(reversed(report["cases"])), None):
+                    with self.assertRaises(helper.CheckFailure):
+                        validate_delta({**report, "cases": cases}, kind)
+                with self.assertRaises(helper.CheckFailure):
+                    validate_delta({**report, "allOwnersSettled": False}, kind)
+            else:
+                # A negative control cannot add a blanket finality claim, even
+                # if the claimed value is false; it has a different contract.
+                for value in (True, False):
+                    with self.assertRaises(helper.CheckFailure):
+                        validate_delta({**report, "allOwnersSettled": value}, kind)
+
     def test_task_loss_requires_native_settlement_without_normal_management_success(self):
         for kind in ("driver-loss", "watchdog-loss"):
             report = loss_report(kind)

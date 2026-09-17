@@ -143,6 +143,36 @@ runtime's provenance, platform, licenses and redistribution terms. Neither this
 script nor matching manifest digests qualify executable custody; production
 launch stays disabled until that separate implementation is accepted.
 
+### Standalone runtime preparation (publisher work, not user setup)
+
+The intended installed application will include its engine; users will not be
+asked to install Python. The following source work is **not yet a working
+standalone distribution**:
+
+- `desktop/tools/prepare_cpython_payload.py` implements a bounded, offline
+  transformation of the pinned Linux x86_64 CPython payload. It treats archives
+  as data, never executes them, preserves required notices, rejects path and
+  inventory conflicts, and leaves interrupted output explicitly incomplete.
+  Its production entry point currently refuses before reading inputs: the
+  accepted notice inventory and original static-link provenance anchors are
+  still missing. Caller-supplied approval flags cannot replace those anchors.
+- `prepare_runtime.py` includes both the passive and configuration bootstraps
+  plus the core ZIP in the complete inventory. Preparing these files does not
+  authorize either entry point to run.
+- The Linux installed-runtime inspection module has a deliberately narrow
+  first scope: Ubuntu 24.04 x86_64 GNU, GA Linux 6.8, and a single original local
+  ext4/XFS root mount with protected immutable installation names. It retains
+  original descriptor custody, refuses unknown namespace/mount/permission
+  observations, and records explicit close results. It is **not connected to
+  engine launch** and cannot manufacture an executable qualified runtime.
+
+Supply provenance, accepted redistribution notices, real native custody,
+loader/import behavior, installer publication and clean-install checks remain
+separate requirements. Other Linux environments and the macOS/Windows installed
+runtime backends still need their own implementation and native evidence.
+An unavailable runtime is an actionable limitation, never a fallback to a
+project-selected executable or the user's ambient Python installation.
+
 The renderer receives typed commands, not general filesystem or shell access.
 Native selection and root binding stay in Rust. UI content is local, with a
 restrictive CSP; project strings are text rather than HTML. No remote fonts,

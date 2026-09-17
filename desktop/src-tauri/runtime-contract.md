@@ -53,16 +53,28 @@ ignored generated files in a clean checkout. The fixed intended payload names:
 
 - `manifest.json` (excluded from its own inventory);
 - `engine_bootstrap.py`;
+- `config_edit_bootstrap.py` (a separately gated configuration-only entry point);
 - `core.zip`;
 - `python/bin/python3` on Unix, or `python/python.exe` on Windows;
 - the explicitly inventoried interpreter/stdlib payload.
+
+The offline CPython payload transformer is publisher preparation, not runtime
+admission. Its production notice/static-link anchors remain absent and its
+public entry point refuses before parsing/writing. The new Linux original-
+descriptor inspection module is also not an executable runtime constructor or
+launch path. Its initial Ubuntu 24.04 / GA6.8 / x86_64 GNU / same-root ext4/XFS
+scope requires separate native qualification. Adding these source modules does
+not enable either the packaged-runtime or native-save gate.
 
 Manifest exact keys:
 `schemaVersion:1`, `protocol:1`, `coreVersion:"0.3.0"`, `target`, `coreSha256`,
 `protocolSha256`, `inventorySha256`, `files:[{path,sha256,size}]`.
 `target` is the exact Cargo target triple. `protocolSha256` hashes the exact
 `src/mobile_release/_desktop_engine.py` stored inside the core ZIP.
-`coreSha256` must equal the core ZIP inventory digest. The file list is strictly
+`coreSha256` must equal the core ZIP inventory digest. The inventory includes
+both fixed bootstraps; their bytes and the complete core ZIP are
+bound by the compiled manifest digest. Including an edit entry point does not
+qualify its owner or permit execution. The file list is strictly
 sorted by ASCII relative path. Inventory SHA-256 hashes compact UTF-8 JSON of
 that array, object keys ordered `path,sha256,size` (Python `sort_keys=True`,
 `separators=(",", ":")`, `ensure_ascii=False`). Hashes are lowercase 64-hex.

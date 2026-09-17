@@ -6,6 +6,10 @@ compile_error!("development-runtime is forbidden when debug assertions are disab
 pub mod error;
 pub mod protocol;
 pub mod runtime;
+// First protected-runtime inspection backend only. It is not connected to a
+// launch path and cannot construct an executable qualified-runtime capability.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod installed_runtime;
 pub mod supervisor;
 pub mod bridge;
 mod document_lifetime;
