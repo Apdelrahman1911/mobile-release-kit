@@ -548,12 +548,39 @@ def windows_snapshot_receipt(context: dict) -> dict:
     return validate_windows_snapshot_receipt(report, bindings=inputs["bindings"])
 
 
+def _windows_cleanup_kind(metadata: object) -> str:
+    """Classify only ordinary entries and the two exact link-like Windows tags."""
+    mode = getattr(metadata, "st_mode", None)
+    attributes = getattr(metadata, "st_file_attributes", None)
+    require(type(mode) is int and mode >= 0 and type(attributes) is int and 0 <= attributes <= 0xFFFFFFFF,
+            "Windows task cleanup encountered incoherent type metadata")
+    directory = bool(attributes & 0x10)
+    if not attributes & 0x400:
+        # The tag is not meaningful when FILE_ATTRIBUTE_REPARSE_POINT is clear.
+        if stat.S_ISDIR(mode) and directory:
+            return "directory"
+        if stat.S_ISREG(mode) and not directory:
+            return "regular"
+        require(not (stat.S_ISDIR(mode) or stat.S_ISREG(mode) or stat.S_ISLNK(mode)),
+                "Windows task cleanup encountered incoherent type metadata")
+        raise CheckFailure("Windows task cleanup encountered an unsupported file type")
+    tag = getattr(metadata, "st_reparse_tag", None)
+    require(type(tag) is int and tag in {0xA000000C, 0xA0000003},
+            "Windows task cleanup encountered an unsupported reparse tag")
+    if tag == 0xA000000C:
+        require(stat.S_ISLNK(mode), "Windows task cleanup encountered incoherent reparse metadata")
+        return "directory-symlink" if directory else "file-symlink"
+    require(directory and stat.S_ISDIR(mode), "Windows task cleanup encountered incoherent reparse metadata")
+    return "junction"
+
+
 def clean_windows_outputs(context: dict) -> None:
     # This is ordinary finite post-verification cleanup, NOT a cleanup remedy for
-    # native failure/uncertainty. No reparse point or additional writer is admitted.
+    # native failure/uncertainty. The original root/ancestry remain ordinary and
+    # no additional writer is admitted; known reparse entries are leaves only.
     windows_snapshot_receipt(context)
     root = Path(context["root"])
-    files, directories, pending = [], [], [(root, 0)]
+    leaves, directories, pending = [], [], [(root, 0)]
     seen, groups, members = {str(root)}, {}, {}
     count = 0
     while pending:
@@ -562,8 +589,8 @@ def clean_windows_outputs(context: dict) -> None:
             info = directory.lstat()
         except OSError:
             raise CheckFailure("Windows cleanup inventory directory metadata failed") from None
-        require(stat.S_ISDIR(info.st_mode) and not getattr(info, "st_file_attributes", 0) & 0x400
-                and depth <= 64, "Windows cleanup directory is redirected or too deep")
+        require(_windows_cleanup_kind(info) == "directory" and depth <= 64,
+                "Windows cleanup directory is redirected or too deep")
         directories.append((directory, info.st_dev, info.st_ino))
         try:
             with os.scandir(directory) as entries:
@@ -573,18 +600,20 @@ def clean_windows_outputs(context: dict) -> None:
                     require(entry.path not in seen, "Windows task cleanup inventory repeated a path")
                     seen.add(entry.path)
                     path = Path(entry.path)
-                    # Windows DirEntry.stat caches zero dev/inode/link-count fields.
-                    # Bind full no-follow facts, as in the pre-unlink recheck below.
+                    # CPython 3.14.7 caches raw Windows enumeration attributes/tag.
+                    # Screen them before lstat, which may process non-name-surrogate
+                    # tags. Cached zero dev/inode/nlink NEVER supplies group authority.
+                    # This screen is not atomic custody against an additional writer.
                     try:
+                        cached_kind = _windows_cleanup_kind(entry.stat(follow_symlinks=False))
                         metadata = path.lstat()
                     except OSError:
                         raise CheckFailure("Windows cleanup inventory entry metadata failed") from None
-                    require(not getattr(metadata, "st_file_attributes", 0) & 0x400 and not stat.S_ISLNK(metadata.st_mode),
-                            "Windows task cleanup encountered a reparse point")
-                    if stat.S_ISDIR(metadata.st_mode):
+                    kind = _windows_cleanup_kind(metadata)
+                    require(kind == cached_kind, "Windows task cleanup inventory entry classification changed")
+                    if kind == "directory":
                         pending.append((path, depth + 1))
                     else:
-                        require(stat.S_ISREG(metadata.st_mode), "Windows task cleanup encountered an unsupported file type")
                         links = getattr(metadata, "st_nlink", None)
                         require(type(links) is int and 1 <= links <= 500000,
                                 "Windows task cleanup inventory has an invalid link count")
@@ -592,35 +621,41 @@ def clean_windows_outputs(context: dict) -> None:
                         require(type(device) is int and device >= 0 and type(inode) is int and inode > 0,
                                 "Windows task cleanup inventory has an unusable file identity")
                         identity = (device, inode)
-                        binding = (links, metadata.st_size, metadata.st_mtime_ns)
+                        reparse = ((metadata.st_file_attributes, metadata.st_reparse_tag) if kind != "regular" else None)
+                        binding = (links, metadata.st_size, metadata.st_mtime_ns, kind, reparse)
                         if identity in groups:
                             require(groups[identity] == binding, "Windows task cleanup hardlink metadata disagrees")
                         else:
                             groups[identity] = binding
                         members[identity] = members.get(identity, 0) + 1
-                        files.append((path, identity))
+                        leaves.append((path, identity))
         except OSError:
             raise CheckFailure("Windows cleanup inventory enumeration failed") from None
-    # The complete non-following manifest is collected before the first deletion.
-    # Expected native originals are already joined; no other task root is selected.
-    for identity, (links, _, _) in groups.items():
-        require(members[identity] == links, "Windows task cleanup hardlink group is not closed inside the original root")
+    # The complete manifest never descends into known reparse leaves. All original
+    # owners are already joined; every leaf group closes before the first deletion.
+    for identity, binding in groups.items():
+        require(members[identity] == binding[0],
+                "Windows task cleanup hardlink group is not closed inside the original root")
     remaining = {identity: binding[0] for identity, binding in groups.items()}
-    for path, identity in files:
+    for path, identity in leaves:
         try:
             info = path.lstat()
         except OSError:
             raise CheckFailure("Windows cleanup before-unlink metadata failed") from None
-        _, size, modified = groups[identity]
+        _, size, modified, kind, reparse = groups[identity]
+        observed_kind = _windows_cleanup_kind(info)
         device, inode = getattr(info, "st_dev", None), getattr(info, "st_ino", None)
-        require(stat.S_ISREG(info.st_mode) and not getattr(info, "st_file_attributes", 0) & 0x400
-                and type(device) is int and type(inode) is int
-                and (device, inode, info.st_size, info.st_mtime_ns) == (*identity, size, modified),
-                "Windows task cleanup file identity changed")
+        require(observed_kind == kind and type(device) is int and type(inode) is int
+                and (device, inode, info.st_size, info.st_mtime_ns) == (*identity, size, modified)
+                and (reparse is None or (info.st_file_attributes, info.st_reparse_tag) == reparse),
+                "Windows task cleanup file identity changed" if kind == "regular"
+                else "Windows task cleanup reparse leaf binding changed")
         links = getattr(info, "st_nlink", None)
         require(type(links) is int and links == remaining[identity], "Windows task cleanup remaining link count changed")
         # An earlier successful unlink may change this inode's ctime, not its
         # retained size/mtime. Never replace this counter with later metadata.
+        # Pinned CPython's unlink dispatch removes directory symlinks/junctions
+        # with RemoveDirectoryW, not their targets. No fallback is permitted.
         try:
             path.unlink()
         except OSError:
@@ -632,7 +667,7 @@ def clean_windows_outputs(context: dict) -> None:
             info = path.lstat()
         except OSError:
             raise CheckFailure("Windows cleanup final directory metadata failed") from None
-        require(stat.S_ISDIR(info.st_mode) and not getattr(info, "st_file_attributes", 0) & 0x400
+        require(_windows_cleanup_kind(info) == "directory"
                 and (info.st_dev, info.st_ino) == (device, inode), "Windows task cleanup directory identity changed")
         try:
             path.rmdir()
