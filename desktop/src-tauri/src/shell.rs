@@ -4,7 +4,7 @@ use tauri::{Emitter, Manager, State, Webview, WebviewUrl, WebviewWindowBuilder};
 use tokio::sync::{watch, oneshot, Mutex as AsyncMutex};
 use crate::{
     asset_commands::{self, AssetError, CommandError, Reason},
-    asset_session::{AssetStatus, DocumentBinding, OriginalWork},
+    asset_session::{AssetStatus, DocumentBinding, NativeResponse, OriginalWork},
     bridge::{AppInfo, DesktopBridge, Project},
     edit_commands, edit_owner::EditOwner, edit_protocol::ConfigEditStatus,
     error::BridgeError,
@@ -421,14 +421,26 @@ mod owned_gtk {
                         // Latch the actual response/endpoint under the real
                         // admission lock BEFORE calling filename(), without
                         // holding that lock over any GTK API.
-                        if call.begin_response(response == gtk::ResponseType::Accept, false) == Some(true) { call.selected_path(native_path(dialog)); }
+                        let response = match response {
+                            gtk::ResponseType::Accept => NativeResponse::Accept,
+                            gtk::ResponseType::Cancel | gtk::ResponseType::DeleteEvent => NativeResponse::Decline,
+                            _ => NativeResponse::Other,
+                        };
+                        if call.begin_response(response, false) == Some(true) { call.selected_path(native_path(dialog)); }
                     }));
                     entry.destroy = Some(dialog.connect_destroy(move |_| destroyed(&destroy_call)));
                 }
                 Object::Message(dialog) => {
                     dialog.set_title("Quit and discard unsaved drafts?"); dialog.set_destroy_with_parent(true);
                     entry.response = Some(dialog.connect_response(move |_, response| {
-                        if let Some(call) = response_call.upgrade() { let _ = call.begin_response(response == gtk::ResponseType::Ok, true); }
+                        if let Some(call) = response_call.upgrade() {
+                            let response = match response {
+                                gtk::ResponseType::Ok => NativeResponse::Accept,
+                                gtk::ResponseType::Cancel | gtk::ResponseType::DeleteEvent => NativeResponse::Decline,
+                                _ => NativeResponse::Other,
+                            };
+                            let _ = call.begin_response(response, true);
+                        }
                     }));
                     entry.destroy = Some(dialog.connect_destroy(move |_| destroyed(&destroy_call)));
                 }

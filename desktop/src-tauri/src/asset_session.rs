@@ -107,6 +107,12 @@ struct RecordStatus { record_id: Token, revision: u32, kind: Kind, availability:
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum JoinReceipt { New, Pending, Returned, Failed }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeResponse { Accept, Decline, Other }
+fn admitted_response(response: NativeResponse, original: bool, interrupted: bool, quit: bool) -> (bool, bool) {
+    let admitted = original && !interrupted;
+    (admitted && response == NativeResponse::Accept, admitted && quit && response == NativeResponse::Decline)
+}
 #[cfg(feature = "desktop-shell")]
 type CoordinatorHandle = tauri::async_runtime::JoinHandle<()>;
 #[cfg(not(feature = "desktop-shell"))]
@@ -138,7 +144,7 @@ impl OriginalWork {
             child: AsyncMutex::new(ChildBook { handle: None, receipt: JoinReceipt::New }), source: Arc::new(Mutex::new(SourceBook::new())),
             retirement: Mutex::new(Retirement::default()), retired: AtomicBool::new(true),
             gui: Arc::new(GuiCall { owner: owner.clone(), document, facts: Mutex::new(GuiFacts { dispatched: false, constructing: false,
-                created: false, showing: false, response: false, accepted: false, accepted_at: None,
+                created: false, showing: false, response: false, accepted: false, declined: false, accepted_at: None,
                 destroyed: false, released: !gui_needed, not_created: !gui_needed, close_queued: false, close_ack: false, release_queued: false,
                 selected: None, refusal: None }), wake: Notify::new() }) })
     }
@@ -172,6 +178,14 @@ impl OriginalWork {
         coordinator && child && source && self.gui.settled()
     }
     fn resources_settled(&self) -> bool { self.original_resources_settled() && self.retired.load(Ordering::SeqCst) }
+    fn normally_declined(&self) -> bool {
+        // A normal body may also return after refusal/not-created. Neither that
+        // nor a failed join is evidence of a genuine native Cancel response.
+        self.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            && self.gui.facts().is_some_and(|facts| facts.created && !facts.not_created && facts.response
+                && facts.declined && !facts.accepted && facts.refusal.is_none()
+                && facts.destroyed && facts.released && facts.close_ack)
+    }
     fn retain_retirement(&self, retirement: Retirement) -> Result<(), Retirement> {
         let Ok(mut holding) = self.retirement.try_lock() else { return Err(retirement); };
         if !self.retired.swap(false, Ordering::SeqCst) { return Err(retirement); }
@@ -188,7 +202,7 @@ impl OriginalWork {
 pub(crate) struct GuiCall { owner: Weak<OriginalWork>, document: Weak<Inner>, facts: Mutex<GuiFacts>, pub(crate) wake: Notify }
 pub(crate) struct GuiFacts {
     pub(crate) dispatched: bool, pub(crate) constructing: bool,
-    pub(crate) created: bool, pub(crate) showing: bool, pub(crate) response: bool, pub(crate) accepted: bool,
+    pub(crate) created: bool, pub(crate) showing: bool, pub(crate) response: bool, pub(crate) accepted: bool, pub(crate) declined: bool,
     pub(crate) accepted_at: Option<Instant>,
     pub(crate) destroyed: bool, pub(crate) released: bool, pub(crate) not_created: bool,
     pub(crate) close_queued: bool, pub(crate) close_ack: bool, pub(crate) release_queued: bool, pub(crate) selected: Option<std::path::PathBuf>,
@@ -217,11 +231,11 @@ impl GuiCall {
         if state.quit.as_ref().is_some_and(|quit| Arc::ptr_eq(quit, &owner)) { stop_quit(&mut state, now); }
         owner.stop(); document.bump(&mut state); self.changed();
     }
-    pub(crate) fn begin_response(&self, accepted: bool, quit: bool) -> Option<bool> {
+    pub(crate) fn begin_response(&self, response: NativeResponse, quit: bool) -> Option<bool> {
         let Some(inner) = self.document.upgrade() else { return None; };
         let document = DocumentBinding { inner };
         let Some(owner) = self.owner() else { return None; };
-        document.gui_response(&owner, accepted, quit)
+        document.gui_response(&owner, response, quit)
     }
     pub(crate) fn selected_path(&self, path: Result<std::path::PathBuf, Reason>) {
         let Some(inner) = self.document.upgrade() else { return; };
@@ -294,6 +308,27 @@ fn session_data_empty(state: &DocumentState) -> bool {
     state.records.is_empty() && state.assignments.is_empty() && state.context.is_none()
         && state.slot.as_ref().is_none_or(|slot| slot.candidate.is_none() && slot.staged.is_none() && slot.context.is_none()
             && slot.retired_payload.is_none() && slot.selection.is_none() && slot.preview.is_none())
+}
+fn assets_can_exit_locked(state: &DocumentState) -> bool {
+    !state.retiring && session_data_empty(state) && state.slot.as_ref().is_none_or(|slot| slot.owner.resources_settled())
+}
+fn complete_empty_session_lock(state: &mut DocumentState) -> bool {
+    // The caller must have reinserted its exact original slot. Empty data alone
+    // cannot settle a pending coordinator/source/GUI or off-lock retirement.
+    if state.lock_pending && assets_can_exit_locked(state) {
+        state.session = false; state.lock_pending = false; true
+    } else { false }
+}
+fn quit_question_admitted(state: &DocumentState) -> bool {
+    if state.stopping || state.quit_accepted || state.quit_pending || state.retiring
+        || state.slot.as_ref().is_some_and(|slot| !slot.owner.gui.settled())
+        || state.quit.as_ref().is_some_and(|quit| !quit.resources_settled()) { return false; }
+    if !state.unknown { return true; } // Preserve ordinary quit admission.
+    // This grants only a question after genuine late settlement and a closed
+    // session. Unknown, old endpoints, and original receipts are not reset.
+    !state.exhausted && !state.lost_observed && state.lifetime.original_bound()
+        && !state.session && !state.lock_pending && assets_can_exit_locked(state)
+        && state.quit.as_ref().is_none_or(|quit| quit.normally_declined())
 }
 struct Inner { state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32> }
 #[derive(Clone)]
@@ -630,7 +665,7 @@ impl Drop for CoordinatorEnd {
 }
 
 impl DocumentBinding {
-    fn gui_response(&self, owner: &Arc<OriginalWork>, accepted: bool, quit: bool) -> Option<bool> {
+    fn gui_response(&self, owner: &Arc<OriginalWork>, response: NativeResponse, quit: bool) -> Option<bool> {
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
         let mut facts = owner.gui.facts()?;
         if facts.response { return None; }
@@ -638,7 +673,9 @@ impl DocumentBinding {
         let now = Instant::now();
         let original = if quit { state.quit.as_ref().is_some_and(|work| Arc::ptr_eq(work, owner)) }
             else { state.slot.as_ref().is_some_and(|slot| Arc::ptr_eq(&slot.owner, owner)) && state.lifetime.original_bound() && !state.stopping && !state.unknown };
-        facts.accepted = accepted && original && !owner.interrupted();
+        // Remember the actual native decline before stop_quit changes STOP.
+        // A programmatic post-STOP close or rejected late OK is never Cancel.
+        (facts.accepted, facts.declined) = admitted_response(response, original, owner.interrupted(), quit);
         if facts.accepted { facts.accepted_at = Some(now); owner.set_endpoint(Some(now + WORK)); }
         let read_one_path = facts.accepted && !quit;
         if quit {
@@ -812,6 +849,7 @@ impl DocumentBinding {
             }
         }
         state.slot = Some(slot);
+        if complete_empty_session_lock(&mut state) { self.bump(&mut state); }
         if state.unknown { invalidate_all(&mut state); }
         drop(state);
         // A completed abandoned child result is never a new usable selection.
@@ -1349,11 +1387,8 @@ impl DocumentBinding {
         if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
         Ok(())
     }
-    fn assets_can_exit_locked(state: &DocumentState) -> bool {
-        !state.retiring && session_data_empty(state) && state.slot.as_ref().is_none_or(|slot| slot.owner.resources_settled())
-    }
     pub(crate) fn assets_can_exit(&self) -> bool {
-        self.reconcile(); Self::assets_can_exit_locked(&self.lock())
+        self.reconcile(); assets_can_exit_locked(&self.lock())
     }
     async fn shutdown_assets(&self) -> Result<(), AssetError> {
         // Native OK set stopping/revoked authority under the real gate before
@@ -1362,7 +1397,7 @@ impl DocumentBinding {
             self.reconcile();
             {
                 let state = self.lock();
-                if Self::assets_can_exit_locked(&state) { return Ok(()); }
+                if assets_can_exit_locked(&state) { return Ok(()); }
                 if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1371,7 +1406,7 @@ impl DocumentBinding {
     pub(crate) fn can_exit(&self) -> bool {
         let (ready, quit) = {
             let state = self.lock();
-            (state.stopping && state.quit_accepted && Self::assets_can_exit_locked(&state), state.quit.clone())
+            (state.stopping && state.quit_accepted && assets_can_exit_locked(&state), state.quit.clone())
         };
         // The app's data-only observer does not run general session publication.
         // Only this already-ended quit original is joined here.
@@ -1380,13 +1415,12 @@ impl DocumentBinding {
     }
     pub(crate) fn request_quit(&self, app: tauri::AppHandle) {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
-        // A later Close is only an observation/wakeup of the existing originals.
-        // In particular it never repeats shutdown or opens a cleanup dialog.
-        if state.stopping || state.unknown || state.quit_pending || state.retiring {
+        // An unresolved or already accepted quit only wakes its originals. A
+        // settled, closed Unknown session can ask for first consent; this never
+        // repairs that session, replaces unresolved work or repeats shutdown.
+        if !quit_question_admitted(&state) {
             if let Some(quit) = &state.quit { quit.wake.notify_one(); } return;
         }
-        if state.slot.as_ref().is_some_and(|slot| !slot.owner.gui.settled()) { return; }
-        if state.quit.as_ref().is_some_and(|quit| !quit.resources_settled()) { return; }
         let id = match self.next_operation(&mut state) { Ok(id) => id, Err(_) => return };
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
         let previous = state.quit.replace(owner.clone());
@@ -1552,5 +1586,113 @@ mod tests {
         assert!(!session_data_empty(&state)); assert!(state.lock_pending && state.session);
         state.records.clear(); assert!(session_data_empty(&state));
         // This predicate is data emptiness only, not a fabricated native join.
+    }
+
+    // Synthetic facts for predicate coverage only: no native join/GUI evidence
+    // is produced, and no owner task or filesystem operation is started.
+    fn late_unknown() -> DocumentState {
+        let mut state = empty_state();
+        state.lifetime.navigation(true); state.lifetime.started(true);
+        state.lifetime.crash_hook_installed(); state.lifetime.finished(true);
+        state.unknown = true; state.session = false;
+        let mut original = slot(None, Some(Instant::now() + REVIEW));
+        original.phase = Phase::Unknown; original.settlement = Settlement::LateKnown;
+        original.cleanup_end = Some(Instant::now());
+        original.owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        state.slot = Some(original); state
+    }
+
+    #[test]
+    fn first_unknown_quit_requires_closed_session_and_complete_original_settlement() {
+        let state = late_unknown();
+        let original = state.slot.as_ref().unwrap();
+        let endpoints = (original.cleanup_end, original.review_end, original.owner.endpoint());
+        assert!(quit_question_admitted(&state)); assert!(state.unknown);
+        assert_eq!(endpoints, (original.cleanup_end, original.review_end, original.owner.endpoint()));
+        for modify in [
+            (|s: &mut DocumentState| s.session = true) as fn(&mut DocumentState),
+            |s| s.lock_pending = true, |s| s.retiring = true, |s| s.exhausted = true,
+            |s| s.lost_observed = true, |s| { s.lifetime.invalidate(); },
+            |s| s.stopping = true, |s| s.quit_pending = true, |s| s.quit_accepted = true,
+            |s| s.slot.as_ref().unwrap().owner.coordinator.lock().unwrap().receipt = JoinReceipt::Pending,
+            |s| s.slot.as_ref().unwrap().owner.gui.facts().unwrap().not_created = false,
+            |s| s.slot.as_ref().unwrap().owner.retired.store(false, Ordering::SeqCst),
+            |s| s.slot.as_mut().unwrap().candidate = Some(Candidate { payload: scalar(), record_id: token('a'), existing: None }),
+            |s| s.records.push(Record { key: RecordKey { id: token('a'), revision: 1 }, payload: scalar(), mutation_pending: false }),
+        ] {
+            let mut state = late_unknown(); modify(&mut state); assert!(!quit_question_admitted(&state));
+        }
+        // Ordinary pre-existing behavior allows asking before an open session
+        // is discarded; only native OK initiates that shutdown.
+        assert!(quit_question_admitted(&empty_state()));
+    }
+
+    #[test]
+    fn unknown_quit_repeat_requires_genuine_decline_and_normal_original_join() {
+        let mut state = late_unknown(); let quit = OriginalWork::new(2, true, Weak::new());
+        quit.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        {
+            let mut facts = quit.gui.facts().unwrap();
+            facts.created = true; facts.response = true; facts.declined = true;
+            facts.destroyed = true; facts.released = true; facts.close_ack = true;
+        }
+        state.quit = Some(quit.clone()); state.quit_cleanup_end = Some(Instant::now());
+        let endpoint = state.quit_cleanup_end;
+        assert!(quit_question_admitted(&state));
+        for receipt in [JoinReceipt::New, JoinReceipt::Pending, JoinReceipt::Failed] {
+            quit.coordinator.lock().unwrap().receipt = receipt;
+            assert!(!quit_question_admitted(&state));
+        }
+        quit.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        for modify in [
+            (|f: &mut GuiFacts| f.declined = false) as fn(&mut GuiFacts),
+            |f| f.accepted = true, |f| f.response = false, |f| f.not_created = true,
+            |f| f.created = false, |f| f.refusal = Some(Reason::SourceRefused),
+            |f| f.close_ack = false, |f| f.destroyed = false, |f| f.released = false,
+        ] {
+            {
+                let mut facts = quit.gui.facts().unwrap();
+                facts.declined = true; facts.accepted = false; facts.response = true;
+                facts.not_created = false; facts.created = true; facts.refusal = None;
+                facts.close_ack = true; facts.destroyed = true; facts.released = true;
+                modify(&mut facts);
+            }
+            assert!(!quit_question_admitted(&state));
+        }
+        assert!(state.unknown && !state.quit_accepted && !state.stopping);
+        assert_eq!(state.quit_cleanup_end, endpoint);
+    }
+
+    #[test]
+    fn native_decline_cannot_be_inferred_from_interruption_or_a_late_accept() {
+        assert_eq!(admitted_response(NativeResponse::Accept, true, false, true), (true, false));
+        assert_eq!(admitted_response(NativeResponse::Decline, true, false, true), (false, true));
+        assert_eq!(admitted_response(NativeResponse::Decline, true, false, false), (false, false));
+        for response in [NativeResponse::Accept, NativeResponse::Decline, NativeResponse::Other] {
+            assert_eq!(admitted_response(response, true, true, true), (false, false));
+            assert_eq!(admitted_response(response, false, false, true), (false, false));
+        }
+        assert_eq!(admitted_response(NativeResponse::Other, true, false, true), (false, false));
+    }
+
+    #[test]
+    fn late_known_empty_lock_requires_reinserted_slot_and_positive_original_resources() {
+        let mut state = late_unknown(); state.session = true; state.lock_pending = true;
+        let mut original = state.slot.take().unwrap();
+        original.candidate = Some(Candidate { payload: scalar(), record_id: token('a'), existing: None });
+        state.slot = Some(original); // Actual reconcile must do this before the predicate.
+        assert!(!complete_empty_session_lock(&mut state));
+        state.slot.as_mut().unwrap().candidate = None;
+        state.retiring = true; assert!(!complete_empty_session_lock(&mut state)); state.retiring = false;
+        state.slot.as_ref().unwrap().owner.coordinator.lock().unwrap().receipt = JoinReceipt::Pending;
+        assert!(!complete_empty_session_lock(&mut state));
+        state.slot.as_ref().unwrap().owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        let original = state.slot.as_ref().unwrap();
+        let endpoints = (original.cleanup_end, original.review_end, original.owner.endpoint());
+        assert!(complete_empty_session_lock(&mut state));
+        assert!(state.unknown && !state.session && !state.lock_pending);
+        let original = state.slot.as_ref().unwrap();
+        assert_eq!(endpoints, (original.cleanup_end, original.review_end, original.owner.endpoint()));
+        assert!(!complete_empty_session_lock(&mut state));
     }
 }
