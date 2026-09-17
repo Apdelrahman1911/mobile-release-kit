@@ -27,7 +27,7 @@ jobs:
           ENV: /dev/null
           # Literal public source, not caller/context code. The short heredoc
           # adds its final LF; env-i does not pass this variable to Python.
-          # Embedded collector SHA256: 3696a7e3e3d4edc34b56c8fe209d7fa2ec0f3d89ceac43ca842e52bf116f697b
+          # Embedded collector SHA256: 403207053709b7fc93a432adb4af88ce5e8f1570fd122d843b5c2e4320ec5d7e
           # Bound read policy SHA256: 1f0172048d1ea48ce91fa459a32b23b7a5f3be2cf89c0eb2ba88a60349e32488
           MRK_H0_PROGRAM: |-
             """H0: bounded public DATA candidate, never builder or host admission."""
@@ -46,10 +46,62 @@ jobs:
             F = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
             BODY = META = SUPPORT = 0
             CACHE, GAPS = {}, []
+            PHASE = "BOOTSTRAP_CONTEXT"
             
             
             class Refused(Exception):
                 pass
+            
+            
+            FAILURE_STATUS = {
+                ("BOOTSTRAP_CONTEXT", "GUARD"): 80,
+                ("BOOTSTRAP_CONTEXT", "IO"): 81,
+                ("BOOTSTRAP_CONTEXT", "DATA_PARSE"): 82,
+                ("BOOTSTRAP_CONTEXT", "INTERNAL"): 83,
+                ("EVENT", "GUARD"): 84,
+                ("EVENT", "IO"): 85,
+                ("EVENT", "DATA_PARSE"): 86,
+                ("EVENT", "INTERNAL"): 87,
+                ("OWNED_SCRATCH", "GUARD"): 88,
+                ("OWNED_SCRATCH", "IO"): 89,
+                ("OWNED_SCRATCH", "DATA_PARSE"): 90,
+                ("OWNED_SCRATCH", "INTERNAL"): 91,
+                ("HOST_FACTS", "GUARD"): 92,
+                ("HOST_FACTS", "IO"): 93,
+                ("HOST_FACTS", "DATA_PARSE"): 94,
+                ("HOST_FACTS", "INTERNAL"): 95,
+                ("CANDIDATES", "GUARD"): 96,
+                ("CANDIDATES", "IO"): 97,
+                ("CANDIDATES", "DATA_PARSE"): 98,
+                ("CANDIDATES", "INTERNAL"): 99,
+                ("CI_SNAPSHOT", "GUARD"): 100,
+                ("CI_SNAPSHOT", "IO"): 101,
+                ("CI_SNAPSHOT", "DATA_PARSE"): 102,
+                ("CI_SNAPSHOT", "INTERNAL"): 103,
+                ("ENCODE", "GUARD"): 104,
+                ("ENCODE", "IO"): 105,
+                ("ENCODE", "DATA_PARSE"): 106,
+                ("ENCODE", "INTERNAL"): 107,
+                ("WRITE", "GUARD"): 108,
+                ("WRITE", "IO"): 109,
+                ("WRITE", "DATA_PARSE"): 110,
+                ("WRITE", "INTERNAL"): 111,
+            }
+            
+            
+            def failure_status(phase, error):
+                """Classify only the boundary and exception family, never its contents."""
+                if type(phase) is not str:
+                    return 70
+                if isinstance(error, Refused):
+                    reason = "GUARD"
+                elif isinstance(error, OSError):
+                    reason = "IO"
+                elif isinstance(error, (json.JSONDecodeError, UnicodeDecodeError)):
+                    reason = "DATA_PARSE"
+                else:
+                    reason = "INTERNAL"
+                return FAILURE_STATUS.get((phase, reason), 70)
             
             
             def need(ok):
@@ -248,6 +300,7 @@ jobs:
             
             
             def context():
+                global PHASE
                 e = dict(os.environ)
                 need(set(e) == set(P["environment"]))
                 for key, pattern in P["patterns"].items():
@@ -259,6 +312,7 @@ jobs:
                     need(e[key] == s + "/tmp")
                 need(e["HOME"] == s + "/home" and os.getcwd() == s + "/neutral")
                 need(os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid())
+                PHASE = "EVENT"
                 event_row, raw = metadata(e["GITHUB_EVENT_PATH"], 2**20)
                 need(raw is not None)
                 event = json.loads(raw, object_pairs_hook=unique)
@@ -499,11 +553,14 @@ jobs:
             
             
             def main():
+                global PHASE
+                PHASE = "BOOTSTRAP_CONTEXT"
                 os.umask(0o077)
                 for key, value in ((resource.RLIMIT_AS, 512 * 2**20), (resource.RLIMIT_CPU, 60), (resource.RLIMIT_NOFILE, 128),
                                    (resource.RLIMIT_FSIZE, 8 * 2**20), (resource.RLIMIT_CORE, 0)):
                     resource.setrlimit(key, (value, value))
                 e, scratch, event = context()
+                PHASE = "OWNED_SCRATCH"
                 owned_dirs = {p: ident(at(p)) for p in (scratch, scratch + "/home", scratch + "/tmp", scratch + "/neutral")}
                 for path, s in owned_dirs.items():
                     need(s["uid"] == os.getuid() and s["mode"] == 0o700 and stat.S_ISDIR(at(path).st_mode))
@@ -532,8 +589,13 @@ jobs:
                 need(reservation < 32 * 2**20 and os.statvfs(scratch).f_frsize <= 4096)
                 need(sum(charge(at(p)) for p in owned_dirs) + charge(os.fstat(1)) + charge(os.fstat(2))
                      + (charge(stdin) if stat.S_ISREG(stdin.st_mode) else 0) <= 256 * 1024)
+                PHASE = "HOST_FACTS"
                 facts, mounts = vm(e)
-                files, shape = candidates(), ci(e, scratch, mounts)
+                PHASE = "CANDIDATES"
+                files = candidates()
+                PHASE = "CI_SNAPSHOT"
+                shape = ci(e, scratch, mounts)
+                PHASE = "ENCODE"
                 shape["originalObserver"] = {"argv": ["/usr/bin/env", "-i"] + [k + "=" + e[k] for k in P["environment"]] + P["observerArgvTail"],
                     "validatedPushNonDeletion": True,
                     "pythonArgv": sys.argv, "environment": e, "stdinKind": "pipe" if stat.S_ISFIFO(stdin.st_mode) else "regular-heredoc",
@@ -549,6 +611,7 @@ jobs:
                 values = dict(zip(("host-facts.json", "host-candidate-files.json", "ci-shape.json", "fit-gaps.json"), (facts, files, shape, gaps)))
                 encoded = {name: canonical(value) for name, value in values.items()}
                 need(sum(map(len, encoded.values())) <= 2 * 2**20)
+                PHASE = "WRITE"
                 root = directory(scratch)
                 index = {"schema": "mrk-h0-index-1", "root": owned_dirs[scratch], "directories": owned_dirs, "files": {}}
                 try:
@@ -581,9 +644,9 @@ jobs:
             
             try:
                 main()
-            except BaseException:
+            except BaseException as error:
                 os.write(2, b"MRK_H0_REFUSED\n")
-                sys.exit(70)
+                sys.exit(failure_status(PHASE, error))
         run: |
           # Fixed trusted diagnostic bootstrap. No xtrace, caller command or tool probe.
           set +x
@@ -608,7 +671,7 @@ jobs:
           [[ $UID == "$EUID" && $EUID -gt 0 && -d /tmp && ! -L /tmp ]] || fail
           [[ ${MRK_H0_PROGRAM+x} == x ]] || fail
           readonly MRK_H0_PROGRAM
-          [[ ${#MRK_H0_PROGRAM} -eq 42077 ]] || fail
+          [[ ${#MRK_H0_PROGRAM} -eq 43968 ]] || fail
           S="/tmp/mrk-builder-host-observe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           readonly S
           [[ ! -e $S && ! -L $S ]] || fail
@@ -661,6 +724,42 @@ jobs:
           { printf '{"endUnix":"%s","schema":"mrk-h0-shell-wait-1","startUnix":"%s","status":%s}\n' "$end" "$start" "$rc" >"$S/wait.json"; } 2>/dev/null || fail
           printf 'MRK-H0 OBSERVER-WAIT %s\n' "$rc"
           if [[ $rc -ne 0 ]]; then
+            # Closed failure labels only; unknown/timeout/signal codes stay generic.
+            case "$rc" in
+              80) printf 'MRK-H0 OBSERVER-FAILURE BOOTSTRAP_CONTEXT GUARD\n' ;;
+              81) printf 'MRK-H0 OBSERVER-FAILURE BOOTSTRAP_CONTEXT IO\n' ;;
+              82) printf 'MRK-H0 OBSERVER-FAILURE BOOTSTRAP_CONTEXT DATA_PARSE\n' ;;
+              83) printf 'MRK-H0 OBSERVER-FAILURE BOOTSTRAP_CONTEXT INTERNAL\n' ;;
+              84) printf 'MRK-H0 OBSERVER-FAILURE EVENT GUARD\n' ;;
+              85) printf 'MRK-H0 OBSERVER-FAILURE EVENT IO\n' ;;
+              86) printf 'MRK-H0 OBSERVER-FAILURE EVENT DATA_PARSE\n' ;;
+              87) printf 'MRK-H0 OBSERVER-FAILURE EVENT INTERNAL\n' ;;
+              88) printf 'MRK-H0 OBSERVER-FAILURE OWNED_SCRATCH GUARD\n' ;;
+              89) printf 'MRK-H0 OBSERVER-FAILURE OWNED_SCRATCH IO\n' ;;
+              90) printf 'MRK-H0 OBSERVER-FAILURE OWNED_SCRATCH DATA_PARSE\n' ;;
+              91) printf 'MRK-H0 OBSERVER-FAILURE OWNED_SCRATCH INTERNAL\n' ;;
+              92) printf 'MRK-H0 OBSERVER-FAILURE HOST_FACTS GUARD\n' ;;
+              93) printf 'MRK-H0 OBSERVER-FAILURE HOST_FACTS IO\n' ;;
+              94) printf 'MRK-H0 OBSERVER-FAILURE HOST_FACTS DATA_PARSE\n' ;;
+              95) printf 'MRK-H0 OBSERVER-FAILURE HOST_FACTS INTERNAL\n' ;;
+              96) printf 'MRK-H0 OBSERVER-FAILURE CANDIDATES GUARD\n' ;;
+              97) printf 'MRK-H0 OBSERVER-FAILURE CANDIDATES IO\n' ;;
+              98) printf 'MRK-H0 OBSERVER-FAILURE CANDIDATES DATA_PARSE\n' ;;
+              99) printf 'MRK-H0 OBSERVER-FAILURE CANDIDATES INTERNAL\n' ;;
+              100) printf 'MRK-H0 OBSERVER-FAILURE CI_SNAPSHOT GUARD\n' ;;
+              101) printf 'MRK-H0 OBSERVER-FAILURE CI_SNAPSHOT IO\n' ;;
+              102) printf 'MRK-H0 OBSERVER-FAILURE CI_SNAPSHOT DATA_PARSE\n' ;;
+              103) printf 'MRK-H0 OBSERVER-FAILURE CI_SNAPSHOT INTERNAL\n' ;;
+              104) printf 'MRK-H0 OBSERVER-FAILURE ENCODE GUARD\n' ;;
+              105) printf 'MRK-H0 OBSERVER-FAILURE ENCODE IO\n' ;;
+              106) printf 'MRK-H0 OBSERVER-FAILURE ENCODE DATA_PARSE\n' ;;
+              107) printf 'MRK-H0 OBSERVER-FAILURE ENCODE INTERNAL\n' ;;
+              108) printf 'MRK-H0 OBSERVER-FAILURE WRITE GUARD\n' ;;
+              109) printf 'MRK-H0 OBSERVER-FAILURE WRITE IO\n' ;;
+              110) printf 'MRK-H0 OBSERVER-FAILURE WRITE DATA_PARSE\n' ;;
+              111) printf 'MRK-H0 OBSERVER-FAILURE WRITE INTERNAL\n' ;;
+              *) : ;;
+            esac
             printf 'MRK-H0 ERROR OBSERVER_RETAINED\n'
             exit "$rc"
           fi
@@ -740,7 +839,7 @@ jobs:
           import stat
           import sys
           
-          COLLECTOR_SHA256 = "3696a7e3e3d4edc34b56c8fe209d7fa2ec0f3d89ceac43ca842e52bf116f697b"
+          COLLECTOR_SHA256 = "403207053709b7fc93a432adb4af88ce5e8f1570fd122d843b5c2e4320ec5d7e"
           POLICY_SHA256 = "1f0172048d1ea48ce91fa459a32b23b7a5f3be2cf89c0eb2ba88a60349e32488"
           SHAPES = {'ci-shape.json': ['schema', 'scope', 'locations', 'census', 'originalCiSnapshotCharge', 'originalObserver', 'return'], 'fit-gaps.json': ['schema', 'scope', 'storageBoundary', 'observedGaps', 'launchGaps'], 'host-candidate-files.json': ['schema', 'scope', 'tools', 'support', 'aliases', 'providers', 'packageVersions', 'runnerVersionDirectory', 'runner'], 'host-facts.json': ['schema', 'scope', 'policySha256', 'run', 'uid', 'gid', 'kernel', 'osRelease', 'metadata', 'filesystemsPresent', 'memory', 'procSelfAlias']}
           ENVIRONMENT = ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TZ', 'ImageOS', 'ImageVersion', 'GITHUB_WORKSPACE', 'RUNNER_TEMP', 'GITHUB_ENV', 'GITHUB_OUTPUT', 'GITHUB_PATH', 'GITHUB_STEP_SUMMARY', 'GITHUB_EVENT_PATH', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_EVENT_NAME', 'RUNNER_ENVIRONMENT', 'GITHUB_REF']
