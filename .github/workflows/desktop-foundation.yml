@@ -51,7 +51,6 @@ jobs:
     env:
       MRK_DESKTOP_PLATFORM: ${{ matrix.platform }}
       MRK_DESKTOP_HOSTED_CHECKS: passive-v1
-      RUNNER_ENVIRONMENT: ${{ runner.environment }}
       NODE_DISABLE_COMPILE_CACHE: '1'
     steps:
       - name: Require disposable hosting and exact-source selection
@@ -59,6 +58,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted ]]
@@ -89,6 +89,7 @@ jobs:
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py prepare'
       - name: Acquire only locked active-platform compiler inputs
         timeout-minutes: 15
@@ -96,6 +97,7 @@ jobs:
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
       - name: Compile headless tests and applicable native shell
         timeout-minutes: 25
@@ -103,6 +105,7 @@ jobs:
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
       - name: Verify genuine passive IPC and original-child settlement
         timeout-minutes: 5
@@ -110,6 +113,7 @@ jobs:
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py native'
       - name: Retain only allowlisted synthetic evidence
         if: always() && steps.prepare.outcome == 'success'
@@ -131,4 +135,5 @@ jobs:
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py clean'
