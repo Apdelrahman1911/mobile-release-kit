@@ -132,6 +132,34 @@ def _short_alias_error_reason(api, code):
     return reasons.get(code, "short_alias_other_refused")
 
 
+def _installed_deny_data_dacl(data):
+    """Validate installed policy bytes, not the caller's effective access."""
+    if type(data) is not bytes or not 20 <= len(data) <= 16 * 1024 or data[0] != 1:
+        return False
+    control = int.from_bytes(data[2:4], "little")
+    if control & 0x9004 != 0x9004:  # SELF_RELATIVE, DACL_PROTECTED, DACL_PRESENT.
+        return False
+    offset = int.from_bytes(data[16:20], "little")
+    if offset < 20 or offset % 4 or offset > len(data) - 8:
+        return False
+    size = int.from_bytes(data[offset + 2:offset + 4], "little")
+    count = int.from_bytes(data[offset + 4:offset + 6], "little")
+    if data[offset] != 2 or size < 8 or size % 4 or size > len(data) - offset or count != 2:
+        return False
+    cursor, end = offset + 8, offset + size
+    world = b"\x01\x01\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00"
+    for ace_type, mask in ((1, 1), (0, 0x1F01FF)):
+        if (cursor + 20 > end or data[cursor] != ace_type or data[cursor + 1] != 0
+                or int.from_bytes(data[cursor + 2:cursor + 4], "little") != 20
+                or int.from_bytes(data[cursor + 4:cursor + 8], "little") != mask
+                or data[cursor + 8:cursor + 20] != world):
+            return False
+        cursor += 20
+    # The original ACL allocation may contain spare capacity. Only AceCount
+    # records are ACEs; unused bounded bytes are not another access rule.
+    return True
+
+
 def _failure_diagnostic(case, nonce, stage, reason, fixture_state, reader_state, output_state):
     """Closed scalar reduction only; no exception rendering, IO or custody probe."""
     cases = ("ordinary-source", "ordinary-zip", "closed-gate", "link-children", "reparse-root",
@@ -1454,13 +1482,15 @@ class Fixture:
         n.call(n.a.AddAccessAllowedAceEx, (acl, 2, 0, 0x1F01FF, sid), (acl, sid))
         n.call(n.a.SetSecurityInfo, (handle, 1, 4 | 0x80000000, None, None, acl, None), (acl, saved), kind="zero")
         record["changed"] = True
-        try:
-            unexpected = n.open(path, 0x100081)
-        except NativeFailure as error:
-            require(error.code == 5, "fixture_dacl_denial_required")
-        else:
-            n.close(unexpected)
-            raise FixtureFailure("fixture_dacl_not_effective")
+        # Verify the installed protected policy through the original restore
+        # owner, not a CreateFileW backup-style open with different semantics.
+        # Actual ordinary-reader STATUS_ACCESS_DENIED observations remain
+        # mandatory in completed_open_error and the unchanged native reducer.
+        installed, installed_needed = c.create_string_buffer(16 * 1024), n.U32()
+        n.call(n.a.GetKernelObjectSecurity,
+               (handle, 4, installed, len(installed), c.byref(installed_needed)), (installed, installed_needed))
+        require(0 < installed_needed.value <= len(installed), "fixture_dacl_not_effective")
+        require(_installed_deny_data_dacl(installed[:installed_needed.value]), "fixture_dacl_not_effective")
 
     def observe_oplock(self) -> None:
         n = self.native

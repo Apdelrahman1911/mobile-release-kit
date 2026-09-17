@@ -711,6 +711,84 @@ class WindowsSnapshotPureTests(unittest.TestCase):
         for api_name in (None, 1, b"SetFileShortNameW"):
             self.assertIsNone(classify(api_name, 5))
 
+    def test_installed_dacl_policy_requires_exact_protected_world_aces(self):
+        # Execute only the scalar bytes predicate, never the fixture's native
+        # module/constructor/open/setter/readback or restoration code.
+        name = "_installed_deny_data_dacl"
+        source = (Path(__file__).resolve().parents[1] / "native_desktop_snapshot_windows.py").read_bytes()
+        self.assertLessEqual(len(source), 128 * 1024)
+        parsed = ast.parse(source, filename="reviewed-dacl-fixture-source")
+        selected = [node for node in parsed.body if getattr(node, "name", None) == name]
+        self.assertEqual(len(selected), 1)
+        definition = selected[0]
+        self.assertIs(type(definition), ast.FunctionDef)
+        self.assertFalse(definition.decorator_list or definition.returns or definition.type_comment
+                         or getattr(definition, "type_params", []))
+        args = definition.args
+        self.assertEqual(tuple(arg.arg for arg in args.args), ("data",))
+        self.assertFalse(args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg or args.defaults or args.kw_defaults)
+        self.assertIsNone(args.args[0].annotation)
+        self.assertEqual(sum(isinstance(node, ast.FunctionDef) for node in ast.walk(definition)), 1)
+        safe = {"type": type, "bytes": bytes, "int": int, "len": len}
+        nodes = (ast.FunctionDef, ast.arguments, ast.arg, ast.Expr, ast.Constant, ast.Name, ast.Load, ast.Store,
+                 ast.Assign, ast.AugAssign, ast.For, ast.If, ast.Return, ast.Call, ast.Attribute, ast.Tuple,
+                 ast.Subscript, ast.Slice, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
+                 ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
+        for node in ast.walk(definition):
+            self.assertIsInstance(node, nodes)
+            if isinstance(node, ast.Name):
+                self.assertFalse(node.id.startswith("__"))
+            if isinstance(node, ast.Attribute):
+                self.assertIsInstance(node.value, ast.Name)
+                self.assertEqual((node.value.id, node.attr), ("int", "from_bytes"))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                self.assertIn(node.func.id, safe)
+        namespace = {"__builtins__": safe}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-dacl-policy-predicate", "exec",
+                     dont_inherit=True), namespace)
+        self.assertEqual(set(namespace), {"__builtins__", name})
+        check = namespace[name]
+        world = bytes.fromhex("010100000000000100000000")
+        deny = struct.pack("<BBHI", 1, 0, 20, 1) + world
+        allow = struct.pack("<BBHI", 0, 0, 20, 0x1F01FF) + world
+
+        def descriptor(*, offset=20, capacity=48):
+            return (struct.pack("<BBHIIII", 1, 0, 0x9004, 0, 0, 0, offset) + bytes(offset - 20)
+                    + struct.pack("<BBHHH", 2, 0, capacity, 2, 0) + deny + allow
+                    + b"\xa5" * (capacity - 48))
+
+        valid = descriptor()
+        for data in (valid, descriptor(offset=24), descriptor(capacity=256)):
+            self.assertIs(check(data), True)
+
+        def changed(offset, replacement):
+            return valid[:offset] + replacement + valid[offset + len(replacement):]
+
+        malformed = [changed(0, b"\x02"), changed(20, b"\x04"),
+                     valid[:28] + allow + deny, valid[:28] + deny + allow[:-1]]
+        for control in (0, 0x8004, 0x9000, 0x1004):
+            malformed.append(changed(2, struct.pack("<H", control)))
+        for offset in (0, 4, 16, 21, 64, 0xFFFFFFFC):
+            malformed.append(changed(16, struct.pack("<I", offset)))
+        for size in (0, 4, 8, 28, 47, 49, 52, 65532):
+            malformed.append(changed(22, struct.pack("<H", size)))
+        for count in (0, 1, 3, 65535):
+            malformed.append(changed(24, struct.pack("<H", count)))
+        for offset in (28, 48):
+            malformed.extend((changed(offset, b"\x05"), changed(offset + 1, b"\x10"),
+                              changed(offset + 2, struct.pack("<H", 24)),
+                              changed(offset + 4, struct.pack("<I", 2)),
+                              changed(offset + 8, b"\x02"), changed(offset + 9, b"\x02"),
+                              changed(offset + 15, b"\x05"), changed(offset + 16, b"\x01")))
+        malformed.append(changed(22, struct.pack("<HH", 68, 3)) + allow)
+        for data in malformed:
+            with self.subTest(data=data.hex()):
+                self.assertIs(check(data), False)
+        for end in range(len(valid)):
+            self.assertIs(check(valid[:end]), False)
+        for data in (None, True, 1, "descriptor", bytearray(valid), memoryview(valid), valid + bytes(16384)):
+            self.assertIs(check(data), False)
+
     def test_failure_diagnostic_is_closed_bounded_and_unknown_silent(self):
         # Compile only this scalar reducer, never the fixture/emitter/observer.
         name = "_failure_diagnostic"
