@@ -565,7 +565,10 @@ def clean_windows_outputs(context: dict) -> None:
             for entry in entries:
                 count += 1
                 require(count <= 500000, "Windows task cleanup inventory exceeded its bound")
-                path, metadata = Path(entry.path), entry.stat(follow_symlinks=False)
+                path = Path(entry.path)
+                # Windows DirEntry.stat caches zero dev/inode/link-count fields.
+                # Bind full no-follow facts, as in the pre-unlink recheck below.
+                metadata = path.lstat()
                 require(not getattr(metadata, "st_file_attributes", 0) & 0x400 and not stat.S_ISLNK(metadata.st_mode),
                         "Windows task cleanup encountered a reparse point")
                 if stat.S_ISDIR(metadata.st_mode):

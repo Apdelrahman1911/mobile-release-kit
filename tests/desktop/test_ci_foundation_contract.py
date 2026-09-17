@@ -970,5 +970,105 @@ class WindowsConsumerTests(unittest.TestCase):
             leaf.assert_called_once_with(target / "debug" / "a.exe")
 
 
+class WindowsCleanupMetadataTests(unittest.TestCase):
+    """Actual cleanup control flow with fake capabilities; no real file removal."""
+
+    def fixture(self, *, inventory_change=None, recheck_change=None, prerequisite=False):
+        events = []
+        root, first, nested, second = "/inert", "/inert/first", "/inert/nested", "/inert/nested/second"
+        def metadata(inode, *, directory=False):
+            return {"st_mode": (stat.S_IFDIR if directory else stat.S_IFREG) | 0o700,
+                    "st_file_attributes": 0, "st_nlink": 1, "st_dev": 7, "st_ino": inode,
+                    "st_size": 4, "st_mtime_ns": 100}
+        values = {root: metadata(10, directory=True), first: metadata(11),
+                  nested: metadata(12, directory=True), second: metadata(13)}
+        reads = {}
+
+        class FakePath:
+            def __init__(self, value):
+                self.value = value
+                self.parts = tuple(value.split("/"))
+            def lstat(self):
+                events.append(("lstat", self.value))
+                reads[self.value] = reads.get(self.value, 0) + 1
+                result = dict(values[self.value])
+                if self.value == first:
+                    result.update((inventory_change if reads[self.value] == 1 else recheck_change) or {})
+                return SimpleNamespace(**result)
+            def unlink(self):
+                events.append(("unlink", self.value))
+            def rmdir(self):
+                events.append(("rmdir", self.value))
+
+        class Entry:
+            def __init__(self, path):
+                self.path = path
+            def stat(self, *, follow_symlinks):
+                events.append(("cached-stat", self.path))
+                self_test.assertIs(follow_symlinks, False)
+                return SimpleNamespace(**{**values[self.path], "st_dev": 0, "st_ino": 0, "st_nlink": 0})
+
+        class Enumeration:
+            def __init__(self, path):
+                self.path = path
+            def __enter__(self):
+                events.append(("scan", self.path.value))
+                return iter(Entry(value) for value in {root: (first, nested), nested: (second,)}[self.path.value])
+            def __exit__(self, *args):
+                events.append(("scan-close", self.path.value))
+
+        def receipt(context):
+            self.assertEqual(context, {"root": root})
+            events.append(("receipt", root))
+            if prerequisite:
+                raise helper.CheckFailure("inert unsettled prerequisite")
+        self_test = self
+        return events, FakePath, Enumeration, receipt
+
+    def invoke(self, fixture):
+        events, paths, enumeration, receipt = fixture
+        with patch.object(helper, "Path", paths), patch.object(helper.os, "scandir", enumeration), \
+                patch.object(helper, "windows_snapshot_receipt", side_effect=receipt), \
+                patch.object(helper, "run", side_effect=AssertionError("cleanup must not select a tool")), \
+                redirect_stdout(io.StringIO()):
+            helper.clean_windows_outputs({"root": "/inert"})
+
+    def test_windows_cleanup_uses_full_no_follow_metadata_and_complete_inventory(self):
+        fixture = self.fixture()
+        events = fixture[0]
+        self.invoke(fixture)
+        self.assertFalse(any(kind == "cached-stat" for kind, _ in events))
+        first_unlink = events.index(("unlink", "/inert/first"))
+        self.assertLess(events.index(("scan-close", "/inert/nested")), first_unlink)
+        self.assertEqual([item for item in events if item[0] in ("unlink", "rmdir")],
+                         [("unlink", "/inert/first"), ("unlink", "/inert/nested/second"),
+                          ("rmdir", "/inert/nested"), ("rmdir", "/inert")])
+        for index, (kind, path) in enumerate(events):
+            if kind in ("unlink", "rmdir"):
+                self.assertEqual(events[index - 1], ("lstat", path))
+        self.assertEqual(events[0], ("receipt", "/inert"))
+
+    def test_windows_cleanup_preserves_admission_and_before_unlink_refusals(self):
+        fixture = self.fixture(prerequisite=True)
+        with self.assertRaises(helper.CheckFailure):
+            self.invoke(fixture)
+        self.assertEqual(fixture[0], [("receipt", "/inert")])
+        refused = ({"st_file_attributes": 0x400}, {"st_mode": stat.S_IFLNK | 0o700},
+                   {"st_mode": stat.S_IFIFO | 0o600}, {"st_nlink": 2}, {"st_nlink": 0})
+        for changed in refused:
+            with self.subTest(stage="inventory", changed=changed):
+                fixture = self.fixture(inventory_change=changed)
+                with self.assertRaises(helper.CheckFailure):
+                    self.invoke(fixture)
+                self.assertFalse(any(kind in ("unlink", "rmdir") for kind, _ in fixture[0]))
+        for changed in (*refused, {"st_dev": 8}, {"st_ino": 99}, {"st_size": 5}, {"st_mtime_ns": 101}):
+            with self.subTest(stage="before-unlink", changed=changed):
+                fixture = self.fixture(recheck_change=changed)
+                with self.assertRaises(helper.CheckFailure):
+                    self.invoke(fixture)
+                self.assertIn(("scan-close", "/inert/nested"), fixture[0])
+                self.assertFalse(any(kind in ("unlink", "rmdir") for kind, _ in fixture[0]))
+
+
 if __name__ == "__main__":
     unittest.main()
