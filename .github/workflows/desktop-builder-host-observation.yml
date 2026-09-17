@@ -27,7 +27,7 @@ jobs:
           ENV: /dev/null
           # Literal public source, not caller/context code. The short heredoc
           # adds its final LF; env-i does not pass this variable to Python.
-          # Embedded collector SHA256: 75ea4290eb780aaa144bf20b7dc5aa2ed5044bcc1fad0b62bc28d4fe4d807d11
+          # Embedded collector SHA256: 67d3cdbb407c95736a7c94065b86bb34ebea3b23141b5607d7cf7581a0a6ffa7
           # Bound read policy SHA256: 1f0172048d1ea48ce91fa459a32b23b7a5f3be2cf89c0eb2ba88a60349e32488
           MRK_H0_PROGRAM: |-
             """H0: bounded public DATA candidate, never builder or host admission."""
@@ -480,6 +480,17 @@ jobs:
                 return result, mounts
             
             
+            def select_provider_support(name, provider_index, paths):
+                need(guard(len(name) <= 256, "PROVIDER_PATH_LENGTH")
+                     and guard(os.path.normpath(name) == name, "PROVIDER_PATH_CANONICAL"))
+                if re.fullmatch(r"/[A-Za-z0-9_./+@=-]+", name) is None:
+                    # Preserve read admission; an unselected name is an explicit support gap.
+                    gap("SUPPORT", "host-candidate-files.json#/providers/" + str(provider_index))
+                    return
+                paths.add(name)
+                guard(len(paths) <= 4096, "SUPPORT_PATH_COUNT")
+            
+            
             def candidates():
                 tools = [measure(path) for path in P["tools"]]
                 for i, row in enumerate(tools):
@@ -491,7 +502,7 @@ jobs:
                         gap("SUPPORT", "host-candidate-files.json#/aliases/" + str(i))
                 ready_aliases = {r["path"]: r["aliasTarget"] for r in aliases if r["kind"] == "alias" and r["aliasTarget"]}
                 providers, paths = [], set(P["supportFixed"])
-                for path in P["providers"]:
+                for provider_index, path in enumerate(P["providers"]):
                     row, raw = metadata(path, 256 * 1024)
                     providers.append(row)
                     for name in (raw or b"").decode("utf-8").splitlines():
@@ -500,11 +511,7 @@ jobs:
                                 name = new + name[len(old):]
                                 break
                         if any(name.startswith(root) for root in P["supportRoots"]):
-                            need(guard(len(name) <= 256, "PROVIDER_PATH_LENGTH")
-                                 and guard(os.path.normpath(name) == name, "PROVIDER_PATH_CANONICAL")
-                                 and guard(re.fullmatch(r"/[A-Za-z0-9_./+@=-]+", name), "PROVIDER_PATH_CHARSET"))
-                            paths.add(name)
-                            guard(len(paths) <= 4096, "SUPPORT_PATH_COUNT")
+                            select_provider_support(name, provider_index, paths)
                 support = []
                 for path in sorted(paths - set(P["tools"])):
                     row = measure(path, support=True, aliases=paths)
@@ -762,7 +769,7 @@ jobs:
           [[ $UID == "$EUID" && $EUID -gt 0 && -d /tmp && ! -L /tmp ]] || fail
           [[ ${MRK_H0_PROGRAM+x} == x ]] || fail
           readonly MRK_H0_PROGRAM
-          [[ ${#MRK_H0_PROGRAM} -eq 47205 ]] || fail
+          [[ ${#MRK_H0_PROGRAM} -eq 47455 ]] || fail
           S="/tmp/mrk-builder-host-observe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           readonly S
           [[ ! -e $S && ! -L $S ]] || fail
@@ -972,7 +979,7 @@ jobs:
           import stat
           import sys
           
-          COLLECTOR_SHA256 = "75ea4290eb780aaa144bf20b7dc5aa2ed5044bcc1fad0b62bc28d4fe4d807d11"
+          COLLECTOR_SHA256 = "67d3cdbb407c95736a7c94065b86bb34ebea3b23141b5607d7cf7581a0a6ffa7"
           POLICY_SHA256 = "1f0172048d1ea48ce91fa459a32b23b7a5f3be2cf89c0eb2ba88a60349e32488"
           SHAPES = {'ci-shape.json': ['schema', 'scope', 'locations', 'census', 'originalCiSnapshotCharge', 'originalObserver', 'return'], 'fit-gaps.json': ['schema', 'scope', 'storageBoundary', 'observedGaps', 'launchGaps'], 'host-candidate-files.json': ['schema', 'scope', 'tools', 'support', 'aliases', 'providers', 'packageVersions', 'runnerVersionDirectory', 'runner'], 'host-facts.json': ['schema', 'scope', 'policySha256', 'run', 'uid', 'gid', 'kernel', 'osRelease', 'metadata', 'filesystemsPresent', 'memory', 'procSelfAlias']}
           ENVIRONMENT = ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TZ', 'ImageOS', 'ImageVersion', 'GITHUB_WORKSPACE', 'RUNNER_TEMP', 'GITHUB_ENV', 'GITHUB_OUTPUT', 'GITHUB_PATH', 'GITHUB_STEP_SUMMARY', 'GITHUB_EVENT_PATH', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_EVENT_NAME', 'RUNNER_ENVIRONMENT', 'GITHUB_REF']
