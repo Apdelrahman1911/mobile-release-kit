@@ -4279,7 +4279,8 @@ pub(crate) mod github_tls {
         struct Progress {
             schema_version: u32, scope: String, #[serde(rename = "case")] case_name: String, state: String,
             event: String, sequence: u64, requests: u64, body_bytes: u64, wire_read_bytes: u64,
-            wire_write_bytes: u64, dns_questions: u64, dns_a: u64, dns_aaaa: u64, client_stop: Option<String>,
+            wire_write_bytes: u64, dns_questions: u64, dns_a: u64,
+            #[serde(rename = "dnsAAAA")] dns_aaaa: u64, client_stop: Option<String>,
         }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -4299,12 +4300,29 @@ pub(crate) mod github_tls {
             wire_read_bytes: Vec<u64>, wire_write_bytes: Vec<u64>, reply_bytes: Vec<u64>, all_sockets_closed: bool,
             sni: u64, phase: String, withheld_wire_bytes: u64, body_bytes: u64, incomplete_body: bool,
             client_stop: Option<String>, progress_count: u64, dns_questions: u64, dns_a: u64,
-            dns_aaaa: u64, dns_replies: u64, completion: Completion,
+            #[serde(rename = "dnsAAAA")] dns_aaaa: u64, dns_replies: u64, completion: Completion,
         }
         struct Frames { progress: Vec<(Progress, Instant)>, terminal: Terminal }
         fn fields(value: &Value, expected: &[&str], code: &'static str) -> Check<()> {
             require(value.as_object().is_some_and(|row| row.len() == expected.len()
                 && expected.iter().all(|name| row.contains_key(*name))), code)
+        }
+        fn decode_progress_frame(line: &[u8]) -> Check<Progress> {
+            let value = protocol::strict_json(line).map_err(|_| "tls_deadline_progress_json")?;
+            fields(&value, &["schemaVersion", "scope", "case", "state", "event", "sequence", "requests", "bodyBytes",
+                "wireReadBytes", "wireWriteBytes", "dnsQuestions", "dnsA", "dnsAAAA", "clientStop"], "tls_deadline_progress_fields")?;
+            serde_json::from_value(value).map_err(|_| "tls_deadline_progress_schema")
+        }
+        fn decode_terminal_frame(line: &[u8]) -> Check<(Terminal, Value)> {
+            let value = protocol::strict_json(line).map_err(|_| "tls_deadline_terminal_json")?;
+            fields(&value, &["schemaVersion", "scope", "case", "state", "status", "code", "connections", "handshakes", "requests",
+                "decryptedBytes", "authBytes", "closeNotify", "tlsRefused", "wireReadBytes", "wireWriteBytes", "replyBytes",
+                "allSocketsClosed", "sni", "phase", "withheldWireBytes", "bodyBytes", "incompleteBody", "clientStop",
+                "progressCount", "dnsQuestions", "dnsA", "dnsAAAA", "dnsReplies", "completion"], "tls_deadline_terminal_fields")?;
+            fields(&value["completion"], &["bytes", "eof", "closed", "primaryEmpty", "primaryUnexpected", "primaryClosed",
+                "proxy", "dnsEmpty", "dnsClosed"], "tls_deadline_completion_fields")?;
+            let terminal: Terminal = serde_json::from_value(value.clone()).map_err(|_| "tls_deadline_terminal_schema")?;
+            Ok((terminal, value))
         }
         fn client_stop(value: Option<&str>, handshake: bool) -> bool {
             matches!(value, Some("tcp-eof" | "connection-reset"))
@@ -4340,23 +4358,13 @@ pub(crate) mod github_tls {
                 }
                 let mut progress = Vec::new();
                 for (index, line) in lines[1..lines.len() - 2].iter().enumerate() {
-                    let value = protocol::strict_json(line).map_err(|_| "tls_deadline_progress_json")?;
-                    fields(&value, &["schemaVersion", "scope", "case", "state", "event", "sequence", "requests", "bodyBytes",
-                        "wireReadBytes", "wireWriteBytes", "dnsQuestions", "dnsA", "dnsAAAA", "clientStop"], "tls_deadline_progress_fields")?;
-                    let item: Progress = serde_json::from_value(value).map_err(|_| "tls_deadline_progress_schema")?;
+                    let item = decode_progress_frame(line)?;
                     require(item.schema_version == 1 && item.scope == "github-tls-peer-v1" && item.case_name == scenario.name
                         && item.state == "progress" && item.sequence == index as u64 + 1 && item.sequence <= 24,
                         "tls_deadline_progress_identity")?;
                     progress.push((item, arrivals.frames[index + 1].1));
                 }
-                let value = protocol::strict_json(lines[lines.len() - 2]).map_err(|_| "tls_deadline_terminal_json")?;
-                fields(&value, &["schemaVersion", "scope", "case", "state", "status", "code", "connections", "handshakes", "requests",
-                    "decryptedBytes", "authBytes", "closeNotify", "tlsRefused", "wireReadBytes", "wireWriteBytes", "replyBytes",
-                    "allSocketsClosed", "sni", "phase", "withheldWireBytes", "bodyBytes", "incompleteBody", "clientStop",
-                    "progressCount", "dnsQuestions", "dnsA", "dnsAAAA", "dnsReplies", "completion"], "tls_deadline_terminal_fields")?;
-                fields(&value["completion"], &["bytes", "eof", "closed", "primaryEmpty", "primaryUnexpected", "primaryClosed",
-                    "proxy", "dnsEmpty", "dnsClosed"], "tls_deadline_completion_fields")?;
-                let terminal: Terminal = serde_json::from_value(value.clone()).map_err(|_| "tls_deadline_terminal_schema")?;
+                let (terminal, value) = decode_terminal_frame(lines[lines.len() - 2])?;
                 let frames = Self { progress, terminal };
                 frames.check(scenario)?;
                 drop(arrivals);
@@ -5358,6 +5366,88 @@ pub(crate) mod github_tls {
             // DATA-only predicates. These tests create no Child, descriptor,
             // socket, namespace, file or certificate and certify no native run.
             use super::*;
+
+            // Literal producer wire keys, not Serialize-derived Rust DTOs. These
+            // inert frames exercise decoding, not native peer/finality evidence.
+            const WIRE_PROGRESS: &str = concat!(
+                r#"{"schemaVersion":1,"scope":"github-tls-peer-v1","case":"T4-owner-clear","state":"progress","event":"first-get","sequence":1,"#,
+                r#""requests":1,"bodyBytes":0,"wireReadBytes":100,"wireWriteBytes":150,"dnsQuestions":0,"dnsA":0,"dnsAAAA":0,"clientStop":null}"#,
+            );
+            const WIRE_TERMINAL: &str = concat!(
+                r#"{"schemaVersion":1,"scope":"github-tls-peer-v1","case":"T4-owner-clear","state":"finished","status":"passed","code":null,"#,
+                r#""connections":4,"handshakes":4,"requests":4,"decryptedBytes":1000,"authBytes":116,"closeNotify":4,"tlsRefused":false,"#,
+                r#""wireReadBytes":[100,100,100,100],"wireWriteBytes":[150,150,150,150],"replyBytes":[125,125,125,125],"allSocketsClosed":true,"#,
+                r#""sni":4,"phase":"ambient","withheldWireBytes":0,"bodyBytes":0,"incompleteBody":false,"clientStop":null,"progressCount":1,"#,
+                r#""dnsQuestions":0,"dnsA":0,"dnsAAAA":0,"dnsReplies":0,"completion":{"bytes":1,"eof":true,"closed":true,"primaryEmpty":true,"#,
+                r#""primaryUnexpected":0,"primaryClosed":true,"proxy":{"empty":true,"unexpected":0,"closed":true},"dnsEmpty":null,"dnsClosed":null}}"#,
+            );
+            #[test]
+            fn deadline_wire_frames_preserve_exact_dns_acronym() {
+                let progress = decode_progress_frame(WIRE_PROGRESS.as_bytes()).unwrap();
+                assert_eq!((progress.dns_questions, progress.dns_a, progress.dns_aaaa), (0, 0, 0));
+                let (terminal, wire) = decode_terminal_frame(WIRE_TERMINAL.as_bytes()).unwrap();
+                assert_eq!((terminal.dns_questions, terminal.dns_a, terminal.dns_aaaa), (0, 0, 0));
+                assert_eq!(wire["dnsAAAA"], json!(0));
+                assert!(wire.get("dnsAaaa").is_none() && wire.get("dns_aaaa").is_none());
+
+                // Nonzero counters prove the canonical field was actually read,
+                // not silently ignored/defaulted. Semantic phase checks stay in
+                // Frames::check; these helpers only decode the closed wire DTOs.
+                let mut dns_progress = protocol::strict_json(WIRE_PROGRESS.as_bytes()).unwrap();
+                let mut dns_terminal = protocol::strict_json(WIRE_TERMINAL.as_bytes()).unwrap();
+                for value in [&mut dns_progress, &mut dns_terminal] {
+                    value["case"] = json!("T5-dns");
+                    value["dnsQuestions"] = json!(3);
+                    value["dnsA"] = json!(1);
+                    value["dnsAAAA"] = json!(2);
+                }
+                let progress = decode_progress_frame(&serde_json::to_vec(&dns_progress).unwrap()).unwrap();
+                let (terminal, wire) = decode_terminal_frame(&serde_json::to_vec(&dns_terminal).unwrap()).unwrap();
+                assert_eq!((progress.dns_questions, progress.dns_a, progress.dns_aaaa), (3, 1, 2));
+                assert_eq!((terminal.dns_questions, terminal.dns_a, terminal.dns_aaaa), (3, 1, 2));
+                assert_eq!(wire["dnsAAAA"], json!(2));
+            }
+            #[test]
+            fn deadline_wire_frames_reject_noncanonical_dns_fields() {
+                type Decode = fn(&[u8]) -> Check<()>;
+                let decoders: [(&str, Decode, &str, &str, &str); 2] = [
+                    (WIRE_PROGRESS, |raw| decode_progress_frame(raw).map(|_| ()), "tls_deadline_progress_fields",
+                        "tls_deadline_progress_json", "tls_deadline_progress_schema"),
+                    (WIRE_TERMINAL, |raw| decode_terminal_frame(raw).map(|_| ()), "tls_deadline_terminal_fields",
+                        "tls_deadline_terminal_json", "tls_deadline_terminal_schema"),
+                ];
+                for (raw, decode, fields_code, json_code, schema_code) in decoders {
+                    let original = protocol::strict_json(raw.as_bytes()).unwrap();
+                    let mut missing = original.clone();
+                    missing.as_object_mut().unwrap().remove("dnsAAAA");
+                    assert_eq!(decode(&serde_json::to_vec(&missing).unwrap()), Err(fields_code));
+                    for alias in ["dnsAaaa", "dns_aaaa"] {
+                        let mut only_alias = missing.clone();
+                        only_alias[alias] = json!(0);
+                        assert_eq!(decode(&serde_json::to_vec(&only_alias).unwrap()), Err(fields_code));
+                        let mut both = original.clone();
+                        both[alias] = json!(0);
+                        assert_eq!(decode(&serde_json::to_vec(&both).unwrap()), Err(fields_code));
+                    }
+                    let mut unknown = original.clone();
+                    unknown["unrecognized"] = json!(0);
+                    assert_eq!(decode(&serde_json::to_vec(&unknown).unwrap()), Err(fields_code));
+                    for invalid in [json!(true), json!(-1), json!("0"), Value::Null] {
+                        let mut wrong_type = original.clone();
+                        wrong_type["dnsAAAA"] = invalid;
+                        assert_eq!(decode(&serde_json::to_vec(&wrong_type).unwrap()), Err(schema_code));
+                    }
+                    // Preserve duplicate keys as raw bytes so strict_json must
+                    // reject them before Value could overwrite a repeated key.
+                    let duplicate = raw.replacen(r#""dnsAAAA":0"#, r#""dnsAAAA":0,"dnsAAAA":1"#, 1);
+                    assert_ne!(duplicate, raw);
+                    assert_eq!(decode(duplicate.as_bytes()), Err(json_code));
+                }
+                let mut completion = protocol::strict_json(WIRE_TERMINAL.as_bytes()).unwrap();
+                completion["completion"]["unrecognized"] = json!(0);
+                assert_eq!(decode_terminal_frame(&serde_json::to_vec(&completion).unwrap()).err(),
+                    Some("tls_deadline_completion_fields"));
+            }
 
             #[test]
             fn resource_limits_require_both_exact_finite_sides() {
