@@ -1,4 +1,4 @@
-"""Fixed synthetic T1--T3/T6 peer. Not a general server or production trust path.
+"""Fixed synthetic T1--T6 peer. Not a general server or production trust path.
 
 SOURCE authoring is not permission to run this file. Only the independently
 admitted disposable Linux namespace entry may start it, with an original Child
@@ -29,7 +29,9 @@ ORIGINAL_CASES = ("T1-source", "T1-zip", "T2-root", "T2-name", "T2-expired",
                   "T3-clean", "T3-ragged", "T3-length", "T3-chunk")
 STREAMING_CASES = ("T6-header", "T6-body", "T6-chunk-metadata", "T6-unauthorized",
                    "T6-rate-expiry", "T6-target", "T6-redirect")
-CASES = ORIGINAL_CASES + STREAMING_CASES
+CASES = ORIGINAL_CASES + STREAMING_CASES  # The separately reported original16 lane.
+DEADLINE_CASES = ("T4-owner-clear", "T4-ambient-fixed", "T4-ambient-no-rescue",
+                  "T5-dns", "T5-handshake", "T5-read", "T5-helper-read")
 EARLY_REFUSAL_CASES = frozenset(case for case in STREAMING_CASES if case != "T6-target")
 SCOPE = "github-tls-peer-v1"
 HOST = "api.github.com"
@@ -40,6 +42,11 @@ REPLY_LIMIT = 64 * 1024
 FIXTURE_LIMIT = 16 * 1024
 CASE_SECONDS = 16.0
 REDIRECT_PORT = 18889
+PROXY_PORT = 18888
+DNS_LIMIT = 8
+TRICKLE_BODY = b'{"id":11,"login":"owner"}'
+TRICKLE_COUNT = 14  # Initial byte, then13 real one-second intervals; never complete.
+_OUTPUT_BYTES = 0
 AUTH_ALERTS = frozenset({"TLSV1_ALERT_UNKNOWN_CA", "SSLV3_ALERT_BAD_CERTIFICATE",
                          "TLSV1_ALERT_CERTIFICATE_UNKNOWN", "SSLV3_ALERT_CERTIFICATE_EXPIRED"})
 
@@ -410,8 +417,10 @@ def complete_listener_observation(listener: socket.socket, redirect: socket.sock
 
 
 def emit(value: dict) -> None:
+    global _OUTPUT_BYTES
     raw = json.dumps(value, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii") + b"\n"
-    require(len(raw) <= 4096, "output")
+    require(len(raw) <= 4096 and _OUTPUT_BYTES + len(raw) <= 8 * 1024, "output")
+    _OUTPUT_BYTES += len(raw)
     view = memoryview(raw)
     while view:
         count = os.write(1, view)
@@ -419,7 +428,7 @@ def emit(value: dict) -> None:
         view = view[count:]
 
 
-def main() -> int:
+def original_main() -> int:
     if len(sys.argv) != 2 or sys.argv[1] not in CASES:
         os.write(2, b"github-tls-peer: admission\n")
         return 71
@@ -611,6 +620,443 @@ def main() -> int:
     if emission_failed:
         return 74  # Parent still needs original wait and both pipe joins.
     return 0 if record["status"] == "passed" else 71
+
+
+def dns_question(raw: bytes) -> tuple[int, int]:
+    """Closed libc question shape, not a DNS server/parser for arbitrary data."""
+    name = b"\x03api\x06github\x03com\x00"
+    require(len(raw) == 12 + len(name) + 4 and len(raw) <= 512
+            and raw[2:12] == b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+            and raw[12:12 + len(name)] == name and raw[-2:] == b"\x00\x01",
+            "dns-question")
+    kind = int.from_bytes(raw[-4:-2], "big")
+    require(kind in {1, 28}, "dns-question")
+    return int.from_bytes(raw[:2], "big"), kind
+
+
+class DeadlinePeer:
+    """Only the seven literal T4/T5 scripts and their original completion pipe.
+
+    No new supervisor, task, thread, configurable endpoint or replacement socket.
+    As in accepted T6, S+EOF is a disposal rendezvous, never client finality by
+    itself. Rust must send it only after its original client book settles.
+    """
+
+    def __init__(self, case: str) -> None:
+        require(case in DEADLINE_CASES, "admission")
+        self.case = case
+        self.base = {"schemaVersion": 1, "scope": SCOPE, "case": case}
+        self.record = {**self.base, "state": "finished", "status": "failed", "code": "admission",
+            "connections": 0, "handshakes": 0, "requests": 0, "decryptedBytes": 0,
+            "authBytes": 0, "closeNotify": 0, "tlsRefused": False, "sni": 0,
+            "wireReadBytes": [], "wireWriteBytes": [], "replyBytes": [], "allSocketsClosed": False,
+            "phase": "pending", "withheldWireBytes": 0, "bodyBytes": 0,
+            "incompleteBody": False, "clientStop": None, "progressCount": 0,
+            "dnsQuestions": 0, "dnsA": 0, "dnsAAAA": 0, "dnsReplies": 0}
+        self.completion = {"bytes": 0, "eof": False, "closed": False,
+            "primaryEmpty": False, "primaryUnexpected": 0, "primaryClosed": False,
+            "proxy": {"empty": False, "unexpected": 0, "closed": False}
+                     if case.startswith("T4-") else None,
+            "dnsEmpty": False if case == "T5-dns" else None,
+            "dnsClosed": False if case == "T5-dns" else None}
+        self.record["completion"] = self.completion
+        # Original slots, including allocation-failure accept custody, precede
+        # creation/readiness. Every sole close is independently attempted later.
+        self.sockets = {"primary": None, "proxy": None, "dns": None}
+        self.closed = {"primary": False, "proxy": False, "dns": False}
+        self.unexpected = {"primary": None, "proxy": None}
+        self.unexpected_closed = {"primary": False, "proxy": False}
+        self.unregistered = None
+        self.connections: list[Connection] = []
+        self.client: Connection | None = None
+        self.signal = bytearray()
+        self.close_claimed = False
+        self.control_close_claimed = False
+        self.transactions: set[tuple[int, int]] = set()
+        self.next_byte: float | None = None
+
+    def progress(self, event: str) -> None:
+        require(event in {"dns-question", "client-hello", "first-get", "body-byte", "client-stop"}
+                and self.record["progressCount"] < 24, "output")
+        self.record["progressCount"] += 1
+        # The normally driven ORIGINAL Rust reader timestamps each complete
+        # frame. Do not replace that observation with this peer's clock/sleeps.
+        emit({**self.base, "state": "progress", "event": event,
+            "sequence": self.record["progressCount"], "requests": self.record["requests"],
+            "bodyBytes": self.record["bodyBytes"],
+            "wireReadBytes": sum(item.read_bytes for item in self.connections),
+            "wireWriteBytes": sum(item.written_bytes for item in self.connections),
+            "dnsQuestions": self.record["dnsQuestions"], "dnsA": self.record["dnsA"],
+            "dnsAAAA": self.record["dnsAAAA"], "clientStop": self.record["clientStop"]})
+
+    def listen(self, role: str, port: int) -> None:
+        require((role, port) in {("primary", 443), ("proxy", PROXY_PORT)}
+                and self.sockets[role] is None, "socket-state")
+        self.sockets[role] = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        original = self.sockets[role]
+        original.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        original.bind(("127.0.0.1", port))
+        original.listen(1)
+        original.setblocking(False)
+
+    def accept(self, context: ssl.SSLContext) -> Connection:
+        listener = self.sockets["primary"]
+        listener.settimeout(remaining())
+        self.unregistered, address = listener.accept()
+        connection = Connection(self.unregistered)
+        self.connections.append(connection)
+        self.unregistered = None
+        self.record["connections"] += 1
+        require(address[0] == "127.0.0.1" and 0 < address[1] < 65536, "unexpected-request")
+        connection.attach(context)
+        return connection
+
+    def no_pending(self, role: str) -> bool:
+        require(role in {"primary", "proxy"} and self.unexpected[role] is None, "unexpected-connection")
+        try:
+            self.unexpected[role], _address = self.sockets[role].accept()
+        except BlockingIOError:
+            return True
+        if role == "primary":
+            self.completion["primaryUnexpected"] += 1
+        else:
+            self.completion["proxy"]["unexpected"] += 1
+        raise Refused("unexpected-connection")
+
+    def receive_dns(self) -> None:
+        while True:
+            remaining()
+            try:
+                raw, address = self.sockets["dns"].recvfrom(513)
+            except BlockingIOError:
+                return
+            require(address[0] == "127.0.0.1" and 0 < address[1] < 65536
+                    and self.record["dnsQuestions"] < DNS_LIMIT, "dns-question")
+            transaction, kind = dns_question(raw)
+            # A/AAAA may legitimately have equal16-bit IDs. Bind each original
+            # question's (ID,type), allow its retransmission, and retain no raw
+            # packet. The eight-datagram bound includes every retransmission.
+            self.transactions.add((transaction, kind))
+            self.record["dnsQuestions"] += 1
+            self.record["dnsA" if kind == 1 else "dnsAAAA"] += 1
+            self.progress("dns-question")
+            # Deliberately NO UDP write/send/forward. Retain only the bounded
+            # original transaction mapping, not packet content in any receipt.
+
+    def receive_control(self) -> None:
+        try:
+            block = os.read(0, 2 - len(self.signal))
+        except BlockingIOError:
+            return
+        if block:
+            self.signal.extend(block)
+            self.completion["bytes"] = len(self.signal)
+            require(self.signal == b"S", "control")
+        else:
+            self.completion["eof"] = True
+            require(self.signal == b"S", "control")
+
+    def stopped(self, kind: str) -> None:
+        require(self.case in {"T5-handshake", "T5-read", "T5-helper-read"}
+                and self.record["phase"] in {"handshake", "read"}
+                and self.record["clientStop"] is None
+                and kind in {"tcp-eof", "connection-reset", "broken-pipe", "tls-close-notify"}, "client-stop")
+        self.record["clientStop"] = kind
+        self.next_byte = None
+        self.progress("client-stop")
+
+    def observe_client(self) -> None:
+        connection = self.client
+        require(connection is not None and self.record["clientStop"] is None, "socket-state")
+        require(connection.read_bytes < WIRE_LIMIT, "wire-limit")
+        try:
+            block = connection.original.recv(min(16384, WIRE_LIMIT - connection.read_bytes))
+        except BlockingIOError:
+            return
+        except ConnectionResetError as error:
+            require(type(error) is ConnectionResetError and error.errno == errno.ECONNRESET, "tcp")
+            self.stopped("connection-reset")
+            return
+        if not block:
+            self.stopped("tcp-eof")
+            return
+        connection.read_bytes += len(block)
+        # No client application bytes are valid after the one original GET;
+        # after an unsent ServerHello even a further client TLS flight is not
+        # this fixed withheld-handshake script. Never send a server alert here.
+        require(self.record["phase"] == "read", "unexpected-request")
+        require(connection.incoming.write(block) == len(block), "tls-alert")
+        try:
+            decoded = connection.tls.read(1)
+        except ssl.SSLWantReadError:
+            return  # Bounded partial incoming TLS record, not close evidence.
+        except ssl.SSLZeroReturnError as error:
+            require(type(error) is ssl.SSLZeroReturnError and error.errno == ssl.SSL_ERROR_ZERO_RETURN, "tls-alert")
+            self.stopped("tls-close-notify")
+            return
+        require(decoded == b"", "unexpected-request")
+        self.stopped("tls-close-notify")
+
+    def send_byte(self) -> None:
+        connection = self.client
+        require(connection is not None and self.record["phase"] == "read"
+                and self.record["clientStop"] is None
+                and self.record["bodyBytes"] < TRICKLE_COUNT < len(TRICKLE_BODY), "script")
+        index = self.record["bodyBytes"]
+        before = connection.written_bytes
+        try:
+            connection.respond(TRICKLE_BODY[index:index + 1], False)
+        except (BrokenPipeError, ConnectionResetError) as error:
+            # Only the actual post-GET wire send may use these two categories.
+            # The original reader timestamps this close; Rust must reject it
+            # if early or inconsistent with the original client/frame window.
+            if type(error) is BrokenPipeError and error.errno == errno.EPIPE:
+                self.stopped("broken-pipe")
+            elif type(error) is ConnectionResetError and error.errno == errno.ECONNRESET:
+                self.stopped("connection-reset")
+            else:
+                raise
+            return
+        require(connection.written_bytes > before and connection.outgoing.pending == 0, "trickle-progress")
+        self.record["bodyBytes"] += 1
+        self.record["incompleteBody"] = True
+        # Actual successful flush precedes progress. No catch-up burst, queued
+        # plaintext, scheduled sleep or delayed publication substitutes for it.
+        self.progress("body-byte")
+        self.next_byte = (time.monotonic() + 1.0
+                          if self.record["bodyBytes"] < TRICKLE_COUNT else None)
+        connection.original.setblocking(False)
+
+    def finish_observation(self) -> None:
+        for role in ("primary", "proxy"):
+            if self.sockets[role] is not None:
+                self.sockets[role].setblocking(False)
+        if self.client is not None:
+            self.client.original.setblocking(False)
+        while not self.completion["eof"]:
+            readers = [0, self.sockets["primary"]]
+            readers.extend(self.sockets[role] for role in ("proxy", "dns") if self.sockets[role] is not None)
+            if self.client is not None and self.record["clientStop"] is None:
+                readers.append(self.client.original)
+            wait = remaining()
+            if self.next_byte is not None:
+                wait = min(wait, max(0.0, self.next_byte - time.monotonic()))
+            ready, _, _ = select.select(readers, [], [], wait)
+            remaining()
+            # Pending accepts WIN even with simultaneous S+EOF. This reuses
+            # the accepted original-listener horizon, not script-length proof.
+            for role in ("primary", "proxy"):
+                if self.sockets[role] is not None and self.sockets[role] in ready:
+                    self.no_pending(role)
+            if self.sockets["dns"] is not None and self.sockets["dns"] in ready:
+                self.receive_dns()
+            if self.client is not None and self.record["clientStop"] is None and self.client.original in ready:
+                self.observe_client()
+            if 0 in ready:
+                self.receive_control()
+            if not self.completion["eof"] and self.next_byte is not None and time.monotonic() >= self.next_byte:
+                self.send_byte()
+        remaining()
+        self.completion["primaryEmpty"] = self.no_pending("primary")
+        if self.sockets["proxy"] is not None:
+            self.completion["proxy"]["empty"] = self.no_pending("proxy")
+        if self.sockets["dns"] is not None:
+            self.receive_dns()  # Finite <=8; returns only on original EAGAIN.
+            self.completion["dnsEmpty"] = True
+            require(self.record["dnsQuestions"] > 0, "dns-question")
+        if self.client is not None and self.record["clientStop"] is None:
+            self.observe_client()  # Final original nonblocking observation.
+        require(self.client is None or self.record["clientStop"] is not None, "client-stop")
+        remaining()
+
+    def withhold_handshake(self, context: ssl.SSLContext) -> None:
+        self.client = self.accept(context)
+        connection = self.client
+        while True:
+            remaining()
+            try:
+                connection.tls.do_handshake()
+            except (ssl.SSLWantReadError, ssl.SSLWantWriteError):
+                if self.record["sni"] == 1 and connection.outgoing.pending > 0:
+                    break
+                require(connection.outgoing.pending == 0 and connection.read_bytes < WIRE_LIMIT, "tls-state")
+                connection.original.settimeout(remaining())
+                block = connection.original.recv(min(16384, WIRE_LIMIT - connection.read_bytes))
+                remaining()
+                require(bool(block), "tls-alert")
+                connection.read_bytes += len(block)
+                require(connection.incoming.write(block) == len(block), "tls-alert")
+            else:
+                raise Refused("tls-state")  # A completed handshake is not withheld.
+        require(connection.written_bytes == 0 and self.record["handshakes"] == 0, "tls-state")
+        self.record["withheldWireBytes"] = connection.outgoing.pending
+        self.record["phase"] = "handshake"
+        self.progress("client-hello")
+        # Do not call receive()/flush()/respond()/unwrap(): the actual pending
+        # server flight remains in this same MemoryBIO through client settlement.
+
+    def run(self) -> None:
+        directory = admit()  # Peer keeps FSIZE=0; the real probe must NOT inherit it.
+        control = os.fstat(0)
+        require(stat.S_ISFIFO(control.st_mode) and control.st_uid == os.geteuid(), "control")
+        os.set_blocking(0, False)
+        context = None
+        if self.case != "T5-dns":
+            certificate, key = directory / "api-valid.pem", directory / "server-key.pem"
+            before = (fixed_body(certificate, FIXTURE_LIMIT), fixed_body(key, FIXTURE_LIMIT))
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.keylog_filename = None
+            context.set_alpn_protocols(["http/1.1"])
+            context.load_cert_chain(str(certificate), str(key))
+            require(before == (fixed_body(certificate, FIXTURE_LIMIT), fixed_body(key, FIXTURE_LIMIT)), "inputs")
+            del before
+
+            def server_name(_connection: ssl.SSLObject, name: str | None, _context: ssl.SSLContext) -> int | None:
+                if name != HOST:
+                    return ssl.ALERT_DESCRIPTION_UNRECOGNIZED_NAME
+                self.record["sni"] += 1
+                return None
+
+            context.set_servername_callback(server_name)
+        self.listen("primary", 443)
+        if self.case.startswith("T4-"):
+            self.listen("proxy", PROXY_PORT)
+        if self.case == "T5-dns":
+            self.sockets["dns"] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sockets["dns"].bind(("127.0.0.1", 53))
+            self.sockets["dns"].setblocking(False)
+            self.record["phase"] = "dns"
+        remaining()
+        emit({**self.base, "state": "ready"})
+        if self.case == "T5-handshake":
+            self.withhold_handshake(context)
+        elif self.case in {"T5-read", "T5-helper-read"}:
+            self.client = self.accept(context)
+            self.client.handshake()
+            self.record["handshakes"] += 1
+            self.client.request(b"/user", self.record)
+            require(self.record["sni"] == 1, "tls-state")
+            self.record["phase"] = "read"
+            self.progress("first-get")
+            headers = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n"
+                       b"Content-Length: " + str(len(TRICKLE_BODY)).encode("ascii") + b"\r\n\r\n")
+            self.client.respond(headers, False)
+            self.send_byte()
+        elif self.case.startswith("T4-"):
+            refused = self.case == "T4-ambient-no-rescue"
+            schedule = script("T2-root" if refused else "T1-source")
+            self.record["phase"] = "ambient"
+            for index, (path, reply, clean) in enumerate(schedule):
+                connection = self.accept(context)
+                try:
+                    try:
+                        connection.handshake()
+                        self.record["handshakes"] += 1
+                        connection.request(path, self.record)
+                        if self.record["requests"] == 1:
+                            self.progress("first-get")
+                    except ssl.SSLError as error:
+                        require(refused and error.reason in AUTH_ALERTS
+                                and self.record["handshakes"] == self.record["decryptedBytes"]
+                                == self.record["requests"] == self.record["authBytes"] == 0, "tls-alert")
+                        self.record["tlsRefused"] = True
+                    require(self.record["sni"] == index + 1, "tls-state")
+                    if refused:
+                        require(self.record["tlsRefused"], "tls-alert")
+                    else:
+                        self.record["closeNotify"] += int(connection.respond(reply, clean))
+                finally:
+                    connection.close()
+            require(self.record["connections"] == len(schedule), "script")
+        self.finish_observation()
+
+    def close(self) -> None:
+        if self.close_claimed:
+            return
+        self.close_claimed = True
+
+        def close_error() -> None:
+            self.record["code"] = self.record["code"] or "close"
+
+        unregistered_closed = self.unregistered is None
+        if self.unregistered is not None:
+            try:
+                self.unregistered.close()
+                unregistered_closed = True
+            except BaseException:
+                close_error()
+        for connection in self.connections:
+            try:
+                connection.close()  # Original class refuses retry after uncertainty.
+            except BaseException:
+                close_error()
+        for role, original in self.unexpected.items():
+            if original is not None:
+                try:
+                    original.close()
+                    self.unexpected_closed[role] = True
+                except BaseException:
+                    close_error()
+        for role, original in self.sockets.items():
+            if original is not None:
+                try:
+                    original.close()
+                    self.closed[role] = True
+                except BaseException:
+                    close_error()
+        if not self.control_close_claimed:
+            self.control_close_claimed = True
+            try:
+                os.close(0)  # Original inherited pipe, never duplicated/reopened.
+                self.completion["closed"] = True
+            except BaseException:
+                close_error()
+        self.completion["primaryClosed"] = self.closed["primary"]
+        if self.completion["proxy"] is not None:
+            self.completion["proxy"]["closed"] = self.closed["proxy"]
+        if self.case == "T5-dns":
+            self.completion["dnsClosed"] = self.closed["dns"]
+        self.record["wireReadBytes"] = [item.read_bytes for item in self.connections]
+        self.record["wireWriteBytes"] = [item.written_bytes for item in self.connections]
+        self.record["replyBytes"] = [item.reply_bytes for item in self.connections]
+        self.record["allSocketsClosed"] = (self.sockets["primary"] is not None and unregistered_closed
+            and all(item.closed for item in self.connections)
+            and all(original is None or self.closed[role] for role, original in self.sockets.items())
+            and all(original is None or self.unexpected_closed[role] for role, original in self.unexpected.items()))
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or sys.argv[1] not in DEADLINE_CASES:
+        return original_main()  # Original sixteen scripts/frames/expectations unchanged.
+    peer = DeadlinePeer(sys.argv[1])
+    complete = False
+    emission_failed = False
+    try:
+        peer.run()
+        peer.record["code"] = None
+        complete = True
+    except Refused as error:
+        peer.record["code"] = error.args[0]
+    except (TimeoutError, socket.timeout):
+        peer.record["code"] = "deadline"
+    except ssl.SSLError:
+        peer.record["code"] = "tls-alert"
+    except OSError:
+        peer.record["code"] = "tcp"
+    except BaseException:
+        peer.record["code"] = "internal"
+    finally:
+        peer.close()
+        if complete and peer.record["code"] is None and peer.record["allSocketsClosed"] and peer.completion["closed"]:
+            peer.record["status"] = "passed"
+        try:
+            emit(peer.record)
+        except BaseException:
+            emission_failed = True
+    if emission_failed:
+        return 74  # Preserve pending exceptions; parent still needs original joins.
+    return 0 if peer.record["status"] == "passed" else 71
 
 
 if __name__ == "__main__":

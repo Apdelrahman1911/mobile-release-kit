@@ -1,6 +1,6 @@
 #!/usr/bin/bash
 # SOURCE only until the dedicated TLS command/runner admission is accepted.
-# Fixed Ubuntu24 GitHub-hosted T1--T3 entry, not a general privileged launcher.
+# Fixed Ubuntu24 GitHub-hosted T1--T6 entry, not a general privileged launcher.
 # The original CI observer owns sudo/unshare and its wait. This entry cannot
 # certify that outer wait, retire another task's resources or authorize cleanup.
 set -euo pipefail
@@ -12,7 +12,7 @@ refuse() {
     exit 71
 }
 
-[[ $# == 12 && $UID == 0 && $EUID == 0 && ${LANG-} == C && ${LC_ALL-} == C ]] || refuse admission
+[[ ( $# == 12 || $# == 13 ) && $UID == 0 && $EUID == 0 && ${LANG-} == C && ${LC_ALL-} == C ]] || refuse admission
 source=$1
 root=$2
 artifact=$3
@@ -25,6 +25,16 @@ inputs_sha=$9
 artifact_sha=${10}
 artifact_bytes=${11}
 source_sha=${12}
+# The old twelve-argument entry retains its original single test/configuration.
+# Only these two literal follow-on profiles add entries, never a caller-supplied
+# libtest filter, resolver setting, endpoint, command or destination.
+profile=original
+if [[ $# == 13 ]]; then
+    case ${13} in
+        hosts|dns-withhold) profile=${13} ;;
+        *) refuse profile ;;
+    esac
+fi
 [[ $original_uid =~ ^[1-9][0-9]{0,9}$ && $original_gid =~ ^[1-9][0-9]{0,9}$ ]] || refuse identity
 (( original_uid < 4294967295 && original_gid < 4294967295 )) || refuse identity
 [[ $inputs_sha =~ ^[0-9a-f]{64}$ && $artifact_sha =~ ^[0-9a-f]{64}$
@@ -176,14 +186,33 @@ diagnostic_stage=source-inputs
 entry=$source/desktop/src-tauri/tests/fixtures/github_tls_namespace.sh
 [[ $0 == "$entry" && -x $python ]] || refuse entry
 ordinary "$entry" "$original_uid" 65536
-for pathname in "$source" "$source/src" "$root" "$root/github-tls" "$root/github-tls-namespace" \
+test_root=$root/github-tls
+config_root=$root/github-tls-namespace
+manifest=$root/github-tls-inputs.json
+check_mode=github-readonly-tls-v1
+test_name=supervisor::hosted_tests::github_tls_hosted_contract
+extra_env=()
+case "$profile" in
+    hosts|dns-withhold)
+        test_root=$root/github-tls-deadline
+        config_root=$root/github-tls-deadline-namespace-$profile
+        manifest=$root/github-tls-deadline-inputs.json
+        check_mode=github-readonly-tls-deadline-v1
+        extra_env+=("MRK_GITHUB_TLS_PROFILE=$profile")
+        if [[ $profile == hosts ]]; then
+            test_name=supervisor::hosted_tests::github_tls_deadline_hosts_hosted_contract
+        else
+            test_name=supervisor::hosted_tests::github_tls_deadline_dns_hosted_contract
+        fi
+        ;;
+esac
+for pathname in "$source" "$source/src" "$root" "$test_root" "$config_root" \
     "$root/target" "$root/target/x86_64-unknown-linux-gnu" \
     "$root/target/x86_64-unknown-linux-gnu/debug" "$root/target/x86_64-unknown-linux-gnu/debug/deps"; do
     directory "$pathname"
 done
 
 diagnostic_stage=manifest
-manifest=$root/github-tls-inputs.json
 ordinary "$manifest" "$original_uid" 1048576
 manifest_stamp=$(stamp "$manifest")
 hash_is "$manifest" "$inputs_sha"
@@ -199,7 +228,18 @@ diagnostic_stage=resolver-inputs
 hosts=$'127.0.0.1 api.github.com localhost\n::1 localhost\n'
 resolver=$'# Synthetic namespace: DNS is disabled by hosts: files.\nnameserver 127.0.0.1\noptions timeout:1 attempts:1\n'
 nsswitch=$'passwd: files\ngroup: files\nhosts: files\n'
-config_root=$root/github-tls-namespace
+if [[ $profile == dns-withhold ]]; then
+    hosts=$'127.0.0.1 localhost\n::1 localhost\n'
+    resolver=$'nameserver 127.0.0.1\noptions timeout:15 attempts:1 ndots:1\n'
+    nsswitch=$'passwd: files\ngroup: files\nhosts: dns\n'
+    # The admitted libc/NSS closure must separately prove its applicable cache
+    # path. These fixed Linux nscd paths must be absent, including dangling links;
+    # do not stop a host service, remove its socket or claim a hosts/cache hit
+    # qualifies genuine resolver timeout. The only resolver is owned UDP:53.
+    for pathname in /run/nscd/socket /var/run/nscd/socket /run/.nscd_socket /var/run/.nscd_socket; do
+        [[ ! -e $pathname && ! -L $pathname ]] || refuse resolver-cache
+    done
+fi
 exact_config "$config_root/hosts" "$hosts"
 exact_config "$config_root/resolv.conf" "$resolver"
 exact_config "$config_root/nsswitch.conf" "$nsswitch"
@@ -326,22 +366,45 @@ ordinary "$manifest" "$original_uid" 1048576
 hash_is "$artifact" "$artifact_sha"
 hash_is "$manifest" "$inputs_sha"
 [[ $(stamp "$artifact") == "$artifact_stamp" && $(stamp "$manifest") == "$manifest_stamp" ]] || refuse changed
+if [[ $profile == hosts ]]; then
+    # Fixed synthetic settings exist BEFORE libtest threads start. Product
+    # spawning remains env_clear; only the literal direct probes explicitly
+    # construct their own opposing CA set. No live credential or proxy exists.
+    ambient=$root/github-tls-deadline-ambient
+    directory "$ambient"
+    directory "$ambient/empty-ca-dir"
+    shopt -s nullglob dotglob
+    empty_ca_entries=("$ambient/empty-ca-dir"/*)
+    shopt -u nullglob dotglob
+    (( ${#empty_ca_entries[@]} == 0 )) || refuse ambient
+    [[ ! -e $ambient/owner-clear.keylog && ! -L $ambient/owner-clear.keylog ]] || refuse ambient
+    other_ca=$source/desktop/src-tauri/tests/fixtures/github_tls/other-root-ca.pem
+    ordinary "$other_ca" "$original_uid" 16384
+    extra_env+=("HTTP_PROXY=http://127.0.0.1:18888" "http_proxy=http://127.0.0.1:18888"
+        "HTTPS_PROXY=http://127.0.0.1:18888" "https_proxy=http://127.0.0.1:18888"
+        "ALL_PROXY=http://127.0.0.1:18888" "all_proxy=http://127.0.0.1:18888"
+        "NO_PROXY=" "no_proxy=" "SSL_CERT_FILE=$other_ca"
+        "SSL_CERT_DIR=$ambient/empty-ca-dir" "SSLKEYLOGFILE=$ambient/owner-clear.keylog")
+fi
 cd -- "$root"
 
 # Both privilege drop and the exact artifact are mandatory. No PATH, HOME,
-# loader, proxy, TLS-default, Python or account environment is inherited. The
-# ordinary libtest owner independently retains/settles its product and peer.
+# loader, proxy, TLS-default, Python or account environment is inherited. Only
+# the new hosts profile CONSTRUCTS the above literal inert settings; no ambient
+# value is forwarded. The ordinary libtest owner retains/settles product/probe,
+# peer and the S+EOF writer separately. Rust verifies every new bound input.
 exec /usr/bin/setpriv --reuid="$original_uid" --regid="$original_gid" --clear-groups \
     --inh-caps=-all --ambient-caps=-all --bounding-set=-all --no-new-privs -- \
     /usr/bin/env -i LANG=C LC_ALL=C \
-    MRK_DESKTOP_HOSTED_CHECKS=github-readonly-tls-v1 GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
+    MRK_DESKTOP_HOSTED_CHECKS="$check_mode" GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted \
     GITHUB_REF=refs/heads/verify/desktop-github-connection-tls GITHUB_SHA="$source_sha" \
     GITHUB_RUN_ID="$run_id" GITHUB_RUN_ATTEMPT="$attempt" \
-    MRK_DESKTOP_TEST_ROOT="$root/github-tls" MRK_DESKTOP_TEST_CORE_ZIP="$root/core.zip" \
+    MRK_DESKTOP_TEST_ROOT="$test_root" MRK_DESKTOP_TEST_CORE_ZIP="$root/core.zip" \
     MRK_DESKTOP_DEV_CORE="$source/src" MRK_DESKTOP_DEV_PYTHON="$python" \
     MRK_GITHUB_TLS_INPUTS="$manifest" MRK_GITHUB_TLS_ARTIFACT="$artifact" \
     MRK_GITHUB_TLS_ARTIFACT_SHA256="$artifact_sha" MRK_GITHUB_TLS_ARTIFACT_BYTES="$artifact_bytes" \
     MRK_TLS_ORIGINAL_UID="$original_uid" MRK_TLS_ORIGINAL_GID="$original_gid" \
     MRK_TLS_PARENT_NETNS="$parent_netns" MRK_TLS_PARENT_MNTNS="$parent_mntns" \
     MRK_TLS_NETNS="$netns" MRK_TLS_MNTNS="$mntns" \
-    "$artifact" --ignored --exact supervisor::hosted_tests::github_tls_hosted_contract --nocapture --test-threads=1
+    "${extra_env[@]}" \
+    "$artifact" --ignored --exact "$test_name" --nocapture --test-threads=1

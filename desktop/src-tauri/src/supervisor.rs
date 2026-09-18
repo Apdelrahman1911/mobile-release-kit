@@ -185,6 +185,8 @@ impl OwnerState {
 #[derive(Default)]
 struct Resources {
     inspection: Option<JoinHandle<Result<VerifiedRuntime, BridgeError>>>,
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_environment: Option<JoinHandle<Result<Option<bool>, ()>>>,
     acquisition: Option<JoinHandle<std::io::Result<Child>>>, child: Option<Child>,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     failed_writer: Option<JoinHandle<WriteEnd>>, failed_stdout: Option<JoinHandle<ReadEnd>>, failed_stderr: Option<JoinHandle<ReadEnd>>,
@@ -720,6 +722,24 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     };
     #[cfg(all(test, feature = "development-runtime"))]
     { lock(&owner.observation).spawned = true; }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if matches!(profile, Profile::GitHubReadOnly) && inner.test.github_observe_environment.load(Ordering::SeqCst) {
+        // Only T4-owner-clear requests this read-only observation. The actual
+        // Child is ALREADY retained here, before request writing or any wait.
+        // The original blocking reader is in the same Resources, not a PID
+        // search, new joiner, artificial owner gate or product environment hook.
+        let Some(id) = resources.child.as_ref().and_then(Child::id) else {
+            owner.unknown(&inner); return DriverEnd::RetainedUnknown;
+        };
+        resources.github_environment = Some(tokio::task::spawn_blocking(move || hosted_tests::original_child_environment(id)));
+        match join_slot(&mut resources.github_environment).await {
+            Ok(Ok(value)) => {
+                lock(&owner.observation).github_initial_environment = value;
+                resources.github_environment.take();
+            },
+            _ => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; },
+        }
+    }
     let (stdin, stdout, stderr) = match resources.child.as_mut() {
         Some(child) => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
         None => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }

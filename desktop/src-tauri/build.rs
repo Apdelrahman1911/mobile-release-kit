@@ -21,6 +21,10 @@ fn main() {
     // here and thereby silently promote unreviewed runtime bytes to authority.
     anchor("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256");
     anchor("MRK_BUNDLED_PROTOCOL_SHA256");
+    // The two synthetic TLS manifests are explicit inputs to the SAME libtest
+    // artifact. Neither is discovered or promoted to authority by this build.
+    anchor("MRK_GITHUB_TLS_INPUTS_SHA256");
+    anchor("MRK_GITHUB_TLS_DEADLINE_INPUTS_SHA256");
     let target = env::var("TARGET").unwrap_or_default();
     println!("cargo:rustc-env=MRK_COMPILED_TARGET={target}");
     #[cfg(feature = "desktop-shell")]

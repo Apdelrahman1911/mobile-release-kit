@@ -524,11 +524,13 @@ GITHUB_TLS_RECEIPT_SCOPE = "github-readonly-tls-hosted-v1"
 GITHUB_TLS_WORKFLOW = ".github/workflows/desktop-github-connection-tls.yml"
 GITHUB_TLS_REF = "refs/heads/verify/desktop-github-connection-tls"
 GITHUB_TLS_TEST = "supervisor::hosted_tests::github_tls_hosted_contract"
-GITHUB_TLS_PHASES = ("prepare", "acquire", "compile", "github-tls", "clean")
+GITHUB_TLS_PHASES = ("prepare", "acquire", "compile", "github-tls", "github-tls-deadline", "clean")
 GITHUB_TLS_CHECKS = {
     "acquire": ("rust-toolchain-install", "rust-version-target", "github-tls-locked-headless-metadata"),
     "compile": ("rust-version-target", "github-tls-headless-test-compile-only", "github-tls-compiled-artifact"),
     "github-tls": ("github-tls-original-artifact", "github-tls-original-outer-wait", "github-tls-receipt"),
+    "github-tls-deadline": ("github-tls-original-artifact", "github-tls-hosts-original-outer-wait",
+                            "github-tls-hosts-receipt", "github-tls-dns-original-outer-wait", "github-tls-dns-receipt"),
 }
 # Seven fixed additions; the original nine retain their exact receipt shapes.
 # Values bind scripted reply sizes and conservative sent-byte floors, not
@@ -549,15 +551,42 @@ GITHUB_TLS_REPLY_STOPS = frozenset({"none", *(stage + ":" + kind for stage in ("
 GITHUB_TLS_CERTIFICATES = ("root-ca.pem", "other-root-ca.pem", "api-valid.pem",
                            "wrong-san.pem", "api-expired.pem", "server-key.pem")
 GITHUB_TLS_FIXTURES = "desktop/src-tauri/tests/fixtures"
-GITHUB_TLS_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target", "github-tls", "github-tls-namespace")
+GITHUB_TLS_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target", "github-tls", "github-tls-namespace",
+    "github-tls-deadline", "github-tls-deadline-namespace-hosts", "github-tls-deadline-namespace-dns-withhold",
+    "github-tls-deadline-ambient")
 GITHUB_TLS_CONFIG = {
     "hosts": b"127.0.0.1 api.github.com localhost\n::1 localhost\n",
     "resolv.conf": b"# Synthetic namespace: DNS is disabled by hosts: files.\nnameserver 127.0.0.1\noptions timeout:1 attempts:1\n",
     "nsswitch.conf": b"passwd: files\ngroup: files\nhosts: files\n",
 }
+GITHUB_TLS_DEADLINE_SCOPE = "github-readonly-tls-deadline-native-v1"
+GITHUB_TLS_DEADLINE_RECEIPT_SCOPE = "github-readonly-tls-deadline-hosted-v1"
+GITHUB_TLS_DEADLINE_PROFILES = ("hosts", "dns-withhold")
+GITHUB_TLS_DEADLINE_CASES = {
+    "hosts": ("T4-owner-clear", "T4-ambient-fixed", "T4-ambient-no-rescue", "T5-handshake", "T5-read", "T5-helper-read"),
+    "dns-withhold": ("T5-dns",),
+}
+GITHUB_TLS_DEADLINE_CONFIG = {
+    "hosts": GITHUB_TLS_CONFIG,
+    "dns-withhold": {
+        "hosts": b"127.0.0.1 localhost\n::1 localhost\n",
+        "resolv.conf": b"nameserver 127.0.0.1\noptions timeout:15 attempts:1 ndots:1\n",
+        "nsswitch.conf": b"passwd: files\ngroup: files\nhosts: dns\n",
+    },
+}
+GITHUB_TLS_DEADLINE_RESOLVER = {"family": "glibc", "version": "2.39", "nss": "builtin-files-dns"}
+GITHUB_TLS_DEADLINE_CACHE_PATHS = ("/run/nscd/socket", "/var/run/nscd/socket", "/run/.nscd_socket", "/var/run/.nscd_socket")
+GITHUB_TLS_DEADLINE_NOT_VERIFIED = (
+    "populated-ambient-ca-directory", "platform-trust-stores", "getaddrinfo-internal-cancellation",
+    "T6-streaming-controls", "CA-file-native-faults", "native-stuck-spawn-wait-close",
+    "real-github-authentication", "production-runtime-custody", "native-gui", "native-document-lifecycle",
+    "packaged-runtime", "production-enablement",
+)
 GITHUB_TLS_SOURCES = tuple(sorted({
     *GITHUB_READONLY_SOURCES, GITHUB_TLS_WORKFLOW,
     f"{GITHUB_TLS_FIXTURES}/github_tls_peer.py", f"{GITHUB_TLS_FIXTURES}/github_tls_namespace.sh",
+    "tests/desktop/test_github_tls_deadline_peer_contract.py", "tests/desktop/test_github_tls_peer_compile.py",
+    "tests/desktop/test_github_tls_resolver_policy.py", "desktop/github-connection-contract.md",
     *(f"{GITHUB_TLS_FIXTURES}/github_tls/{name}" for name in GITHUB_TLS_CERTIFICATES),
 }))
 GITHUB_TLS_NOT_VERIFIED = (
@@ -2885,6 +2914,10 @@ def github_tls_runtime() -> tuple[dict, dict, set[Path]]:
     require(sys.version.split()[0] == PYTHON and sys.flags.isolated and sys.flags.no_site
             and sys.dont_write_bytecode and sys.flags.optimize == 0 and sys.platform == "linux",
             "TLS development interpreter flags/version differ")
+    # One real version observation in this SAME original runtime probe. Later
+    # manifests/namespace checks bind the mapped object below; a supplied
+    # descriptor, another native call or a filename is not version evidence.
+    require(os.confstr("CS_GNU_LIBC_VERSION") == "glibc 2.39", "TLS deadline resolver runtime is unsupported")
     prefix = Path(sys.base_prefix).resolve(strict=True)
     library = Path(sysconfig.get_path("stdlib")).resolve(strict=True)
     require(library == prefix / "lib/python3.14"
@@ -2909,16 +2942,29 @@ def github_tls_runtime() -> tuple[dict, dict, set[Path]]:
         maps = stream.read(1024 * 1024 + 1)
     require(len(maps) <= 1024 * 1024, "TLS loader mapping exceeds its bound")
     libraries = set()
+    backing = {}
     for line in maps.decode("utf-8", errors="strict").splitlines():
         fields = line.split(None, 5)
-        if len(fields) != 6 or "x" not in fields[1] or not fields[5].startswith("/"):
+        if len(fields) != 6 or not fields[5].startswith("/"):
             continue
         require(not fields[5].endswith(" (deleted)"), "TLS mapped runtime was deleted")
         path = Path(fields[5]).resolve(strict=True)
+        require(not path.name.startswith("libnss_"), "TLS deadline dynamic NSS runtime is unsupported")
+        if "x" not in fields[1]:
+            continue
+        require(re.fullmatch(r"[0-9a-f]+:[0-9a-f]+", fields[3]) is not None
+                and re.fullmatch(r"[1-9][0-9]{0,19}", fields[4]) is not None,
+                "TLS mapped backing identity differs")
+        major, minor = (int(part, 16) for part in fields[3].split(":"))
+        info = path.lstat()
+        identity = (major, minor, int(fields[4]))
+        require(stat.S_ISREG(info.st_mode) and identity == (os.major(info.st_dev), os.minor(info.st_dev), info.st_ino)
+                and (path not in backing or backing[path] == identity), "TLS mapped backing file changed")
+        backing[path] = identity  # Several VMAs of one original are not several libraries.
         libraries.add(path)
         require(len(libraries) <= 128, "TLS mapped loader closure exceeds its bound")
     for role, pattern in (("libssl", r"libssl\.so\.[0-9.]+"), ("libcrypto", r"libcrypto\.so\.[0-9.]+"),
-                          ("loader", r"ld-linux-x86-64\.so\.2")):
+                          ("loader", r"ld-linux-x86-64\.so\.2"), ("libc", r"libc\.so\.6")):
         found = [path for path in libraries if re.fullmatch(pattern, path.name)]
         require(len(found) == 1, "TLS required original SSL/loader object differs")
         roles[role] = str(found[0])
@@ -2929,9 +2975,50 @@ def github_tls_runtime() -> tuple[dict, dict, set[Path]]:
     return {"opensslVersion": ssl.OPENSSL_VERSION, "ignoreUnexpectedEof": mask}, roles, paths
 
 
-def github_tls_manifest(context: dict) -> dict:
+def github_tls_deadline_host_config(raw: bytes, name: str) -> None:
+    """Closed DATA grammar for the actually consumed glibc configuration."""
+    require(type(name) is str and name in {"host.conf", "gai.conf"} and type(raw) is bytes and 0 < len(raw) <= 16 * 1024
+            and b"\0" not in raw, "TLS deadline resolver configuration differs")
+    try:
+        raw.decode("utf-8", errors="strict")
+    except UnicodeError:
+        raise CheckFailure("TLS deadline resolver configuration is not UTF-8") from None
+    lines = raw.split(b"\n")
+    require(len(lines) <= 128 and all(len(line) <= 512 for line in lines), "TLS deadline resolver line bound differs")
+    active = [line.split(b"#", 1)[0].strip(b" \t\r") for line in lines]
+    active = [line for line in active if line]
+    allowed = {b"order hosts,bind", b"multi on"} if name == "host.conf" else set()
+    require(len(active) == len(set(active)) and set(active) <= allowed,
+            "TLS deadline resolver has an unsupported active directive")
+
+
+def github_tls_deadline_cache_absent() -> None:
+    # No contact, removal, service lookup or repair: an unsupported host refuses.
+    require(all(not os.path.lexists(path) for path in GITHUB_TLS_DEADLINE_CACHE_PATHS),
+            "TLS deadline resolver cache path is present or uncertain")
+
+
+def github_tls_deadline_resolver_file(path: Path, *, configuration: str | None = None) -> dict:
+    before = github_file_identity(path)
+    require(before["uid"] == 0 and before["gid"] == 0 and not before["mode"] & 0o022,
+            "TLS deadline resolver backing file is not protected")
+    record = github_tls_file(path)
+    if configuration is not None:
+        require(path == Path("/etc") / configuration and record["size"] <= 16 * 1024,
+                "TLS deadline resolver configuration path differs")
+        with path.open("rb") as original:
+            raw = original.read(16 * 1024 + 1)
+        require(len(raw) == record["size"] and hashlib.sha256(raw).hexdigest() == record["sha256"],
+                "TLS deadline resolver configuration changed while reading")
+        github_tls_deadline_host_config(raw, configuration)
+    require(same_compile_json(before, github_file_identity(path)), "TLS deadline resolver original file changed")
+    return record
+
+
+def github_tls_manifest(context: dict, observation: tuple[dict, dict, set[Path]]) -> dict:
     source, root = Path(context["source"]), Path(context["root"])
-    ssl, runtime_roles, paths = github_tls_runtime()
+    ssl, original_roles, original_paths = observation
+    runtime_roles, paths = {key: value for key, value in original_roles.items() if key != "libc"}, set(original_paths)
     roles = {"python": context["python"], "bootstrap": str(source / "desktop/github_connection_bootstrap.py"),
              "coreZip": str(root / "core.zip"), "peer": str(source / GITHUB_TLS_FIXTURES / "github_tls_peer.py"),
              "namespace": str(source / GITHUB_TLS_FIXTURES / "github_tls_namespace.sh"), **runtime_roles,
@@ -2959,13 +3046,47 @@ def github_tls_manifest(context: dict) -> dict:
     return value
 
 
-def validate_github_tls_manifest(value: object, *, context: dict) -> dict:
+def github_tls_deadline_manifest(context: dict, original: dict, observation: tuple[dict, dict, set[Path]]) -> dict:
+    """Derive the second closed manifest from the ONE original runtime probe."""
+    validate_github_tls_manifest(original, context=context)
+    root = Path(context["root"])
+    roles = {key: value for key, value in original["roles"].items() if key not in GITHUB_TLS_CONFIG}
+    roles.update({f"{profile}:{name}": str(root / f"github-tls-deadline-namespace-{profile}" / name)
+                  for profile in GITHUB_TLS_DEADLINE_PROFILES for name in GITHUB_TLS_CONFIG})
+    roles.update({"libc": observation[1]["libc"], "resolver:host.conf": "/etc/host.conf", "resolver:gai.conf": "/etc/gai.conf"})
+    removed = {original["roles"][name] for name in GITHUB_TLS_CONFIG}
+    records = {row["path"]: row for row in original["files"] if row["path"] not in removed}
+    require(roles["libc"] in records and Path(roles["libc"]) in observation[2], "TLS version-probed libc is not bound")
+    for role in ("libc", "resolver:host.conf", "resolver:gai.conf"):
+        path = Path(roles[role])
+        row = github_tls_deadline_resolver_file(path, configuration=role.split(":", 1)[1] if role.startswith("resolver:") else None)
+        require(str(path) not in records or same_compile_json(records[str(path)], row), "TLS original resolver bytes changed")
+        records[str(path)] = row
+    for profile, configs in GITHUB_TLS_DEADLINE_CONFIG.items():
+        for name, expected in configs.items():
+            path = Path(roles[f"{profile}:{name}"])
+            row = github_tls_file(path)
+            require(row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                    "TLS deadline profile resolver bytes differ")
+            records[str(path)] = row
+    github_tls_deadline_cache_absent()
+    value = {**original, "scope": GITHUB_TLS_DEADLINE_SCOPE, "resolver": dict(GITHUB_TLS_DEADLINE_RESOLVER),
+             "roles": roles, "files": [records[name] for name in sorted(records)]}
+    validate_github_tls_manifest(value, context=context, deadline=True)
+    return value
+
+
+def validate_github_tls_manifest(value: object, *, context: dict, deadline: bool = False) -> dict:
     """Pure closed input DATA shape; acquisition and hashes remain independent."""
-    manifest = closed_object(value, {"schemaVersion", "scope", "sourceSha", "sourceTree", "workflowSha256", "runId", "attempt",
-        "sourceRoot", "jobRoot", "python", "coreSource", "coreZip", "uid", "gid", "parentNetns", "parentMntns", "ssl", "roles", "files"},
+    require(type(deadline) is bool, "TLS manifest selector differs")
+    fields = {"schemaVersion", "scope", "sourceSha", "sourceTree", "workflowSha256", "runId", "attempt",
+        "sourceRoot", "jobRoot", "python", "coreSource", "coreZip", "uid", "gid", "parentNetns", "parentMntns", "ssl", "roles", "files"}
+    manifest = closed_object(value, fields | ({"resolver"} if deadline else set()),
         "TLS input manifest fields differ")
+    if deadline:
+        require(same_compile_json(manifest["resolver"], GITHUB_TLS_DEADLINE_RESOLVER), "TLS deadline resolver descriptor differs")
     source, root = Path(context["source"]), Path(context["root"])
-    fixed = {"schemaVersion": 1, "scope": GITHUB_TLS_SCOPE,
+    fixed = {"schemaVersion": 1, "scope": GITHUB_TLS_DEADLINE_SCOPE if deadline else GITHUB_TLS_SCOPE,
              **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
              "sourceRoot": str(source), "jobRoot": str(root), "python": context["python"],
              "coreSource": str(source / "src"), "coreZip": str(root / "core.zip")}
@@ -2985,6 +3106,13 @@ def validate_github_tls_manifest(value: object, *, context: dict) -> dict:
         **{name: str(root / "github-tls-namespace" / name) for name in GITHUB_TLS_CONFIG},
         **{"tool:" + name: path for name, path in GITHUB_TLS_TOOLS.items()}}
     runtime_roles = {"ssl", "socket", "_ssl", "_socket", "libssl", "libcrypto", "loader"}
+    if deadline:
+        for name in GITHUB_TLS_CONFIG:
+            del fixed_roles[name]
+        fixed_roles.update({f"{profile}:{name}": str(root / f"github-tls-deadline-namespace-{profile}" / name)
+                            for profile in GITHUB_TLS_DEADLINE_PROFILES for name in GITHUB_TLS_CONFIG})
+        fixed_roles.update({"resolver:host.conf": "/etc/host.conf", "resolver:gai.conf": "/etc/gai.conf"})
+        runtime_roles.add("libc")
     roles = closed_object(manifest["roles"], set(fixed_roles) | runtime_roles, "TLS closed runtime/fixture/tool roles differ")
     require(all(roles[key] == path for key, path in fixed_roles.items()), "TLS fixed source/CA/config/tool path differs")
     require(type(manifest["files"]) is list and 0 < len(manifest["files"]) <= 2048, "TLS input file roster differs")
@@ -3008,6 +3136,8 @@ def validate_github_tls_manifest(value: object, *, context: dict) -> dict:
     for name, pattern in (("libssl", r"libssl\.so\.[0-9.]+"), ("libcrypto", r"libcrypto\.so\.[0-9.]+"),
                           ("loader", r"ld-linux-x86-64\.so\.2")):
         require(re.fullmatch(pattern, Path(roles[name]).name) is not None, "TLS selected SSL/loader object differs")
+    if deadline:
+        require(Path(roles["libc"]).name == "libc.so.6", "TLS selected resolver object differs")
     require(all(str(source / name) in names for name in GITHUB_TLS_SOURCES)
             and all(str(source / "src" / name) in names for name in GTK_CORE_PATHS), "TLS actual source/core closure is incomplete")
     records = {row["path"]: row for row in manifest["files"]}
@@ -3021,7 +3151,8 @@ def validate_github_tls_manifest(value: object, *, context: dict) -> dict:
 def github_tls_directories(context: dict) -> dict:
     root = Path(context["root"])
     return {"root": workflow_directory_identity(root), "source": workflow_directory_identity(Path(context["source"])),
-            **{name: workflow_directory_identity(root / name) for name in GITHUB_TLS_DIRECTORIES}}
+            **{name: workflow_directory_identity(root / name) for name in GITHUB_TLS_DIRECTORIES},
+            "github-tls-deadline-ambient/empty-ca-dir": workflow_directory_identity(root / "github-tls-deadline-ambient/empty-ca-dir")}
 
 
 def github_tls_input_summary(context: dict, manifest: dict) -> dict:
@@ -3032,7 +3163,7 @@ def github_tls_input_summary(context: dict, manifest: dict) -> dict:
     core = [row(str(source / "src" / name), name) for name in GTK_CORE_PATHS]
     validate_gtk_core_inventory(core)
     python = by_path[manifest["python"]]
-    return {"sourceFiles": [row(str(source / name), name) for name in GITHUB_TLS_SOURCES], "coreFiles": core,
+    value = {"sourceFiles": [row(str(source / name), name) for name in GITHUB_TLS_SOURCES], "coreFiles": core,
             "coreZipSha256": by_path[manifest["coreZip"]]["sha256"],
             "pythonSha256": python["sha256"], "pythonBytes": python["size"],
             "closureFiles": len(by_path), "closureBytes": sum(item["size"] for item in by_path.values()),
@@ -3040,6 +3171,9 @@ def github_tls_input_summary(context: dict, manifest: dict) -> dict:
             "ssl": manifest["ssl"],
             "roles": {name: {key: by_path[path][key] for key in ("size", "sha256")}
                       for name, path in manifest["roles"].items()}}
+    if manifest["scope"] == GITHUB_TLS_DEADLINE_SCOPE:
+        value["resolver"] = manifest["resolver"]
+    return value
 
 
 def prepare_github_tls_context(context: dict, inventory: list[dict]) -> None:
@@ -3047,12 +3181,22 @@ def prepare_github_tls_context(context: dict, inventory: list[dict]) -> None:
     for name, data in GITHUB_TLS_CONFIG.items():
         with (root / "github-tls-namespace" / name).open("xb") as stream:
             stream.write(data)
+    for profile, configs in GITHUB_TLS_DEADLINE_CONFIG.items():
+        for name, data in configs.items():
+            with (root / f"github-tls-deadline-namespace-{profile}" / name).open("xb") as stream:
+                stream.write(data)
+    (root / "github-tls-deadline-ambient/empty-ca-dir").mkdir(mode=0o700)
     context["originalDirectories"] = github_tls_directories(context)
     context["observedHost"] = workflow_host(root)
-    manifest = github_tls_manifest(context)
+    observation = github_tls_runtime()  # Exactly one genuine SSL/version/mapping probe for both manifests.
+    manifest = github_tls_manifest(context, observation)
+    deadline = github_tls_deadline_manifest(context, manifest, observation)
     write_json(root / "github-tls-inputs.json", manifest)
     context["tlsInputsSha256"] = hash_file(root / "github-tls-inputs.json")
     context["tlsInputs"] = github_tls_input_summary(context, manifest)
+    write_json(root / "github-tls-deadline-inputs.json", deadline)
+    context["tlsDeadlineInputsSha256"] = hash_file(root / "github-tls-deadline-inputs.json")
+    context["tlsDeadlineInputs"] = github_tls_input_summary(context, deadline)
     require(same_compile_json(inventory, context["tlsInputs"]["coreFiles"]), "TLS source/ZIP inventory differs")
     github_tls_source_unchanged(context)
 
@@ -3064,28 +3208,39 @@ def github_tls_inputs_unchanged(context: dict) -> None:
             "Wrong TLS input scope")
     require(same_compile_json(github_tls_directories(context), context["originalDirectories"]),
             "TLS original directory identity changed")
-    path = Path(context["root"]) / "github-tls-inputs.json"
-    require(hash_file(path) == context["tlsInputsSha256"], "TLS compiled input anchor changed")
-    manifest = read_bounded_json(path, 1024 * 1024)
-    validate_github_tls_manifest(manifest, context=context)
-    require(type(manifest) is dict and manifest.get("scope") == GITHUB_TLS_SCOPE
-            and manifest.get("schemaVersion") == 1
-            and all(manifest.get(key) == context[key]
-                    for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt"))
-            and manifest.get("sourceRoot") == context["source"] and manifest.get("jobRoot") == context["root"]
-            and manifest.get("python") == context["python"] and manifest.get("uid") == os.geteuid()
-            and manifest.get("gid") == os.getegid()
-            and all(manifest.get(key) == value for key, value in github_tls_namespaces().items()),
-            "TLS original context/namespace binding changed")
-    require(type(manifest.get("files")) is list and 0 < len(manifest["files"]) <= 2048,
-            "TLS original input roster differs")
-    library = Path(manifest["roles"]["ssl"]).parent
-    expected_stdlib = {Path(row["path"]) for row in manifest["files"] if library in Path(row["path"]).parents}
+    manifests, records = [], {}
+    original_namespaces = github_tls_namespaces()
+    for deadline, stem, anchor, summary in (
+            (False, "github-tls", "tlsInputsSha256", "tlsInputs"),
+            (True, "github-tls-deadline", "tlsDeadlineInputsSha256", "tlsDeadlineInputs")):
+        path = Path(context["root"]) / f"{stem}-inputs.json"
+        require(sha256_value(context.get(anchor)) and hash_file(path) == context[anchor], "TLS compiled input anchor changed")
+        manifest = read_bounded_json(path, 1024 * 1024)
+        validate_github_tls_manifest(manifest, context=context, deadline=deadline)
+        require(manifest["uid"] == os.geteuid() and manifest["gid"] == os.getegid()
+                and all(manifest[key] == value for key, value in original_namespaces.items()),
+                "TLS original context/namespace binding changed")
+        require(same_compile_json(context[summary], github_tls_input_summary(context, manifest)), "TLS frozen input summary changed")
+        for row in manifest["files"]:
+            require(row["path"] not in records or same_compile_json(records[row["path"]], row), "TLS shared manifest bytes disagree")
+            records[row["path"]] = row
+        manifests.append(manifest)
+    original, deadline_manifest = manifests
+    library = Path(original["roles"]["ssl"]).parent
+    expected_stdlib = {Path(path) for path in records if library in Path(path).parents}
     require(github_tls_stdlib_files(library) == expected_stdlib, "TLS original import roster changed")
-    observed = [github_tls_file(Path(row["path"])) for row in manifest["files"]]
-    require(same_compile_json(manifest["files"], observed)
-            and same_compile_json(context["tlsInputs"], github_tls_input_summary(context, manifest)),
-            "TLS original runtime/source/CA/namespace inputs changed")
+    require(all(original["roles"][role] == deadline_manifest["roles"][role]
+                for role in original["roles"] if role not in GITHUB_TLS_CONFIG)
+            and same_compile_json(original["ssl"], deadline_manifest["ssl"]), "TLS manifests do not share their original runtime")
+    special = {deadline_manifest["roles"][role]: role for role in ("libc", "resolver:host.conf", "resolver:gai.conf")}
+    github_tls_deadline_cache_absent()
+    for path, expected in sorted(records.items()):
+        role = special.get(path)
+        observed = (github_tls_deadline_resolver_file(Path(path), configuration=role.split(":", 1)[1] if role.startswith("resolver:") else None)
+                    if role is not None else github_tls_file(Path(path)))
+        require(same_compile_json(expected, observed), "TLS original runtime/source/CA/namespace inputs changed")
+    require(not os.path.lexists(Path(context["root"]) / "github-tls-deadline-ambient/owner-clear.keylog"),
+            "TLS owner keylog is present or uncertain")
 
 
 def github_tls_source_unchanged(context: dict) -> None:
@@ -3105,7 +3260,9 @@ def github_tls_public_bindings(context: dict) -> dict:
                                            "workflowRef", "workflowSha256", "runId", "attempt", "tlsInputsSha256", "tlsInputs")},
             "python": PYTHON, "rust": {"release": RUST, "target": TARGETS["linux"]},
             "features": ["development-runtime"], "testTarget": "lib", "host": context["observedHost"],
-            "notVerified": list(GITHUB_TLS_NOT_VERIFIED)}
+            "notVerified": list(GITHUB_TLS_NOT_VERIFIED),
+            "deadline": {"tlsInputsSha256": context["tlsDeadlineInputsSha256"], "inputs": context["tlsDeadlineInputs"],
+                         "notVerified": list(GITHUB_TLS_DEADLINE_NOT_VERIFIED)}}
 
 
 def validate_github_tls_peer(value: object, name: str) -> None:
@@ -3155,8 +3312,8 @@ def validate_github_tls_peer(value: object, name: str) -> None:
                 "TLS peer streaming close-notify count differs")
 
 
-def validate_github_tls_receipt(value: object, *, bindings: dict) -> dict:
-    """Closed sixteen-case inner facts, independently bound; never an outer wait."""
+def github_tls_expected_receipt_bindings(bindings: object) -> dict:
+    """Shared closed DATA only; authority must come from the original context."""
     binding_keys = {"sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256",
                     "artifactSha256", "artifactBytes", "coreZipSha256", "pythonSha256", "namespace"}
     expected = closed_object(bindings, binding_keys, "TLS expected binding fields differ")
@@ -3170,13 +3327,12 @@ def validate_github_tls_receipt(value: object, *, bindings: dict) -> dict:
     original = closed_object(expected["namespace"], {"parentNetns", "parentMntns", "uid", "gid"},
                              "TLS expected original namespace differs")
     require(all(integer_between(original[key], 1, 2**32 - 1) for key in ("uid", "gid")), "TLS original user differs")
-    receipt = closed_object(value, {"schemaVersion", "scope", "status", "allOwnersSettled", "allPeersSettled",
-        "failureCode", "bindings", "cases", "outerWait", "notVerified"}, "TLS receipt fields differ")
-    exact = {"schemaVersion": 1, "scope": GITHUB_TLS_RECEIPT_SCOPE, "status": "passed", "allOwnersSettled": True,
-             "allPeersSettled": True, "failureCode": None, "outerWait": "external-original-observer-required",
-             "notVerified": list(GITHUB_TLS_NOT_VERIFIED)}
-    require(same_compile_json({key: receipt[key] for key in exact}, exact), "TLS receipt header/finality/limitations differ")
-    supplied = closed_object(receipt["bindings"], binding_keys, "TLS receipt binding fields differ")
+    return expected
+
+
+def github_tls_supplied_receipt_bindings(value: object, expected: dict) -> None:
+    binding_keys, original = set(expected), expected["namespace"]
+    supplied = closed_object(value, binding_keys, "TLS receipt binding fields differ")
     require(same_compile_json({key: supplied[key] for key in binding_keys - {"namespace"}},
                              {key: expected[key] for key in binding_keys - {"namespace"}}), "TLS independently bound inputs differ")
     namespace = closed_object(supplied["namespace"], set(original) | {"netns", "mntns"}, "TLS namespace fields differ")
@@ -3184,6 +3340,18 @@ def validate_github_tls_receipt(value: object, *, bindings: dict) -> dict:
     for key, parent, kind in (("netns", "parentNetns", "net"), ("mntns", "parentMntns", "mnt")):
         require(all(type(namespace[item]) is str and re.fullmatch(kind + r":\[[1-9][0-9]{0,19}\]", namespace[item]) is not None
                     for item in (key, parent)) and namespace[key] != namespace[parent], "TLS namespace was not distinct")
+
+
+def validate_github_tls_receipt(value: object, *, bindings: dict) -> dict:
+    """Closed sixteen-case inner facts, independently bound; never an outer wait."""
+    expected = github_tls_expected_receipt_bindings(bindings)
+    receipt = closed_object(value, {"schemaVersion", "scope", "status", "allOwnersSettled", "allPeersSettled",
+        "failureCode", "bindings", "cases", "outerWait", "notVerified"}, "TLS receipt fields differ")
+    exact = {"schemaVersion": 1, "scope": GITHUB_TLS_RECEIPT_SCOPE, "status": "passed", "allOwnersSettled": True,
+             "allPeersSettled": True, "failureCode": None, "outerWait": "external-original-observer-required",
+             "notVerified": list(GITHUB_TLS_NOT_VERIFIED)}
+    require(same_compile_json({key: receipt[key] for key in exact}, exact), "TLS receipt header/finality/limitations differ")
+    github_tls_supplied_receipt_bindings(receipt["bindings"], expected)
     require(type(receipt["cases"]) is list and len(receipt["cases"]) == len(GITHUB_TLS_CASES), "TLS sixteen-case roster differs")
     for name, supplied_case in zip(GITHUB_TLS_CASES, receipt["cases"], strict=True):
         streaming = name in GITHUB_TLS_STREAMING
@@ -3236,6 +3404,274 @@ def parse_github_tls_receipt(raw: bytes, *, bindings: dict) -> dict:
     return validate_github_tls_receipt(bounded_json(raw, 128 * 1024), bindings=bindings)
 
 
+def github_tls_deadline_ambient_hashes(context: dict) -> dict:
+    """Expected values from the admitted context, NEVER from a received row."""
+    root, source = Path(context["root"]), Path(context["source"])
+    result = {}
+    for name in ("T4-owner-clear", "T4-ambient-fixed", "T4-ambient-no-rescue", "T5-helper-read"):
+        ambient = root / "github-tls-deadline-ambient" if name == "T4-owner-clear" else root / "github-tls-deadline/hosts" / name / "ambient"
+        ca = "root-ca.pem" if name == "T4-ambient-no-rescue" else "other-root-ca.pem"
+        values = {key: "http://127.0.0.1:18888" for key in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")}
+        values.update(LANG="C", LC_ALL="C", NO_PROXY="", no_proxy="",
+                      SSL_CERT_FILE=str(source / GITHUB_TLS_FIXTURES / "github_tls" / ca),
+                      SSL_CERT_DIR=str(ambient / "empty-ca-dir"),
+                      SSLKEYLOGFILE=str(ambient / ("owner-clear.keylog" if name == "T4-owner-clear" else "client.keylog")))
+        require(all(value.isascii() for value in values.values()), "TLS fixed ambient path is not ASCII")
+        result[name] = hashlib.sha256(canonical_json(values)).hexdigest()
+    return result
+
+
+def github_tls_deadline_peer(value: object, name: str, progress: object) -> None:
+    peer = closed_object(value, {"acquisitionJoined", "spawned", "waited", "exitCode", "exitSuccess", "stopAttempted",
+        "stdoutJoined", "stderrJoined", "stdoutEof", "stderrEof", "stdoutBytes", "stderrBytes", "stdoutOverflow",
+        "stderrOverflow", "ready", "settled", "withinEndpoint", "protocolChecked", "terminal", "control"},
+        "TLS deadline original peer fields differ")
+    fixed = dict.fromkeys(("acquisitionJoined", "spawned", "waited", "exitSuccess", "stdoutJoined", "stderrJoined",
+                          "stdoutEof", "stderrEof", "ready", "settled", "withinEndpoint", "protocolChecked"), True)
+    fixed.update(exitCode=0, stopAttempted=False, stderrBytes=0, stdoutOverflow=False, stderrOverflow=False)
+    require(same_compile_json({key: peer[key] for key in fixed}, fixed)
+            and integer_between(peer["stdoutBytes"], 1, 8192), "TLS deadline original peer finality differs")
+    control = dict.fromkeys(("acquired", "started", "joined", "writeComplete", "shutdownComplete",
+                             "productSettled", "withinEndpoint", "released"), True)
+    control["failed"] = False
+    require(same_compile_json(peer["control"], control), "TLS deadline original S/EOF writer is incomplete")
+    terminal = closed_object(peer["terminal"], {"schemaVersion", "scope", "case", "state", "status", "code", "connections",
+        "handshakes", "requests", "decryptedBytes", "authBytes", "closeNotify", "tlsRefused", "wireReadBytes", "wireWriteBytes",
+        "replyBytes", "allSocketsClosed", "sni", "phase", "withheldWireBytes", "bodyBytes", "incompleteBody", "clientStop",
+        "progressCount", "dnsQuestions", "dnsA", "dnsAAAA", "dnsReplies", "completion"}, "TLS deadline peer terminal fields differ")
+    dns, handshake, read = name == "T5-dns", name == "T5-handshake", name in {"T5-read", "T5-helper-read"}
+    refused = name == "T4-ambient-no-rescue"
+    connections = 0 if dns else 4 if name in {"T4-owner-clear", "T4-ambient-fixed"} else 1
+    requests = 0 if dns or handshake or refused else connections
+    fixed = {"schemaVersion": 1, "scope": "github-tls-peer-v1", "case": name, "state": "finished", "status": "passed",
+        "code": None, "connections": connections, "sni": connections, "handshakes": requests, "requests": requests,
+        "authBytes": requests * len(b"Bearer INERT_NOT_A_CREDENTIAL"), "tlsRefused": refused,
+        "closeNotify": 0 if read or handshake or refused or dns else 4, "allSocketsClosed": True,
+        "phase": "dns" if dns else "handshake" if handshake else "read" if read else "ambient",
+        "incompleteBody": read, "dnsReplies": 0}
+    require(same_compile_json({key: terminal[key] for key in fixed}, fixed)
+            and integer_between(terminal["decryptedBytes"], fixed["authBytes"], 0 if dns or handshake or refused else connections * 8192)
+            and integer_between(terminal["withheldWireBytes"], 1 if handshake else 0, 128 * 1024 if handshake else 0)
+            and integer_between(terminal["bodyBytes"], 1 if read else 0, 14 if read else 0),
+            "TLS deadline peer case/wire phase differs")
+    completion = {"bytes": 1, "eof": True, "closed": True, "primaryEmpty": True, "primaryUnexpected": 0,
+                  "primaryClosed": True, "proxy": {"empty": True, "unexpected": 0, "closed": True} if name.startswith("T4-") else None,
+                  "dnsEmpty": True if dns else None, "dnsClosed": True if dns else None}
+    require(same_compile_json(terminal["completion"], completion), "TLS deadline original listener/DNS horizon differs")
+    for key, maximum in (("wireReadBytes", 128 * 1024), ("wireWriteBytes", 128 * 1024), ("replyBytes", 64 * 1024)):
+        zero = key == "wireWriteBytes" and handshake or key == "replyBytes" and (handshake or refused)
+        require(type(terminal[key]) is list and len(terminal[key]) == connections
+                and all(integer_between(item, 0 if zero else 1, 0 if zero else maximum) for item in terminal[key]),
+                "TLS deadline original connection byte roster differs")
+    stops = {"tcp-eof", "connection-reset"} if handshake else {"tcp-eof", "connection-reset", "broken-pipe", "tls-close-notify"}
+    require((type(terminal["clientStop"]) is str and terminal["clientStop"] in stops) if read or handshake else terminal["clientStop"] is None,
+            "TLS deadline peer client-stop category differs")
+    require(integer_between(terminal["dnsQuestions"], 1 if dns else 0, 8 if dns else 0)
+            and all(integer_between(terminal[key], 0, 8 if dns else 0) for key in ("dnsA", "dnsAAAA"))
+            and terminal["dnsA"] + terminal["dnsAAAA"] == terminal["dnsQuestions"]
+            and type(progress) is list and len(progress) <= 24
+            and integer_between(terminal["progressCount"], 0, 24) and terminal["progressCount"] == len(progress),
+            "TLS deadline DNS/progress roster differs")
+    body = questions = a = aaaa = wire_read = wire_write = last_at = 0
+    phase_seen = stopped = False
+    for sequence, raw in enumerate(progress, 1):
+        item = closed_object(raw, {"event", "sequence", "requests", "bodyBytes", "wireReadBytes", "wireWriteBytes",
+            "dnsQuestions", "dnsA", "dnsAAAA", "clientStop", "afterPeerStartNs"}, "TLS deadline progress fields differ")
+        require(integer_between(item["sequence"], 1, 24) and item["sequence"] == sequence
+                and all(integer_between(item[key], 0, maximum) for key, maximum in (
+                    ("requests", 4), ("bodyBytes", 14), ("wireReadBytes", connections * 128 * 1024),
+                    ("wireWriteBytes", connections * 128 * 1024), ("dnsQuestions", 8), ("dnsA", 8), ("dnsAAAA", 8),
+                    ("afterPeerStartNs", 16_000_000_000)))
+                and not stopped and wire_read <= item["wireReadBytes"] <= sum(terminal["wireReadBytes"])
+                and wire_write <= item["wireWriteBytes"] <= sum(terminal["wireWriteBytes"])
+                and item["afterPeerStartNs"] >= last_at, "TLS deadline original-reader progress is malformed")
+        event = item["event"]
+        if event == "dns-question":
+            require(dns and item["dnsQuestions"] == questions + 1 and item["dnsA"] >= a and item["dnsAAAA"] >= aaaa
+                    and item["dnsA"] + item["dnsAAAA"] == item["dnsQuestions"], "TLS deadline genuine DNS progress differs")
+            questions, a, aaaa, phase_seen = item["dnsQuestions"], item["dnsA"], item["dnsAAAA"], True
+        elif event == "client-hello":
+            require(handshake and not phase_seen and item["wireReadBytes"] > 0 and item["wireWriteBytes"] == 0,
+                    "TLS deadline genuine ClientHello progress differs")
+            phase_seen = True
+        elif event == "first-get":
+            require(not (dns or handshake or refused or phase_seen) and item["requests"] == 1
+                    and item["wireReadBytes"] > 0 and item["wireWriteBytes"] > 0, "TLS deadline genuine first GET differs")
+            phase_seen = True
+        elif event == "body-byte":
+            require(read and phase_seen and item["bodyBytes"] == body + 1 and item["wireWriteBytes"] > wire_write,
+                    "TLS deadline positive flushed-body progress differs")
+            body = item["bodyBytes"]
+        elif event == "client-stop":
+            require((read or handshake) and phase_seen and item["clientStop"] == terminal["clientStop"],
+                    "TLS deadline original client stop differs")
+            stopped = True
+        else:
+            raise CheckFailure("TLS deadline unknown progress event")
+        require(item["bodyBytes"] == body and item["requests"] == (0 if dns or handshake or refused else 1)
+                and (item["dnsQuestions"], item["dnsA"], item["dnsAAAA"]) == (questions, a, aaaa)
+                and (item["clientStop"] is not None) is stopped, "TLS deadline progress counters disagree")
+        wire_read, wire_write, last_at = item["wireReadBytes"], item["wireWriteBytes"], item["afterPeerStartNs"]
+    require(phase_seen is not refused and stopped is (read or handshake) and body == terminal["bodyBytes"]
+            and (questions, a, aaaa) == (terminal["dnsQuestions"], terminal["dnsA"], terminal["dnsAAAA"]),
+            "TLS deadline terminal/progress observations disagree")
+
+
+def github_tls_deadline_progressing(get: int, until: int, body: list[int]) -> bool:
+    cadence = 1_500_000_000
+    before = [at for at in body if at <= until]
+    return (bool(body) and get <= body[0] <= get + cadence
+            and all(left < right <= left + cadence for left, right in zip(body, body[1:]))
+            and all(at <= until + cadence for at in body) and bool(before) and until <= before[-1] + cadence)
+
+
+def github_tls_deadline_timing(value: object, name: str, progress: list[dict]) -> None:
+    first = {event: next((row["afterPeerStartNs"] for row in progress if row["event"] == event), None)
+             for event in ("first-get", "client-hello", "dns-question", "client-stop")}
+    body = [row["afterPeerStartNs"] for row in progress if row["event"] == "body-byte"]
+    direct = name in {"T4-ambient-fixed", "T4-ambient-no-rescue", "T5-helper-read"}
+    if direct:
+        timing = closed_object(value, {"kind", "spawnAfterPeerStartNs", "settledAfterPeerStartNs", "firstGetAfterLaunchNs",
+            "responseAfterLaunchNs", "clientStopAfterLaunchNs", "bodyProgressAfterLaunchNs", "helperWindowChecked"},
+            "TLS original direct-reader timing fields differ")
+        require(timing["kind"] == "fixture-owned-bootstrap"
+                and all(integer_between(timing[key], 0, 16_000_000_000) for key in
+                        ("spawnAfterPeerStartNs", "settledAfterPeerStartNs", "responseAfterLaunchNs")),
+                "TLS original direct-reader timestamps differ")
+        launch, settled, frame = timing["spawnAfterPeerStartNs"], timing["settledAfterPeerStartNs"], timing["responseAfterLaunchNs"]
+        require(launch + frame <= settled < 16_000_000_000, "TLS original frame was not observed before settlement/endpoint")
+        for key, event in (("firstGetAfterLaunchNs", "first-get"), ("clientStopAfterLaunchNs", "client-stop")):
+            at = first[event]
+            require(timing[key] is None if at is None else integer_between(timing[key], 0, 16_000_000_000)
+                    and launch <= at and timing[key] == at - launch, "TLS reader-relative timestamp does not match original progress")
+        require(type(timing["bodyProgressAfterLaunchNs"]) is list
+                and all(integer_between(at, 0, 16_000_000_000) for at in timing["bodyProgressAfterLaunchNs"])
+                and same_compile_json(timing["bodyProgressAfterLaunchNs"], [at - launch for at in body]),
+                "TLS original body-progress clock provenance differs")
+        if first["first-get"] is not None:
+            require(first["first-get"] <= launch + frame, "TLS first GET followed its claimed response")
+        helper = name == "T5-helper-read"
+        require(timing["helperWindowChecked"] is helper, "TLS direct timing scope differs")
+        if helper:
+            get, stop = timing["firstGetAfterLaunchNs"], timing["clientStopAfterLaunchNs"]
+            require(integer_between(get, 0, 2_000_000_000) and 10_000_000_000 <= frame <= 12_000_000_000
+                    and integer_between(stop, 10_000_000_000, 16_000_000_000)
+                    and github_tls_deadline_progressing(launch + get, launch + min(frame, stop), body),
+                    "TLS genuine helper budget/progress window is unproved")
+    else:
+        timing = closed_object(value, {"kind", "operationStartAfterPeerNs", "operationEndpointAfterPeerNs", "cleanupEndpointAfterPeerNs",
+            "settledAfterPeerNs", "phaseAfterPeerNs", "phase", "originalDeadlineChecked", "cleanupExact"},
+            "TLS original owner timing fields differ")
+        phase = "dns-question" if name == "T5-dns" else "client-hello" if name == "T5-handshake" else "first-get"
+        require(timing["kind"] == "ordinary-owner" and timing["phase"] == phase
+                and all(integer_between(timing[key], 0, 16_000_000_000) for key in ("operationStartAfterPeerNs",
+                    "operationEndpointAfterPeerNs", "settledAfterPeerNs", "phaseAfterPeerNs"))
+                and timing["phaseAfterPeerNs"] == first[phase], "TLS original owner phase/clock provenance differs")
+        start, endpoint, settled, observed = (timing[key] for key in ("operationStartAfterPeerNs", "operationEndpointAfterPeerNs",
+                                                                       "settledAfterPeerNs", "phaseAfterPeerNs"))
+        require(endpoint == start + 10_000_000_000 and start <= observed < endpoint and settled < 16_000_000_000,
+                "TLS original owner operation endpoint changed")
+        deadline = name != "T4-owner-clear"
+        require(timing["originalDeadlineChecked"] is deadline and timing["cleanupExact"] is deadline,
+                "TLS original owner deadline scope differs")
+        if deadline:
+            require(integer_between(timing["cleanupEndpointAfterPeerNs"], 0, 16_000_000_000)
+                    and timing["cleanupEndpointAfterPeerNs"] == endpoint + 2_000_000_000
+                    and endpoint <= settled < timing["cleanupEndpointAfterPeerNs"], "TLS immutable original cleanup endpoint differs")
+            if name in {"T5-handshake", "T5-read"}:
+                require(first["client-stop"] is not None and first["client-stop"] >= endpoint, "TLS client stopped before its owner deadline")
+            if name == "T5-read":
+                require(github_tls_deadline_progressing(observed, endpoint, body), "TLS owner read was not genuinely progressing")
+        else:
+            require(timing["cleanupEndpointAfterPeerNs"] is None and observed < settled < endpoint,
+                    "TLS ordinary positive owner acquired a cleanup deadline")
+
+
+def github_tls_deadline_client(case: dict, name: str) -> None:
+    direct = name in {"T4-ambient-fixed", "T4-ambient-no-rescue", "T5-helper-read"}
+    deadline = name in {"T5-dns", "T5-handshake", "T5-read"}
+    if direct:
+        require(case["product"] is None, "TLS fixture-owned bootstrap is misreported as a product owner")
+        probe = closed_object(case["probe"], {"acquisitionJoined", "spawned", "waited", "exitCode", "exitSuccess", "stopAttempted",
+            "writerJoined", "writeComplete", "shutdownComplete", "stdinReleased", "stdoutJoined", "stderrJoined", "stdoutEof", "stderrEof",
+            "stdoutBytes", "stderrBytes", "stdoutOverflow", "stderrOverflow", "settled", "withinEndpoint", "frameObserved"},
+            "TLS original direct-bootstrap fields differ")
+        fixed = dict.fromkeys(("acquisitionJoined", "spawned", "waited", "exitSuccess", "writerJoined", "writeComplete", "shutdownComplete",
+            "stdinReleased", "stdoutJoined", "stderrJoined", "stdoutEof", "stderrEof", "settled", "withinEndpoint", "frameObserved"), True)
+        fixed.update(exitCode=0, stopAttempted=False, stderrBytes=0, stdoutOverflow=False, stderrOverflow=False)
+        require(same_compile_json({key: probe[key] for key in fixed}, fixed)
+                and integer_between(probe["stdoutBytes"], 1, 64 * 1024), "TLS original direct-bootstrap finality differs")
+        return
+    require(case["probe"] is None, "TLS original Supervisor is misreported as a fixture-owned bootstrap")
+    product = closed_object(case["product"], {"settled", "projectionChecked", "reason", "registeredOwners", "disabled", "owners"},
+                            "TLS deadline product fields differ")
+    require(same_compile_json({key: product[key] for key in product if key != "owners"},
+            {"settled": True, "projectionChecked": True, "reason": case["reason"], "registeredOwners": 0, "disabled": False})
+            and type(product["owners"]) is list and len(product["owners"]) == 1, "TLS original product finality differs")
+    owner = closed_object(product["owners"][0], {"id", "profile", "terminal", "unknownLatched", "permitRetained", "observerJoined", "firstError", "native"},
+                          "TLS deadline original owner fields differ")
+    require(same_compile_json({key: owner[key] for key in owner if key != "native"},
+            {"id": "github-read-1", "profile": "github-readonly", "terminal": True, "unknownLatched": False,
+             "permitRetained": False, "observerJoined": True, "firstError": "query_timeout" if deadline else None}),
+            "TLS original owner error/join/release differs")
+    if deadline:
+        # Separate closed predicate: the ordinary nine-case validator continues
+        # requiring a successful original child exit and a positive response.
+        expected = dict.fromkeys(("inspection_joined", "acquisition_joined", "spawned", "waited", "writer_joined", "writer_complete",
+            "stdout_eof", "stderr_eof", "stdout_joined", "stderr_joined", "driver_joined", "watchdog_joined"), True)
+        expected.update(exit_success=False, stdout_bytes=0, stderr_bytes=0)
+        require(same_compile_json(owner["native"], expected), "TLS timeout owner has incomplete original native observations")
+    else:
+        _validate_github_readonly_native(owner["native"], name, "github-readonly")
+
+
+def validate_github_tls_deadline_receipt(value: object, *, bindings: dict, profile: str, ambient_hashes: dict) -> dict:
+    require(type(profile) is str and profile in GITHUB_TLS_DEADLINE_PROFILES, "TLS deadline receipt profile differs")
+    expected = github_tls_expected_receipt_bindings(bindings)
+    hashes = closed_object(ambient_hashes, {"T4-owner-clear", "T4-ambient-fixed", "T4-ambient-no-rescue", "T5-helper-read"},
+                           "TLS expected ambient role-set fields differ")
+    require(all(sha256_value(value) for value in hashes.values()), "TLS expected ambient role hashes differ")
+    receipt = closed_object(value, {"schemaVersion", "scope", "profile", "status", "allOwnersSettled", "allProbesSettled", "allPeersSettled",
+        "failureCode", "bindings", "cases", "outerWait", "notVerified"}, "TLS deadline receipt fields differ")
+    fixed = {"schemaVersion": 1, "scope": GITHUB_TLS_DEADLINE_RECEIPT_SCOPE, "profile": profile, "status": "passed",
+        "allOwnersSettled": True, "allProbesSettled": True, "allPeersSettled": True, "failureCode": None,
+        "outerWait": "external-original-observer-required", "notVerified": list(GITHUB_TLS_DEADLINE_NOT_VERIFIED)}
+    require(same_compile_json({key: receipt[key] for key in fixed}, fixed), "TLS deadline header/finality/limitations differ")
+    github_tls_supplied_receipt_bindings(receipt["bindings"], expected)
+    require(type(receipt["cases"]) is list and len(receipt["cases"]) == len(GITHUB_TLS_DEADLINE_CASES[profile]),
+            "TLS deadline profile case roster differs")
+    for name, supplied in zip(GITHUB_TLS_DEADLINE_CASES[profile], receipt["cases"], strict=True):
+        case = closed_object(supplied, {"case", "entry", "passed", "failureCode", "coreMode", "trustFixture", "elapsedMs", "clientSettled",
+            "projectionChecked", "reason", "product", "probe", "ambient", "timing", "progress", "peer", "resolverCacheAbsentAfter"},
+            "TLS deadline case fields differ")
+        direct = name in {"T4-ambient-fixed", "T4-ambient-no-rescue", "T5-helper-read"}
+        reason = ("none" if name in {"T4-owner-clear", "T4-ambient-fixed"} else "tls-failed" if name == "T4-ambient-no-rescue"
+                  else "network-unavailable" if name == "T5-helper-read" else "query_timeout")
+        fixed = {"case": name, "entry": "fixture-owned-bootstrap" if direct else "ordinary-supervisor", "passed": True,
+            "failureCode": None, "coreMode": "source", "trustFixture": "other-root-ca.pem" if name == "T4-ambient-no-rescue" else "root-ca.pem",
+            "clientSettled": True, "projectionChecked": True, "reason": reason, "resolverCacheAbsentAfter": True if name == "T5-dns" else None}
+        require(same_compile_json({key: case[key] for key in fixed}, fixed)
+                and integer_between(case["elapsedMs"], 0, github_tls_outer_seconds(profile) * 1000),
+                "TLS deadline case ownership/reason/order differs")
+        github_tls_deadline_client(case, name)
+        if name in hashes:
+            ambient = dict.fromkeys(("writableControlCreated", "writableControlWritten", "writableControlSynced", "writableControlClosed",
+                "keylogAbsentBefore", "keylogAbsentAfter", "emptyCaDirectoryBefore", "emptyCaDirectoryAfter", "fileSizeLimitNonzero"), True)
+            ambient.update(roleSetSha256=hashes[name], initialEnvironment="observed-allowlist" if name == "T4-owner-clear" else None)
+            require(same_compile_json(case["ambient"], ambient), "TLS original ambient role/writability/environment observations differ")
+        else:
+            require(case["ambient"] is None, "TLS deadline case has an unrelated ambient claim")
+        github_tls_deadline_peer(case["peer"], name, case["progress"])
+        github_tls_deadline_timing(case["timing"], name, case["progress"])
+    require(len(canonical_json(receipt)) <= 128 * 1024, "TLS deadline receipt exceeds its bound")
+    return receipt
+
+
+def parse_github_tls_deadline_receipt(raw: bytes, *, bindings: dict, profile: str, ambient_hashes: dict) -> dict:
+    require(type(raw) is bytes and 0 < len(raw) <= 128 * 1024, "TLS deadline receipt byte bound differs")
+    return validate_github_tls_deadline_receipt(bounded_json(raw, 128 * 1024), bindings=bindings, profile=profile, ambient_hashes=ambient_hashes)
+
+
 def github_tls_compile_record(context: dict, argv: list[str], messages: Path) -> dict:
     ordinary(messages)
     require(0 < messages.stat().st_size <= 16 * 1024 * 1024, "TLS compiler output exceeds its bound")
@@ -3244,7 +3680,7 @@ def github_tls_compile_record(context: dict, argv: list[str], messages: Path) ->
     root = Path(context["root"])
     path = github_compiled_test(raw, source=Path(context["source"]), target_root=root / "target")
     value = {"schemaVersion": 1, "scope": GITHUB_TLS_SCOPE,
-             **{key: context[key] for key in ("sourceSha", "sourceTree", "tlsInputsSha256")},
+             **{key: context[key] for key in ("sourceSha", "sourceTree", "tlsInputsSha256", "tlsDeadlineInputsSha256")},
              "path": str(path), **github_artifact_identity(path, root),
              "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(),
              "messagesSha256": hashlib.sha256(raw).hexdigest()}
@@ -3255,10 +3691,11 @@ def github_tls_compile_record(context: dict, argv: list[str], messages: Path) ->
 def github_tls_original_artifact(context: dict) -> dict:
     root = Path(context["root"])
     value = closed_object(read_bounded_json(root / "github-tls-compiled-test.json", 16384),
-        {"schemaVersion", "scope", "sourceSha", "sourceTree", "tlsInputsSha256", "path", "identity", "size",
+        {"schemaVersion", "scope", "sourceSha", "sourceTree", "tlsInputsSha256", "tlsDeadlineInputsSha256", "path", "identity", "size",
          "sha256", "invocationSha256", "messagesSha256"}, "TLS original compile record differs")
     require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == GITHUB_TLS_SCOPE
-            and all(value[key] == context[key] for key in ("sourceSha", "sourceTree", "tlsInputsSha256"))
+            and all(value[key] == context[key] for key in ("sourceSha", "sourceTree", "tlsInputsSha256", "tlsDeadlineInputsSha256"))
+            and all(sha256_value(value[key]) for key in ("tlsInputsSha256", "tlsDeadlineInputsSha256"))
             and sha256_value(value["invocationSha256"]) and sha256_value(value["messagesSha256"]),
             "TLS original compiler source/input anchor differs")
     path = github_executable_path(value["path"], target_root=root / "target")
@@ -3272,23 +3709,42 @@ def github_tls_compiled_public(compiled: dict) -> dict:
             "identitySha256": hashlib.sha256(canonical_json(compiled["identity"])).hexdigest()}
 
 
-def github_tls_expected_bindings(context: dict, compiled: dict, manifest: dict) -> dict:
-    return {**{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256")},
+def github_tls_expected_bindings(context: dict, compiled: dict, manifest: dict, *, profile: str | None = None) -> dict:
+    github_tls_outer_seconds(profile)
+    summary = context["tlsDeadlineInputs" if profile is not None else "tlsInputs"]
+    return {**{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+            "tlsInputsSha256": context["tlsDeadlineInputsSha256" if profile is not None else "tlsInputsSha256"],
             "artifactSha256": compiled["sha256"], "artifactBytes": compiled["size"],
-            "coreZipSha256": context["tlsInputs"]["coreZipSha256"], "pythonSha256": context["tlsInputs"]["pythonSha256"],
+            "coreZipSha256": summary["coreZipSha256"], "pythonSha256": summary["pythonSha256"],
             "namespace": {key: manifest[key] for key in ("parentNetns", "parentMntns", "uid", "gid")}}
 
 
-def github_tls_launch_argv(context: dict, compiled: dict, manifest: dict) -> list[str]:
+def github_tls_outer_seconds(profile: str | None) -> int:
+    require(profile is None or type(profile) is str and profile in GITHUB_TLS_DEADLINE_PROFILES,
+            "TLS fixed outer profile differs")
+    return {None: 300, "hosts": 180, "dns-withhold": 60}[profile]
+
+
+def github_tls_output_stem(profile: str | None) -> str:
+    github_tls_outer_seconds(profile)
+    return "github-tls" if profile is None else f"github-tls-deadline-{profile}"
+
+
+def github_tls_launch_argv(context: dict, compiled: dict, manifest: dict, *, profile: str | None = None) -> list[str]:
     """Exactly the original artifact through the fixed namespace entry; no shell command string."""
     require(context.get("executionScope") == GITHUB_TLS_SCOPE and context.get("platform") == "linux",
             "Wrong TLS namespace launch scope")
-    return ["/usr/bin/sudo", "-n", "--", "/usr/bin/unshare", "--mount", "--net", "--",
+    github_tls_outer_seconds(profile)
+    require(manifest.get("scope") == (GITHUB_TLS_SCOPE if profile is None else GITHUB_TLS_DEADLINE_SCOPE),
+            "TLS namespace manifest profile differs")
+    argv = ["/usr/bin/sudo", "-n", "--", "/usr/bin/unshare", "--mount", "--net", "--",
             "/usr/bin/env", "-i", "LANG=C", "LC_ALL=C", "/usr/bin/bash", "--noprofile", "--norc",
             str(Path(context["source"]) / GITHUB_TLS_FIXTURES / "github_tls_namespace.sh"),
             context["source"], context["root"], compiled["path"], context["python"],
             str(manifest["uid"]), str(manifest["gid"]), manifest["parentNetns"], manifest["parentMntns"],
-            context["tlsInputsSha256"], compiled["sha256"], str(compiled["size"]), context["sourceSha"]]
+            context["tlsInputsSha256" if profile is None else "tlsDeadlineInputsSha256"],
+            compiled["sha256"], str(compiled["size"]), context["sourceSha"]]
+    return argv if profile is None else [*argv, profile]
 
 
 def github_tls_outer_limits() -> None:
@@ -3300,9 +3756,12 @@ def github_tls_outer_limits() -> None:
     resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, 1024 * 1024 * 1024))
 
 
-def github_tls_outer_base(context: dict, compiled: dict) -> dict:
-    return {"schemaVersion": 1, "scope": "github-readonly-tls-original-outer-v1",
-            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256")},
+def github_tls_outer_base(context: dict, compiled: dict, *, profile: str | None = None) -> dict:
+    github_tls_outer_seconds(profile)
+    return {"schemaVersion": 1, "scope": "github-readonly-tls-original-outer-v1" if profile is None else "github-readonly-tls-deadline-original-outer-v1",
+            **({"profile": profile} if profile is not None else {}),
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+            "tlsInputsSha256": context["tlsInputsSha256" if profile is None else "tlsDeadlineInputsSha256"],
             "artifactSha256": compiled["sha256"], "artifactBytes": compiled["size"],
             "artifactIdentitySha256": hashlib.sha256(canonical_json(compiled["identity"])).hexdigest()}
 
@@ -3316,7 +3775,7 @@ def github_tls_namespace_refusal(raw: bytes | None) -> dict | None:
     codes = frozenset(("admission", "identity", "binding", "namespace", "path", "metadata", "file",
         "file-type", "file-permissions", "file-links", "file-owner", "file-size", "directory", "hash",
         "configuration", "layout", "artifact", "entry", "resolver", "propagation", "mount", "readonly",
-        "loopback", "route", "port", "changed"))
+        "loopback", "route", "port", "changed", "profile", "resolver-cache", "ambient"))
     if type(raw) is not bytes or not 0 < len(raw) <= 256:
         return None
     # No strip(), substring match, generic exception or best-effort decoding.
@@ -3349,27 +3808,33 @@ def github_tls_stderr_snapshot(path: Path) -> bytes | None:
         return None
 
 
-def github_tls_failure_diagnostics(context: dict, compiled: dict, outer: dict, launch_error: str) -> None:
+def github_tls_failure_diagnostics(context: dict, compiled: dict, outer: dict, launch_error: str,
+                                   *, profile: str | None = None) -> None:
     """Failed-only public projection; success/cleanup parsers cannot consume it."""
     require(launch_error in {"none", "timeout", "oserror", "subprocess-error"}, "Unknown TLS launch diagnostic")
     root = Path(context["root"])
-    raw = github_tls_stderr_snapshot(root / "github-tls.stderr") if outer["waitObserved"] is True else None
-    value = {"schemaVersion": 1, "scope": GITHUB_TLS_EVIDENCE_SCOPE, "phase": "github-tls", "status": "failed",
-        **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256")},
+    stem = github_tls_output_stem(profile)  # Closed original/hosts/dns-withhold routing only.
+    phase = "github-tls" if profile is None else "github-tls-deadline"
+    raw = github_tls_stderr_snapshot(root / f"{stem}.stderr") if outer["waitObserved"] is True else None
+    value = {"schemaVersion": 1, "scope": GITHUB_TLS_EVIDENCE_SCOPE, "phase": phase, "status": "failed",
+        **({"profile": profile} if profile is not None else {}),
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+        "tlsInputsSha256": context["tlsInputsSha256" if profile is None else "tlsDeadlineInputsSha256"],
         "compiledTest": github_tls_compiled_public(compiled), "launchError": launch_error,
         "namespaceRefusal": github_tls_namespace_refusal(raw),
         "outerObservation": {key: outer[key] for key in ("status", "waitObserved", "exitCode", "timedOut",
             "elapsedMs", "stdoutBytes", "stderrBytes")}}
     # Original private outer receipt was written first. A missing diagnostic
-    # cannot erase it or suppress the original fatal outcome.
+    # cannot erase it or suppress the original fatal outcome. First failure
+    # aborts the phase, so no next profile may replace this failed projection.
     try:
-        write_json(root / "github-tls-checks.json", value)
+        write_json(root / f"{phase}-checks.json", value)
     except OSError:
         print("TLS failed-only diagnostic artifact unavailable; original failure retained.", flush=True)
     print("TLS failed-only diagnostic: " + canonical_json(value).decode("ascii"), flush=True)
 
 
-def github_tls_run_outer(context: dict, compiled: dict) -> dict:
+def github_tls_run_outer(context: dict, compiled: dict, *, profile: str | None = None) -> dict:
     """Only this original CompletedProcess supplies an outer-wait observation.
 
     Timeout/OSError/nonzero return spends the claim and never permits clean.
@@ -3377,19 +3842,20 @@ def github_tls_run_outer(context: dict, compiled: dict) -> dict:
     assertion from the inner fixture substitutes for the actual returned wait.
     """
     root = Path(context["root"])
-    manifest = read_bounded_json(root / "github-tls-inputs.json", 1024 * 1024)
-    destination = root / "github-tls-outer.json"
+    stem = github_tls_output_stem(profile)
+    manifest = read_bounded_json(root / ("github-tls-inputs.json" if profile is None else "github-tls-deadline-inputs.json"), 1024 * 1024)
+    destination = root / f"{stem}-outer.json"
     require(not os.path.lexists(destination), "TLS outer attempt was already recorded")
-    value = {**github_tls_outer_base(context, compiled), "status": "unknown", "waitObserved": False,
+    value = {**github_tls_outer_base(context, compiled, profile=profile), "status": "unknown", "waitObserved": False,
              "exitCode": None, "timedOut": False, "elapsedMs": 0, "stdoutBytes": None, "stderrBytes": None}
     launch_error = "none"
     start = time.monotonic()
-    with (root / "github-tls.stdout").open("x", encoding="utf-8") as output, \
-            (root / "github-tls.stderr").open("x", encoding="utf-8") as diagnostics:
+    with (root / f"{stem}.stdout").open("x", encoding="utf-8") as output, \
+            (root / f"{stem}.stderr").open("x", encoding="utf-8") as diagnostics:
         try:
-            original = subprocess.run(github_tls_launch_argv(context, compiled, manifest), cwd=root,
+            original = subprocess.run(github_tls_launch_argv(context, compiled, manifest, profile=profile), cwd=root,
                 env=clean_environment(root), stdin=subprocess.DEVNULL, stdout=output, stderr=diagnostics,
-                check=False, timeout=300, preexec_fn=github_tls_outer_limits)
+                check=False, timeout=github_tls_outer_seconds(profile), preexec_fn=github_tls_outer_limits)
         except subprocess.TimeoutExpired:
             value["timedOut"] = True
             launch_error = "timeout"
@@ -3403,14 +3869,14 @@ def github_tls_run_outer(context: dict, compiled: dict) -> dict:
                          waitObserved=True, exitCode=original.returncode)
     value["elapsedMs"] = max(0, int((time.monotonic() - start) * 1000))
     if value["waitObserved"]:
-        value.update(stdoutBytes=(root / "github-tls.stdout").stat().st_size,
-                     stderrBytes=(root / "github-tls.stderr").stat().st_size)
+        value.update(stdoutBytes=(root / f"{stem}.stdout").stat().st_size,
+                     stderrBytes=(root / f"{stem}.stderr").stat().st_size)
     write_json(destination, value)  # Exclusive original record, never overwritten by a receipt projection.
     try:
-        validate_github_tls_outer(value, context=context, compiled=compiled)
+        validate_github_tls_outer(value, context=context, compiled=compiled, profile=profile)
     except CheckFailure:
         try:
-            github_tls_failure_diagnostics(context, compiled, value, launch_error)
+            github_tls_failure_diagnostics(context, compiled, value, launch_error, profile=profile)
         except Exception:
             # Diagnostics are best-effort only. Their own read/projection/write
             # or log failure must never replace the original fatal observation.
@@ -3419,46 +3885,60 @@ def github_tls_run_outer(context: dict, compiled: dict) -> dict:
     return value
 
 
-def validate_github_tls_outer(value: object, *, context: dict, compiled: dict) -> dict:
-    base = github_tls_outer_base(context, compiled)
+def validate_github_tls_outer(value: object, *, context: dict, compiled: dict, profile: str | None = None) -> dict:
+    base = github_tls_outer_base(context, compiled, profile=profile)
     closed_object(value, set(base) | {"status", "waitObserved", "exitCode", "timedOut", "elapsedMs", "stdoutBytes", "stderrBytes"},
                   "TLS original outer receipt fields differ")
     require(same_compile_json({key: value[key] for key in base}, base)
             and value["status"] == "passed" and value["waitObserved"] is True
             and type(value["exitCode"]) is int and value["exitCode"] == 0 and value["timedOut"] is False
-            and integer_between(value["elapsedMs"], 0, 300000)
+            and integer_between(value["elapsedMs"], 0, github_tls_outer_seconds(profile) * 1000)
             and all(integer_between(value[key], 0, 1024 * 1024) for key in ("stdoutBytes", "stderrBytes")),
             "TLS original outer wait failed, was unknown, or changed")
     return value
 
 
-def github_tls_result(context: dict) -> dict:
+def github_tls_result(context: dict, *, profile: str | None = None) -> dict:
     root = Path(context["root"])
+    stem = github_tls_output_stem(profile)
     compiled = github_tls_original_artifact(context)
-    manifest = read_bounded_json(root / "github-tls-inputs.json", 1024 * 1024)
-    raw = read_bounded_json(root / "github-tls/receipt.json", 128 * 1024)
-    validate_github_tls_receipt(raw, bindings=github_tls_expected_bindings(context, compiled, manifest))
-    outer = validate_github_tls_outer(read_bounded_json(root / "github-tls-outer.json", 16384), context=context, compiled=compiled)
-    return {"nativeReceiptSha256": hash_file(root / "github-tls/receipt.json"), "outer": outer}
+    manifest = read_bounded_json(root / ("github-tls-inputs.json" if profile is None else "github-tls-deadline-inputs.json"), 1024 * 1024)
+    receipt_path = root / ("github-tls/receipt.json" if profile is None else f"github-tls-deadline/{profile}/receipt.json")
+    raw = read_bounded_json(receipt_path, 128 * 1024)
+    bindings = github_tls_expected_bindings(context, compiled, manifest, profile=profile)
+    if profile is None:
+        validate_github_tls_receipt(raw, bindings=bindings)
+    else:
+        validate_github_tls_deadline_receipt(raw, bindings=bindings, profile=profile,
+                                           ambient_hashes=github_tls_deadline_ambient_hashes(context))
+    outer = validate_github_tls_outer(read_bounded_json(root / f"{stem}-outer.json", 16384), context=context, compiled=compiled, profile=profile)
+    return {"nativeReceiptSha256": hash_file(receipt_path), "outer": outer}
+
+
+def github_tls_deadline_result(context: dict) -> dict:
+    return {profile: github_tls_result(context, profile=profile) for profile in GITHUB_TLS_DEADLINE_PROFILES}
 
 
 def github_tls_phase_claim(context: dict, name: str) -> dict:
     return {"scope": GITHUB_TLS_SCOPE, "phase": name,
-            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256")}}
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256", "tlsDeadlineInputsSha256")}}
 
 
 def github_tls_phase_value(context: dict, name: str, checks: list[str]) -> dict:
     require(name in GITHUB_TLS_CHECKS and context.get("executionScope") == GITHUB_TLS_SCOPE, "Unknown TLS phase receipt")
     value = {"schemaVersion": 1, "scope": GITHUB_TLS_EVIDENCE_SCOPE, "phase": name, "status": "passed",
              **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha",
-                                            "workflowRef", "workflowSha256", "runId", "attempt", "tlsInputsSha256")},
+                                            "workflowRef", "workflowSha256", "runId", "attempt", "tlsInputsSha256", "tlsDeadlineInputsSha256")},
              "inputSha256": hashlib.sha256(canonical_json(context["tlsInputs"])).hexdigest(),
+             "deadlineInputSha256": hashlib.sha256(canonical_json(context["tlsDeadlineInputs"])).hexdigest(),
              "rust": {"release": RUST, "target": TARGETS["linux"]},
              "checks": [{"check": check, "exitCode": 0} for check in checks]}
-    if name in {"compile", "github-tls"}:
+    if name in {"compile", "github-tls", "github-tls-deadline"}:
         value["compiledTest"] = github_tls_compiled_public(github_tls_original_artifact(context))
     if name == "github-tls":
         value.update(github_tls_result(context))
+    if name == "github-tls-deadline":
+        value["profiles"] = github_tls_deadline_result(context)
     return value
 
 
@@ -3485,6 +3965,12 @@ def github_tls_predecessors(context: dict, name: str) -> None:
     if name == "github-tls":
         require(not os.path.lexists(root / "github-tls-outer.json")
                 and not os.path.lexists(root / "github-tls/receipt.json"), "TLS original native attempt already has output")
+    if name == "github-tls-deadline":
+        for profile in GITHUB_TLS_DEADLINE_PROFILES:
+            require(not os.path.lexists(root / f"github-tls-deadline/{profile}")
+                    and all(not os.path.lexists(root / f"{github_tls_output_stem(profile)}{suffix}")
+                            for suffix in ("-outer.json", ".stdout", ".stderr")),
+                    "TLS deadline original profile attempt already has output")
 
 
 def phase_github_tls(name: str, context: dict) -> None:
@@ -3500,7 +3986,8 @@ def phase_github_tls(name: str, context: dict) -> None:
     github_tls_source_unchanged(context)
     no_cargo_configuration((root, *root.parents, source / "desktop/src-tauri", source / "desktop", source, *source.parents))
     environment = clean_environment(root)
-    environment.update(GITHUB_SHA=context["sourceSha"], MRK_GITHUB_TLS_INPUTS_SHA256=context["tlsInputsSha256"])
+    environment.update(GITHUB_SHA=context["sourceSha"], MRK_GITHUB_TLS_INPUTS_SHA256=context["tlsInputsSha256"],
+                       MRK_GITHUB_TLS_DEADLINE_INPUTS_SHA256=context["tlsDeadlineInputsSha256"])
     manifest = source / "desktop/src-tauri/Cargo.toml"
     if name == "acquire":
         run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
@@ -3522,11 +4009,18 @@ def phase_github_tls(name: str, context: dict) -> None:
             run(argv, check="github-tls-headless-test-compile-only", cwd=root, env=environment, timeout=600,
                 output=output, diagnostics=diagnostics)
         github_tls_compile_record(context, argv, messages)
-    else:
-        require(name == "github-tls", "Unknown TLS native phase")
+    elif name == "github-tls":
         compiled = github_tls_original_artifact(context)
         github_tls_run_outer(context, compiled)
         github_tls_result(context)  # Both independent inner original owners AND the actual original outer wait.
+    else:
+        require(name == "github-tls-deadline", "Unknown TLS native phase")
+        compiled = github_tls_original_artifact(context)
+        for profile in GITHUB_TLS_DEADLINE_PROFILES:
+            github_tls_run_outer(context, compiled, profile=profile)
+            # Positive HOSTS outer AND six-case inner settlement gate DNS. A
+            # failing/unknown original never reaches the next namespace call.
+            github_tls_result(context, profile=profile)
     # No source/tool call or deletion follows a missing/unknown original result.
     github_tls_source_unchanged(context)
     phase_receipt(context, name, list(GITHUB_TLS_CHECKS[name]))
@@ -3544,23 +4038,68 @@ def clean_github_tls(context: dict) -> None:
     root = Path(context["root"])
     compiled = github_tls_compiled_public(github_tls_original_artifact(context))
     original_result = github_tls_result(context)
+    deadline_result = github_tls_deadline_result(context)
     write_json(root / "clean-started.json", github_tls_phase_claim(context, "clean"))
     private_files = ("core.zip", "gitconfig-empty", "cargo-metadata.json", "acquire.stderr",
                      "github-tls-compile-messages.jsonl", "compile.stderr", "github-tls-compiled-test.json",
-                     "github-tls.stdout", "github-tls.stderr")
+                     "github-tls.stdout", "github-tls.stderr",
+                     *(f"{github_tls_output_stem(profile)}.{kind}" for profile in GITHUB_TLS_DEADLINE_PROFILES for kind in ("stdout", "stderr")))
     evidence = ("context.json", "public-bindings.json", "clean-started.json",
-                "github-tls-inputs.json", "github-tls-outer.json",
+                "github-tls-inputs.json", "github-tls-outer.json", "github-tls-deadline-inputs.json",
+                *(f"{github_tls_output_stem(profile)}-outer.json" for profile in GITHUB_TLS_DEADLINE_PROFILES),
                 *(f"{phase}-{suffix}.json" for phase in GITHUB_TLS_CHECKS for suffix in ("started", "checks")))
     require({path.name for path in root.iterdir()} == set((*GITHUB_TLS_DIRECTORIES, *private_files, *evidence)),
             "TLS task cleanup has missing or unexpected top-level entries; retain outputs")
     native = root / "github-tls"
     require({path.name for path in native.iterdir()} == {"receipt.json", *GITHUB_TLS_CASES},
             "TLS settled fixture inventory differs; retain outputs")
+    deadline_root = root / "github-tls-deadline"
+    require({path.name for path in deadline_root.iterdir()} == set(GITHUB_TLS_DEADLINE_PROFILES),
+            "TLS settled deadline profile inventory differs; retain outputs")
+    profile_roots = [deadline_root / profile for profile in GITHUB_TLS_DEADLINE_PROFILES]
+    for profile, pathname in zip(GITHUB_TLS_DEADLINE_PROFILES, profile_roots, strict=True):
+        workflow_directory_identity(pathname)  # Refuse a link before enumerating it.
+        require({item.name for item in pathname.iterdir()} == {"receipt.json", *GITHUB_TLS_DEADLINE_CASES[profile]},
+                "TLS settled deadline case inventory differs; retain outputs")
+    # Fixture-owned trees have an exact producer roster. Compiler caches remain
+    # separately bounded below; they do not authorize arbitrary fixture leaves.
+    fixed_rosters, fixed_files, releases = {}, {}, {}
+    cases = [(native / name, name) for name in GITHUB_TLS_CASES]
+    cases.extend((deadline_root / profile / name, name)
+                 for profile in GITHUB_TLS_DEADLINE_PROFILES for name in GITHUB_TLS_DEADLINE_CASES[profile])
+    direct_names = {"T4-ambient-fixed", "T4-ambient-no-rescue", "T5-helper-read"}
+    ambient_roots = [root / "github-tls-deadline-ambient"]
+    for case_root, name in cases:
+        direct = name in direct_names
+        fixed_rosters[case_root] = {"control", "runtime"} | ({"ambient"} if direct else set())
+        fixed_rosters[case_root / "control"] = set() if direct else {"release-github-read-1.json"}
+        fixed_rosters[case_root / "runtime"] = {"github_connection_bootstrap.py", "github-ca.pem"}
+        if direct:
+            ambient_roots.append(case_root / "ambient")
+        else:
+            releases[case_root / "control/release-github-read-1.json"] = {
+                "nonce": hashlib.sha256(str(case_root).encode("utf-8")).hexdigest(), "id": "github-read-1", "release": True}
+        trust = "other-root-ca.pem" if name in {"T2-root", "T4-ambient-no-rescue"} else "root-ca.pem"
+        for output, role in (("github_connection_bootstrap.py", "bootstrap"), ("github-ca.pem", trust)):
+            fixed_files[case_root / "runtime" / output] = context["tlsInputs"]["roles"][role]
+    for ambient in ambient_roots:
+        fixed_rosters[ambient] = {"empty-ca-dir", "write-control"}
+        fixed_rosters[ambient / "empty-ca-dir"] = set()
+        fixed_files[ambient / "write-control"] = {"size": 1, "sha256": hashlib.sha256(b"w").hexdigest()}
+    for namespace, configs in [(root / "github-tls-namespace", GITHUB_TLS_CONFIG),
+            *((root / f"github-tls-deadline-namespace-{profile}", GITHUB_TLS_DEADLINE_CONFIG[profile])
+              for profile in GITHUB_TLS_DEADLINE_PROFILES)]:
+        fixed_rosters[namespace] = set(configs)
+        fixed_files.update({namespace / name: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                            for name, data in configs.items()})
     original_root = root.lstat()
-    directories = {root: original_root, native: native.lstat()}
+    directories = {root: original_root, native: native.lstat(), deadline_root: deadline_root.lstat(),
+                   **{path: path.lstat() for path in profile_roots}}
     leaves, removals, total = [], [], 0
-    pending = [(root / name, 0) for name in GITHUB_TLS_DIRECTORIES if name != "github-tls"]
+    pending = [(root / name, 0) for name in GITHUB_TLS_DIRECTORIES if name not in {"github-tls", "github-tls-deadline"}]
     pending.extend((native / name, 0) for name in GITHUB_TLS_CASES)
+    pending.extend((deadline_root / profile / name, 0)
+                   for profile in GITHUB_TLS_DEADLINE_PROFILES for name in GITHUB_TLS_DEADLINE_CASES[profile])
     pending.extend((root / name, 0) for name in private_files)
     while pending:
         path, depth = pending.pop()
@@ -3568,18 +4107,38 @@ def clean_github_tls(context: dict) -> None:
         require(depth <= 32 and len(leaves) + len(removals) < 100000
                 and info.st_dev == original_root.st_dev and info.st_uid == os.geteuid(),
                 "TLS cleanup crossed its original filesystem, owner or inventory bound")
+        if path in fixed_rosters:
+            require(stat.S_ISDIR(info.st_mode), "TLS fixture directory is no longer an original directory")
+        if path in fixed_files or path in releases:
+            require(stat.S_ISREG(info.st_mode), "TLS fixture leaf is no longer an original ordinary file")
         if stat.S_ISDIR(info.st_mode):
             directories[path] = info
             removals.append(path)
+            seen = set()
             with os.scandir(path) as entries:
                 for entry in entries:
                     require(len(pending) + len(leaves) + len(removals) < 100000, "TLS cleanup inventory exceeds its bound")
+                    if path in fixed_rosters:
+                        require(entry.name in fixed_rosters[path] and entry.name not in seen,
+                                "TLS fixture has an unexpected original entry; retain outputs")
+                    seen.add(entry.name)
                     pending.append((path / entry.name, depth + 1))
+            require(path not in fixed_rosters or seen == fixed_rosters[path], "TLS fixture original roster is incomplete")
             require(github_cleanup_identity(path.lstat(), directory=True) == github_cleanup_identity(info, directory=True),
                     "TLS cleanup directory changed during inventory")
         else:
             require(stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode),
                     "TLS cleanup found an unexpected file kind; retain outputs")
+            if path in fixed_files or path in releases:
+                record = github_tls_file(path)
+                if path in fixed_files:
+                    require(same_compile_json({key: record[key] for key in ("size", "sha256")}, fixed_files[path]),
+                            "TLS original copied runtime, resolver or control bytes changed")
+                else:
+                    require(record["size"] <= 512 and same_compile_json(read_bounded_json(path, 512), releases[path]),
+                            "TLS original owner release-control payload differs")
+                require(github_cleanup_identity(path.lstat()) == github_cleanup_identity(info),
+                        "TLS original bound fixture leaf changed during inventory")
             total += info.st_size
             require(total <= 8 * 1024 * 1024 * 1024, "TLS cleanup output size exceeds its bound")
             leaves.append((path, info))
@@ -3606,17 +4165,22 @@ def clean_github_tls(context: dict) -> None:
         require(github_cleanup_identity(path.lstat(), directory=True)
                 == github_cleanup_identity(directories[path], directory=True), "TLS cleanup original directory changed")
         path.rmdir()  # Unknown/new content fails closed rather than being swept.
-    require({path.name for path in root.iterdir()} == {"github-tls", *evidence}
-            and {path.name for path in native.iterdir()} == {"receipt.json"}, "TLS cleanup postcondition differs")
+    require({path.name for path in root.iterdir()} == {"github-tls", "github-tls-deadline", *evidence}
+            and {path.name for path in native.iterdir()} == {"receipt.json"}
+            and {path.name for path in deadline_root.iterdir()} == set(GITHUB_TLS_DEADLINE_PROFILES)
+            and all({path.name for path in profile.iterdir()} == {"receipt.json"} for profile in profile_roots),
+            "TLS cleanup postcondition differs")
     write_json(root / "clean-checks.json", {
         "schemaVersion": 1, "scope": GITHUB_TLS_EVIDENCE_SCOPE, "phase": "clean", "status": "passed",
         **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef",
                                        "workflowSha256", "runId", "attempt")},
         "allOriginalOwnersSettled": True, "allOriginalPeersSettled": True, "observerJoinsComplete": True,
         "originalOuterWaitObserved": True, "tlsInputsSha256": context["tlsInputsSha256"],
-        "compiledTest": compiled, **original_result,
+        "tlsDeadlineInputsSha256": context["tlsDeadlineInputsSha256"], "allOriginalProbesSettled": True,
+        "compiledTest": compiled, **original_result, "deadlineProfiles": deadline_result,
         "removedFiles": len(leaves), "removedDirectories": len(removals), "inventoriedBytes": total,
-        "retained": ["redacted-evidence", "private-original-context", "private-tls-input-manifest", "private-original-outer-receipt"], "productionQualified": False,
+        "retained": ["redacted-evidence", "private-original-context", "private-tls-input-manifest", "private-original-outer-receipt",
+                     "private-deadline-input-manifest", "private-deadline-original-outer-receipts"], "productionQualified": False,
     })
     print("Removed only positively settled TLS compiler and fixture outputs; original evidence retained.")
 
@@ -4455,7 +5019,7 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core", "windows-snapshot", "github-owner", "github-tls"))
+    parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline"))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)

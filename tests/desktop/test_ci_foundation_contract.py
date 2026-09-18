@@ -621,7 +621,10 @@ class FixedCompilerHelperTests(unittest.TestCase):
         self.assertEqual(launch.args[0].func.id, "github_tls_launch_argv")
         outer_keywords = {keyword.arg: keyword.value for keyword in launch.keywords}
         self.assertIs(outer_keywords["check"].value, False)
-        self.assertEqual(outer_keywords["timeout"].value, 300)
+        self.assertIsInstance(outer_keywords["timeout"], ast.Call)
+        self.assertEqual(outer_keywords["timeout"].func.id, "github_tls_outer_seconds")
+        self.assertEqual(outer_keywords["timeout"].args[0].id, "profile")
+        self.assertEqual([helper.github_tls_outer_seconds(profile) for profile in (None, "hosts", "dns-withhold")], [300, 180, 60])
         self.assertEqual(outer_keywords["preexec_fn"].id, "github_tls_outer_limits")
         tool_calls = [node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "run"]
         labels = []
@@ -2545,7 +2548,7 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
         self.assertLessEqual(len(raw), 512 * 1024)
         source = raw.decode("utf-8")
         main = source.split("def main() -> int:\n", 1)[1].split('\n\nif __name__ == "__main__":', 1)[0]
-        self.assertIn('"workflow-core", "windows-snapshot", "github-owner", "github-tls"))', main)
+        self.assertIn('"workflow-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline"))', main)
         self.assertIn('scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")', main)
         self.assertLess(main.index("admit_phase(scope, args.phase)"), main.index("platform = admitted_host()"))
         self.assertLess(main.index("platform = admitted_host()"), main.index("prepare(platform, scope)"))
@@ -4211,11 +4214,13 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
     EVIDENCE = "desktop-github-readonly-tls-native-only-v1"
     WORKFLOW = ".github/workflows/desktop-github-connection-tls.yml"
     REF = "refs/heads/verify/desktop-github-connection-tls"
-    PHASES = ("prepare", "acquire", "compile", "github-tls", "clean")
+    PHASES = ("prepare", "acquire", "compile", "github-tls", "github-tls-deadline", "clean")
     CHECKS = {
         "acquire": ("rust-toolchain-install", "rust-version-target", "github-tls-locked-headless-metadata"),
         "compile": ("rust-version-target", "github-tls-headless-test-compile-only", "github-tls-compiled-artifact"),
         "github-tls": ("github-tls-original-artifact", "github-tls-original-outer-wait", "github-tls-receipt"),
+        "github-tls-deadline": ("github-tls-original-artifact", "github-tls-hosts-original-outer-wait",
+                                "github-tls-hosts-receipt", "github-tls-dns-original-outer-wait", "github-tls-dns-receipt"),
     }
     CERTIFICATES = ("root-ca.pem", "other-root-ca.pem", "api-valid.pem", "wrong-san.pem", "api-expired.pem", "server-key.pem")
     TOOLS = {**{name: "/usr/bin/" + name for name in (
@@ -4246,11 +4251,12 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             "source": "/inert/tls/source", "python": "/inert/tls/python/bin/python3.14",
             "git": "/inert/tls/git", "rustup": "/inert/tls/rustup", "sourceSha": "1" * 40, "sourceTree": "3" * 40,
             "workflowSha": "1" * 40, "workflowPath": cls.WORKFLOW, "workflowRef": cls.environment()["GITHUB_WORKFLOW_REF"],
-            "workflowSha256": "4" * 64, "runId": "123", "attempt": "2", "tlsInputsSha256": "9" * 64,
+            "workflowSha256": "4" * 64, "runId": "123", "attempt": "2", "tlsInputsSha256": "9" * 64, "tlsDeadlineInputsSha256": "6" * 64,
             "originalDirectories": {"inert": "original identities supplied separately"},
             "observedHost": {"kernelRelease": "inert-6.8", "machine": "x86_64", "nonRoot": True,
                 "filesystem": {"device": "7", "blockSize": 4096, "fragmentSize": 4096, "nameMax": 255, "flags": 0}}}
         context["tlsInputs"] = cls.input_summary(context, cls.manifest(context))
+        context["tlsDeadlineInputs"] = cls.input_summary(context, cls.deadline_manifest(context))
         return context
 
     @classmethod
@@ -4269,7 +4275,7 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             "_socket": str(library / "lib-dynload/_socket.cpython-314-x86_64-linux-gnu.so"),
             "libssl": "/inert/tls/lib/libssl.so.3", "libcrypto": "/inert/tls/lib/libcrypto.so.3",
             "loader": "/inert/tls/lib/ld-linux-x86-64.so.2"}
-        names = {*roles.values(), *(str(source / name) for name in helper.GITHUB_TLS_SOURCES),
+        names = {*roles.values(), "/inert/tls/lib/libc.so.6", *(str(source / name) for name in helper.GITHUB_TLS_SOURCES),
                  *(str(source / "src" / name) for name in helper.GTK_CORE_PATHS)}
         hashes = {roles["python"]: "8" * 64, roles["coreZip"]: "7" * 64, str(source / cls.WORKFLOW): "4" * 64}
         files = [{"path": name, "size": 16 if name == roles["python"] else 32, "sha256": hashes.get(name, "5" * 64)}
@@ -4282,23 +4288,43 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             "ssl": {"opensslVersion": "OpenSSL 3.0.0 inert supplied DATA", "ignoreUnexpectedEof": 128}, "roles": roles, "files": files}
 
     @classmethod
+    def deadline_manifest(cls, context):
+        value = cls.manifest(context)
+        root = PurePosixPath(context["root"])
+        removed = {value["roles"][name] for name in cls.CONFIG}
+        roles = {key: path for key, path in value["roles"].items() if key not in cls.CONFIG}
+        roles.update({f"{profile}:{name}": str(root / f"github-tls-deadline-namespace-{profile}" / name)
+                      for profile in ("hosts", "dns-withhold") for name in cls.CONFIG})
+        roles.update({"libc": "/inert/tls/lib/libc.so.6", "resolver:host.conf": "/etc/host.conf", "resolver:gai.conf": "/etc/gai.conf"})
+        records = {row["path"]: row for row in value["files"] if row["path"] not in removed}
+        for pathname in roles.values():
+            if pathname not in records:
+                records[pathname] = {"path": pathname, "size": 32, "sha256": "5" * 64}
+        return {**value, "scope": "github-readonly-tls-deadline-native-v1", "roles": roles,
+                "resolver": {"family": "glibc", "version": "2.39", "nss": "builtin-files-dns"},
+                "files": [records[name] for name in sorted(records)]}
+
+    @classmethod
     def input_summary(cls, context, manifest):
         source = PurePosixPath(context["source"])
         by_path = {row["path"]: row for row in manifest["files"]}
         def row(path, name):
             return {"path": name, "size": by_path[str(path)]["size"], "sha256": by_path[str(path)]["sha256"]}
-        return {"sourceFiles": [row(source / name, name) for name in helper.GITHUB_TLS_SOURCES],
+        value = {"sourceFiles": [row(source / name, name) for name in helper.GITHUB_TLS_SOURCES],
             "coreFiles": [row(source / "src" / name, name) for name in helper.GTK_CORE_PATHS],
             "coreZipSha256": by_path[manifest["coreZip"]]["sha256"], "pythonSha256": by_path[manifest["python"]]["sha256"],
             "pythonBytes": by_path[manifest["python"]]["size"], "closureFiles": len(by_path),
             "closureBytes": sum(item["size"] for item in by_path.values()),
             "closureSha256": hashlib.sha256(cls.encoded(manifest["files"])).hexdigest(), "ssl": manifest["ssl"],
             "roles": {name: {key: by_path[path][key] for key in ("size", "sha256")} for name, path in manifest["roles"].items()}}
+        if "resolver" in manifest:
+            value["resolver"] = manifest["resolver"]
+        return value
 
     @classmethod
     def artifact(cls):
         return {"schemaVersion": 1, "scope": cls.SCOPE, "sourceSha": "1" * 40, "sourceTree": "3" * 40,
-            "tlsInputsSha256": "9" * 64,
+            "tlsInputsSha256": "9" * 64, "tlsDeadlineInputsSha256": "6" * 64,
             "path": "/inert/tls/mrk-desktop-foundation-github-tls-123-2/target/x86_64-unknown-linux-gnu/debug/deps/mobile_release_desktop-0123456789abcdef",
             "size": 144, "sha256": "a" * 64, "invocationSha256": "b" * 64, "messagesSha256": "c" * 64,
             "identity": {"device": "7", "inode": "88", "mode": stat.S_IFREG | 0o700, "uid": 1000, "gid": 1000,
@@ -4311,9 +4337,11 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 "identitySha256": hashlib.sha256(cls.encoded(value["identity"])).hexdigest()}
 
     @classmethod
-    def outer(cls, context):
-        return {"schemaVersion": 1, "scope": "github-readonly-tls-original-outer-v1",
-            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256")},
+    def outer(cls, context, profile=None):
+        return {"schemaVersion": 1, "scope": "github-readonly-tls-original-outer-v1" if profile is None else "github-readonly-tls-deadline-original-outer-v1",
+            **({"profile": profile} if profile is not None else {}),
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+            "tlsInputsSha256": context["tlsInputsSha256" if profile is None else "tlsDeadlineInputsSha256"],
             "artifactSha256": "a" * 64, "artifactBytes": 144,
             "artifactIdentitySha256": hashlib.sha256(cls.encoded(cls.artifact()["identity"])).hexdigest(),
             "status": "passed", "waitObserved": True, "exitCode": 0, "timedOut": False,
@@ -4322,21 +4350,29 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
     @classmethod
     def claim(cls, context, name):
         return {"scope": cls.SCOPE, "phase": name,
-            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256")}}
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256", "tlsDeadlineInputsSha256")}}
 
     @classmethod
     def phase_report(cls, context, name):
         value = {"schemaVersion": 1, "scope": cls.EVIDENCE, "phase": name, "status": "passed",
             **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha",
-                                           "workflowRef", "workflowSha256", "runId", "attempt", "tlsInputsSha256")},
+                                           "workflowRef", "workflowSha256", "runId", "attempt", "tlsInputsSha256", "tlsDeadlineInputsSha256")},
             "inputSha256": hashlib.sha256(cls.encoded(context["tlsInputs"])).hexdigest(),
+            "deadlineInputSha256": hashlib.sha256(cls.encoded(context["tlsDeadlineInputs"])).hexdigest(),
             "rust": {"release": helper.RUST, "target": "x86_64-unknown-linux-gnu"},
             "checks": [{"check": check, "exitCode": 0} for check in cls.CHECKS[name]]}
-        if name in ("compile", "github-tls"):
+        if name in ("compile", "github-tls", "github-tls-deadline"):
             value["compiledTest"] = cls.compiled_public()
         if name == "github-tls":
             value.update(nativeReceiptSha256="d" * 64, outer=cls.outer(context))
+        if name == "github-tls-deadline":
+            value["profiles"] = cls.deadline_result(context)
         return value
+
+    @classmethod
+    def deadline_result(cls, context):
+        return {profile: {"nativeReceiptSha256": digest * 64, "outer": cls.outer(context, profile)}
+                for profile, digest in (("hosts", "e"), ("dns-withhold", "f"))}
 
     def test_tls_fixed_scope_binding_refuses_owner23_and_other_lanes_before_io(self):
         environment, forbidden = self.environment(), self.forbidden
@@ -4389,7 +4425,9 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         self.assertEqual(helper.GITHUB_TLS_CONFIG, self.CONFIG)
         self.assertEqual(set(helper.GITHUB_TLS_SOURCES) - set(helper.GITHUB_READONLY_SOURCES), {
             self.WORKFLOW, "desktop/src-tauri/tests/fixtures/github_tls_peer.py",
-            "desktop/src-tauri/tests/fixtures/github_tls_namespace.sh",
+            "desktop/src-tauri/tests/fixtures/github_tls_namespace.sh", "tests/desktop/test_github_tls_deadline_peer_contract.py",
+            "desktop/github-connection-contract.md", "tests/desktop/test_github_tls_peer_compile.py",
+            "tests/desktop/test_github_tls_resolver_policy.py",
             *("desktop/src-tauri/tests/fixtures/github_tls/" + name for name in self.CERTIFICATES)})
         mutations = []
         for key, value in (("scope", helper.GITHUB_READONLY_SCOPE), ("schemaVersion", True), ("uid", 0), ("gid", True),
@@ -4427,13 +4465,14 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
     def test_tls_frozen_import_roster_and_bytes_recheck_without_ssl_or_tools(self):
         context, forbidden, test = self.context(), self.forbidden, self
         manifest = self.manifest(context)
+        deadline = self.deadline_manifest(context)
         library = PurePosixPath(manifest["roles"]["ssl"]).parent
         expected = {PurePosixPath(row["path"]) for row in manifest["files"] if library in PurePosixPath(row["path"]).parents}
-        rows = {row["path"]: row for row in manifest["files"]}
+        rows = {row["path"]: row for value in (manifest, deadline) for row in value["files"]}
 
         def exercise(mutation):
             events = []
-            def record(path):
+            def record(path, **kwargs):
                 events.append(("file", str(path)))
                 value = dict(rows[str(path)])
                 if mutation == "bytes" and str(path) == manifest["roles"]["server-key.pem"]:
@@ -4444,28 +4483,34 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 events.append(("roster", str(path)))
                 return expected | {library / "__pycache__/ssl.cpython-314.pyc"} if mutation == "added-cache" else set(expected)
             with patch.multiple(helper, Path=PurePosixPath, github_tls_runtime=forbidden, github_tls_file=record,
+                    github_tls_deadline_resolver_file=record,
                     github_tls_stdlib_files=roster, run=forbidden, tools=forbidden, ordinary=forbidden,
                     source_unchanged=forbidden, write_json=forbidden), \
                     patch.object(helper, "github_tls_directories", return_value=context["originalDirectories"]), \
-                    patch.object(helper, "hash_file", return_value="f" * 64 if mutation == "anchor" else "9" * 64), \
-                    patch.object(helper, "read_bounded_json", return_value=deepcopy(manifest)), \
+                    patch.object(helper, "hash_file", side_effect=lambda path: "f" * 64 if mutation == "anchor" or mutation == "deadline-anchor" and path.name == "github-tls-deadline-inputs.json"
+                                 else "6" * 64 if path.name == "github-tls-deadline-inputs.json" else "9" * 64), \
+                    patch.object(helper, "read_bounded_json", side_effect=lambda path, limit: deepcopy(deadline if path.name == "github-tls-deadline-inputs.json" else manifest)), \
                     patch.object(helper, "github_tls_namespaces", return_value={"parentNetns": "net:[999]" if mutation == "namespace" else "net:[100]", "parentMntns": "mnt:[200]"}), \
                     patch.object(helper.os, "geteuid", return_value=1000, create=True), \
                     patch.object(helper.os, "getegid", return_value=1000, create=True), \
+                    patch.object(helper.os.path, "lexists", side_effect=lambda path: mutation == "cache" and str(path) == "/run/nscd/socket"), \
                     patch.object(helper.subprocess, "run", side_effect=forbidden), patch.object(helper.subprocess, "Popen", side_effect=forbidden):
                 if mutation:
                     with test.assertRaises(helper.CheckFailure):
                         helper.github_tls_inputs_unchanged(context)
                 else:
                     helper.github_tls_inputs_unchanged(context)
-            if mutation in ("anchor", "namespace"):
+            if mutation in ("anchor", "deadline-anchor", "namespace"):
                 test.assertEqual(events, [])
-            elif mutation == "added-cache":
+            elif mutation in ("added-cache", "cache"):
                 test.assertEqual(events, [("roster", str(library))])
             else:
-                test.assertEqual(events, [("roster", str(library)), *(("file", row["path"]) for row in manifest["files"])])
+                ordered = sorted(rows)
+                if mutation == "bytes":
+                    ordered = ordered[:ordered.index(manifest["roles"]["server-key.pem"]) + 1]
+                test.assertEqual(events, [("roster", str(library)), *(("file", path) for path in ordered)])
 
-        for mutation in (None, "anchor", "namespace", "added-cache", "bytes"):
+        for mutation in (None, "anchor", "deadline-anchor", "namespace", "added-cache", "cache", "bytes"):
             with self.subTest(freeze=mutation):
                 exercise(mutation)
 
@@ -4527,7 +4572,8 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         self.assertEqual(observations, ["ordinary-message", "original-artifact"])
 
         for mutation in (None, ("scope", helper.GITHUB_READONLY_SCOPE), ("sourceTree", "f" * 40),
-                ("tlsInputsSha256", "f" * 64), ("schemaVersion", True), ("size", 145), ("sha256", "e" * 64),
+                ("tlsInputsSha256", "f" * 64), ("tlsDeadlineInputsSha256", "9" * 64),
+                ("tlsDeadlineInputsSha256", None), ("schemaVersion", True), ("size", 145), ("sha256", "e" * 64),
                 ("path", compiled["path"].replace("debug/deps", "release/deps")), ("identity", {**compiled["identity"], "inode": "89"})):
             value = deepcopy(expected)
             if mutation:
@@ -4552,15 +4598,34 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         self.assertEqual(len(launch[15:]), 12)
         self.assertNotIn("--pid", launch)
         self.assertNotIn(helper.GITHUB_READONLY_TEST, launch)
+        deadline = self.deadline_manifest(context)
+        with patch.object(helper, "Path", PurePosixPath):
+            for profile in ("hosts", "dns-withhold"):
+                self.assertEqual(helper.github_tls_expected_bindings(context, compiled, deadline, profile=profile), tls_deadline_binding_data())
+                scoped = helper.github_tls_launch_argv(context, compiled, deadline, profile=profile)
+                self.assertEqual(scoped, [*launch[:23], "6" * 64, *launch[24:], profile])
+                self.assertEqual(len(scoped[15:]), 13)
+                with self.assertRaises(helper.CheckFailure):
+                    helper.github_tls_launch_argv(context, compiled, manifest, profile=profile)
+            for profile in (True, "dns", "hosts-extra", "", "T5-read"):
+                with self.subTest(foreign_profile=profile), self.assertRaises(helper.CheckFailure):
+                    helper.github_tls_launch_argv(context, compiled, deadline, profile=profile)
+            with self.assertRaises(helper.CheckFailure):
+                helper.github_tls_launch_argv(context, compiled, deadline)
 
     def test_tls_original_outer_wait_not_inner_assertion_controls_success(self):
         context, compiled, test, forbidden = self.context(), self.artifact(), self, self.forbidden
         root = PurePosixPath(context["root"])
-        manifest, expected = self.manifest(context), self.outer(context)
         base_environment = {"PATH": "/inert/no-executables", "HOME": str(root / "home")}
         original_validate = helper.validate_github_tls_outer
         diagnostic_faults = {"diagnostic-pipe": BrokenPipeError, "diagnostic-shape": ValueError}
-        for outcome in (0, 7, "timeout", "oserror", "subprocess-error", *diagnostic_faults, "existing"):
+        for profile, outcome in ((profile, outcome) for profile in (None, "hosts", "dns-withhold")
+                                 for outcome in (0, 7, "timeout", "oserror", "subprocess-error", *diagnostic_faults, "existing")):
+            manifest = self.manifest(context) if profile is None else self.deadline_manifest(context)
+            expected = self.outer(context, profile)
+            stem = "github-tls" if profile is None else f"github-tls-deadline-{profile}"
+            inputs = "github-tls-inputs.json" if profile is None else "github-tls-deadline-inputs.json"
+            seconds = {None: 300, "hosts": 180, "dns-withhold": 60}[profile]
             events, streams, written, diagnostics, failures = [], {}, {}, [], []
             class Writer(io.StringIO):
                 def __init__(self, name):
@@ -4571,7 +4636,7 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 def open(self, mode, *, encoding=None):
                     test.assertEqual((mode, encoding), ("x", "utf-8"))
                     test.assertEqual(self.parent, root)
-                    test.assertIn(self.name, ("github-tls.stdout", "github-tls.stderr"))
+                    test.assertIn(self.name, (f"{stem}.stdout", f"{stem}.stderr"))
                     test.assertNotIn(self.name, streams)
                     streams[self.name] = Writer(self.name)
                     events.append(("open", self.name))
@@ -4581,33 +4646,34 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     test.assertIn(self.name, streams)
                     return SimpleNamespace(st_size=256 if self.name.endswith("stdout") else 0)
             def read(path, limit):
-                test.assertEqual((path, limit), (root / "github-tls-inputs.json", 1024 * 1024))
+                test.assertEqual((path, limit), (root / inputs, 1024 * 1024))
                 return deepcopy(manifest)
             def process(argv, **kwargs):
                 events.append(("run", "original-outer"))
-                test.assertEqual(argv, helper.github_tls_launch_argv(context, compiled, manifest))
+                test.assertEqual(argv, helper.github_tls_launch_argv(context, compiled, manifest, profile=profile))
                 test.assertEqual(set(kwargs), {"cwd", "env", "stdin", "stdout", "stderr", "check", "timeout", "preexec_fn"})
                 test.assertEqual((kwargs["cwd"], kwargs["env"], kwargs["stdin"], kwargs["check"], kwargs["timeout"]),
-                                 (root, base_environment, subprocess.DEVNULL, False, 300))
+                                 (root, base_environment, subprocess.DEVNULL, False, seconds))
                 test.assertIs(kwargs["preexec_fn"], helper.github_tls_outer_limits)
-                test.assertIs(kwargs["stdout"], streams["github-tls.stdout"])
-                test.assertIs(kwargs["stderr"], streams["github-tls.stderr"])
+                test.assertIs(kwargs["stdout"], streams[f"{stem}.stdout"])
+                test.assertIs(kwargs["stderr"], streams[f"{stem}.stderr"])
                 test.assertFalse(any(stream.closed for stream in streams.values()))
                 if outcome == "timeout":
-                    raise subprocess.TimeoutExpired("private-inert-command", 300)
+                    raise subprocess.TimeoutExpired("private-inert-command", seconds)
                 if outcome == "oserror":
                     raise OSError("private-inert-error")
                 if outcome == "subprocess-error":
                     raise subprocess.SubprocessError("private-inert-preexec")
                 return subprocess.CompletedProcess(argv, 7 if outcome in diagnostic_faults else outcome)
             def emit(path, value):
-                test.assertEqual(path, root / "github-tls-outer.json")
+                test.assertEqual(path, root / f"{stem}-outer.json")
                 test.assertTrue(all(stream.closed for stream in streams.values()))
                 test.assertFalse(written)
                 written.update(deepcopy(value))
                 events.append(("write", "original-outer"))
-            def diagnose(actual_context, actual_compiled, original, launch_error):
+            def diagnose(actual_context, actual_compiled, original, launch_error, **routing):
                 test.assertEqual((actual_context, actual_compiled), (context, compiled))
+                test.assertEqual(routing, {"profile": profile})
                 test.assertEqual(original, written)  # Only after exclusive original record.
                 diagnostics.append((deepcopy(original), launch_error))
                 if outcome in diagnostic_faults:
@@ -4618,7 +4684,7 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 except helper.CheckFailure as original_failure:
                     failures.append(original_failure)
                     raise
-            with self.subTest(outer=outcome), patch.multiple(helper, Path=OuterPath, read_bounded_json=read,
+            with self.subTest(profile=profile, outer=outcome), patch.multiple(helper, Path=OuterPath, read_bounded_json=read,
                     write_json=emit, run=forbidden, tools=forbidden, github_tls_result=forbidden,
                     github_tls_runtime=forbidden, hash_file=forbidden, github_tls_failure_diagnostics=diagnose,
                     validate_github_tls_outer=validate), \
@@ -4628,10 +4694,10 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     patch.object(helper.subprocess, "run", side_effect=process), \
                     patch.object(helper.subprocess, "Popen", side_effect=forbidden):
                 if outcome == 0:
-                    self.assertEqual(helper.github_tls_run_outer(context, compiled), expected)
+                    self.assertEqual(helper.github_tls_run_outer(context, compiled, profile=profile), expected)
                 else:
                     with self.assertRaises(helper.CheckFailure) as caught:
-                        helper.github_tls_run_outer(context, compiled)
+                        helper.github_tls_run_outer(context, compiled, profile=profile)
                     self.assertNotIn("private-inert", str(caught.exception))
                     if outcome != "existing":
                         self.assertEqual(len(failures), 1)
@@ -4641,8 +4707,8 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 self.assertEqual(written, {})
                 self.assertEqual(diagnostics, [])
                 continue
-            self.assertEqual(events, [("open", "github-tls.stdout"), ("open", "github-tls.stderr"),
-                ("run", "original-outer"), ("close", "github-tls.stderr"), ("close", "github-tls.stdout"), ("write", "original-outer")])
+            self.assertEqual(events, [("open", f"{stem}.stdout"), ("open", f"{stem}.stderr"),
+                ("run", "original-outer"), ("close", f"{stem}.stderr"), ("close", f"{stem}.stdout"), ("write", "original-outer")])
             if outcome == 0:
                 self.assertEqual(written, expected)
                 self.assertEqual(diagnostics, [])
@@ -4654,11 +4720,14 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             if outcome != 0:
                 self.assertEqual(diagnostics, [(written,
                     "none" if outcome == 7 or outcome in diagnostic_faults else outcome)])
-        for key, value in (("waitObserved", 1), ("status", "unknown"), ("exitCode", False), ("timedOut", True),
-                ("elapsedMs", 300001), ("stdoutBytes", 1048577), ("artifactIdentitySha256", "f" * 64),
-                ("tlsInputsSha256", "f" * 64), ("outerWait", "passed")):
-            with self.subTest(forged_outer=key), self.assertRaises(helper.CheckFailure):
-                helper.validate_github_tls_outer({**expected, key: value}, context=context, compiled=compiled)
+        for profile in (None, "hosts", "dns-withhold"):
+            expected = self.outer(context, profile)
+            seconds = {None: 300, "hosts": 180, "dns-withhold": 60}[profile]
+            for key, value in (("waitObserved", 1), ("status", "unknown"), ("exitCode", False), ("timedOut", True),
+                    ("elapsedMs", seconds * 1000 + 1), ("stdoutBytes", 1048577), ("artifactIdentitySha256", "f" * 64),
+                    ("tlsInputsSha256", "f" * 64), ("profile", "other"), ("outerWait", "passed")):
+                with self.subTest(profile=profile, forged_outer=key), self.assertRaises(helper.CheckFailure):
+                    helper.validate_github_tls_outer({**expected, key: value}, context=context, compiled=compiled, profile=profile)
         limits = []
         resource = SimpleNamespace(RLIMIT_CORE="core", RLIMIT_FSIZE="file", RLIMIT_NOFILE="fds", RLIMIT_AS="address-space",
                                    setrlimit=lambda key, value: limits.append((key, value)))
@@ -4673,6 +4742,9 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         expected = {"stage": "host-resolver", "code": "file-owner"}
         frame = b"github-tls-namespace: host-resolver/file-owner\n"
         self.assertEqual(helper.github_tls_namespace_refusal(frame), expected)
+        for stage, code in (("admission", "profile"), ("resolver-inputs", "resolver-cache"), ("final-bindings", "ambient")):
+            self.assertEqual(helper.github_tls_namespace_refusal(f"github-tls-namespace: {stage}/{code}\n".encode("ascii")),
+                             {"stage": stage, "code": code})
         for raw in (None, "github-tls-namespace: host-resolver/file-owner\n", b"", frame[:-1],
                 b"private-path\n" + frame, frame + b"private-token", frame * 2,
                 frame.replace(b"host-resolver", b"private-identity"), frame.replace(b"file-owner", b"unknown"),
@@ -4723,50 +4795,69 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
 
     def test_tls_failed_diagnostics_are_redacted_non_authorizing_projections(self):
         context, compiled, test = self.context(), self.artifact(), self
-        outer = {**self.outer(context), "status": "failed", "exitCode": 71, "stderrBytes": 53}
-        # A private field in an observation must not be copied into public output.
-        outer["private"] = "private-token-and-path"
-        for raw, write_fails in ((b"github-tls-namespace: host-resolver/file-owner\n", False),
-                                 (b"private-token-and-path", False), (b"", True)):
-            writes, output = [], io.StringIO()
-            def emit(path, value):
-                test.assertEqual(path, PurePosixPath(context["root"]) / "github-tls-checks.json")
-                writes.append(deepcopy(value))
-                if write_fails: raise OSError("private-token-and-path")
-            with patch.multiple(helper, write_json=emit, github_tls_stderr_snapshot=lambda path: raw), redirect_stdout(output):
-                helper.github_tls_failure_diagnostics(context, compiled, outer, "none")
-            self.assertEqual(len(writes), 1)
-            value = writes[0]
-            self.assertEqual(set(value), {"schemaVersion", "scope", "phase", "status", "sourceSha", "sourceTree",
-                "workflowSha256", "runId", "attempt", "tlsInputsSha256", "compiledTest", "launchError",
-                "namespaceRefusal", "outerObservation"})
-            self.assertEqual((value["scope"], value["phase"], value["status"], value["launchError"]),
-                             (self.EVIDENCE, "github-tls", "failed", "none"))
-            self.assertEqual(value["outerObservation"], {key: outer[key] for key in (
-                "status", "waitObserved", "exitCode", "timedOut", "elapsedMs", "stdoutBytes", "stderrBytes")})
-            self.assertEqual(value["namespaceRefusal"], {"stage": "host-resolver", "code": "file-owner"} if raw.startswith(b"github-tls-") else None)
-            self.assertNotIn("private", output.getvalue())
-            self.assertNotIn(context["root"], output.getvalue())
-            self.assertNotIn(compiled["path"], output.getvalue())
-            lines = output.getvalue().splitlines()
-            self.assertEqual(json.loads(lines[-1].removeprefix("TLS failed-only diagnostic: ")), value)
-            self.assertEqual(len(lines), 2 if write_fails else 1)
-            with patch.object(helper, "github_tls_phase_value", return_value={"status": "passed"}):
+        for profile in (None, "hosts", "dns-withhold"):
+            phase = "github-tls" if profile is None else "github-tls-deadline"
+            stem = "github-tls" if profile is None else f"github-tls-deadline-{profile}"
+            outer = {**self.outer(context, profile), "status": "failed", "exitCode": 71, "stderrBytes": 53}
+            # A private field in an observation must not be copied into public output.
+            outer["private"] = "private-token-and-path"
+            for raw, write_fails in ((b"github-tls-namespace: host-resolver/file-owner\n", False),
+                                     (b"private-token-and-path", False), (b"", True)):
+                writes, snapshots, output = [], [], io.StringIO()
+                def snapshot(path):
+                    test.assertEqual(path, PurePosixPath(context["root"]) / f"{stem}.stderr")
+                    snapshots.append(path)
+                    return raw
+                def emit(path, value):
+                    test.assertEqual(path, PurePosixPath(context["root"]) / f"{phase}-checks.json")
+                    writes.append(deepcopy(value))
+                    if write_fails: raise OSError("private-token-and-path")
+                with self.subTest(profile=profile, write_fails=write_fails), \
+                        patch.multiple(helper, write_json=emit, github_tls_stderr_snapshot=snapshot), redirect_stdout(output):
+                    helper.github_tls_failure_diagnostics(context, compiled, outer, "none", profile=profile)
+                self.assertEqual(len(writes), 1)
+                self.assertEqual(len(snapshots), 1)
+                value = writes[0]
+                self.assertEqual(set(value), {"schemaVersion", "scope", "phase", "status", "sourceSha", "sourceTree",
+                    "workflowSha256", "runId", "attempt", "tlsInputsSha256", "compiledTest", "launchError",
+                    "namespaceRefusal", "outerObservation"} | ({"profile"} if profile is not None else set()))
+                self.assertEqual((value["scope"], value["phase"], value["status"], value["launchError"]),
+                                 (self.EVIDENCE, phase, "failed", "none"))
+                self.assertEqual(value.get("profile"), profile)
+                self.assertEqual(value["tlsInputsSha256"], context["tlsInputsSha256" if profile is None else "tlsDeadlineInputsSha256"])
+                self.assertEqual(value["outerObservation"], {key: outer[key] for key in (
+                    "status", "waitObserved", "exitCode", "timedOut", "elapsedMs", "stdoutBytes", "stderrBytes")})
+                self.assertEqual(value["namespaceRefusal"], {"stage": "host-resolver", "code": "file-owner"} if raw.startswith(b"github-tls-") else None)
+                self.assertNotIn("private", output.getvalue())
+                self.assertNotIn(context["root"], output.getvalue())
+                self.assertNotIn(compiled["path"], output.getvalue())
+                lines = output.getvalue().splitlines()
+                self.assertEqual(json.loads(lines[-1].removeprefix("TLS failed-only diagnostic: ")), value)
+                self.assertEqual(len(lines), 2 if write_fails else 1)
+                with patch.object(helper, "github_tls_phase_value", return_value={"status": "passed"}):
+                    for claimed_phase in ("github-tls", "github-tls-deadline"):
+                        with self.assertRaises(helper.CheckFailure):
+                            helper.validate_github_tls_phase_receipt(value, context, claimed_phase)
                 with self.assertRaises(helper.CheckFailure):
-                    helper.validate_github_tls_phase_receipt(value, context, "github-tls")
-            with self.assertRaises(helper.CheckFailure):
-                helper.validate_github_tls_outer(value, context=context, compiled=compiled)
-        for launch_error in ("timeout", "oserror", "subprocess-error"):
-            unknown = {**outer, "status": "unknown", "waitObserved": False, "exitCode": None,
-                       "timedOut": launch_error == "timeout", "stdoutBytes": None, "stderrBytes": None}
-            writes, output = [], io.StringIO()
-            with patch.multiple(helper, github_tls_stderr_snapshot=self.forbidden,
-                    write_json=lambda path, value: writes.append(value)), redirect_stdout(output):
-                helper.github_tls_failure_diagnostics(context, compiled, unknown, launch_error)
-            self.assertEqual((writes[0]["status"], writes[0]["namespaceRefusal"], writes[0]["launchError"]),
-                             ("failed", None, launch_error))
-            self.assertFalse(writes[0]["outerObservation"]["waitObserved"])
-            self.assertIsNone(writes[0]["outerObservation"]["exitCode"])
+                    helper.validate_github_tls_outer(value, context=context, compiled=compiled, profile=profile)
+            for launch_error in ("timeout", "oserror", "subprocess-error"):
+                unknown = {**outer, "status": "unknown", "waitObserved": False, "exitCode": None,
+                           "timedOut": launch_error == "timeout", "stdoutBytes": None, "stderrBytes": None}
+                writes, output = [], io.StringIO()
+                with patch.multiple(helper, github_tls_stderr_snapshot=self.forbidden,
+                        write_json=lambda path, value: writes.append(value)), redirect_stdout(output):
+                    helper.github_tls_failure_diagnostics(context, compiled, unknown, launch_error, profile=profile)
+                self.assertEqual((writes[0]["status"], writes[0]["namespaceRefusal"], writes[0]["launchError"]),
+                                 ("failed", None, launch_error))
+                self.assertFalse(writes[0]["outerObservation"]["waitObserved"])
+                self.assertIsNone(writes[0]["outerObservation"]["exitCode"])
+        # Unknown selectors refuse before observing a stream or emitting a
+        # diagnostic, rather than becoming arbitrary path/report routing.
+        for profile in (True, "dns", "", "hosts/other", ["hosts"]):
+            with self.subTest(invalid_profile=profile), \
+                    patch.multiple(helper, github_tls_stderr_snapshot=self.forbidden, write_json=self.forbidden), \
+                    self.assertRaises(helper.CheckFailure):
+                helper.github_tls_failure_diagnostics(context, compiled, outer, "none", profile=profile)
 
     def test_tls_predecessors_require_own_claims_inner_and_outer_before_cleanup(self):
         context, compiled, test, forbidden = self.context(), self.artifact(), self, self.forbidden
@@ -4780,6 +4871,13 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             data["github-tls-inputs.json"] = test.manifest(context)
             data["github-tls/receipt.json"] = github_tls_report_data()
             data["github-tls-outer.json"] = test.outer(context)
+            data["github-tls-deadline-inputs.json"] = test.deadline_manifest(context)
+            digests = {"github-tls/receipt.json": "d" * 64}
+            for profile, digest in (("hosts", "e"), ("dns-withhold", "f")):
+                path = f"github-tls-deadline/{profile}/receipt.json"
+                data[path] = tls_deadline_report_data(profile)
+                data[f"github-tls-deadline-{profile}-outer.json"] = test.outer(context, profile)
+                digests[path] = digest * 64
             if mutation:
                 path, keys, value = mutation
                 row = data[path]
@@ -4788,14 +4886,16 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 row[keys[-1]] = value
             def read(path, limit):
                 name = path.relative_to(root).as_posix()
-                expected_limit = 4096 if name.endswith("-started.json") else 128 * 1024 if name == "github-tls/receipt.json" else 1024 * 1024 if name == "github-tls-inputs.json" else 16384 if name == "github-tls-outer.json" else 32768
+                expected_limit = (4096 if name.endswith("-started.json") else 128 * 1024 if name.endswith("/receipt.json")
+                                  else 1024 * 1024 if name.endswith("-inputs.json") else 16384 if name.endswith("-outer.json") else 32768)
                 test.assertEqual(limit, expected_limit)
                 events.append(("read", name))
                 return deepcopy(data[name])
             def digest(path):
-                test.assertEqual(path, root / "github-tls/receipt.json")
-                events.append(("hash", "native"))
-                return "d" * 64
+                name = path.relative_to(root).as_posix()
+                test.assertIn(name, digests)
+                events.append(("hash", name))
+                return digests[name]
             with patch.multiple(helper, Path=PurePosixPath, read_bounded_json=read, hash_file=digest,
                     run=forbidden, tools=forbidden, github_tls_inputs_unchanged=forbidden, github_tls_source_unchanged=forbidden,
                     ordinary=forbidden, write_json=forbidden, clean_environment=forbidden), \
@@ -4812,17 +4912,26 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     call()
             return events
 
-        for name in ("acquire", "compile", "github-tls", "clean"):
+        for name in (*self.CHECKS, "clean"):
             events = exercise(name)
             previous = list(self.CHECKS) if name == "clean" else list(self.CHECKS)[:list(self.CHECKS).index(name)]
-            expected = [("read", f"{prior}-{suffix}.json") for prior in previous for suffix in ("started", "checks")]
-            if name == "clean":
-                expected.extend([("read", "github-tls-inputs.json"), ("read", "github-tls/receipt.json"),
-                                 ("read", "github-tls-outer.json"), ("hash", "native")])
+            expected = []
+            for prior in previous:
+                expected.extend(("read", f"{prior}-{suffix}.json") for suffix in ("started", "checks"))
+                if prior == "github-tls":
+                    expected.extend([("read", "github-tls-inputs.json"), ("read", "github-tls/receipt.json"),
+                                     ("read", "github-tls-outer.json"), ("hash", "github-tls/receipt.json")])
+                elif prior == "github-tls-deadline":
+                    for profile in ("hosts", "dns-withhold"):
+                        expected.extend([("read", "github-tls-deadline-inputs.json"),
+                            ("read", f"github-tls-deadline/{profile}/receipt.json"),
+                            ("read", f"github-tls-deadline-{profile}-outer.json"),
+                            ("hash", f"github-tls-deadline/{profile}/receipt.json")])
             self.assertEqual(events, expected)
         mutations = (
             ("acquire-started.json", ("scope",), helper.GITHUB_READONLY_SCOPE),
             ("compile-started.json", ("attempt",), "3"), ("compile-started.json", ("tlsInputsSha256",), "f" * 64),
+            ("compile-started.json", ("tlsDeadlineInputsSha256",), "9" * 64),
             ("compile-checks.json", ("compiledTest", "identitySha256"), "f" * 64),
             ("github-tls-checks.json", ("nativeReceiptSha256",), "f" * 64),
             ("github-tls/receipt.json", ("scope",), "github-readonly-hosted-v1"),
@@ -4835,6 +4944,15 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             ("github-tls-outer.json", ("waitObserved",), False),
             ("github-tls-outer.json", ("artifactSha256",), "f" * 64),
             ("github-tls-outer.json", ("exitCode",), 1),
+            ("github-tls-deadline-started.json", ("tlsDeadlineInputsSha256",), "9" * 64),
+            ("github-tls-deadline-checks.json", ("profiles", "hosts", "nativeReceiptSha256"), "d" * 64),
+            ("github-tls-deadline-checks.json", ("deadlineInputSha256",), "9" * 64),
+            ("github-tls-deadline/hosts/receipt.json", ("allProbesSettled",), False),
+            ("github-tls-deadline/hosts/receipt.json", ("cases", 1, "probe", "stdoutJoined"), False),
+            ("github-tls-deadline/hosts/receipt.json", ("cases", 0, "peer", "control", "shutdownComplete"), False),
+            ("github-tls-deadline/dns-withhold/receipt.json", ("cases", 0, "product", "owners", 0, "unknownLatched"), True),
+            ("github-tls-deadline-hosts-outer.json", ("waitObserved",), False),
+            ("github-tls-deadline-dns-withhold-outer.json", ("timedOut",), True),
         )
         for mutation in mutations:
             with self.subTest(predecessor=mutation[:2]):
@@ -4848,13 +4966,20 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         for name in ("clean-started.json", "clean-checks.json"):
             with self.subTest(spent_clean=name):
                 exercise("clean", present=(name,), clean=True)
+        for name in ("github-tls-deadline-started.json", "github-tls-deadline-checks.json",
+                *(f"github-tls-deadline/{profile}" for profile in ("hosts", "dns-withhold")),
+                *(f"github-tls-deadline-{profile}{suffix}" for profile in ("hosts", "dns-withhold")
+                  for suffix in ("-outer.json", ".stdout", ".stderr"))):
+            with self.subTest(spent_deadline=name):
+                exercise("github-tls-deadline", present=(name,))
 
     def test_tls_phase_routes_compile_once_and_stop_on_original_outer_or_inner_failure(self):
         context, compiled, test, forbidden = self.context(), self.artifact(), self, self.forbidden
         root, source = PurePosixPath(context["root"]), PurePosixPath(context["source"])
         cargo, rustc = "/inert/tls/selected/cargo", "/inert/tls/selected/rustc"
         environment = {"HOME": str(root / "home"), "PATH": "/inert/no-executables"}
-        admitted_environment = {**environment, "GITHUB_SHA": "1" * 40, "MRK_GITHUB_TLS_INPUTS_SHA256": "9" * 64}
+        admitted_environment = {**environment, "GITHUB_SHA": "1" * 40, "MRK_GITHUB_TLS_INPUTS_SHA256": "9" * 64,
+                                "MRK_GITHUB_TLS_DEADLINE_INPUTS_SHA256": "6" * 64}
         manifest = str(source / "desktop/src-tauri/Cargo.toml")
         commands = {
             "acquire": [("rust-toolchain-install", [context["rustup"], "toolchain", "install", helper.RUST,
@@ -4866,12 +4991,17 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 "--no-default-features", "--features", "development-runtime", "--target", "x86_64-unknown-linux-gnu",
                 "--manifest-path", manifest, "--target-dir", str(root / "target"), "--lib", "--no-run", "--message-format=json"])],
             "github-tls": [],
+            "github-tls-deadline": [],
         }
         for name, failure in (("acquire", None), ("compile", None), ("github-tls", None),
-                              ("compile", "compile"), ("github-tls", "outer"), ("github-tls", "inner")):
+                ("compile", "compile"), ("github-tls", "outer"), ("github-tls", "inner"),
+                ("github-tls-deadline", None), ("github-tls-deadline", "hosts-outer"),
+                ("github-tls-deadline", "hosts-inner"), ("github-tls-deadline", "dns-withhold-outer"),
+                ("github-tls-deadline", "dns-withhold-inner")):
             events, streams, writes, calls = [], {}, {}, []
             pair = {"acquire": ("cargo-metadata.json", "acquire.stderr"),
-                    "compile": ("github-tls-compile-messages.jsonl", "compile.stderr"), "github-tls": ()}[name]
+                    "compile": ("github-tls-compile-messages.jsonl", "compile.stderr"),
+                    "github-tls": (), "github-tls-deadline": ()}[name]
             class StreamPath(PurePosixPath):
                 def open(self, mode, *, encoding=None, newline=None):
                     test.assertEqual((self.parent, mode, encoding), (root, "x", "utf-8"))
@@ -4913,18 +5043,26 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 test.assertEqual(argv, commands["compile"][0][1]); test.assertEqual(messages, root / "github-tls-compile-messages.jsonl")
                 test.assertTrue(all(stream.closed for stream in streams.values())); events.append("compile-record")
                 return compiled
-            def outer(value, artifact):
-                test.assertIs(value, context); test.assertIs(artifact, compiled); test.assertEqual(name, "github-tls")
-                events.append("outer")
-                if failure == "outer":
+            def outer(value, artifact, *, profile=None):
+                test.assertIs(value, context); test.assertIs(artifact, compiled)
+                test.assertIn(name, ("github-tls", "github-tls-deadline"))
+                test.assertIn(profile, ("hosts", "dns-withhold") if name == "github-tls-deadline" else (None,))
+                event = "outer" if profile is None else f"{profile}-outer"
+                test.assertNotIn(event, events); events.append(event)
+                if profile == "dns-withhold":
+                    test.assertIn("hosts-inner", events)
+                if failure == event:
                     raise helper.CheckFailure("inert original outer refusal")
-                return test.outer(context)
-            def result(value):
-                test.assertIs(value, context); test.assertEqual(name, "github-tls"); test.assertIn("outer", events)
-                events.append("inner")
-                if failure == "inner":
+                return test.outer(context, profile)
+            def result(value, *, profile=None):
+                test.assertIs(value, context); test.assertIn(name, ("github-tls", "github-tls-deadline"))
+                test.assertIn("outer" if profile is None else f"{profile}-outer", events)
+                event = "inner" if profile is None else f"{profile}-inner"
+                events.append(event)
+                if failure == event:
                     raise helper.CheckFailure("inert original peer/client refusal")
-                return {"nativeReceiptSha256": "d" * 64, "outer": test.outer(context)}
+                return {"nativeReceiptSha256": {None: "d", "hosts": "e", "dns-withhold": "f"}[profile] * 64,
+                        "outer": test.outer(context, profile)}
             def emit(path, value):
                 test.assertEqual(path.parent, root); test.assertNotIn(path.name, writes)
                 expected = test.claim(context, name) if path.name == f"{name}-started.json" else test.phase_report(context, name)
@@ -4959,6 +5097,22 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     self.assertLess(events.index("outer"), events.index("inner"))
                 if not failure:
                     self.assertLess(events.index("inner"), len(events) - 1)
+            elif name == "github-tls-deadline":
+                self.assertEqual(events.count("tools"), 0)
+                self.assertEqual(events.count("compile-record"), 0)
+                prefix = ["hosts-outer", "hosts-inner", "dns-withhold-outer", "dns-withhold-inner"]
+                if failure:
+                    prefix = prefix[:prefix.index(failure) + 1]
+                self.assertEqual(events[5:5 + len(prefix)], prefix)
+                self.assertEqual(events.count("hosts-outer"), 1)
+                self.assertEqual(events.count("dns-withhold-outer"), int(failure not in ("hosts-outer", "hosts-inner")))
+                if failure:
+                    self.assertEqual(events[5:], prefix)
+                else:
+                    # Later phase serialization revalidates supplied DATA; it
+                    # does not relaunch a namespace or recompile the artifact.
+                    self.assertEqual(events[9], "source")
+                    self.assertEqual(events[-1], "receipt")
             elif name == "compile":
                 self.assertEqual(events.count("compile-record"), 0 if failure else 1)
 
@@ -4984,7 +5138,11 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             **{key: original[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha", "workflowRef",
                 "workflowSha256", "runId", "attempt", "tlsInputsSha256", "tlsInputs")},
             "python": "3.14.7", "rust": {"release": helper.RUST, "target": "x86_64-unknown-linux-gnu"},
-            "features": ["development-runtime"], "testTarget": "lib", "host": original["observedHost"], "notVerified": TLS_NOT_VERIFIED}
+            "features": ["development-runtime"], "testTarget": "lib", "host": original["observedHost"], "notVerified": TLS_NOT_VERIFIED,
+            "deadline": {"tlsInputsSha256": "6" * 64, "inputs": original["tlsDeadlineInputs"],
+                         "notVerified": ["populated-ambient-ca-directory", "platform-trust-stores", "getaddrinfo-internal-cancellation",
+                            "T6-streaming-controls", "CA-file-native-faults", "native-stuck-spawn-wait-close", "real-github-authentication",
+                            "production-runtime-custody", "native-gui", "native-document-lifecycle", "packaged-runtime", "production-enablement"]}}
         class ContextPath(PurePosixPath):
             def resolve(self, *, strict=False):
                 test.assertTrue(strict); return self
@@ -5024,14 +5182,31 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         context, test, forbidden = self.context(), self, self.forbidden
         root = PurePosixPath(context["root"])
         native, outside = root / "github-tls", PurePosixPath("/inert/tls/outside")
-        work = ("home", "cargo", "rustup", "tmp", "target", "github-tls-namespace")
+        deadline = root / "github-tls-deadline"
+        profile_cases = {"hosts": ("T4-owner-clear", "T4-ambient-fixed", "T4-ambient-no-rescue", "T5-handshake", "T5-read", "T5-helper-read"),
+                         "dns-withhold": ("T5-dns",)}
+        namespace_bytes = {root / "github-tls-namespace" / name: data for name, data in self.CONFIG.items()}
+        for profile, configs in (("hosts", self.CONFIG), ("dns-withhold", {
+                "hosts": b"127.0.0.1 localhost\n::1 localhost\n",
+                "resolv.conf": b"nameserver 127.0.0.1\noptions timeout:15 attempts:1 ndots:1\n",
+                "nsswitch.conf": b"passwd: files\ngroup: files\nhosts: dns\n"})):
+            namespace_bytes.update({root / f"github-tls-deadline-namespace-{profile}" / name: data for name, data in configs.items()})
+        profiles = tuple(deadline / name for name in profile_cases)
+        ambient = (root / "github-tls-deadline-ambient", *(deadline / "hosts" / name / "ambient"
+                    for name in ("T4-ambient-fixed", "T4-ambient-no-rescue", "T5-helper-read")))
+        work = ("home", "cargo", "rustup", "tmp", "target", "github-tls-namespace",
+                "github-tls-deadline-namespace-hosts", "github-tls-deadline-namespace-dns-withhold", "github-tls-deadline-ambient")
         private = ("core.zip", "gitconfig-empty", "cargo-metadata.json", "acquire.stderr", "github-tls-compile-messages.jsonl",
-                   "compile.stderr", "github-tls-compiled-test.json", "github-tls.stdout", "github-tls.stderr")
+                   "compile.stderr", "github-tls-compiled-test.json", "github-tls.stdout", "github-tls.stderr",
+                   *(f"github-tls-deadline-{profile}.{kind}" for profile in profile_cases for kind in ("stdout", "stderr")))
         evidence = ("context.json", "public-bindings.json", "github-tls-inputs.json", "github-tls-outer.json",
+                    "github-tls-deadline-inputs.json", *(f"github-tls-deadline-{profile}-outer.json" for profile in profile_cases),
                     *(f"{phase}-{suffix}.json" for phase in self.CHECKS for suffix in ("started", "checks")))
-        self.assertEqual(set(helper.GITHUB_TLS_DIRECTORIES), {*work, "github-tls"})
+        self.assertEqual(set(helper.GITHUB_TLS_DIRECTORIES), {*work, "github-tls", "github-tls-deadline"})
 
-        for mutation in (None, "finality", "unexpected", "missing-streaming", "changed-leaf", "late-entry"):
+        for mutation in (None, "finality", "deadline-finality", "unexpected", "missing-streaming", "unexpected-profile", "profile-link",
+                "keylog", "ambient-ca", "ambient-control", "nested-case", "nested-control", "nested-runtime", "nested-original",
+                "runtime-copy", "release-control", "leaf-directory", "foreign-owner", "foreign-mount", "changed-leaf", "late-entry"):
             nodes, counts, writes = {}, {}, {}
             events, scans, unlinked, removed = [], [], [], []
             def add(path, kind="file", *, size=32, inode=None, links=1):
@@ -5043,7 +5218,9 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     "st_nlink": 2 if kind == "directory" else links, "st_mtime_ns": 1000, "st_ctime_ns": 2000}
             def children(path):
                 return sorted(child for child in nodes if child.parent == path)
-            add(root, "directory"); add(native, "directory")
+            add(root, "directory"); add(native, "directory"); add(deadline, "directory")
+            for profile in profiles:
+                add(profile, "directory")
             add(outside, "directory"); add(outside / "protected.pem")
             add(PurePosixPath(context["source"]), "directory")
             add(PurePosixPath(context["source"]) / "protected.py")
@@ -5051,6 +5228,11 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             case_rows = TLS_CASE_ROWS[:-1] if mutation == "missing-streaming" else TLS_CASE_ROWS
             for name, *_ in case_rows:
                 directories.update((native / name, native / name / "control", native / name / "runtime"))
+            for profile, names in profile_cases.items():
+                for name in names:
+                    directories.update((deadline / profile / name, deadline / profile / name / "control", deadline / profile / name / "runtime"))
+            directories.update(ambient)
+            directories.update(path / "empty-ca-dir" for path in ambient)
             for path in sorted(directories, key=lambda path: (len(path.parts), str(path))):
                 add(path, "directory")
             leaves = {root / name for name in private}
@@ -5060,28 +5242,63 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 leaves.update((native / name / "control/release-github-read-1.json",
                     native / name / "runtime/github_connection_bootstrap.py", native / name / "runtime/github-ca.pem"))
             leaves.update(root / "github-tls-namespace" / name for name in self.CONFIG)
+            for profile, names in profile_cases.items():
+                leaves.update(root / f"github-tls-deadline-namespace-{profile}" / name for name in self.CONFIG)
+                for name in names:
+                    leaves.update((deadline / profile / name / "runtime/github_connection_bootstrap.py",
+                                   deadline / profile / name / "runtime/github-ca.pem"))
+                    if name not in ("T4-ambient-fixed", "T4-ambient-no-rescue", "T5-helper-read"):
+                        leaves.add(deadline / profile / name / "control/release-github-read-1.json")
+            controls = {path / "write-control" for path in ambient}
+            leaves.update(controls)
             for path in sorted(leaves):
-                add(path)
+                add(path, size=1 if path in controls else len(namespace_bytes[path]) if path in namespace_bytes else 32)
+                if path in controls:
+                    nodes[path]["st_mode"] = stat.S_IFREG | 0o600
             for name in evidence:
                 add(root / name)
             add(native / "receipt.json")
+            for profile in profiles:
+                add(profile / "receipt.json")
             link = root / "tmp/external-link"
             add(link, "link"); leaves.add(link)
             aliases = (root / "cargo/original-hardlink", root / "target/original-hardlink")
             add(aliases[0], inode=9999, links=2); add(aliases[1], inode=9999, links=2); leaves.update(aliases)
             if mutation == "unexpected":
                 add(root / "unexpected.pem")
+            elif mutation == "unexpected-profile":
+                add(deadline / "another-profile", "directory")
+            elif mutation == "profile-link":
+                nodes[profiles[0]]["st_mode"] = stat.S_IFLNK | 0o777
+            elif mutation == "keylog":
+                add(ambient[1] / "client.keylog", "link")
+            elif mutation == "ambient-ca":
+                add(ambient[0] / "empty-ca-dir/unexpected.pem")
+            elif mutation in ("nested-case", "nested-control", "nested-runtime", "nested-original"):
+                parent = {"nested-case": deadline / "hosts/T5-read", "nested-control": deadline / "hosts/T5-read/control",
+                          "nested-runtime": deadline / "hosts/T5-read/runtime", "nested-original": native / "T1-source/control"}[mutation]
+                add(parent / "unexpected.pem")
+            elif mutation == "leaf-directory":
+                parent = deadline / "hosts/T5-read/runtime/github-ca.pem"
+                nodes[parent]["st_mode"] = stat.S_IFDIR | 0o700
+                add(parent / "unexpected.pem")
+            elif mutation == "foreign-owner":
+                nodes[root / private[-1]]["st_uid"] = 1001
+            elif mutation == "foreign-mount":
+                nodes[root / private[-1]]["st_dev"] = 8
             initial = deepcopy(nodes)
-            protected = {root / name for name in evidence} | {native / "receipt.json"}
+            protected = {root / name for name in evidence} | {native / "receipt.json", *(profile / "receipt.json" for profile in profiles)}
             protected.update(path for path in nodes if path != root and root not in path.parents)
             total = sum(nodes[path]["st_size"] for path in leaves)
             expected_receipt = {"schemaVersion": 1, "scope": self.EVIDENCE, "phase": "clean", "status": "passed",
                 **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")},
                 "allOriginalOwnersSettled": True, "allOriginalPeersSettled": True, "observerJoinsComplete": True,
                 "originalOuterWaitObserved": True, "tlsInputsSha256": "9" * 64, "compiledTest": self.compiled_public(),
+                "tlsDeadlineInputsSha256": "6" * 64, "allOriginalProbesSettled": True, "deadlineProfiles": self.deadline_result(context),
                 "nativeReceiptSha256": "d" * 64, "outer": self.outer(context), "removedFiles": len(leaves),
                 "removedDirectories": len(directories), "inventoriedBytes": total,
-                "retained": ["redacted-evidence", "private-original-context", "private-tls-input-manifest", "private-original-outer-receipt"],
+                "retained": ["redacted-evidence", "private-original-context", "private-tls-input-manifest", "private-original-outer-receipt",
+                             "private-deadline-input-manifest", "private-deadline-original-outer-receipts"],
                 "productionQualified": False}
             class FakePath(PurePosixPath):
                 # No following read/metadata or recursive convenience deletion
@@ -5092,12 +5309,16 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     test.assertTrue(path == root or root in path.parents)
                     test.assertIn(path, nodes)
                     counts[path] = counts.get(path, 0) + 1
-                    if mutation == "changed-leaf" and path == root / "github-tls.stderr" and counts[path] == 2:
+                    if mutation == "changed-leaf" and path == root / private[-1] and counts[path] == 2:
                         nodes[path]["st_mtime_ns"] += 1
                     return SimpleNamespace(**nodes[path])
                 def iterdir(self):
-                    path = PurePosixPath(self); test.assertIn(path, (root, native))
+                    path = PurePosixPath(self)
+                    test.assertIn(path, (root, native, deadline, *profiles, *ambient, *(folder / "empty-ca-dir" for folder in ambient)))
+                    test.assertTrue(stat.S_ISDIR(nodes[path]["st_mode"]))
                     return iter(FakePath(child) for child in children(path))
+                def is_symlink(self):
+                    return stat.S_ISLNK(nodes[PurePosixPath(self)]["st_mode"])
                 def unlink(self):
                     path = PurePosixPath(self)
                     test.assertIn(path, leaves); test.assertNotIn(path, unlinked)
@@ -5131,6 +5352,27 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 if mutation == "finality":
                     raise helper.CheckFailure("inert finality missing")
                 return {"nativeReceiptSha256": "d" * 64, "outer": test.outer(context)}
+            def deadline_result(value):
+                test.assertIs(value, context); events.append(("finality", "deadline"))
+                if mutation == "deadline-finality":
+                    raise helper.CheckFailure("inert original probe finality missing")
+                return test.deadline_result(context)
+            def bound_file(path):
+                test.assertIn(path, leaves)
+                if path in controls:
+                    return {"path": str(path), "size": 1,
+                            "sha256": "0" * 64 if mutation == "ambient-control" else hashlib.sha256(b"w").hexdigest()}
+                if path in namespace_bytes:
+                    data = namespace_bytes[path]
+                    return {"path": str(path), "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                test.assertIn(path.parent.name, ("control", "runtime"))
+                return {"path": str(path), "size": 32,
+                        "sha256": "0" * 64 if mutation == "runtime-copy" and path == deadline / "hosts/T5-read/runtime/github-ca.pem" else "5" * 64}
+            def release_data(path, limit):
+                test.assertEqual((path.name, path.parent.name, limit), ("release-github-read-1.json", "control", 512))
+                test.assertIn(path, leaves)
+                return {"nonce": "0" * 64 if mutation == "release-control" else hashlib.sha256(str(path.parent.parent).encode()).hexdigest(),
+                        "id": "github-read-1", "release": True}
             def emit(path, value):
                 path = PurePosixPath(path)
                 test.assertIn(path.name, ("clean-started.json", "clean-checks.json"))
@@ -5141,9 +5383,10 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             with self.subTest(cleanup=mutation), redirect_stdout(notice), patch.multiple(helper, Path=FakePath,
                     github_tls_predecessors=lambda value, name: events.append(("predecessors", name)),
                     github_tls_inputs_unchanged=lambda value: events.append(("inputs", "original")),
-                    github_tls_result=result, write_json=emit, run=forbidden, tools=forbidden,
+                    github_tls_result=result, github_tls_deadline_result=deadline_result, github_tls_file=bound_file,
+                    write_json=emit, run=forbidden, tools=forbidden,
                     github_tls_source_unchanged=forbidden, source_unchanged=forbidden, clean_environment=forbidden,
-                    read_bounded_json=forbidden, hash_file=forbidden, ordinary=forbidden), \
+                    read_bounded_json=release_data, hash_file=forbidden, ordinary=forbidden), \
                     patch.object(helper, "github_tls_original_artifact", return_value=self.artifact()), \
                     patch.object(helper.os, "scandir", side_effect=scan), patch.object(helper.os, "geteuid", return_value=1000, create=True), \
                     patch.object(helper.os, "unlink", side_effect=forbidden), patch.object(helper.os, "rmdir", side_effect=forbidden), \
@@ -5166,10 +5409,13 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 self.assertEqual(writes, {"clean-started.json": self.claim(context, "clean"), "clean-checks.json": expected_receipt})
                 self.assertEqual(set(nodes), (set(initial) - leaves - directories) | {root / "clean-started.json", root / "clean-checks.json"})
                 self.assertEqual(children(native), [native / "receipt.json"])
+                self.assertEqual(children(deadline), sorted(profiles))
+                for profile in profiles:
+                    self.assertEqual(children(profile), [profile / "receipt.json"])
                 self.assertEqual(notice.getvalue(), "Removed only positively settled TLS compiler and fixture outputs; original evidence retained.\n")
             else:
                 self.assertNotIn("clean-checks.json", writes); self.assertEqual(notice.getvalue(), "")
-                self.assertEqual(set(writes), set() if mutation == "finality" else {"clean-started.json"})
+                self.assertEqual(set(writes), set() if mutation in ("finality", "deadline-finality") else {"clean-started.json"})
                 if mutation != "late-entry":
                     self.assertEqual(unlinked, []); self.assertEqual(removed, [])
                 else:
@@ -5177,8 +5423,421 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     self.assertIn(root / "home", nodes)
 
 
+TLS_DEADLINE_NOT_VERIFIED = ["populated-ambient-ca-directory", "platform-trust-stores", "getaddrinfo-internal-cancellation",
+    "T6-streaming-controls", "CA-file-native-faults", "native-stuck-spawn-wait-close", "real-github-authentication",
+    "production-runtime-custody", "native-gui", "native-document-lifecycle", "packaged-runtime", "production-enablement"]
+
+
+def tls_deadline_ambient_hashes_data(context):
+    root, source = PurePosixPath(context["root"]), PurePosixPath(context["source"])
+    values = {}
+    for name in ("T4-owner-clear", "T4-ambient-fixed", "T4-ambient-no-rescue", "T5-helper-read"):
+        folder = root / "github-tls-deadline-ambient" if name == "T4-owner-clear" else root / "github-tls-deadline/hosts" / name / "ambient"
+        environment = {"LANG": "C", "LC_ALL": "C", "NO_PROXY": "", "no_proxy": "",
+            "SSL_CERT_FILE": str(source / "desktop/src-tauri/tests/fixtures/github_tls" / ("root-ca.pem" if name == "T4-ambient-no-rescue" else "other-root-ca.pem")),
+            "SSL_CERT_DIR": str(folder / "empty-ca-dir"), "SSLKEYLOGFILE": str(folder / ("owner-clear.keylog" if name == "T4-owner-clear" else "client.keylog"))}
+        for scheme in ("HTTP", "HTTPS", "ALL"):
+            environment[scheme + "_PROXY"] = environment[scheme.lower() + "_proxy"] = "http://127.0.0.1:18888"
+        values[name] = hashlib.sha256(json.dumps(environment, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+    return values
+
+
+def tls_deadline_binding_data():
+    return {**github_tls_binding_data(), "tlsInputsSha256": "6" * 64}
+
+
+def tls_deadline_report_data(profile):
+    """Independent supplied DATA only: these observations are NOT native evidence."""
+    names = {"hosts": ("T4-owner-clear", "T4-ambient-fixed", "T4-ambient-no-rescue", "T5-handshake", "T5-read", "T5-helper-read"),
+             "dns-withhold": ("T5-dns",)}[profile]
+    binding = tls_deadline_binding_data()
+    binding["namespace"] = {**binding["namespace"], "netns": "net:[101]" if profile == "hosts" else "net:[102]",
+                            "mntns": "mnt:[201]" if profile == "hosts" else "mnt:[202]"}
+    hashes = tls_deadline_ambient_hashes_data(GitHubTLSCIIntegrationTests.context())
+    cases = []
+    for name in names:
+        direct = name in ("T4-ambient-fixed", "T4-ambient-no-rescue", "T5-helper-read")
+        dns, handshake, read, refusal = name == "T5-dns", name == "T5-handshake", name in ("T5-read", "T5-helper-read"), name == "T4-ambient-no-rescue"
+        owner_timeout = dns or handshake or name == "T5-read"
+        reason = "query_timeout" if owner_timeout else "network-unavailable" if name == "T5-helper-read" else "tls-failed" if refusal else "none"
+        connections = 0 if dns else 4 if name in ("T4-owner-clear", "T4-ambient-fixed") else 1
+        requests = 0 if dns or handshake or refusal else connections
+        progress = []
+        def event(kind, at, *, body=0, written=200, questions=0, a=0, aaaa=0, stop=None):
+            progress.append({"event": kind, "sequence": len(progress) + 1, "requests": 0 if dns or handshake or refusal else 1,
+                "bodyBytes": body, "wireReadBytes": 0 if dns else 100, "wireWriteBytes": written,
+                "dnsQuestions": questions, "dnsA": a, "dnsAAAA": aaaa, "clientStop": stop, "afterPeerStartNs": at})
+        if dns:
+            event("dns-question", 1_100_000_000, written=0, questions=1, a=1)
+            event("dns-question", 1_100_000_001, written=0, questions=2, a=1, aaaa=1)
+        elif handshake:
+            event("client-hello", 1_100_000_000, written=0)
+            event("client-stop", 11_200_000_000, written=0, stop="tcp-eof")
+        elif not refusal:
+            event("first-get", 1_100_000_000)
+            if read:
+                for index in range(11):
+                    event("body-byte", 1_100_000_000 + index * 1_000_000_000, body=index + 1, written=210 + index * 10)
+                event("client-stop", 11_300_000_000, body=11, written=310, stop="tcp-eof")
+        product = deepcopy(github_tls_report_data()["cases"][0]["product"])
+        product["reason"] = reason
+        if owner_timeout:
+            product["owners"][0]["firstError"] = "query_timeout"
+            product["owners"][0]["native"].update(exit_success=False, stdout_bytes=0, stderr_bytes=0)
+        probe = dict.fromkeys(("acquisitionJoined", "spawned", "waited", "exitSuccess", "writerJoined", "writeComplete", "shutdownComplete",
+            "stdinReleased", "stdoutJoined", "stderrJoined", "stdoutEof", "stderrEof", "settled", "withinEndpoint", "frameObserved"), True)
+        probe.update(exitCode=0, stopAttempted=False, stdoutBytes=512, stderrBytes=0, stdoutOverflow=False, stderrOverflow=False)
+        peer = deepcopy(github_tls_report_data()["cases"][0]["peer"])
+        peer["stdoutBytes"] = 4096
+        peer["control"] = dict.fromkeys(("acquired", "started", "joined", "writeComplete", "shutdownComplete", "productSettled", "withinEndpoint", "released"), True)
+        peer["control"]["failed"] = False
+        peer["terminal"] = {"schemaVersion": 1, "scope": "github-tls-peer-v1", "case": name, "state": "finished", "status": "passed", "code": None,
+            "connections": connections, "handshakes": requests, "requests": requests,
+            "decryptedBytes": requests * 100, "authBytes": requests * len(b"Bearer INERT_NOT_A_CREDENTIAL"),
+            "closeNotify": 4 if name in ("T4-owner-clear", "T4-ambient-fixed") else 0, "tlsRefused": refusal,
+            "wireReadBytes": [100] * connections, "wireWriteBytes": [0 if handshake else 310 if read else 1024] * connections,
+            "replyBytes": [0 if handshake or refusal else 75 if read else 64] * connections, "allSocketsClosed": True,
+            "sni": connections, "phase": "dns" if dns else "handshake" if handshake else "read" if read else "ambient",
+            "withheldWireBytes": 512 if handshake else 0, "bodyBytes": 11 if read else 0, "incompleteBody": read,
+            "clientStop": "tcp-eof" if handshake or read else None, "progressCount": len(progress),
+            "dnsQuestions": 2 if dns else 0, "dnsA": 1 if dns else 0, "dnsAAAA": 1 if dns else 0, "dnsReplies": 0,
+            "completion": {"bytes": 1, "eof": True, "closed": True, "primaryEmpty": True, "primaryUnexpected": 0, "primaryClosed": True,
+                "proxy": {"empty": True, "unexpected": 0, "closed": True} if name.startswith("T4-") else None,
+                "dnsEmpty": True if dns else None, "dnsClosed": True if dns else None}}
+        ambient = None
+        if name in hashes:
+            ambient = dict.fromkeys(("writableControlCreated", "writableControlWritten", "writableControlSynced", "writableControlClosed",
+                "keylogAbsentBefore", "keylogAbsentAfter", "emptyCaDirectoryBefore", "emptyCaDirectoryAfter", "fileSizeLimitNonzero"), True)
+            ambient.update(roleSetSha256=hashes[name], initialEnvironment="observed-allowlist" if name == "T4-owner-clear" else None)
+        if direct:
+            timing = {"kind": "fixture-owned-bootstrap", "spawnAfterPeerStartNs": 1_000_000_000,
+                "settledAfterPeerStartNs": 11_400_000_000 if read else 2_000_000_000,
+                "firstGetAfterLaunchNs": None if refusal else 100_000_000, "responseAfterLaunchNs": 10_200_000_000 if read else 500_000_000,
+                "clientStopAfterLaunchNs": 10_300_000_000 if read else None,
+                "bodyProgressAfterLaunchNs": [100_000_000 + index * 1_000_000_000 for index in range(11)] if read else [],
+                "helperWindowChecked": read}
+        else:
+            timing = {"kind": "ordinary-owner", "operationStartAfterPeerNs": 1_000_000_000, "operationEndpointAfterPeerNs": 11_000_000_000,
+                "cleanupEndpointAfterPeerNs": 13_000_000_000 if owner_timeout else None,
+                "settledAfterPeerNs": 11_400_000_000 if owner_timeout else 2_000_000_000,
+                "phaseAfterPeerNs": 1_100_000_000, "phase": "dns-question" if dns else "client-hello" if handshake else "first-get",
+                "originalDeadlineChecked": owner_timeout, "cleanupExact": owner_timeout}
+        cases.append({"case": name, "entry": "fixture-owned-bootstrap" if direct else "ordinary-supervisor", "passed": True,
+            "failureCode": None, "coreMode": "source", "trustFixture": "other-root-ca.pem" if refusal else "root-ca.pem", "elapsedMs": 12000,
+            "clientSettled": True, "projectionChecked": True, "reason": reason, "product": None if direct else product,
+            "probe": probe if direct else None, "ambient": ambient, "timing": timing, "progress": progress, "peer": peer,
+            "resolverCacheAbsentAfter": True if dns else None})
+    return {"schemaVersion": 1, "scope": "github-readonly-tls-deadline-hosted-v1", "profile": profile, "status": "passed",
+        "allOwnersSettled": True, "allProbesSettled": True, "allPeersSettled": True, "failureCode": None,
+        "bindings": binding, "cases": cases, "outerWait": "external-original-observer-required", "notVerified": list(TLS_DEADLINE_NOT_VERIFIED)}
+
+
+class GitHubTLSDeadlineContractTests(unittest.TestCase):
+    """Closed supplied-DATA contracts, not original native observations."""
+
+    @staticmethod
+    def validate(report, profile="hosts", *, bindings=None, ambient_hashes=None):
+        return helper.validate_github_tls_deadline_receipt(report,
+            bindings=tls_deadline_binding_data() if bindings is None else bindings, profile=profile,
+            ambient_hashes=tls_deadline_ambient_hashes_data(GitHubTLSCIIntegrationTests.context()) if ambient_hashes is None else ambient_hashes)
+
+    def reject_at(self, path, replacement, *, profile="hosts"):
+        report = tls_deadline_report_data(profile)
+        row = report
+        for key in path[:-1]:
+            row = row[key]
+        row[path[-1]] = replacement
+        with self.subTest(profile=profile, path=path, value=replacement), self.assertRaises(helper.CheckFailure):
+            self.validate(report, profile)
+
+    def test_deadline_manifest_replaces_only_resolver_roles_and_rejects_ordinary_null_descriptor(self):
+        context = GitHubTLSCIIntegrationTests.context()
+        original = GitHubTLSCIIntegrationTests.manifest(context)
+        deadline = GitHubTLSCIIntegrationTests.deadline_manifest(context)
+        roles = {f"{profile}:{name}" for profile in ("hosts", "dns-withhold") for name in ("hosts", "resolv.conf", "nsswitch.conf")}
+        roles.update(("libc", "resolver:host.conf", "resolver:gai.conf"))
+        self.assertEqual(set(deadline["roles"]) - set(original["roles"]), roles)
+        self.assertEqual(set(original["roles"]) - set(deadline["roles"]), {"hosts", "resolv.conf", "nsswitch.conf"})
+        mutations = []
+        for descriptor in (None, {}, {"family": "glibc", "version": "2.38", "nss": "builtin-files-dns"},
+                           {**deadline["resolver"], "extra": True}, {**deadline["resolver"], "nss": "dynamic"}):
+            mutations.append({**deepcopy(deadline), "resolver": descriptor})
+        missing = deepcopy(deadline); del missing["resolver"]; mutations.append(missing)
+        for role in roles:
+            missing = deepcopy(deadline); del missing["roles"][role]; mutations.append(missing)
+        for role, path in (("hosts:hosts", original["roles"]["hosts"]),
+                ("dns-withhold:nsswitch.conf", deadline["roles"]["hosts:nsswitch.conf"]),
+                ("libc", deadline["roles"]["libssl"]), ("resolver:host.conf", "/etc/gai.conf")):
+            changed = deepcopy(deadline); changed["roles"][role] = path; mutations.append(changed)
+        changed = deepcopy(deadline); changed["roles"].update({key: original["roles"][key] for key in GitHubTLSCIIntegrationTests.CONFIG})
+        mutations.append(changed)
+        forbidden = GitHubTLSCIIntegrationTests.forbidden
+        with patch.multiple(helper, Path=PurePosixPath, github_tls_runtime=forbidden, github_tls_file=forbidden,
+                github_tls_deadline_resolver_file=forbidden, ordinary=forbidden, hash_file=forbidden,
+                read_bounded_json=forbidden, run=forbidden, tools=forbidden):
+            self.assertIs(helper.validate_github_tls_manifest(deadline, context=context, deadline=True), deadline)
+            self.assertEqual(helper.github_tls_input_summary(context, deadline), context["tlsDeadlineInputs"])
+            for index, value in enumerate(mutations):
+                with self.subTest(manifest=index), self.assertRaises(helper.CheckFailure):
+                    helper.validate_github_tls_manifest(value, context=context, deadline=True)
+            for value in (None, deadline["resolver"]):
+                with self.subTest(ordinary_resolver=value), self.assertRaises(helper.CheckFailure):
+                    helper.validate_github_tls_manifest({**original, "resolver": value}, context=context)
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_github_tls_manifest(deadline, context=context)
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_github_tls_manifest(original, context=context, deadline=True)
+
+    def test_deadline_resolver_grammar_and_absence_checks_have_no_repair_or_lookup(self):
+        for name, raw in (("host.conf", b"# comment\norder hosts,bind\nmulti on\n"),
+                ("host.conf", b" \t order hosts,bind  # selected files/dns\r\n\tmulti on \r\n"),
+                ("gai.conf", b"# default\n\t\r\n"), ("gai.conf", b"\n" * 127)):
+            helper.github_tls_deadline_host_config(raw, name)
+        for raw, name in ((b"", "host.conf"), (b"multi on\0", "host.conf"), (b"\xff", "gai.conf"),
+                (b"#" * 513, "gai.conf"), (b"\n" * 128, "gai.conf"), (b"#" * 16385, "gai.conf"),
+                (b"multi on\nmulti on\n", "host.conf"), (b"order bind,hosts\n", "host.conf"),
+                (b"order hosts,bind\ntrim .test\n", "host.conf"), (b"multi\ton\n", "host.conf"),
+                (b"multi on\n", "gai.conf"), (b"label ::1/128 0\n", "gai.conf"),
+                (b"\xc2\xa0", "gai.conf"), (b"# comment\n", "resolv.conf"), (b"# comment\n", []),
+                (bytearray(b"# default\n"), "gai.conf")):
+            with self.subTest(name=name, raw=raw), self.assertRaises(helper.CheckFailure):
+                helper.github_tls_deadline_host_config(raw, name)
+        paths = ("/run/nscd/socket", "/var/run/nscd/socket", "/run/.nscd_socket", "/var/run/.nscd_socket")
+        forbidden = GitHubTLSCIIntegrationTests.forbidden
+        for present in (None, *paths):
+            seen = []
+            def exists(path):
+                self.assertIn(path, paths); seen.append(path)
+                return path == present  # Presence includes a dangling link, not just a live service.
+            with patch.object(helper.os.path, "lexists", side_effect=exists), \
+                    patch.multiple(helper, Path=forbidden, run=forbidden, tools=forbidden), \
+                    patch.object(helper.subprocess, "run", side_effect=forbidden), patch.object(helper.os, "unlink", side_effect=forbidden):
+                if present:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.github_tls_deadline_cache_absent()
+                else:
+                    helper.github_tls_deadline_cache_absent()
+            self.assertEqual(seen, list(paths if present is None else paths[:paths.index(present) + 1]))
+
+    def test_deadline_runtime_observer_requires_one_supported_original_libc_not_one_vma(self):
+        # All imported modules, mapping bytes and path observations below are
+        # supplied finite capabilities. No SSLContext, libc probe or proc file
+        # on the test host is consulted; this is not native version evidence.
+        prefix, test = PurePosixPath("/inert/resolver/python"), self
+        library = prefix / "lib/python3.14"
+        module_paths = {name: library / (name + ".py") for name in ("ssl", "socket")}
+        module_paths.update({name: library / "lib-dynload" / (name + ".cpython-314-x86_64-linux-gnu.so")
+                             for name in ("_ssl", "_socket", "resource")})
+        native_paths = {name: PurePosixPath("/inert/resolver/lib") / filename for name, filename in (
+            ("libssl", "libssl.so.3"), ("libcrypto", "libcrypto.so.3"), ("loader", "ld-linux-x86-64.so.2"), ("libc", "libc.so.6"))}
+        forbidden = GitHubTLSCIIntegrationTests.forbidden
+        for mutation in (None, "version", "second-libc", "backing-identity", "deleted", "dynamic-nss"):
+            streams, probes, mappings = [], [], []
+            for path in native_paths.values():
+                # Normal ELF VMA repetition of the same canonical inode is
+                # expected and cannot be misclassified as duplicate libc.
+                mappings.extend(f"1000-2000 {mode} 00000000 07:03 500 {path}" for mode in ("r--p", "r-xp", "r-xp"))
+            if mutation == "second-libc":
+                mappings.append("1000-2000 r-xp 00000000 07:03 501 /inert/resolver/other/libc.so.6")
+            elif mutation == "dynamic-nss":
+                mappings.append("1000-2000 r--p 00000000 07:03 500 /inert/resolver/lib/libnss_dns.so.2")
+            elif mutation == "deleted":
+                mappings[-1] += " (deleted)"
+            raw = ("\n".join(mappings) + "\n").encode("utf-8")
+            class RuntimePath(PurePosixPath):
+                def resolve(self, *, strict=False):
+                    test.assertTrue(strict); return self
+                def open(self, mode):
+                    test.assertEqual((str(self), mode), ("/proc/self/maps", "rb"))
+                    stream = io.BytesIO(raw); streams.append(stream); return stream
+                def lstat(self):
+                    test.assertTrue(str(self).startswith("/inert/resolver/"))
+                    inode = 501 if (mutation == "backing-identity" and self.name == "libc.so.6"
+                                    or mutation == "second-libc" and self.parent.name == "other") else 500
+                    return SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_dev=1795, st_ino=inode)
+            def ssl_context(protocol):
+                test.assertEqual(protocol, 1); probes.append("supplied-ssl-options")
+                return SimpleNamespace(options=0)
+            modules = {name: SimpleNamespace(__file__=str(path)) for name, path in module_paths.items()}
+            modules["ssl"] = SimpleNamespace(__file__=str(module_paths["ssl"]), OP_IGNORE_UNEXPECTED_EOF=128,
+                OPENSSL_VERSION="OpenSSL 3.0.0 supplied DATA", PROTOCOL_TLS_CLIENT=1, SSLContext=ssl_context)
+            modules["sysconfig"] = SimpleNamespace(get_path=lambda key: str(library) if key == "stdlib" else forbidden())
+            supplied_sys = SimpleNamespace(version=helper.PYTHON, flags=SimpleNamespace(isolated=True, no_site=True, optimize=0),
+                dont_write_bytecode=True, platform="linux", base_prefix=str(prefix), executable=str(prefix / "bin/python3.14"),
+                path=[str(library), str(library / "lib-dynload"), str(prefix / "lib/python314.zip")], modules=modules)
+            with self.subTest(runtime=mutation), patch.dict(helper.sys.modules, modules), \
+                    patch.multiple(helper, Path=RuntimePath, sys=supplied_sys, run=forbidden, tools=forbidden,
+                                   github_tls_file=forbidden, hash_file=forbidden, read_bounded_json=forbidden), \
+                    patch.object(helper, "github_tls_stdlib_files", return_value=set(module_paths.values())) as roster, \
+                    patch.object(helper.os, "confstr", return_value="glibc 2.38" if mutation == "version" else "glibc 2.39", create=True) as version, \
+                    patch.object(helper.os, "major", return_value=7, create=True), patch.object(helper.os, "minor", return_value=3, create=True), \
+                    patch.object(helper.subprocess, "run", side_effect=forbidden), patch.object(helper.subprocess, "Popen", side_effect=forbidden):
+                if mutation:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.github_tls_runtime()
+                else:
+                    ssl, roles, files = helper.github_tls_runtime()
+                    self.assertEqual(ssl, {"opensslVersion": "OpenSSL 3.0.0 supplied DATA", "ignoreUnexpectedEof": 128})
+                    self.assertEqual(roles["libc"], str(native_paths["libc"]))
+                    self.assertEqual(files, set(module_paths.values()) | set(native_paths.values()))
+                version.assert_called_once_with("CS_GNU_LIBC_VERSION")
+                if mutation == "version":
+                    roster.assert_not_called()
+                else:
+                    roster.assert_called_once_with(library)
+            self.assertEqual(probes, [] if mutation == "version" else ["supplied-ssl-options"])
+            self.assertEqual(len(streams), 0 if mutation == "version" else 1)
+            self.assertTrue(all(stream.closed for stream in streams))
+
+    def test_deadline_supplied_profiles_require_external_bindings_and_exact_ambient_roles(self):
+        context = GitHubTLSCIIntegrationTests.context()
+        hashes = tls_deadline_ambient_hashes_data(context)
+        with patch.object(helper, "Path", PurePosixPath):
+            self.assertEqual(helper.github_tls_deadline_ambient_hashes(context), hashes)
+        self.assertEqual(list(helper.GITHUB_TLS_DEADLINE_NOT_VERIFIED), TLS_DEADLINE_NOT_VERIFIED)
+        for profile in ("hosts", "dns-withhold"):
+            report = tls_deadline_report_data(profile)
+            self.assertIs(self.validate(report, profile), report)
+            raw = GitHubTLSCIIntegrationTests.encoded(report)
+            self.assertEqual(helper.parse_github_tls_deadline_receipt(raw, bindings=tls_deadline_binding_data(),
+                             profile=profile, ambient_hashes=hashes), report)
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_github_tls_receipt(report, bindings=github_tls_binding_data())
+            self.reject_at(("profile",), "dns-withhold" if profile == "hosts" else "hosts", profile=profile)
+            self.reject_at(("cases",), list(reversed(report["cases"])) if profile == "hosts" else [], profile=profile)
+        report = tls_deadline_report_data("hosts")
+        for key, value in (("schemaVersion", True), ("status", "failed-retained"), ("allOwnersSettled", 1),
+                ("allProbesSettled", False), ("allPeersSettled", False), ("failureCode", "unsettled"),
+                ("outerWait", "passed"), ("notVerified", TLS_DEADLINE_NOT_VERIFIED[:-1]), ("extra", True)):
+            self.reject_at((key,), value)
+        for key in report:
+            missing = deepcopy(report); del missing[key]
+            with self.subTest(missing=key), self.assertRaises(helper.CheckFailure):
+                self.validate(missing)
+        for key, value in (("tlsInputsSha256", "9" * 64), ("artifactSha256", "0" * 64), ("attempt", "3")):
+            self.reject_at(("bindings", key), value)
+        self.reject_at(("bindings", "namespace", "netns"), "net:[100]")
+        for index in (0, 1, 2, 5):
+            name = report["cases"][index]["case"]
+            self.reject_at(("cases", index, "ambient", "roleSetSha256"), "0" * 64)
+            with self.subTest(expected_role=name), self.assertRaises(helper.CheckFailure):
+                self.validate(report, ambient_hashes={**hashes, name: "0" * 64})
+        for key, value in report["cases"][0]["ambient"].items():
+            if type(value) is bool:
+                self.reject_at(("cases", 0, "ambient", key), False)
+        for state in (None, "unavailable-source-only", "observed-disallowed", True):
+            self.reject_at(("cases", 0, "ambient", "initialEnvironment"), state)
+        self.reject_at(("cases", 1, "ambient", "initialEnvironment"), "observed-allowlist")
+        self.reject_at(("cases", 3, "ambient"), report["cases"][0]["ambient"])
+        self.reject_at(("cases", 0, "resolverCacheAbsentAfter"), False, profile="dns-withhold")
+
+    def test_deadline_client_roles_and_original_join_evidence_cannot_substitute_for_each_other(self):
+        report = tls_deadline_report_data("hosts")
+        for index, row in enumerate(report["cases"]):
+            for key, value in (("reason", "engine_failed"), ("clientSettled", False), ("projectionChecked", 1),
+                    ("entry", "ordinary-supervisor" if row["product"] is None else "fixture-owned-bootstrap")):
+                self.reject_at(("cases", index, key), value)
+        self.reject_at(("cases", 1, "product"), report["cases"][0]["product"])
+        self.reject_at(("cases", 0, "probe"), report["cases"][1]["probe"])
+        for key, value in report["cases"][1]["probe"].items():
+            if type(value) is bool:
+                self.reject_at(("cases", 1, "probe", key), not value)
+        for key, value in (("exitCode", 1), ("exitCode", False), ("stdoutBytes", 0), ("stdoutBytes", 65537),
+                           ("stderrBytes", 1), ("extra", True)):
+            self.reject_at(("cases", 1, "probe", key), value)
+        timeout = report["cases"][3]["product"]["owners"][0]
+        for key, value in (("terminal", False), ("unknownLatched", True), ("permitRetained", True),
+                           ("observerJoined", False), ("firstError", None)):
+            self.reject_at(("cases", 3, "product", "owners", 0, key), value)
+        for key, value in timeout["native"].items():
+            self.reject_at(("cases", 3, "product", "owners", 0, "native", key), not value if type(value) is bool else 1)
+        # Ordinary positive validation remains strict; a timeout outcome is not
+        # accepted by either T1-T3 or the ordinary owner-clear predicate.
+        self.reject_at(("cases", 0, "product", "owners", 0, "native", "exit_success"), False)
+        self.reject_at(("cases", 0, "peer", "waited"), False, profile="dns-withhold")
+        for key, value in report["cases"][1]["peer"]["control"].items():
+            self.reject_at(("cases", 1, "peer", "control", key), not value)
+        for key, value in (("bytes", 0), ("eof", False), ("closed", False), ("primaryEmpty", False),
+                           ("primaryUnexpected", 1), ("primaryClosed", False)):
+            self.reject_at(("cases", 1, "peer", "terminal", "completion", key), value)
+        for key, value in (("empty", False), ("unexpected", 1), ("closed", False)):
+            self.reject_at(("cases", 1, "peer", "terminal", "completion", "proxy", key), value)
+        for key in ("dnsEmpty", "dnsClosed"):
+            self.reject_at(("cases", 0, "peer", "terminal", "completion", key), False, profile="dns-withhold")
+        for key, value in (("dnsReplies", 1), ("dnsQuestions", 0), ("dnsA", 3)):
+            self.reject_at(("cases", 0, "peer", "terminal", key), value, profile="dns-withhold")
+        self.reject_at(("cases", 3, "peer", "terminal", "clientStop"), "broken-pipe")
+        self.reject_at(("cases", 3, "peer", "terminal", "withheldWireBytes"), 0)
+
+    def test_deadline_original_clocks_progress_and_immediate_lf_cannot_be_retimed_by_join(self):
+        report = tls_deadline_report_data("hosts")
+        for field, value in (("responseAfterLaunchNs", 9_999_999_999), ("responseAfterLaunchNs", 12_000_000_001),
+                ("clientStopAfterLaunchNs", 9_999_999_999), ("firstGetAfterLaunchNs", 2_000_000_001),
+                ("helperWindowChecked", False), ("spawnAfterPeerStartNs", 2_000_000_000),
+                ("bodyProgressAfterLaunchNs", []), ("settledAfterPeerStartNs", 11_199_999_999)):
+            self.reject_at(("cases", 5, "timing", field), value)
+        for frame in (10_000_000_000, 12_000_000_000):
+            boundary = deepcopy(report)
+            boundary["cases"][5]["timing"].update(responseAfterLaunchNs=frame, settledAfterPeerStartNs=13_400_000_000)
+            self.assertIs(self.validate(boundary), boundary)
+        early = deepcopy(report)
+        early["cases"][5]["timing"].update(responseAfterLaunchNs=1_000_000_000, settledAfterPeerStartNs=15_000_000_000)
+        with self.assertRaises(helper.CheckFailure):
+            self.validate(early)  # Fifteen-second wait cannot move the original first LF to ten seconds.
+        for index in (3, 4):
+            for field, value in (("operationEndpointAfterPeerNs", 12_000_000_000),
+                    ("cleanupEndpointAfterPeerNs", 14_000_000_000), ("settledAfterPeerNs", 10_999_999_999),
+                    ("settledAfterPeerNs", 13_000_000_000), ("phaseAfterPeerNs", 11_000_000_000),
+                    ("originalDeadlineChecked", False), ("cleanupExact", 1)):
+                self.reject_at(("cases", index, "timing", field), value)
+        self.reject_at(("cases", 3, "progress", 1, "afterPeerStartNs"), 10_900_000_000)
+        self.reject_at(("cases", 5, "progress", 1, "wireWriteBytes"), 200)
+        self.reject_at(("cases", 5, "progress", 2, "sequence"), 2)
+        self.reject_at(("cases", 5, "progress", 1, "bodyBytes"), 0)
+        self.reject_at(("cases", 5, "peer", "terminal", "incompleteBody"), False)
+        # Keep both clocks correlated while introducing a real observation gap
+        # or missing coverage; a false hash/schema mismatch must not mask it.
+        for mutation in ("gap", "missing-body", "early-stop", "late-get"):
+            changed = deepcopy(report); case = changed["cases"][5]
+            if mutation == "gap":
+                case["progress"][2]["afterPeerStartNs"] += 600_000_000
+            elif mutation == "missing-body":
+                case["progress"] = [case["progress"][0], case["progress"][1], case["progress"][-1]]
+                case["progress"][-1]["bodyBytes"] = 1
+                case["peer"]["terminal"]["bodyBytes"] = 1
+            elif mutation == "early-stop":
+                del case["progress"][-2]
+                case["progress"][-1]["bodyBytes"] = 10
+                case["peer"]["terminal"]["bodyBytes"] = 10
+                case["progress"][-1]["afterPeerStartNs"] = 10_999_999_999
+            else:
+                for item in case["progress"]:
+                    item["afterPeerStartNs"] += 2_000_000_001
+                case["timing"].update(responseAfterLaunchNs=12_000_000_000, settledAfterPeerStartNs=13_600_000_000)
+            launch = case["timing"]["spawnAfterPeerStartNs"]
+            for sequence, item in enumerate(case["progress"], 1):
+                item["sequence"] = sequence
+            case["peer"]["terminal"]["progressCount"] = len(case["progress"])
+            case["timing"]["firstGetAfterLaunchNs"] = case["progress"][0]["afterPeerStartNs"] - launch
+            case["timing"]["clientStopAfterLaunchNs"] = case["progress"][-1]["afterPeerStartNs"] - launch
+            case["timing"]["bodyProgressAfterLaunchNs"] = [item["afterPeerStartNs"] - launch for item in case["progress"] if item["event"] == "body-byte"]
+            with self.subTest(progress=mutation), self.assertRaises(helper.CheckFailure):
+                self.validate(changed)
+
+    def test_deadline_raw_receipt_is_bounded_closed_and_not_a_native_receipt_claim(self):
+        raw = GitHubTLSCIIntegrationTests.encoded(tls_deadline_report_data("hosts"))
+        hashes = tls_deadline_ambient_hashes_data(GitHubTLSCIIntegrationTests.context())
+        for index, value in enumerate((b"", bytearray(raw), raw.decode(), raw[:-1], raw + b"{}", b"\xff", b"x" * 131073,
+                raw.replace(b'"passed":true', b'"passed":true,"passed":true', 1),
+                raw.replace(b'"elapsedMs":12000', b'"elapsedMs":NaN', 1),
+                raw.replace(b'"elapsedMs":12000', b'"elapsedMs":1.0', 1),
+                b'{"nested":' + b'[' * 17 + b'0' + b']' * 17 + b'}')):
+            with self.subTest(raw=index), self.assertRaises(helper.CheckFailure):
+                helper.parse_github_tls_deadline_receipt(value, bindings=tls_deadline_binding_data(), profile="hosts", ambient_hashes=hashes)
+
+
 class GitHubTLSWorkflowContractTests(unittest.TestCase):
-    def test_tls_workflow_has_own_fixed_chain_and_only_six_redacted_artifacts(self):
+    def test_tls_workflow_has_one_compilation_fixed_profiles_and_only_nine_redacted_artifacts(self):
         # One bounded SOURCE read. No YAML loader, workflow dispatch or shell.
         import re
         path = SOURCE / ".github/workflows/desktop-github-connection-tls.yml"
@@ -5187,8 +5846,8 @@ class GitHubTLSWorkflowContractTests(unittest.TestCase):
         self.assertLessEqual(len(raw), 16384)
         workflow = raw.decode("utf-8")
         self.assertEqual(re.findall(r"^  ([a-z][a-z0-9-]*):$", workflow.split("\njobs:\n", 1)[1], re.MULTILINE), ["github-readonly-tls-native"])
-        self.assertEqual(re.findall(r"ci_foundation\.py ([a-z-]+)'", workflow), ["prepare", "acquire", "compile", "github-tls", "clean"])
-        self.assertEqual(len(re.findall(r"^        run:", workflow, re.MULTILINE)), 7)
+        self.assertEqual(re.findall(r"ci_foundation\.py ([a-z-]+)'", workflow), ["prepare", "acquire", "compile", "github-tls", "github-tls-deadline", "clean"])
+        self.assertEqual(len(re.findall(r"^        run:", workflow, re.MULTILINE)), 8)
         compiler_check = '"$MRK_PYTHON" -I -S -B tests/desktop/test_github_tls_peer_compile.py PeerCompileWarningTests -v'
         self.assertEqual(workflow.count(compiler_check), 1)
         self.assertLess(workflow.index("ci_foundation.py prepare"), workflow.index(compiler_check))
@@ -5209,7 +5868,10 @@ class GitHubTLSWorkflowContractTests(unittest.TestCase):
                 "MRK_DESKTOP_HOSTED_CHECKS: github-readonly-tls-native-v1", "if: success()",
                 "if: always() && steps.prepare.outcome == 'success'"):
             self.assertIn(guard, workflow)
-        self.assertEqual(workflow.count('"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py'), 5)
+        self.assertEqual(workflow.count('"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py'), 6)
+        self.assertEqual(workflow.count("ci_foundation.py compile'"), 1)
+        self.assertIn("      - tests/desktop/test_github_tls_deadline_peer_contract.py\n", workflow)
+        self.assertIn("      - tests/desktop/test_github_tls_resolver_policy.py\n", workflow)
         self.assertEqual(re.findall(r"uses: ([^\s]+)", workflow), [
             "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
             "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
@@ -5217,7 +5879,23 @@ class GitHubTLSWorkflowContractTests(unittest.TestCase):
         paths = workflow.split("          path: |\n", 1)[1].split("          if-no-files-found:", 1)[0]
         self.assertEqual([line.strip() for line in paths.splitlines()], ["${{ steps.prepare.outputs.root }}/" + name for name in (
             "public-bindings.json", "acquire-checks.json", "compile-checks.json", "github-tls-checks.json",
-            "github-tls/receipt.json", "clean-checks.json")])
+            "github-tls/receipt.json", "github-tls-deadline-checks.json", "github-tls-deadline/hosts/receipt.json",
+            "github-tls-deadline/dns-withhold/receipt.json", "clean-checks.json")])
+
+    def test_tls_build_explicitly_anchors_both_manifests_without_promoting_adjacent_bytes(self):
+        # One bounded SOURCE read; this never executes the build script.
+        with (SOURCE / "desktop/src-tauri/build.rs").open("rb") as stream:
+            raw = stream.read(8192 + 1)
+        self.assertLessEqual(len(raw), 8192)
+        build = raw.decode("utf-8")
+        for key in ("MRK_GITHUB_TLS_INPUTS_SHA256", "MRK_GITHUB_TLS_DEADLINE_INPUTS_SHA256"):
+            self.assertEqual(build.count(f'anchor("{key}");'), 1)
+        self.assertIn('println!("cargo:rerun-if-env-changed={name}")', build)
+        self.assertIn('println!("cargo:rustc-env={name}={value}")', build)
+        self.assertIn('value.len() != 64', build)
+        self.assertIn("(b'a'..=b'f').contains(&c)", build)
+        for dynamic in ("std::fs", "read_to_string", "std::process", "Command::new", "github-tls-inputs.json", "github-tls-deadline-inputs.json"):
+            self.assertNotIn(dynamic, build)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-name: Desktop GitHub TLS T1-T3 and T6 native verification
+name: Desktop GitHub TLS T1-T3 and T6 with T4-T5 native verification
 
 on:
   push:
@@ -9,13 +9,15 @@ on:
       - templates/workflows/**
       - tests/desktop/test_ci_foundation_contract.py
       - tests/desktop/test_github_tls_peer_compile.py
+      - tests/desktop/test_github_tls_resolver_policy.py
+      - tests/desktop/test_github_tls_deadline_peer_contract.py
       - pyproject.toml
       - .github/workflows/desktop-github-workflow-apply-native.yml
       - .github/workflows/desktop-github-connection-tls.yml
   workflow_dispatch:
     inputs:
       expected_sha:
-        description: Exact reviewed T1-T3 and T6 synthetic TLS candidate (no live GitHub)
+        description: Exact reviewed T1-T3 and T6 with T4-T5 synthetic TLS candidate (no live GitHub)
         required: true
         type: string
 
@@ -28,7 +30,7 @@ concurrency:
 
 jobs:
   github-readonly-tls-native:
-    name: Fixed headless GitHub TLS T1-T3 and T6 / linux
+    name: Fixed headless GitHub TLS T1-T3 and T6 with T4-T5 / linux
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -108,7 +110,19 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py github-tls'
+      - name: Verify ambient isolation and real deadlines using the same original artifact
+        # Six hosts cases must independently settle before the withheld-DNS
+        # namespace starts. No recompile, live GitHub, or generic test selection.
+        timeout-minutes: 6
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py github-tls-deadline'
       - name: Validate independent product, peer and outer finality before finite cleanup
+        # All three original namespace outcomes and every owner/probe/peer join
+        # are required. A passed libtest or workflow step alone is insufficient.
         if: success()
         timeout-minutes: 2
         shell: bash
@@ -128,6 +142,9 @@ jobs:
             ${{ steps.prepare.outputs.root }}/compile-checks.json
             ${{ steps.prepare.outputs.root }}/github-tls-checks.json
             ${{ steps.prepare.outputs.root }}/github-tls/receipt.json
+            ${{ steps.prepare.outputs.root }}/github-tls-deadline-checks.json
+            ${{ steps.prepare.outputs.root }}/github-tls-deadline/hosts/receipt.json
+            ${{ steps.prepare.outputs.root }}/github-tls-deadline/dns-withhold/receipt.json
             ${{ steps.prepare.outputs.root }}/clean-checks.json
           if-no-files-found: error
           retention-days: 14

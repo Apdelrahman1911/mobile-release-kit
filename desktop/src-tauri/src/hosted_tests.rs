@@ -40,6 +40,9 @@ pub(super) struct Observation {
     pub driver_joined: bool, pub watchdog_joined: bool,
     #[serde(skip)]
     pub observer_joined: bool,
+    #[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[serde(skip)]
+    pub github_initial_environment: Option<bool>,
     // Private copies only. In particular the passive-hosted-v2 serialized
     // observation and its M1/M2 field set are unchanged.
     #[cfg(windows)]
@@ -93,6 +96,8 @@ pub(super) struct Hooks {
     #[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) github_tls: Mutex<Option<github_tls::GitHubTlsRuntime>>,
     #[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) github_observe_environment: AtomicBool,
+    #[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     github_document_minted: AtomicBool,
 }
 impl Hooks {
@@ -123,6 +128,34 @@ pub(super) async fn observed_read<R: AsyncRead + Unpin>(reader: R, limit: usize,
 fn require(value: bool, code: &'static str) -> Check<()> { if value { Ok(()) } else { Err(code) } }
 fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 fn environment(name: &str) -> Check<String> { std::env::var(name).map_err(|_| "missing_hosted_input") }
+#[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(super) fn original_child_environment(original_id: u32) -> Result<Option<bool>, ()> {
+    use std::{io::Read, os::unix::fs::OpenOptionsExt};
+    if original_id == 0 { return Ok(None); }
+    let path = PathBuf::from(format!("/proc/{original_id}/environ"));
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC;
+    let mut bytes = [0u8; 8193];
+    let Ok(mut original) = fs::OpenOptions::new().read(true).custom_flags(flags.bits() as i32).open(path) else { return Ok(None); };
+    let read = (|| {
+        let mut length = 0;
+        while length < bytes.len() {
+            let count = original.read(&mut bytes[length..]).map_err(|_| ())?;
+            if count == 0 { return Ok(length); }
+            length += count;
+        }
+        Err(())
+    })();
+    let closed = nix::unistd::close(original).is_ok(); // One original close; no numeric retry.
+    let allowed = match read {
+        Ok(length) if length > 0 && length <= 8192 && bytes[length - 1] == 0 => {
+            let entries = bytes[..length - 1].split(|byte| *byte == 0).collect::<Vec<_>>();
+            Some(entries.len() == 2 && entries.contains(&b"LANG=C".as_slice()) && entries.contains(&b"LC_ALL=C".as_slice()))
+        },
+        _ => None,
+    };
+    bytes.fill(0); // Only the allowlist boolean leaves this original reader.
+    if closed { Ok(allowed) } else { Err(()) }
+}
 fn selected(name: &str) -> Check<PathBuf> {
     let path = PathBuf::from(environment(name)?);
     require(path.is_absolute(), "hosted_input_not_absolute")?;
@@ -142,13 +175,21 @@ impl Inputs {
         Self::admit_mode("passive-v1")
     }
     fn admit_mode(mode: &'static str) -> Check<Self> {
+        Self::admit_scoped(mode, None)
+    }
+    fn admit_scoped(mode: &'static str, scope: Option<&'static str>) -> Check<Self> {
         // Defense in depth only: runner scheduling must also be approved before
         // the triggering push. Setting these strings is not execution authority.
         require(environment("MRK_DESKTOP_HOSTED_CHECKS")? == mode
             && environment("GITHUB_ACTIONS")? == "true"
             && environment("RUNNER_ENVIRONMENT")? == "github-hosted", "hosted_admission_required")?;
         require(matches!(std::env::consts::OS, "linux" | "macos" | "windows"), "unsupported_host")?;
-        let root = selected("MRK_DESKTOP_TEST_ROOT")?;
+        let mut root = selected("MRK_DESKTOP_TEST_ROOT")?;
+        if let Some(scope) = scope {
+            require(mode == "github-readonly-tls-deadline-v1" && matches!(scope, "hosts" | "dns-withhold"), "hosted_scope")?;
+            root = root.join(scope);
+            fs::create_dir(&root).map_err(|_| "hosted_scope_not_fresh")?;
+        }
         require(fs::read_dir(&root).map_err(|_| "test_root_unavailable")?.next().is_none(), "test_root_not_fresh")?;
         let source = selected("MRK_DESKTOP_DEV_CORE")?;
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -310,6 +351,8 @@ impl Case {
                     || !observed.driver_joined || !observed.watchdog_joined { return false; }
             }
             let resources = owner.resources.lock().await;
+            #[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if resources.github_environment.is_some() { return false; }
             if resources.inspection.is_some() || resources.acquisition.is_some() || resources.child.is_some()
                 || resources.writer.is_some() || resources.stdout.is_some() || resources.stderr.is_some()
                 || resources.failed_writer.is_some() || resources.failed_stdout.is_some() || resources.failed_stderr.is_some() { return false; }
@@ -2961,6 +3004,16 @@ async fn windows_static_snapshot_hosted_contract() { windows_snapshot::run().awa
 async fn github_tls_hosted_contract() { github_tls::run().await; }
 
 #[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the separately reviewed disposable T4/T5 hosts namespace"]
+async fn github_tls_deadline_hosts_hosted_contract() { github_tls::run_deadline("hosts").await; }
+
+#[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the separately reviewed disposable T5 dns-withhold namespace"]
+async fn github_tls_deadline_dns_hosted_contract() { github_tls::run_deadline("dns-withhold").await; }
+
+#[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) mod github_tls {
     use super::*;
     use std::{collections::{BTreeMap, BTreeSet}, io::{Read, Write}, os::unix::fs::{MetadataExt, PermissionsExt}};
@@ -2968,6 +3021,7 @@ pub(crate) mod github_tls {
     use crate::github_connection_protocol::{Coverage, FactState, Permission, Presence, Reason, Visibility, WorkflowState};
 
     const INPUTS_ANCHOR: Option<&str> = option_env!("MRK_GITHUB_TLS_INPUTS_SHA256");
+    const DEADLINE_INPUTS_ANCHOR: Option<&str> = option_env!("MRK_GITHUB_TLS_DEADLINE_INPUTS_SHA256");
     const BOOTSTRAP: &[u8] = include_bytes!("../../github_connection_bootstrap.py");
     const PEER: &[u8] = include_bytes!("../tests/fixtures/github_tls_peer.py");
     const NAMESPACE: &[u8] = include_bytes!("../tests/fixtures/github_tls_namespace.sh");
@@ -3064,12 +3118,15 @@ pub(crate) mod github_tls {
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct Ssl { openssl_version: String, ignore_unexpected_eof: u64 }
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Resolver { family: String, version: String, nss: String }
+    #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct Manifest {
         schema_version: u32, scope: String, source_sha: String, source_tree: String, workflow_sha256: String,
         run_id: String, attempt: String, source_root: PathBuf, job_root: PathBuf, python: PathBuf,
         core_source: PathBuf, core_zip: PathBuf, uid: u32, gid: u32, parent_netns: String, parent_mntns: String,
-        ssl: Ssl, roles: BTreeMap<String, PathBuf>, files: Vec<TlsFile>,
+        ssl: Ssl, #[serde(default)] resolver: Option<Resolver>, roles: BTreeMap<String, PathBuf>, files: Vec<TlsFile>,
     }
     impl Manifest {
         fn role(&self, name: &str) -> Check<&Path> { self.roles.get(name).map(PathBuf::as_path).ok_or("tls_role_missing") }
@@ -3095,20 +3152,31 @@ pub(crate) mod github_tls {
     struct Admitted { inputs: Inputs, common: Arc<Common> }
     impl Admitted {
         fn new() -> Check<Self> {
-            let inputs = Inputs::admit_mode("github-readonly-tls-v1")?;
+            Self::new_profile(None)
+        }
+        fn new_profile(profile: Option<&'static str>) -> Check<Self> {
+            require(profile.is_none() || matches!(profile, Some("hosts" | "dns-withhold")), "tls_profile")?;
+            let inputs = Inputs::admit_scoped(if profile.is_some() { "github-readonly-tls-deadline-v1" }
+                else { "github-readonly-tls-v1" }, profile)?;
             require(crate::runtime::COMPILED_TARGET == "x86_64-unknown-linux-gnu"
                 && !crate::runtime::GITHUB_TLS_PROFILE_QUALIFIED && lock(&RETAINED).is_none()
                 && environment("GITHUB_REF")? == "refs/heads/verify/desktop-github-connection-tls", "tls_host_or_route")?;
-            let anchor = INPUTS_ANCHOR.filter(|value| sha(value, 64)).ok_or("tls_compile_anchor_missing")?;
+            let anchor = (if profile.is_some() { DEADLINE_INPUTS_ANCHOR } else { INPUTS_ANCHOR })
+                .filter(|value| sha(value, 64)).ok_or("tls_compile_anchor_missing")?;
             let input_path = PathBuf::from(environment("MRK_GITHUB_TLS_INPUTS")?);
             let bytes = read(&input_path, 1024 * 1024)?;
             require(hash(&bytes) == anchor, "tls_inputs_compile_binding")?;
-            let manifest: Manifest = serde_json::from_value(protocol::strict_json(&bytes).map_err(|_| "tls_inputs_json")?)
-                .map_err(|_| "tls_inputs_schema")?;
+            let manifest_value = protocol::strict_json(&bytes).map_err(|_| "tls_inputs_json")?;
+            // Presence is checked before Option deserialization: null is NOT
+            // an absent resolver field in the original16 manifest.
+            require(manifest_value.as_object().is_some_and(|value| value.contains_key("resolver") == profile.is_some()),
+                "tls_resolver_descriptor_scope")?;
+            let manifest: Manifest = serde_json::from_value(manifest_value).map_err(|_| "tls_inputs_schema")?;
             let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).parent().and_then(Path::parent).ok_or("tls_source_layout")?
                 .canonicalize().map_err(|_| "tls_source_layout")?;
             let python = selected("MRK_DESKTOP_DEV_PYTHON")?;
-            require(manifest.schema_version == 1 && manifest.scope == "github-readonly-tls-native-v1"
+            require(manifest.schema_version == 1 && manifest.scope == (if profile.is_some() {
+                    "github-readonly-tls-deadline-native-v1" } else { "github-readonly-tls-native-v1" })
                 && sha(&manifest.source_sha, 40) && sha(&manifest.source_tree, 40) && sha(&manifest.workflow_sha256, 64)
                 && manifest.source_sha == environment("GITHUB_SHA")? && manifest.workflow_sha256 == hash(WORKFLOW)
                 && digits(&manifest.run_id) && digits(&manifest.attempt)
@@ -3117,12 +3185,20 @@ pub(crate) mod github_tls {
                 && manifest.core_source == inputs.source && manifest.core_zip == inputs.zip && manifest.python == python,
                 "tls_inputs_binding")?;
             path(&manifest.job_root)?;
-            require(input_path == manifest.job_root.join("github-tls-inputs.json") && inputs.root.starts_with(&manifest.job_root)
+            require(input_path == manifest.job_root.join(if profile.is_some() { "github-tls-deadline-inputs.json" } else { "github-tls-inputs.json" })
+                && inputs.root.starts_with(&manifest.job_root)
                 && inputs.root != manifest.job_root && !inputs.root.starts_with(&checkout), "tls_private_layout")?;
             require(manifest.ssl.openssl_version.starts_with("OpenSSL ") && manifest.ssl.openssl_version.len() <= 160
                 && manifest.ssl.openssl_version.is_ascii() && manifest.ssl.ignore_unexpected_eof > 0,
                 "tls_genuine_ssl_binding")?;
-            require(manifest.roles.len() == ROLES.len() && ROLES.iter().all(|role| manifest.roles.contains_key(*role))
+            let mut expected_roles = ROLES.iter().copied().collect::<BTreeSet<_>>();
+            if profile.is_some() {
+                for name in ["hosts", "resolv.conf", "nsswitch.conf"] { expected_roles.remove(name); }
+                expected_roles.extend(["hosts:hosts", "hosts:resolv.conf", "hosts:nsswitch.conf",
+                    "dns-withhold:hosts", "dns-withhold:resolv.conf", "dns-withhold:nsswitch.conf",
+                    "libc", "resolver:host.conf", "resolver:gai.conf"]);
+            }
+            require(manifest.roles.len() == expected_roles.len() && expected_roles.iter().all(|role| manifest.roles.contains_key(*role))
                 && !manifest.files.is_empty() && manifest.files.len() <= 2048, "tls_input_roster")?;
             let mut previous: Option<&str> = None;
             let mut total = 0u64;
@@ -3157,8 +3233,10 @@ pub(crate) mod github_tls {
                 require(read(manifest.role(role)?, expected.len() as u64)?.as_slice() == expected, "tls_compiled_fixture_binding")?;
             }
             for name in ["hosts", "resolv.conf", "nsswitch.conf"] {
-                let expected = manifest.job_root.join("github-tls-namespace").join(name);
-                require(manifest.role(name)? == expected, "tls_resolver_role")?;
+                let role = profile.map_or_else(|| name.to_owned(), |profile| format!("{profile}:{name}"));
+                let directory = profile.map_or_else(|| "github-tls-namespace".to_owned(), |profile| format!("github-tls-deadline-namespace-{profile}"));
+                let expected = manifest.job_root.join(directory).join(name);
+                require(manifest.role(&role)? == expected, "tls_resolver_role")?;
                 let visible = Path::new("/etc").join(name);
                 let visible = if name == "resolv.conf" {
                     // Only Ubuntu's fixed resolver aliases, already admitted
@@ -3171,6 +3249,7 @@ pub(crate) mod github_tls {
                 } else { visible };
                 require(read(&expected, 16 * 1024)? == read(&visible, 16 * 1024)?, "tls_private_resolver_bytes")?;
             }
+            if let Some(profile) = profile { deadline::admit_resolver(&manifest, profile)?; }
             let netns = environment("MRK_TLS_NETNS")?;
             let mntns = environment("MRK_TLS_MNTNS")?;
             require(ns(&manifest.parent_netns, "net:[") && ns(&manifest.parent_mntns, "mnt:[")
@@ -3247,6 +3326,7 @@ pub(crate) mod github_tls {
         match value {
             Reason::None => "none", Reason::TlsFailed => "tls-failed", Reason::ResponseInvalid => "response-invalid",
             Reason::ResponseLimit => "response-limit", Reason::Unauthorized => "unauthorized", Reason::TargetChanged => "target-changed",
+            Reason::NetworkUnavailable => "network-unavailable",
             _ => "unexpected",
         }
     }
@@ -3254,7 +3334,8 @@ pub(crate) mod github_tls {
         bytes.len() <= 1024 && protocol::strict_json(bytes).ok() == Some(json!({
             "schemaVersion":1,"scope":"github-tls-peer-v1","case":name,"state":"ready"}))
     }
-    async fn peer_stdout<R: AsyncRead + Unpin>(mut reader: R, name: &'static str, ready_tx: oneshot::Sender<bool>) -> ReadEnd {
+    async fn peer_stdout<R: AsyncRead + Unpin>(mut reader: R, name: &'static str, ready_tx: oneshot::Sender<bool>,
+        progress: Option<Arc<Mutex<deadline::Arrivals>>>) -> ReadEnd {
         let mut ready_tx = Some(ready_tx);
         let mut bytes = Vec::new();
         let mut overflow = false;
@@ -3263,9 +3344,12 @@ pub(crate) mod github_tls {
             match reader.read(&mut buffer).await {
                 Ok(0) => return ReadEnd { bytes, eof: true, overflow },
                 Ok(length) => {
+                    let original_read_at = Instant::now();
                     let keep = length.min(PEER_OUTPUT_LIMIT.saturating_sub(bytes.len()));
+                    let previous = bytes.len();
                     bytes.extend_from_slice(&buffer[..keep]);
                     overflow |= keep != length;
+                    if let Some(progress) = &progress { lock(progress).observe(&bytes, previous, original_read_at); }
                     if let Some(end) = bytes.iter().position(|byte| *byte == b'\n') {
                         if let Some(tx) = ready_tx.take() { let _ = tx.send(ready(&bytes[..end], name)); }
                     } else if bytes.len() > 1024 || overflow {
@@ -3495,6 +3579,7 @@ pub(crate) mod github_tls {
         stdout_started: bool, stderr_started: bool, stdout_joined: bool, stderr_joined: bool, stdout_failed: bool, stderr_failed: bool,
         out: Option<ReadEnd>, err: Option<ReadEnd>, ready_rx: Option<oneshot::Receiver<bool>>, ready: bool,
         control: Option<PeerControl>,
+        progress: Option<Arc<Mutex<deadline::Arrivals>>>,
         waited: Option<ExitStatus>, wait_failed: bool, stop_attempted: bool, expired: bool,
         settled: bool, protocol_checked: bool, terminal: Option<Value>,
     }
@@ -3555,10 +3640,11 @@ pub(crate) mod github_tls {
             let (ready_tx, ready_rx) = oneshot::channel();
             self.ready_rx = Some(ready_rx);
             let original = self.stdout_original.clone();
+            let progress = self.progress.clone();
             self.stdout = Some(tokio::spawn(async move {
                 let mut original = original.lock().await;
                 let Some(stdout) = original.as_mut() else { return ReadEnd { bytes: Vec::new(), eof: false, overflow: false }; };
-                let end = peer_stdout(stdout, name, ready_tx).await;
+                let end = peer_stdout(stdout, name, ready_tx, progress).await;
                 if end.eof { drop(original.take()); }
                 end
             }));
@@ -3656,7 +3742,10 @@ pub(crate) mod github_tls {
             // projection assertion. A projection failure can still dispose with
             // S, but cannot turn the case into success. False/unwind/missing
             // completion instead returns the close-only writer's failure.
-            if (failed && self.control.is_none()) || self.control.as_ref().is_some_and(|control| control.failed) { self.stop_original(); }
+            // Failed literal deadline cases dispose their own original peer
+            // promptly, including after late acquisition; T6 still waits for S.
+            if (failed && (self.control.is_none() || deadline::case_name(name)))
+                || self.control.as_ref().is_some_and(|control| control.failed) { self.stop_original(); }
             loop {
                 let wait_pending = self.child.is_some() && self.waited.is_none() && !self.wait_failed;
                 let out_pending = self.stdout.is_some() && !self.stdout_failed;
@@ -4062,5 +4151,1198 @@ pub(crate) mod github_tls {
         }
         std::env::set_var("MRK_DESKTOP_DEV_CORE", &admitted.inputs.source); // Every original client AND peer settled.
         if receipt.write("passed", None).is_err() { panic!("TLS final receipt failed after independent settlement"); }
+    }
+
+    pub(super) async fn run_deadline(profile: &'static str) { deadline::run(profile).await; }
+
+    // Seven fixed follow-on cases. These are not a product transport, a generic
+    // process runner or permission to invoke native fixtures on a shared host.
+    // The original16 parser and its positive owner predicates above remain
+    // separate; a timeout cannot become an accepted T1--T3 or T6 result.
+    mod deadline {
+        use super::*;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        const DIRECT_ID: &str = "tls-direct-1";
+        const CLIENT_RESERVE: Duration = Duration::from_secs(14);
+        const CADENCE: Duration = Duration::from_millis(1500);
+        const HELPER_EARLIEST: Duration = Duration::from_secs(10);
+        const HELPER_LATEST: Duration = Duration::from_secs(12);
+        const GET_LATEST: Duration = Duration::from_secs(2);
+        const NOT_VERIFIED: &[&str] = &["populated-ambient-ca-directory", "platform-trust-stores",
+            "getaddrinfo-internal-cancellation", "T6-streaming-controls", "CA-file-native-faults",
+            "native-stuck-spawn-wait-close", "real-github-authentication", "production-runtime-custody",
+            "native-gui", "native-document-lifecycle", "packaged-runtime", "production-enablement"];
+        const HOSTS: &[Scenario] = &[
+            Scenario { name: "T4-owner-clear", zip: false, other_root: false, reason: Reason::None, connections: 4 },
+            Scenario { name: "T4-ambient-fixed", zip: false, other_root: false, reason: Reason::None, connections: 4 },
+            Scenario { name: "T4-ambient-no-rescue", zip: false, other_root: true, reason: Reason::TlsFailed, connections: 1 },
+            Scenario { name: "T5-handshake", zip: false, other_root: false, reason: Reason::NetworkUnavailable, connections: 1 },
+            Scenario { name: "T5-read", zip: false, other_root: false, reason: Reason::NetworkUnavailable, connections: 1 },
+            Scenario { name: "T5-helper-read", zip: false, other_root: false, reason: Reason::NetworkUnavailable, connections: 1 },
+        ];
+        const DNS: &[Scenario] = &[
+            Scenario { name: "T5-dns", zip: false, other_root: false, reason: Reason::NetworkUnavailable, connections: 0 },
+        ];
+        fn direct(name: &str) -> bool { matches!(name, "T4-ambient-fixed" | "T4-ambient-no-rescue" | "T5-helper-read") }
+        fn owner_deadline(name: &str) -> bool { matches!(name, "T5-dns" | "T5-handshake" | "T5-read") }
+        pub(super) fn case_name(name: &str) -> bool { name == "T4-owner-clear" || direct(name) || owner_deadline(name) }
+        fn elapsed(origin: Instant, observation: Instant) -> Option<u64> {
+            observation.checked_duration_since(origin).and_then(|value| u64::try_from(value.as_nanos()).ok())
+        }
+
+        #[derive(Default)]
+        pub(super) struct Arrivals {
+            frames: Vec<(usize, Instant)>, observed_bytes: usize, invalid: bool,
+        }
+        impl Arrivals {
+            pub(super) fn observe(&mut self, bytes: &[u8], previous: usize, at: Instant) {
+                // Called only by the normally driven original stdout reader,
+                // immediately after its read. Store LF offsets/times, not a
+                // second stream, peer timestamps or later parsing/wait times.
+                if previous != self.observed_bytes || previous > bytes.len() || bytes.len() > PEER_OUTPUT_LIMIT {
+                    self.invalid = true; return;
+                }
+                for (offset, byte) in bytes[previous..].iter().enumerate() {
+                    if *byte == b'\n' {
+                        if self.frames.len() == 26 { self.invalid = true; break; }
+                        self.frames.push((previous + offset + 1, at));
+                    }
+                }
+                self.observed_bytes = bytes.len();
+            }
+        }
+        #[derive(Clone, Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Progress {
+            schema_version: u32, scope: String, #[serde(rename = "case")] case_name: String, state: String,
+            event: String, sequence: u64, requests: u64, body_bytes: u64, wire_read_bytes: u64,
+            wire_write_bytes: u64, dns_questions: u64, dns_a: u64, dns_aaaa: u64, client_stop: Option<String>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Proxy { empty: bool, unexpected: u64, closed: bool }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Completion {
+            bytes: u64, eof: bool, closed: bool, primary_empty: bool, primary_unexpected: u64,
+            primary_closed: bool, proxy: Option<Proxy>, dns_empty: Option<bool>, dns_closed: Option<bool>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Terminal {
+            schema_version: u32, scope: String, #[serde(rename = "case")] case_name: String, state: String,
+            status: String, code: Option<String>, connections: u64, handshakes: u64, requests: u64,
+            decrypted_bytes: u64, auth_bytes: u64, close_notify: u64, tls_refused: bool,
+            wire_read_bytes: Vec<u64>, wire_write_bytes: Vec<u64>, reply_bytes: Vec<u64>, all_sockets_closed: bool,
+            sni: u64, phase: String, withheld_wire_bytes: u64, body_bytes: u64, incomplete_body: bool,
+            client_stop: Option<String>, progress_count: u64, dns_questions: u64, dns_a: u64,
+            dns_aaaa: u64, dns_replies: u64, completion: Completion,
+        }
+        struct Frames { progress: Vec<(Progress, Instant)>, terminal: Terminal }
+        fn fields(value: &Value, expected: &[&str], code: &'static str) -> Check<()> {
+            require(value.as_object().is_some_and(|row| row.len() == expected.len()
+                && expected.iter().all(|name| row.contains_key(*name))), code)
+        }
+        fn client_stop(value: Option<&str>, handshake: bool) -> bool {
+            matches!(value, Some("tcp-eof" | "connection-reset"))
+                || !handshake && matches!(value, Some("broken-pipe" | "tls-close-notify"))
+        }
+        impl Frames {
+            fn from_original(peer: &mut Peer, scenario: &Scenario) -> Check<Self> {
+                require(peer.settled && peer.spawned && peer.ready && !peer.expired && !peer.stop_attempted
+                    && peer.waited.as_ref().is_some_and(ExitStatus::success), "tls_deadline_peer_native")?;
+                let endpoint = peer.endpoint.ok_or("tls_peer_endpoint_missing")?;
+                let control = peer.control.as_ref().ok_or("tls_deadline_control_missing")?;
+                require(control.settled() && !control.failed
+                    && control.joined_at.is_some_and(|at| at < endpoint)
+                    && control.end.as_ref().is_some_and(|end| end.product_settled && end.write_complete
+                        && end.shutdown_complete && !end.failed && end.completed_at.is_some_and(|at| at < endpoint)),
+                    "tls_deadline_control_not_confirmed")?;
+                let out = peer.out.as_ref().ok_or("tls_peer_stdout_missing")?;
+                let err = peer.err.as_ref().ok_or("tls_peer_stderr_missing")?;
+                require(out.eof && err.eof && !out.overflow && !err.overflow && err.bytes.is_empty()
+                    && out.bytes.len() <= PEER_OUTPUT_LIMIT, "tls_deadline_peer_output")?;
+                let arrivals = lock(peer.progress.as_ref().ok_or("tls_deadline_arrivals_missing")?);
+                let lines = out.bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+                require(!arrivals.invalid && arrivals.observed_bytes == out.bytes.len()
+                    && (3..=27).contains(&lines.len()) && lines.last().is_some_and(|line| line.is_empty())
+                    && lines.len() == arrivals.frames.len() + 1 && ready(lines[0], scenario.name), "tls_deadline_frame_count")?;
+                let mut offset = 0usize;
+                let mut previous_time = None;
+                for (line, (end, at)) in lines[..lines.len() - 1].iter().zip(&arrivals.frames) {
+                    offset += line.len() + 1;
+                    require(!line.is_empty() && line.len() <= 4096 && *end == offset && *at < endpoint
+                        && previous_time.map_or(true, |before| before <= *at), "tls_deadline_frame_arrival")?;
+                    previous_time = Some(*at);
+                }
+                let mut progress = Vec::new();
+                for (index, line) in lines[1..lines.len() - 2].iter().enumerate() {
+                    let value = protocol::strict_json(line).map_err(|_| "tls_deadline_progress_json")?;
+                    fields(&value, &["schemaVersion", "scope", "case", "state", "event", "sequence", "requests", "bodyBytes",
+                        "wireReadBytes", "wireWriteBytes", "dnsQuestions", "dnsA", "dnsAAAA", "clientStop"], "tls_deadline_progress_fields")?;
+                    let item: Progress = serde_json::from_value(value).map_err(|_| "tls_deadline_progress_schema")?;
+                    require(item.schema_version == 1 && item.scope == "github-tls-peer-v1" && item.case_name == scenario.name
+                        && item.state == "progress" && item.sequence == index as u64 + 1 && item.sequence <= 24,
+                        "tls_deadline_progress_identity")?;
+                    progress.push((item, arrivals.frames[index + 1].1));
+                }
+                let value = protocol::strict_json(lines[lines.len() - 2]).map_err(|_| "tls_deadline_terminal_json")?;
+                fields(&value, &["schemaVersion", "scope", "case", "state", "status", "code", "connections", "handshakes", "requests",
+                    "decryptedBytes", "authBytes", "closeNotify", "tlsRefused", "wireReadBytes", "wireWriteBytes", "replyBytes",
+                    "allSocketsClosed", "sni", "phase", "withheldWireBytes", "bodyBytes", "incompleteBody", "clientStop",
+                    "progressCount", "dnsQuestions", "dnsA", "dnsAAAA", "dnsReplies", "completion"], "tls_deadline_terminal_fields")?;
+                fields(&value["completion"], &["bytes", "eof", "closed", "primaryEmpty", "primaryUnexpected", "primaryClosed",
+                    "proxy", "dnsEmpty", "dnsClosed"], "tls_deadline_completion_fields")?;
+                let terminal: Terminal = serde_json::from_value(value.clone()).map_err(|_| "tls_deadline_terminal_schema")?;
+                let frames = Self { progress, terminal };
+                frames.check(scenario)?;
+                drop(arrivals);
+                peer.terminal = Some(value); // Validated redacted fields only.
+                peer.protocol_checked = true;
+                Ok(frames)
+            }
+            fn check(&self, scenario: &Scenario) -> Check<()> {
+                let facts = &self.terminal;
+                let completion = &facts.completion;
+                let dns = scenario.name == "T5-dns";
+                let handshake = scenario.name == "T5-handshake";
+                let read = matches!(scenario.name, "T5-read" | "T5-helper-read");
+                let refused = scenario.name == "T4-ambient-no-rescue";
+                let requests = if dns || handshake || refused { 0 } else { scenario.connections };
+                require(facts.schema_version == 1 && facts.scope == "github-tls-peer-v1" && facts.case_name == scenario.name
+                    && facts.state == "finished" && facts.status == "passed" && facts.code.is_none() && facts.all_sockets_closed
+                    && facts.connections == scenario.connections && facts.sni == scenario.connections
+                    && facts.handshakes == requests && facts.requests == requests && facts.tls_refused == refused
+                    && facts.decrypted_bytes <= facts.connections * 8192
+                    && facts.auth_bytes == requests * b"Bearer INERT_NOT_A_CREDENTIAL".len() as u64
+                    && facts.decrypted_bytes >= facts.auth_bytes && facts.close_notify == (if read || handshake || refused || dns { 0 } else { 4 })
+                    && facts.phase == (if dns { "dns" } else if handshake { "handshake" } else if read { "read" } else { "ambient" }),
+                    "tls_deadline_peer_facts")?;
+                require(completion.bytes == 1 && completion.eof && completion.closed && completion.primary_empty
+                    && completion.primary_unexpected == 0 && completion.primary_closed
+                    && (if scenario.name.starts_with("T4-") { completion.proxy.as_ref().is_some_and(|sink| sink.empty && sink.unexpected == 0 && sink.closed) }
+                        else { completion.proxy.is_none() })
+                    && completion.dns_empty == (if dns { Some(true) } else { None })
+                    && completion.dns_closed == (if dns { Some(true) } else { None }), "tls_deadline_peer_horizon")?;
+                require(facts.wire_read_bytes.len() == facts.connections as usize && facts.wire_write_bytes.len() == facts.connections as usize
+                    && facts.reply_bytes.len() == facts.connections as usize
+                    && facts.wire_read_bytes.iter().all(|bytes| (1..=128 * 1024).contains(bytes))
+                    && facts.wire_write_bytes.iter().all(|bytes| if handshake { *bytes == 0 } else { (1..=128 * 1024).contains(bytes) })
+                    && facts.reply_bytes.iter().all(|bytes| if refused || handshake { *bytes == 0 } else { (1..=64 * 1024).contains(bytes) }),
+                    "tls_deadline_peer_wire")?;
+                require((if handshake { (1..=128 * 1024).contains(&facts.withheld_wire_bytes) } else { facts.withheld_wire_bytes == 0 })
+                    && facts.incomplete_body == read && (if read { (1..=14).contains(&facts.body_bytes) } else { facts.body_bytes == 0 }),
+                    "tls_deadline_withheld_phase")?;
+                require((if read || handshake { client_stop(facts.client_stop.as_deref(), handshake) } else { facts.client_stop.is_none() })
+                    && facts.dns_replies == 0 && facts.dns_a <= 8 && facts.dns_aaaa <= 8 && facts.dns_a + facts.dns_aaaa == facts.dns_questions
+                    && (if dns { (1..=8).contains(&facts.dns_questions) } else { facts.dns_questions == 0 })
+                    && facts.progress_count == self.progress.len() as u64, "tls_deadline_peer_phase_completion")?;
+                if refused || handshake || dns { require(facts.decrypted_bytes == 0, "tls_deadline_unexpected_http")?; }
+                let mut body = 0;
+                let mut questions = 0;
+                let mut a = 0;
+                let mut aaaa = 0;
+                let mut bytes_read = 0;
+                let mut bytes_written = 0;
+                let mut phase_seen = false;
+                let mut stopped = false;
+                for (item, _) in &self.progress {
+                    require(!stopped && item.wire_read_bytes >= bytes_read && item.wire_write_bytes >= bytes_written
+                        && item.wire_read_bytes <= facts.wire_read_bytes.iter().sum::<u64>()
+                        && item.wire_write_bytes <= facts.wire_write_bytes.iter().sum::<u64>(), "tls_deadline_progress_wire")?;
+                    match item.event.as_str() {
+                        "dns-question" => {
+                            require(dns && item.dns_questions == questions + 1 && item.dns_a <= 8 && item.dns_aaaa <= 8
+                                && item.dns_a >= a && item.dns_aaaa >= aaaa
+                                && item.dns_a + item.dns_aaaa == item.dns_questions, "tls_deadline_dns_progress")?;
+                            questions = item.dns_questions; a = item.dns_a; aaaa = item.dns_aaaa;
+                            phase_seen = true;
+                        },
+                        "client-hello" => {
+                            require(handshake && !phase_seen && item.wire_read_bytes > 0 && item.wire_write_bytes == 0,
+                                "tls_deadline_hello_progress")?;
+                            phase_seen = true;
+                        },
+                        "first-get" => {
+                            require(!dns && !handshake && !refused && !phase_seen && item.requests == 1
+                                && item.wire_read_bytes > 0 && item.wire_write_bytes > 0, "tls_deadline_get_progress")?;
+                            phase_seen = true;
+                        },
+                        "body-byte" => {
+                            require(read && phase_seen && item.body_bytes == body + 1 && item.body_bytes <= 14
+                                && item.wire_write_bytes > bytes_written, "tls_deadline_body_progress")?;
+                            body = item.body_bytes;
+                        },
+                        "client-stop" => {
+                            require((read || handshake) && phase_seen && client_stop(item.client_stop.as_deref(), handshake)
+                                && item.client_stop == facts.client_stop, "tls_deadline_client_stop")?;
+                            stopped = true;
+                        },
+                        _ => return Err("tls_deadline_progress_event"),
+                    }
+                    require(item.body_bytes == body && item.requests == (if dns || handshake || refused { 0 } else { 1 })
+                        && item.dns_questions == questions && item.dns_a == a && item.dns_aaaa == aaaa
+                        && (stopped == item.client_stop.is_some()), "tls_deadline_progress_counters")?;
+                    bytes_read = item.wire_read_bytes; bytes_written = item.wire_write_bytes;
+                }
+                require(phase_seen != refused && stopped == (read || handshake) && body == facts.body_bytes
+                    && questions == facts.dns_questions && a == facts.dns_a && aaaa == facts.dns_aaaa,
+                    "tls_deadline_progress_terminal_consistency")
+            }
+            fn first(&self, event: &str) -> Option<Instant> {
+                self.progress.iter().find(|(item, _)| item.event == event).map(|(_, at)| *at)
+            }
+            fn body_times(&self) -> Vec<Instant> {
+                self.progress.iter().filter(|(item, _)| item.event == "body-byte").map(|(_, at)| *at).collect()
+            }
+            fn evidence(&self, origin: Instant) -> Value {
+                json!(self.progress.iter().map(|(item, at)| json!({"event":item.event,"sequence":item.sequence,
+                    "requests":item.requests,"bodyBytes":item.body_bytes,"wireReadBytes":item.wire_read_bytes,
+                    "wireWriteBytes":item.wire_write_bytes,"dnsQuestions":item.dns_questions,"dnsA":item.dns_a,
+                    "dnsAAAA":item.dns_aaaa,"clientStop":item.client_stop,"afterPeerStartNs":elapsed(origin, *at)})).collect::<Vec<_>>())
+            }
+        }
+
+        // Pure predicates consume original observations; they do not control,
+        // delay, synthesize or replace the real clocks/readers above.
+        fn progressing(get: Instant, until: Instant, body: &[Instant]) -> bool {
+            !body.is_empty() && body[0] >= get && body[0] <= get + CADENCE
+                && body.windows(2).all(|pair| pair[1] > pair[0] && pair[1] <= pair[0] + CADENCE)
+                && body.iter().all(|at| *at <= until + CADENCE)
+                && body.iter().copied().filter(|at| *at <= until).last().is_some_and(|last| until <= last + CADENCE)
+        }
+        fn helper_window(launch: Instant, get: Instant, frame: Instant, stop: Instant, body: &[Instant]) -> bool {
+            get >= launch && get <= launch + GET_LATEST && frame >= launch + HELPER_EARLIEST
+                && frame <= launch + HELPER_LATEST && stop >= launch + HELPER_EARLIEST
+                && progressing(get, frame.min(stop), body)
+        }
+        fn owner_window(endpoint: Instant, cleanup: Option<Instant>, settled: Instant, phase: Instant) -> bool {
+            phase < endpoint && cleanup == Some(endpoint + CLEANUP_TIME)
+                && settled >= endpoint && settled < endpoint + CLEANUP_TIME
+        }
+
+        const CACHE_PATHS: &[&str] = &["/run/nscd/socket", "/var/run/nscd/socket", "/run/.nscd_socket", "/var/run/.nscd_socket"];
+        const CONFIGS: &[(&str, &str, &[u8])] = &[
+            ("hosts", "hosts", b"127.0.0.1 api.github.com localhost\n::1 localhost\n"),
+            ("hosts", "resolv.conf", b"# Synthetic namespace: DNS is disabled by hosts: files.\nnameserver 127.0.0.1\noptions timeout:1 attempts:1\n"),
+            ("hosts", "nsswitch.conf", b"passwd: files\ngroup: files\nhosts: files\n"),
+            ("dns-withhold", "hosts", b"127.0.0.1 localhost\n::1 localhost\n"),
+            ("dns-withhold", "resolv.conf", b"nameserver 127.0.0.1\noptions timeout:15 attempts:1 ndots:1\n"),
+            ("dns-withhold", "nsswitch.conf", b"passwd: files\ngroup: files\nhosts: dns\n"),
+        ];
+        fn caches_absent() -> bool { CACHE_PATHS.iter().all(|pathname| absent(Path::new(pathname))) }
+        fn host_configuration(bytes: &[u8], host_conf: bool) -> bool {
+            if bytes.len() > 16 * 1024 || bytes.contains(&0) { return false; }
+            let Ok(text) = std::str::from_utf8(bytes) else { return false; };
+            let mut seen = BTreeSet::new();
+            let mut count = 0;
+            for line in text.split('\n') {
+                count += 1;
+                if count > 128 || line.len() > 512 { return false; }
+                let active = line.split('#').next().unwrap_or("").trim_matches([' ', '\t', '\r']);
+                if !active.is_empty() && (!host_conf || !matches!(active, "order hosts,bind" | "multi on") || !seen.insert(active)) {
+                    return false;
+                }
+            }
+            true
+        }
+        fn proc_bytes(pathname: &'static str, limit: usize) -> Check<Vec<u8>> {
+            require(matches!(pathname, "/proc/self/maps" | "/proc/self/status"), "tls_proc_role")?;
+            let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC;
+            let mut original = fs::OpenOptions::new().read(true).custom_flags(flags.bits() as i32).open(pathname)
+                .map_err(|_| "tls_proc_open")?;
+            let mut bytes = Vec::new();
+            let result = Read::by_ref(&mut original).take(limit as u64 + 1).read_to_end(&mut bytes);
+            let closed = nix::unistd::close(original).is_ok(); // One close on success OR read failure.
+            require(closed, "tls_proc_close_unknown")?;
+            require(result.is_ok() && !bytes.is_empty() && bytes.len() <= limit, "tls_proc_read")?;
+            Ok(bytes)
+        }
+        fn mapped_libc(manifest: &Manifest) -> Check<()> {
+            let libc = manifest.role("libc")?;
+            let record = manifest.record(libc)?;
+            path(libc)?;
+            let metadata = fs::symlink_metadata(libc).map_err(|_| "tls_libc_metadata")?;
+            require(metadata.is_file() && metadata.uid() == 0 && metadata.gid() == 0 && metadata.nlink() == 1
+                && metadata.mode() & 0o7022 == 0 && file_hash(libc, record.size)? == record.sha256, "tls_libc_backing_file")?;
+            let bytes = proc_bytes("/proc/self/maps", 512 * 1024)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| "tls_libc_maps")?;
+            let mut identities = BTreeSet::new();
+            let mut segments = 0usize;
+            for line in text.lines() {
+                let words = line.split_ascii_whitespace().collect::<Vec<_>>();
+                require((5..=6).contains(&words.len()), "tls_libc_maps")?;
+                if words.len() == 5 || !words[5].starts_with('/') { continue; }
+                let mapped = Path::new(words[5]);
+                let name = mapped.file_name().and_then(|name| name.to_str()).ok_or("tls_libc_maps")?;
+                require(!name.starts_with("libnss_"), "tls_dynamic_nss_unsupported")?;
+                if name != "libc.so.6" && !name.starts_with("libc-") { continue; }
+                segments += 1;
+                require(segments <= 16, "tls_libc_map_limit")?;
+                let mapped = mapped.canonicalize().map_err(|_| "tls_libc_backing_file")?;
+                let (major, minor) = words[3].split_once(':').ok_or("tls_libc_map_device")?;
+                let major = u64::from_str_radix(major, 16).map_err(|_| "tls_libc_map_device")?;
+                let minor = u64::from_str_radix(minor, 16).map_err(|_| "tls_libc_map_device")?;
+                let inode = words[4].parse::<u64>().map_err(|_| "tls_libc_map_inode")?;
+                require(mapped == libc && inode == metadata.ino() && major == nix::sys::stat::major(metadata.dev())
+                    && minor == nix::sys::stat::minor(metadata.dev()), "tls_libc_original_mapping")?;
+                identities.insert((major, minor, inode, mapped));
+            }
+            // Multiple normal ELF segment VMAs are one backing object. This is
+            // equality to the very libc genuinely version-probed by the selected
+            // Python collector, NOT a second native Rust glibc-version probe.
+            require(segments > 0 && identities.len() == 1
+                && stamp(&fs::symlink_metadata(libc).map_err(|_| "tls_libc_metadata")?) == stamp(&metadata), "tls_libc_original_mapping")
+        }
+        fn resolver_runtime(manifest: &Manifest) -> Check<()> {
+            require(manifest.resolver.as_ref().is_some_and(|resolver| resolver.family == "glibc"
+                && resolver.version == "2.39" && resolver.nss == "builtin-files-dns"), "tls_resolver_profile")?;
+            mapped_libc(manifest)?;
+            for (role, pathname, host_conf) in [("resolver:host.conf", "/etc/host.conf", true), ("resolver:gai.conf", "/etc/gai.conf", false)] {
+                let pathname = Path::new(pathname);
+                require(manifest.role(role)? == pathname, "tls_resolver_config_role")?;
+                let metadata = fs::symlink_metadata(pathname).map_err(|_| "tls_resolver_config_metadata")?;
+                let record = manifest.record(pathname)?;
+                let bytes = read(pathname, 16 * 1024)?;
+                require(metadata.is_file() && metadata.uid() == 0 && metadata.gid() == 0 && metadata.nlink() == 1
+                    && metadata.mode() & 0o7022 == 0 && record.size == bytes.len() as u64 && record.sha256 == hash(&bytes)
+                    && host_configuration(&bytes, host_conf), "tls_resolver_config_not_supported")?;
+            }
+            require(caches_absent(), "tls_resolver_cache_present")
+        }
+        fn parent_environment(manifest: &Manifest, profile: &'static str) -> Check<()> {
+            let mut expected = BTreeMap::new();
+            for (key, value) in [("LANG", "C"), ("LC_ALL", "C"), ("MRK_DESKTOP_HOSTED_CHECKS", "github-readonly-tls-deadline-v1"),
+                ("GITHUB_ACTIONS", "true"), ("RUNNER_ENVIRONMENT", "github-hosted"),
+                ("GITHUB_REF", "refs/heads/verify/desktop-github-connection-tls"), ("MRK_GITHUB_TLS_PROFILE", profile)] {
+                expected.insert(key.to_owned(), value.to_owned());
+            }
+            for (key, value) in [("GITHUB_SHA", manifest.source_sha.clone()), ("GITHUB_RUN_ID", manifest.run_id.clone()),
+                ("GITHUB_RUN_ATTEMPT", manifest.attempt.clone()), ("MRK_TLS_ORIGINAL_UID", manifest.uid.to_string()),
+                ("MRK_TLS_ORIGINAL_GID", manifest.gid.to_string()), ("MRK_TLS_PARENT_NETNS", manifest.parent_netns.clone()),
+                ("MRK_TLS_PARENT_MNTNS", manifest.parent_mntns.clone())] { expected.insert(key.to_owned(), value); }
+            for key in ["MRK_TLS_NETNS", "MRK_TLS_MNTNS", "MRK_GITHUB_TLS_ARTIFACT", "MRK_GITHUB_TLS_ARTIFACT_SHA256", "MRK_GITHUB_TLS_ARTIFACT_BYTES"] {
+                // Independently checked by Admitted immediately after this
+                // closed-role-set check, not accepted as arbitrary values.
+                expected.insert(key.to_owned(), environment(key)?);
+            }
+            for (key, pathname) in [("MRK_DESKTOP_TEST_ROOT", manifest.job_root.join("github-tls-deadline")),
+                ("MRK_DESKTOP_TEST_CORE_ZIP", manifest.core_zip.clone()), ("MRK_DESKTOP_DEV_CORE", manifest.core_source.clone()),
+                ("MRK_DESKTOP_DEV_PYTHON", manifest.python.clone()), ("MRK_GITHUB_TLS_INPUTS", manifest.job_root.join("github-tls-deadline-inputs.json"))] {
+                expected.insert(key.to_owned(), pathname.to_str().ok_or("tls_parent_environment_path")?.to_owned());
+            }
+            if profile == "hosts" {
+                let root = manifest.job_root.join("github-tls-deadline-ambient");
+                expected.extend(ambient_values(manifest.role("other-root-ca.pem")?, &root, &root.join("owner-clear.keylog"))?);
+            }
+            let actual = std::env::vars_os().map(|(key, value)| Ok((key.into_string().map_err(|_| "tls_parent_environment")?,
+                value.into_string().map_err(|_| "tls_parent_environment")?))).collect::<Check<BTreeMap<_, _>>>()?;
+            require(actual == expected, "tls_parent_environment")
+        }
+        pub(super) fn admit_resolver(manifest: &Manifest, profile: &'static str) -> Check<()> {
+            require(matches!(profile, "hosts" | "dns-withhold") && environment("MRK_GITHUB_TLS_PROFILE")? == profile
+                && PathBuf::from(environment("MRK_DESKTOP_TEST_ROOT")?) == manifest.job_root.join("github-tls-deadline"),
+                "tls_deadline_profile_layout")?;
+            for &(fixed_profile, name, expected) in CONFIGS {
+                let role = format!("{fixed_profile}:{name}");
+                let pathname = manifest.job_root.join(format!("github-tls-deadline-namespace-{fixed_profile}")).join(name);
+                require(manifest.role(&role)? == pathname && read(&pathname, 16 * 1024)?.as_slice() == expected,
+                    "tls_deadline_fixed_resolver_bytes")?;
+            }
+            parent_environment(manifest, profile)?;
+            require(rustix::process::getuid().as_raw() == manifest.uid && rustix::process::geteuid().as_raw() == manifest.uid
+                && rustix::process::getgid().as_raw() == manifest.gid && rustix::process::getegid().as_raw() == manifest.gid,
+                "tls_deadline_original_identity")?;
+            let status = proc_bytes("/proc/self/status", 64 * 1024)?;
+            let status = std::str::from_utf8(&status).map_err(|_| "tls_deadline_privilege_status")?;
+            for (name, value) in [("CapInh:", "0000000000000000"), ("CapPrm:", "0000000000000000"), ("CapEff:", "0000000000000000"),
+                ("CapBnd:", "0000000000000000"), ("CapAmb:", "0000000000000000"), ("NoNewPrivs:", "1"), ("Groups:", "")] {
+                require(status.lines().filter_map(|line| line.strip_prefix(name)).collect::<Vec<_>>() == vec![format!("\t{value}")],
+                    "tls_deadline_privilege_drop")?;
+            }
+            resolver_runtime(manifest)
+        }
+
+        fn absent(pathname: &Path) -> bool {
+            matches!(fs::symlink_metadata(pathname), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        }
+        fn owned_directory(pathname: &Path, uid: u32, gid: u32) -> Check<()> {
+            path(pathname)?;
+            let metadata = fs::symlink_metadata(pathname).map_err(|_| "tls_ambient_directory")?;
+            require(metadata.is_dir() && metadata.uid() == uid && metadata.gid() == gid
+                && metadata.mode() & 0o7022 == 0, "tls_ambient_directory")
+        }
+        fn nonzero_file_limit() -> bool {
+            let limit = rustix::process::getrlimit(rustix::process::Resource::Fsize);
+            limit.current.zip(limit.maximum).is_some_and(|(soft, hard)| soft > 0 && soft <= hard && hard <= 1024 * 1024)
+        }
+        fn ambient_values(ca: &Path, root: &Path, keylog: &Path) -> Check<BTreeMap<String, String>> {
+            let mut environment = BTreeMap::new();
+            for key in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+                environment.insert(key.to_owned(), "http://127.0.0.1:18888".to_owned());
+            }
+            for (key, value) in [("LANG", "C"), ("LC_ALL", "C"), ("NO_PROXY", ""), ("no_proxy", "")] {
+                environment.insert(key.to_owned(), value.to_owned());
+            }
+            let empty_ca = root.join("empty-ca-dir");
+            for (key, pathname) in [("SSL_CERT_FILE", ca), ("SSL_CERT_DIR", empty_ca.as_path()), ("SSLKEYLOGFILE", keylog)] {
+                environment.insert(key.to_owned(), pathname.to_str().ok_or("tls_ambient_path")?.to_owned());
+            }
+            Ok(environment)
+        }
+        struct Ambient {
+            root: PathBuf, empty_ca: PathBuf, keylog: PathBuf, control: PathBuf,
+            uid: u32, gid: u32, environment: BTreeMap<String, String>, role_hash: String,
+            created: bool, written: bool, synced: bool, close_claimed: bool, closed: bool,
+            keylog_before: bool, keylog_after: bool, empty_before: bool, empty_after: bool, file_limit: bool,
+        }
+        impl Ambient {
+            fn new(common: &Common, case: &Case) -> Check<Self> {
+                let owner = case.name == "T4-owner-clear";
+                require(owner || direct(case.name), "tls_ambient_case")?;
+                let root = if owner { common.manifest.job_root.join("github-tls-deadline-ambient") }
+                    else { case.root.join("ambient") };
+                let empty_ca = root.join("empty-ca-dir");
+                let keylog = root.join(if owner { "owner-clear.keylog" } else { "client.keylog" });
+                let ca = common.manifest.role(if case.name == "T4-ambient-no-rescue" { "root-ca.pem" } else { "other-root-ca.pem" })?;
+                let environment = ambient_values(ca, &root, &keylog)?;
+                let role_hash = hash(&serde_json::to_vec(&environment).map_err(|_| "tls_ambient_encoding")?);
+                Ok(Self { control: root.join("write-control"), root, empty_ca, keylog, uid: common.manifest.uid, gid: common.manifest.gid,
+                    environment, role_hash, created: false, written: false, synced: false, close_claimed: false, closed: false,
+                    keylog_before: false, keylog_after: false, empty_before: false, empty_after: false, file_limit: false })
+            }
+            fn empty(&self) -> bool {
+                owned_directory(&self.empty_ca, self.uid, self.gid).is_ok()
+                    && fs::read_dir(&self.empty_ca).is_ok_and(|mut entries| entries.next().is_none())
+            }
+            fn prepare(&mut self, create: bool) -> Check<()> {
+                if create {
+                    fs::create_dir(&self.root).and_then(|_| fs::create_dir(&self.empty_ca)).map_err(|_| "tls_ambient_not_fresh")?;
+                }
+                owned_directory(&self.root, self.uid, self.gid)?;
+                self.empty_before = self.empty();
+                self.keylog_before = absent(&self.keylog);
+                self.file_limit = nonzero_file_limit();
+                require(self.empty_before && self.keylog_before && self.file_limit
+                    && rustix::process::getuid().as_raw() == self.uid && rustix::process::geteuid().as_raw() == self.uid
+                    && rustix::process::getgid().as_raw() == self.gid && rustix::process::getegid().as_raw() == self.gid,
+                    "tls_ambient_control_admission")?;
+                let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC;
+                let mut original = fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+                    .custom_flags(flags.bits() as i32).open(&self.control).map_err(|_| "tls_ambient_control_create")?;
+                self.created = true;
+                let identity = original.metadata().is_ok_and(|metadata| metadata.is_file() && metadata.uid() == self.uid
+                    && metadata.gid() == self.gid && metadata.nlink() == 1 && metadata.mode() & 0o7777 == 0o600);
+                if identity { self.written = original.write_all(b"w").is_ok(); }
+                self.synced = original.sync_all().is_ok();
+                self.close_claimed = true;
+                self.closed = nix::unistd::close(original).is_ok(); // Sole original close, even after a write/sync failure.
+                require(identity && self.written && self.synced && self.closed, "tls_ambient_control_write_close")
+            }
+            fn after(&mut self) -> Check<()> {
+                owned_directory(&self.root, self.uid, self.gid)?;
+                self.keylog_after = absent(&self.keylog);
+                self.empty_after = self.empty();
+                require(self.keylog_after && self.empty_after && self.created && self.written && self.synced && self.closed
+                    && nonzero_file_limit() && read(&self.control, 1)?.as_slice() == b"w", "tls_ambient_postcondition")?;
+                let mut names = BTreeSet::new();
+                for entry in fs::read_dir(&self.root).map_err(|_| "tls_ambient_postcondition")? {
+                    let entry = entry.map_err(|_| "tls_ambient_postcondition")?;
+                    require(names.len() < 2 && names.insert(entry.file_name()), "tls_ambient_extra_output")?;
+                }
+                require(names == [std::ffi::OsString::from("empty-ca-dir"), std::ffi::OsString::from("write-control")]
+                    .into_iter().collect(), "tls_ambient_extra_output")
+            }
+            fn settled(&self) -> bool { !self.created || self.close_claimed && self.closed }
+            fn evidence(&self, initial: Option<&str>) -> Value {
+                json!({"roleSetSha256":self.role_hash,"writableControlCreated":self.created,"writableControlWritten":self.written,
+                    "writableControlSynced":self.synced,"writableControlClosed":self.closed,"keylogAbsentBefore":self.keylog_before,
+                    "keylogAbsentAfter":self.keylog_after,"emptyCaDirectoryBefore":self.empty_before,"emptyCaDirectoryAfter":self.empty_after,
+                    "fileSizeLimitNonzero":self.file_limit,"initialEnvironment":initial})
+            }
+        }
+
+        #[derive(Default)]
+        struct ProbeInput { stdin: Option<tokio::process::ChildStdin>, request: Option<Vec<u8>> }
+        #[derive(Default)]
+        struct ProbeWrite { complete: bool, shutdown: bool, released: bool }
+        struct ProbeRead { output: ReadEnd, frame: Option<Instant> }
+        async fn probe_writer(original: Arc<AsyncMutex<ProbeInput>>, endpoint: Instant) -> ProbeWrite {
+            let mut original = original.lock().await;
+            let mut end = ProbeWrite::default();
+            let ProbeInput { stdin, request } = &mut *original;
+            if let (Some(stdin), Some(bytes)) = (stdin.as_mut(), request.as_ref()) {
+                if Instant::now() < endpoint {
+                    end.complete = matches!(guarded(tokio::time::timeout_at(tokio::time::Instant::from_std(endpoint),
+                        stdin.write_all(bytes))).await, Ok(Ok(Ok(()))));
+                }
+            }
+            // Attempt the same original shutdown independently after a failed
+            // write/unwind. Never duplicate a pipe or renew the resource clock.
+            if let Some(stdin) = original.stdin.as_mut() {
+                end.shutdown = matches!(guarded(tokio::time::timeout_at(tokio::time::Instant::from_std(endpoint),
+                    stdin.shutdown())).await, Ok(Ok(Ok(()))));
+            }
+            if end.shutdown { drop(original.stdin.take()); end.released = true; }
+            if let Some(bytes) = original.request.as_mut() { bytes.fill(0); }
+            original.request.take();
+            end
+        }
+        async fn probe_stdout<R: AsyncRead + Unpin>(reader: &mut R) -> ProbeRead {
+            let mut bytes = Vec::new();
+            let mut overflow = false;
+            let mut frame = None;
+            let mut buffer = [0u8; 8192];
+            loop {
+                match reader.read(&mut buffer).await {
+                    Ok(0) => return ProbeRead { output: ReadEnd { bytes, eof: true, overflow }, frame },
+                    Ok(length) => {
+                        // F is captured here, in the original normally driven
+                        // response read, even if later parsing/wait is delayed.
+                        let at = Instant::now();
+                        let keep = length.min(github_protocol::RESPONSE_LIMIT.saturating_sub(bytes.len()));
+                        bytes.extend_from_slice(&buffer[..keep]);
+                        overflow |= keep != length;
+                        if frame.is_none() && buffer[..keep].contains(&b'\n') { frame = Some(at); }
+                    },
+                    Err(_) => return ProbeRead { output: ReadEnd { bytes, eof: false, overflow }, frame },
+                }
+            }
+        }
+        #[derive(Default)]
+        struct Probe {
+            endpoint: Option<Instant>, launch: Option<Instant>, completed_at: Option<Instant>,
+            acquisition: Option<JoinHandle<Check<(Child, Instant)>>>, acquisition_joined: bool, acquisition_failed: bool, spawn_refused: bool,
+            child: Option<Child>, spawned: bool, pipes_retained: bool,
+            input: Arc<AsyncMutex<ProbeInput>>, stdout_original: Arc<AsyncMutex<Option<tokio::process::ChildStdout>>>,
+            stderr_original: Arc<AsyncMutex<Option<tokio::process::ChildStderr>>>,
+            writer: Option<JoinHandle<ProbeWrite>>, stdout: Option<JoinHandle<ProbeRead>>, stderr: Option<JoinHandle<ReadEnd>>,
+            writer_started: bool, stdout_started: bool, stderr_started: bool,
+            writer_joined: bool, stdout_joined: bool, stderr_joined: bool,
+            writer_failed: bool, stdout_failed: bool, stderr_failed: bool,
+            write: Option<ProbeWrite>, out: Option<ProbeRead>, err: Option<ReadEnd>,
+            waited: Option<ExitStatus>, wait_failed: bool, stop_attempted: bool, expired: bool, settled: bool,
+        }
+        enum ProbeEvent {
+            Wait(std::io::Result<ExitStatus>), Write(Result<ProbeWrite, tokio::task::JoinError>),
+            Out(Result<ProbeRead, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Deadline,
+        }
+        impl Probe {
+            fn begin(&mut self, selection: GitHubTlsRuntime, config: RuntimeConfig, name: &'static str,
+                environment: BTreeMap<String, String>, endpoint: Instant) -> Check<()> {
+                require(direct(name) && self.endpoint.is_none() && Instant::now() + CLIENT_RESERVE <= endpoint
+                    && nonzero_file_limit(), "tls_probe_admission")?;
+                let bytes = github_protocol::encode_private_request(DIRECT_ID, "owner/app", None, None, TOKEN)
+                    .map_err(|_| "tls_probe_request")?;
+                self.input.try_lock().map_err(|_| "tls_probe_input_busy")?.request = Some(bytes);
+                self.endpoint = Some(endpoint); // The peer's original acquisition-inclusive clock, not a new 16s.
+                self.acquisition = Some(tokio::task::spawn_blocking(move || {
+                    // Resolve the genuine admitted runtime. Constructing an
+                    // unchecked VerifiedRuntime would bypass the source/CA/
+                    // runtime inventory and is intentionally not available.
+                    let runtime = config.resolve_github_tls_fixture(endpoint, &selection).map_err(|_| "tls_probe_runtime")?;
+                    let mut command = Command::new(&runtime.python);
+                    command.args(["-I", "-S", "-B"]).arg(&runtime.bootstrap).arg(&runtime.core)
+                        .current_dir(&runtime.cwd).env_clear().envs(environment)
+                        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+                    require(Instant::now() + CLIENT_RESERVE <= endpoint && nonzero_file_limit(), "tls_probe_spawn_deadline")?;
+                    let launch = Instant::now(); // L, immediately before THIS actual original spawn call.
+                    command.spawn().map(|child| (child, launch)).map_err(|_| "tls_probe_spawn_refused")
+                }));
+                Ok(())
+            }
+            fn retain_pipes(&mut self) -> Check<()> {
+                if self.pipes_retained { return Ok(()); }
+                let mut input = self.input.try_lock().map_err(|_| "tls_probe_input_busy")?;
+                let mut out = self.stdout_original.try_lock().map_err(|_| "tls_probe_output_busy")?;
+                let mut err = self.stderr_original.try_lock().map_err(|_| "tls_probe_output_busy")?;
+                let child = self.child.as_mut().ok_or("tls_probe_child_missing")?;
+                require(input.stdin.is_none() && out.is_none() && err.is_none(), "tls_probe_pipe_replacement")?;
+                input.stdin = child.stdin.take();
+                *out = child.stdout.take();
+                *err = child.stderr.take();
+                self.pipes_retained = true; // No await/fallible step between taking/storing originals.
+                Ok(())
+            }
+            fn start_writer(&mut self) -> Check<()> {
+                if self.writer_started { return require(self.writer.is_some() || self.writer_joined, "tls_probe_writer_missing"); }
+                self.writer_started = true;
+                require(self.input.try_lock().is_ok_and(|input| input.stdin.is_some() && input.request.is_some()), "tls_probe_input_missing")?;
+                let endpoint = self.endpoint.ok_or("tls_probe_not_started")?;
+                self.writer = Some(tokio::spawn(probe_writer(self.input.clone(), endpoint)));
+                Ok(())
+            }
+            fn start_stdout(&mut self) -> Check<()> {
+                if self.stdout_started { return require(self.stdout.is_some() || self.stdout_joined, "tls_probe_stdout_missing"); }
+                self.stdout_started = true;
+                require(self.stdout_original.try_lock().is_ok_and(|original| original.is_some()), "tls_probe_stdout_missing")?;
+                let original = self.stdout_original.clone();
+                self.stdout = Some(tokio::spawn(async move {
+                    let mut original = original.lock().await;
+                    let Some(stdout) = original.as_mut() else {
+                        return ProbeRead { output: ReadEnd { bytes: Vec::new(), eof: false, overflow: false }, frame: None };
+                    };
+                    let result = probe_stdout(stdout).await;
+                    if result.output.eof { drop(original.take()); }
+                    result
+                }));
+                Ok(())
+            }
+            fn start_stderr(&mut self) -> Check<()> {
+                if self.stderr_started { return require(self.stderr.is_some() || self.stderr_joined, "tls_probe_stderr_missing"); }
+                self.stderr_started = true;
+                require(self.stderr_original.try_lock().is_ok_and(|original| original.is_some()), "tls_probe_stderr_missing")?;
+                let original = self.stderr_original.clone();
+                let (faults, _receiver) = mpsc::channel(2);
+                self.stderr = Some(tokio::spawn(async move {
+                    let mut original = original.lock().await;
+                    let Some(stderr) = original.as_mut() else { return ReadEnd { bytes: Vec::new(), eof: false, overflow: false }; };
+                    let result = read_bounded(stderr, protocol::STDERR_LIMIT, faults).await;
+                    if result.eof { drop(original.take()); }
+                    result
+                }));
+                Ok(())
+            }
+            async fn prepare_pipes(&mut self) -> Check<()> {
+                let kept = guarded(async { self.retain_pipes() }).await.unwrap_or_else(Err);
+                let writer = guarded(async { self.start_writer() }).await.unwrap_or_else(Err);
+                let out = guarded(async { self.start_stdout() }).await.unwrap_or_else(Err);
+                let err = guarded(async { self.start_stderr() }).await.unwrap_or_else(Err);
+                if writer.is_err() { self.writer_failed = true; }
+                if out.is_err() { self.stdout_failed = true; }
+                if err.is_err() { self.stderr_failed = true; }
+                kept.and(writer).and(out).and(err)
+            }
+            async fn acquire(&mut self) -> Check<()> {
+                require(!self.acquisition_failed, "tls_probe_acquisition_unknown")?;
+                let endpoint = self.endpoint.ok_or("tls_probe_not_started")?;
+                if !self.acquisition_joined {
+                    let task = self.acquisition.as_mut().ok_or("tls_probe_acquisition_missing")?;
+                    let result = match tokio::time::timeout_at(tokio::time::Instant::from_std(endpoint), task).await {
+                        Ok(result) => result,
+                        Err(_) => { self.expired = true; return Err("tls_probe_acquisition_deadline"); },
+                    };
+                    let result = match result {
+                        Ok(result) => { self.acquisition_joined = true; self.acquisition.take(); result },
+                        Err(_) => { self.acquisition_failed = true; return Err("tls_probe_acquisition_unknown"); },
+                    };
+                    match result {
+                        Ok((child, launch)) => { self.child = Some(child); self.launch = Some(launch); self.spawned = true; },
+                        Err(code) => { self.spawn_refused = true; return Err(code); },
+                    }
+                }
+                require(self.spawned, "tls_probe_spawn_refused")?;
+                self.prepare_pipes().await?;
+                require(Instant::now() < endpoint, "tls_probe_acquisition_deadline")
+            }
+            fn stop_original(&mut self) {
+                if self.stop_attempted || self.waited.is_some() || self.wait_failed { return; }
+                let Some(child) = self.child.as_mut() else { return; };
+                match child.try_wait() {
+                    Ok(Some(status)) => self.waited = Some(status),
+                    Ok(None) => { self.stop_attempted = true; let _ = child.start_kill(); },
+                    Err(_) => self.wait_failed = true,
+                }
+            }
+            async fn settle(&mut self, failed: bool) -> bool {
+                if self.settled { return true; }
+                let Some(endpoint) = self.endpoint else { self.settled = true; return true; };
+                if !self.acquisition_joined && !self.acquisition_failed { let _ = guarded(self.acquire()).await; }
+                if self.spawned { let _ = self.prepare_pipes().await; }
+                if failed || self.writer_failed || self.stdout_failed || self.stderr_failed { self.stop_original(); }
+                loop {
+                    let wait_pending = self.child.is_some() && self.waited.is_none() && !self.wait_failed;
+                    let writer_pending = self.writer.is_some() && !self.writer_failed;
+                    let out_pending = self.stdout.is_some() && !self.stdout_failed;
+                    let err_pending = self.stderr.is_some() && !self.stderr_failed;
+                    if !wait_pending && !writer_pending && !out_pending && !err_pending {
+                        self.completed_at = Some(Instant::now());
+                        self.expired |= Instant::now() >= endpoint;
+                        self.settled = !self.expired && self.acquisition_joined && !self.acquisition_failed
+                            && (self.spawn_refused || self.spawned && self.waited.is_some() && !self.wait_failed
+                                && self.writer_joined && self.stdout_joined && self.stderr_joined
+                                && !self.writer_failed && !self.stdout_failed && !self.stderr_failed
+                                && self.write.as_ref().is_some_and(|end| end.released)
+                                && self.out.as_ref().is_some_and(|end| end.output.eof) && self.err.as_ref().is_some_and(|end| end.eof));
+                        if self.settled { self.child.take(); }
+                        return self.settled;
+                    }
+                    let event = {
+                        let Self { child, writer, stdout, stderr, .. } = self;
+                        tokio::select! {
+                            result = wait_original(child), if wait_pending => ProbeEvent::Wait(result),
+                            result = join_slot(writer), if writer_pending => ProbeEvent::Write(result),
+                            result = join_slot(stdout), if out_pending => ProbeEvent::Out(result),
+                            result = join_slot(stderr), if err_pending => ProbeEvent::Err(result),
+                            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(endpoint)) => ProbeEvent::Deadline,
+                        }
+                    };
+                    match event {
+                        ProbeEvent::Wait(Ok(status)) => self.waited = Some(status),
+                        ProbeEvent::Wait(Err(_)) => self.wait_failed = true,
+                        ProbeEvent::Write(Ok(end)) => {
+                            let failed = !end.complete || !end.shutdown || !end.released;
+                            self.writer_joined = true; self.writer.take(); self.write = Some(end);
+                            if failed { self.stop_original(); }
+                        },
+                        ProbeEvent::Out(Ok(end)) => {
+                            let failed = !end.output.eof || end.output.overflow;
+                            self.stdout_joined = true; self.stdout.take(); self.out = Some(end);
+                            if failed { self.stop_original(); }
+                        },
+                        ProbeEvent::Err(Ok(end)) => {
+                            let failed = !end.eof || end.overflow;
+                            self.stderr_joined = true; self.stderr.take(); self.err = Some(end);
+                            if failed { self.stop_original(); }
+                        },
+                        ProbeEvent::Write(Err(_)) => { self.writer_failed = true; self.stop_original(); },
+                        ProbeEvent::Out(Err(_)) => { self.stdout_failed = true; self.stop_original(); },
+                        ProbeEvent::Err(Err(_)) => { self.stderr_failed = true; self.stop_original(); },
+                        ProbeEvent::Deadline => { self.expired = true; self.stop_original(); return false; },
+                    }
+                }
+            }
+            fn outcome(&self) -> Check<GitHubReadOutcome> {
+                require(self.settled && self.spawned && !self.stop_attempted && !self.expired
+                    && self.waited.as_ref().is_some_and(ExitStatus::success)
+                    && self.write.as_ref().is_some_and(|end| end.complete && end.shutdown && end.released), "tls_probe_native_result")?;
+                let out = self.out.as_ref().ok_or("tls_probe_response_missing")?;
+                let err = self.err.as_ref().ok_or("tls_probe_stderr_missing")?;
+                require(out.output.eof && !out.output.overflow && out.frame.is_some() && err.eof && !err.overflow
+                    && err.bytes.is_empty(), "tls_probe_output")?;
+                github_protocol::decode_private_response(DIRECT_ID, &out.output.bytes).map_err(|_| "tls_probe_response_protocol")
+            }
+            fn evidence(&self) -> Value {
+                json!({"acquisitionJoined":self.acquisition_joined,"spawned":self.spawned,"waited":self.waited.is_some(),
+                    "exitCode":self.waited.as_ref().and_then(ExitStatus::code),"exitSuccess":self.waited.as_ref().map(ExitStatus::success),
+                    "stopAttempted":self.stop_attempted,"writerJoined":self.writer_joined,
+                    "writeComplete":self.write.as_ref().is_some_and(|end| end.complete),"shutdownComplete":self.write.as_ref().is_some_and(|end| end.shutdown),
+                    "stdinReleased":self.write.as_ref().is_some_and(|end| end.released),"stdoutJoined":self.stdout_joined,"stderrJoined":self.stderr_joined,
+                    "stdoutEof":self.out.as_ref().is_some_and(|end| end.output.eof),"stderrEof":self.err.as_ref().is_some_and(|end| end.eof),
+                    "stdoutBytes":self.out.as_ref().map_or(0, |end| end.output.bytes.len()),"stderrBytes":self.err.as_ref().map_or(0, |end| end.bytes.len()),
+                    "stdoutOverflow":self.out.as_ref().is_some_and(|end| end.output.overflow),"stderrOverflow":self.err.as_ref().is_some_and(|end| end.overflow),
+                    "settled":self.settled,"withinEndpoint":self.settled && !self.expired
+                        && self.completed_at.zip(self.endpoint).is_some_and(|(done, endpoint)| done < endpoint),
+                    "frameObserved":self.out.as_ref().is_some_and(|end| end.frame.is_some())})
+            }
+        }
+
+        fn projection(outcome: &GitHubReadOutcome, expected: Reason) -> Check<()> {
+            require(outcome.facts.schema_version == 1 && outcome.control.reason == expected
+                && outcome.control.credential_expires_at.is_none() && outcome.control.cooldown_seconds.is_none()
+                && !outcome.control.cooldown_blocked, "tls_deadline_control_projection")?;
+            if expected == Reason::None {
+                require(outcome.facts.account.state == FactState::Observed && outcome.facts.account.reason == Reason::None
+                    && outcome.facts.account.value.as_ref().is_some_and(|account| account.id == "11" && account.login == "owner")
+                    && outcome.facts.repository.state == FactState::Observed && outcome.facts.repository.reason == Reason::None
+                    && outcome.facts.repository.value.as_ref().is_some_and(|repository| repository.id == "22" && repository.full_name == "owner/app"
+                        && repository.default_branch == "main" && repository.visibility == Visibility::Private && !repository.archived
+                        && repository.permissions.pull == Permission::ReportedAllowed && repository.permissions.push == Permission::ReportedDenied
+                        && repository.permissions.admin == Permission::ReportedDenied)
+                    && outcome.facts.automation.state == FactState::Observed && outcome.facts.automation.reason == Reason::None
+                    && outcome.facts.automation.value.as_ref().is_some_and(|automation| automation.coverage == Coverage::Complete
+                        && automation.workflows.len() == 4 && automation.workflows.iter().all(|row| row.presence == Presence::NotListed
+                            && row.remote_id.is_none() && row.state == WorkflowState::Unknown))
+                    && outcome.facts.account.observed_at.is_some() && outcome.facts.account.observed_at == outcome.facts.repository.observed_at
+                    && outcome.facts.account.observed_at == outcome.facts.automation.observed_at, "tls_deadline_success_projection")
+            } else {
+                require(outcome.facts.account.state == FactState::Unavailable && outcome.facts.account.value.is_none()
+                    && outcome.facts.account.observed_at.is_none() && outcome.facts.account.reason == expected
+                    && outcome.facts.repository.state == FactState::Unavailable && outcome.facts.repository.value.is_none()
+                    && outcome.facts.repository.observed_at.is_none() && outcome.facts.repository.reason == expected
+                    && outcome.facts.automation.state == FactState::Unavailable && outcome.facts.automation.value.is_none()
+                    && outcome.facts.automation.observed_at.is_none() && outcome.facts.automation.reason == expected,
+                    "tls_deadline_refusal_projection")
+            }
+        }
+        struct Extra {
+            retained: Arc<Retained>, probe: AsyncMutex<Probe>, ambient: Mutex<Option<Ambient>>,
+        }
+        // Additional originals for exactly the three direct probes. Retained
+        // alongside the accepted original peer/product book BEFORE any native
+        // acquisition, not stashed after a failed attempt to recover handles.
+        static ORIGINALS: Mutex<Option<Arc<Extra>>> = Mutex::new(None);
+        struct DeadlineCase {
+            base: TlsCase, originals: Arc<Extra>, completion: Option<oneshot::Sender<()>>,
+            owner_settled_at: Option<Instant>, timing: Value, progress: Value, cache_after: Option<bool>,
+        }
+        impl DeadlineCase {
+            fn new(admitted: &Admitted, scenario: &'static Scenario) -> Check<Self> {
+                require(lock(&ORIGINALS).is_none() && case_name(scenario.name), "tls_deadline_previous_originals")?;
+                let base = admitted.case(scenario)?;
+                let originals = Arc::new(Extra { retained: base.retained.clone(), probe: AsyncMutex::new(Probe::default()),
+                    ambient: Mutex::new(None) });
+                *lock(&ORIGINALS) = Some(originals.clone());
+                if scenario.name == "T4-owner-clear" || direct(scenario.name) {
+                    *lock(&originals.ambient) = Some(Ambient::new(&admitted.common, &base.product)?);
+                }
+                let (sender, receiver) = oneshot::channel();
+                {
+                    let mut peer = base.retained.peer.try_lock().map_err(|_| "tls_deadline_peer_busy")?;
+                    peer.control = Some(PeerControl::new(receiver));
+                    peer.progress = Some(Arc::new(Mutex::new(Arrivals::default())));
+                }
+                if scenario.name == "T4-owner-clear" {
+                    base.product.supervisor.inner.test.github_observe_environment.store(true, Ordering::SeqCst);
+                }
+                Ok(Self { base, originals, completion: Some(sender), owner_settled_at: None,
+                    timing: Value::Null, progress: Value::Null, cache_after: None })
+            }
+            async fn exercise(&mut self) -> Check<()> {
+                let name = self.base.scenario.name;
+                if let Some(ambient) = lock(&self.originals.ambient).as_mut() { ambient.prepare(direct(name))?; }
+                resolver_runtime(&self.originals.retained.selection.original.common.manifest)?;
+                let endpoint = {
+                    let mut peer = self.base.retained.peer.lock().await;
+                    peer.begin(&self.base.retained.selection.original.common, name)?;
+                    peer.readiness(name).await?;
+                    peer.endpoint.ok_or("tls_peer_endpoint_missing")?
+                };
+                require(Instant::now() + CLIENT_RESERVE <= endpoint, "tls_deadline_insufficient_peer_time")?;
+                if direct(name) {
+                    let environment = lock(&self.originals.ambient).as_ref().ok_or("tls_probe_ambient_missing")?.environment.clone();
+                    let mut probe = self.originals.probe.lock().await;
+                    probe.begin(self.base.retained.selection.clone(), self.base.product.supervisor.inner.runtime.clone(), name, environment, endpoint)?;
+                    probe.acquire().await?;
+                    require(probe.settle(false).await, "tls_probe_custody_unresolved")?;
+                    projection(&probe.outcome()?, self.base.scenario.reason)?;
+                    self.base.result_reason = Some(reason(self.base.scenario.reason));
+                } else {
+                    {
+                        let mut retained = lock(&self.base.retained.ticket);
+                        require(retained.is_none(), "tls_ticket_already_admitted")?;
+                        let ticket = self.base.product.supervisor.start_github_readonly("owner/app", None, None, TOKEN)
+                            .map_err(|_| "tls_product_admission")?;
+                        *retained = Some(ticket); // No fallible operation/await between admission and retention.
+                    }
+                    let receipt = tokio::time::timeout_at(tokio::time::Instant::from_std(endpoint), async {
+                        loop {
+                            let receipt = lock(&self.base.retained.ticket).as_ref().map(GitHubReadTicket::receipt).ok_or("tls_ticket_missing")?;
+                            if !matches!(receipt, GitHubReadReceipt::Pending) { return Ok::<_, &'static str>(receipt); }
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    }).await.map_err(|_| "tls_product_observation_deadline")??;
+                    let GitHubReadReceipt::Settled { outcome, settled_at, was_unknown: false } = receipt
+                        else { return Err("tls_deadline_owner_not_settled"); };
+                    self.owner_settled_at = Some(settled_at);
+                    if owner_deadline(name) {
+                        require(outcome.is_err_and(|error| error.code == "query_timeout"), "tls_deadline_owner_timeout_missing")?;
+                        self.base.result_reason = Some("query_timeout");
+                    } else {
+                        let outcome = outcome.map_err(|_| "tls_deadline_owner_outcome")?;
+                        projection(&outcome, self.base.scenario.reason)?;
+                        self.base.result_reason = Some(reason(self.base.scenario.reason));
+                    }
+                }
+                self.base.projection_checked = true;
+                Ok(())
+            }
+            fn owner_facts(&self) -> Check<()> {
+                let name = self.base.scenario.name;
+                let owners = self.base.product.supervisor.inner.test.owners();
+                require(self.base.product.supervisor.can_exit() && !self.base.product.supervisor.disabled()
+                    && self.base.product.supervisor.inner.permits.available_permits() == ACTIVE_LIMIT, "tls_deadline_owner_roster")?;
+                if direct(name) {
+                    return require(owners.is_empty() && lock(&self.base.retained.ticket).is_none(), "tls_probe_not_an_owner");
+                }
+                self.base.product.native_facts(true, true)?;
+                require(owners.len() == 1, "tls_deadline_owner_roster")?;
+                let owner = &owners[0];
+                let state = lock(&owner.state);
+                let observed = lock(&owner.observation);
+                require(matches!(owner.profile, Profile::GitHubReadOnly) && state.terminal && !state.unknown
+                    && observed.observer_joined && lock(&owner.permit).is_none(), "tls_deadline_owner_finality")?;
+                if owner_deadline(name) {
+                    require(state.error.as_ref().is_some_and(|error| error.code == "query_timeout")
+                        && observed.exit_success == Some(false) && observed.stdout_bytes == 0 && observed.stderr_bytes == 0,
+                        "tls_deadline_owner_first_failure")?;
+                } else {
+                    require(state.error.is_none() && observed.exit_success == Some(true)
+                        && observed.github_initial_environment == Some(true), "tls_owner_initial_environment_not_observed")?;
+                }
+                Ok(())
+            }
+            async fn timing(&mut self, frames: &Frames) -> Check<()> {
+                let name = self.base.scenario.name;
+                let endpoint = self.base.retained.peer.lock().await.endpoint.ok_or("tls_peer_endpoint_missing")?;
+                let origin = endpoint.checked_sub(PEER_TIME).ok_or("tls_peer_clock")?;
+                self.progress = frames.evidence(origin);
+                if direct(name) {
+                    let probe = self.originals.probe.lock().await;
+                    let launch = probe.launch.ok_or("tls_probe_launch_missing")?;
+                    let done = probe.completed_at.ok_or("tls_probe_completion_missing")?;
+                    let frame = probe.out.as_ref().and_then(|out| out.frame).ok_or("tls_probe_frame_missing")?;
+                    let get = frames.first("first-get");
+                    let stop = frames.first("client-stop");
+                    let body = frames.body_times();
+                    let helper = name == "T5-helper-read";
+                    let timing_ok = !helper || get.zip(stop).is_some_and(|(get, stop)| helper_window(launch, get, frame, stop, &body));
+                    self.timing = json!({"kind":"fixture-owned-bootstrap","spawnAfterPeerStartNs":elapsed(origin, launch),
+                        "settledAfterPeerStartNs":elapsed(origin, done),"firstGetAfterLaunchNs":get.and_then(|get| elapsed(launch, get)),
+                        "responseAfterLaunchNs":elapsed(launch, frame),"clientStopAfterLaunchNs":stop.and_then(|stop| elapsed(launch, stop)),
+                        "bodyProgressAfterLaunchNs":body.iter().map(|at| elapsed(launch, *at)).collect::<Vec<_>>(),
+                        "helperWindowChecked":helper && timing_ok});
+                    require(launch >= origin && done < endpoint && frame >= launch && frame <= done && timing_ok,
+                        "tls_helper_original_reader_window")?;
+                } else {
+                    let owner = self.base.product.owner("github-read-1")?;
+                    let state = lock(&owner.state);
+                    let owner_endpoint = state.endpoint;
+                    let start = owner_endpoint.checked_sub(OPERATION_TIME).ok_or("tls_owner_clock")?;
+                    let settled = self.owner_settled_at.ok_or("tls_owner_settlement_missing")?;
+                    let phase_name = if name == "T5-dns" { "dns-question" } else if name == "T5-handshake" { "client-hello" } else { "first-get" };
+                    let phase = frames.first(phase_name).ok_or("tls_deadline_phase_missing")?;
+                    let deadline = owner_deadline(name);
+                    let exact_cleanup = state.cleanup_endpoint == Some(owner_endpoint + CLEANUP_TIME);
+                    let checked = if deadline { owner_window(owner_endpoint, state.cleanup_endpoint, settled, phase) }
+                        else { state.cleanup_endpoint.is_none() && settled < owner_endpoint && phase < settled };
+                    self.timing = json!({"kind":"ordinary-owner","operationStartAfterPeerNs":elapsed(origin, start),
+                        "operationEndpointAfterPeerNs":elapsed(origin, owner_endpoint),
+                        "cleanupEndpointAfterPeerNs":state.cleanup_endpoint.and_then(|at| elapsed(origin, at)),
+                        "settledAfterPeerNs":elapsed(origin, settled),"phaseAfterPeerNs":elapsed(origin, phase),"phase":phase_name,
+                        "originalDeadlineChecked":deadline && checked,"cleanupExact":deadline && exact_cleanup});
+                    require(start >= origin && settled < endpoint && phase >= start && checked, "tls_owner_original_endpoint")?;
+                    if matches!(name, "T5-handshake" | "T5-read") {
+                        let stop = frames.first("client-stop").ok_or("tls_deadline_client_stop_missing")?;
+                        require(stop >= owner_endpoint, "tls_owner_early_client_stop")?;
+                        if name == "T5-read" { require(progressing(phase, owner_endpoint, &frames.body_times()), "tls_owner_read_progress_gap")?; }
+                    }
+                }
+                Ok(())
+            }
+            async fn final_checks(&mut self) -> Check<()> {
+                // All independent assertions run, even if an earlier one fails.
+                // Assertions cannot substitute for the preceding native joins.
+                let owner = guarded(async { self.owner_facts() }).await.unwrap_or_else(Err);
+                let frames = guarded(async { Frames::from_original(&mut *self.base.retained.peer.lock().await, self.base.scenario) })
+                    .await.unwrap_or_else(Err);
+                let ambient = guarded(async {
+                    if let Some(ambient) = lock(&self.originals.ambient).as_mut() { ambient.after()?; }
+                    Ok(())
+                }).await.unwrap_or_else(Err);
+                let resolver = guarded(async {
+                    resolver_runtime(&self.base.retained.selection.original.common.manifest)?;
+                    if self.base.scenario.name == "T5-dns" { self.cache_after = Some(caches_absent()); }
+                    Ok(())
+                }).await.unwrap_or_else(Err);
+                let timing = match frames { Ok(frames) => guarded(self.timing(&frames)).await.unwrap_or_else(Err), Err(code) => Err(code) };
+                owner.and(ambient).and(resolver).and(timing)
+            }
+            async fn evidence(&self, passed: bool, failure: Option<&str>, client_settled: bool) -> Value {
+                let legacy = self.base.evidence(passed, failure, client_settled).await;
+                let direct = direct(self.base.scenario.name);
+                let probe = if direct { self.originals.probe.lock().await.evidence() } else { Value::Null };
+                let initial = if self.base.scenario.name == "T4-owner-clear" {
+                    self.base.product.supervisor.inner.test.owners().first().map(|owner| match lock(&owner.observation).github_initial_environment {
+                        Some(true) => "observed-allowlist", Some(false) => "observed-not-allowlist", None => "unavailable-source-bound-only",
+                    })
+                } else { None };
+                let ambient = lock(&self.originals.ambient).as_ref().map(|ambient| ambient.evidence(initial));
+                json!({"case":self.base.scenario.name,"entry":if direct { "fixture-owned-bootstrap" } else { "ordinary-supervisor" },
+                    "passed":passed,"failureCode":failure,"coreMode":"source",
+                    "trustFixture":if self.base.scenario.other_root { "other-root-ca.pem" } else { "root-ca.pem" },
+                    "elapsedMs":self.base.product.begin.elapsed().as_millis(),"clientSettled":client_settled,
+                    "projectionChecked":self.base.projection_checked,"reason":self.base.result_reason,
+                    "product":if direct { Value::Null } else { legacy["product"].clone() },"probe":probe,"ambient":ambient,
+                    "timing":self.timing,"progress":self.progress,"peer":legacy["peer"],"resolverCacheAbsentAfter":self.cache_after})
+            }
+            async fn release(&self) -> Check<()> {
+                require(self.originals.probe.lock().await.settled && self.base.retained.peer.lock().await.settled
+                    && lock(&self.originals.ambient).as_ref().map_or(true, Ambient::settled), "tls_deadline_originals_unsettled")?;
+                let mut originals = lock(&ORIGINALS);
+                require(originals.as_ref().is_some_and(|old| Arc::ptr_eq(old, &self.originals))
+                    && Arc::ptr_eq(&self.originals.retained, &self.base.retained), "tls_deadline_original_identity")?;
+                self.base.release_retention()?;
+                originals.take();
+                Ok(())
+            }
+        }
+        struct DeadlineReceipt { path: PathBuf, profile: &'static str, bindings: Value, cases: Vec<Value> }
+        impl DeadlineReceipt {
+            fn write(&self, state: &str, code: Option<&str>) -> Check<()> {
+                let bytes = serde_json::to_vec(&json!({"schemaVersion":1,"scope":"github-readonly-tls-deadline-hosted-v1",
+                    "profile":self.profile,"status":state,"allOwnersSettled":state == "passed","allProbesSettled":state == "passed",
+                    "allPeersSettled":state == "passed","failureCode":code,"bindings":self.bindings,"cases":self.cases,
+                    "outerWait":"external-original-observer-required","notVerified":NOT_VERIFIED})).map_err(|_| "tls_deadline_receipt_encoding")?;
+                require(bytes.len() <= 128 * 1024, "tls_deadline_receipt_limit")?;
+                fs::write(&self.path, bytes).map_err(|_| "tls_deadline_receipt_write")
+            }
+        }
+        pub(super) async fn run(profile: &'static str) {
+            let admitted = match Admitted::new_profile(Some(profile)) {
+                Ok(admitted) => admitted, Err(code) => panic!("TLS deadline admission failed: {code}"),
+            };
+            let mut receipt = DeadlineReceipt { path: admitted.inputs.root.join("receipt.json"), profile,
+                bindings: admitted.common.bindings.clone(), cases: Vec::new() };
+            if receipt.write("running", None).is_err() { panic!("TLS deadline receipt unavailable before native work"); }
+            let cases = if profile == "hosts" { HOSTS } else { DNS };
+            for scenario in cases {
+                let mut case = match DeadlineCase::new(&admitted, scenario) {
+                    Ok(case) => case,
+                    Err(code) => { let _ = receipt.write("failed", Some(code)); panic!("TLS deadline preparation failed: {code}"); },
+                };
+                let mut checked = guarded(case.exercise()).await.unwrap_or_else(Err);
+                let failed = checked.is_err();
+                let originals = case.originals.clone();
+                let peer_book = case.base.retained.clone();
+                let completion = case.completion.take();
+                // The one completion sender travels with actual client cleanup.
+                // An unwind/false/missing original closes it without success.
+                // Both client books and the peer are driven independently.
+                let (client, peer) = tokio::join!(guarded(async {
+                    let (product, probe) = tokio::join!(guarded(case.base.product.settle(failed)),
+                        guarded(async { originals.probe.lock().await.settle(failed).await }));
+                    let settled = matches!(product, Ok(true)) && matches!(probe, Ok(true))
+                        && lock(&originals.ambient).as_ref().map_or(true, Ambient::settled);
+                    let spawned = if direct(scenario.name) { originals.probe.lock().await.spawned }
+                        else { originals.retained.supervisor.inner.test.owners().iter().any(|owner| lock(&owner.observation).spawned) };
+                    if settled && spawned {
+                        if let Some(completion) = completion { let _ = completion.send(()); }
+                    } else { drop(completion); }
+                    settled
+                }), guarded(async { peer_book.peer.lock().await.settle(scenario.name, failed).await }));
+                let client_settled = matches!(client, Ok(true));
+                let peer_settled = matches!(peer, Ok(true));
+                if !client_settled || !peer_settled {
+                    receipt.cases.push(case.evidence(false, Some("tls_deadline_custody_unresolved"), client_settled).await);
+                    let _ = receipt.write("failed-retained", Some("tls_deadline_custody_unresolved"));
+                    pending::<()>().await; // Original books retained, no next case or cleanup-to-success.
+                    return;
+                }
+                let assertions = guarded(case.final_checks()).await.unwrap_or_else(Err);
+                if checked.is_ok() { checked = assertions; }
+                if let Err(code) = case.release().await {
+                    receipt.cases.push(case.evidence(false, Some(code), client_settled).await);
+                    let _ = receipt.write("failed-retained", Some(code));
+                    pending::<()>().await;
+                    return;
+                }
+                receipt.cases.push(case.evidence(checked.is_ok(), checked.err(), client_settled).await);
+                if let Err(code) = checked { let _ = receipt.write("failed", Some(code)); panic!("TLS deadline check failed after original joins: {code}"); }
+                if receipt.write("running", None).is_err() { panic!("TLS deadline receipt failed after original joins"); }
+            }
+            // Both profile invocations use the same closed source runtime; all
+            // original owner/probe/peer tasks have returned before this point.
+            if receipt.write("passed", None).is_err() { panic!("TLS deadline final receipt failed after original joins"); }
+        }
+
+        #[cfg(test)]
+        mod models {
+            // DATA-only predicates. These tests create no Child, descriptor,
+            // socket, namespace, file or certificate and certify no native run.
+            use super::*;
+
+            fn progress_until(launch: Instant, seconds: u64) -> Vec<Instant> {
+                (0..seconds).map(|second| launch + Duration::from_millis(200) + Duration::from_secs(second)).collect()
+            }
+            #[test]
+            fn helper_response_uses_original_frame_lower_and_upper_bounds() {
+                let launch = Instant::now();
+                let get = launch + Duration::from_millis(100);
+                for second in [10, 12] {
+                    let frame = launch + Duration::from_secs(second);
+                    let body = progress_until(launch, second);
+                    assert!(helper_window(launch, get, frame, frame + Duration::from_millis(1), &body));
+                }
+                let frame = launch + HELPER_EARLIEST - Duration::from_nanos(1);
+                let later_wait = launch + HELPER_LATEST;
+                assert!(!helper_window(launch, get, frame, later_wait, &progress_until(launch, 10)));
+                let frame = launch + HELPER_LATEST + Duration::from_nanos(1);
+                assert!(!helper_window(launch, get, frame, frame, &progress_until(launch, 12)));
+                assert!(!helper_window(launch, launch + GET_LATEST + Duration::from_nanos(1), later_wait,
+                    later_wait, &progress_until(launch, 12)));
+            }
+            #[test]
+            fn helper_requires_genuine_continuing_progress_and_no_early_stop() {
+                let launch = Instant::now();
+                let get = launch + Duration::from_millis(100);
+                let frame = launch + Duration::from_secs(10);
+                let valid = progress_until(launch, 10);
+                assert!(helper_window(launch, get, frame, frame, &valid));
+                assert!(!helper_window(launch, get, frame, frame, &[]));
+                assert!(!helper_window(launch, get, frame, frame - Duration::from_nanos(1), &valid));
+                let mut gap = valid.clone(); gap.remove(4);
+                assert!(!helper_window(launch, get, frame, frame, &gap));
+                let mut queued = valid.clone(); queued[4] = queued[3];
+                assert!(!helper_window(launch, get, frame, frame, &queued));
+                assert!(!helper_window(launch, get, frame, frame, &valid[..8]));
+                let mut late_first = valid; late_first[0] = get + CADENCE + Duration::from_nanos(1);
+                assert!(!helper_window(launch, get, frame, frame, &late_first));
+            }
+            #[test]
+            fn owner_cleanup_is_anchored_to_its_original_operation_endpoint() {
+                let origin = Instant::now();
+                let endpoint = origin + OPERATION_TIME;
+                let phase = origin + Duration::from_secs(1);
+                assert!(owner_window(endpoint, Some(endpoint + CLEANUP_TIME), endpoint, phase));
+                assert!(!owner_window(endpoint, None, endpoint, phase));
+                assert!(!owner_window(endpoint, Some(phase + CLEANUP_TIME), endpoint, phase));
+                assert!(!owner_window(endpoint, Some(endpoint + CLEANUP_TIME), endpoint + CLEANUP_TIME, phase));
+                assert!(!owner_window(endpoint, Some(endpoint + CLEANUP_TIME), endpoint - Duration::from_nanos(1), phase));
+                assert!(!owner_window(endpoint, Some(endpoint + CLEANUP_TIME), endpoint, endpoint));
+            }
+            #[test]
+            fn original_progress_arrivals_track_split_lf_frames_without_retiming() {
+                let origin = Instant::now();
+                let later = origin + Duration::from_secs(1);
+                let mut arrivals = Arrivals::default();
+                arrivals.observe(b"ready\npart", 0, origin);
+                arrivals.observe(b"ready\npartial\n", 10, later);
+                assert!(!arrivals.invalid);
+                assert_eq!(arrivals.frames, [(6, origin), (14, later)]);
+                arrivals.observe(b"ready\npartial\n", 0, later);
+                assert!(arrivals.invalid); // No replay of queued bytes as fresh observations.
+            }
+            fn read_frames() -> Frames {
+                let name = "T5-read";
+                let origin = Instant::now();
+                let progress = [
+                    ("first-get", 0, 100, None), ("body-byte", 1, 150, None), ("client-stop", 1, 150, Some("tcp-eof")),
+                ].into_iter().enumerate().map(|(index, (event, body_bytes, wire_write_bytes, stop))| (Progress {
+                    schema_version: 1, scope: "github-tls-peer-v1".to_owned(), case_name: name.to_owned(), state: "progress".to_owned(),
+                    event: event.to_owned(), sequence: index as u64 + 1, requests: 1, body_bytes, wire_read_bytes: 100,
+                    wire_write_bytes, dns_questions: 0, dns_a: 0, dns_aaaa: 0, client_stop: stop.map(str::to_owned),
+                }, origin + Duration::from_secs(index as u64))).collect();
+                Frames { progress, terminal: Terminal {
+                    schema_version: 1, scope: "github-tls-peer-v1".to_owned(), case_name: name.to_owned(), state: "finished".to_owned(),
+                    status: "passed".to_owned(), code: None, connections: 1, handshakes: 1, requests: 1, decrypted_bytes: 100,
+                    auth_bytes: b"Bearer INERT_NOT_A_CREDENTIAL".len() as u64, close_notify: 0, tls_refused: false,
+                    wire_read_bytes: vec![100], wire_write_bytes: vec![150], reply_bytes: vec![125], all_sockets_closed: true,
+                    sni: 1, phase: "read".to_owned(), withheld_wire_bytes: 0, body_bytes: 1, incomplete_body: true,
+                    client_stop: Some("tcp-eof".to_owned()), progress_count: 3, dns_questions: 0, dns_a: 0, dns_aaaa: 0, dns_replies: 0,
+                    completion: Completion { bytes: 1, eof: true, closed: true, primary_empty: true, primary_unexpected: 0,
+                        primary_closed: true, proxy: None, dns_empty: None, dns_closed: None },
+                } }
+            }
+            #[test]
+            fn classified_progress_needs_positive_wire_bytes_and_original_horizon() {
+                let scenario = &HOSTS[4];
+                let mut frames = read_frames();
+                assert!(frames.check(scenario).is_ok());
+                frames.progress[1].0.wire_write_bytes = frames.progress[0].0.wire_write_bytes;
+                assert!(frames.check(scenario).is_err());
+                let mut frames = read_frames(); frames.terminal.completion.primary_empty = false;
+                assert!(frames.check(scenario).is_err());
+                let mut frames = read_frames(); frames.terminal.completion.eof = false;
+                assert!(frames.check(scenario).is_err());
+                let mut frames = read_frames(); frames.terminal.body_bytes = 25;
+                assert!(frames.check(scenario).is_err());
+                let mut frames = read_frames(); frames.terminal.dns_replies = 1;
+                assert!(frames.check(scenario).is_err());
+            }
+            #[test]
+            fn resolver_profile_refuses_ambient_policy_and_unbounded_configuration() {
+                assert!(host_configuration(b"# fixed\norder hosts,bind\nmulti on\n", true));
+                assert!(host_configuration(b"# default precedence\n", false));
+                for bytes in [b"multi off\n".as_slice(), b"multi on\nmulti on\n", b"spoofalert on\n", b"multi on\0"] {
+                    assert!(!host_configuration(bytes, true));
+                }
+                assert!(!host_configuration(b"precedence ::ffff:0:0/96 100\n", false));
+                assert!(!host_configuration(&vec![b'#'; 513], true));
+                assert!(!host_configuration(&vec![b'\n'; 128], true));
+                assert!(!host_configuration(b"\xff", true));
+            }
+        }
     }
 }

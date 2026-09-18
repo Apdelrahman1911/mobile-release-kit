@@ -128,3 +128,37 @@ file faults, packaged SSL-runtime custody and native GUI/document callbacks
 remain unqualified. A sixteen-case receipt would qualify only its exact source,
 fixture and original run—not real GitHub authentication, every supported
 platform, standalone distribution or production activation.
+
+### Authored Linux TLS follow-on: ambient inputs and real deadlines
+
+The synthetic TLS lane has a separately claimed T4/T5 follow-on: six fixed
+hosts-routed cases and one separately isolated withheld-DNS case. It uses the
+same original compiled artifact as T1–T3/T6, with two explicit input-manifest
+anchors. Four cases exercise the ordinary Supervisor/ticket; three explicitly
+exercise a fixture-owned copy of the genuine bootstrap, not a fabricated
+product runtime or a second product supervisor. These are authored checks,
+**not a claim of execution, native qualification or production enablement**.
+
+The ambient cases compare the correct sibling CA against a wrong ambient CA,
+and the wrong sibling CA against a correct ambient CA. Original proxy-listener
+observation, a genuinely writable control file, absent keylog, and the original
+owner child's observed cleared environment are distinct required facts. An
+empty ambient CA directory does not qualify populated/platform trust stores.
+
+The deadline cases withhold actual DNS replies or handshake output, or offer a
+real incomplete TLS response one byte per second. Owner cases require the
+unchanged startup-inclusive10s endpoint/+2s cleanup and every original join.
+The direct helper-read case separately requires the normally driven original
+response reader to observe its complete typed refusal10–12s after actual spawn,
+with first GET by2s and continued wire progress; delayed waits or generic errors
+cannot establish that measurement. Each resource endpoint still starts before
+the original acquisition and lasts16s, never restarts at readiness or spawn.
+
+DNS qualification is deliberately restricted to the selected Ubuntu24 GNU
+runtime: genuine Python glibc2.39 observation, exact mapped-library equality
+after privilege drop, fixed configuration and absent applicable cache sockets.
+It neither qualifies arbitrary NSS/platforms nor claims getaddrinfo is itself
+10s-bounded/cancellable. Each namespace's actual outer wait remains independent
+of its closed inner receipt. Any unknown original prevents the next namespace
+or cleanup-to-success; only exact private task outputs can be removed. Reports
+retain the two follow-on receipts separately from original T1–T3/T6 limitations.
