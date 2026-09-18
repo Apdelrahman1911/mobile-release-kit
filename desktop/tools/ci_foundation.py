@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import TextIO
 import zipfile
 
@@ -89,6 +90,17 @@ GTK_COMPILE_SOURCES = (
     "desktop/src-tauri/src/session_gtk_qualification.rs",
     "desktop/src-tauri/src/session_gtk_qualification/native_contract.rs",
     "desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py",
+    # cfg(test) hosted_tests embeds these bytes in the same Linux libtest. This
+    # is compiler-input accounting, never permission to execute the TLS entry.
+    ".github/workflows/desktop-github-connection-tls.yml",
+    "desktop/src-tauri/tests/fixtures/github_tls_peer.py",
+    "desktop/src-tauri/tests/fixtures/github_tls_namespace.sh",
+    "desktop/src-tauri/tests/fixtures/github_tls/root-ca.pem",
+    "desktop/src-tauri/tests/fixtures/github_tls/other-root-ca.pem",
+    "desktop/src-tauri/tests/fixtures/github_tls/api-valid.pem",
+    "desktop/src-tauri/tests/fixtures/github_tls/wrong-san.pem",
+    "desktop/src-tauri/tests/fixtures/github_tls/api-expired.pem",
+    "desktop/src-tauri/tests/fixtures/github_tls/server-key.pem",
     "desktop/src-tauri/tests/session_gtk_qualification.rs",
     "desktop/src-tauri/tests/session_gtk_recipe.js",
     "desktop/native/session_gtk_input_linux.c", "desktop/tools/qualify_session_gtk.py",
@@ -506,6 +518,46 @@ GITHUB_READONLY_SOURCES = tuple(sorted({
     "desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py",
     "tests/desktop/test_github_connection_native_contract.py",
 }))
+GITHUB_TLS_SCOPE = "github-readonly-tls-native-v1"
+GITHUB_TLS_EVIDENCE_SCOPE = "desktop-github-readonly-tls-native-only-v1"
+GITHUB_TLS_RECEIPT_SCOPE = "github-readonly-tls-hosted-v1"
+GITHUB_TLS_WORKFLOW = ".github/workflows/desktop-github-connection-tls.yml"
+GITHUB_TLS_REF = "refs/heads/verify/desktop-github-connection-tls"
+GITHUB_TLS_TEST = "supervisor::hosted_tests::github_tls_hosted_contract"
+GITHUB_TLS_PHASES = ("prepare", "acquire", "compile", "github-tls", "clean")
+GITHUB_TLS_CHECKS = {
+    "acquire": ("rust-toolchain-install", "rust-version-target", "github-tls-locked-headless-metadata"),
+    "compile": ("rust-version-target", "github-tls-headless-test-compile-only", "github-tls-compiled-artifact"),
+    "github-tls": ("github-tls-original-artifact", "github-tls-original-outer-wait", "github-tls-receipt"),
+}
+GITHUB_TLS_CASES = ("T1-source", "T1-zip", "T2-root", "T2-name", "T2-expired",
+                    "T3-clean", "T3-ragged", "T3-length", "T3-chunk")
+GITHUB_TLS_CERTIFICATES = ("root-ca.pem", "other-root-ca.pem", "api-valid.pem",
+                           "wrong-san.pem", "api-expired.pem", "server-key.pem")
+GITHUB_TLS_FIXTURES = "desktop/src-tauri/tests/fixtures"
+GITHUB_TLS_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target", "github-tls", "github-tls-namespace")
+GITHUB_TLS_CONFIG = {
+    "hosts": b"127.0.0.1 api.github.com localhost\n::1 localhost\n",
+    "resolv.conf": b"# Synthetic namespace: DNS is disabled by hosts: files.\nnameserver 127.0.0.1\noptions timeout:1 attempts:1\n",
+    "nsswitch.conf": b"passwd: files\ngroup: files\nhosts: files\n",
+}
+GITHUB_TLS_SOURCES = tuple(sorted({
+    *GITHUB_READONLY_SOURCES, GITHUB_TLS_WORKFLOW,
+    f"{GITHUB_TLS_FIXTURES}/github_tls_peer.py", f"{GITHUB_TLS_FIXTURES}/github_tls_namespace.sh",
+    *(f"{GITHUB_TLS_FIXTURES}/github_tls/{name}" for name in GITHUB_TLS_CERTIFICATES),
+}))
+GITHUB_TLS_NOT_VERIFIED = (
+    "T4-destination-ambient-environment", "T5-real-network-deadlines", "T6-streaming-controls",
+    "CA-file-native-faults", "real-github-authentication", "production-runtime-custody",
+    "native-gui", "native-document-lifecycle", "packaged-runtime", "production-enablement",
+)
+# Absolute tool spellings are part of the fixed namespace entry, not PATH selection.
+GITHUB_TLS_TOOLS = {
+    "sudo": "/usr/bin/sudo", "unshare": "/usr/bin/unshare", "env": "/usr/bin/env",
+    "bash": "/usr/bin/bash", "mount": "/usr/bin/mount", "ip": "/usr/bin/ip",
+    "sysctl": "/usr/sbin/sysctl", "setpriv": "/usr/bin/setpriv", "stat": "/usr/bin/stat",
+    "sha256sum": "/usr/bin/sha256sum", "readlink": "/usr/bin/readlink", "findmnt": "/usr/bin/findmnt",
+}
 TOOL_CHECKS = frozenset({
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
@@ -523,6 +575,7 @@ TOOL_CHECKS = frozenset({
     "workflow-core-committed-close", "workflow-source-status",
     "windows-snapshot-native-contract",
     "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
+    "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
 })
 
 
@@ -537,7 +590,7 @@ def require(condition: bool, message: str) -> None:
 
 def admit_phase(scope: str, phase: str) -> None:
     """Closed scope selection, before context, tools, or native dispatch."""
-    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
+    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
     if scope in COMPILE_PROFILES:
         require(phase in COMPILE_PHASES, "Compiler-only scope cannot execute a native phase")
     elif scope == WORKFLOW_NATIVE_SCOPE:
@@ -546,6 +599,8 @@ def admit_phase(scope: str, phase: str) -> None:
         require(phase in WINDOWS_SNAPSHOT_PHASES, "Windows snapshot scope cannot execute an unrelated phase")
     elif scope == GITHUB_READONLY_SCOPE:
         require(phase in GITHUB_READONLY_PHASES, "G1 scope cannot execute an unrelated phase")
+    elif scope == GITHUB_TLS_SCOPE:
+        require(phase in GITHUB_TLS_PHASES, "TLS scope cannot execute an unrelated phase")
     else:
         require(phase in BOUNDARY_PHASES, "Foundation scope cannot execute a workflow-only phase")
 
@@ -556,6 +611,7 @@ def admit_platform(scope: str, platform: str) -> None:
     require(scope != WORKFLOW_NATIVE_SCOPE or platform == "linux", "Workflow native verification requires Linux")
     require(scope != WINDOWS_SNAPSHOT_SCOPE or platform == "windows", "Windows snapshot verification requires Windows")
     require(scope != GITHUB_READONLY_SCOPE or platform == "linux", "G1 native verification requires Linux")
+    require(scope != GITHUB_TLS_SCOPE or platform == "linux", "TLS verification requires Linux")
 
 
 def compile_profile(scope: str) -> dict:
@@ -722,7 +778,8 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
     require(check in TOOL_CHECKS, "Unknown fixed compiler check")
     require(not (capture and output is not None), "Conflicting compiler output destinations")
     require(diagnostics is None or (output is not None and check in {
-        "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract"}),
+        "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
+        "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only"}),
         "Unexpected private diagnostic destination")
     print(f"Fixed check: {check}", flush=True)
     try:
@@ -745,7 +802,7 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
 def admitted_host() -> str:
     require(os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
+            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
             "This fixed check requires an explicitly admitted disposable hosted job")
     platform = os.environ.get("MRK_DESKTOP_PLATFORM", "")
     require(platform in TARGETS and platform == {
@@ -754,7 +811,7 @@ def admitted_host() -> str:
     admit_platform(os.environ["MRK_DESKTOP_HOSTED_CHECKS"], platform)
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:
         admitted_scope(platform)
-    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE}:
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
         require(os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"
                 and os.environ.get("ImageOS") == "ubuntu24" and os.uname().machine == "x86_64"
                 and os.geteuid() != 0, "Workflow native checks require the non-root Ubuntu 24 x86_64 runner")
@@ -2736,6 +2793,707 @@ def clean_github_readonly(context: dict) -> None:
     print("Removed only positively settled G1 compiler and fixture outputs; original evidence retained.")
 
 
+def github_tls_binding(environment: dict[str, str]) -> dict[str, str]:
+    """The TLS lane is not an alias or successor of the owner23 lane."""
+    sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
+    run_id, attempt = environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
+    require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None,
+            "TLS source identity differs")
+    require(all(re.fullmatch(r"[1-9][0-9]{0,19}", item) is not None for item in (run_id, attempt)),
+            "TLS run identity differs")
+    require(environment.get("GITHUB_REF") == GITHUB_TLS_REF and environment.get("GITHUB_WORKFLOW_SHA") == sha
+            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{GITHUB_TLS_WORKFLOW}@{GITHUB_TLS_REF}",
+            "TLS workflow/ref binding differs")
+    require(environment.get("GITHUB_EVENT_NAME") == "push"
+            or environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch" and environment.get("MRK_EXPECTED_SHA") == sha,
+            "TLS event or exact dispatch source differs")
+    return {"workflowPath": GITHUB_TLS_WORKFLOW, "workflowSha": sha,
+            "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha, "runId": run_id, "attempt": attempt}
+
+
+def github_tls_namespaces() -> dict:
+    values = {name: os.readlink(f"/proc/self/ns/{name}") for name in ("net", "mnt")}
+    require(all(re.fullmatch(name + r":\[[1-9][0-9]{0,19}\]", value) is not None
+                for name, value in values.items()), "TLS original namespace identity differs")
+    return {"parentNetns": values["net"], "parentMntns": values["mnt"]}
+
+
+def github_tls_file(path: Path) -> dict:
+    """Reuse the original ordinary-file hash discipline for a canonical input."""
+    require(path.is_absolute() and path.resolve(strict=True) == path, "TLS input is not canonical")
+    before = github_file_identity(path)
+    require(0 <= before["size"] <= 64 * 1024 * 1024, "TLS input exceeds its file bound")
+    result = {"path": str(path), "size": before["size"], "sha256": hash_file(path)}
+    require(same_compile_json(before, github_file_identity(path)), "TLS input changed while binding")
+    return result
+
+
+def github_tls_stdlib_files(library: Path) -> set[Path]:
+    """Finite DATA-only import-roster observation, also usable before cleanup."""
+    require(library.is_absolute() and library.resolve(strict=True) == library and library.is_dir(),
+            "TLS selected stdlib directory differs")
+    archive = library.parent / "python314.zip"
+    require(not os.path.lexists(archive), "TLS unexpected stdlib archive is not bound")
+    paths, seen = set(), 0
+    excluded = {"site-packages", "test", "tests", "idlelib", "tkinter", "turtledemo", "ensurepip", "venv"}
+    for parent, directories, names in os.walk(library, followlinks=False):
+        here = Path(parent)
+        seen += len(directories) + len(names)
+        require(seen <= 8192 and len(here.relative_to(library).parts) <= 16,
+                "TLS selected stdlib enumeration exceeds its bound")
+        directories[:] = sorted(name for name in directories if name not in excluded)
+        for name in directories:
+            require(not (here / name).is_symlink(), "TLS stdlib directory link differs")
+        for name in sorted(names):
+            # Fixed -I -S -B without -O cannot select optimization1/2 caches.
+            if name.endswith((".py", ".pyc", ".so")) and not re.search(r"\.opt-[12]\.pyc$", name):
+                path = here / name
+                require(not path.is_symlink(), "TLS stdlib input link differs")
+                paths.add(path)
+                require(len(paths) <= 1800, "TLS selected stdlib file count exceeds its bound")
+    require(bool(paths), "TLS selected stdlib is empty")
+    return paths
+
+
+def github_tls_runtime() -> tuple[dict, dict, set[Path]]:
+    """Admitted prepare only: selected development runtime, not a host audit.
+
+    No product import, CA generation, peer/socket or production selection occurs.
+    The SSL option roundtrip and actual ELF mapping are real runtime observations,
+    not deductions from a version string. Lazy imports keep inert loaders inert.
+    """
+    import resource
+    import socket
+    import ssl
+    import sysconfig
+
+    require(sys.version.split()[0] == PYTHON and sys.flags.isolated and sys.flags.no_site
+            and sys.dont_write_bytecode and sys.flags.optimize == 0 and sys.platform == "linux",
+            "TLS development interpreter flags/version differ")
+    prefix = Path(sys.base_prefix).resolve(strict=True)
+    library = Path(sysconfig.get_path("stdlib")).resolve(strict=True)
+    require(library == prefix / "lib/python3.14"
+            and Path(sys.executable).resolve(strict=True).parent.parent == prefix, "TLS selected stdlib layout differs")
+    paths = github_tls_stdlib_files(library)
+    allowed_search = {str(library), str(library / "lib-dynload"), str(prefix / "lib/python314.zip")}
+    require(all(item in allowed_search for item in sys.path), "TLS import search escaped the selected stdlib")
+    roles = {name: str(Path(module.__file__).resolve(strict=True)) for name, module in (
+        ("ssl", ssl), ("socket", socket), ("_ssl", sys.modules["_ssl"]), ("_socket", sys.modules["_socket"]))}
+    require(all(Path(value) in paths for value in roles.values()), "TLS SSL/socket extension is outside its bound runtime")
+    mask = int(getattr(ssl, "OP_IGNORE_UNEXPECTED_EOF", 0))
+    require(0 < mask < 2**64 and type(ssl.OPENSSL_VERSION) is str and 0 < len(ssl.OPENSSL_VERSION) <= 128,
+            "TLS public EOF option is unavailable")
+    probe = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    probe.options |= mask
+    require(int(probe.options) & mask == mask, "TLS public EOF option cannot be set")
+    probe.options &= ~mask
+    require(int(probe.options) & mask == 0, "TLS public EOF option cannot be cleared")
+    # Capture after the actual SSL option probe, including any object loaded by
+    # SSLContext construction as well as the previously imported resource limit.
+    with Path("/proc/self/maps").open("rb") as stream:
+        maps = stream.read(1024 * 1024 + 1)
+    require(len(maps) <= 1024 * 1024, "TLS loader mapping exceeds its bound")
+    libraries = set()
+    for line in maps.decode("utf-8", errors="strict").splitlines():
+        fields = line.split(None, 5)
+        if len(fields) != 6 or "x" not in fields[1] or not fields[5].startswith("/"):
+            continue
+        require(not fields[5].endswith(" (deleted)"), "TLS mapped runtime was deleted")
+        path = Path(fields[5]).resolve(strict=True)
+        libraries.add(path)
+        require(len(libraries) <= 128, "TLS mapped loader closure exceeds its bound")
+    for role, pattern in (("libssl", r"libssl\.so\.[0-9.]+"), ("libcrypto", r"libcrypto\.so\.[0-9.]+"),
+                          ("loader", r"ld-linux-x86-64\.so\.2")):
+        found = [path for path in libraries if re.fullmatch(pattern, path.name)]
+        require(len(found) == 1, "TLS required original SSL/loader object differs")
+        roles[role] = str(found[0])
+    paths.update(libraries)
+    # resource is loaded before the mapping snapshot so the fixed outer limiter
+    # does not silently add an unbound extension after the runtime freeze.
+    require(Path(resource.__file__).resolve(strict=True) in paths, "TLS outer limiter extension is not bound")
+    return {"opensslVersion": ssl.OPENSSL_VERSION, "ignoreUnexpectedEof": mask}, roles, paths
+
+
+def github_tls_manifest(context: dict) -> dict:
+    source, root = Path(context["source"]), Path(context["root"])
+    ssl, runtime_roles, paths = github_tls_runtime()
+    roles = {"python": context["python"], "bootstrap": str(source / "desktop/github_connection_bootstrap.py"),
+             "coreZip": str(root / "core.zip"), "peer": str(source / GITHUB_TLS_FIXTURES / "github_tls_peer.py"),
+             "namespace": str(source / GITHUB_TLS_FIXTURES / "github_tls_namespace.sh"), **runtime_roles,
+             **{name: str(source / GITHUB_TLS_FIXTURES / "github_tls" / name) for name in GITHUB_TLS_CERTIFICATES},
+             **{name: str(root / "github-tls-namespace" / name) for name in GITHUB_TLS_CONFIG},
+             **{"tool:" + name: value for name, value in GITHUB_TLS_TOOLS.items()}}
+    paths.update(Path(value) for value in roles.values())
+    paths.update(source / name for name in GITHUB_TLS_SOURCES)
+    paths.update(source / "src" / name for name in GTK_CORE_PATHS)
+    require(len(paths) <= 2048, "TLS input closure has too many files")
+    files = [github_tls_file(path) for path in sorted(paths, key=str)]
+    require(sum(row["size"] for row in files) <= 256 * 1024 * 1024, "TLS input closure exceeds its byte bound")
+    for name, expected in GITHUB_TLS_CONFIG.items():
+        require((root / "github-tls-namespace" / name).read_bytes() == expected, "TLS fixed resolver configuration differs")
+    uid, gid = os.geteuid(), os.getegid()
+    require(0 < uid < 2**32 and 0 < gid < 2**32 and os.getuid() == uid and os.getgid() == gid,
+            "TLS original non-root identity differs")
+    value = {"schemaVersion": 1, "scope": GITHUB_TLS_SCOPE,
+             **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+             "sourceRoot": str(source), "jobRoot": str(root), "python": context["python"],
+             "coreSource": str(source / "src"), "coreZip": str(root / "core.zip"), "uid": uid, "gid": gid,
+             **github_tls_namespaces(), "ssl": ssl, "roles": roles, "files": files}
+    require(len(canonical_json(value)) + 1 <= 1024 * 1024, "TLS precompile manifest exceeds its bound")
+    validate_github_tls_manifest(value, context=context)
+    return value
+
+
+def validate_github_tls_manifest(value: object, *, context: dict) -> dict:
+    """Pure closed input DATA shape; acquisition and hashes remain independent."""
+    manifest = closed_object(value, {"schemaVersion", "scope", "sourceSha", "sourceTree", "workflowSha256", "runId", "attempt",
+        "sourceRoot", "jobRoot", "python", "coreSource", "coreZip", "uid", "gid", "parentNetns", "parentMntns", "ssl", "roles", "files"},
+        "TLS input manifest fields differ")
+    source, root = Path(context["source"]), Path(context["root"])
+    fixed = {"schemaVersion": 1, "scope": GITHUB_TLS_SCOPE,
+             **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+             "sourceRoot": str(source), "jobRoot": str(root), "python": context["python"],
+             "coreSource": str(source / "src"), "coreZip": str(root / "core.zip")}
+    require(same_compile_json({key: manifest[key] for key in fixed}, fixed)
+            and all(integer_between(manifest[key], 1, 2**32 - 1) for key in ("uid", "gid")), "TLS manifest source/user differs")
+    for key, kind in (("parentNetns", "net"), ("parentMntns", "mnt")):
+        require(type(manifest[key]) is str and re.fullmatch(kind + r":\[[1-9][0-9]{0,19}\]", manifest[key]) is not None,
+                "TLS manifest original namespace differs")
+    ssl = closed_object(manifest["ssl"], {"opensslVersion", "ignoreUnexpectedEof"}, "TLS SSL option fields differ")
+    require(type(ssl["opensslVersion"]) is str and ssl["opensslVersion"].startswith("OpenSSL ")
+            and 0 < len(ssl["opensslVersion"]) <= 128 and all(0x20 <= ord(c) <= 0x7e for c in ssl["opensslVersion"])
+            and integer_between(ssl["ignoreUnexpectedEof"], 1, 2**64 - 1), "TLS genuine SSL option support differs")
+    fixed_roles = {"python": context["python"], "bootstrap": str(source / "desktop/github_connection_bootstrap.py"),
+        "coreZip": str(root / "core.zip"), "peer": str(source / GITHUB_TLS_FIXTURES / "github_tls_peer.py"),
+        "namespace": str(source / GITHUB_TLS_FIXTURES / "github_tls_namespace.sh"),
+        **{name: str(source / GITHUB_TLS_FIXTURES / "github_tls" / name) for name in GITHUB_TLS_CERTIFICATES},
+        **{name: str(root / "github-tls-namespace" / name) for name in GITHUB_TLS_CONFIG},
+        **{"tool:" + name: path for name, path in GITHUB_TLS_TOOLS.items()}}
+    runtime_roles = {"ssl", "socket", "_ssl", "_socket", "libssl", "libcrypto", "loader"}
+    roles = closed_object(manifest["roles"], set(fixed_roles) | runtime_roles, "TLS closed runtime/fixture/tool roles differ")
+    require(all(roles[key] == path for key, path in fixed_roles.items()), "TLS fixed source/CA/config/tool path differs")
+    require(type(manifest["files"]) is list and 0 < len(manifest["files"]) <= 2048, "TLS input file roster differs")
+    names, total = [], 0
+    for row in manifest["files"]:
+        closed_object(row, {"path", "size", "sha256"}, "TLS input file fields differ")
+        path = row["path"]
+        require(type(path) is str and 0 < len(path) <= 16384 and path.startswith("/") and "\0" not in path
+                and "\\" not in path and not any(part in {"", ".", ".."} for part in path.split("/")[1:])
+                and integer_between(row["size"], 0, 64 * 1024 * 1024) and sha256_value(row["sha256"]),
+                "TLS input file binding is malformed")
+        names.append(path)
+        total += row["size"]
+    require(names == sorted(set(names)) and total <= 256 * 1024 * 1024
+            and all(type(path) is str and path in names for path in roles.values()), "TLS input closure is missing, duplicate or oversized")
+    library = Path(context["python"]).parent.parent / "lib/python3.14"
+    require(all(roles[name] == str(library / f"{name}.py") for name in ("ssl", "socket"))
+            and all(Path(roles[name]).parent == library / "lib-dynload"
+                    and re.fullmatch(re.escape(name) + r"\.(cpython-314-x86_64-linux-gnu|abi3)\.so", Path(roles[name]).name)
+                    for name in ("_ssl", "_socket")), "TLS selected SSL/socket import paths differ")
+    for name, pattern in (("libssl", r"libssl\.so\.[0-9.]+"), ("libcrypto", r"libcrypto\.so\.[0-9.]+"),
+                          ("loader", r"ld-linux-x86-64\.so\.2")):
+        require(re.fullmatch(pattern, Path(roles[name]).name) is not None, "TLS selected SSL/loader object differs")
+    require(all(str(source / name) in names for name in GITHUB_TLS_SOURCES)
+            and all(str(source / "src" / name) in names for name in GTK_CORE_PATHS), "TLS actual source/core closure is incomplete")
+    records = {row["path"]: row for row in manifest["files"]}
+    require(all(records[path]["size"] > 0 for path in roles.values())
+            and records[str(source / GITHUB_TLS_WORKFLOW)]["sha256"] == context["workflowSha256"],
+            "TLS required input is empty or workflow bytes differ")
+    require(len(canonical_json(manifest)) <= 1024 * 1024, "TLS manifest byte bound differs")
+    return manifest
+
+
+def github_tls_directories(context: dict) -> dict:
+    root = Path(context["root"])
+    return {"root": workflow_directory_identity(root), "source": workflow_directory_identity(Path(context["source"])),
+            **{name: workflow_directory_identity(root / name) for name in GITHUB_TLS_DIRECTORIES}}
+
+
+def github_tls_input_summary(context: dict, manifest: dict) -> dict:
+    source = Path(context["source"])
+    by_path = {row["path"]: row for row in manifest["files"]}
+    def row(path: str, relative: str) -> dict:
+        return {"path": relative, **{key: by_path[path][key] for key in ("size", "sha256")}}
+    core = [row(str(source / "src" / name), name) for name in GTK_CORE_PATHS]
+    validate_gtk_core_inventory(core)
+    python = by_path[manifest["python"]]
+    return {"sourceFiles": [row(str(source / name), name) for name in GITHUB_TLS_SOURCES], "coreFiles": core,
+            "coreZipSha256": by_path[manifest["coreZip"]]["sha256"],
+            "pythonSha256": python["sha256"], "pythonBytes": python["size"],
+            "closureFiles": len(by_path), "closureBytes": sum(item["size"] for item in by_path.values()),
+            "closureSha256": hashlib.sha256(canonical_json(manifest["files"])).hexdigest(),
+            "ssl": manifest["ssl"],
+            "roles": {name: {key: by_path[path][key] for key in ("size", "sha256")}
+                      for name, path in manifest["roles"].items()}}
+
+
+def prepare_github_tls_context(context: dict, inventory: list[dict]) -> None:
+    root = Path(context["root"])
+    for name, data in GITHUB_TLS_CONFIG.items():
+        with (root / "github-tls-namespace" / name).open("xb") as stream:
+            stream.write(data)
+    context["originalDirectories"] = github_tls_directories(context)
+    context["observedHost"] = workflow_host(root)
+    manifest = github_tls_manifest(context)
+    write_json(root / "github-tls-inputs.json", manifest)
+    context["tlsInputsSha256"] = hash_file(root / "github-tls-inputs.json")
+    context["tlsInputs"] = github_tls_input_summary(context, manifest)
+    require(same_compile_json(inventory, context["tlsInputs"]["coreFiles"]), "TLS source/ZIP inventory differs")
+    github_tls_source_unchanged(context)
+
+
+def github_tls_inputs_unchanged(context: dict) -> None:
+    # Revalidate the frozen bytes as DATA, not a new SSL probe, product import or
+    # tool invocation. In particular this remains safe at the cleanup boundary.
+    require(context.get("executionScope") == GITHUB_TLS_SCOPE and context.get("platform") == "linux",
+            "Wrong TLS input scope")
+    require(same_compile_json(github_tls_directories(context), context["originalDirectories"]),
+            "TLS original directory identity changed")
+    path = Path(context["root"]) / "github-tls-inputs.json"
+    require(hash_file(path) == context["tlsInputsSha256"], "TLS compiled input anchor changed")
+    manifest = read_bounded_json(path, 1024 * 1024)
+    validate_github_tls_manifest(manifest, context=context)
+    require(type(manifest) is dict and manifest.get("scope") == GITHUB_TLS_SCOPE
+            and manifest.get("schemaVersion") == 1
+            and all(manifest.get(key) == context[key]
+                    for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt"))
+            and manifest.get("sourceRoot") == context["source"] and manifest.get("jobRoot") == context["root"]
+            and manifest.get("python") == context["python"] and manifest.get("uid") == os.geteuid()
+            and manifest.get("gid") == os.getegid()
+            and all(manifest.get(key) == value for key, value in github_tls_namespaces().items()),
+            "TLS original context/namespace binding changed")
+    require(type(manifest.get("files")) is list and 0 < len(manifest["files"]) <= 2048,
+            "TLS original input roster differs")
+    library = Path(manifest["roles"]["ssl"]).parent
+    expected_stdlib = {Path(row["path"]) for row in manifest["files"] if library in Path(row["path"]).parents}
+    require(github_tls_stdlib_files(library) == expected_stdlib, "TLS original import roster changed")
+    observed = [github_tls_file(Path(row["path"])) for row in manifest["files"]]
+    require(same_compile_json(manifest["files"], observed)
+            and same_compile_json(context["tlsInputs"], github_tls_input_summary(context, manifest)),
+            "TLS original runtime/source/CA/namespace inputs changed")
+
+
+def github_tls_source_unchanged(context: dict) -> None:
+    source_unchanged(context)
+    environment = clean_environment(Path(context["root"]))
+    require(run([context["git"], "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=Path(context["source"]),
+                env=environment, timeout=15, capture=True) == context["sourceTree"], "TLS source tree changed")
+    require(run([context["git"], "status", "--porcelain=v1", "--untracked-files=all"], check="workflow-source-status",
+                cwd=Path(context["source"]), env=environment, timeout=15, capture=True) == "",
+            "TLS source contains unreviewed or generated inputs")
+    github_tls_inputs_unchanged(context)
+
+
+def github_tls_public_bindings(context: dict) -> dict:
+    return {"schemaVersion": 1, "scope": GITHUB_TLS_EVIDENCE_SCOPE,
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha",
+                                           "workflowRef", "workflowSha256", "runId", "attempt", "tlsInputsSha256", "tlsInputs")},
+            "python": PYTHON, "rust": {"release": RUST, "target": TARGETS["linux"]},
+            "features": ["development-runtime"], "testTarget": "lib", "host": context["observedHost"],
+            "notVerified": list(GITHUB_TLS_NOT_VERIFIED)}
+
+
+def validate_github_tls_peer(value: object, name: str) -> None:
+    """Pure redacted peer DATA; socket exit alone is not either parent's finality."""
+    peer = closed_object(value, {"schemaVersion", "scope", "case", "state", "status", "code", "connections",
+        "handshakes", "requests", "decryptedBytes", "authBytes", "closeNotify", "tlsRefused",
+        "wireReadBytes", "wireWriteBytes", "replyBytes", "allSocketsClosed"}, "TLS peer terminal fields differ")
+    connections = 5 if name == "T1-zip" else 4 if name in {"T1-source", "T3-clean"} else 1
+    refused = name.startswith("T2-")
+    exact = {"schemaVersion": 1, "scope": "github-tls-peer-v1", "case": name, "state": "finished",
+             "status": "passed", "code": None, "connections": connections,
+             "handshakes": 0 if refused else connections, "requests": 0 if refused else connections,
+             "authBytes": 0 if refused else connections * len(b"Bearer INERT_NOT_A_CREDENTIAL"),
+             "closeNotify": 0 if refused or name == "T3-ragged" else connections,
+             "tlsRefused": refused, "allSocketsClosed": True}
+    require(same_compile_json({key: peer[key] for key in exact}, exact), "TLS peer protocol/case/finality differs")
+    require(integer_between(peer["decryptedBytes"], 0 if refused else peer["authBytes"],
+                            0 if refused else connections * 8192), "TLS peer decrypted-byte bound differs")
+    for key, maximum in (("wireReadBytes", 128 * 1024), ("wireWriteBytes", 128 * 1024), ("replyBytes", 64 * 1024)):
+        require(type(peer[key]) is list and len(peer[key]) == connections, "TLS peer connection byte roster differs")
+        require(all(integer_between(item, 0 if refused and key == "replyBytes" else 1,
+                                    0 if refused and key == "replyBytes" else maximum) for item in peer[key]),
+                "TLS peer connection byte bounds differ")
+
+
+def validate_github_tls_receipt(value: object, *, bindings: dict) -> dict:
+    """Closed nine-case inner facts, independently bound; never an outer wait."""
+    binding_keys = {"sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256",
+                    "artifactSha256", "artifactBytes", "coreZipSha256", "pythonSha256", "namespace"}
+    expected = closed_object(bindings, binding_keys, "TLS expected binding fields differ")
+    require(all(type(expected[key]) is str and re.fullmatch(r"[0-9a-f]{40}", expected[key]) is not None
+                and expected[key] != "0" * 40 for key in ("sourceSha", "sourceTree"))
+            and all(sha256_value(expected[key]) for key in ("workflowSha256", "tlsInputsSha256", "artifactSha256",
+                                                          "coreZipSha256", "pythonSha256"))
+            and all(type(expected[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", expected[key]) is not None
+                    for key in ("runId", "attempt"))
+            and integer_between(expected["artifactBytes"], 1, 512 * 1024 * 1024), "TLS expected bindings are malformed")
+    original = closed_object(expected["namespace"], {"parentNetns", "parentMntns", "uid", "gid"},
+                             "TLS expected original namespace differs")
+    require(all(integer_between(original[key], 1, 2**32 - 1) for key in ("uid", "gid")), "TLS original user differs")
+    receipt = closed_object(value, {"schemaVersion", "scope", "status", "allOwnersSettled", "allPeersSettled",
+        "failureCode", "bindings", "cases", "outerWait", "notVerified"}, "TLS receipt fields differ")
+    exact = {"schemaVersion": 1, "scope": GITHUB_TLS_RECEIPT_SCOPE, "status": "passed", "allOwnersSettled": True,
+             "allPeersSettled": True, "failureCode": None, "outerWait": "external-original-observer-required",
+             "notVerified": list(GITHUB_TLS_NOT_VERIFIED)}
+    require(same_compile_json({key: receipt[key] for key in exact}, exact), "TLS receipt header/finality/limitations differ")
+    supplied = closed_object(receipt["bindings"], binding_keys, "TLS receipt binding fields differ")
+    require(same_compile_json({key: supplied[key] for key in binding_keys - {"namespace"}},
+                             {key: expected[key] for key in binding_keys - {"namespace"}}), "TLS independently bound inputs differ")
+    namespace = closed_object(supplied["namespace"], set(original) | {"netns", "mntns"}, "TLS namespace fields differ")
+    require(same_compile_json({key: namespace[key] for key in original}, original), "TLS original namespace/user changed")
+    for key, parent, kind in (("netns", "parentNetns", "net"), ("mntns", "parentMntns", "mnt")):
+        require(all(type(namespace[item]) is str and re.fullmatch(kind + r":\[[1-9][0-9]{0,19}\]", namespace[item]) is not None
+                    for item in (key, parent)) and namespace[key] != namespace[parent], "TLS namespace was not distinct")
+    require(type(receipt["cases"]) is list and len(receipt["cases"]) == len(GITHUB_TLS_CASES), "TLS nine-case roster differs")
+    for name, supplied_case in zip(GITHUB_TLS_CASES, receipt["cases"], strict=True):
+        case = closed_object(supplied_case, {"case", "passed", "failureCode", "elapsedMs", "coreMode", "trustFixture", "product", "peer"},
+                             "TLS case fields differ")
+        require(same_compile_json({key: case[key] for key in ("case", "passed", "failureCode", "coreMode", "trustFixture")},
+                    {"case": name, "passed": True, "failureCode": None, "coreMode": "zip" if name == "T1-zip" else "source",
+                     "trustFixture": "other-root-ca.pem" if name == "T2-root" else "root-ca.pem"})
+                and integer_between(case["elapsedMs"], 0, 300000), "TLS case order, trust or original endpoint differs")
+        product = closed_object(case["product"], {"settled", "projectionChecked", "reason", "registeredOwners", "disabled", "owners"},
+                                "TLS product observation fields differ")
+        reason = "none" if name in {"T1-source", "T1-zip", "T3-clean"} else "response-invalid" if name in {"T3-length", "T3-chunk"} else "tls-failed"
+        require(same_compile_json({key: product[key] for key in product if key != "owners"},
+                {"settled": True, "projectionChecked": True, "reason": reason, "registeredOwners": 0, "disabled": False})
+                and type(product["owners"]) is list and len(product["owners"]) == 1, "TLS typed projection or owner finality differs")
+        owner = closed_object(product["owners"][0], {"id", "profile", "terminal", "unknownLatched", "permitRetained",
+                                                     "observerJoined", "firstError", "native"}, "TLS original owner fields differ")
+        require(same_compile_json({key: owner[key] for key in owner if key != "native"},
+                {"id": "github-read-1", "profile": "github-readonly", "terminal": True, "unknownLatched": False,
+                 "permitRetained": False, "observerJoined": True, "firstError": None}), "TLS original owner was not completely settled")
+        _validate_github_readonly_native(owner["native"], name, "github-readonly")
+        peer = closed_object(case["peer"], {"acquisitionJoined", "spawned", "waited", "exitCode", "exitSuccess", "stopAttempted",
+            "stdoutJoined", "stderrJoined", "stdoutEof", "stderrEof", "stdoutBytes", "stderrBytes", "stdoutOverflow",
+            "stderrOverflow", "ready", "settled", "withinEndpoint", "protocolChecked", "terminal"}, "TLS original peer fields differ")
+        required = {key: True for key in ("acquisitionJoined", "spawned", "waited", "exitSuccess", "stdoutJoined", "stderrJoined",
+                                         "stdoutEof", "stderrEof", "ready", "settled", "withinEndpoint", "protocolChecked")}
+        required.update(exitCode=0, stopAttempted=False, stdoutOverflow=False, stderrOverflow=False, stderrBytes=0)
+        require(same_compile_json({key: peer[key] for key in required}, required)
+                and integer_between(peer["stdoutBytes"], 1, 8192), "TLS original peer wait/reader/finality differs")
+        validate_github_tls_peer(peer["terminal"], name)
+    require(len(canonical_json(receipt)) <= 128 * 1024, "TLS receipt exceeds its byte bound")
+    return receipt
+
+
+def parse_github_tls_receipt(raw: bytes, *, bindings: dict) -> dict:
+    require(type(raw) is bytes and 0 < len(raw) <= 128 * 1024, "TLS receipt bytes differ or exceed their bound")
+    return validate_github_tls_receipt(bounded_json(raw, 128 * 1024), bindings=bindings)
+
+
+def github_tls_compile_record(context: dict, argv: list[str], messages: Path) -> dict:
+    ordinary(messages)
+    require(0 < messages.stat().st_size <= 16 * 1024 * 1024, "TLS compiler output exceeds its bound")
+    with messages.open("rb") as stream:
+        raw = stream.read(16 * 1024 * 1024 + 1)
+    root = Path(context["root"])
+    path = github_compiled_test(raw, source=Path(context["source"]), target_root=root / "target")
+    value = {"schemaVersion": 1, "scope": GITHUB_TLS_SCOPE,
+             **{key: context[key] for key in ("sourceSha", "sourceTree", "tlsInputsSha256")},
+             "path": str(path), **github_artifact_identity(path, root),
+             "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(),
+             "messagesSha256": hashlib.sha256(raw).hexdigest()}
+    write_json(root / "github-tls-compiled-test.json", value)
+    return value
+
+
+def github_tls_original_artifact(context: dict) -> dict:
+    root = Path(context["root"])
+    value = closed_object(read_bounded_json(root / "github-tls-compiled-test.json", 16384),
+        {"schemaVersion", "scope", "sourceSha", "sourceTree", "tlsInputsSha256", "path", "identity", "size",
+         "sha256", "invocationSha256", "messagesSha256"}, "TLS original compile record differs")
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == GITHUB_TLS_SCOPE
+            and all(value[key] == context[key] for key in ("sourceSha", "sourceTree", "tlsInputsSha256"))
+            and sha256_value(value["invocationSha256"]) and sha256_value(value["messagesSha256"]),
+            "TLS original compiler source/input anchor differs")
+    path = github_executable_path(value["path"], target_root=root / "target")
+    require(same_compile_json({key: value[key] for key in ("identity", "size", "sha256")}, github_artifact_identity(path, root)),
+            "TLS original compiled artifact changed")
+    return value
+
+
+def github_tls_compiled_public(compiled: dict) -> dict:
+    return {**{key: compiled[key] for key in ("size", "sha256", "invocationSha256", "messagesSha256")},
+            "identitySha256": hashlib.sha256(canonical_json(compiled["identity"])).hexdigest()}
+
+
+def github_tls_expected_bindings(context: dict, compiled: dict, manifest: dict) -> dict:
+    return {**{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256")},
+            "artifactSha256": compiled["sha256"], "artifactBytes": compiled["size"],
+            "coreZipSha256": context["tlsInputs"]["coreZipSha256"], "pythonSha256": context["tlsInputs"]["pythonSha256"],
+            "namespace": {key: manifest[key] for key in ("parentNetns", "parentMntns", "uid", "gid")}}
+
+
+def github_tls_launch_argv(context: dict, compiled: dict, manifest: dict) -> list[str]:
+    """Exactly the original artifact through the fixed namespace entry; no shell command string."""
+    require(context.get("executionScope") == GITHUB_TLS_SCOPE and context.get("platform") == "linux",
+            "Wrong TLS namespace launch scope")
+    return ["/usr/bin/sudo", "-n", "--", "/usr/bin/unshare", "--mount", "--net", "--",
+            "/usr/bin/env", "-i", "LANG=C", "LC_ALL=C", "/usr/bin/bash", "--noprofile", "--norc",
+            str(Path(context["source"]) / GITHUB_TLS_FIXTURES / "github_tls_namespace.sh"),
+            context["source"], context["root"], compiled["path"], context["python"],
+            str(manifest["uid"]), str(manifest["gid"]), manifest["parentNetns"], manifest["parentMntns"],
+            context["tlsInputsSha256"], compiled["sha256"], str(compiled["size"]), context["sourceSha"]]
+
+
+def github_tls_outer_limits() -> None:
+    # Fixed child-only POSIX envelope, not a hostile-code sandbox or VM disposal.
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))
+    resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
+    resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, 1024 * 1024 * 1024))
+
+
+def github_tls_outer_base(context: dict, compiled: dict) -> dict:
+    return {"schemaVersion": 1, "scope": "github-readonly-tls-original-outer-v1",
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256")},
+            "artifactSha256": compiled["sha256"], "artifactBytes": compiled["size"],
+            "artifactIdentitySha256": hashlib.sha256(canonical_json(compiled["identity"])).hexdigest()}
+
+
+def github_tls_run_outer(context: dict, compiled: dict) -> dict:
+    """Only this original CompletedProcess supplies an outer-wait observation.
+
+    Timeout/OSError/nonzero return spends the claim and never permits clean.
+    subprocess.run owns its original launcher handle; no PID lookup/adoption or
+    assertion from the inner fixture substitutes for the actual returned wait.
+    """
+    root = Path(context["root"])
+    manifest = read_bounded_json(root / "github-tls-inputs.json", 1024 * 1024)
+    destination = root / "github-tls-outer.json"
+    require(not os.path.lexists(destination), "TLS outer attempt was already recorded")
+    value = {**github_tls_outer_base(context, compiled), "status": "unknown", "waitObserved": False,
+             "exitCode": None, "timedOut": False, "elapsedMs": 0, "stdoutBytes": None, "stderrBytes": None}
+    start = time.monotonic()
+    with (root / "github-tls.stdout").open("x", encoding="utf-8") as output, \
+            (root / "github-tls.stderr").open("x", encoding="utf-8") as diagnostics:
+        try:
+            original = subprocess.run(github_tls_launch_argv(context, compiled, manifest), cwd=root,
+                env=clean_environment(root), stdin=subprocess.DEVNULL, stdout=output, stderr=diagnostics,
+                check=False, timeout=300, preexec_fn=github_tls_outer_limits)
+        except subprocess.TimeoutExpired:
+            value["timedOut"] = True
+        except (OSError, subprocess.SubprocessError):
+            pass
+        else:
+            require(type(original.returncode) is int, "TLS original outer return differs")
+            value.update(status="passed" if original.returncode == 0 else "failed",
+                         waitObserved=True, exitCode=original.returncode)
+    value["elapsedMs"] = max(0, int((time.monotonic() - start) * 1000))
+    if value["waitObserved"]:
+        value.update(stdoutBytes=(root / "github-tls.stdout").stat().st_size,
+                     stderrBytes=(root / "github-tls.stderr").stat().st_size)
+    write_json(destination, value)  # Exclusive original record, never overwritten by a receipt projection.
+    validate_github_tls_outer(value, context=context, compiled=compiled)
+    return value
+
+
+def validate_github_tls_outer(value: object, *, context: dict, compiled: dict) -> dict:
+    base = github_tls_outer_base(context, compiled)
+    closed_object(value, set(base) | {"status", "waitObserved", "exitCode", "timedOut", "elapsedMs", "stdoutBytes", "stderrBytes"},
+                  "TLS original outer receipt fields differ")
+    require(same_compile_json({key: value[key] for key in base}, base)
+            and value["status"] == "passed" and value["waitObserved"] is True
+            and type(value["exitCode"]) is int and value["exitCode"] == 0 and value["timedOut"] is False
+            and integer_between(value["elapsedMs"], 0, 300000)
+            and all(integer_between(value[key], 0, 1024 * 1024) for key in ("stdoutBytes", "stderrBytes")),
+            "TLS original outer wait failed, was unknown, or changed")
+    return value
+
+
+def github_tls_result(context: dict) -> dict:
+    root = Path(context["root"])
+    compiled = github_tls_original_artifact(context)
+    manifest = read_bounded_json(root / "github-tls-inputs.json", 1024 * 1024)
+    raw = read_bounded_json(root / "github-tls/receipt.json", 128 * 1024)
+    validate_github_tls_receipt(raw, bindings=github_tls_expected_bindings(context, compiled, manifest))
+    outer = validate_github_tls_outer(read_bounded_json(root / "github-tls-outer.json", 16384), context=context, compiled=compiled)
+    return {"nativeReceiptSha256": hash_file(root / "github-tls/receipt.json"), "outer": outer}
+
+
+def github_tls_phase_claim(context: dict, name: str) -> dict:
+    return {"scope": GITHUB_TLS_SCOPE, "phase": name,
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256")}}
+
+
+def github_tls_phase_value(context: dict, name: str, checks: list[str]) -> dict:
+    require(name in GITHUB_TLS_CHECKS and context.get("executionScope") == GITHUB_TLS_SCOPE, "Unknown TLS phase receipt")
+    value = {"schemaVersion": 1, "scope": GITHUB_TLS_EVIDENCE_SCOPE, "phase": name, "status": "passed",
+             **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha",
+                                            "workflowRef", "workflowSha256", "runId", "attempt", "tlsInputsSha256")},
+             "inputSha256": hashlib.sha256(canonical_json(context["tlsInputs"])).hexdigest(),
+             "rust": {"release": RUST, "target": TARGETS["linux"]},
+             "checks": [{"check": check, "exitCode": 0} for check in checks]}
+    if name in {"compile", "github-tls"}:
+        value["compiledTest"] = github_tls_compiled_public(github_tls_original_artifact(context))
+    if name == "github-tls":
+        value.update(github_tls_result(context))
+    return value
+
+
+def validate_github_tls_phase_receipt(value: object, context: dict, name: str) -> dict:
+    require(name in GITHUB_TLS_CHECKS and context.get("executionScope") == GITHUB_TLS_SCOPE,
+            "Unexpected TLS receipt scope or phase")
+    require(same_compile_json(value, github_tls_phase_value(context, name, list(GITHUB_TLS_CHECKS[name]))),
+            "TLS original phase receipt is incomplete or changed")
+    return value
+
+
+def github_tls_predecessors(context: dict, name: str) -> None:
+    require(context.get("executionScope") == GITHUB_TLS_SCOPE and name in (*GITHUB_TLS_CHECKS, "clean"),
+            "Unknown TLS successor or scope")
+    phases, root = list(GITHUB_TLS_CHECKS), Path(context["root"])
+    previous = phases if name == "clean" else phases[:phases.index(name)]
+    for prior in previous:
+        require(same_compile_json(read_bounded_json(root / f"{prior}-started.json", 4096), github_tls_phase_claim(context, prior)),
+                "TLS original phase claim differs")
+        validate_github_tls_phase_receipt(read_bounded_json(root / f"{prior}-checks.json", 32768), context, prior)
+    for later in (*phases[len(previous):], "clean"):
+        for suffix in ("started", "checks"):
+            require(not os.path.lexists(root / f"{later}-{suffix}.json"), "TLS phase already claimed; retain outputs")
+    if name == "github-tls":
+        require(not os.path.lexists(root / "github-tls-outer.json")
+                and not os.path.lexists(root / "github-tls/receipt.json"), "TLS original native attempt already has output")
+
+
+def phase_github_tls(name: str, context: dict) -> None:
+    require(context.get("executionScope") == GITHUB_TLS_SCOPE and context.get("platform") == "linux", "Wrong TLS phase scope")
+    admit_phase(GITHUB_TLS_SCOPE, name)
+    require(name != "prepare", "TLS preparation has a separate fixed entry")
+    if name == "clean":
+        clean_github_tls(context)
+        return
+    github_tls_predecessors(context, name)
+    root, source = Path(context["root"]), Path(context["source"])
+    write_json(root / f"{name}-started.json", github_tls_phase_claim(context, name))
+    github_tls_source_unchanged(context)
+    no_cargo_configuration((root, *root.parents, source / "desktop/src-tauri", source / "desktop", source, *source.parents))
+    environment = clean_environment(root)
+    environment.update(GITHUB_SHA=context["sourceSha"], MRK_GITHUB_TLS_INPUTS_SHA256=context["tlsInputsSha256"])
+    manifest = source / "desktop/src-tauri/Cargo.toml"
+    if name == "acquire":
+        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+            check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
+        cargo, _ = tools(context, environment)
+        with (root / "cargo-metadata.json").open("x", encoding="utf-8") as output, \
+                (root / "acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                 "--features", "development-runtime", "--filter-platform", TARGETS["linux"], "--manifest-path", str(manifest)],
+                check="github-tls-locked-headless-metadata", cwd=root, env=environment, timeout=600, output=output, diagnostics=diagnostics)
+    elif name == "compile":
+        cargo, _ = tools(context, environment)
+        argv = [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--features", "development-runtime",
+                "--target", TARGETS["linux"], "--manifest-path", str(manifest), "--target-dir", str(root / "target"),
+                "--lib", "--no-run", "--message-format=json"]
+        messages = root / "github-tls-compile-messages.jsonl"
+        with messages.open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "compile.stderr").open("x", encoding="utf-8") as diagnostics:
+            run(argv, check="github-tls-headless-test-compile-only", cwd=root, env=environment, timeout=600,
+                output=output, diagnostics=diagnostics)
+        github_tls_compile_record(context, argv, messages)
+    else:
+        require(name == "github-tls", "Unknown TLS native phase")
+        compiled = github_tls_original_artifact(context)
+        github_tls_run_outer(context, compiled)
+        github_tls_result(context)  # Both independent inner original owners AND the actual original outer wait.
+    # No source/tool call or deletion follows a missing/unknown original result.
+    github_tls_source_unchanged(context)
+    phase_receipt(context, name, list(GITHUB_TLS_CHECKS[name]))
+
+
+def clean_github_tls(context: dict) -> None:
+    """Positive original finality only; finite no-follow deletion, no process scan.
+
+    On failure retain all remaining names for disposable-host teardown. This is
+    a cooperative, private job namespace, not an atomic unlink against a hostile
+    same-user renamer. Unknown/new entries are never added to the deletion plan.
+    """
+    github_tls_predecessors(context, "clean")
+    github_tls_inputs_unchanged(context)
+    root = Path(context["root"])
+    compiled = github_tls_compiled_public(github_tls_original_artifact(context))
+    original_result = github_tls_result(context)
+    write_json(root / "clean-started.json", github_tls_phase_claim(context, "clean"))
+    private_files = ("core.zip", "gitconfig-empty", "cargo-metadata.json", "acquire.stderr",
+                     "github-tls-compile-messages.jsonl", "compile.stderr", "github-tls-compiled-test.json",
+                     "github-tls.stdout", "github-tls.stderr")
+    evidence = ("context.json", "public-bindings.json", "clean-started.json",
+                "github-tls-inputs.json", "github-tls-outer.json",
+                *(f"{phase}-{suffix}.json" for phase in GITHUB_TLS_CHECKS for suffix in ("started", "checks")))
+    require({path.name for path in root.iterdir()} == set((*GITHUB_TLS_DIRECTORIES, *private_files, *evidence)),
+            "TLS task cleanup has missing or unexpected top-level entries; retain outputs")
+    native = root / "github-tls"
+    require({path.name for path in native.iterdir()} == {"receipt.json", *GITHUB_TLS_CASES},
+            "TLS settled fixture inventory differs; retain outputs")
+    original_root = root.lstat()
+    directories = {root: original_root, native: native.lstat()}
+    leaves, removals, total = [], [], 0
+    pending = [(root / name, 0) for name in GITHUB_TLS_DIRECTORIES if name != "github-tls"]
+    pending.extend((native / name, 0) for name in GITHUB_TLS_CASES)
+    pending.extend((root / name, 0) for name in private_files)
+    while pending:
+        path, depth = pending.pop()
+        info = path.lstat()
+        require(depth <= 32 and len(leaves) + len(removals) < 100000
+                and info.st_dev == original_root.st_dev and info.st_uid == os.geteuid(),
+                "TLS cleanup crossed its original filesystem, owner or inventory bound")
+        if stat.S_ISDIR(info.st_mode):
+            directories[path] = info
+            removals.append(path)
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    require(len(pending) + len(leaves) + len(removals) < 100000, "TLS cleanup inventory exceeds its bound")
+                    pending.append((path / entry.name, depth + 1))
+            require(github_cleanup_identity(path.lstat(), directory=True) == github_cleanup_identity(info, directory=True),
+                    "TLS cleanup directory changed during inventory")
+        else:
+            require(stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode),
+                    "TLS cleanup found an unexpected file kind; retain outputs")
+            total += info.st_size
+            require(total <= 8 * 1024 * 1024 * 1024, "TLS cleanup output size exceeds its bound")
+            leaves.append((path, info))
+    # The whole finite plan is admitted before the first unlink. Keep the
+    # original parent identities, never follow a link or sweep a changed tree.
+    removed_links: dict[tuple[int, int], int] = {}
+    def parent_unchanged(path: Path) -> None:
+        for parent in (path.parent, *path.parent.parents):
+            if parent not in directories:
+                break
+            require(github_cleanup_identity(parent.lstat(), directory=True)
+                    == github_cleanup_identity(directories[parent], directory=True), "TLS cleanup original parent changed")
+            if parent == root:
+                break
+    for path, original_info in leaves:
+        parent_unchanged(path)
+        current, key = path.lstat(), (original_info.st_dev, original_info.st_ino)
+        require(github_cleanup_identity(current) == github_cleanup_identity(original_info)
+                and current.st_nlink == original_info.st_nlink - removed_links.get(key, 0), "TLS cleanup original leaf changed")
+        path.unlink()  # A link is removed as a leaf; its target is never opened.
+        removed_links[key] = removed_links.get(key, 0) + 1
+    for path in sorted(removals, key=lambda item: len(item.parts), reverse=True):
+        parent_unchanged(path)
+        require(github_cleanup_identity(path.lstat(), directory=True)
+                == github_cleanup_identity(directories[path], directory=True), "TLS cleanup original directory changed")
+        path.rmdir()  # Unknown/new content fails closed rather than being swept.
+    require({path.name for path in root.iterdir()} == {"github-tls", *evidence}
+            and {path.name for path in native.iterdir()} == {"receipt.json"}, "TLS cleanup postcondition differs")
+    write_json(root / "clean-checks.json", {
+        "schemaVersion": 1, "scope": GITHUB_TLS_EVIDENCE_SCOPE, "phase": "clean", "status": "passed",
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef",
+                                       "workflowSha256", "runId", "attempt")},
+        "allOriginalOwnersSettled": True, "allOriginalPeersSettled": True, "observerJoinsComplete": True,
+        "originalOuterWaitObserved": True, "tlsInputsSha256": context["tlsInputsSha256"],
+        "compiledTest": compiled, **original_result,
+        "removedFiles": len(leaves), "removedDirectories": len(removals), "inventoriedBytes": total,
+        "retained": ["redacted-evidence", "private-original-context", "private-tls-input-manifest", "private-original-outer-receipt"], "productionQualified": False,
+    })
+    print("Removed only positively settled TLS compiler and fixture outputs; original evidence retained.")
+
+
 def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | None = None,
                   scope: str = "passive-development-foundation-only", compiled: dict | None = None) -> None:
     # Only called after the fixed phase and final source check actually succeed.
@@ -2772,6 +3530,11 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                 "G1 phase cannot produce other native or product authority")
         value = github_phase_value(context, name, checks)
         validate_github_phase_receipt(value, context, name)
+    elif context.get("executionScope") == GITHUB_TLS_SCOPE:
+        require(node is None and scope == "passive-development-foundation-only" and compiled is None,
+                "TLS phase cannot produce another lane's authority")
+        value = github_tls_phase_value(context, name, checks)
+        validate_github_tls_phase_receipt(value, context, name)
     write_json(Path(context["root"]) / f"{name}-checks.json", value)
 
 
@@ -2808,8 +3571,10 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     profile = compile_profile(scope) if scope in COMPILE_PROFILES else None
     native_workflow = scope == WORKFLOW_NATIVE_SCOPE
     native_github = scope == GITHUB_READONLY_SCOPE
+    native_tls = scope == GITHUB_TLS_SCOPE
     binding = (compile_workflow_binding(os.environ, scope) if profile else workflow_native_binding(os.environ)
-               if native_workflow else github_readonly_binding(os.environ) if native_github else {})
+               if native_workflow else github_readonly_binding(os.environ) if native_github
+               else github_tls_binding(os.environ) if native_tls else {})
     source = Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True)
     temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
     sha = os.environ["GITHUB_SHA"]
@@ -2821,22 +3586,22 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
                             temp, *temp.parents))
     for ancestor in (source / "desktop", source, *source.parents):
         require(not (ancestor / ".npmrc").exists(), "Ambient npm project configuration is not admitted")
-    if native_workflow or native_github:
+    if native_workflow or native_github or native_tls:
         # One original root per actual job attempt. A second prepare must not
         # mint a fresh path to evade a failed/Unknown phase's retained claims.
-        label = "github" if native_github else "workflow"
+        label = "github-tls" if native_tls else "github" if native_github else "workflow"
         root = temp / f"mrk-desktop-foundation-{label}-{binding['runId']}-{binding['attempt']}"
         root.mkdir(mode=0o700)
     else:
         root = Path(tempfile.mkdtemp(prefix="mrk-desktop-foundation-", dir=temp))
     no_cargo_configuration((root,))
-    directories = GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (
+    directories = GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (
         "home", "cargo", "rustup", "tmp", "target", "windows-snapshot", "appdata", "localappdata") if windows else (
         "home", "cargo", "rustup", "tmp", "target", "native", "config-owner", "config-driver-loss", "config-watchdog-loss",
         "config-stop", "config-terminal-deadline", "config-startup-stop", "config-transaction-eof", "appdata", "localappdata", "npm-cache")
     for name in directories:
         (root / name).mkdir(mode=0o700)
-    empty_files = ("gitconfig-empty",) if native_workflow or native_github or windows else ("npmrc-user", "npmrc-global", "gitconfig-empty")
+    empty_files = ("gitconfig-empty",) if native_workflow or native_github or native_tls or windows else ("npmrc-user", "npmrc-global", "gitconfig-empty")
     for name in empty_files:
         (root / name).touch(mode=0o600, exist_ok=False)
     git = shutil.which("git")
@@ -2846,13 +3611,13 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15, capture=True) == sha,
             "Event and checkout source differ")
     tree = run([git, "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=source, env=environment, timeout=15, capture=True)
-    if native_workflow or native_github:
+    if native_workflow or native_github or native_tls:
         require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40,
                 "Workflow native source tree differs")
     inventory = []
     total = 0
     package = source / "src/mobile_release"
-    input_paths = sorted(package.rglob("*"), key=(lambda path: path.as_posix()) if native_workflow or native_github else None)
+    input_paths = sorted(package.rglob("*"), key=(lambda path: path.as_posix()) if native_workflow or native_github or native_tls else None)
     with zipfile.ZipFile(root / "core.zip", "x", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in input_paths:
             require(not path.is_symlink(), "Core input contains a symbolic link")
@@ -2878,8 +3643,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if windows:
         context.update(scope=scope, event=os.environ["GITHUB_EVENT_NAME"], ref=os.environ["GITHUB_REF"])
     workflow = (profile["workflow"] if profile else WORKFLOW_NATIVE_WORKFLOW if native_workflow
-                else GITHUB_READONLY_WORKFLOW if native_github else ".github/workflows/desktop-foundation.yml")
-    if profile or native_workflow or native_github:
+                else GITHUB_READONLY_WORKFLOW if native_github else GITHUB_TLS_WORKFLOW if native_tls
+                else ".github/workflows/desktop-foundation.yml")
+    if profile or native_workflow or native_github or native_tls:
         context["workflowSha256"] = hash_file(source / workflow)
     if scope == GTK_COMPILE_SCOPE:
         validate_gtk_core_inventory(inventory)
@@ -2888,6 +3654,8 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         prepare_workflow_native_context(context, inventory)
     elif native_github:
         prepare_github_readonly_context(context, inventory)
+    elif native_tls:
+        prepare_github_tls_context(context, inventory)
     source_unchanged(context)
     if not windows:
         write_json(root / "context.json", context)
@@ -2895,6 +3663,8 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         public = workflow_public_bindings(context)
     elif native_github:
         public = github_public_bindings(context)
+    elif native_tls:
+        public = github_tls_public_bindings(context)
     else:
         public = {
             "scope": profile["evidence"] if profile else WINDOWS_SNAPSHOT_PUBLIC_SCOPE if windows else "passive-development-foundation-only", "sourceSha": sha, "sourceTree": tree,
@@ -2939,7 +3709,7 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE) -> dict:
             and root.parent == Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
             and not root.is_symlink(), "Unrecognized task root")
     ordinary(root / "context.json")
-    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope == GITHUB_READONLY_SCOPE
+    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}
                else workflow_json(root / "context.json") if scope == WORKFLOW_NATIVE_SCOPE
                else json.loads((root / "context.json").read_text(encoding="utf-8")))
     require(context["root"] == str(root) and context["platform"] == platform and context.get("executionScope") == scope
@@ -2988,6 +3758,20 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE) -> dict:
         github_inputs_unchanged(context)
         require(same_compile_json(read_bounded_json(root / "public-bindings.json", 256 * 1024), github_public_bindings(context)),
                 "G1 public source binding changed")
+    elif scope == GITHUB_TLS_SCOPE:
+        binding = github_tls_binding(os.environ)
+        require(type(context) is dict and all(context.get(key) == value for key, value in binding.items())
+                and root.name == f"mrk-desktop-foundation-github-tls-{binding['runId']}-{binding['attempt']}"
+                and context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
+                and context.get("python") == str(Path(sys.executable).resolve(strict=True))
+                and type(context.get("sourceTree")) is str and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+                and context["sourceTree"] != "0" * 40
+                and context.get("workflowSha256") == hash_file(Path(context["source"]) / GITHUB_TLS_WORKFLOW),
+                "TLS context/source binding changed")
+        validate_workflow_host(context.get("observedHost"))
+        github_tls_inputs_unchanged(context)
+        require(same_compile_json(read_bounded_json(root / "public-bindings.json", 256 * 1024), github_tls_public_bindings(context)),
+                "TLS public source binding changed")
     return context
 
 
@@ -3281,6 +4065,9 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if scope == GITHUB_READONLY_SCOPE:
         phase_github_readonly(name, context)
         return
+    if scope == GITHUB_TLS_SCOPE:
+        phase_github_tls(name, context)
+        return
     windows = scope == WINDOWS_SNAPSHOT_SCOPE
     root, source = Path(context["root"]), Path(context["source"])
     environment = clean_environment(root)
@@ -3541,7 +4328,7 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core", "windows-snapshot", "github-owner"))
+    parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core", "windows-snapshot", "github-owner", "github-tls"))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)

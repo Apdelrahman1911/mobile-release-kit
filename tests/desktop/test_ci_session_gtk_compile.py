@@ -79,9 +79,9 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         rust_paths = re.findall(r'^    source!\("([^\"]+)"\),$', rust_block, re.MULTILINE)
         self.assertEqual(python_paths, rust_paths)
         self.assertEqual(python_paths, sorted(set(python_paths)))
-        self.assertEqual(len(python_paths), 173)
+        self.assertEqual(len(python_paths), 182)
         self.assertNotIn("len(SOURCES) == 154", driver)
-        self.assertEqual(driver.count("len(SOURCES) == 173"), 2)
+        self.assertEqual(driver.count("len(SOURCES) == 182"), 2)
         self.assertEqual(tuple(path.removeprefix("src/") for path in python_paths if path.startswith("src/")),
                          helper.GTK_CORE_PATHS)
         package = root / "src/mobile_release"
@@ -105,6 +105,15 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         # do not infer completeness from the consumer's own roster constant.
         for relative in ("desktop/github_connection_bootstrap.py",
                          "desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py",
+                         ".github/workflows/desktop-github-connection-tls.yml",
+                         "desktop/src-tauri/tests/fixtures/github_tls_peer.py",
+                         "desktop/src-tauri/tests/fixtures/github_tls_namespace.sh",
+                         "desktop/src-tauri/tests/fixtures/github_tls/api-expired.pem",
+                         "desktop/src-tauri/tests/fixtures/github_tls/api-valid.pem",
+                         "desktop/src-tauri/tests/fixtures/github_tls/other-root-ca.pem",
+                         "desktop/src-tauri/tests/fixtures/github_tls/root-ca.pem",
+                         "desktop/src-tauri/tests/fixtures/github_tls/server-key.pem",
+                         "desktop/src-tauri/tests/fixtures/github_tls/wrong-san.pem",
                          "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/supervisor.rs",
                          "desktop/src-tauri/src/hosted_tests.rs", "desktop/src-tauri/src/asset_session.rs"):
             self.assertIn(relative, python_paths)

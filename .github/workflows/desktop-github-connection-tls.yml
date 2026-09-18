@@ -1,0 +1,125 @@
+name: Desktop GitHub TLS T1-T3 native verification
+
+on:
+  push:
+    branches: [verify/desktop-github-connection-tls]
+    paths:
+      - desktop/**
+      - src/mobile_release/**
+      - templates/workflows/**
+      - tests/desktop/test_ci_foundation_contract.py
+      - pyproject.toml
+      - .github/workflows/desktop-github-workflow-apply-native.yml
+      - .github/workflows/desktop-github-connection-tls.yml
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed T1-T3 synthetic TLS candidate (no live GitHub)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-github-connection-tls-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  github-readonly-tls-native:
+    name: Fixed headless GitHub TLS T1-T3 / linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      MRK_DESKTOP_PLATFORM: linux
+      MRK_DESKTOP_HOSTED_CHECKS: github-readonly-tls-native-v1
+      MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
+    steps:
+      - name: Require exact disposable non-root Linux verification source
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]
+          [[ "$ImageOS" == ubuntu24 && "$EUID" -ne 0 ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-github-connection-tls ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-github-connection-tls.yml@$GITHUB_REF" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == push ]]
+          fi
+      - name: Check out exact candidate without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select fixed native helper Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Bind exact source, SSL development runtime and synthetic fixture bytes
+        id: prepare
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py prepare'
+      - name: Acquire only locked headless Linux compiler inputs
+        timeout-minutes: 15
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
+      - name: Compile one headless library-test artifact without execution
+        timeout-minutes: 12
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
+      - name: Verify nine fixed TLS cases inside the private loopback namespace
+        # Outer workflow ceiling only. The helper binds a tighter finite batch
+        # timeout; outer exit alone never supplies product/peer finality or permits cleanup.
+        timeout-minutes: 10
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py github-tls'
+      - name: Validate independent product, peer and outer finality before finite cleanup
+        if: success()
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py clean'
+      - name: Retain only allowlisted redacted TLS evidence
+        if: always() && steps.prepare.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-github-connection-tls-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.prepare.outputs.root }}/public-bindings.json
+            ${{ steps.prepare.outputs.root }}/acquire-checks.json
+            ${{ steps.prepare.outputs.root }}/compile-checks.json
+            ${{ steps.prepare.outputs.root }}/github-tls-checks.json
+            ${{ steps.prepare.outputs.root }}/github-tls/receipt.json
+            ${{ steps.prepare.outputs.root }}/clean-checks.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1

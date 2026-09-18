@@ -45,6 +45,7 @@ ROSTER = ("picker-cancel", "picker-select", "source-select", "quit-cancel", "qui
 # Literal source DATA matched to Q's complete first-party roster. No runtime
 # glob, Git discovery, source execution, generated include or module import.
 SOURCES = (
+    '.github/workflows/desktop-github-connection-tls.yml',
     'desktop/config_edit_bootstrap.py',
     'desktop/engine_bootstrap.py',
     'desktop/github_connection_bootstrap.py',
@@ -91,6 +92,14 @@ SOURCES = (
     'desktop/src-tauri/src/supervisor.rs',
     'desktop/src-tauri/tauri.conf.json',
     'desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py',
+    'desktop/src-tauri/tests/fixtures/github_tls/api-expired.pem',
+    'desktop/src-tauri/tests/fixtures/github_tls/api-valid.pem',
+    'desktop/src-tauri/tests/fixtures/github_tls/other-root-ca.pem',
+    'desktop/src-tauri/tests/fixtures/github_tls/root-ca.pem',
+    'desktop/src-tauri/tests/fixtures/github_tls/server-key.pem',
+    'desktop/src-tauri/tests/fixtures/github_tls/wrong-san.pem',
+    'desktop/src-tauri/tests/fixtures/github_tls_namespace.sh',
+    'desktop/src-tauri/tests/fixtures/github_tls_peer.py',
     'desktop/src-tauri/tests/fixtures/passive_core/__init__.py',
     'desktop/src-tauri/tests/fixtures/passive_core/_desktop_engine.py',
     'desktop/src-tauri/tests/session_gtk_qualification.rs',
@@ -1541,7 +1550,7 @@ class Freeze:
         require(Path(__file__).resolve(strict=True) == launcher and os.getcwd() == str(repository / "desktop/src-tauri"), "fixed actual launcher source/cwd")
         require(type(v["display"]) is str and re.fullmatch(r":[1-9][0-9]{0,3}", v["display"]) is not None
                 and os.environ.get("DISPLAY") == v["display"], "fixed inherited display number")
-        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 173, "complete frozen173 source roster")
+        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 182, "complete frozen182 source roster")
         for path in SOURCES:
             h(v["sourceHashes"][path])
             actual, st = book.hash_file(exact_path(repository / path), 2 * 1024 * 1024)
@@ -2588,7 +2597,7 @@ def inert_source_tests() -> None:
     raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
     fixed(FiniteJson(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
     longest = max(SOURCES, key=len)
-    assert len(SOURCES) == 173 and 64 < len(longest) <= 128 and len(WITNESS) == 18
+    assert len(SOURCES) == 182 and 64 < len(longest) <= 128 and len(WITNESS) == 18
     raw = (json.dumps({longest: "a" * 64}, separators=(",", ":")) + "\n").encode("ascii")
     rejects(lambda data: FiniteJson(data, native=True).parse(lf=True), raw)
     base = {"response-decision": 1, "response-leave": 3, "close-dispatch": 2, "close-enter": 4, "close-ack": 5, "close-leave": 6,

@@ -327,6 +327,72 @@ impl RuntimeConfig {
         runtime.bootstrap = bootstrap;
         Ok(runtime)
     }
+    /// Separate finite TLS fixture, never a production gate or an env-selected
+    /// bootstrap. This is still the owner's original blocking inspection and
+    /// endpoint. The private selection was minted against the compile-anchored
+    /// source/runtime/CA/namespace manifest, not a version string or fake core.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_github_tls_fixture(&self, end: Instant,
+        selection: &crate::supervisor::GitHubTlsRuntime) -> Result<VerifiedRuntime, BridgeError> {
+        fn closed_inventory(root: &Path, names: &BTreeSet<String>, end: Instant) -> Result<(), BridgeError> {
+            exact_inventory(root, names, end)?;
+            // Unlike packaged payloads, neither TLS source nor its private
+            // two-file bootstrap directory has an exempt root manifest.
+            match fs::symlink_metadata(root.join("manifest.json")) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                _ => return Err(unavailable()),
+            }
+            deadline(end)
+        }
+        deadline(end)?;
+        let mut runtime = self.development(end)?;
+        if runtime.python.as_path() != selection.python() || runtime.core.as_path() != selection.core()
+            || selection.files().is_empty() || selection.files().len() > FILE_COUNT {
+            return Err(unavailable());
+        }
+        // Includes the genuine source/ZIP, stdlib/import inputs, _ssl/_socket,
+        // mapped loader/libssl/libcrypto, fixed peer/namespace and all six PEMs.
+        // No TLS import, certificate generation or subprocess occurs here.
+        let mut total = 0u64;
+        closed_inventory(selection.source(), selection.source_files(), end)?;
+        for item in selection.files() {
+            let (path, size, expected) = item.parts();
+            if size > FILE_LIMIT || !sha(expected) { return Err(unavailable()); }
+            total = total.checked_add(size).ok_or_else(unavailable)?;
+            if total > TOTAL_LIMIT || hash_checked(path, size, end)? != expected { return Err(unavailable()); }
+        }
+        // Source mode and ZIP mode share the exact genuine implementation. The
+        // ZIP's admitted bytes are independently bound above, not rebuilt here.
+        let sources: [(&str, &[u8]); 4] = [
+            ("mobile_release/__init__.py", include_bytes!("../../../src/mobile_release/__init__.py")),
+            ("mobile_release/api/__init__.py", include_bytes!("../../../src/mobile_release/api/__init__.py")),
+            ("mobile_release/_desktop_github_engine.py", include_bytes!("../../../src/mobile_release/_desktop_github_engine.py")),
+            ("mobile_release/_github_connection_transport.py", include_bytes!("../../../src/mobile_release/_github_connection_transport.py")),
+        ];
+        for (name, bytes) in sources {
+            if read_checked(&selection.source().join(name), bytes.len() as u64, end)?.as_slice() != bytes { return Err(unavailable()); }
+        }
+        let bootstrap = selection.bootstrap();
+        let cwd = bootstrap.parent().ok_or_else(unavailable)?;
+        if !bootstrap.file_name().is_some_and(|name| name == "github_connection_bootstrap.py")
+            || selection.trust().is_empty() || selection.trust().len() as u64 > GITHUB_CA_LIMIT { return Err(unavailable()); }
+        const BOOTSTRAP: &[u8] = include_bytes!("../../github_connection_bootstrap.py");
+        let private_files = ["github_connection_bootstrap.py".to_owned(), "github-ca.pem".to_owned()]
+            .into_iter().collect::<BTreeSet<_>>();
+        closed_inventory(cwd, &private_files, end)?;
+        if read_checked(bootstrap, BOOTSTRAP.len() as u64, end)?.as_slice() != BOOTSTRAP
+            || read_checked(&cwd.join("github-ca.pem"), GITHUB_CA_LIMIT, end)?.as_slice() != selection.trust() {
+            return Err(unavailable());
+        }
+        closed_inventory(selection.source(), selection.source_files(), end)?;
+        closed_inventory(cwd, &private_files, end)?;
+        deadline(end)?;
+        // The live factory derives its only trust input from this exact private
+        // bootstrap's sibling. Never from the checkout cwd, an argv CA or URL.
+        runtime.bootstrap = bootstrap.to_path_buf();
+        runtime.cwd = cwd.to_path_buf();
+        Ok(runtime)
+    }
     /// Unqualified preparation helper only; no application command calls this,
     /// and its result intentionally contains no executable/bootstrap/core paths.
     pub fn inspect_bundle_for_packaging(&self, end: Instant) -> Result<BundleInspection, BridgeError> {

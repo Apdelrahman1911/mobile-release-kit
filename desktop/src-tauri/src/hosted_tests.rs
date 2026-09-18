@@ -91,6 +91,8 @@ pub(super) struct Hooks {
     #[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(super) github_fixture: Mutex<Option<github_fixture::GitHubFixtureRuntime>>,
     #[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) github_tls: Mutex<Option<github_tls::GitHubTlsRuntime>>,
+    #[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     github_document_minted: AtomicBool,
 }
 impl Hooks {
@@ -2950,3 +2952,699 @@ mod windows_snapshot {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Disposable fixed Windows scope only; independent source review and execution admission required"]
 async fn windows_static_snapshot_hosted_contract() { windows_snapshot::run().await; }
+
+// A separate literal entry and runtime selection. This is genuine local TLS in
+// the reviewed private namespaces, never an owner23 alias or production opt-in.
+#[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the separately reviewed disposable GitHub-hosted TLS workflow"]
+async fn github_tls_hosted_contract() { github_tls::run().await; }
+
+#[cfg(all(debug_assertions, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) mod github_tls {
+    use super::*;
+    use std::{collections::{BTreeMap, BTreeSet}, io::{Read, Write}, os::unix::fs::{MetadataExt, PermissionsExt}};
+    use serde::Deserialize;
+    use crate::github_connection_protocol::{Coverage, FactState, Permission, Presence, Reason, Visibility, WorkflowState};
+
+    const INPUTS_ANCHOR: Option<&str> = option_env!("MRK_GITHUB_TLS_INPUTS_SHA256");
+    const BOOTSTRAP: &[u8] = include_bytes!("../../github_connection_bootstrap.py");
+    const PEER: &[u8] = include_bytes!("../tests/fixtures/github_tls_peer.py");
+    const NAMESPACE: &[u8] = include_bytes!("../tests/fixtures/github_tls_namespace.sh");
+    const WORKFLOW: &[u8] = include_bytes!("../../../.github/workflows/desktop-github-connection-tls.yml");
+    const PEMS: &[(&str, &[u8])] = &[
+        ("root-ca.pem", include_bytes!("../tests/fixtures/github_tls/root-ca.pem")),
+        ("other-root-ca.pem", include_bytes!("../tests/fixtures/github_tls/other-root-ca.pem")),
+        ("api-valid.pem", include_bytes!("../tests/fixtures/github_tls/api-valid.pem")),
+        ("wrong-san.pem", include_bytes!("../tests/fixtures/github_tls/wrong-san.pem")),
+        ("api-expired.pem", include_bytes!("../tests/fixtures/github_tls/api-expired.pem")),
+        ("server-key.pem", include_bytes!("../tests/fixtures/github_tls/server-key.pem")),
+    ];
+    const TOKEN: &str = "INERT_NOT_A_CREDENTIAL";
+    const PEER_TIME: Duration = Duration::from_secs(16);
+    const PEER_OUTPUT_LIMIT: usize = 8 * 1024;
+    const FILE_LIMIT: u64 = 512 * 1024 * 1024;
+    const LIMITATIONS: &[&str] = &["T4-destination-ambient-environment", "T5-real-network-deadlines",
+        "T6-streaming-controls", "CA-file-native-faults", "real-github-authentication", "production-runtime-custody",
+        "native-gui", "native-document-lifecycle", "packaged-runtime", "production-enablement"];
+    const ROLES: &[&str] = &["python", "bootstrap", "coreZip", "peer", "namespace", "root-ca.pem", "other-root-ca.pem",
+        "api-valid.pem", "wrong-san.pem", "api-expired.pem", "server-key.pem", "hosts", "resolv.conf", "nsswitch.conf",
+        "ssl", "socket", "_ssl", "_socket", "libssl", "libcrypto", "loader",
+        "tool:sudo", "tool:unshare", "tool:env", "tool:bash", "tool:mount", "tool:ip", "tool:sysctl", "tool:setpriv",
+        "tool:stat", "tool:sha256sum", "tool:readlink", "tool:findmnt"];
+
+    fn sha(value: &str, length: usize) -> bool {
+        value.len() == length && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+    fn digits(value: &str) -> bool {
+        !value.is_empty() && value.len() <= 20 && !value.starts_with('0') && value.bytes().all(|byte| byte.is_ascii_digit())
+    }
+    fn ns(value: &str, kind: &str) -> bool {
+        value.strip_prefix(kind).and_then(|value| value.strip_suffix(']')).is_some_and(digits)
+    }
+    fn path(path: &Path) -> Check<()> {
+        require(path.is_absolute() && path.to_str().is_some_and(|value| value.is_ascii() && value.len() <= 4096)
+            && !path.components().any(|part| matches!(part, std::path::Component::ParentDir)), "tls_path_shape")?;
+        let mut prefix = PathBuf::new();
+        for part in path.components() {
+            prefix.push(part.as_os_str());
+            require(!fs::symlink_metadata(&prefix).map_err(|_| "tls_path_unavailable")?.file_type().is_symlink(), "tls_path_symlink")?;
+        }
+        require(path.canonicalize().map_err(|_| "tls_path_unavailable")?.as_os_str() == path.as_os_str(), "tls_path_not_canonical")
+    }
+    fn stamp(value: &fs::Metadata) -> (u64, u64, u32, u64, u64, i64, i64, i64, i64) {
+        (value.dev(), value.ino(), value.mode(), value.nlink(), value.len(), value.mtime(), value.mtime_nsec(), value.ctime(), value.ctime_nsec())
+    }
+    fn file(pathname: &Path, limit: u64) -> Check<(fs::File, fs::Metadata)> {
+        path(pathname)?;
+        let before = fs::symlink_metadata(pathname).map_err(|_| "tls_file_metadata")?;
+        require(before.is_file() && before.len() <= limit, "tls_file_bound")?;
+        let original = fs::File::open(pathname).map_err(|_| "tls_file_open")?;
+        require(stamp(&original.metadata().map_err(|_| "tls_file_metadata")?) == stamp(&before), "tls_file_changed")?;
+        Ok((original, before))
+    }
+    fn unchanged(pathname: &Path, original: &fs::File, before: &fs::Metadata) -> Check<()> {
+        require(stamp(&original.metadata().map_err(|_| "tls_file_metadata")?) == stamp(before)
+            && stamp(&fs::symlink_metadata(pathname).map_err(|_| "tls_file_metadata")?) == stamp(before), "tls_file_changed")
+    }
+    fn read(pathname: &Path, limit: u64) -> Check<Vec<u8>> {
+        let (mut original, before) = file(pathname, limit)?;
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut original).take(limit + 1).read_to_end(&mut bytes).map_err(|_| "tls_file_read")?;
+        require(bytes.len() as u64 == before.len(), "tls_file_changed")?;
+        unchanged(pathname, &original, &before)?;
+        Ok(bytes)
+    }
+    fn file_hash(pathname: &Path, size: u64) -> Check<String> {
+        require(size <= FILE_LIMIT, "tls_file_bound")?;
+        let (mut original, before) = file(pathname, size)?;
+        require(before.len() == size, "tls_file_size")?;
+        let mut hash = Sha256::new();
+        let mut count = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let length = original.read(&mut buffer).map_err(|_| "tls_file_read")?;
+            if length == 0 { break; }
+            count = count.checked_add(length as u64).ok_or("tls_file_bound")?;
+            require(count <= size, "tls_file_changed")?;
+            hash.update(&buffer[..length]);
+        }
+        require(count == size, "tls_file_changed")?;
+        unchanged(pathname, &original, &before)?;
+        Ok(format!("{:x}", hash.finalize()))
+    }
+
+    #[derive(Clone, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub(crate) struct TlsFile { path: PathBuf, size: u64, sha256: String }
+    impl TlsFile {
+        pub(crate) fn parts(&self) -> (&Path, u64, &str) { (&self.path, self.size, &self.sha256) }
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Ssl { openssl_version: String, ignore_unexpected_eof: u64 }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Manifest {
+        schema_version: u32, scope: String, source_sha: String, source_tree: String, workflow_sha256: String,
+        run_id: String, attempt: String, source_root: PathBuf, job_root: PathBuf, python: PathBuf,
+        core_source: PathBuf, core_zip: PathBuf, uid: u32, gid: u32, parent_netns: String, parent_mntns: String,
+        ssl: Ssl, roles: BTreeMap<String, PathBuf>, files: Vec<TlsFile>,
+    }
+    impl Manifest {
+        fn role(&self, name: &str) -> Check<&Path> { self.roles.get(name).map(PathBuf::as_path).ok_or("tls_role_missing") }
+        fn record(&self, path: &Path) -> Check<&TlsFile> { self.files.iter().find(|item| item.path == path).ok_or("tls_role_unbound") }
+    }
+    struct Common {
+        manifest: Manifest, source_files: BTreeSet<String>, peer_env: BTreeMap<String, String>, bindings: Value,
+    }
+    struct Selection { common: Arc<Common>, core: PathBuf, bootstrap: PathBuf, trust: Vec<u8> }
+    /// No constructor outside this admitted, finite harness. Clone preserves the
+    /// same immutable original binding; it cannot turn on the product profile.
+    #[derive(Clone)]
+    pub(crate) struct GitHubTlsRuntime { original: Arc<Selection> }
+    impl GitHubTlsRuntime {
+        pub(crate) fn python(&self) -> &Path { &self.original.common.manifest.python }
+        pub(crate) fn core(&self) -> &Path { &self.original.core }
+        pub(crate) fn source(&self) -> &Path { &self.original.common.manifest.core_source }
+        pub(crate) fn source_files(&self) -> &BTreeSet<String> { &self.original.common.source_files }
+        pub(crate) fn files(&self) -> &[TlsFile] { &self.original.common.manifest.files }
+        pub(crate) fn bootstrap(&self) -> &Path { &self.original.bootstrap }
+        pub(crate) fn trust(&self) -> &[u8] { &self.original.trust }
+    }
+    struct Admitted { inputs: Inputs, common: Arc<Common> }
+    impl Admitted {
+        fn new() -> Check<Self> {
+            let inputs = Inputs::admit_mode("github-readonly-tls-v1")?;
+            require(crate::runtime::COMPILED_TARGET == "x86_64-unknown-linux-gnu"
+                && !crate::runtime::GITHUB_TLS_PROFILE_QUALIFIED && lock(&RETAINED).is_none()
+                && environment("GITHUB_REF")? == "refs/heads/verify/desktop-github-connection-tls", "tls_host_or_route")?;
+            let anchor = INPUTS_ANCHOR.filter(|value| sha(value, 64)).ok_or("tls_compile_anchor_missing")?;
+            let input_path = PathBuf::from(environment("MRK_GITHUB_TLS_INPUTS")?);
+            let bytes = read(&input_path, 1024 * 1024)?;
+            require(hash(&bytes) == anchor, "tls_inputs_compile_binding")?;
+            let manifest: Manifest = serde_json::from_value(protocol::strict_json(&bytes).map_err(|_| "tls_inputs_json")?)
+                .map_err(|_| "tls_inputs_schema")?;
+            let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).parent().and_then(Path::parent).ok_or("tls_source_layout")?
+                .canonicalize().map_err(|_| "tls_source_layout")?;
+            let python = selected("MRK_DESKTOP_DEV_PYTHON")?;
+            require(manifest.schema_version == 1 && manifest.scope == "github-readonly-tls-native-v1"
+                && sha(&manifest.source_sha, 40) && sha(&manifest.source_tree, 40) && sha(&manifest.workflow_sha256, 64)
+                && manifest.source_sha == environment("GITHUB_SHA")? && manifest.workflow_sha256 == hash(WORKFLOW)
+                && digits(&manifest.run_id) && digits(&manifest.attempt)
+                && manifest.run_id == environment("GITHUB_RUN_ID")? && manifest.attempt == environment("GITHUB_RUN_ATTEMPT")?
+                && manifest.uid != 0 && manifest.gid != 0 && manifest.source_root == checkout
+                && manifest.core_source == inputs.source && manifest.core_zip == inputs.zip && manifest.python == python,
+                "tls_inputs_binding")?;
+            path(&manifest.job_root)?;
+            require(input_path == manifest.job_root.join("github-tls-inputs.json") && inputs.root.starts_with(&manifest.job_root)
+                && inputs.root != manifest.job_root && !inputs.root.starts_with(&checkout), "tls_private_layout")?;
+            require(manifest.ssl.openssl_version.starts_with("OpenSSL ") && manifest.ssl.openssl_version.len() <= 160
+                && manifest.ssl.openssl_version.is_ascii() && manifest.ssl.ignore_unexpected_eof > 0,
+                "tls_genuine_ssl_binding")?;
+            require(manifest.roles.len() == ROLES.len() && ROLES.iter().all(|role| manifest.roles.contains_key(*role))
+                && !manifest.files.is_empty() && manifest.files.len() <= 2048, "tls_input_roster")?;
+            let mut previous: Option<&str> = None;
+            let mut total = 0u64;
+            let mut source_files = BTreeSet::new();
+            for item in &manifest.files {
+                let spelling = item.path.to_str().ok_or("tls_input_path")?;
+                require(previous.map_or(true, |before| before < spelling) && sha(&item.sha256, 64), "tls_input_order")?;
+                previous = Some(spelling);
+                total = total.checked_add(item.size).ok_or("tls_input_limit")?;
+                require(total <= 1024 * 1024 * 1024 && file_hash(&item.path, item.size)? == item.sha256, "tls_input_bytes")?;
+                if let Ok(relative) = item.path.strip_prefix(&manifest.core_source) {
+                    let name = relative.to_str().ok_or("tls_source_name")?;
+                    require(crate::runtime::safe_payload_path(name) && source_files.insert(name.to_owned()), "tls_source_roster")?;
+                }
+            }
+            require(!source_files.is_empty(), "tls_source_roster")?;
+            for pathname in manifest.roles.values() { let _ = manifest.record(pathname)?; }
+            let fixtures = checkout.join("desktop/src-tauri/tests/fixtures");
+            for (role, expected) in [("python", python), ("bootstrap", checkout.join("desktop/github_connection_bootstrap.py")),
+                ("coreZip", inputs.zip.clone()), ("peer", fixtures.join("github_tls_peer.py")),
+                ("namespace", fixtures.join("github_tls_namespace.sh"))] {
+                require(manifest.role(role)? == expected, "tls_fixed_role")?;
+            }
+            for &(name, bytes) in PEMS {
+                let expected = fixtures.join("github_tls").join(name);
+                require(manifest.role(name)? == expected, "tls_fixed_pem")?;
+                let item = manifest.record(&expected)?;
+                require(item.size > 0 && item.size <= 512 * 1024 && item.sha256 == hash(bytes)
+                    && read(&expected, 512 * 1024)?.as_slice() == bytes, "tls_compiled_pem_binding")?;
+            }
+            for (role, expected) in [("bootstrap", BOOTSTRAP), ("peer", PEER), ("namespace", NAMESPACE)] {
+                require(read(manifest.role(role)?, expected.len() as u64)?.as_slice() == expected, "tls_compiled_fixture_binding")?;
+            }
+            for name in ["hosts", "resolv.conf", "nsswitch.conf"] {
+                let expected = manifest.job_root.join("github-tls-namespace").join(name);
+                require(manifest.role(name)? == expected, "tls_resolver_role")?;
+                let visible = Path::new("/etc").join(name);
+                let visible = if name == "resolv.conf" {
+                    // Only Ubuntu's fixed resolver aliases, already admitted
+                    // and RO-bound by the namespace entry. No general symlink
+                    // relaxation for source/runtime/trust or other host files.
+                    let canonical = visible.canonicalize().map_err(|_| "tls_resolver_alias")?;
+                    require(["/etc/resolv.conf", "/run/systemd/resolve/stub-resolv.conf", "/run/systemd/resolve/resolv.conf"]
+                        .iter().any(|allowed| canonical == Path::new(allowed)), "tls_resolver_alias")?;
+                    canonical
+                } else { visible };
+                require(read(&expected, 16 * 1024)? == read(&visible, 16 * 1024)?, "tls_private_resolver_bytes")?;
+            }
+            let netns = environment("MRK_TLS_NETNS")?;
+            let mntns = environment("MRK_TLS_MNTNS")?;
+            require(ns(&manifest.parent_netns, "net:[") && ns(&manifest.parent_mntns, "mnt:[")
+                && ns(&netns, "net:[") && ns(&mntns, "mnt:[") && netns != manifest.parent_netns && mntns != manifest.parent_mntns
+                && fs::read_link("/proc/self/ns/net").ok().as_deref() == Some(Path::new(&netns))
+                && fs::read_link("/proc/self/ns/mnt").ok().as_deref() == Some(Path::new(&mntns))
+                && environment("MRK_TLS_PARENT_NETNS")? == manifest.parent_netns
+                && environment("MRK_TLS_PARENT_MNTNS")? == manifest.parent_mntns
+                && environment("MRK_TLS_ORIGINAL_UID")? == manifest.uid.to_string()
+                && environment("MRK_TLS_ORIGINAL_GID")? == manifest.gid.to_string(), "tls_namespace_binding")?;
+            let artifact = PathBuf::from(environment("MRK_GITHUB_TLS_ARTIFACT")?);
+            let artifact_sha = environment("MRK_GITHUB_TLS_ARTIFACT_SHA256")?;
+            let artifact_size = environment("MRK_GITHUB_TLS_ARTIFACT_BYTES")?.parse::<u64>().map_err(|_| "tls_artifact_size")?;
+            require(sha(&artifact_sha, 64) && artifact_size > 0
+                && std::env::current_exe().map_err(|_| "tls_current_artifact")? == artifact
+                && file_hash(&artifact, artifact_size)? == artifact_sha, "tls_original_artifact_binding")?;
+            let mut peer_env = BTreeMap::new();
+            for (key, value) in [("MRK_DESKTOP_HOSTED_CHECKS", "github-readonly-tls-v1".to_owned()),
+                ("GITHUB_ACTIONS", "true".to_owned()), ("RUNNER_ENVIRONMENT", "github-hosted".to_owned()),
+                ("MRK_TLS_PARENT_NETNS", manifest.parent_netns.clone()), ("MRK_TLS_PARENT_MNTNS", manifest.parent_mntns.clone()),
+                ("MRK_TLS_NETNS", netns.clone()), ("MRK_TLS_MNTNS", mntns.clone()),
+                ("MRK_TLS_ORIGINAL_UID", manifest.uid.to_string()), ("MRK_TLS_ORIGINAL_GID", manifest.gid.to_string()),
+                ("MRK_TLS_PEER_SHA256", hash(PEER))] { peer_env.insert(key.to_owned(), value); }
+            let bindings = json!({"sourceSha":manifest.source_sha,"sourceTree":manifest.source_tree,
+                "workflowSha256":manifest.workflow_sha256,"runId":manifest.run_id,"attempt":manifest.attempt,
+                "tlsInputsSha256":anchor,"artifactSha256":artifact_sha,"artifactBytes":artifact_size,
+                "coreZipSha256":manifest.record(&manifest.core_zip)?.sha256,"pythonSha256":manifest.record(&manifest.python)?.sha256,
+                "namespace":{"parentNetns":manifest.parent_netns,"parentMntns":manifest.parent_mntns,
+                    "netns":netns,"mntns":mntns,"uid":manifest.uid,"gid":manifest.gid}});
+            Ok(Self { inputs, common: Arc::new(Common { manifest, source_files, peer_env, bindings }) })
+        }
+    }
+
+    struct Scenario { name: &'static str, zip: bool, other_root: bool, reason: Reason, connections: u64 }
+    const CASES: &[Scenario] = &[
+        Scenario { name: "T1-source", zip: false, other_root: false, reason: Reason::None, connections: 4 },
+        Scenario { name: "T1-zip", zip: true, other_root: false, reason: Reason::None, connections: 5 },
+        Scenario { name: "T2-root", zip: false, other_root: true, reason: Reason::TlsFailed, connections: 1 },
+        Scenario { name: "T2-name", zip: false, other_root: false, reason: Reason::TlsFailed, connections: 1 },
+        Scenario { name: "T2-expired", zip: false, other_root: false, reason: Reason::TlsFailed, connections: 1 },
+        Scenario { name: "T3-clean", zip: false, other_root: false, reason: Reason::None, connections: 4 },
+        Scenario { name: "T3-ragged", zip: false, other_root: false, reason: Reason::TlsFailed, connections: 1 },
+        Scenario { name: "T3-length", zip: false, other_root: false, reason: Reason::ResponseInvalid, connections: 1 },
+        Scenario { name: "T3-chunk", zip: false, other_root: false, reason: Reason::ResponseInvalid, connections: 1 },
+    ];
+    fn reason(value: Reason) -> &'static str {
+        match value { Reason::None => "none", Reason::TlsFailed => "tls-failed", Reason::ResponseInvalid => "response-invalid", _ => "unexpected" }
+    }
+    fn ready(bytes: &[u8], name: &str) -> bool {
+        bytes.len() <= 1024 && protocol::strict_json(bytes).ok() == Some(json!({
+            "schemaVersion":1,"scope":"github-tls-peer-v1","case":name,"state":"ready"}))
+    }
+    async fn peer_stdout<R: AsyncRead + Unpin>(mut reader: R, name: &'static str, ready_tx: oneshot::Sender<bool>) -> ReadEnd {
+        let mut ready_tx = Some(ready_tx);
+        let mut bytes = Vec::new();
+        let mut overflow = false;
+        let mut buffer = [0u8; 4096];
+        loop {
+            match reader.read(&mut buffer).await {
+                Ok(0) => return ReadEnd { bytes, eof: true, overflow },
+                Ok(length) => {
+                    let keep = length.min(PEER_OUTPUT_LIMIT.saturating_sub(bytes.len()));
+                    bytes.extend_from_slice(&buffer[..keep]);
+                    overflow |= keep != length;
+                    if let Some(end) = bytes.iter().position(|byte| *byte == b'\n') {
+                        if let Some(tx) = ready_tx.take() { let _ = tx.send(ready(&bytes[..end], name)); }
+                    } else if bytes.len() > 1024 || overflow {
+                        if let Some(tx) = ready_tx.take() { let _ = tx.send(false); }
+                    }
+                    // Discard excess, but retain this original reader to real EOF.
+                }
+                Err(_) => return ReadEnd { bytes, eof: false, overflow },
+            }
+        }
+    }
+    // This guard is TLS-local; it changes neither the original owner fixture nor
+    // product scheduling. Catch each cleanup independently, including its drop.
+    async fn guarded<F: Future>(future: F) -> Check<F::Output> {
+        let mut future = Box::pin(future);
+        let result = std::future::poll_fn(|cx| {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx))) {
+                Ok(Poll::Pending) => Poll::Pending,
+                Ok(Poll::Ready(value)) => Poll::Ready(Ok(value)),
+                Err(_) => Poll::Ready(Err("tls_case_unwind")),
+            }
+        }).await;
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(future))).is_err() { return Err("tls_case_drop_unwind"); }
+        result
+    }
+
+    #[derive(Default)]
+    struct Peer {
+        endpoint: Option<Instant>, completed_at: Option<Instant>,
+        acquisition: Option<JoinHandle<std::io::Result<Child>>>, acquisition_joined: bool, acquisition_failed: bool,
+        child: Option<Child>, spawned: bool, spawn_refused: bool,
+        stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
+        stdout_joined: bool, stderr_joined: bool, stdout_failed: bool, stderr_failed: bool,
+        out: Option<ReadEnd>, err: Option<ReadEnd>, ready_rx: Option<oneshot::Receiver<bool>>, ready: bool,
+        waited: Option<ExitStatus>, wait_failed: bool, stop_attempted: bool, expired: bool,
+        settled: bool, protocol_checked: bool, terminal: Option<Value>,
+    }
+    enum PeerEvent {
+        Wait(std::io::Result<ExitStatus>), Out(Result<ReadEnd, tokio::task::JoinError>),
+        Err(Result<ReadEnd, tokio::task::JoinError>), Deadline,
+    }
+    impl Peer {
+        fn begin(&mut self, common: &Common, name: &'static str) -> Check<()> {
+            require(self.endpoint.is_none(), "tls_peer_already_started")?;
+            let python = common.manifest.python.clone();
+            let script = common.manifest.role("peer")?.to_path_buf();
+            let cwd = script.parent().ok_or("tls_peer_layout")?.to_path_buf();
+            let environment = common.peer_env.clone();
+            let endpoint = Instant::now() + PEER_TIME;
+            self.endpoint = Some(endpoint); // Includes queue, spawn and readiness.
+            self.acquisition = Some(tokio::task::spawn_blocking(move || {
+                if Instant::now() >= endpoint { return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "TLS peer admission expired")); }
+                let mut command = Command::new(python);
+                command.args(["-I", "-S", "-B"]).arg(script).arg(name).current_dir(cwd)
+                    .env_clear().env("LC_ALL", "C").env("LANG", "C").envs(environment)
+                    .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+                if Instant::now() >= endpoint { return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "TLS peer admission expired")); }
+                command.spawn()
+            }));
+            Ok(())
+        }
+        async fn acquire(&mut self, name: &'static str) -> Check<()> {
+            if self.acquisition_joined { return require(self.spawned, "tls_peer_spawn_refused"); }
+            require(!self.acquisition_failed, "tls_peer_acquisition_unknown")?;
+            let endpoint = self.endpoint.ok_or("tls_peer_not_started")?;
+            let task = self.acquisition.as_mut().ok_or("tls_peer_acquisition_missing")?;
+            let result = match tokio::time::timeout_at(tokio::time::Instant::from_std(endpoint), task).await {
+                Ok(result) => result,
+                Err(_) => { self.expired = true; return Err("tls_peer_acquisition_deadline"); },
+            };
+            let result = match result {
+                Ok(result) => { self.acquisition_joined = true; self.acquisition.take(); result },
+                Err(_) => { self.acquisition_failed = true; return Err("tls_peer_acquisition_unknown"); },
+            };
+            match result {
+                Ok(child) => { self.child = Some(child); self.spawned = true; },
+                Err(_) => { self.spawn_refused = true; return Err("tls_peer_spawn_refused"); },
+            }
+            // The original child is in its retained book BEFORE taking any pipe
+            // or observing readiness. Store both original readers before await.
+            let (stdout, stderr) = match self.child.as_mut() {
+                Some(child) => (child.stdout.take(), child.stderr.take()),
+                None => return Err("tls_peer_child_missing"),
+            };
+            let (ready_tx, ready_rx) = oneshot::channel();
+            self.ready_rx = Some(ready_rx);
+            if let Some(stdout) = stdout { self.stdout = Some(tokio::spawn(peer_stdout(stdout, name, ready_tx))); }
+            if let Some(stderr) = stderr {
+                let (faults, _receiver) = mpsc::channel(2);
+                self.stderr = Some(tokio::spawn(read_bounded(stderr, PEER_OUTPUT_LIMIT, faults)));
+            }
+            require(self.stdout.is_some() && self.stderr.is_some(), "tls_peer_pipe_missing")?;
+            require(Instant::now() < endpoint, "tls_peer_acquisition_deadline")
+        }
+        async fn readiness(&mut self, name: &'static str) -> Check<()> {
+            self.acquire(name).await?;
+            let endpoint = self.endpoint.ok_or("tls_peer_not_started")?;
+            let receiver = self.ready_rx.as_mut().ok_or("tls_peer_readiness_missing")?;
+            let admitted = tokio::time::timeout_at(tokio::time::Instant::from_std(endpoint), receiver).await
+                .map_err(|_| "tls_peer_readiness_deadline")?.map_err(|_| "tls_peer_readiness_closed")?;
+            self.ready_rx.take();
+            require(admitted && Instant::now() < endpoint, "tls_peer_readiness_invalid")?;
+            self.ready = true;
+            Ok(())
+        }
+        fn stop_original(&mut self) {
+            if self.stop_attempted || self.waited.is_some() || self.wait_failed { return; }
+            let Some(child) = self.child.as_mut() else { return; };
+            match child.try_wait() {
+                Ok(Some(status)) => self.waited = Some(status),
+                Ok(None) => {
+                    self.stop_attempted = true;
+                    // Even a rejected stop request cannot suppress the original
+                    // wait. Only that wait and both reader joins prove finality.
+                    let _ = child.start_kill();
+                },
+                Err(_) => self.wait_failed = true,
+            }
+        }
+        async fn settle(&mut self, name: &'static str, failed: bool) -> bool {
+            let Some(endpoint) = self.endpoint else { self.settled = true; return true; };
+            if !self.acquisition_joined && !self.acquisition_failed { let _ = self.acquire(name).await; }
+            if failed { self.stop_original(); }
+            loop {
+                let wait_pending = self.child.is_some() && self.waited.is_none() && !self.wait_failed;
+                let out_pending = self.stdout.is_some() && !self.stdout_failed;
+                let err_pending = self.stderr.is_some() && !self.stderr_failed;
+                if !wait_pending && !out_pending && !err_pending {
+                    self.completed_at = Some(Instant::now());
+                    self.expired |= Instant::now() >= endpoint;
+                    self.settled = !self.expired && self.acquisition_joined && !self.acquisition_failed
+                        && (self.spawn_refused || self.spawned && self.waited.is_some() && !self.wait_failed
+                            && self.stdout_joined && self.stderr_joined && !self.stdout_failed && !self.stderr_failed
+                            && self.out.as_ref().is_some_and(|end| end.eof) && self.err.as_ref().is_some_and(|end| end.eof));
+                    if self.settled { self.child.take(); }
+                    return self.settled;
+                }
+                let event = {
+                    let Self { child, stdout, stderr, .. } = self;
+                    tokio::select! {
+                        result = wait_original(child), if wait_pending => PeerEvent::Wait(result),
+                        result = join_slot(stdout), if out_pending => PeerEvent::Out(result),
+                        result = join_slot(stderr), if err_pending => PeerEvent::Err(result),
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(endpoint)) => PeerEvent::Deadline,
+                    }
+                };
+                match event {
+                    PeerEvent::Wait(Ok(status)) => self.waited = Some(status),
+                    PeerEvent::Wait(Err(_)) => self.wait_failed = true,
+                    PeerEvent::Out(Ok(end)) => { self.stdout_joined = true; self.stdout.take(); self.out = Some(end); },
+                    PeerEvent::Err(Ok(end)) => { self.stderr_joined = true; self.stderr.take(); self.err = Some(end); },
+                    // Keep each failed consumed handle without polling it again;
+                    // still attempt the OTHER reader and original child wait.
+                    PeerEvent::Out(Err(_)) => self.stdout_failed = true,
+                    PeerEvent::Err(Err(_)) => self.stderr_failed = true,
+                    PeerEvent::Deadline => { self.expired = true; self.stop_original(); return false; },
+                }
+            }
+        }
+        fn evidence(&self) -> Value {
+            json!({"acquisitionJoined":self.acquisition_joined,"spawned":self.spawned,"waited":self.waited.is_some(),
+                "exitCode":self.waited.as_ref().and_then(ExitStatus::code),"exitSuccess":self.waited.as_ref().map(ExitStatus::success),
+                "stopAttempted":self.stop_attempted,"stdoutJoined":self.stdout_joined,"stderrJoined":self.stderr_joined,
+                "stdoutEof":self.out.as_ref().is_some_and(|end| end.eof),"stderrEof":self.err.as_ref().is_some_and(|end| end.eof),
+                "stdoutBytes":self.out.as_ref().map_or(0, |end| end.bytes.len()),"stderrBytes":self.err.as_ref().map_or(0, |end| end.bytes.len()),
+                "stdoutOverflow":self.out.as_ref().is_some_and(|end| end.overflow),"stderrOverflow":self.err.as_ref().is_some_and(|end| end.overflow),
+                "ready":self.ready,"settled":self.settled,"withinEndpoint":self.settled && !self.expired && self.completed_at.zip(self.endpoint).is_some_and(|(done, end)| done < end),
+                "protocolChecked":self.protocol_checked,"terminal":self.terminal})
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Finished {
+        schema_version: u32, scope: String, #[serde(rename = "case")] case_name: String, state: String,
+        status: String, code: Option<String>, connections: u64, handshakes: u64, requests: u64, decrypted_bytes: u64,
+        auth_bytes: u64, close_notify: u64, tls_refused: bool, wire_read_bytes: Vec<u64>, wire_write_bytes: Vec<u64>,
+        reply_bytes: Vec<u64>, all_sockets_closed: bool,
+    }
+    impl Peer {
+        fn check(&mut self, scenario: &Scenario) -> Check<()> {
+            require(self.settled && self.spawned && self.ready && !self.expired && !self.stop_attempted
+                && self.waited.as_ref().is_some_and(ExitStatus::success), "tls_peer_native_result")?;
+            let out = self.out.as_ref().ok_or("tls_peer_stdout_missing")?;
+            let err = self.err.as_ref().ok_or("tls_peer_stderr_missing")?;
+            require(out.eof && err.eof && !out.overflow && !err.overflow && err.bytes.is_empty()
+                && out.bytes.len() <= PEER_OUTPUT_LIMIT, "tls_peer_output_bound")?;
+            let lines = out.bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+            require(lines.len() == 3 && lines[2].is_empty() && ready(lines[0], scenario.name), "tls_peer_frame_count")?;
+            let value = protocol::strict_json(lines[1]).map_err(|_| "tls_peer_terminal_json")?;
+            const FIELDS: &[&str] = &["schemaVersion", "scope", "case", "state", "status", "code", "connections", "handshakes",
+                "requests", "decryptedBytes", "authBytes", "closeNotify", "tlsRefused", "wireReadBytes", "wireWriteBytes", "replyBytes", "allSocketsClosed"];
+            require(value.as_object().is_some_and(|row| row.len() == FIELDS.len() && FIELDS.iter().all(|name| row.contains_key(*name))),
+                "tls_peer_terminal_fields")?;
+            let facts: Finished = serde_json::from_value(value.clone()).map_err(|_| "tls_peer_terminal_schema")?;
+            let refused = scenario.name.starts_with("T2-");
+            let requests = if refused { 0 } else { scenario.connections };
+            require(facts.schema_version == 1 && facts.scope == "github-tls-peer-v1" && facts.case_name == scenario.name
+                && facts.state == "finished" && facts.status == "passed" && facts.code.is_none() && facts.all_sockets_closed
+                && facts.connections == scenario.connections && facts.handshakes == requests && facts.requests == requests
+                && facts.tls_refused == refused && facts.close_notify <= facts.connections
+                && facts.decrypted_bytes <= facts.connections * 8192
+                && facts.auth_bytes == requests * b"Bearer INERT_NOT_A_CREDENTIAL".len() as u64
+                && facts.decrypted_bytes >= facts.auth_bytes, "tls_peer_case_observations")?;
+            require(facts.wire_read_bytes.len() == facts.connections as usize && facts.wire_write_bytes.len() == facts.connections as usize
+                && facts.reply_bytes.len() == facts.connections as usize
+                && facts.wire_read_bytes.iter().chain(&facts.wire_write_bytes).all(|size| (1..=128 * 1024).contains(size))
+                && facts.reply_bytes.iter().all(|size| if refused { *size == 0 } else { (1..=64 * 1024).contains(size) }), "tls_peer_wire_bounds")?;
+            if refused { require(facts.decrypted_bytes == 0 && facts.close_notify == 0, "tls_peer_authorization_before_refusal")?; }
+            match scenario.name {
+                "T1-source" | "T1-zip" | "T3-clean" => require(facts.close_notify == scenario.connections, "tls_peer_clean_notify_missing")?,
+                "T3-ragged" => require(facts.close_notify == 0, "tls_peer_ragged_notify_present")?,
+                "T3-length" | "T3-chunk" => require(facts.close_notify == 1, "tls_peer_framing_notify_missing")?,
+                _ => {},
+            }
+            // Only this closed, validated redacted frame can enter the receipt.
+            // Raw streams and even a peer-provided failure message never do.
+            self.terminal = Some(value);
+            self.protocol_checked = true;
+            Ok(())
+        }
+    }
+
+    struct Retained {
+        supervisor: Supervisor, selection: GitHubTlsRuntime, ticket: Mutex<Option<GitHubReadTicket>>, peer: AsyncMutex<Peer>,
+    }
+    // Install before acquisition/readiness/admission. A failing future or its
+    // destructor cannot drop original resource books or permit another case.
+    static RETAINED: Mutex<Option<Arc<Retained>>> = Mutex::new(None);
+    struct TlsCase {
+        product: Case, retained: Arc<Retained>, scenario: &'static Scenario, projection_checked: bool, result_reason: Option<&'static str>,
+    }
+    impl Admitted {
+        fn case(&self, scenario: &'static Scenario) -> Check<TlsCase> {
+            require(lock(&RETAINED).is_none(), "tls_previous_case_retained")?;
+            let product = Case::new(&self.inputs, scenario.name, None, scenario.zip)?;
+            let private = product.root.join("runtime");
+            fs::create_dir(&private).map_err(|_| "tls_private_directory")?;
+            let trust_name = if scenario.other_root { "other-root-ca.pem" } else { "root-ca.pem" };
+            let trust = read(self.common.manifest.role(trust_name)?, 512 * 1024)?;
+            for (name, bytes) in [("github_connection_bootstrap.py", BOOTSTRAP), ("github-ca.pem", trust.as_slice())] {
+                let mut original = fs::OpenOptions::new().write(true).create_new(true).open(private.join(name)).map_err(|_| "tls_private_create")?;
+                original.write_all(bytes).and_then(|_| original.sync_all()).map_err(|_| "tls_private_write")?;
+                original.set_permissions(fs::Permissions::from_mode(0o400)).map_err(|_| "tls_private_mode")?;
+            }
+            let selection = GitHubTlsRuntime { original: Arc::new(Selection { common: self.common.clone(),
+                core: if scenario.zip { self.inputs.zip.clone() } else { self.inputs.source.clone() },
+                bootstrap: private.join("github_connection_bootstrap.py"), trust }) };
+            *lock(&product.supervisor.inner.test.github_tls) = Some(selection.clone());
+            let retained = Arc::new(Retained { supervisor: product.supervisor.clone(), selection,
+                ticket: Mutex::new(None), peer: AsyncMutex::new(Peer::default()) });
+            *lock(&RETAINED) = Some(retained.clone());
+            Ok(TlsCase { product, retained, scenario, projection_checked: false, result_reason: None })
+        }
+    }
+    impl TlsCase {
+        async fn exercise(&mut self) -> Check<()> {
+            let endpoint = {
+                let mut peer = self.retained.peer.lock().await;
+                peer.begin(&self.retained.selection.original.common, self.scenario.name)?;
+                peer.readiness(self.scenario.name).await?;
+                peer.endpoint.ok_or("tls_peer_endpoint_missing")?
+            };
+            {
+                let mut retained = lock(&self.retained.ticket);
+                require(retained.is_none(), "tls_ticket_already_admitted")?;
+                let ticket = self.product.supervisor.start_github_readonly("owner/app", None, None, TOKEN)
+                    .map_err(|_| "tls_product_admission")?;
+                *retained = Some(ticket); // No await/fallible step after admission.
+            }
+            // The peer's original endpoint also bounds this observer. It never
+            // changes the product's own original 10s operation/2s cleanup times.
+            let observation = tokio::time::timeout_at(tokio::time::Instant::from_std(endpoint), async {
+                loop {
+                    let receipt = lock(&self.retained.ticket).as_ref().map(GitHubReadTicket::receipt).ok_or("tls_ticket_missing")?;
+                    if !matches!(receipt, GitHubReadReceipt::Pending) { return Ok::<_, &'static str>(receipt); }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }).await.map_err(|_| "tls_product_observation_deadline")??;
+            let GitHubReadReceipt::Settled { outcome: Ok(outcome), settled_at, was_unknown: false } = observation
+                else { return Err("tls_product_typed_outcome_missing"); };
+            let owner = self.product.owner("github-read-1")?;
+            require(Instant::now() < endpoint && settled_at <= Instant::now() && settled_at < owner.endpoint()
+                && outcome.facts.schema_version == 1 && outcome.control.reason == self.scenario.reason
+                && outcome.control.credential_expires_at.is_none() && outcome.control.cooldown_seconds.is_none()
+                && !outcome.control.cooldown_blocked, "tls_product_control_projection")?;
+            if self.scenario.reason == Reason::None {
+                require(outcome.facts.account.state == FactState::Observed && outcome.facts.account.reason == Reason::None
+                    && outcome.facts.account.value.as_ref().is_some_and(|account| account.id == "11" && account.login == "owner")
+                    && outcome.facts.repository.state == FactState::Observed && outcome.facts.repository.reason == Reason::None
+                    && outcome.facts.repository.value.as_ref().is_some_and(|repository| repository.id == "22" && repository.full_name == "owner/app"
+                        && repository.default_branch == "main" && repository.visibility == Visibility::Private && !repository.archived
+                        && repository.permissions.pull == Permission::ReportedAllowed && repository.permissions.push == Permission::ReportedDenied
+                        && repository.permissions.admin == Permission::ReportedDenied)
+                    && outcome.facts.automation.state == FactState::Observed && outcome.facts.automation.reason == Reason::None
+                    && outcome.facts.automation.value.as_ref().is_some_and(|automation| automation.coverage == Coverage::Complete
+                        && automation.workflows.len() == 4 && automation.workflows.iter().all(|row| row.presence == Presence::NotListed
+                            && row.remote_id.is_none() && row.state == WorkflowState::Unknown))
+                    && outcome.facts.account.observed_at.is_some() && outcome.facts.account.observed_at == outcome.facts.repository.observed_at
+                    && outcome.facts.account.observed_at == outcome.facts.automation.observed_at, "tls_product_success_projection")?;
+            } else {
+                require(outcome.facts.account.state == FactState::Unavailable && outcome.facts.account.value.is_none()
+                    && outcome.facts.account.observed_at.is_none() && outcome.facts.account.reason == self.scenario.reason
+                    && outcome.facts.repository.state == FactState::Unavailable && outcome.facts.repository.value.is_none()
+                    && outcome.facts.repository.observed_at.is_none() && outcome.facts.repository.reason == self.scenario.reason
+                    && outcome.facts.automation.state == FactState::Unavailable && outcome.facts.automation.value.is_none()
+                    && outcome.facts.automation.observed_at.is_none() && outcome.facts.automation.reason == self.scenario.reason,
+                    "tls_product_refusal_projection")?;
+            }
+            self.result_reason = Some(reason(self.scenario.reason));
+            self.projection_checked = true;
+            Ok(())
+        }
+        fn product_facts(&self) -> Check<()> {
+            self.product.native_facts(true, true)?;
+            let owners = self.product.supervisor.inner.test.owners();
+            require(owners.len() == 1 && self.product.supervisor.can_exit() && !self.product.supervisor.disabled()
+                && self.product.supervisor.inner.permits.available_permits() == ACTIVE_LIMIT, "tls_product_final_roster")?;
+            for owner in owners {
+                let state = lock(&owner.state);
+                let observed = lock(&owner.observation);
+                require(matches!(owner.profile, Profile::GitHubReadOnly) && state.terminal && !state.unknown && state.error.is_none()
+                    && observed.observer_joined && observed.exit_success == Some(true) && lock(&owner.permit).is_none(), "tls_product_finality")?;
+            }
+            Ok(())
+        }
+        async fn evidence(&self, passed: bool, failure: Option<&str>, product_settled: bool) -> Value {
+            let owners = self.product.supervisor.inner.test.owners().iter().map(|owner| {
+                let state = lock(&owner.state);
+                let observed = lock(&owner.observation);
+                json!({"id":owner.id,"profile":"github-readonly","terminal":state.terminal,"unknownLatched":state.unknown,
+                    "permitRetained":lock(&owner.permit).is_some(),"observerJoined":observed.observer_joined,
+                    "firstError":state.error.as_ref().map(|error| &error.code),"native":observed.clone()})
+            }).collect::<Vec<_>>();
+            let peer = self.retained.peer.lock().await.evidence();
+            json!({"case":self.scenario.name,"passed":passed,"failureCode":failure,"elapsedMs":self.product.begin.elapsed().as_millis(),
+                "coreMode":if self.scenario.zip { "zip" } else { "source" },
+                "trustFixture":if self.scenario.other_root { "other-root-ca.pem" } else { "root-ca.pem" },
+                "product":{"settled":product_settled,"projectionChecked":self.projection_checked,"reason":self.result_reason,
+                    "registeredOwners":lock(&self.product.supervisor.inner.owners).len(),"disabled":self.product.supervisor.disabled(),"owners":owners},
+                "peer":peer})
+        }
+        fn release_retention(&self) -> Check<()> {
+            require(Arc::ptr_eq(&self.retained.supervisor.inner, &self.product.supervisor.inner)
+                && self.product.supervisor.can_exit()
+                && lock(&self.product.supervisor.inner.test.github_tls).as_ref()
+                    .is_some_and(|selection| Arc::ptr_eq(&selection.original, &self.retained.selection.original))
+                && lock(&self.retained.ticket).as_ref().map_or(true, |ticket| matches!(ticket.receipt(), GitHubReadReceipt::Settled { .. })),
+                "tls_original_retention_not_settled")?;
+            let mut slot = lock(&RETAINED);
+            require(slot.as_ref().is_some_and(|original| Arc::ptr_eq(original, &self.retained)), "tls_retention_identity")?;
+            lock(&self.retained.ticket).take();
+            slot.take();
+            Ok(())
+        }
+    }
+    struct TlsReceipt { path: PathBuf, bindings: Value, cases: Vec<Value> }
+    impl TlsReceipt {
+        fn write(&self, state: &str, code: Option<&str>) -> Check<()> {
+            let bytes = serde_json::to_vec(&json!({"schemaVersion":1,"scope":"github-readonly-tls-hosted-v1",
+                "status":state,"allOwnersSettled":state == "passed","allPeersSettled":state == "passed","failureCode":code,
+                "bindings":self.bindings,"cases":self.cases,"outerWait":"external-original-observer-required","notVerified":LIMITATIONS}))
+                .map_err(|_| "tls_receipt_encoding")?;
+            require(bytes.len() <= 128 * 1024, "tls_receipt_limit")?;
+            fs::write(&self.path, bytes).map_err(|_| "tls_receipt_write")
+        }
+    }
+    pub(super) async fn run() {
+        let admitted = match Admitted::new() { Ok(value) => value, Err(code) => panic!("TLS hosted admission failed: {code}") };
+        let mut receipt = TlsReceipt { path: admitted.inputs.root.join("receipt.json"), bindings: admitted.common.bindings.clone(), cases: Vec::new() };
+        if receipt.write("running", None).is_err() { panic!("TLS receipt unavailable before native work"); }
+        for scenario in CASES {
+            let mut case = match admitted.case(scenario) {
+                Ok(case) => case,
+                Err(code) => { let _ = receipt.write("failed", Some(code)); panic!("TLS fixture preparation failed: {code}"); },
+            };
+            let mut checked = guarded(case.exercise()).await.unwrap_or_else(Err);
+            let failed = checked.is_err();
+            let peer_book = case.retained.clone();
+            // Neither early false nor unwind in Case::settle can skip peer
+            // stop/wait/readers. Each independent original gets its own guard;
+            // join! drives BOTH attempts, never boolean short-circuit or try_join.
+            let (product_result, peer_result) = tokio::join!(
+                guarded(case.product.settle(failed)),
+                guarded(async { peer_book.peer.lock().await.settle(scenario.name, failed).await }),
+            );
+            let product_settled = matches!(product_result, Ok(true));
+            let peer_settled = matches!(peer_result, Ok(true));
+            if !product_settled || !peer_settled {
+                receipt.cases.push(case.evidence(false, Some("tls_custody_unresolved"), product_settled).await);
+                let _ = receipt.write("failed-retained", Some("tls_custody_unresolved"));
+                // Keep the actual Case plus static original books, without
+                // changing inputs, starting the next case or guessing cleanup.
+                pending::<()>().await;
+                return;
+            }
+            let product_check = guarded(async { case.product_facts() }).await.unwrap_or_else(Err);
+            let peer_check = guarded(async { case.retained.peer.lock().await.check(scenario) }).await.unwrap_or_else(Err);
+            if checked.is_ok() { checked = product_check.and(peer_check); }
+            if let Err(code) = case.release_retention() {
+                receipt.cases.push(case.evidence(false, Some(code), product_settled).await);
+                let _ = receipt.write("failed-retained", Some(code));
+                pending::<()>().await;
+                return;
+            }
+            receipt.cases.push(case.evidence(checked.is_ok(), checked.err(), product_settled).await);
+            if let Err(code) = checked { let _ = receipt.write("failed", Some(code)); panic!("TLS check failed after independent settlement: {code}"); }
+            if receipt.write("running", None).is_err() { panic!("TLS receipt failed after independent settlement"); }
+        }
+        std::env::set_var("MRK_DESKTOP_DEV_CORE", &admitted.inputs.source); // Every original client AND peer settled.
+        if receipt.write("passed", None).is_err() { panic!("TLS final receipt failed after independent settlement"); }
+    }
+}

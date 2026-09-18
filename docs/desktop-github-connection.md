@@ -1,17 +1,23 @@
 # GitHub connection and read-only observations
 
-## Current status: guidance integration and read-only source preparation (G1A)
+## Current status: integrated read-only connection source, not enabled
 
-This increment is **not a working GitHub connection**. It adds a credential-free
-core projector and help resource, closed public/native wire contracts, an inert
-controller and a status/help component. The separately reviewed lead composition
-mounts that component with no native port and null status, exposes nullable core
-help through the catalogue, and registers the pure Rust module for compilation.
-No code in this increment
-collects a token, implements a live observation port, registers a native command,
-launches a helper, authenticates, contacts GitHub or changes a capability gate.
-This pure-help composition does not activate a backend.
-The new tests are authored cases, not verification results.
+The Desktop application does **not yet provide a usable GitHub login**. The
+source now includes the guided connection UI, fixed native commands, session
+lifecycle, original-process supervisor integration, private engine protocol and
+fixed-host HTTPS transport. These extend the earlier credential-free guidance
+and pure projector; they are not just an unconnected UI proposal. Native session
+and TLS qualification gates nevertheless remain false. Ordinary builds refuse
+credential admission before copying a token into the native session, and cannot
+use a test fixture to activate the connection.
+
+The exact commit `d84a15db77e4776c5d89e23b87b868e21fb3a314` passed the
+[focused Linux native job](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/35299903903)
+(attempt 1): **17 original-owner cases and 6 controlled document cases**.
+Its original finality and finite cleanup evidence were independently reconciled.
+The fixture exchanges synthetic private frames without contacting GitHub. This
+does not verify TLS, real authentication, native WebView callbacks, macOS or
+Windows GitHub behavior, an installed runtime, or a shipped Desktop application.
 
 Local workflow preview/Apply stays independent. Installing local caller files
 does not push them, authenticate an account, configure remote resources or make
@@ -55,7 +61,7 @@ object body and `failure: "none"`. Other HTTP statuses require a null body; raw
 GitHub error bodies never enter this interface. A supplied transport failure has
 null status/body and a finite failure reason. There are at most two 100-record
 workflow pages and five reads total, 256 KiB per body and 1 MiB for the complete
-input, with depth/node bounds. The future transport must independently enforce
+input, with depth/node bounds. The separate transport must independently enforce
 the actual IO/framing/TLS bounds; this projector cannot certify them.
 
 The output is exactly `{schemaVersion: 1, account, repository, automation}`.
@@ -83,7 +89,7 @@ never become verified workflow absence or instructions to escalate permissions.
 Malformed data yields a fixed redacted error. Earlier observations can be marked
 stale; they must not be silently relabelled fresh after failure.
 
-## Public status and proposed private wire
+## Public status and private wire
 
 The TypeScript and registered pure Rust modules describe this closed status:
 
@@ -121,7 +127,8 @@ The fixed disclaimer is
 Environment, secret, variable, protection and runner observations remain not-run;
 remote mutation/dispatch remain false and readiness/compatibility remain unknown.
 
-Exactly four future commands are described, but none is registered here:
+Exactly four fixed commands are registered in the native shell. Registration
+does not bypass the closed runtime and connection gates:
 
 | Command | Exact arguments |
 | --- | --- |
@@ -130,23 +137,26 @@ Exactly four future commands are described, but none is registered here:
 | `github_connection_refresh` | `{sessionId, expectedRevision}` |
 | `github_connection_disconnect` | `{sessionId}` |
 
-Requests are at most 8 KiB. A future advanced token is nonempty printable ASCII
+Requests are at most 8 KiB. An advanced session-only token is nonempty printable ASCII
 without whitespace, at most 4096 bytes; there is no trimming or token-prefix trust.
 The TS request-shape helper returns only a Boolean, never a private object. Rust
 credential-bearing inbound request types have no Debug/Clone/Serialize, and all
-rejections use fixed diagnostics. The private future helper envelope is fixed
+rejections use fixed diagnostics. The private helper envelope is fixed
 `mrk-github-readonly/1` with `{protocol, id, params: {repository,
 expectedAccountId, expectedRepositoryId, token}}`; both expected IDs are required
-nullable fields. This is a wire description, not a private pipe/launch path.
+nullable fields. The original Supervisor owns this private pipe/launch path;
+the renderer cannot choose a helper, command line or destination.
 
-## Inert UI coordination
+## UI coordination and gated native handoff
 
 `GitHubConnectionController` accepts only an explicitly supplied observation
-port. The interface has Status, Refresh, Disconnect and subscription methods,
-**no Connect/token method and no live implementation**. Preview/unavailable ports
-are never called. The exported entry-availability constant is false and the
-component has no active credential input. Hypothetical available statuses in
-inert tests do not change any runtime capability.
+port. The observation interface has Status, Refresh, Disconnect and subscription
+methods, but no token field. A separate one-shot native handoff implements
+Connect; the controller never stores its token in public state. The fixed native
+port is wired, while preview/unavailable ports are never called. The exported
+entry-availability constant remains false and the component has no active
+credential input. Hypothetical available statuses in inert tests do not change
+any runtime capability.
 
 The controller subscribes before its first retained Status read. Document,
 project-generation, target and service changes invalidate callbacks before
@@ -171,8 +181,9 @@ retired session. Cleanup-unknown stays blocked.
 Context changes and disposal may issue a best-effort exact-session Disconnect;
 they are not evidence that native consumers stopped, memory was erased or remote
 grants were revoked. Replacing a service with unresolved retirement remains
-blocked. The future original owner must independently enforce document identity,
-deadline, cancellation, successful settlement and secret lifetime.
+blocked. The native original owner independently enforces document identity,
+deadline, cancellation, successful settlement and secret lifetime; rendered
+native callback qualification remains outstanding.
 
 `GitHubConnection.tsx` is isolated presentation using existing icons and help
 buttons. It labels retained/stale facts, reported roles, limited metadata,
@@ -183,28 +194,29 @@ entry or Refresh, but does not disable Status/Disconnect. Input IDs are reposito
 and token; guidance IDs are authentication, permissions, session-memory,
 repository-identity, automation-observation, remote-changes and revocation.
 
-## Narrow lead-owned integration
+## Guidance and application integration
 
-The ten-file authoring freeze is preserved separately. Its accepted SOURCE
-amendment is now composed through these narrow seams; none activates a backend
-or supplies verification evidence:
+The earlier pure guidance composition is retained in these application seams;
+the subsequent gated native integration does not turn guidance into authority:
 
 1. **Core help only:** `api/_catalog.py` and `api/contracts.py` expose nullable
    `githubConnection` help. Only the fixed guide is read; unrelated errors still
    propagate. Projection is not registered as a query or network method.
 2. **Useful disabled UI:** `types.ts`, `bridge.ts` and `preview.ts` consume the
    strict core guide. Missing/invalid additive help becomes null. `App.tsx` mounts
-   the component on the GitHub page with no port or native status/session/revision.
+   the component on the GitHub page and attaches the fixed observation port.
+   Native Status can explain an unavailable gate; a working observation port
+   does not authorize token entry or manufacture a connected session.
    Bootstrap/service and project-selection changes invalidate help synchronously;
    a separate identity token prevents late catalogue replies from restoring it,
    including an away-and-back selection. Retained help is marked previously
    loaded. Reloading service/guidance uses the existing bootstrap, not a fake
    connection. Existing Setup/Apply/configuration/asset ownership is unchanged.
    Local files, connection observations and remote setup keep separate claims.
-3. **Pure Rust registration:** `lib.rs` declares `github_connection_protocol`.
-   This makes its wire types and inline tests reachable by the real headless
-   crate without adding a handler, owner, service, shell command or capability.
-   Earlier compilation before this declaration covered none of this module.
+3. **Separate native integration:** the registered protocol and session modules,
+   original Supervisor ticket, document binding and fixed shell commands now
+   connect the application layers. The private read-only profile is not a
+   passive API method, a general command runner or an enabled capability.
 4. **Regression registration:** the normal UI test script includes the new
    connection leaf after all existing leaves. Focused validation still uses only
    the affected leaves; registration does not justify repeating the whole suite.
@@ -215,18 +227,19 @@ without mounting the component. Node strip-types cases do not typecheck TSX or
 prove rendered UI behavior. No dependency/lock/build/runtime change is needed
 merely to author these isolated files.
 
-## Remaining live-route obligations
+## Implemented lifecycle and remaining qualification
 
-A distinct original-owner/TLS/credential-lifetime review is mandatory before a
-token route exists. Reuse one closed private original-supervisor profile rather
-than a new job owner or passive API execution route. Only five fixed verified
-HTTPS GETs on the admitted GitHub API host are proposed; no redirects, returned
-URLs, retries, ambient proxy/CA overrides, external tools, hooks or TLS bypass.
-Actual private framing, successful original settlement, failure cleanup, cooldown,
-response bounds and target binding need fresh native qualification. HTTP 200 or
-a helper exit alone is not successful original settlement.
+The implemented token route uses one closed private original-supervisor profile,
+not a new job owner or passive API execution route. The transport permits at most
+five fixed HTTPS GETs on the admitted GitHub API host; no redirects, returned
+URLs, logical retries, ambient proxy/CA overrides, external tools, hooks or TLS
+bypass. The native job above verifies original private-frame ownership and
+controlled document integration only. Real-socket TLS authentication, EOF and
+streaming bounds, destination/environment isolation, DNS/handshake/read deadlines,
+trust-file failure behavior and actual native document callbacks remain separate
+qualification obligations. HTTP 200 or a helper exit alone cannot prove them.
 
-The proposed native ceiling is 60 minutes from acceptance, shortened by known
+The implemented native ceiling is 60 minutes from acceptance, shortened by known
 expiry, never extended by Status/Refresh/navigation. Credentials remain in
 private session memory, not project assets, environment/argv/temp files, logs,
 renderer stores or configuration. Retirement blocks admission immediately;
@@ -242,30 +255,23 @@ qualified OS-keyring lifecycle; plaintext fallback is never allowed. Local
 Disconnect is not remote revocation; the fixed help gives manual GitHub Settings
 navigation without opening a browser or retaining a credential.
 
-## Focused checks to propose after source review
+## Verification boundaries
 
-No command below has been run for this increment. Bind the actual source/tool
-identities and admit execution separately; do not fetch/install dependencies or
-rerun unrelated historical matrices to qualify this pure boundary.
+Focused Python supplied-data, UI fake-port and Rust state/protocol tests protect
+projection, privacy, wire contracts and lifecycle decisions. The TypeScript
+no-emit check covers TSX types; neither it nor pure Node tests establish rendered
+native behavior. The integration was locally compiled without running a native
+fixture, and its 22 selected CI/GTK contract tests passed before the native job.
 
-- From the repository root:
-  `PYTHONPATH=src python3 -B -m unittest discover -s tests/desktop -p test_github_connection.py`.
-  One supplied-DATA/help leaf covers whitelisting, identities, complete/limited
-  listing, finite failures/bounds, stale copies and ambient-IO tripwires.
-- From `desktop`:
-  `node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/github-connection.test.mjs`.
-  One fake-port leaf covers closed DTOs/commands/help, public privacy, generations,
-  Busy retirement, reply/event races, lost replies, expiry and sticky cleanup.
-- From `desktop`, with an already admitted local compiler/dependency tree:
-  `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json`.
-  This is the existing no-emit typecheck entry point, not a build, browser or
-  native qualification result.
-- **Only after the separately authorized module declaration**, propose the real
-  crate leaf from `desktop/src-tauri`:
-  `cargo test --offline --locked --no-default-features --lib github_connection_protocol::tests`.
-  Its build script/dependency compilation are still execution boundaries needing
-  admission. The inline cases concern strict wire/null keys/facts/privacy only,
-  not a live credential, owner, TLS profile, secure storage or device flow.
+The dedicated native workflow runs only its fixed original-owner/document entry
+on a disposable hosted Linux runner. It binds the exact source, one compiled
+test artifact, runtime, original run/attempt and finite case roster. Successful
+cleanup requires original finality, not just a green assertion or process exit.
+Only six named redacted JSON records are published; no raw token, private frame,
+runtime payload or local evidence is uploaded.
 
-No new harness, network test, package build, native GUI or existing gate flip is
-needed to establish the limited claims of G1A.
+Native/process, real-socket, namespace and GUI fixtures must not be run on a
+shared development machine. Use their reviewed disposable-hosted routes after
+focused local checks. Keep failed, skipped and unexecuted checks distinct from
+passes, reuse unchanged source-bound evidence, and do not enable a production
+gate merely because the headless fixture passed.

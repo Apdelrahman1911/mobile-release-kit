@@ -607,8 +607,21 @@ class FixedCompilerHelperTests(unittest.TestCase):
                      and isinstance(node.func.value, ast.Name)
                      and node.func.value.id == "subprocess" and node.func.attr == "run"]
         wrapper = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run")
-        self.assertEqual(len(raw_calls), 1)
-        self.assertIn(raw_calls[0], list(ast.walk(wrapper)))
+        outer = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "github_tls_run_outer")
+        self.assertEqual(len(raw_calls), 2)
+        ordinary_calls = [call for call in raw_calls if call in list(ast.walk(wrapper))]
+        outer_calls = [call for call in raw_calls if call in list(ast.walk(outer))]
+        self.assertEqual((len(ordinary_calls), len(outer_calls)), (1, 1))
+        # The one additional closed launcher must retain its own actual wait;
+        # it is not a generic check label or an inner-receipt assertion.
+        launch = outer_calls[0]
+        self.assertIsInstance(launch.args[0], ast.Call)
+        self.assertIsInstance(launch.args[0].func, ast.Name)
+        self.assertEqual(launch.args[0].func.id, "github_tls_launch_argv")
+        outer_keywords = {keyword.arg: keyword.value for keyword in launch.keywords}
+        self.assertIs(outer_keywords["check"].value, False)
+        self.assertEqual(outer_keywords["timeout"].value, 300)
+        self.assertEqual(outer_keywords["preexec_fn"].id, "github_tls_outer_limits")
         tool_calls = [node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "run"]
         labels = []
         for call in tool_calls:
@@ -2473,6 +2486,7 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
             helper.GTK_COMPILE_SCOPE: (set(helper.COMPILE_PHASES), {"linux"}),
             helper.WORKFLOW_NATIVE_SCOPE: (set(helper.WORKFLOW_NATIVE_PHASES), {"linux"}),
             helper.GITHUB_READONLY_SCOPE: (set(helper.GITHUB_READONLY_PHASES), {"linux"}),
+            helper.GITHUB_TLS_SCOPE: (set(helper.GITHUB_TLS_PHASES), {"linux"}),
             helper.WINDOWS_SNAPSHOT_SCOPE: ({"prepare", "acquire", "compile", "windows-snapshot", "clean"}, {"windows"}),
         }
         self.assertEqual(helper.FOUNDATION_SCOPE, helper.BOUNDARY_SCOPE)
@@ -2526,11 +2540,11 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
 
         # Fixed bounded SOURCE reads only: main and real hosted admission are never called.
         with HELPER.open("rb") as stream:
-            raw = stream.read(256 * 1024 + 1)
-        self.assertLessEqual(len(raw), 256 * 1024)
+            raw = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(raw), 512 * 1024)
         source = raw.decode("utf-8")
         main = source.split("def main() -> int:\n", 1)[1].split('\n\nif __name__ == "__main__":', 1)[0]
-        self.assertIn('"workflow-core", "windows-snapshot", "github-owner"))', main)
+        self.assertIn('"workflow-core", "windows-snapshot", "github-owner", "github-tls"))', main)
         self.assertIn('scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")', main)
         self.assertLess(main.index("admit_phase(scope, args.phase)"), main.index("platform = admitted_host()"))
         self.assertLess(main.index("platform = admitted_host()"), main.index("prepare(platform, scope)"))
@@ -2541,7 +2555,7 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
         host = source.split("def admitted_host() -> str:\n", 1)[1].split("\n\ndef admitted_scope(", 1)[0]
         self.assertEqual(host.count("admitted_scope(platform)"), 1)
         self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:\n        admitted_scope(platform)', host)
-        self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE}:', host)
+        self.assertIn('if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:', host)
         self.assertIn('os.environ.get("ImageOS") == "ubuntu24" and os.uname().machine == "x86_64"', host)
         self.assertIn('os.geteuid() != 0', host)
 
@@ -2670,15 +2684,15 @@ class WindowsCompositionRoutingTests(unittest.TestCase):
                 helper.load_context("windows", helper.WINDOWS_SNAPSHOT_SCOPE)
 
         with HELPER.open("rb") as stream:
-            raw = stream.read(256 * 1024 + 1)
-        self.assertLessEqual(len(raw), 256 * 1024)
+            raw = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(raw), 512 * 1024)
         source = raw.decode("utf-8")
         prepare = source.split("def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:\n", 1)[1].split("\n\ndef load_context(", 1)[0]
         self.assertTrue(prepare.startswith('    admit_phase(scope, "prepare")\n    admit_platform(scope, platform)\n'))
         self.assertLess(prepare.index('require(admitted_scope(platform) == scope'), prepare.index('source = Path('))
-        self.assertIn('directories = GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (\n'
+        self.assertIn('directories = GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (\n'
                       '        "home", "cargo", "rustup", "tmp", "target", "windows-snapshot", "appdata", "localappdata") if windows else (', prepare)
-        self.assertIn('empty_files = ("gitconfig-empty",) if native_workflow or native_github or windows else ("npmrc-user", "npmrc-global", "gitconfig-empty")', prepare)
+        self.assertIn('empty_files = ("gitconfig-empty",) if native_workflow or native_github or native_tls or windows else ("npmrc-user", "npmrc-global", "gitconfig-empty")', prepare)
         self.assertIn('"executionScope": scope,', prepare)
         self.assertIn('if windows:\n        context.update(scope=scope, event=os.environ["GITHUB_EVENT_NAME"], ref=os.environ["GITHUB_REF"])', prepare)
         self.assertEqual(prepare.count('write_json(root / "context.json", context)'), 2)
@@ -3778,6 +3792,1059 @@ class GitHubReadonlyCIIntegrationTests(unittest.TestCase):
         for mutation in ("none", "unexpected-entry", "changed-leaf", "late-entry"):
             with self.subTest(cleanup=mutation):
                 exercise(mutation)
+
+
+# Independent supplied TLS DATA. These builders are not native execution,
+# certificate verification, a runtime probe or evidence that a peer ever ran.
+TLS_CASE_ROWS = (
+    ("T1-source", 4, "none", "source", "root-ca.pem", False, 4),
+    ("T1-zip", 5, "none", "zip", "root-ca.pem", False, 5),
+    ("T2-root", 1, "tls-failed", "source", "other-root-ca.pem", True, 0),
+    ("T2-name", 1, "tls-failed", "source", "root-ca.pem", True, 0),
+    ("T2-expired", 1, "tls-failed", "source", "root-ca.pem", True, 0),
+    ("T3-clean", 4, "none", "source", "root-ca.pem", False, 4),
+    ("T3-ragged", 1, "tls-failed", "source", "root-ca.pem", False, 0),
+    ("T3-length", 1, "response-invalid", "source", "root-ca.pem", False, 1),
+    ("T3-chunk", 1, "response-invalid", "source", "root-ca.pem", False, 1),
+)
+TLS_NOT_VERIFIED = [
+    "T4-destination-ambient-environment", "T5-real-network-deadlines", "T6-streaming-controls",
+    "CA-file-native-faults", "real-github-authentication", "production-runtime-custody",
+    "native-gui", "native-document-lifecycle", "packaged-runtime", "production-enablement",
+]
+
+
+def github_tls_binding_data() -> dict:
+    return {"sourceSha": "1" * 40, "sourceTree": "3" * 40, "workflowSha256": "4" * 64,
+            "runId": "123", "attempt": "2", "tlsInputsSha256": "9" * 64,
+            "artifactSha256": "a" * 64, "artifactBytes": 144, "coreZipSha256": "7" * 64,
+            "pythonSha256": "8" * 64,
+            "namespace": {"parentNetns": "net:[100]", "parentMntns": "mnt:[200]", "uid": 1000, "gid": 1000}}
+
+
+def github_tls_report_data() -> dict:
+    cases = []
+    for name, connections, reason, mode, trust, refused, notify in TLS_CASE_ROWS:
+        native = {**dict.fromkeys(("inspection_joined", "acquisition_joined", "spawned", "waited", "exit_success",
+            "writer_joined", "writer_complete", "stdout_eof", "stderr_eof", "stdout_joined", "stderr_joined",
+            "driver_joined", "watchdog_joined"), True), "stdout_bytes": 1024, "stderr_bytes": 0}
+        terminal = {"schemaVersion": 1, "scope": "github-tls-peer-v1", "case": name, "state": "finished",
+            "status": "passed", "code": None, "connections": connections, "handshakes": 0 if refused else connections,
+            "requests": 0 if refused else connections, "decryptedBytes": 0 if refused else connections * 128,
+            "authBytes": 0 if refused else connections * len(b"Bearer INERT_NOT_A_CREDENTIAL"), "closeNotify": notify,
+            "tlsRefused": refused, "wireReadBytes": [1024] * connections, "wireWriteBytes": [2048] * connections,
+            "replyBytes": [0 if refused else 512] * connections, "allSocketsClosed": True}
+        peer = {**dict.fromkeys(("acquisitionJoined", "spawned", "waited", "exitSuccess", "stdoutJoined", "stderrJoined",
+                    "stdoutEof", "stderrEof", "ready", "settled", "withinEndpoint", "protocolChecked"), True),
+                "exitCode": 0, "stopAttempted": False, "stdoutOverflow": False, "stderrOverflow": False,
+                "stdoutBytes": 1024, "stderrBytes": 0, "terminal": terminal}
+        cases.append({"case": name, "passed": True, "failureCode": None, "elapsedMs": 100,
+            "coreMode": mode, "trustFixture": trust,
+            "product": {"settled": True, "projectionChecked": True, "reason": reason, "registeredOwners": 0,
+                "disabled": False, "owners": [{"id": "github-read-1", "profile": "github-readonly", "terminal": True,
+                    "unknownLatched": False, "permitRetained": False, "observerJoined": True,
+                    "firstError": None, "native": native}]}, "peer": peer})
+    bindings = github_tls_binding_data()
+    bindings["namespace"].update(netns="net:[101]", mntns="mnt:[201]")
+    return {"schemaVersion": 1, "scope": "github-readonly-tls-hosted-v1", "status": "passed", "allOwnersSettled": True,
+            "allPeersSettled": True, "failureCode": None, "bindings": bindings, "cases": cases,
+            "outerWait": "external-original-observer-required", "notVerified": list(TLS_NOT_VERIFIED)}
+
+
+class GitHubTLSReceiptContractTests(unittest.TestCase):
+    def reject_at(self, path, replacement):
+        report = github_tls_report_data()
+        target = report
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = replacement
+        with self.subTest(path=path, value=replacement), self.assertRaises(helper.CheckFailure):
+            helper.validate_github_tls_receipt(report, bindings=github_tls_binding_data())
+
+    def test_tls_supplied_nine_case_data_is_not_execution_or_outer_finality(self):
+        report = github_tls_report_data()
+        self.assertEqual(tuple(row[0] for row in TLS_CASE_ROWS), helper.GITHUB_TLS_CASES)
+        self.assertEqual(TLS_NOT_VERIFIED, list(helper.GITHUB_TLS_NOT_VERIFIED))
+        self.assertIs(report, helper.validate_github_tls_receipt(report, bindings=github_tls_binding_data()))
+        raw = json.dumps(report, separators=(",", ":")).encode("utf-8")
+        self.assertEqual(report, helper.parse_github_tls_receipt(raw, bindings=github_tls_binding_data()))
+        self.assertNotIn("outer", report)
+        for foreign in (github_readonly_report_data(), native_report(), {**report, "outerWait": True}):
+            with self.subTest(foreign_scope=foreign.get("scope")), self.assertRaises(helper.CheckFailure):
+                helper.validate_github_tls_receipt(foreign, bindings=github_tls_binding_data())
+        with self.assertRaises(helper.CheckFailure):
+            validate_github_readonly_data(report)
+
+    def test_tls_closed_headers_inputs_and_distinct_original_namespaces(self):
+        report = github_tls_report_data()
+        for key, value in (("schemaVersion", True), ("scope", "github-readonly-native-v1"), ("status", "failed-retained"),
+                ("allOwnersSettled", False), ("allPeersSettled", 1), ("failureCode", "tls_custody_unresolved"),
+                ("outerWait", "passed"), ("extra", True), ("cases", report["cases"][:-1]),
+                ("cases", report["cases"] + report["cases"][:1]), ("cases", list(reversed(report["cases"]))),
+                ("cases", [report["cases"][0]] * 9), ("notVerified", TLS_NOT_VERIFIED[:-1])):
+            self.reject_at((key,), value)
+        for key in report:
+            bad = deepcopy(report); del bad[key]
+            with self.subTest(missing=key), self.assertRaises(helper.CheckFailure):
+                helper.validate_github_tls_receipt(bad, bindings=github_tls_binding_data())
+        for key in github_tls_binding_data().keys() - {"namespace"}:
+            value = 145 if key == "artifactBytes" else "5" if key in {"runId", "attempt"} else "f" * len(report["bindings"][key])
+            self.reject_at(("bindings", key), value)
+        for key, value in (("netns", "net:[100]"), ("mntns", "mnt:[200]"), ("netns", "mnt:[101]"),
+                ("parentNetns", "net:[999]"), ("parentMntns", "mnt:[999]"), ("uid", 0), ("gid", True),
+                ("uid", 1001), ("netns", "net:[0]"), ("netns", "net:[001]"), ("extra", True)):
+            self.reject_at(("bindings", "namespace", key), value)
+        expected = github_tls_binding_data()
+        for key, value in (("sourceSha", "0" * 40), ("sourceTree", "A" * 40), ("runId", 123), ("attempt", "0"),
+                ("artifactBytes", True), ("artifactBytes", 512 * 1024 * 1024 + 1), ("workflowSha256", "bad")):
+            with self.subTest(expected_binding=key), self.assertRaises(helper.CheckFailure):
+                helper.validate_github_tls_receipt(report, bindings={**expected, key: value})
+
+    def test_tls_every_original_product_and_peer_join_is_required(self):
+        report = github_tls_report_data()
+        # Generic schema/join predicates are shared: mutate one representative,
+        # not a nine-case Cartesian replay of the same structural validator.
+        for index, case in enumerate(report["cases"][:1]):
+            for key in ("settled", "projectionChecked"):
+                for value in (False, 1, None):
+                    self.reject_at(("cases", index, "product", key), value)
+            for key, value in (("registeredOwners", 1), ("registeredOwners", False), ("disabled", True),
+                    ("owners", []), ("owners", case["product"]["owners"] * 2), ("extra", True)):
+                self.reject_at(("cases", index, "product", key), value)
+            owner = case["product"]["owners"][0]
+            for key, value in (("id", "github-read-2"), ("profile", "passive"), ("terminal", False),
+                    ("unknownLatched", True), ("permitRetained", True), ("observerJoined", False),
+                    ("firstError", "engine_failed"), ("extra", True)):
+                self.reject_at(("cases", index, "product", "owners", 0, key), value)
+            for key, value in owner["native"].items():
+                for bad in ((False, 1, None) if type(value) is bool else (-1, True, 65537) if key == "stdout_bytes" else (1, False)):
+                    self.reject_at(("cases", index, "product", "owners", 0, "native", key), bad)
+            for key, value in case["peer"].items():
+                if type(value) is bool:
+                    for bad in (not value, int(value), None):
+                        self.reject_at(("cases", index, "peer", key), bad)
+            for key, value in (("exitCode", 1), ("exitCode", None), ("exitCode", False), ("stdoutBytes", 0),
+                    ("stdoutBytes", 8193), ("stdoutBytes", True), ("stderrBytes", 1), ("extra", True)):
+                self.reject_at(("cases", index, "peer", key), value)
+            self.reject_at(("cases", index, "product", "owners", 0, "native", "extra"), True)
+        for index in range(1, len(report["cases"])):
+            self.reject_at(("cases", index, "product", "owners", 0, "native", "exit_success"), False)
+            self.reject_at(("cases", index, "peer", "waited"), False)
+
+    def test_tls_auth_refusal_eof_framing_and_typed_projection_are_case_specific(self):
+        for key, value in (("case", "g1-correct"), ("passed", False), ("passed", 1), ("failureCode", "tls_failed"),
+                          ("elapsedMs", -1), ("elapsedMs", True), ("elapsedMs", 300001), ("extra", True)):
+            self.reject_at(("cases", 0, key), value)
+        for key, value in (("schemaVersion", True), ("scope", "github-readonly-tls-hosted-v1"), ("case", "T4"),
+                ("state", "ready"), ("status", "failed"), ("code", "peer_failed"), ("allSocketsClosed", False), ("extra", True)):
+            self.reject_at(("cases", 0, "peer", "terminal", key), value)
+        for index, (name, connections, reason, mode, trust, refused, notify) in enumerate(TLS_CASE_ROWS):
+            for key, value in (("coreMode", "zip" if mode == "source" else "source"),
+                    ("trustFixture", "root-ca.pem" if trust == "other-root-ca.pem" else "other-root-ca.pem")):
+                self.reject_at(("cases", index, key), value)
+            self.reject_at(("cases", index, "product", "reason"), "none" if reason != "none" else "tls-failed")
+            for key, value in (("connections", connections + 1),
+                    ("handshakes", 1 if refused else 0), ("requests", 1 if refused else 0), ("tlsRefused", not refused),
+                    ("authBytes", 1 if refused else 0), ("decryptedBytes", 1 if refused else connections * 8192 + 1),
+                    ("closeNotify", 1 if notify == 0 else 0)):
+                self.reject_at(("cases", index, "peer", "terminal", key), value)
+            if index in (0, 2):  # One successful and one pre-HTTP-refusal vector shape.
+                for key, limit in (("wireReadBytes", 131072), ("wireWriteBytes", 131072), ("replyBytes", 65536)):
+                    for vector in ([], [1] * (connections + 1), [True] * connections, [-1] * connections,
+                            [limit + 1] * connections, [1 if refused and key == "replyBytes" else 0] * connections):
+                        self.reject_at(("cases", index, "peer", "terminal", key), vector)
+
+    def test_tls_raw_receipt_duplicate_scalar_depth_size_and_encoding_bounds(self):
+        raw = json.dumps(github_tls_report_data(), separators=(",", ":")).encode("utf-8")
+        invalid = (b"", bytearray(raw), raw.decode("utf-8"), raw[:-1], raw + b"{}", b"\xff", b"x" * 131073,
+                   raw.replace(b'"passed":true', b'"passed":true,"passed":true', 1),
+                   raw.replace(b'"elapsedMs":100', b'"elapsedMs":1.0', 1),
+                   raw.replace(b'"elapsedMs":100', b'"elapsedMs":NaN', 1),
+                   b'{"nested":' + b'[' * 17 + b'0' + b']' * 17 + b'}')
+        for index, value in enumerate(invalid):
+            with self.subTest(raw=index), self.assertRaises(helper.CheckFailure):
+                helper.parse_github_tls_receipt(value, bindings=github_tls_binding_data())
+
+
+class GitHubTLSCIIntegrationTests(unittest.TestCase):
+    """Actual CI control algorithms over supplied, finite inert capabilities."""
+
+    SCOPE = "github-readonly-tls-native-v1"
+    EVIDENCE = "desktop-github-readonly-tls-native-only-v1"
+    WORKFLOW = ".github/workflows/desktop-github-connection-tls.yml"
+    REF = "refs/heads/verify/desktop-github-connection-tls"
+    PHASES = ("prepare", "acquire", "compile", "github-tls", "clean")
+    CHECKS = {
+        "acquire": ("rust-toolchain-install", "rust-version-target", "github-tls-locked-headless-metadata"),
+        "compile": ("rust-version-target", "github-tls-headless-test-compile-only", "github-tls-compiled-artifact"),
+        "github-tls": ("github-tls-original-artifact", "github-tls-original-outer-wait", "github-tls-receipt"),
+    }
+    CERTIFICATES = ("root-ca.pem", "other-root-ca.pem", "api-valid.pem", "wrong-san.pem", "api-expired.pem", "server-key.pem")
+    TOOLS = {**{name: "/usr/bin/" + name for name in (
+        "sudo", "unshare", "env", "bash", "mount", "setpriv", "readlink", "findmnt", "stat", "sha256sum", "ip")},
+        "sysctl": "/usr/sbin/sysctl"}
+    CONFIG = {"hosts": b"127.0.0.1 api.github.com localhost\n::1 localhost\n",
+        "resolv.conf": b"# Synthetic namespace: DNS is disabled by hosts: files.\nnameserver 127.0.0.1\noptions timeout:1 attempts:1\n",
+        "nsswitch.conf": b"passwd: files\ngroup: files\nhosts: files\n"}
+
+    @staticmethod
+    def forbidden(*args, **kwargs):
+        raise AssertionError("TLS inert contract requested an unprovided IO/tool/runtime capability")
+
+    @staticmethod
+    def encoded(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("utf-8")
+
+    @classmethod
+    def environment(cls):
+        return {"GITHUB_SHA": "1" * 40, "GITHUB_WORKFLOW_SHA": "1" * 40,
+                "GITHUB_REPOSITORY": "fictional/project", "GITHUB_REF": cls.REF,
+                "GITHUB_WORKFLOW_REF": f"fictional/project/{cls.WORKFLOW}@{cls.REF}",
+                "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_EVENT_NAME": "push"}
+
+    @classmethod
+    def context(cls):
+        context = {"executionScope": cls.SCOPE, "platform": "linux", "root": "/inert/tls/mrk-desktop-foundation-github-tls-123-2",
+            "source": "/inert/tls/source", "python": "/inert/tls/python/bin/python3.14",
+            "git": "/inert/tls/git", "rustup": "/inert/tls/rustup", "sourceSha": "1" * 40, "sourceTree": "3" * 40,
+            "workflowSha": "1" * 40, "workflowPath": cls.WORKFLOW, "workflowRef": cls.environment()["GITHUB_WORKFLOW_REF"],
+            "workflowSha256": "4" * 64, "runId": "123", "attempt": "2", "tlsInputsSha256": "9" * 64,
+            "originalDirectories": {"inert": "original identities supplied separately"},
+            "observedHost": {"kernelRelease": "inert-6.8", "machine": "x86_64", "nonRoot": True,
+                "filesystem": {"device": "7", "blockSize": 4096, "fragmentSize": 4096, "nameMax": 255, "flags": 0}}}
+        context["tlsInputs"] = cls.input_summary(context, cls.manifest(context))
+        return context
+
+    @classmethod
+    def manifest(cls, context):
+        source, root = PurePosixPath(context["source"]), PurePosixPath(context["root"])
+        fixtures = source / "desktop/src-tauri/tests/fixtures"
+        library = PurePosixPath(context["python"]).parent.parent / "lib/python3.14"
+        roles = {"python": context["python"], "bootstrap": str(source / "desktop/github_connection_bootstrap.py"),
+            "coreZip": str(root / "core.zip"), "peer": str(fixtures / "github_tls_peer.py"),
+            "namespace": str(fixtures / "github_tls_namespace.sh"),
+            **{name: str(fixtures / "github_tls" / name) for name in cls.CERTIFICATES},
+            **{name: str(root / "github-tls-namespace" / name) for name in cls.CONFIG},
+            **{"tool:" + name: path for name, path in cls.TOOLS.items()},
+            "ssl": str(library / "ssl.py"), "socket": str(library / "socket.py"),
+            "_ssl": str(library / "lib-dynload/_ssl.cpython-314-x86_64-linux-gnu.so"),
+            "_socket": str(library / "lib-dynload/_socket.cpython-314-x86_64-linux-gnu.so"),
+            "libssl": "/inert/tls/lib/libssl.so.3", "libcrypto": "/inert/tls/lib/libcrypto.so.3",
+            "loader": "/inert/tls/lib/ld-linux-x86-64.so.2"}
+        names = {*roles.values(), *(str(source / name) for name in helper.GITHUB_TLS_SOURCES),
+                 *(str(source / "src" / name) for name in helper.GTK_CORE_PATHS)}
+        hashes = {roles["python"]: "8" * 64, roles["coreZip"]: "7" * 64, str(source / cls.WORKFLOW): "4" * 64}
+        files = [{"path": name, "size": 16 if name == roles["python"] else 32, "sha256": hashes.get(name, "5" * 64)}
+                 for name in sorted(names)]
+        return {"schemaVersion": 1, "scope": cls.SCOPE,
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+            "sourceRoot": str(source), "jobRoot": str(root), "python": context["python"],
+            "coreSource": str(source / "src"), "coreZip": str(root / "core.zip"), "uid": 1000, "gid": 1000,
+            "parentNetns": "net:[100]", "parentMntns": "mnt:[200]",
+            "ssl": {"opensslVersion": "OpenSSL 3.0.0 inert supplied DATA", "ignoreUnexpectedEof": 128}, "roles": roles, "files": files}
+
+    @classmethod
+    def input_summary(cls, context, manifest):
+        source = PurePosixPath(context["source"])
+        by_path = {row["path"]: row for row in manifest["files"]}
+        def row(path, name):
+            return {"path": name, "size": by_path[str(path)]["size"], "sha256": by_path[str(path)]["sha256"]}
+        return {"sourceFiles": [row(source / name, name) for name in helper.GITHUB_TLS_SOURCES],
+            "coreFiles": [row(source / "src" / name, name) for name in helper.GTK_CORE_PATHS],
+            "coreZipSha256": by_path[manifest["coreZip"]]["sha256"], "pythonSha256": by_path[manifest["python"]]["sha256"],
+            "pythonBytes": by_path[manifest["python"]]["size"], "closureFiles": len(by_path),
+            "closureBytes": sum(item["size"] for item in by_path.values()),
+            "closureSha256": hashlib.sha256(cls.encoded(manifest["files"])).hexdigest(), "ssl": manifest["ssl"],
+            "roles": {name: {key: by_path[path][key] for key in ("size", "sha256")} for name, path in manifest["roles"].items()}}
+
+    @classmethod
+    def artifact(cls):
+        return {"schemaVersion": 1, "scope": cls.SCOPE, "sourceSha": "1" * 40, "sourceTree": "3" * 40,
+            "tlsInputsSha256": "9" * 64,
+            "path": "/inert/tls/mrk-desktop-foundation-github-tls-123-2/target/x86_64-unknown-linux-gnu/debug/deps/mobile_release_desktop-0123456789abcdef",
+            "size": 144, "sha256": "a" * 64, "invocationSha256": "b" * 64, "messagesSha256": "c" * 64,
+            "identity": {"device": "7", "inode": "88", "mode": stat.S_IFREG | 0o700, "uid": 1000, "gid": 1000,
+                         "size": 144, "mtimeNs": 1000000}}
+
+    @classmethod
+    def compiled_public(cls):
+        value = cls.artifact()
+        return {**{key: value[key] for key in ("size", "sha256", "invocationSha256", "messagesSha256")},
+                "identitySha256": hashlib.sha256(cls.encoded(value["identity"])).hexdigest()}
+
+    @classmethod
+    def outer(cls, context):
+        return {"schemaVersion": 1, "scope": "github-readonly-tls-original-outer-v1",
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256")},
+            "artifactSha256": "a" * 64, "artifactBytes": 144,
+            "artifactIdentitySha256": hashlib.sha256(cls.encoded(cls.artifact()["identity"])).hexdigest(),
+            "status": "passed", "waitObserved": True, "exitCode": 0, "timedOut": False,
+            "elapsedMs": 125, "stdoutBytes": 256, "stderrBytes": 0}
+
+    @classmethod
+    def claim(cls, context, name):
+        return {"scope": cls.SCOPE, "phase": name,
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256")}}
+
+    @classmethod
+    def phase_report(cls, context, name):
+        value = {"schemaVersion": 1, "scope": cls.EVIDENCE, "phase": name, "status": "passed",
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha",
+                                           "workflowRef", "workflowSha256", "runId", "attempt", "tlsInputsSha256")},
+            "inputSha256": hashlib.sha256(cls.encoded(context["tlsInputs"])).hexdigest(),
+            "rust": {"release": helper.RUST, "target": "x86_64-unknown-linux-gnu"},
+            "checks": [{"check": check, "exitCode": 0} for check in cls.CHECKS[name]]}
+        if name in ("compile", "github-tls"):
+            value["compiledTest"] = cls.compiled_public()
+        if name == "github-tls":
+            value.update(nativeReceiptSha256="d" * 64, outer=cls.outer(context))
+        return value
+
+    def test_tls_fixed_scope_binding_refuses_owner23_and_other_lanes_before_io(self):
+        environment, forbidden = self.environment(), self.forbidden
+        self.assertEqual((helper.GITHUB_TLS_SCOPE, helper.GITHUB_TLS_EVIDENCE_SCOPE, helper.GITHUB_TLS_WORKFLOW,
+                          helper.GITHUB_TLS_REF, helper.GITHUB_TLS_PHASES, helper.GITHUB_TLS_CHECKS),
+                         (self.SCOPE, self.EVIDENCE, self.WORKFLOW, self.REF, self.PHASES, self.CHECKS))
+        expected = {"workflowPath": self.WORKFLOW, "workflowSha": "1" * 40, "workflowRef": environment["GITHUB_WORKFLOW_REF"],
+                    "sourceSha": "1" * 40, "runId": "123", "attempt": "2"}
+        with patch.multiple(helper, Path=forbidden, load_context=forbidden, tools=forbidden, run=forbidden,
+                read_bounded_json=forbidden, hash_file=forbidden, write_json=forbidden, clean_environment=forbidden,
+                phase_github_readonly=forbidden, phase_workflow_native=forbidden, phase_github_tls=forbidden), \
+                patch.object(helper.subprocess, "run", side_effect=forbidden), patch.object(helper.subprocess, "Popen", side_effect=forbidden):
+            self.assertEqual(helper.github_tls_binding(environment), expected)
+            for key, value in (("GITHUB_REF", helper.GITHUB_READONLY_REF), ("GITHUB_REF", "refs/heads/main"),
+                    ("GITHUB_SHA", "0" * 40), ("GITHUB_WORKFLOW_SHA", "2" * 40), ("GITHUB_REPOSITORY", "another/project"),
+                    ("GITHUB_WORKFLOW_REF", "fictional/project/other.yml@main"), ("GITHUB_RUN_ID", "0"),
+                    ("GITHUB_RUN_ATTEMPT", "02"), ("GITHUB_EVENT_NAME", "pull_request")):
+                with self.subTest(binding=key), self.assertRaises(helper.CheckFailure):
+                    helper.github_tls_binding({**environment, key: value})
+            dispatch = {**environment, "GITHUB_EVENT_NAME": "workflow_dispatch"}
+            for sha in (None, "main", "2" * 40):
+                with self.subTest(dispatch=sha), self.assertRaises(helper.CheckFailure):
+                    helper.github_tls_binding({**dispatch, "MRK_EXPECTED_SHA": sha})
+            self.assertEqual(helper.github_tls_binding({**dispatch, "MRK_EXPECTED_SHA": "1" * 40}), expected)
+            for binding in (helper.github_readonly_binding, helper.workflow_native_binding, helper.compile_workflow_binding):
+                with self.subTest(foreign_binding=binding.__name__), self.assertRaises(helper.CheckFailure):
+                    binding(environment)
+            with self.assertRaises(helper.CheckFailure):
+                helper.github_tls_binding(GitHubReadonlyCIIntegrationTests.environment())
+            for name in self.PHASES:
+                helper.admit_phase(self.SCOPE, name)
+            for name in ("native", "github-owner", "workflow-owner", "workflow-core", "windows-snapshot", "config-owner", "unknown"):
+                with self.subTest(phase=name), self.assertRaises(helper.CheckFailure):
+                    helper.phase(name, "linux", self.SCOPE)
+            for scope in (helper.GITHUB_READONLY_SCOPE, helper.BOUNDARY_SCOPE, helper.WORKFLOW_NATIVE_SCOPE,
+                          helper.WINDOWS_SNAPSHOT_SCOPE, *helper.COMPILE_PROFILES):
+                with self.subTest(scope=scope), self.assertRaises(helper.CheckFailure):
+                    helper.phase("github-tls", "linux", scope)
+            for platform in ("windows", "macos", "other"):
+                with self.subTest(platform=platform), self.assertRaises(helper.CheckFailure):
+                    helper.prepare(platform, self.SCOPE)
+                with self.subTest(native_platform=platform), self.assertRaises(helper.CheckFailure):
+                    helper.phase("github-tls", platform, self.SCOPE)
+
+    def test_tls_manifest_roles_source_ca_ssl_and_file_bounds_are_closed_data(self):
+        context, forbidden = self.context(), self.forbidden
+        manifest = self.manifest(context)
+        self.assertEqual(helper.GITHUB_TLS_CERTIFICATES, self.CERTIFICATES)
+        self.assertEqual(helper.GITHUB_TLS_TOOLS, self.TOOLS)
+        self.assertEqual(helper.GITHUB_TLS_CONFIG, self.CONFIG)
+        self.assertEqual(set(helper.GITHUB_TLS_SOURCES) - set(helper.GITHUB_READONLY_SOURCES), {
+            self.WORKFLOW, "desktop/src-tauri/tests/fixtures/github_tls_peer.py",
+            "desktop/src-tauri/tests/fixtures/github_tls_namespace.sh",
+            *("desktop/src-tauri/tests/fixtures/github_tls/" + name for name in self.CERTIFICATES)})
+        mutations = []
+        for key, value in (("scope", helper.GITHUB_READONLY_SCOPE), ("schemaVersion", True), ("uid", 0), ("gid", True),
+                ("gid", 2**32), ("parentNetns", "net:[0]"), ("parentMntns", "net:[200]"), ("python", "/another/python"),
+                ("coreSource", "/another/source"), ("workflowSha256", "f" * 64), ("tlsInputsSha256", "9" * 64)):
+            mutations.append({**deepcopy(manifest), key: value})
+        for key, value in (("ignoreUnexpectedEof", 0), ("ignoreUnexpectedEof", True), ("ignoreUnexpectedEof", 2**64),
+                ("opensslVersion", "unknown"), ("opensslVersion", "OpenSSL \nprivate"), ("extra", True)):
+            bad = deepcopy(manifest); bad["ssl"][key] = value; mutations.append(bad)
+        for role in manifest["roles"]:
+            bad = deepcopy(manifest); del bad["roles"][role]; mutations.append(bad)
+            bad = deepcopy(manifest); bad["roles"][role] = manifest["roles"]["bootstrap"]; mutations.append(bad)
+            if role == "bootstrap":
+                mutations.pop()  # A genuine unchanged value is not a refusal test.
+        for key, value in (("size", True), ("size", -1), ("size", 64 * 1024 * 1024 + 1), ("sha256", "A" * 64),
+                ("path", "relative/input.py"), ("path", "/inert//input.py"), ("path", "/inert/../input.py"),
+                ("path", "/inert/./input.py"), ("path", "/inert/input\0.py"), ("path", "/inert/input\\file.py"), ("extra", True)):
+            bad = deepcopy(manifest); bad["files"][0][key] = value; mutations.append(bad)
+        for files in (manifest["files"][:-1], manifest["files"] + manifest["files"][:1], list(reversed(manifest["files"])),
+                      [{**row, "size": 64 * 1024 * 1024} for row in manifest["files"]]):
+            mutations.append({**deepcopy(manifest), "files": files})
+        for name in (*self.CERTIFICATES, "python", "coreZip"):
+            bad = deepcopy(manifest)
+            next(row for row in bad["files"] if row["path"] == manifest["roles"][name])["size"] = 0
+            mutations.append(bad)
+        with patch.multiple(helper, Path=PurePosixPath, github_tls_runtime=forbidden, github_tls_file=forbidden,
+                ordinary=forbidden, hash_file=forbidden, read_bounded_json=forbidden, run=forbidden, tools=forbidden), \
+                patch.object(helper.subprocess, "run", side_effect=forbidden):
+            self.assertIs(manifest, helper.validate_github_tls_manifest(manifest, context=context))
+            self.assertEqual(helper.github_tls_input_summary(context, manifest), context["tlsInputs"])
+            for index, value in enumerate(mutations):
+                with self.subTest(manifest_mutation=index), self.assertRaises(helper.CheckFailure):
+                    helper.validate_github_tls_manifest(value, context=context)
+
+    def test_tls_frozen_import_roster_and_bytes_recheck_without_ssl_or_tools(self):
+        context, forbidden, test = self.context(), self.forbidden, self
+        manifest = self.manifest(context)
+        library = PurePosixPath(manifest["roles"]["ssl"]).parent
+        expected = {PurePosixPath(row["path"]) for row in manifest["files"] if library in PurePosixPath(row["path"]).parents}
+        rows = {row["path"]: row for row in manifest["files"]}
+
+        def exercise(mutation):
+            events = []
+            def record(path):
+                events.append(("file", str(path)))
+                value = dict(rows[str(path)])
+                if mutation == "bytes" and str(path) == manifest["roles"]["server-key.pem"]:
+                    value["sha256"] = "f" * 64
+                return value
+            def roster(path):
+                test.assertEqual(path, library)
+                events.append(("roster", str(path)))
+                return expected | {library / "__pycache__/ssl.cpython-314.pyc"} if mutation == "added-cache" else set(expected)
+            with patch.multiple(helper, Path=PurePosixPath, github_tls_runtime=forbidden, github_tls_file=record,
+                    github_tls_stdlib_files=roster, run=forbidden, tools=forbidden, ordinary=forbidden,
+                    source_unchanged=forbidden, write_json=forbidden), \
+                    patch.object(helper, "github_tls_directories", return_value=context["originalDirectories"]), \
+                    patch.object(helper, "hash_file", return_value="f" * 64 if mutation == "anchor" else "9" * 64), \
+                    patch.object(helper, "read_bounded_json", return_value=deepcopy(manifest)), \
+                    patch.object(helper, "github_tls_namespaces", return_value={"parentNetns": "net:[999]" if mutation == "namespace" else "net:[100]", "parentMntns": "mnt:[200]"}), \
+                    patch.object(helper.os, "geteuid", return_value=1000, create=True), \
+                    patch.object(helper.os, "getegid", return_value=1000, create=True), \
+                    patch.object(helper.subprocess, "run", side_effect=forbidden), patch.object(helper.subprocess, "Popen", side_effect=forbidden):
+                if mutation:
+                    with test.assertRaises(helper.CheckFailure):
+                        helper.github_tls_inputs_unchanged(context)
+                else:
+                    helper.github_tls_inputs_unchanged(context)
+            if mutation in ("anchor", "namespace"):
+                test.assertEqual(events, [])
+            elif mutation == "added-cache":
+                test.assertEqual(events, [("roster", str(library))])
+            else:
+                test.assertEqual(events, [("roster", str(library)), *(("file", row["path"]) for row in manifest["files"])])
+
+        for mutation in (None, "anchor", "namespace", "added-cache", "bytes"):
+            with self.subTest(freeze=mutation):
+                exercise(mutation)
+
+        class RosterPath(PurePosixPath):
+            def resolve(self, *, strict=False):
+                test.assertTrue(strict)
+                return self
+            def is_dir(self):
+                return self == library
+            def is_symlink(self):
+                return False
+        walk = [(str(library), ["lib-dynload", "__pycache__", "site-packages"], ["ssl.py", "socket.py", "README"]),
+                (str(library / "lib-dynload"), [], ["_ssl.cpython-314-x86_64-linux-gnu.so", "_socket.cpython-314-x86_64-linux-gnu.so"]),
+                (str(library / "__pycache__"), [], ["ssl.cpython-314.pyc", "ssl.cpython-314.opt-1.pyc", "ssl.cpython-314.opt-2.pyc"])]
+        with patch.multiple(helper, Path=RosterPath, run=forbidden, tools=forbidden, github_tls_runtime=forbidden), \
+                patch.object(helper.os, "walk", return_value=iter(walk)) as walking, \
+                patch.object(helper.os.path, "lexists", return_value=False), \
+                patch.object(helper.subprocess, "run", side_effect=forbidden):
+            self.assertEqual(helper.github_tls_stdlib_files(RosterPath(library)), expected | {library / "__pycache__/ssl.cpython-314.pyc"})
+            walking.assert_called_once_with(RosterPath(library), followlinks=False)
+            self.assertNotIn("site-packages", walk[0][1])
+        for too_many in ([(str(library), [], ["README"] * 8193)], [(str(library / ("deep/" * 17)), [], ["ssl.py"])]):
+            with patch.object(helper, "Path", RosterPath), patch.object(helper.os.path, "lexists", return_value=False), \
+                    patch.object(helper.os, "walk", return_value=iter(too_many)), self.assertRaises(helper.CheckFailure):
+                helper.github_tls_stdlib_files(RosterPath(library))
+
+    def test_tls_compile_record_and_launch_bind_original_artifact_and_input_anchor(self):
+        context, compiled, test, forbidden = self.context(), self.artifact(), self, self.forbidden
+        root, source = PurePosixPath(context["root"]), PurePosixPath(context["source"])
+        cargo_row = {"reason": "compiler-artifact", "executable": compiled["path"],
+            "manifest_path": str(source / "desktop/src-tauri/Cargo.toml"),
+            "target": {"kind": ["lib"], "name": "mobile_release_desktop", "src_path": str(source / "desktop/src-tauri/src/lib.rs")},
+            "profile": {"test": True, "debug_assertions": True}, "features": ["development-runtime"], "fresh": False}
+        raw = self.encoded(cargo_row) + b"\n" + self.encoded({"reason": "build-finished", "success": True}) + b"\n"
+        argv = ["/inert/tls/cargo", "test", "--lib", "--no-run", "--message-format=json"]
+        writes, observations = {}, []
+        class MessagePath(PurePosixPath):
+            def stat(self):
+                test.assertEqual(self, root / "github-tls-compile-messages.jsonl")
+                return SimpleNamespace(st_size=len(raw))
+            def open(self, mode):
+                test.assertEqual((self, mode), (root / "github-tls-compile-messages.jsonl", "rb"))
+                return io.BytesIO(raw)
+        def identity(path, job):
+            test.assertEqual((path, job), (PurePosixPath(compiled["path"]), root))
+            observations.append("original-artifact")
+            return {key: deepcopy(compiled[key]) for key in ("identity", "size", "sha256")}
+        def emit(path, value):
+            test.assertEqual(path, root / "github-tls-compiled-test.json")
+            test.assertFalse(writes)
+            writes.update(value)
+        with patch.multiple(helper, Path=MessagePath, github_artifact_identity=identity, write_json=emit,
+                ordinary=lambda path: observations.append("ordinary-message"), run=forbidden, tools=forbidden,
+                hash_file=forbidden, read_bounded_json=forbidden), patch.object(helper.subprocess, "run", side_effect=forbidden):
+            result = helper.github_tls_compile_record(context, argv, MessagePath(root / "github-tls-compile-messages.jsonl"))
+        expected = {**compiled, "messagesSha256": hashlib.sha256(raw).hexdigest(), "invocationSha256": hashlib.sha256(self.encoded(argv)).hexdigest()}
+        self.assertEqual(result, expected)
+        self.assertEqual(writes, expected)
+        self.assertEqual(observations, ["ordinary-message", "original-artifact"])
+
+        for mutation in (None, ("scope", helper.GITHUB_READONLY_SCOPE), ("sourceTree", "f" * 40),
+                ("tlsInputsSha256", "f" * 64), ("schemaVersion", True), ("size", 145), ("sha256", "e" * 64),
+                ("path", compiled["path"].replace("debug/deps", "release/deps")), ("identity", {**compiled["identity"], "inode": "89"})):
+            value = deepcopy(expected)
+            if mutation:
+                value[mutation[0]] = mutation[1]
+            with self.subTest(original=mutation), patch.multiple(helper, Path=PurePosixPath, github_artifact_identity=identity,
+                    run=forbidden, tools=forbidden, hash_file=forbidden, ordinary=forbidden), \
+                    patch.object(helper, "read_bounded_json", return_value=value):
+                if mutation:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.github_tls_original_artifact(context)
+                else:
+                    self.assertEqual(helper.github_tls_original_artifact(context), expected)
+        manifest = self.manifest(context)
+        with patch.object(helper, "Path", PurePosixPath):
+            self.assertEqual(helper.github_tls_expected_bindings(context, compiled, manifest), github_tls_binding_data())
+            launch = helper.github_tls_launch_argv(context, compiled, manifest)
+        self.assertEqual(launch, ["/usr/bin/sudo", "-n", "--", "/usr/bin/unshare", "--mount", "--net", "--",
+            "/usr/bin/env", "-i", "LANG=C", "LC_ALL=C", "/usr/bin/bash", "--noprofile", "--norc",
+            str(source / "desktop/src-tauri/tests/fixtures/github_tls_namespace.sh"),
+            context["source"], context["root"], compiled["path"], context["python"], "1000", "1000", "net:[100]", "mnt:[200]",
+            "9" * 64, "a" * 64, "144", "1" * 40])
+        self.assertEqual(len(launch[15:]), 12)
+        self.assertNotIn("--pid", launch)
+        self.assertNotIn(helper.GITHUB_READONLY_TEST, launch)
+
+    def test_tls_original_outer_wait_not_inner_assertion_controls_success(self):
+        context, compiled, test, forbidden = self.context(), self.artifact(), self, self.forbidden
+        root = PurePosixPath(context["root"])
+        manifest, expected = self.manifest(context), self.outer(context)
+        base_environment = {"PATH": "/inert/no-executables", "HOME": str(root / "home")}
+        for outcome in (0, 7, "timeout", "oserror", "existing"):
+            events, streams, written = [], {}, {}
+            class Writer(io.StringIO):
+                def __init__(self, name):
+                    super().__init__(); self.name = name
+                def __exit__(self, *args):
+                    self.close(); events.append(("close", self.name)); return False
+            class OuterPath(PurePosixPath):
+                def open(self, mode, *, encoding=None):
+                    test.assertEqual((mode, encoding), ("x", "utf-8"))
+                    test.assertEqual(self.parent, root)
+                    test.assertIn(self.name, ("github-tls.stdout", "github-tls.stderr"))
+                    test.assertNotIn(self.name, streams)
+                    streams[self.name] = Writer(self.name)
+                    events.append(("open", self.name))
+                    return streams[self.name]
+                def stat(self):
+                    test.assertTrue(all(stream.closed for stream in streams.values()))
+                    test.assertIn(self.name, streams)
+                    return SimpleNamespace(st_size=256 if self.name.endswith("stdout") else 0)
+            def read(path, limit):
+                test.assertEqual((path, limit), (root / "github-tls-inputs.json", 1024 * 1024))
+                return deepcopy(manifest)
+            def process(argv, **kwargs):
+                events.append(("run", "original-outer"))
+                test.assertEqual(argv, helper.github_tls_launch_argv(context, compiled, manifest))
+                test.assertEqual(set(kwargs), {"cwd", "env", "stdin", "stdout", "stderr", "check", "timeout", "preexec_fn"})
+                test.assertEqual((kwargs["cwd"], kwargs["env"], kwargs["stdin"], kwargs["check"], kwargs["timeout"]),
+                                 (root, base_environment, subprocess.DEVNULL, False, 300))
+                test.assertIs(kwargs["preexec_fn"], helper.github_tls_outer_limits)
+                test.assertIs(kwargs["stdout"], streams["github-tls.stdout"])
+                test.assertIs(kwargs["stderr"], streams["github-tls.stderr"])
+                test.assertFalse(any(stream.closed for stream in streams.values()))
+                if outcome == "timeout":
+                    raise subprocess.TimeoutExpired("private-inert-command", 300)
+                if outcome == "oserror":
+                    raise OSError("private-inert-error")
+                return subprocess.CompletedProcess(argv, outcome)
+            def emit(path, value):
+                test.assertEqual(path, root / "github-tls-outer.json")
+                test.assertTrue(all(stream.closed for stream in streams.values()))
+                test.assertFalse(written)
+                written.update(deepcopy(value))
+                events.append(("write", "original-outer"))
+            with self.subTest(outer=outcome), patch.multiple(helper, Path=OuterPath, read_bounded_json=read,
+                    write_json=emit, run=forbidden, tools=forbidden, github_tls_result=forbidden,
+                    github_tls_runtime=forbidden, hash_file=forbidden), \
+                    patch.object(helper, "clean_environment", return_value=base_environment), \
+                    patch.object(helper.time, "monotonic", side_effect=[10.0, 10.125]), \
+                    patch.object(helper.os.path, "lexists", return_value=outcome == "existing"), \
+                    patch.object(helper.subprocess, "run", side_effect=process), \
+                    patch.object(helper.subprocess, "Popen", side_effect=forbidden):
+                if outcome == 0:
+                    self.assertEqual(helper.github_tls_run_outer(context, compiled), expected)
+                else:
+                    with self.assertRaises(helper.CheckFailure) as caught:
+                        helper.github_tls_run_outer(context, compiled)
+                    self.assertNotIn("private-inert", str(caught.exception))
+            if outcome == "existing":
+                self.assertEqual(events, [])
+                self.assertEqual(written, {})
+                continue
+            self.assertEqual(events, [("open", "github-tls.stdout"), ("open", "github-tls.stderr"),
+                ("run", "original-outer"), ("close", "github-tls.stderr"), ("close", "github-tls.stdout"), ("write", "original-outer")])
+            if outcome == 0:
+                self.assertEqual(written, expected)
+            elif outcome == 7:
+                self.assertEqual(written, {**expected, "status": "failed", "exitCode": 7})
+            else:
+                self.assertEqual(written, {**expected, "status": "unknown", "waitObserved": False,
+                    "exitCode": None, "timedOut": outcome == "timeout", "stdoutBytes": None, "stderrBytes": None})
+        for key, value in (("waitObserved", 1), ("status", "unknown"), ("exitCode", False), ("timedOut", True),
+                ("elapsedMs", 300001), ("stdoutBytes", 1048577), ("artifactIdentitySha256", "f" * 64),
+                ("tlsInputsSha256", "f" * 64), ("outerWait", "passed")):
+            with self.subTest(forged_outer=key), self.assertRaises(helper.CheckFailure):
+                helper.validate_github_tls_outer({**expected, key: value}, context=context, compiled=compiled)
+        limits = []
+        resource = SimpleNamespace(RLIMIT_CORE="core", RLIMIT_FSIZE="file", RLIMIT_NOFILE="fds", RLIMIT_AS="address-space",
+                                   setrlimit=lambda key, value: limits.append((key, value)))
+        # This fake module is the only capability provided to the limiter; no
+        # real rlimit is changed in the test process, child, or shared host.
+        with patch.dict(helper.sys.modules, {"resource": resource}):
+            helper.github_tls_outer_limits()
+        self.assertEqual(limits, [("core", (0, 0)), ("file", (1048576, 1048576)),
+                                 ("fds", (128, 128)), ("address-space", (1073741824, 1073741824))])
+
+    def test_tls_predecessors_require_own_claims_inner_and_outer_before_cleanup(self):
+        context, compiled, test, forbidden = self.context(), self.artifact(), self, self.forbidden
+        root = PurePosixPath(context["root"])
+
+        def exercise(name, *, mutation=None, present=(), clean=False):
+            data, events = {}, []
+            for prior in test.CHECKS:
+                data[f"{prior}-started.json"] = test.claim(context, prior)
+                data[f"{prior}-checks.json"] = test.phase_report(context, prior)
+            data["github-tls-inputs.json"] = test.manifest(context)
+            data["github-tls/receipt.json"] = github_tls_report_data()
+            data["github-tls-outer.json"] = test.outer(context)
+            if mutation:
+                path, keys, value = mutation
+                row = data[path]
+                for key in keys[:-1]:
+                    row = row[key]
+                row[keys[-1]] = value
+            def read(path, limit):
+                name = path.relative_to(root).as_posix()
+                expected_limit = 4096 if name.endswith("-started.json") else 128 * 1024 if name == "github-tls/receipt.json" else 1024 * 1024 if name == "github-tls-inputs.json" else 16384 if name == "github-tls-outer.json" else 32768
+                test.assertEqual(limit, expected_limit)
+                events.append(("read", name))
+                return deepcopy(data[name])
+            def digest(path):
+                test.assertEqual(path, root / "github-tls/receipt.json")
+                events.append(("hash", "native"))
+                return "d" * 64
+            with patch.multiple(helper, Path=PurePosixPath, read_bounded_json=read, hash_file=digest,
+                    run=forbidden, tools=forbidden, github_tls_inputs_unchanged=forbidden, github_tls_source_unchanged=forbidden,
+                    ordinary=forbidden, write_json=forbidden, clean_environment=forbidden), \
+                    patch.object(helper, "github_tls_original_artifact", return_value=compiled), \
+                    patch.object(helper.os.path, "lexists", side_effect=lambda path: path.relative_to(root).as_posix() in present), \
+                    patch.object(helper.os, "scandir", side_effect=forbidden), \
+                    patch.object(helper.shutil, "rmtree", side_effect=forbidden), \
+                    patch.object(helper.subprocess, "run", side_effect=forbidden), patch.object(helper.subprocess, "Popen", side_effect=forbidden):
+                call = (lambda: helper.clean_github_tls(context)) if clean else (lambda: helper.github_tls_predecessors(context, name))
+                if mutation or present:
+                    with test.assertRaises(helper.CheckFailure):
+                        call()
+                else:
+                    call()
+            return events
+
+        for name in ("acquire", "compile", "github-tls", "clean"):
+            events = exercise(name)
+            previous = list(self.CHECKS) if name == "clean" else list(self.CHECKS)[:list(self.CHECKS).index(name)]
+            expected = [("read", f"{prior}-{suffix}.json") for prior in previous for suffix in ("started", "checks")]
+            if name == "clean":
+                expected.extend([("read", "github-tls-inputs.json"), ("read", "github-tls/receipt.json"),
+                                 ("read", "github-tls-outer.json"), ("hash", "native")])
+            self.assertEqual(events, expected)
+        mutations = (
+            ("acquire-started.json", ("scope",), helper.GITHUB_READONLY_SCOPE),
+            ("compile-started.json", ("attempt",), "3"), ("compile-started.json", ("tlsInputsSha256",), "f" * 64),
+            ("compile-checks.json", ("compiledTest", "identitySha256"), "f" * 64),
+            ("github-tls-checks.json", ("nativeReceiptSha256",), "f" * 64),
+            ("github-tls/receipt.json", ("scope",), "github-readonly-hosted-v1"),
+            ("github-tls/receipt.json", ("allPeersSettled",), False),
+            ("github-tls/receipt.json", ("cases", 0, "product", "owners", 0, "unknownLatched"), True),
+            ("github-tls/receipt.json", ("cases", 0, "peer", "stdoutJoined"), False),
+            ("github-tls-outer.json", ("waitObserved",), False),
+            ("github-tls-outer.json", ("artifactSha256",), "f" * 64),
+            ("github-tls-outer.json", ("exitCode",), 1),
+        )
+        for mutation in mutations:
+            with self.subTest(predecessor=mutation[:2]):
+                # Real clean must refuse in real predecessor validation, before
+                # its input observer, clean claim, inventory or first deletion.
+                exercise("clean", mutation=mutation, clean=True)
+        for name in ("github-tls-started.json", "github-tls-checks.json", "github-tls-outer.json",
+                     "github-tls/receipt.json", "clean-started.json", "clean-checks.json"):
+            with self.subTest(spent=name):
+                exercise("github-tls", present=(name,))
+        for name in ("clean-started.json", "clean-checks.json"):
+            with self.subTest(spent_clean=name):
+                exercise("clean", present=(name,), clean=True)
+
+    def test_tls_phase_routes_compile_once_and_stop_on_original_outer_or_inner_failure(self):
+        context, compiled, test, forbidden = self.context(), self.artifact(), self, self.forbidden
+        root, source = PurePosixPath(context["root"]), PurePosixPath(context["source"])
+        cargo, rustc = "/inert/tls/selected/cargo", "/inert/tls/selected/rustc"
+        environment = {"HOME": str(root / "home"), "PATH": "/inert/no-executables"}
+        admitted_environment = {**environment, "GITHUB_SHA": "1" * 40, "MRK_GITHUB_TLS_INPUTS_SHA256": "9" * 64}
+        manifest = str(source / "desktop/src-tauri/Cargo.toml")
+        commands = {
+            "acquire": [("rust-toolchain-install", [context["rustup"], "toolchain", "install", helper.RUST,
+                "--profile", "minimal", "--no-self-update"]),
+                ("github-tls-locked-headless-metadata", [cargo, "metadata", "--locked", "--format-version", "1",
+                    "--no-default-features", "--features", "development-runtime", "--filter-platform",
+                    "x86_64-unknown-linux-gnu", "--manifest-path", manifest])],
+            "compile": [("github-tls-headless-test-compile-only", [cargo, "test", "--locked", "--offline", "--jobs", "1",
+                "--no-default-features", "--features", "development-runtime", "--target", "x86_64-unknown-linux-gnu",
+                "--manifest-path", manifest, "--target-dir", str(root / "target"), "--lib", "--no-run", "--message-format=json"])],
+            "github-tls": [],
+        }
+        for name, failure in (("acquire", None), ("compile", None), ("github-tls", None),
+                              ("compile", "compile"), ("github-tls", "outer"), ("github-tls", "inner")):
+            events, streams, writes, calls = [], {}, {}, []
+            pair = {"acquire": ("cargo-metadata.json", "acquire.stderr"),
+                    "compile": ("github-tls-compile-messages.jsonl", "compile.stderr"), "github-tls": ()}[name]
+            class StreamPath(PurePosixPath):
+                def open(self, mode, *, encoding=None, newline=None):
+                    test.assertEqual((self.parent, mode, encoding), (root, "x", "utf-8"))
+                    test.assertIn(self.name, pair)
+                    test.assertNotIn(self.name, streams)
+                    test.assertEqual(newline, "\n" if self.name.endswith("jsonl") else None)
+                    streams[self.name] = io.StringIO()
+                    return streams[self.name]
+            def load(platform, scope):
+                test.assertEqual((platform, scope), ("linux", test.SCOPE))
+                events.append("load")
+                return context
+            def predecessors(value, phase):
+                test.assertIs(value, context); test.assertEqual(phase, name); events.append("predecessors")
+            def unchanged(value):
+                test.assertIs(value, context); events.append("source")
+            def configuration(paths):
+                test.assertEqual(paths, (root, *root.parents, source / "desktop/src-tauri", source / "desktop", source, *source.parents))
+                events.append("configuration")
+            def selected(value, env):
+                test.assertIs(value, context); test.assertEqual(env, admitted_environment)
+                test.assertIn(name, ("acquire", "compile")); events.append("tools")
+                return cargo, rustc
+            def execute(argv, *, check, cwd, env, timeout, output=None, diagnostics=None):
+                test.assertLess(len(calls), len(commands[name]))
+                test.assertEqual((check, argv), commands[name][len(calls)])
+                test.assertEqual((cwd, env, timeout), (root, admitted_environment, 600))
+                calls.append((check, argv)); events.append("run")
+                if check != "rust-toolchain-install":
+                    test.assertIs(output, streams[pair[0]]); test.assertIs(diagnostics, streams[pair[1]])
+                    test.assertFalse(output.closed or diagnostics.closed)
+                else:
+                    test.assertIsNone(output); test.assertIsNone(diagnostics)
+                if failure == "compile":
+                    raise helper.CheckFailure("inert compiler refusal")
+                return ""
+            def record(value, argv, messages):
+                test.assertIs(value, context); test.assertEqual(name, "compile")
+                test.assertEqual(argv, commands["compile"][0][1]); test.assertEqual(messages, root / "github-tls-compile-messages.jsonl")
+                test.assertTrue(all(stream.closed for stream in streams.values())); events.append("compile-record")
+                return compiled
+            def outer(value, artifact):
+                test.assertIs(value, context); test.assertIs(artifact, compiled); test.assertEqual(name, "github-tls")
+                events.append("outer")
+                if failure == "outer":
+                    raise helper.CheckFailure("inert original outer refusal")
+                return test.outer(context)
+            def result(value):
+                test.assertIs(value, context); test.assertEqual(name, "github-tls"); test.assertIn("outer", events)
+                events.append("inner")
+                if failure == "inner":
+                    raise helper.CheckFailure("inert original peer/client refusal")
+                return {"nativeReceiptSha256": "d" * 64, "outer": test.outer(context)}
+            def emit(path, value):
+                test.assertEqual(path.parent, root); test.assertNotIn(path.name, writes)
+                expected = test.claim(context, name) if path.name == f"{name}-started.json" else test.phase_report(context, name)
+                test.assertEqual(value, expected); writes[path.name] = deepcopy(value)
+                events.append("claim" if path.name.endswith("-started.json") else "receipt")
+            with self.subTest(phase=name, failure=failure), patch.multiple(helper, Path=StreamPath, load_context=load,
+                    github_tls_predecessors=predecessors, github_tls_source_unchanged=unchanged, no_cargo_configuration=configuration,
+                    tools=selected, run=execute, github_tls_compile_record=record, github_tls_run_outer=outer,
+                    github_tls_result=result, write_json=emit, source_unchanged=forbidden, read_bounded_json=forbidden,
+                    github_tls_runtime=forbidden, github_tls_inputs_unchanged=forbidden, ordinary=forbidden, hash_file=forbidden,
+                    phase_github_readonly=forbidden, phase_workflow_native=forbidden, clean_compile=forbidden), \
+                    patch.object(helper, "github_tls_original_artifact", return_value=compiled), \
+                    patch.object(helper, "clean_environment", side_effect=lambda path: dict(environment)), \
+                    patch.object(helper.subprocess, "run", side_effect=forbidden), patch.object(helper.subprocess, "Popen", side_effect=forbidden), \
+                    patch.object(helper.os, "scandir", side_effect=forbidden), patch.object(helper.shutil, "rmtree", side_effect=forbidden):
+                if failure:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.phase(name, "linux", self.SCOPE)
+                else:
+                    helper.phase(name, "linux", self.SCOPE)
+            self.assertEqual(events[:5], ["load", "predecessors", "claim", "source", "configuration"])
+            self.assertEqual(calls, commands[name])
+            self.assertTrue(all(stream.closed for stream in streams.values()))
+            self.assertEqual(set(writes), {f"{name}-started.json"} if failure else {f"{name}-started.json", f"{name}-checks.json"})
+            self.assertEqual(events.count("source"), 1 if failure else 2)
+            if name == "github-tls":
+                self.assertEqual(events.count("outer"), 1)
+                self.assertEqual(events.count("tools"), 0)
+                if failure == "outer":
+                    self.assertNotIn("inner", events)
+                else:
+                    self.assertLess(events.index("outer"), events.index("inner"))
+                if not failure:
+                    self.assertLess(events.index("inner"), len(events) - 1)
+            elif name == "compile":
+                self.assertEqual(events.count("compile-record"), 0 if failure else 1)
+
+        # Keep the shared wrapper's diagnostic extension exact, not a generic
+        # github-tls-* capability. No native launch passes through this wrapper.
+        with io.StringIO() as output, io.StringIO() as diagnostics, io.StringIO() as notices, redirect_stdout(notices), \
+                patch.object(helper.subprocess, "run", return_value=SimpleNamespace(stdout="inert")) as process, \
+                patch.object(helper.subprocess, "Popen", side_effect=forbidden):
+            for role in ("github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only"):
+                helper.run(["/inert/no-tool"], check=role, cwd=root, env=environment, timeout=1, output=output, diagnostics=diagnostics)
+                process.assert_called_once_with(["/inert/no-tool"], cwd=root, env=environment, check=True, timeout=1,
+                                                text=True, stdout=output, stderr=diagnostics)
+                process.reset_mock()
+            for role in ("github-tls-native", "github-tls-any-command", "locked-platform-metadata"):
+                with self.assertRaises(helper.CheckFailure):
+                    helper.run(["/inert/no-tool"], check=role, cwd=root, env=environment, timeout=1, output=output, diagnostics=diagnostics)
+            process.assert_not_called()
+
+    def test_tls_context_keeps_exact_lane_root_source_python_and_public_binding(self):
+        original, test, forbidden = self.context(), self, self.forbidden
+        root = PurePosixPath(original["root"])
+        public = {"schemaVersion": 1, "scope": self.EVIDENCE,
+            **{key: original[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha", "workflowRef",
+                "workflowSha256", "runId", "attempt", "tlsInputsSha256", "tlsInputs")},
+            "python": "3.14.7", "rust": {"release": helper.RUST, "target": "x86_64-unknown-linux-gnu"},
+            "features": ["development-runtime"], "testTarget": "lib", "host": original["observedHost"], "notVerified": TLS_NOT_VERIFIED}
+        class ContextPath(PurePosixPath):
+            def resolve(self, *, strict=False):
+                test.assertTrue(strict); return self
+            def is_symlink(self):
+                return False
+        for change in (None, ("executionScope", helper.GITHUB_READONLY_SCOPE), ("source", "/inert/other-source"),
+                ("python", "/inert/other-python"), ("workflowPath", helper.GITHUB_READONLY_WORKFLOW),
+                ("sourceTree", True), ("attempt", "3"), ("workflowSha256", "f" * 64), ("public", "foreign")):
+            context, supplied_public, events = deepcopy(original), deepcopy(public), []
+            if change:
+                if change[0] == "public":
+                    supplied_public["scope"] = helper.GITHUB_READONLY_EVIDENCE_SCOPE
+                else:
+                    context[change[0]] = change[1]
+            def read(path, limit):
+                test.assertEqual(limit, 256 * 1024); test.assertEqual(path.parent, root)
+                events.append(path.name)
+                return deepcopy(context if path.name == "context.json" else supplied_public)
+            def inputs(value):
+                test.assertEqual(value, context); events.append("inputs")
+            with self.subTest(context_change=change), patch.multiple(helper, Path=ContextPath, read_bounded_json=read,
+                    github_tls_inputs_unchanged=inputs, ordinary=lambda path: None, github_inputs_unchanged=forbidden,
+                    run=forbidden, tools=forbidden, write_json=forbidden, github_tls_runtime=forbidden), \
+                    patch.object(helper, "hash_file", return_value="4" * 64), \
+                    patch.object(helper.sys, "executable", original["python"]), \
+                    patch.dict(helper.os.environ, {**self.environment(), "MRK_DESKTOP_CI_ROOT": str(root),
+                        "RUNNER_TEMP": str(root.parent), "GITHUB_WORKSPACE": original["source"]}, clear=True), \
+                    patch.object(helper.subprocess, "run", side_effect=forbidden):
+                if change:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.load_context("linux", self.SCOPE)
+                else:
+                    self.assertEqual(helper.load_context("linux", self.SCOPE), original)
+            self.assertEqual(events, ["context.json", "inputs", "public-bindings.json"] if change is None or change[0] == "public" else ["context.json"])
+
+    def test_tls_cleanup_finite_no_follow_plan_keeps_evidence_and_unknown_content(self):
+        context, test, forbidden = self.context(), self, self.forbidden
+        root = PurePosixPath(context["root"])
+        native, outside = root / "github-tls", PurePosixPath("/inert/tls/outside")
+        work = ("home", "cargo", "rustup", "tmp", "target", "github-tls-namespace")
+        private = ("core.zip", "gitconfig-empty", "cargo-metadata.json", "acquire.stderr", "github-tls-compile-messages.jsonl",
+                   "compile.stderr", "github-tls-compiled-test.json", "github-tls.stdout", "github-tls.stderr")
+        evidence = ("context.json", "public-bindings.json", "github-tls-inputs.json", "github-tls-outer.json",
+                    *(f"{phase}-{suffix}.json" for phase in self.CHECKS for suffix in ("started", "checks")))
+        self.assertEqual(set(helper.GITHUB_TLS_DIRECTORIES), {*work, "github-tls"})
+
+        for mutation in (None, "finality", "unexpected", "changed-leaf", "late-entry"):
+            nodes, counts, writes = {}, {}, {}
+            events, scans, unlinked, removed = [], [], [], []
+            def add(path, kind="file", *, size=32, inode=None, links=1):
+                path = PurePosixPath(path)
+                test.assertNotIn(path, nodes)
+                mode = {"file": stat.S_IFREG | 0o400, "directory": stat.S_IFDIR | 0o700, "link": stat.S_IFLNK | 0o777}[kind]
+                nodes[path] = {"st_dev": 7, "st_ino": len(nodes) + 100 if inode is None else inode,
+                    "st_mode": mode, "st_uid": 1000, "st_gid": 1000, "st_size": 4096 if kind == "directory" else size,
+                    "st_nlink": 2 if kind == "directory" else links, "st_mtime_ns": 1000, "st_ctime_ns": 2000}
+            def children(path):
+                return sorted(child for child in nodes if child.parent == path)
+            add(root, "directory"); add(native, "directory")
+            add(outside, "directory"); add(outside / "protected.pem")
+            add(PurePosixPath(context["source"]), "directory")
+            add(PurePosixPath(context["source"]) / "protected.py")
+            directories = {root / name for name in work}
+            for name, *_ in TLS_CASE_ROWS:
+                directories.update((native / name, native / name / "control", native / name / "runtime"))
+            for path in sorted(directories, key=lambda path: (len(path.parts), str(path))):
+                add(path, "directory")
+            leaves = {root / name for name in private}
+            for name, *_ in TLS_CASE_ROWS:
+                # These are actual settled producer names, including the
+                # reusable Case::settle release record (not an empty control).
+                leaves.update((native / name / "control/release-github-read-1.json",
+                    native / name / "runtime/github_connection_bootstrap.py", native / name / "runtime/github-ca.pem"))
+            leaves.update(root / "github-tls-namespace" / name for name in self.CONFIG)
+            for path in sorted(leaves):
+                add(path)
+            for name in evidence:
+                add(root / name)
+            add(native / "receipt.json")
+            link = root / "tmp/external-link"
+            add(link, "link"); leaves.add(link)
+            aliases = (root / "cargo/original-hardlink", root / "target/original-hardlink")
+            add(aliases[0], inode=9999, links=2); add(aliases[1], inode=9999, links=2); leaves.update(aliases)
+            if mutation == "unexpected":
+                add(root / "unexpected.pem")
+            initial = deepcopy(nodes)
+            protected = {root / name for name in evidence} | {native / "receipt.json"}
+            protected.update(path for path in nodes if path != root and root not in path.parents)
+            total = sum(nodes[path]["st_size"] for path in leaves)
+            expected_receipt = {"schemaVersion": 1, "scope": self.EVIDENCE, "phase": "clean", "status": "passed",
+                **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")},
+                "allOriginalOwnersSettled": True, "allOriginalPeersSettled": True, "observerJoinsComplete": True,
+                "originalOuterWaitObserved": True, "tlsInputsSha256": "9" * 64, "compiledTest": self.compiled_public(),
+                "nativeReceiptSha256": "d" * 64, "outer": self.outer(context), "removedFiles": len(leaves),
+                "removedDirectories": len(directories), "inventoriedBytes": total,
+                "retained": ["redacted-evidence", "private-original-context", "private-tls-input-manifest", "private-original-outer-receipt"],
+                "productionQualified": False}
+            class FakePath(PurePosixPath):
+                # No following read/metadata or recursive convenience deletion
+                # is available. The symbolic link's external target is opaque.
+                open = stat = resolve = read_bytes = read_text = is_dir = is_file = readlink = glob = rglob = forbidden
+                def lstat(self):
+                    path = PurePosixPath(self)
+                    test.assertTrue(path == root or root in path.parents)
+                    test.assertIn(path, nodes)
+                    counts[path] = counts.get(path, 0) + 1
+                    if mutation == "changed-leaf" and path == root / "github-tls.stderr" and counts[path] == 2:
+                        nodes[path]["st_mtime_ns"] += 1
+                    return SimpleNamespace(**nodes[path])
+                def iterdir(self):
+                    path = PurePosixPath(self); test.assertIn(path, (root, native))
+                    return iter(FakePath(child) for child in children(path))
+                def unlink(self):
+                    path = PurePosixPath(self)
+                    test.assertIn(path, leaves); test.assertNotIn(path, unlinked)
+                    test.assertEqual(set(scans), directories); test.assertTrue(leaves <= counts.keys())
+                    info = nodes.pop(path); unlinked.append(path); events.append(("unlink", path))
+                    for other in nodes.values():
+                        if (other["st_dev"], other["st_ino"]) == (info["st_dev"], info["st_ino"]):
+                            other["st_nlink"] -= 1; other["st_ctime_ns"] += 1
+                    if mutation == "late-entry" and len(unlinked) == 1:
+                        add(root / "home/late.pem")
+                def rmdir(self):
+                    path = PurePosixPath(self); test.assertIn(path, directories)
+                    events.append(("rmdir", path))
+                    if children(path):
+                        raise OSError("inert new entry retained")
+                    del nodes[path]; removed.append(path)
+            class Scan:
+                def __init__(self, entries):
+                    self.entries = entries
+                def __enter__(self):
+                    return iter(self.entries)
+                def __exit__(self, *args):
+                    return False
+            def scan(path):
+                path = PurePosixPath(path)
+                test.assertIn(path, directories); test.assertFalse(unlinked)
+                scans.append(path)
+                return Scan([SimpleNamespace(name=child.name) for child in children(path)])
+            def result(value):
+                test.assertIs(value, context); events.append(("finality", "original"))
+                if mutation == "finality":
+                    raise helper.CheckFailure("inert finality missing")
+                return {"nativeReceiptSha256": "d" * 64, "outer": test.outer(context)}
+            def emit(path, value):
+                path = PurePosixPath(path)
+                test.assertIn(path.name, ("clean-started.json", "clean-checks.json"))
+                test.assertNotIn(path.name, writes)
+                test.assertEqual(value, test.claim(context, "clean") if path.name == "clean-started.json" else expected_receipt)
+                writes[path.name] = deepcopy(value); add(path); events.append(("write", path.name))
+            notice = io.StringIO()
+            with self.subTest(cleanup=mutation), redirect_stdout(notice), patch.multiple(helper, Path=FakePath,
+                    github_tls_predecessors=lambda value, name: events.append(("predecessors", name)),
+                    github_tls_inputs_unchanged=lambda value: events.append(("inputs", "original")),
+                    github_tls_result=result, write_json=emit, run=forbidden, tools=forbidden,
+                    github_tls_source_unchanged=forbidden, source_unchanged=forbidden, clean_environment=forbidden,
+                    read_bounded_json=forbidden, hash_file=forbidden, ordinary=forbidden), \
+                    patch.object(helper, "github_tls_original_artifact", return_value=self.artifact()), \
+                    patch.object(helper.os, "scandir", side_effect=scan), patch.object(helper.os, "geteuid", return_value=1000, create=True), \
+                    patch.object(helper.os, "unlink", side_effect=forbidden), patch.object(helper.os, "rmdir", side_effect=forbidden), \
+                    patch.object(helper.shutil, "rmtree", side_effect=forbidden), patch.object(helper.subprocess, "run", side_effect=forbidden), \
+                    patch.object(helper.subprocess, "Popen", side_effect=forbidden):
+                if mutation == "late-entry":
+                    with self.assertRaises(OSError):
+                        helper.clean_github_tls(context)
+                elif mutation:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.clean_github_tls(context)
+                else:
+                    helper.clean_github_tls(context)
+            self.assertEqual(events[:3], [("predecessors", "clean"), ("inputs", "original"), ("finality", "original")])
+            for path in protected:
+                self.assertEqual(nodes[path], initial[path])
+            self.assertTrue(set(unlinked) <= leaves); self.assertTrue(set(removed) <= directories)
+            if mutation is None:
+                self.assertCountEqual(unlinked, leaves); self.assertCountEqual(removed, directories)
+                self.assertEqual(writes, {"clean-started.json": self.claim(context, "clean"), "clean-checks.json": expected_receipt})
+                self.assertEqual(set(nodes), (set(initial) - leaves - directories) | {root / "clean-started.json", root / "clean-checks.json"})
+                self.assertEqual(children(native), [native / "receipt.json"])
+                self.assertEqual(notice.getvalue(), "Removed only positively settled TLS compiler and fixture outputs; original evidence retained.\n")
+            else:
+                self.assertNotIn("clean-checks.json", writes); self.assertEqual(notice.getvalue(), "")
+                self.assertEqual(set(writes), set() if mutation == "finality" else {"clean-started.json"})
+                if mutation != "late-entry":
+                    self.assertEqual(unlinked, []); self.assertEqual(removed, [])
+                else:
+                    self.assertIn(root / "home/late.pem", nodes); self.assertNotIn(root / "home/late.pem", unlinked)
+                    self.assertIn(root / "home", nodes)
+
+
+class GitHubTLSWorkflowContractTests(unittest.TestCase):
+    def test_tls_workflow_has_own_fixed_chain_and_only_six_redacted_artifacts(self):
+        # One bounded SOURCE read. No YAML loader, workflow dispatch or shell.
+        import re
+        path = SOURCE / ".github/workflows/desktop-github-connection-tls.yml"
+        with path.open("rb") as stream:
+            raw = stream.read(16384 + 1)
+        self.assertLessEqual(len(raw), 16384)
+        workflow = raw.decode("utf-8")
+        self.assertEqual(re.findall(r"^  ([a-z][a-z0-9-]*):$", workflow.split("\njobs:\n", 1)[1], re.MULTILINE), ["github-readonly-tls-native"])
+        self.assertEqual(re.findall(r"ci_foundation\.py ([a-z-]+)'", workflow), ["prepare", "acquire", "compile", "github-tls", "clean"])
+        self.assertEqual(len(re.findall(r"^        run:", workflow, re.MULTILINE)), 6)
+        self.assertEqual(workflow.count("runs-on: ubuntu-24.04"), 1)
+        self.assertEqual(workflow.count("permissions:"), 1)
+        self.assertIn("permissions:\n  contents: read\n", workflow)
+        self.assertNotIn("matrix:", workflow); self.assertNotIn("${{ secrets.", workflow)
+        self.assertNotIn("github-owner", workflow); self.assertNotIn("refs/heads/verify/desktop-github-connection-native", workflow)
+        for guard in ('"$RUNNER_ENVIRONMENT" == github-hosted', '"$RUNNER_OS" == Linux', '"$RUNNER_ARCH" == X64',
+                '"$ImageOS" == ubuntu24', '"$EUID" -ne 0', '"$GITHUB_REF" == refs/heads/verify/desktop-github-connection-tls',
+                '"$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA"', '"$MRK_EXPECTED_SHA" == "$GITHUB_SHA"',
+                '"$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-github-connection-tls.yml@$GITHUB_REF"',
+                "persist-credentials: false", "cancel-in-progress: false", "timeout-minutes: 45", "python-version: '3.14.7'",
+                "MRK_DESKTOP_HOSTED_CHECKS: github-readonly-tls-native-v1", "if: success()",
+                "if: always() && steps.prepare.outcome == 'success'"):
+            self.assertIn(guard, workflow)
+        self.assertEqual(workflow.count('"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py'), 5)
+        self.assertEqual(re.findall(r"uses: ([^\s]+)", workflow), [
+            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"])
+        paths = workflow.split("          path: |\n", 1)[1].split("          if-no-files-found:", 1)[0]
+        self.assertEqual([line.strip() for line in paths.splitlines()], ["${{ steps.prepare.outputs.root }}/" + name for name in (
+            "public-bindings.json", "acquire-checks.json", "compile-checks.json", "github-tls-checks.json",
+            "github-tls/receipt.json", "clean-checks.json")])
 
 
 if __name__ == "__main__":

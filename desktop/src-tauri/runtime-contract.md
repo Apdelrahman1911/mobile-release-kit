@@ -166,6 +166,17 @@ Response-invalid retires credential use while preserving original settlement
 custody and independently justified cooldowns. None of this qualifies an actual
 token, socket, CA, installed runtime or native document lifecycle.
 
+The dedicated `desktop-github-connection-native.yml` workflow has verified the
+original Linux headless owner/document fixture at commit
+`d84a15db77e4776c5d89e23b87b868e21fb3a314` (run `35299903903`, attempt 1).
+Its 23 cases are 17 owner cases and 6 controlled document cases; all original
+owners settled and its finite compiler/fixture cleanup completed. Scheduling
+controls establish retained-error and late-settlement behavior, not genuine
+stuck native syscalls. The fixture's supplied frames establish neither real
+TLS/GitHub authentication nor native WebView callbacks. This result does not
+qualify macOS/Windows GitHub behavior, packaged runtime custody, credential
+persistence or production activation; both qualification gates remain false.
+
 ## Passive protocol and original child owner
 
 Only `capabilities`, `catalog`, `project.snapshot`, `config.validate`,

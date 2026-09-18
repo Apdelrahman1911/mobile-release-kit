@@ -26,6 +26,8 @@ const ACTIVE_LIMIT: usize = 2;
 mod hosted_tests;
 #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use hosted_tests::github_fixture::{GitHubDocumentFixtureBinding, GitHubDocumentFixturePermit, GitHubFixtureRuntime};
+#[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use hosted_tests::github_tls::GitHubTlsRuntime;
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use hosted_tests::session_gtk_probe;
 #[cfg(test)]
@@ -640,6 +642,8 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let windows_bootstrap = lock(&inner.test.windows_bootstrap).clone();
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let github_fixture = lock(&inner.test.github_fixture).clone();
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let github_tls = lock(&inner.test.github_tls).clone();
     resources.inspection = Some(tokio::task::spawn_blocking(move || {
         #[cfg(all(test, feature = "development-runtime"))]
         inspection_gate.wait();
@@ -650,8 +654,18 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 // test-only value exists only after the fixed hosted Case has
                 // bound its inputs; ordinary development retains the TLS gate.
                 #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-                if let Some(selection) = &github_fixture {
-                    return config.resolve_github_fixture(endpoint, selection);
+                {
+                    // Two distinct, privately minted fixture selections. Never
+                    // reinterpret the no-network owner fixture as TLS authority.
+                    if github_fixture.is_some() && github_tls.is_some() {
+                        return Err(BridgeError::unavailable("Conflicting fixed GitHub fixture selections."));
+                    }
+                    if let Some(selection) = &github_tls {
+                        return config.resolve_github_tls_fixture(endpoint, selection);
+                    }
+                    if let Some(selection) = &github_fixture {
+                        return config.resolve_github_fixture(endpoint, selection);
+                    }
                 }
                 config.resolve_github_readonly(endpoint)?
             },

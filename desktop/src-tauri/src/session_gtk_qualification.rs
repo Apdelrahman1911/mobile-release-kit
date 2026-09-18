@@ -157,6 +157,7 @@ macro_rules! source { ($path:literal) => { Source { path:$path, bytes:include_by
 const SOURCES: &[Source] = &[
     // Fixed first-party superset: real frontend/assets/build inputs, native
     // modules (including cfg(test) transitive files), and core import/data tree.
+    source!(".github/workflows/desktop-github-connection-tls.yml"),
     source!("desktop/config_edit_bootstrap.py"),
     source!("desktop/engine_bootstrap.py"),
     source!("desktop/github_connection_bootstrap.py"),
@@ -203,6 +204,14 @@ const SOURCES: &[Source] = &[
     source!("desktop/src-tauri/src/supervisor.rs"),
     source!("desktop/src-tauri/tauri.conf.json"),
     source!("desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py"),
+    source!("desktop/src-tauri/tests/fixtures/github_tls/api-expired.pem"),
+    source!("desktop/src-tauri/tests/fixtures/github_tls/api-valid.pem"),
+    source!("desktop/src-tauri/tests/fixtures/github_tls/other-root-ca.pem"),
+    source!("desktop/src-tauri/tests/fixtures/github_tls/root-ca.pem"),
+    source!("desktop/src-tauri/tests/fixtures/github_tls/server-key.pem"),
+    source!("desktop/src-tauri/tests/fixtures/github_tls/wrong-san.pem"),
+    source!("desktop/src-tauri/tests/fixtures/github_tls_namespace.sh"),
+    source!("desktop/src-tauri/tests/fixtures/github_tls_peer.py"),
     source!("desktop/src-tauri/tests/fixtures/passive_core/__init__.py"),
     source!("desktop/src-tauri/tests/fixtures/passive_core/_desktop_engine.py"),
     source!("desktop/src-tauri/tests/session_gtk_qualification.rs"),
