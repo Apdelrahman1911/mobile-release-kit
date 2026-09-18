@@ -442,6 +442,7 @@ def main() -> int:
     unexpected, unexpected_closed = [None, None], [False, False]
     unregistered = None  # Original accept result remains owned during allocation.
     complete = False
+    emission_failed = False
     try:
         directory = admit()
         if control_fd is not None:
@@ -606,7 +607,9 @@ def main() -> int:
         try:
             emit(record)
         except BaseException:
-            return 74  # Parent still needs original wait and both pipe joins.
+            emission_failed = True
+    if emission_failed:
+        return 74  # Parent still needs original wait and both pipe joins.
     return 0 if record["status"] == "passed" else 71
 
 

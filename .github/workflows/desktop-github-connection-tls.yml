@@ -8,6 +8,7 @@ on:
       - src/mobile_release/**
       - templates/workflows/**
       - tests/desktop/test_ci_foundation_contract.py
+      - tests/desktop/test_github_tls_peer_compile.py
       - pyproject.toml
       - .github/workflows/desktop-github-workflow-apply-native.yml
       - .github/workflows/desktop-github-connection-tls.yml
@@ -73,6 +74,14 @@ jobs:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py prepare'
+      - name: Reject peer compiler warnings before compiler acquisition
+        # The preceding prepare binds exact CPython3.14.7. These two tests only
+        # compile source to unused code objects; they never import/run the peer.
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: '"$MRK_PYTHON" -I -S -B tests/desktop/test_github_tls_peer_compile.py PeerCompileWarningTests -v'
       - name: Acquire only locked headless Linux compiler inputs
         timeout-minutes: 15
         shell: bash

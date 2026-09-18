@@ -5188,7 +5188,12 @@ class GitHubTLSWorkflowContractTests(unittest.TestCase):
         workflow = raw.decode("utf-8")
         self.assertEqual(re.findall(r"^  ([a-z][a-z0-9-]*):$", workflow.split("\njobs:\n", 1)[1], re.MULTILINE), ["github-readonly-tls-native"])
         self.assertEqual(re.findall(r"ci_foundation\.py ([a-z-]+)'", workflow), ["prepare", "acquire", "compile", "github-tls", "clean"])
-        self.assertEqual(len(re.findall(r"^        run:", workflow, re.MULTILINE)), 6)
+        self.assertEqual(len(re.findall(r"^        run:", workflow, re.MULTILINE)), 7)
+        compiler_check = '"$MRK_PYTHON" -I -S -B tests/desktop/test_github_tls_peer_compile.py PeerCompileWarningTests -v'
+        self.assertEqual(workflow.count(compiler_check), 1)
+        self.assertLess(workflow.index("ci_foundation.py prepare"), workflow.index(compiler_check))
+        self.assertLess(workflow.index(compiler_check), workflow.index("ci_foundation.py acquire"))
+        self.assertIn("      - tests/desktop/test_github_tls_peer_compile.py\n", workflow)
         self.assertEqual(workflow.count("runs-on: ubuntu-24.04"), 1)
         self.assertIn("Verify sixteen fixed TLS cases", workflow)
         self.assertIn("T1-T3 and T6", workflow)
