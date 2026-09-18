@@ -1,4 +1,4 @@
-name: Desktop GitHub TLS T1-T3 native verification
+name: Desktop GitHub TLS T1-T3 and T6 native verification
 
 on:
   push:
@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       expected_sha:
-        description: Exact reviewed T1-T3 synthetic TLS candidate (no live GitHub)
+        description: Exact reviewed T1-T3 and T6 synthetic TLS candidate (no live GitHub)
         required: true
         type: string
 
@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   github-readonly-tls-native:
-    name: Fixed headless GitHub TLS T1-T3 / linux
+    name: Fixed headless GitHub TLS T1-T3 and T6 / linux
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -89,7 +89,7 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
-      - name: Verify nine fixed TLS cases inside the private loopback namespace
+      - name: Verify sixteen fixed TLS cases inside the private loopback namespace
         # Outer workflow ceiling only. The helper binds a tighter finite batch
         # timeout; outer exit alone never supplies product/peer finality or permits cleanup.
         timeout-minutes: 10

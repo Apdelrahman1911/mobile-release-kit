@@ -2984,8 +2984,8 @@ pub(crate) mod github_tls {
     const PEER_TIME: Duration = Duration::from_secs(16);
     const PEER_OUTPUT_LIMIT: usize = 8 * 1024;
     const FILE_LIMIT: u64 = 512 * 1024 * 1024;
-    const LIMITATIONS: &[&str] = &["T4-destination-ambient-environment", "T5-real-network-deadlines",
-        "T6-streaming-controls", "CA-file-native-faults", "real-github-authentication", "production-runtime-custody",
+    const LIMITATIONS: &[&str] = &["T4-ambient-proxy-default-ca-keylog", "T5-real-network-deadlines",
+        "product-heap-allocation", "CA-file-native-faults", "real-github-authentication", "production-runtime-custody",
         "native-gui", "native-document-lifecycle", "packaged-runtime", "production-enablement"];
     const ROLES: &[&str] = &["python", "bootstrap", "coreZip", "peer", "namespace", "root-ca.pem", "other-root-ca.pem",
         "api-valid.pem", "wrong-san.pem", "api-expired.pem", "server-key.pem", "hosts", "resolv.conf", "nsswitch.conf",
@@ -3215,9 +3215,40 @@ pub(crate) mod github_tls {
         Scenario { name: "T3-ragged", zip: false, other_root: false, reason: Reason::TlsFailed, connections: 1 },
         Scenario { name: "T3-length", zip: false, other_root: false, reason: Reason::ResponseInvalid, connections: 1 },
         Scenario { name: "T3-chunk", zip: false, other_root: false, reason: Reason::ResponseInvalid, connections: 1 },
+        Scenario { name: "T6-header", zip: false, other_root: false, reason: Reason::ResponseLimit, connections: 1 },
+        Scenario { name: "T6-body", zip: false, other_root: false, reason: Reason::ResponseLimit, connections: 1 },
+        Scenario { name: "T6-chunk-metadata", zip: false, other_root: false, reason: Reason::ResponseLimit, connections: 1 },
+        Scenario { name: "T6-unauthorized", zip: false, other_root: false, reason: Reason::Unauthorized, connections: 1 },
+        Scenario { name: "T6-rate-expiry", zip: false, other_root: false, reason: Reason::ResponseInvalid, connections: 1 },
+        Scenario { name: "T6-target", zip: false, other_root: false, reason: Reason::TargetChanged, connections: 4 },
+        Scenario { name: "T6-redirect", zip: false, other_root: false, reason: Reason::ResponseInvalid, connections: 1 },
     ];
+    impl Scenario {
+        // Literal peer plaintext sizes and minimum parser-input progress. These
+        // are SOURCE-bound counters, not observations of client reads or heap use.
+        fn replies(&self) -> Option<(&'static [u64], &'static [u64])> {
+            match self.name {
+                "T6-header" => Some((&[40630], &[32768])),
+                "T6-body" => Some((&[262215], &[262215])),
+                "T6-chunk-metadata" => Some((&[35803], &[33143])),
+                "T6-unauthorized" => Some((&[99], &[80])),
+                "T6-rate-expiry" => Some((&[175], &[156])),
+                "T6-target" => Some((&[95, 222, 102, 222], &[95, 222, 102, 222])),
+                "T6-redirect" => Some((&[136], &[117])),
+                _ => None,
+            }
+        }
+        fn streaming(&self) -> bool { self.replies().is_some() }
+        fn limits(&self) -> (u64, u64) {
+            if self.name == "T6-body" { (512 * 1024, 320 * 1024) } else { (128 * 1024, 64 * 1024) }
+        }
+    }
     fn reason(value: Reason) -> &'static str {
-        match value { Reason::None => "none", Reason::TlsFailed => "tls-failed", Reason::ResponseInvalid => "response-invalid", _ => "unexpected" }
+        match value {
+            Reason::None => "none", Reason::TlsFailed => "tls-failed", Reason::ResponseInvalid => "response-invalid",
+            Reason::ResponseLimit => "response-limit", Reason::Unauthorized => "unauthorized", Reason::TargetChanged => "target-changed",
+            _ => "unexpected",
+        }
     }
     fn ready(bytes: &[u8], name: &str) -> bool {
         bytes.len() <= 1024 && protocol::strict_json(bytes).ok() == Some(json!({
@@ -3261,20 +3292,215 @@ pub(crate) mod github_tls {
         result
     }
 
+    struct ControlOriginal<W = tokio::process::ChildStdin> {
+        stdin: Option<W>, completion: Option<oneshot::Receiver<()>>,
+    }
+    #[derive(Default)]
+    struct ControlEnd {
+        product_settled: bool, write_complete: bool, shutdown_complete: bool, released: bool, failed: bool,
+        completed_at: Option<Instant>,
+    }
+    struct PeerControl {
+        original: Arc<AsyncMutex<ControlOriginal>>, writer: Option<JoinHandle<ControlEnd>>,
+        acquired: bool, started: bool, joined: bool, join_failed: bool, failed: bool,
+        joined_at: Option<Instant>, end: Option<ControlEnd>,
+    }
+    impl PeerControl {
+        fn new(completion: oneshot::Receiver<()>) -> Self {
+            Self { original: Arc::new(AsyncMutex::new(ControlOriginal { stdin: None, completion: Some(completion) })),
+                writer: None, acquired: false, started: false, joined: false, join_failed: false, failed: false,
+                joined_at: None, end: None }
+        }
+        fn settled(&self) -> bool {
+            self.acquired && self.started && self.joined && !self.join_failed
+                && self.end.as_ref().is_some_and(|end| end.released)
+        }
+        fn evidence(&self, endpoint: Option<Instant>) -> Value {
+            json!({"acquired":self.acquired,"started":self.started,"joined":self.joined,
+                "writeComplete":self.end.as_ref().is_some_and(|end| end.write_complete),
+                "shutdownComplete":self.end.as_ref().is_some_and(|end| end.shutdown_complete),
+                "productSettled":self.end.as_ref().is_some_and(|end| end.product_settled),
+                "withinEndpoint":self.joined_at.zip(endpoint).is_some_and(|(done, limit)| done < limit)
+                    && self.end.as_ref().and_then(|end| end.completed_at).zip(endpoint).is_some_and(|(done, limit)| done < limit),
+                "released":self.end.as_ref().is_some_and(|end| end.released),"failed":self.failed})
+        }
+    }
+    async fn control_writer<W: tokio::io::AsyncWrite + Unpin>(original: Arc<AsyncMutex<ControlOriginal<W>>>, endpoint: Instant) -> ControlEnd {
+        // Borrow from the pre-acquisition retained slot. Unwind/cancellation can
+        // lose neither the original stdin nor its one original receiver.
+        let mut original = original.lock().await;
+        let mut end = ControlEnd::default();
+        if let Some(completion) = original.completion.as_mut() {
+            end.product_settled = matches!(guarded(tokio::time::timeout_at(tokio::time::Instant::from_std(endpoint), completion)).await, Ok(Ok(Ok(()))));
+        }
+        original.completion.take(); // No second receiver or replacement signal.
+        if end.product_settled && Instant::now() < endpoint {
+            if let Some(stdin) = original.stdin.as_mut() {
+                end.write_complete = matches!(guarded(tokio::time::timeout_at(tokio::time::Instant::from_std(endpoint), stdin.write_all(b"S"))).await, Ok(Ok(Ok(()))));
+            }
+        }
+        // Missing/false/unwound completion never writes S. Independently try
+        // the same original shutdown even after a failed/unwound write or deadline;
+        // there is no renewed allowance and no replacement descriptor/task.
+        if let Some(stdin) = original.stdin.as_mut() {
+            end.shutdown_complete = matches!(guarded(tokio::time::timeout_at(tokio::time::Instant::from_std(endpoint), stdin.shutdown())).await, Ok(Ok(Ok(()))));
+        }
+        if end.shutdown_complete {
+            drop(original.stdin.take());
+            end.released = true;
+        }
+        end.completed_at = Some(Instant::now());
+        end.failed = !end.product_settled || !end.write_complete || !end.shutdown_complete || !end.released
+            || end.completed_at.is_some_and(|done| done >= endpoint);
+        end
+    }
+
+    #[cfg(test)]
+    mod control_models {
+        // Exercise the actual writer with inert memory only. No Child, native
+        // pipe, listener, process, filesystem, peer import or test hook is used.
+        use super::*;
+        use std::{io, pin::Pin, task::Context};
+
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Fault { None, WriteError, WriteUnwind, ShutdownError, ShutdownUnwind, ShutdownPending }
+        #[derive(Default)]
+        struct Trace { writes: Vec<Vec<u8>>, shutdowns: usize, drops: usize }
+        struct MemoryWriter { original: Arc<Mutex<Trace>>, fault: Fault }
+        impl tokio::io::AsyncWrite for MemoryWriter {
+            fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
+                lock(&self.original).writes.push(bytes.to_vec());
+                match self.fault {
+                    Fault::WriteError => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
+                    Fault::WriteUnwind => panic!("inert control writer unwind"),
+                    _ => Poll::Ready(Ok(bytes.len())),
+                }
+            }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> { Poll::Ready(Ok(())) }
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                lock(&self.original).shutdowns += 1;
+                match self.fault {
+                    Fault::ShutdownError => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
+                    Fault::ShutdownUnwind => panic!("inert control shutdown unwind"),
+                    Fault::ShutdownPending => Poll::Pending,
+                    _ => Poll::Ready(Ok(())),
+                }
+            }
+        }
+        impl Drop for MemoryWriter {
+            fn drop(&mut self) { lock(&self.original).drops += 1; }
+        }
+
+        fn runtime() -> tokio::runtime::Runtime {
+            match tokio::runtime::Builder::new_current_thread().enable_time().build() {
+                Ok(runtime) => runtime,
+                Err(_) => panic!("inert current-thread timer unavailable"),
+            }
+        }
+        fn original(fault: Fault, completion: Option<oneshot::Receiver<()>>)
+            -> (Arc<AsyncMutex<ControlOriginal<MemoryWriter>>>, Arc<Mutex<Trace>>) {
+            let trace = Arc::new(Mutex::new(Trace::default()));
+            let slot = ControlOriginal { stdin: Some(MemoryWriter { original: trace.clone(), fault }), completion };
+            (Arc::new(AsyncMutex::new(slot)), trace)
+        }
+
+        #[test]
+        fn original_completion_and_endpoint_gate_the_only_success_byte() {
+            for mode in ["confirmed", "absent", "closed", "pending-expired", "queued-expired"] {
+                let (sender, receiver) = oneshot::channel();
+                let mut retained_sender = Some(sender);
+                if matches!(mode, "confirmed" | "queued-expired") {
+                    let Some(sender) = retained_sender.take() else { panic!("original sender missing"); };
+                    assert!(sender.send(()).is_ok());
+                } else if mode == "closed" { drop(retained_sender.take()); }
+                let completion = if mode == "absent" { drop(receiver); None } else { Some(receiver) };
+                let (slot, trace) = original(Fault::None, completion);
+                let expired = mode.ends_with("expired");
+                let endpoint = if expired { Instant::now() - Duration::from_secs(1) }
+                    else { Instant::now() + Duration::from_secs(10) };
+                let end = runtime().block_on(control_writer(slot.clone(), endpoint));
+                let facts = lock(&trace);
+                assert_eq!(facts.writes, if mode == "confirmed" { vec![b"S".to_vec()] } else { vec![] }, "{mode}");
+                assert_eq!(facts.shutdowns, 1, "{mode}");
+                assert_eq!(facts.drops, 1, "{mode}");
+                assert!(end.shutdown_complete && end.released, "{mode}");
+                assert_eq!(end.write_complete, mode == "confirmed", "{mode}");
+                assert_eq!(end.failed, mode != "confirmed", "{mode}");
+                assert_eq!(end.product_settled, matches!(mode, "confirmed" | "queued-expired"), "{mode}");
+                assert_eq!(end.completed_at.is_some_and(|at| at >= endpoint), expired, "{mode}");
+                drop(facts);
+                let Ok(original) = slot.try_lock() else { panic!("original slot remained borrowed"); };
+                assert!(original.stdin.is_none() && original.completion.is_none(), "{mode}");
+                // Pending completion is not manufactured by the writer; a late
+                // original publication cannot resurrect the consumed receiver.
+                if mode == "pending-expired" {
+                    let Some(sender) = retained_sender.take() else { panic!("pending original sender missing"); };
+                    assert!(sender.send(()).is_err());
+                }
+            }
+        }
+
+        #[test]
+        fn failed_or_unwound_write_still_shuts_down_the_same_original() {
+            for fault in [Fault::WriteError, Fault::WriteUnwind] {
+                let (sender, receiver) = oneshot::channel();
+                assert!(sender.send(()).is_ok());
+                let (slot, trace) = original(fault, Some(receiver));
+                let endpoint = Instant::now() + Duration::from_secs(10);
+                let end = runtime().block_on(control_writer(slot.clone(), endpoint));
+                let facts = lock(&trace);
+                assert_eq!(facts.writes, [b"S".to_vec()]);
+                assert_eq!((facts.shutdowns, facts.drops), (1, 1));
+                assert!(end.product_settled && !end.write_complete && end.shutdown_complete && end.released && end.failed);
+                drop(facts);
+                let Ok(original) = slot.try_lock() else { panic!("original slot remained borrowed"); };
+                assert!(original.stdin.is_none() && original.completion.is_none());
+            }
+        }
+
+        #[test]
+        fn uncertain_shutdown_retains_the_same_original_without_renewal() {
+            for fault in [Fault::ShutdownError, Fault::ShutdownUnwind, Fault::ShutdownPending] {
+                let (sender, receiver) = oneshot::channel();
+                assert!(sender.send(()).is_ok());
+                let (slot, trace) = original(fault, Some(receiver));
+                let endpoint = Instant::now() + if fault == Fault::ShutdownPending {
+                    Duration::from_millis(100)
+                } else { Duration::from_secs(10) };
+                let end = runtime().block_on(control_writer(slot.clone(), endpoint));
+                let facts = lock(&trace);
+                assert_eq!(facts.writes, [b"S".to_vec()]);
+                assert!(facts.shutdowns > 0);
+                assert_eq!(facts.drops, 0);
+                assert!(end.product_settled && end.write_complete && !end.shutdown_complete && !end.released && end.failed);
+                assert_eq!(end.completed_at.is_some_and(|at| at >= endpoint), fault == Fault::ShutdownPending);
+                drop(facts);
+                let Ok(original) = slot.try_lock() else { panic!("original slot remained borrowed"); };
+                assert!(original.stdin.as_ref().is_some_and(|writer| Arc::ptr_eq(&writer.original, &trace)));
+                assert!(original.completion.is_none());
+                // Only an inert Rust value is dropped when this model ends;
+                // no native close or producer finality is claimed by the test.
+            }
+        }
+    }
+
     #[derive(Default)]
     struct Peer {
         endpoint: Option<Instant>, completed_at: Option<Instant>,
         acquisition: Option<JoinHandle<std::io::Result<Child>>>, acquisition_joined: bool, acquisition_failed: bool,
-        child: Option<Child>, spawned: bool, spawn_refused: bool,
+        child: Option<Child>, spawned: bool, spawn_refused: bool, pipes_retained: bool,
+        stdout_original: Arc<AsyncMutex<Option<tokio::process::ChildStdout>>>,
+        stderr_original: Arc<AsyncMutex<Option<tokio::process::ChildStderr>>>,
         stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
-        stdout_joined: bool, stderr_joined: bool, stdout_failed: bool, stderr_failed: bool,
+        stdout_started: bool, stderr_started: bool, stdout_joined: bool, stderr_joined: bool, stdout_failed: bool, stderr_failed: bool,
         out: Option<ReadEnd>, err: Option<ReadEnd>, ready_rx: Option<oneshot::Receiver<bool>>, ready: bool,
+        control: Option<PeerControl>,
         waited: Option<ExitStatus>, wait_failed: bool, stop_attempted: bool, expired: bool,
         settled: bool, protocol_checked: bool, terminal: Option<Value>,
     }
     enum PeerEvent {
         Wait(std::io::Result<ExitStatus>), Out(Result<ReadEnd, tokio::task::JoinError>),
-        Err(Result<ReadEnd, tokio::task::JoinError>), Deadline,
+        Err(Result<ReadEnd, tokio::task::JoinError>), Control(Result<ControlEnd, tokio::task::JoinError>), Deadline,
     }
     impl Peer {
         fn begin(&mut self, common: &Common, name: &'static str) -> Check<()> {
@@ -3283,6 +3509,7 @@ pub(crate) mod github_tls {
             let script = common.manifest.role("peer")?.to_path_buf();
             let cwd = script.parent().ok_or("tls_peer_layout")?.to_path_buf();
             let environment = common.peer_env.clone();
+            let controlled = self.control.is_some();
             let endpoint = Instant::now() + PEER_TIME;
             self.endpoint = Some(endpoint); // Includes queue, spawn and readiness.
             self.acquisition = Some(tokio::task::spawn_blocking(move || {
@@ -3290,43 +3517,110 @@ pub(crate) mod github_tls {
                 let mut command = Command::new(python);
                 command.args(["-I", "-S", "-B"]).arg(script).arg(name).current_dir(cwd)
                     .env_clear().env("LC_ALL", "C").env("LANG", "C").envs(environment)
-                    .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+                    .stdin(if controlled { Stdio::piped() } else { Stdio::null() })
+                    .stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
                 if Instant::now() >= endpoint { return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "TLS peer admission expired")); }
                 command.spawn()
             }));
             Ok(())
         }
-        async fn acquire(&mut self, name: &'static str) -> Check<()> {
-            if self.acquisition_joined { return require(self.spawned, "tls_peer_spawn_refused"); }
-            require(!self.acquisition_failed, "tls_peer_acquisition_unknown")?;
-            let endpoint = self.endpoint.ok_or("tls_peer_not_started")?;
-            let task = self.acquisition.as_mut().ok_or("tls_peer_acquisition_missing")?;
-            let result = match tokio::time::timeout_at(tokio::time::Instant::from_std(endpoint), task).await {
-                Ok(result) => result,
-                Err(_) => { self.expired = true; return Err("tls_peer_acquisition_deadline"); },
+        fn retain_pipes(&mut self) -> Check<()> {
+            if self.pipes_retained { return Ok(()); }
+            let mut input = match self.control.as_ref() {
+                Some(control) => Some(control.original.try_lock().map_err(|_| "tls_peer_control_slot_busy")?),
+                None => None,
             };
-            let result = match result {
-                Ok(result) => { self.acquisition_joined = true; self.acquisition.take(); result },
-                Err(_) => { self.acquisition_failed = true; return Err("tls_peer_acquisition_unknown"); },
-            };
-            match result {
-                Ok(child) => { self.child = Some(child); self.spawned = true; },
-                Err(_) => { self.spawn_refused = true; return Err("tls_peer_spawn_refused"); },
-            }
-            // The original child is in its retained book BEFORE taking any pipe
-            // or observing readiness. Store both original readers before await.
-            let (stdout, stderr) = match self.child.as_mut() {
-                Some(child) => (child.stdout.take(), child.stderr.take()),
-                None => return Err("tls_peer_child_missing"),
-            };
+            let mut stdout = self.stdout_original.try_lock().map_err(|_| "tls_peer_stdout_slot_busy")?;
+            let mut stderr = self.stderr_original.try_lock().map_err(|_| "tls_peer_stderr_slot_busy")?;
+            let child = self.child.as_mut().ok_or("tls_peer_child_missing")?;
+            require(stdout.is_none() && stderr.is_none() && input.as_ref().map_or(true, |original| original.stdin.is_none()),
+                "tls_peer_original_pipe_replacement")?;
+            // No await, allocation or fallible step between taking the original
+            // pipes and storing ALL of them in pre-acquisition retained slots.
+            *stdout = child.stdout.take();
+            *stderr = child.stderr.take();
+            let acquired = if let Some(original) = input.as_mut() {
+                original.stdin = child.stdin.take();
+                original.stdin.is_some()
+            } else { false };
+            self.pipes_retained = true;
+            drop(input);
+            if let Some(control) = self.control.as_mut() { control.acquired = acquired; }
+            Ok(())
+        }
+        fn start_stdout(&mut self, name: &'static str) -> Check<()> {
+            if self.stdout_started { return require(self.stdout.is_some() || self.stdout_joined, "tls_peer_stdout_task_missing"); }
+            self.stdout_started = true; // An uncertain allocation is never retried.
+            require(self.stdout_original.try_lock().is_ok_and(|original| original.is_some()), "tls_peer_stdout_missing")?;
             let (ready_tx, ready_rx) = oneshot::channel();
             self.ready_rx = Some(ready_rx);
-            if let Some(stdout) = stdout { self.stdout = Some(tokio::spawn(peer_stdout(stdout, name, ready_tx))); }
-            if let Some(stderr) = stderr {
-                let (faults, _receiver) = mpsc::channel(2);
-                self.stderr = Some(tokio::spawn(read_bounded(stderr, PEER_OUTPUT_LIMIT, faults)));
+            let original = self.stdout_original.clone();
+            self.stdout = Some(tokio::spawn(async move {
+                let mut original = original.lock().await;
+                let Some(stdout) = original.as_mut() else { return ReadEnd { bytes: Vec::new(), eof: false, overflow: false }; };
+                let end = peer_stdout(stdout, name, ready_tx).await;
+                if end.eof { drop(original.take()); }
+                end
+            }));
+            Ok(())
+        }
+        fn start_stderr(&mut self) -> Check<()> {
+            if self.stderr_started { return require(self.stderr.is_some() || self.stderr_joined, "tls_peer_stderr_task_missing"); }
+            self.stderr_started = true;
+            require(self.stderr_original.try_lock().is_ok_and(|original| original.is_some()), "tls_peer_stderr_missing")?;
+            let (faults, _receiver) = mpsc::channel(2);
+            let original = self.stderr_original.clone();
+            self.stderr = Some(tokio::spawn(async move {
+                let mut original = original.lock().await;
+                let Some(stderr) = original.as_mut() else { return ReadEnd { bytes: Vec::new(), eof: false, overflow: false }; };
+                let end = read_bounded(stderr, PEER_OUTPUT_LIMIT, faults).await;
+                if end.eof { drop(original.take()); }
+                end
+            }));
+            Ok(())
+        }
+        fn start_control(&mut self) -> Check<()> {
+            let Some(control) = self.control.as_mut() else { return Ok(()); };
+            if control.started { return require(control.writer.is_some() || control.joined, "tls_peer_control_task_missing"); }
+            control.started = true;
+            let endpoint = self.endpoint.ok_or("tls_peer_not_started")?;
+            require(control.acquired && control.original.try_lock().is_ok_and(|original| original.stdin.is_some() && original.completion.is_some()),
+                "tls_peer_control_missing")?;
+            control.writer = Some(tokio::spawn(control_writer(control.original.clone(), endpoint)));
+            Ok(())
+        }
+        async fn prepare_pipes(&mut self, name: &'static str) -> Check<()> {
+            // Each original gets its own attempt even if another allocation or
+            // setup unwinds. Already-started or uncertain tasks are not replaced.
+            let kept = guarded(async { self.retain_pipes() }).await.unwrap_or_else(Err);
+            let out = guarded(async { self.start_stdout(name) }).await.unwrap_or_else(Err);
+            let err = guarded(async { self.start_stderr() }).await.unwrap_or_else(Err);
+            let control = guarded(async { self.start_control() }).await.unwrap_or_else(Err);
+            if out.is_err() { self.stdout_failed = true; }
+            if err.is_err() { self.stderr_failed = true; }
+            if control.is_err() { if let Some(control) = self.control.as_mut() { control.failed = true; } }
+            kept.and(out).and(err).and(control)
+        }
+        async fn acquire(&mut self, name: &'static str) -> Check<()> {
+            require(!self.acquisition_failed, "tls_peer_acquisition_unknown")?;
+            let endpoint = self.endpoint.ok_or("tls_peer_not_started")?;
+            if !self.acquisition_joined {
+                let task = self.acquisition.as_mut().ok_or("tls_peer_acquisition_missing")?;
+                let result = match tokio::time::timeout_at(tokio::time::Instant::from_std(endpoint), task).await {
+                    Ok(result) => result,
+                    Err(_) => { self.expired = true; return Err("tls_peer_acquisition_deadline"); },
+                };
+                let result = match result {
+                    Ok(result) => { self.acquisition_joined = true; self.acquisition.take(); result },
+                    Err(_) => { self.acquisition_failed = true; return Err("tls_peer_acquisition_unknown"); },
+                };
+                match result {
+                    Ok(child) => { self.child = Some(child); self.spawned = true; },
+                    Err(_) => { self.spawn_refused = true; return Err("tls_peer_spawn_refused"); },
+                }
             }
-            require(self.stdout.is_some() && self.stderr.is_some(), "tls_peer_pipe_missing")?;
+            require(self.spawned, "tls_peer_spawn_refused")?;
+            self.prepare_pipes(name).await?;
             require(Instant::now() < endpoint, "tls_peer_acquisition_deadline")
         }
         async fn readiness(&mut self, name: &'static str) -> Check<()> {
@@ -3356,28 +3650,38 @@ pub(crate) mod github_tls {
         }
         async fn settle(&mut self, name: &'static str, failed: bool) -> bool {
             let Some(endpoint) = self.endpoint else { self.settled = true; return true; };
-            if !self.acquisition_joined && !self.acquisition_failed { let _ = self.acquire(name).await; }
-            if failed { self.stop_original(); }
+            if !self.acquisition_joined && !self.acquisition_failed { let _ = guarded(self.acquire(name)).await; }
+            if self.spawned { let _ = self.prepare_pipes(name).await; }
+            // New cases wait for the positive original product result, not the
+            // projection assertion. A projection failure can still dispose with
+            // S, but cannot turn the case into success. False/unwind/missing
+            // completion instead returns the close-only writer's failure.
+            if (failed && self.control.is_none()) || self.control.as_ref().is_some_and(|control| control.failed) { self.stop_original(); }
             loop {
                 let wait_pending = self.child.is_some() && self.waited.is_none() && !self.wait_failed;
                 let out_pending = self.stdout.is_some() && !self.stdout_failed;
                 let err_pending = self.stderr.is_some() && !self.stderr_failed;
-                if !wait_pending && !out_pending && !err_pending {
+                let control_pending = self.control.as_ref().is_some_and(|control| control.writer.is_some() && !control.join_failed && !control.joined);
+                if !wait_pending && !out_pending && !err_pending && !control_pending {
                     self.completed_at = Some(Instant::now());
                     self.expired |= Instant::now() >= endpoint;
                     self.settled = !self.expired && self.acquisition_joined && !self.acquisition_failed
                         && (self.spawn_refused || self.spawned && self.waited.is_some() && !self.wait_failed
                             && self.stdout_joined && self.stderr_joined && !self.stdout_failed && !self.stderr_failed
-                            && self.out.as_ref().is_some_and(|end| end.eof) && self.err.as_ref().is_some_and(|end| end.eof));
+                            && self.out.as_ref().is_some_and(|end| end.eof) && self.err.as_ref().is_some_and(|end| end.eof)
+                            && self.control.as_ref().map_or(true, PeerControl::settled));
                     if self.settled { self.child.take(); }
                     return self.settled;
                 }
                 let event = {
-                    let Self { child, stdout, stderr, .. } = self;
+                    let Self { child, stdout, stderr, control, .. } = self;
                     tokio::select! {
                         result = wait_original(child), if wait_pending => PeerEvent::Wait(result),
                         result = join_slot(stdout), if out_pending => PeerEvent::Out(result),
                         result = join_slot(stderr), if err_pending => PeerEvent::Err(result),
+                        result = async {
+                            match control.as_mut() { Some(control) => join_slot(&mut control.writer).await, None => pending().await }
+                        }, if control_pending => PeerEvent::Control(result),
                         _ = tokio::time::sleep_until(tokio::time::Instant::from_std(endpoint)) => PeerEvent::Deadline,
                     }
                 };
@@ -3390,22 +3694,50 @@ pub(crate) mod github_tls {
                     // still attempt the OTHER reader and original child wait.
                     PeerEvent::Out(Err(_)) => self.stdout_failed = true,
                     PeerEvent::Err(Err(_)) => self.stderr_failed = true,
-                    PeerEvent::Deadline => { self.expired = true; self.stop_original(); return false; },
+                    PeerEvent::Control(Ok(end)) => {
+                        let failed = end.failed;
+                        if let Some(control) = self.control.as_mut() {
+                            control.joined = true; control.joined_at = Some(Instant::now()); control.writer.take();
+                            control.failed |= failed; control.end = Some(end);
+                        }
+                        if failed { self.stop_original(); }
+                    },
+                    PeerEvent::Control(Err(_)) => {
+                        if let Some(control) = self.control.as_mut() { control.join_failed = true; control.failed = true; }
+                        self.stop_original();
+                    },
+                    PeerEvent::Deadline => {
+                        self.expired = true;
+                        if let Some(control) = self.control.as_mut() { control.failed = true; }
+                        self.stop_original();
+                        return false;
+                    },
                 }
             }
         }
         fn evidence(&self) -> Value {
-            json!({"acquisitionJoined":self.acquisition_joined,"spawned":self.spawned,"waited":self.waited.is_some(),
+            let mut value = json!({"acquisitionJoined":self.acquisition_joined,"spawned":self.spawned,"waited":self.waited.is_some(),
                 "exitCode":self.waited.as_ref().and_then(ExitStatus::code),"exitSuccess":self.waited.as_ref().map(ExitStatus::success),
                 "stopAttempted":self.stop_attempted,"stdoutJoined":self.stdout_joined,"stderrJoined":self.stderr_joined,
                 "stdoutEof":self.out.as_ref().is_some_and(|end| end.eof),"stderrEof":self.err.as_ref().is_some_and(|end| end.eof),
                 "stdoutBytes":self.out.as_ref().map_or(0, |end| end.bytes.len()),"stderrBytes":self.err.as_ref().map_or(0, |end| end.bytes.len()),
                 "stdoutOverflow":self.out.as_ref().is_some_and(|end| end.overflow),"stderrOverflow":self.err.as_ref().is_some_and(|end| end.overflow),
                 "ready":self.ready,"settled":self.settled,"withinEndpoint":self.settled && !self.expired && self.completed_at.zip(self.endpoint).is_some_and(|(done, end)| done < end),
-                "protocolChecked":self.protocol_checked,"terminal":self.terminal})
+                "protocolChecked":self.protocol_checked,"terminal":self.terminal});
+            if let Some(control) = self.control.as_ref() { value["control"] = control.evidence(self.endpoint); }
+            value
         }
     }
 
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct RedirectCompletion { empty: bool, unexpected: u64, closed: bool }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Completion {
+        bytes: u64, eof: bool, closed: bool, primary_empty: bool, primary_unexpected: u64, primary_closed: bool,
+        redirect: Option<RedirectCompletion>,
+    }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct Finished {
@@ -3413,6 +3745,7 @@ pub(crate) mod github_tls {
         status: String, code: Option<String>, connections: u64, handshakes: u64, requests: u64, decrypted_bytes: u64,
         auth_bytes: u64, close_notify: u64, tls_refused: bool, wire_read_bytes: Vec<u64>, wire_write_bytes: Vec<u64>,
         reply_bytes: Vec<u64>, all_sockets_closed: bool,
+        completion: Option<Completion>, reply_stops: Option<Vec<String>>,
     }
     impl Peer {
         fn check(&mut self, scenario: &Scenario) -> Check<()> {
@@ -3427,7 +3760,10 @@ pub(crate) mod github_tls {
             let value = protocol::strict_json(lines[1]).map_err(|_| "tls_peer_terminal_json")?;
             const FIELDS: &[&str] = &["schemaVersion", "scope", "case", "state", "status", "code", "connections", "handshakes",
                 "requests", "decryptedBytes", "authBytes", "closeNotify", "tlsRefused", "wireReadBytes", "wireWriteBytes", "replyBytes", "allSocketsClosed"];
-            require(value.as_object().is_some_and(|row| row.len() == FIELDS.len() && FIELDS.iter().all(|name| row.contains_key(*name))),
+            let streaming = scenario.streaming();
+            require(value.as_object().is_some_and(|row| row.len() == FIELDS.len() + (if streaming { 2 } else { 0 })
+                && FIELDS.iter().all(|name| row.contains_key(*name))
+                && (!streaming || row.contains_key("completion") && row.contains_key("replyStops"))),
                 "tls_peer_terminal_fields")?;
             let facts: Finished = serde_json::from_value(value.clone()).map_err(|_| "tls_peer_terminal_schema")?;
             let refused = scenario.name.starts_with("T2-");
@@ -3439,16 +3775,56 @@ pub(crate) mod github_tls {
                 && facts.decrypted_bytes <= facts.connections * 8192
                 && facts.auth_bytes == requests * b"Bearer INERT_NOT_A_CREDENTIAL".len() as u64
                 && facts.decrypted_bytes >= facts.auth_bytes, "tls_peer_case_observations")?;
+            let (wire_limit, reply_limit) = scenario.limits();
             require(facts.wire_read_bytes.len() == facts.connections as usize && facts.wire_write_bytes.len() == facts.connections as usize
                 && facts.reply_bytes.len() == facts.connections as usize
-                && facts.wire_read_bytes.iter().chain(&facts.wire_write_bytes).all(|size| (1..=128 * 1024).contains(size))
-                && facts.reply_bytes.iter().all(|size| if refused { *size == 0 } else { (1..=64 * 1024).contains(size) }), "tls_peer_wire_bounds")?;
+                && facts.wire_read_bytes.iter().chain(&facts.wire_write_bytes).all(|size| (1..=wire_limit).contains(size))
+                && facts.reply_bytes.iter().all(|size| if refused { *size == 0 } else { (1..=reply_limit).contains(size) }), "tls_peer_wire_bounds")?;
             if refused { require(facts.decrypted_bytes == 0 && facts.close_notify == 0, "tls_peer_authorization_before_refusal")?; }
             match scenario.name {
                 "T1-source" | "T1-zip" | "T3-clean" => require(facts.close_notify == scenario.connections, "tls_peer_clean_notify_missing")?,
                 "T3-ragged" => require(facts.close_notify == 0, "tls_peer_ragged_notify_present")?,
                 "T3-length" | "T3-chunk" => require(facts.close_notify == 1, "tls_peer_framing_notify_missing")?,
                 _ => {},
+            }
+            if let Some((scripted, minima)) = scenario.replies() {
+                let control = self.control.as_ref().ok_or("tls_peer_control_missing")?;
+                let end = control.end.as_ref().ok_or("tls_peer_control_return_missing")?;
+                require(control.settled() && !control.failed && end.product_settled && end.write_complete && end.shutdown_complete
+                    && control.joined_at.zip(self.endpoint).is_some_and(|(done, limit)| done < limit)
+                    && end.completed_at.zip(self.endpoint).is_some_and(|(done, limit)| done < limit), "tls_peer_control_result")?;
+                const COMPLETION_FIELDS: &[&str] = &["bytes", "eof", "closed", "primaryEmpty", "primaryUnexpected", "primaryClosed", "redirect"];
+                require(value.get("completion").and_then(Value::as_object).is_some_and(|row|
+                    row.len() == COMPLETION_FIELDS.len() && COMPLETION_FIELDS.iter().all(|name| row.contains_key(*name))),
+                    "tls_peer_completion_fields")?;
+                let completion = facts.completion.as_ref().ok_or("tls_peer_completion_missing")?;
+                require(completion.bytes == 1 && completion.eof && completion.closed && completion.primary_empty
+                    && completion.primary_unexpected == 0 && completion.primary_closed, "tls_peer_completion_observation")?;
+                if scenario.name == "T6-redirect" {
+                    let redirect = completion.redirect.as_ref().ok_or("tls_peer_redirect_missing")?;
+                    require(redirect.empty && redirect.unexpected == 0 && redirect.closed, "tls_peer_redirect_observation")?;
+                } else { require(completion.redirect.is_none(), "tls_peer_redirect_unexpected")?; }
+                let stops = facts.reply_stops.as_ref().ok_or("tls_peer_reply_stops_missing")?;
+                require(stops.len() == facts.connections as usize && scripted.len() == stops.len() && minima.len() == stops.len(),
+                    "tls_peer_reply_stop_count")?;
+                let mut notified = 0u64;
+                for (index, stop) in stops.iter().enumerate() {
+                    let application_complete = match stop.as_str() {
+                        "none" => { notified += 1; true },
+                        "notify:broken-pipe" | "notify:connection-reset" | "notify:tls-eof" | "notify:tls-close-notify" => true,
+                        "reply:broken-pipe" | "reply:connection-reset" | "reply:tls-eof" | "reply:tls-close-notify" => false,
+                        _ => return Err("tls_peer_reply_stop_category"),
+                    };
+                    require(scenario.name != "T6-target" || stop.as_str() == "none", "tls_peer_target_reply_interrupted")?;
+                    let minimum = if application_complete { scripted[index] } else { minima[index] };
+                    require((minimum..=scripted[index]).contains(&facts.reply_bytes[index])
+                        && facts.wire_write_bytes[index] >= minimum, "tls_peer_streaming_progress")?;
+                }
+                require(facts.close_notify == notified, "tls_peer_streaming_notify_count")?;
+                // These are the peer's original S+EOF, monitored-listener probes
+                // and sole closes, separate from writer intent/return above.
+                // They prove no pending connection at these fixed endpoints,
+                // not universal network non-use or product heap allocation.
             }
             // Only this closed, validated redacted frame can enter the receipt.
             // Raw streams and even a peer-provided failure message never do.
@@ -3466,6 +3842,7 @@ pub(crate) mod github_tls {
     static RETAINED: Mutex<Option<Arc<Retained>>> = Mutex::new(None);
     struct TlsCase {
         product: Case, retained: Arc<Retained>, scenario: &'static Scenario, projection_checked: bool, result_reason: Option<&'static str>,
+        product_completion: Option<oneshot::Sender<()>>, projection: Option<Value>,
     }
     impl Admitted {
         fn case(&self, scenario: &'static Scenario) -> Check<TlsCase> {
@@ -3484,10 +3861,17 @@ pub(crate) mod github_tls {
                 core: if scenario.zip { self.inputs.zip.clone() } else { self.inputs.source.clone() },
                 bootstrap: private.join("github_connection_bootstrap.py"), trust }) };
             *lock(&product.supervisor.inner.test.github_tls) = Some(selection.clone());
+            // Allocate the one original private completion channel and all pipe
+            // slots before any native acquisition. Old nine cases have no control pipe
+            // or new receipt fields; no helper/product arguments are changed.
+            let (product_completion, peer_completion) = if scenario.streaming() {
+                let (sender, receiver) = oneshot::channel(); (Some(sender), Some(receiver))
+            } else { (None, None) };
+            let peer = Peer { control: peer_completion.map(PeerControl::new), ..Peer::default() };
             let retained = Arc::new(Retained { supervisor: product.supervisor.clone(), selection,
-                ticket: Mutex::new(None), peer: AsyncMutex::new(Peer::default()) });
+                ticket: Mutex::new(None), peer: AsyncMutex::new(peer) });
             *lock(&RETAINED) = Some(retained.clone());
-            Ok(TlsCase { product, retained, scenario, projection_checked: false, result_reason: None })
+            Ok(TlsCase { product, retained, scenario, projection_checked: false, result_reason: None, product_completion, projection: None })
         }
     }
     impl TlsCase {
@@ -3517,9 +3901,10 @@ pub(crate) mod github_tls {
             let GitHubReadReceipt::Settled { outcome: Ok(outcome), settled_at, was_unknown: false } = observation
                 else { return Err("tls_product_typed_outcome_missing"); };
             let owner = self.product.owner("github-read-1")?;
+            let cooldown = if self.scenario.name == "T6-rate-expiry" { Some(120) } else { None };
             require(Instant::now() < endpoint && settled_at <= Instant::now() && settled_at < owner.endpoint()
                 && outcome.facts.schema_version == 1 && outcome.control.reason == self.scenario.reason
-                && outcome.control.credential_expires_at.is_none() && outcome.control.cooldown_seconds.is_none()
+                && outcome.control.credential_expires_at.is_none() && outcome.control.cooldown_seconds == cooldown
                 && !outcome.control.cooldown_blocked, "tls_product_control_projection")?;
             if self.scenario.reason == Reason::None {
                 require(outcome.facts.account.state == FactState::Observed && outcome.facts.account.reason == Reason::None
@@ -3535,6 +3920,15 @@ pub(crate) mod github_tls {
                             && row.remote_id.is_none() && row.state == WorkflowState::Unknown))
                     && outcome.facts.account.observed_at.is_some() && outcome.facts.account.observed_at == outcome.facts.repository.observed_at
                     && outcome.facts.account.observed_at == outcome.facts.automation.observed_at, "tls_product_success_projection")?;
+            } else if self.scenario.reason == Reason::TargetChanged {
+                require(outcome.facts.account.state == FactState::Observed && outcome.facts.account.reason == Reason::None
+                    && outcome.facts.account.value.as_ref().is_some_and(|account| account.id == "11" && account.login == "owner")
+                    && outcome.facts.account.observed_at.is_some()
+                    && outcome.facts.repository.state == FactState::Unavailable && outcome.facts.repository.value.is_none()
+                    && outcome.facts.repository.observed_at.is_none() && outcome.facts.repository.reason == Reason::TargetChanged
+                    && outcome.facts.automation.state == FactState::Unavailable && outcome.facts.automation.value.is_none()
+                    && outcome.facts.automation.observed_at.is_none() && outcome.facts.automation.reason == Reason::TargetChanged,
+                    "tls_product_target_projection")?;
             } else {
                 require(outcome.facts.account.state == FactState::Unavailable && outcome.facts.account.value.is_none()
                     && outcome.facts.account.observed_at.is_none() && outcome.facts.account.reason == self.scenario.reason
@@ -3543,6 +3937,14 @@ pub(crate) mod github_tls {
                     && outcome.facts.automation.state == FactState::Unavailable && outcome.facts.automation.value.is_none()
                     && outcome.facts.automation.observed_at.is_none() && outcome.facts.automation.reason == self.scenario.reason,
                     "tls_product_refusal_projection")?;
+            }
+            if self.scenario.streaming() {
+                self.projection = Some(json!({
+                    "account":if outcome.facts.account.state == FactState::Observed { "observed" } else { "unavailable" },
+                    "repository":if outcome.facts.repository.state == FactState::Observed { "observed" } else { "unavailable" },
+                    "automation":if outcome.facts.automation.state == FactState::Observed { "observed" } else { "unavailable" },
+                    "cooldownSeconds":outcome.control.cooldown_seconds,"credentialExpiresAt":outcome.control.credential_expires_at,
+                    "cooldownBlocked":outcome.control.cooldown_blocked}));
             }
             self.result_reason = Some(reason(self.scenario.reason));
             self.projection_checked = true;
@@ -3570,12 +3972,13 @@ pub(crate) mod github_tls {
                     "firstError":state.error.as_ref().map(|error| &error.code),"native":observed.clone()})
             }).collect::<Vec<_>>();
             let peer = self.retained.peer.lock().await.evidence();
+            let mut product = json!({"settled":product_settled,"projectionChecked":self.projection_checked,"reason":self.result_reason,
+                "registeredOwners":lock(&self.product.supervisor.inner.owners).len(),"disabled":self.product.supervisor.disabled(),"owners":owners});
+            if self.scenario.streaming() { product["projection"] = self.projection.clone().unwrap_or(Value::Null); }
             json!({"case":self.scenario.name,"passed":passed,"failureCode":failure,"elapsedMs":self.product.begin.elapsed().as_millis(),
                 "coreMode":if self.scenario.zip { "zip" } else { "source" },
                 "trustFixture":if self.scenario.other_root { "other-root-ca.pem" } else { "root-ca.pem" },
-                "product":{"settled":product_settled,"projectionChecked":self.projection_checked,"reason":self.result_reason,
-                    "registeredOwners":lock(&self.product.supervisor.inner.owners).len(),"disabled":self.product.supervisor.disabled(),"owners":owners},
-                "peer":peer})
+                "product":product,"peer":peer})
         }
         fn release_retention(&self) -> Check<()> {
             require(Arc::ptr_eq(&self.retained.supervisor.inner, &self.product.supervisor.inner)
@@ -3614,11 +4017,24 @@ pub(crate) mod github_tls {
             let mut checked = guarded(case.exercise()).await.unwrap_or_else(Err);
             let failed = checked.is_err();
             let peer_book = case.retained.clone();
+            let product = &mut case.product;
+            let mut completion = case.product_completion.take();
+            let product_attempt = async move {
+                let result = guarded(product.settle(failed)).await;
+                // The sole success publication follows the ACTUAL guarded
+                // Case::settle true return, including its destructor guard.
+                // A false/unwind result only drops the original sender.
+                if matches!(result, Ok(true)) {
+                    if let Some(sender) = completion.take() { let _ = sender.send(()); }
+                }
+                drop(completion);
+                result
+            };
             // Neither early false nor unwind in Case::settle can skip peer
             // stop/wait/readers. Each independent original gets its own guard;
             // join! drives BOTH attempts, never boolean short-circuit or try_join.
             let (product_result, peer_result) = tokio::join!(
-                guarded(case.product.settle(failed)),
+                async { guarded(product_attempt).await.unwrap_or_else(Err) },
                 guarded(async { peer_book.peer.lock().await.settle(scenario.name, failed).await }),
             );
             let product_settled = matches!(product_result, Ok(true));

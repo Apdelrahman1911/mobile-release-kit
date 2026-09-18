@@ -530,8 +530,22 @@ GITHUB_TLS_CHECKS = {
     "compile": ("rust-version-target", "github-tls-headless-test-compile-only", "github-tls-compiled-artifact"),
     "github-tls": ("github-tls-original-artifact", "github-tls-original-outer-wait", "github-tls-receipt"),
 }
+# Seven fixed additions; the original nine retain their exact receipt shapes.
+# Values bind scripted reply sizes and conservative sent-byte floors, not
+# client-read measurements or a product heap-allocation proof.
+GITHUB_TLS_STREAMING = {
+    "T6-header": ("response-limit", (40630,), (32768,)),
+    "T6-body": ("response-limit", (262215,), (262215,)),
+    "T6-chunk-metadata": ("response-limit", (35803,), (33143,)),
+    "T6-unauthorized": ("unauthorized", (99,), (80,)),
+    "T6-rate-expiry": ("response-invalid", (175,), (156,)),
+    "T6-target": ("target-changed", (95, 222, 102, 222), (95, 222, 102, 222)),
+    "T6-redirect": ("response-invalid", (136,), (117,)),
+}
 GITHUB_TLS_CASES = ("T1-source", "T1-zip", "T2-root", "T2-name", "T2-expired",
-                    "T3-clean", "T3-ragged", "T3-length", "T3-chunk")
+                    "T3-clean", "T3-ragged", "T3-length", "T3-chunk", *GITHUB_TLS_STREAMING)
+GITHUB_TLS_REPLY_STOPS = frozenset({"none", *(stage + ":" + kind for stage in ("reply", "notify")
+    for kind in ("broken-pipe", "connection-reset", "tls-eof", "tls-close-notify"))})
 GITHUB_TLS_CERTIFICATES = ("root-ca.pem", "other-root-ca.pem", "api-valid.pem",
                            "wrong-san.pem", "api-expired.pem", "server-key.pem")
 GITHUB_TLS_FIXTURES = "desktop/src-tauri/tests/fixtures"
@@ -547,7 +561,7 @@ GITHUB_TLS_SOURCES = tuple(sorted({
     *(f"{GITHUB_TLS_FIXTURES}/github_tls/{name}" for name in GITHUB_TLS_CERTIFICATES),
 }))
 GITHUB_TLS_NOT_VERIFIED = (
-    "T4-destination-ambient-environment", "T5-real-network-deadlines", "T6-streaming-controls",
+    "T4-ambient-proxy-default-ca-keylog", "T5-real-network-deadlines", "product-heap-allocation",
     "CA-file-native-faults", "real-github-authentication", "production-runtime-custody",
     "native-gui", "native-document-lifecycle", "packaged-runtime", "production-enablement",
 )
@@ -3096,29 +3110,53 @@ def github_tls_public_bindings(context: dict) -> dict:
 
 def validate_github_tls_peer(value: object, name: str) -> None:
     """Pure redacted peer DATA; socket exit alone is not either parent's finality."""
+    require(name in GITHUB_TLS_CASES, "Unknown TLS peer case")
+    streaming = name in GITHUB_TLS_STREAMING
     peer = closed_object(value, {"schemaVersion", "scope", "case", "state", "status", "code", "connections",
         "handshakes", "requests", "decryptedBytes", "authBytes", "closeNotify", "tlsRefused",
-        "wireReadBytes", "wireWriteBytes", "replyBytes", "allSocketsClosed"}, "TLS peer terminal fields differ")
-    connections = 5 if name == "T1-zip" else 4 if name in {"T1-source", "T3-clean"} else 1
+        "wireReadBytes", "wireWriteBytes", "replyBytes", "allSocketsClosed"}
+        | ({"completion", "replyStops"} if streaming else set()), "TLS peer terminal fields differ")
+    connections = 5 if name == "T1-zip" else 4 if name in {"T1-source", "T3-clean", "T6-target"} else 1
     refused = name.startswith("T2-")
     exact = {"schemaVersion": 1, "scope": "github-tls-peer-v1", "case": name, "state": "finished",
              "status": "passed", "code": None, "connections": connections,
              "handshakes": 0 if refused else connections, "requests": 0 if refused else connections,
              "authBytes": 0 if refused else connections * len(b"Bearer INERT_NOT_A_CREDENTIAL"),
-             "closeNotify": 0 if refused or name == "T3-ragged" else connections,
              "tlsRefused": refused, "allSocketsClosed": True}
+    if not streaming:
+        exact["closeNotify"] = 0 if refused or name == "T3-ragged" else connections
     require(same_compile_json({key: peer[key] for key in exact}, exact), "TLS peer protocol/case/finality differs")
     require(integer_between(peer["decryptedBytes"], 0 if refused else peer["authBytes"],
                             0 if refused else connections * 8192), "TLS peer decrypted-byte bound differs")
-    for key, maximum in (("wireReadBytes", 128 * 1024), ("wireWriteBytes", 128 * 1024), ("replyBytes", 64 * 1024)):
+    wire_limit, reply_limit = (512 * 1024, 320 * 1024) if name == "T6-body" else (128 * 1024, 64 * 1024)
+    for key, maximum in (("wireReadBytes", wire_limit), ("wireWriteBytes", wire_limit), ("replyBytes", reply_limit)):
         require(type(peer[key]) is list and len(peer[key]) == connections, "TLS peer connection byte roster differs")
         require(all(integer_between(item, 0 if refused and key == "replyBytes" else 1,
                                     0 if refused and key == "replyBytes" else maximum) for item in peer[key]),
                 "TLS peer connection byte bounds differ")
+    if streaming:
+        # Original writer facts below cannot replace the peer's exact S+EOF,
+        # final original-listener observations or each separate sole close.
+        completion = {"bytes": 1, "eof": True, "closed": True, "primaryEmpty": True,
+                      "primaryUnexpected": 0, "primaryClosed": True,
+                      "redirect": {"empty": True, "unexpected": 0, "closed": True} if name == "T6-redirect" else None}
+        require(same_compile_json(peer["completion"], completion), "TLS peer completion or listener finality differs")
+        stops = peer["replyStops"]
+        require(type(stops) is list and len(stops) == connections
+                and all(type(stop) is str and stop in GITHUB_TLS_REPLY_STOPS
+                        and (name != "T6-target" or stop == "none") for stop in stops),
+                "TLS peer reply-stop roster differs")
+        _, scripted, minima = GITHUB_TLS_STREAMING[name]
+        for index, (stop, size, floor) in enumerate(zip(stops, scripted, minima, strict=True)):
+            minimum = floor if stop.startswith("reply:") else size
+            require(integer_between(peer["replyBytes"][index], minimum, size)
+                    and peer["wireWriteBytes"][index] >= minimum, "TLS peer streaming progress differs")
+        require(type(peer["closeNotify"]) is int and peer["closeNotify"] == stops.count("none"),
+                "TLS peer streaming close-notify count differs")
 
 
 def validate_github_tls_receipt(value: object, *, bindings: dict) -> dict:
-    """Closed nine-case inner facts, independently bound; never an outer wait."""
+    """Closed sixteen-case inner facts, independently bound; never an outer wait."""
     binding_keys = {"sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256",
                     "artifactSha256", "artifactBytes", "coreZipSha256", "pythonSha256", "namespace"}
     expected = closed_object(bindings, binding_keys, "TLS expected binding fields differ")
@@ -3146,20 +3184,29 @@ def validate_github_tls_receipt(value: object, *, bindings: dict) -> dict:
     for key, parent, kind in (("netns", "parentNetns", "net"), ("mntns", "parentMntns", "mnt")):
         require(all(type(namespace[item]) is str and re.fullmatch(kind + r":\[[1-9][0-9]{0,19}\]", namespace[item]) is not None
                     for item in (key, parent)) and namespace[key] != namespace[parent], "TLS namespace was not distinct")
-    require(type(receipt["cases"]) is list and len(receipt["cases"]) == len(GITHUB_TLS_CASES), "TLS nine-case roster differs")
+    require(type(receipt["cases"]) is list and len(receipt["cases"]) == len(GITHUB_TLS_CASES), "TLS sixteen-case roster differs")
     for name, supplied_case in zip(GITHUB_TLS_CASES, receipt["cases"], strict=True):
+        streaming = name in GITHUB_TLS_STREAMING
         case = closed_object(supplied_case, {"case", "passed", "failureCode", "elapsedMs", "coreMode", "trustFixture", "product", "peer"},
                              "TLS case fields differ")
         require(same_compile_json({key: case[key] for key in ("case", "passed", "failureCode", "coreMode", "trustFixture")},
                     {"case": name, "passed": True, "failureCode": None, "coreMode": "zip" if name == "T1-zip" else "source",
                      "trustFixture": "other-root-ca.pem" if name == "T2-root" else "root-ca.pem"})
                 and integer_between(case["elapsedMs"], 0, 300000), "TLS case order, trust or original endpoint differs")
-        product = closed_object(case["product"], {"settled", "projectionChecked", "reason", "registeredOwners", "disabled", "owners"},
+        product = closed_object(case["product"], {"settled", "projectionChecked", "reason", "registeredOwners", "disabled", "owners"}
+                                | ({"projection"} if streaming else set()),
                                 "TLS product observation fields differ")
-        reason = "none" if name in {"T1-source", "T1-zip", "T3-clean"} else "response-invalid" if name in {"T3-length", "T3-chunk"} else "tls-failed"
-        require(same_compile_json({key: product[key] for key in product if key != "owners"},
+        reason = (GITHUB_TLS_STREAMING[name][0] if streaming else "none" if name in {"T1-source", "T1-zip", "T3-clean"}
+                  else "response-invalid" if name in {"T3-length", "T3-chunk"} else "tls-failed")
+        require(same_compile_json({key: product[key] for key in product if key not in {"owners", "projection"}},
                 {"settled": True, "projectionChecked": True, "reason": reason, "registeredOwners": 0, "disabled": False})
                 and type(product["owners"]) is list and len(product["owners"]) == 1, "TLS typed projection or owner finality differs")
+        if streaming:
+            require(same_compile_json(product["projection"], {
+                "account": "observed" if name == "T6-target" else "unavailable",
+                "repository": "unavailable", "automation": "unavailable",
+                "cooldownSeconds": 120 if name == "T6-rate-expiry" else None,
+                "credentialExpiresAt": None, "cooldownBlocked": False}), "TLS streaming product projection differs")
         owner = closed_object(product["owners"][0], {"id", "profile", "terminal", "unknownLatched", "permitRetained",
                                                      "observerJoined", "firstError", "native"}, "TLS original owner fields differ")
         require(same_compile_json({key: owner[key] for key in owner if key != "native"},
@@ -3168,12 +3215,17 @@ def validate_github_tls_receipt(value: object, *, bindings: dict) -> dict:
         _validate_github_readonly_native(owner["native"], name, "github-readonly")
         peer = closed_object(case["peer"], {"acquisitionJoined", "spawned", "waited", "exitCode", "exitSuccess", "stopAttempted",
             "stdoutJoined", "stderrJoined", "stdoutEof", "stderrEof", "stdoutBytes", "stderrBytes", "stdoutOverflow",
-            "stderrOverflow", "ready", "settled", "withinEndpoint", "protocolChecked", "terminal"}, "TLS original peer fields differ")
+            "stderrOverflow", "ready", "settled", "withinEndpoint", "protocolChecked", "terminal"}
+            | ({"control"} if streaming else set()), "TLS original peer fields differ")
         required = {key: True for key in ("acquisitionJoined", "spawned", "waited", "exitSuccess", "stdoutJoined", "stderrJoined",
                                          "stdoutEof", "stderrEof", "ready", "settled", "withinEndpoint", "protocolChecked")}
         required.update(exitCode=0, stopAttempted=False, stdoutOverflow=False, stderrOverflow=False, stderrBytes=0)
         require(same_compile_json({key: peer[key] for key in required}, required)
                 and integer_between(peer["stdoutBytes"], 1, 8192), "TLS original peer wait/reader/finality differs")
+        if streaming:
+            control = {key: True for key in ("acquired", "started", "joined", "writeComplete", "shutdownComplete",
+                                            "productSettled", "withinEndpoint", "released")}
+            require(same_compile_json(peer["control"], {**control, "failed": False}), "TLS original completion writer finality differs")
         validate_github_tls_peer(peer["terminal"], name)
     require(len(canonical_json(receipt)) <= 128 * 1024, "TLS receipt exceeds its byte bound")
     return receipt

@@ -6,6 +6,7 @@ the fixed caller inventory rather than executing hosted admission on the VPS.
 from __future__ import annotations
 
 import ast
+import __future__
 from copy import deepcopy
 from contextlib import redirect_stdout
 import importlib.util
@@ -3806,9 +3807,22 @@ TLS_CASE_ROWS = (
     ("T3-ragged", 1, "tls-failed", "source", "root-ca.pem", False, 0),
     ("T3-length", 1, "response-invalid", "source", "root-ca.pem", False, 1),
     ("T3-chunk", 1, "response-invalid", "source", "root-ca.pem", False, 1),
+    ("T6-header", 1, "response-limit", "source", "root-ca.pem", False, 1),
+    ("T6-body", 1, "response-limit", "source", "root-ca.pem", False, 1),
+    ("T6-chunk-metadata", 1, "response-limit", "source", "root-ca.pem", False, 1),
+    ("T6-unauthorized", 1, "unauthorized", "source", "root-ca.pem", False, 1),
+    ("T6-rate-expiry", 1, "response-invalid", "source", "root-ca.pem", False, 1),
+    ("T6-target", 4, "target-changed", "source", "root-ca.pem", False, 4),
+    ("T6-redirect", 1, "response-invalid", "source", "root-ca.pem", False, 1),
 )
+TLS_STREAMING_REPLIES = {
+    "T6-header": ((40630,), (32768,)), "T6-body": ((262215,), (262215,)),
+    "T6-chunk-metadata": ((35803,), (33143,)), "T6-unauthorized": ((99,), (80,)),
+    "T6-rate-expiry": ((175,), (156,)), "T6-target": ((95, 222, 102, 222), (95, 222, 102, 222)),
+    "T6-redirect": ((136,), (117,)),
+}
 TLS_NOT_VERIFIED = [
-    "T4-destination-ambient-environment", "T5-real-network-deadlines", "T6-streaming-controls",
+    "T4-ambient-proxy-default-ca-keylog", "T5-real-network-deadlines", "product-heap-allocation",
     "CA-file-native-faults", "real-github-authentication", "production-runtime-custody",
     "native-gui", "native-document-lifecycle", "packaged-runtime", "production-enablement",
 ]
@@ -3838,17 +3852,154 @@ def github_tls_report_data() -> dict:
                     "stdoutEof", "stderrEof", "ready", "settled", "withinEndpoint", "protocolChecked"), True),
                 "exitCode": 0, "stopAttempted": False, "stdoutOverflow": False, "stderrOverflow": False,
                 "stdoutBytes": 1024, "stderrBytes": 0, "terminal": terminal}
+        product = {"settled": True, "projectionChecked": True, "reason": reason, "registeredOwners": 0,
+            "disabled": False, "owners": [{"id": "github-read-1", "profile": "github-readonly", "terminal": True,
+                "unknownLatched": False, "permitRetained": False, "observerJoined": True,
+                "firstError": None, "native": native}]}
+        if name in TLS_STREAMING_REPLIES:
+            scripted, _ = TLS_STREAMING_REPLIES[name]
+            terminal.update(replyBytes=list(scripted), wireWriteBytes=[size + 1024 for size in scripted],
+                replyStops=["none"] * connections,
+                completion={"bytes": 1, "eof": True, "closed": True, "primaryEmpty": True,
+                    "primaryUnexpected": 0, "primaryClosed": True,
+                    "redirect": {"empty": True, "unexpected": 0, "closed": True} if name == "T6-redirect" else None})
+            peer["control"] = {**dict.fromkeys(("acquired", "started", "joined", "writeComplete", "shutdownComplete",
+                "productSettled", "withinEndpoint", "released"), True), "failed": False}
+            product["projection"] = {"account": "observed" if name == "T6-target" else "unavailable",
+                "repository": "unavailable", "automation": "unavailable", "credentialExpiresAt": None,
+                "cooldownSeconds": 120 if name == "T6-rate-expiry" else None, "cooldownBlocked": False}
         cases.append({"case": name, "passed": True, "failureCode": None, "elapsedMs": 100,
-            "coreMode": mode, "trustFixture": trust,
-            "product": {"settled": True, "projectionChecked": True, "reason": reason, "registeredOwners": 0,
-                "disabled": False, "owners": [{"id": "github-read-1", "profile": "github-readonly", "terminal": True,
-                    "unknownLatched": False, "permitRetained": False, "observerJoined": True,
-                    "firstError": None, "native": native}]}, "peer": peer})
+            "coreMode": mode, "trustFixture": trust, "product": product, "peer": peer})
     bindings = github_tls_binding_data()
     bindings["namespace"].update(netns="net:[101]", mntns="mnt:[201]")
     return {"schemaVersion": 1, "scope": "github-readonly-tls-hosted-v1", "status": "passed", "allOwnersSettled": True,
             "allPeersSettled": True, "failureCode": None, "bindings": bindings, "cases": cases,
             "outerWait": "external-original-observer-required", "notVerified": list(TLS_NOT_VERIFIED)}
+
+
+class GitHubTLSListenerControlTests(unittest.TestCase):
+    """Actual two peer functions with finite inert capabilities, never a peer import."""
+
+    def model(self, blocks, *, redirect=True, unexpected_slot=None, simultaneous=False):
+        peer = SOURCE / "desktop/src-tauri/tests/fixtures/github_tls_peer.py"
+        parsed = ast.parse(peer.read_bytes(), filename=str(peer))
+        names = {"no_pending", "complete_listener_observation"}
+        definitions = [node for node in parsed.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        self.assertEqual({node.name for node in definitions}, names)
+        self.assertEqual(len(definitions), 2)
+        for definition in definitions:
+            self.assertFalse(definition.decorator_list or definition.args.defaults or definition.args.kw_defaults)
+            self.assertFalse(any(isinstance(node, (ast.Import, ast.ImportFrom)) for node in ast.walk(definition)))
+
+        class Refused(Exception):
+            pass
+        test, control, accepted = self, object(), object()
+        reads, accepts, transitions = [], [], []
+        pending_blocks, ticks = list(blocks), []
+        class Listener:
+            def __init__(self, slot):
+                self.slot = slot
+                self.blocking = None
+            def setblocking(self, value):
+                test.assertIs(value, False)
+                self.blocking = value
+                transitions.append((self.slot, "nonblocking"))
+            def accept(self):
+                test.assertIs(self.blocking, False)
+                accepts.append(self.slot)
+                if self.slot == unexpected_slot:
+                    return accepted, ("inert-address", 0)
+                raise BlockingIOError("inert empty listener")
+        primary, sink = Listener(0), Listener(1) if redirect else None
+        unexpected = [None, None]
+        completion = {"bytes": 0, "eof": False, "closed": False, "primaryEmpty": False,
+            "primaryUnexpected": 0, "primaryClosed": False,
+            "redirect": {"empty": False, "unexpected": 0, "closed": False} if redirect else None}
+        def require(condition, code):
+            if not condition:
+                raise Refused(code)
+        def remaining():
+            ticks.append(None)
+            require(len(ticks) <= 24, "deadline")
+            return 1.0
+        def select(readers, writers, errors, timeout):
+            test.assertEqual(readers, [primary, control] + ([sink] if sink is not None else []))
+            test.assertEqual((writers, errors, timeout), ([], [], 1.0))
+            require(bool(pending_blocks), "deadline")  # Finite exhausted schedule, never a hang.
+            if simultaneous:
+                endpoint = primary if unexpected_slot == 0 else sink
+                test.assertIsNotNone(endpoint)
+                return [control, endpoint], [], []
+            return [control], [], []
+        def read(descriptor, maximum):
+            test.assertIs(descriptor, control)  # Opaque object, not an actual FD.
+            test.assertIn(maximum, (1, 2))
+            block = pending_blocks.pop(0)
+            test.assertLessEqual(len(block), maximum)
+            reads.append(block)
+            return block
+        namespace = {"__builtins__": {"len": len, "enumerate": enumerate, "bytearray": bytearray,
+            "BlockingIOError": BlockingIOError}, "Refused": Refused, "require": require, "remaining": remaining,
+            "select": SimpleNamespace(select=select), "os": SimpleNamespace(read=read)}
+        unit = ast.Module(body=definitions, type_ignores=[])
+        # Postponed annotations require no socket import. Only exact function
+        # definitions execute: no containing imports, initialization or main.
+        exec(compile(unit, str(peer), "exec", flags=__future__.annotations.compiler_flag, dont_inherit=True), namespace)
+        return SimpleNamespace(run=lambda: namespace["complete_listener_observation"](
+            primary, sink, control, unexpected, completion), no_pending=namespace["no_pending"],
+            refused=Refused, completion=completion, unexpected=unexpected, accepted=accepted,
+            primary=primary, sink=sink, reads=reads, accepts=accepts, transitions=transitions)
+
+    def test_original_listener_completion_requires_exact_signal_and_eof(self):
+        for redirect in (False, True):
+            model = self.model([b"S", b""], redirect=redirect)
+            model.run()
+            self.assertEqual(model.reads, [b"S", b""])
+            self.assertEqual(model.accepts, [0, 1] if redirect else [0])
+            self.assertEqual((model.completion["bytes"], model.completion["eof"], model.completion["primaryEmpty"]), (1, True, True))
+            self.assertFalse(model.completion["closed"] or model.completion["primaryClosed"])
+            if redirect:
+                self.assertEqual(model.completion["redirect"], {"empty": True, "unexpected": 0, "closed": False})
+            self.assertEqual(model.unexpected, [None, None])
+        for blocks, reason in (([], "deadline"), ([b"S"], "deadline"), ([b""], "control"),
+                               ([b"X"], "control"), ([b"SS"], "control"), ([b"S", b"X"], "control")):
+            with self.subTest(blocks=blocks):
+                model = self.model(blocks)
+                with self.assertRaisesRegex(model.refused, "^" + reason + "$"):
+                    model.run()
+                self.assertFalse(model.completion["primaryEmpty"] or model.completion["redirect"]["empty"])
+                self.assertEqual(model.accepts, [])
+
+    def test_unexpected_connection_wins_simultaneous_control_and_is_retained(self):
+        for slot in (0, 1):
+            model = self.model([b"S", b""], unexpected_slot=slot, simultaneous=True)
+            with self.assertRaisesRegex(model.refused, "^unexpected-connection$"):
+                model.run()
+            self.assertEqual(model.reads, [])  # Pending accept won even though control was listed first.
+            self.assertIs(model.unexpected[slot], model.accepted)
+            self.assertEqual(model.accepts, [slot])
+            self.assertFalse(model.completion["primaryEmpty"] or model.completion["eof"])
+            target = model.primary if slot == 0 else model.sink
+            # The retained original cannot be replaced or drained by another
+            # observation. This routine never supplies the later sole-close fact.
+            with self.assertRaisesRegex(model.refused, "^unexpected-connection$"):
+                model.no_pending(target, slot, model.unexpected, model.completion)
+            self.assertEqual(model.accepts, [slot])
+            self.assertIs(model.unexpected[slot], model.accepted)
+
+    def test_final_probe_refuses_original_primary_and_redirect_accepts(self):
+        for slot in (0, 1):
+            model = self.model([b"S", b""], unexpected_slot=slot)
+            with self.assertRaisesRegex(model.refused, "^unexpected-connection$"):
+                model.run()
+            self.assertEqual(model.reads, [b"S", b""])
+            self.assertTrue(model.completion["eof"])
+            self.assertEqual(model.accepts, [0] if slot == 0 else [0, 1])
+            self.assertIs(model.unexpected[slot], model.accepted)
+            self.assertEqual(model.completion["primaryUnexpected"], 1 if slot == 0 else 0)
+            self.assertEqual(model.completion["primaryEmpty"], slot == 1)
+            self.assertEqual(model.completion["redirect"]["unexpected"], slot)
+            self.assertFalse(model.completion["redirect"]["empty"] or model.completion["closed"])
 
 
 class GitHubTLSReceiptContractTests(unittest.TestCase):
@@ -3861,14 +4012,21 @@ class GitHubTLSReceiptContractTests(unittest.TestCase):
         with self.subTest(path=path, value=replacement), self.assertRaises(helper.CheckFailure):
             helper.validate_github_tls_receipt(report, bindings=github_tls_binding_data())
 
-    def test_tls_supplied_nine_case_data_is_not_execution_or_outer_finality(self):
+    def test_tls_supplied_sixteen_case_data_is_not_execution_or_outer_finality(self):
         report = github_tls_report_data()
         self.assertEqual(tuple(row[0] for row in TLS_CASE_ROWS), helper.GITHUB_TLS_CASES)
+        self.assertEqual(helper.GITHUB_TLS_STREAMING,
+            {row[0]: (row[2], *TLS_STREAMING_REPLIES[row[0]]) for row in TLS_CASE_ROWS[9:]})
         self.assertEqual(TLS_NOT_VERIFIED, list(helper.GITHUB_TLS_NOT_VERIFIED))
         self.assertIs(report, helper.validate_github_tls_receipt(report, bindings=github_tls_binding_data()))
         raw = json.dumps(report, separators=(",", ":")).encode("utf-8")
         self.assertEqual(report, helper.parse_github_tls_receipt(raw, bindings=github_tls_binding_data()))
         self.assertNotIn("outer", report)
+        for original in report["cases"][:9]:
+            self.assertNotIn("projection", original["product"])
+            self.assertNotIn("control", original["peer"])
+            self.assertNotIn("completion", original["peer"]["terminal"])
+            self.assertNotIn("replyStops", original["peer"]["terminal"])
         for foreign in (github_readonly_report_data(), native_report(), {**report, "outerWait": True}):
             with self.subTest(foreign_scope=foreign.get("scope")), self.assertRaises(helper.CheckFailure):
                 helper.validate_github_tls_receipt(foreign, bindings=github_tls_binding_data())
@@ -3881,7 +4039,7 @@ class GitHubTLSReceiptContractTests(unittest.TestCase):
                 ("allOwnersSettled", False), ("allPeersSettled", 1), ("failureCode", "tls_custody_unresolved"),
                 ("outerWait", "passed"), ("extra", True), ("cases", report["cases"][:-1]),
                 ("cases", report["cases"] + report["cases"][:1]), ("cases", list(reversed(report["cases"]))),
-                ("cases", [report["cases"][0]] * 9), ("notVerified", TLS_NOT_VERIFIED[:-1])):
+                ("cases", [report["cases"][0]] * 16), ("notVerified", TLS_NOT_VERIFIED[:-1])):
             self.reject_at((key,), value)
         for key in report:
             bad = deepcopy(report); del bad[key]
@@ -3903,7 +4061,7 @@ class GitHubTLSReceiptContractTests(unittest.TestCase):
     def test_tls_every_original_product_and_peer_join_is_required(self):
         report = github_tls_report_data()
         # Generic schema/join predicates are shared: mutate one representative,
-        # not a nine-case Cartesian replay of the same structural validator.
+        # not a sixteen-case Cartesian replay of the same structural validator.
         for index, case in enumerate(report["cases"][:1]):
             for key in ("settled", "projectionChecked"):
                 for value in (False, 1, None):
@@ -3953,6 +4111,86 @@ class GitHubTLSReceiptContractTests(unittest.TestCase):
                     for vector in ([], [1] * (connections + 1), [True] * connections, [-1] * connections,
                             [limit + 1] * connections, [1 if refused and key == "replyBytes" else 0] * connections):
                         self.reject_at(("cases", index, "peer", "terminal", key), vector)
+
+    def test_tls_streaming_control_and_peer_completion_are_independent_closed_facts(self):
+        report = github_tls_report_data()
+        # One representative exercises the shared writer and completion schema.
+        # These DATA checks do not execute the actual writer or listener loop.
+        control = report["cases"][9]["peer"]["control"]
+        completion = report["cases"][9]["peer"]["terminal"]["completion"]
+        for key, value in control.items():
+            for wrong in (not value, int(value)):
+                self.reject_at(("cases", 9, "peer", "control", key), wrong)
+        for replacement in (None, {**control, "extra": True}, {key: value for key, value in control.items() if key != "released"}):
+            self.reject_at(("cases", 9, "peer", "control"), replacement)
+        for key, wrong in (("bytes", 0), ("bytes", True), ("eof", False), ("closed", False), ("primaryEmpty", False),
+                ("primaryUnexpected", 1), ("primaryUnexpected", False), ("primaryClosed", False), ("redirect", {}), ("extra", True)):
+            self.reject_at(("cases", 9, "peer", "terminal", "completion", key), wrong)
+        for replacement in (None, {key: value for key, value in completion.items() if key != "redirect"}):
+            self.reject_at(("cases", 9, "peer", "terminal", "completion"), replacement)
+        for key, wrong in (("empty", False), ("unexpected", 1), ("unexpected", False), ("closed", False), ("extra", True)):
+            self.reject_at(("cases", 15, "peer", "terminal", "completion", "redirect", key), wrong)
+        self.reject_at(("cases", 15, "peer", "terminal", "completion", "redirect"), None)
+        self.reject_at(("cases", 9, "product", "settled"), False)
+        self.reject_at(("cases", 9, "peer", "withinEndpoint"), False)
+        for path, value in ((("peer", "control"), control), (("peer", "terminal", "completion"), completion),
+                            (("peer", "terminal", "replyStops"), ["none"] * 4),
+                            (("product", "projection"), report["cases"][9]["product"]["projection"])):
+            self.reject_at(("cases", 0, *path), value)  # New fields cannot reinterpret an old-nine receipt.
+
+    def test_tls_streaming_reply_stops_require_case_local_actual_progress(self):
+        stops = ("none", "reply:broken-pipe", "reply:connection-reset", "reply:tls-eof", "reply:tls-close-notify",
+                 "notify:broken-pipe", "notify:connection-reset", "notify:tls-eof", "notify:tls-close-notify")
+        self.assertEqual(set(stops), helper.GITHUB_TLS_REPLY_STOPS)
+        for stop in stops:
+            report = github_tls_report_data()
+            terminal = report["cases"][9]["peer"]["terminal"]
+            minimum = 32768 if stop.startswith("reply:") else 40630
+            terminal.update(replyStops=[stop], replyBytes=[minimum], wireWriteBytes=[minimum],
+                            closeNotify=int(stop == "none"))
+            self.assertIs(report, helper.validate_github_tls_receipt(report, bindings=github_tls_binding_data()))
+            # Typed known-close categories never waive actual sent progress.
+            terminal["wireWriteBytes"] = [minimum - 1]
+            with self.subTest(stop=stop), self.assertRaises(helper.CheckFailure):
+                helper.validate_github_tls_receipt(report, bindings=github_tls_binding_data())
+        for index, (name, *_rest) in enumerate(TLS_CASE_ROWS[9:], start=9):
+            if name == "T6-target":
+                self.reject_at(("cases", index, "peer", "terminal", "replyStops"), ["notify:broken-pipe"] * 4)
+                continue
+            report = github_tls_report_data()
+            terminal = report["cases"][index]["peer"]["terminal"]
+            minimum = TLS_STREAMING_REPLIES[name][1][0]
+            terminal.update(replyStops=["reply:broken-pipe"], replyBytes=[minimum], wireWriteBytes=[minimum], closeNotify=0)
+            self.assertIs(report, helper.validate_github_tls_receipt(report, bindings=github_tls_binding_data()))
+            terminal["replyBytes"] = [minimum - 1]
+            with self.subTest(case=name), self.assertRaises(helper.CheckFailure):
+                helper.validate_github_tls_receipt(report, bindings=github_tls_binding_data())
+        for key, wrong in (("replyStops", []), ("replyStops", ["none", "none"]), ("replyStops", [None]),
+                ("replyStops", [{}]), ("replyStops", ["reply:timeout"]), ("replyStops", ["reply:OSError"]),
+                ("replyStops", ["none\n"]), ("replyBytes", [40629]), ("replyBytes", [40631]),
+                ("closeNotify", 0), ("closeNotify", True)):
+            self.reject_at(("cases", 9, "peer", "terminal", key), wrong)
+        # Body-only upper bounds must not leak to either old or new small cases.
+        for index, wire, reply in ((0, 128 * 1024, 64 * 1024), (9, 128 * 1024, 64 * 1024),
+                                   (10, 512 * 1024, 320 * 1024)):
+            connections = TLS_CASE_ROWS[index][1]
+            for key, limit in (("wireReadBytes", wire), ("wireWriteBytes", wire), ("replyBytes", reply)):
+                self.reject_at(("cases", index, "peer", "terminal", key), [limit + 1] * connections)
+
+    def test_tls_streaming_cooldown_and_target_projections_are_distinct(self):
+        for index, changes in (
+                (9, (("account", "observed"), ("cooldownSeconds", 120))),
+                (13, (("cooldownSeconds", None), ("cooldownSeconds", 7200), ("cooldownSeconds", 120.0),
+                      ("credentialExpiresAt", "2030-01-01T00:00:00Z"), ("cooldownBlocked", True))),
+                (14, (("account", "unavailable"), ("repository", "observed"), ("automation", "observed"),
+                      ("repositoryValue", {"id": "23"}), ("accountObservedAt", "2030-01-01T00:00:00Z")))):
+            for key, wrong in changes:
+                self.reject_at(("cases", index, "product", "projection", key), wrong)
+        for index in (9, 13, 14):
+            projection = github_tls_report_data()["cases"][index]["product"]["projection"]
+            for replacement in (None, {**projection, "extra": True},
+                                {key: value for key, value in projection.items() if key != "credentialExpiresAt"}):
+                self.reject_at(("cases", index, "product", "projection"), replacement)
 
     def test_tls_raw_receipt_duplicate_scalar_depth_size_and_encoding_bounds(self):
         raw = json.dumps(github_tls_report_data(), separators=(",", ":")).encode("utf-8")
@@ -4591,6 +4829,9 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             ("github-tls/receipt.json", ("allPeersSettled",), False),
             ("github-tls/receipt.json", ("cases", 0, "product", "owners", 0, "unknownLatched"), True),
             ("github-tls/receipt.json", ("cases", 0, "peer", "stdoutJoined"), False),
+            ("github-tls/receipt.json", ("cases", 9, "peer", "control", "writeComplete"), False),
+            ("github-tls/receipt.json", ("cases", 15, "peer", "terminal", "completion", "redirect", "empty"), False),
+            ("github-tls/receipt.json", ("cases", 13, "product", "projection", "cooldownSeconds"), None),
             ("github-tls-outer.json", ("waitObserved",), False),
             ("github-tls-outer.json", ("artifactSha256",), "f" * 64),
             ("github-tls-outer.json", ("exitCode",), 1),
@@ -4790,7 +5031,7 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     *(f"{phase}-{suffix}.json" for phase in self.CHECKS for suffix in ("started", "checks")))
         self.assertEqual(set(helper.GITHUB_TLS_DIRECTORIES), {*work, "github-tls"})
 
-        for mutation in (None, "finality", "unexpected", "changed-leaf", "late-entry"):
+        for mutation in (None, "finality", "unexpected", "missing-streaming", "changed-leaf", "late-entry"):
             nodes, counts, writes = {}, {}, {}
             events, scans, unlinked, removed = [], [], [], []
             def add(path, kind="file", *, size=32, inode=None, links=1):
@@ -4807,12 +5048,13 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             add(PurePosixPath(context["source"]), "directory")
             add(PurePosixPath(context["source"]) / "protected.py")
             directories = {root / name for name in work}
-            for name, *_ in TLS_CASE_ROWS:
+            case_rows = TLS_CASE_ROWS[:-1] if mutation == "missing-streaming" else TLS_CASE_ROWS
+            for name, *_ in case_rows:
                 directories.update((native / name, native / name / "control", native / name / "runtime"))
             for path in sorted(directories, key=lambda path: (len(path.parts), str(path))):
                 add(path, "directory")
             leaves = {root / name for name in private}
-            for name, *_ in TLS_CASE_ROWS:
+            for name, *_ in case_rows:
                 # These are actual settled producer names, including the
                 # reusable Case::settle release record (not an empty control).
                 leaves.update((native / name / "control/release-github-read-1.json",
@@ -4948,6 +5190,8 @@ class GitHubTLSWorkflowContractTests(unittest.TestCase):
         self.assertEqual(re.findall(r"ci_foundation\.py ([a-z-]+)'", workflow), ["prepare", "acquire", "compile", "github-tls", "clean"])
         self.assertEqual(len(re.findall(r"^        run:", workflow, re.MULTILINE)), 6)
         self.assertEqual(workflow.count("runs-on: ubuntu-24.04"), 1)
+        self.assertIn("Verify sixteen fixed TLS cases", workflow)
+        self.assertIn("T1-T3 and T6", workflow)
         self.assertEqual(workflow.count("permissions:"), 1)
         self.assertIn("permissions:\n  contents: read\n", workflow)
         self.assertNotIn("matrix:", workflow); self.assertNotIn("${{ secrets.", workflow)

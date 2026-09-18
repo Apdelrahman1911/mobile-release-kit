@@ -83,6 +83,64 @@ directory() {
         && uid == original_uid )) || refuse directory
 }
 
+# BEGIN PURE RESOLVER OWNERSHIP POLICY
+# These two functions inspect supplied strings only. Inert contract tests run
+# these exact definitions, never this privileged namespace entry.
+resolver_service_uid() {
+    [[ $# == 2 ]] || return 1
+    local rows=$1 runner_uid=$2 line separators name password uid gid gecos home shell
+    local found=0 result=
+    [[ ${#rows} -gt 0 && ${#rows} -le 65536 && $rows == *$'\n'
+        && $runner_uid =~ ^[1-9][0-9]{0,9}$ ]] || return 1
+    (( runner_uid < 4294967295 )) || return 1
+    while IFS= read -r line; do
+        [[ ${line%%:*} == systemd-resolve ]] || continue
+        (( found += 1 ))
+        (( found == 1 )) || return 1
+        separators=${line//[^:]/}
+        [[ ${#separators} == 6 ]] || return 1
+        IFS=: read -r name password uid gid gecos home shell <<< "$line"
+        [[ $name == systemd-resolve && $uid =~ ^[1-9][0-9]{0,9}$
+            && $gid =~ ^(0|[1-9][0-9]{0,9})$ ]] || return 1
+        (( uid < 4294967295 && gid < 4294967295 && uid != runner_uid )) || return 1
+        result=$uid
+    done <<< "$rows"
+    (( found == 1 )) || return 1
+    printf '%s\n' "$result"
+}
+
+resolver_exact_owner() {
+    [[ $# == 4 ]] || return 1
+    local pathname=$1 observed_uid=$2 service_uid=$3 runner_uid=$4
+    [[ $observed_uid =~ ^(0|[1-9][0-9]{0,9})$
+        && $service_uid =~ ^(0|[1-9][0-9]{0,9})$
+        && $runner_uid =~ ^[1-9][0-9]{0,9}$ ]] || return 1
+    (( observed_uid < 4294967295 && service_uid < 4294967295
+        && runner_uid < 4294967295 )) || return 1
+    case "$pathname" in
+        /etc/resolv.conf) (( observed_uid == 0 )) || return 1 ;;
+        /run/systemd/resolve/stub-resolv.conf|/run/systemd/resolve/resolv.conf)
+            (( observed_uid == 0 || (service_uid > 0 && observed_uid == service_uid
+                && service_uid != runner_uid) )) || return 1 ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$observed_uid"
+}
+# END PURE RESOLVER OWNERSHIP POLICY
+
+protected_host_directory() {
+    local pathname=$1 service_uid=$2 metadata mode uid
+    # canonical() intentionally rejects '/', so only this literal root gets
+    # the narrow exception. No caller-selected or intermediate alias is allowed.
+    [[ $pathname == / ]] || canonical "$pathname"
+    [[ -d $pathname && ! -L $pathname ]] || refuse directory
+    metadata=$(/usr/bin/stat --format='%f %u' -- "$pathname" 2>/dev/null) || refuse metadata
+    [[ $metadata =~ ^[0-9a-f]+\ [0-9]+$ ]] || refuse metadata
+    IFS=' ' read -r mode uid <<< "$metadata"
+    (( (16#$mode & 0170000) == 0040000 && (16#$mode & 07022) == 0
+        && (uid == 0 || (service_uid > 0 && uid == service_uid)) )) || refuse directory
+}
+
 hash_is() {
     local pathname=$1 expected=$2 result
     result=$(/usr/bin/sha256sum -- "$pathname" 2>/dev/null) || refuse hash
@@ -146,22 +204,66 @@ exact_config "$config_root/hosts" "$hosts"
 exact_config "$config_root/resolv.conf" "$resolver"
 exact_config "$config_root/nsswitch.conf" "$nsswitch"
 
-# Ubuntu's resolver is sometimes a systemd-owned symlink. Only these literal
-# canonical target spellings are admitted; never remove/replace that link or
-# write through it. hosts/nsswitch do not receive a generic alias exception.
+# Ubuntu's resolver can be a root-owned alias to a systemd-resolve-owned runtime
+# file. Admit that exact named service, not any nonroot owner or the runner.
+# Never change ownership, remove the alias, or write through it.
 diagnostic_stage=host-resolver-path
+resolver_alias_stamp=$(stamp /etc/resolv.conf)
 resolver_target=$(/usr/bin/readlink -e -- /etc/resolv.conf 2>/dev/null) || refuse resolver
 case "$resolver_target" in
     /etc/resolv.conf|/run/systemd/resolve/stub-resolv.conf|/run/systemd/resolve/resolv.conf) ;;
     *) refuse resolver ;;
 esac
-for pathname in /etc/hosts "$resolver_target" /etc/nsswitch.conf; do
+host_directories=(/ /etc)
+service_uid=0
+diagnostic_stage=host-resolver
+for pathname in "${host_directories[@]}"; do protected_host_directory "$pathname" 0; done
+if [[ $resolver_target != /etc/resolv.conf ]]; then
+    [[ -L /etc/resolv.conf ]] || refuse resolver
+    alias_metadata=$(/usr/bin/stat --format='%f %h %u' -- /etc/resolv.conf 2>/dev/null) || refuse metadata
+    [[ $alias_metadata =~ ^[0-9a-f]+\ [0-9]+\ [0-9]+$ ]] || refuse metadata
+    IFS=' ' read -r alias_mode alias_links alias_uid <<< "$alias_metadata"
+    (( (16#$alias_mode & 0170000) == 0120000 && alias_links == 1 && alias_uid == 0 )) || refuse resolver
+    alias_target=$(/usr/bin/readlink -- /etc/resolv.conf 2>/dev/null) || refuse resolver
+    [[ $alias_target == "$resolver_target" || $alias_target == "../${resolver_target#/}" ]] || refuse resolver
+    for pathname in /run /run/systemd; do protected_host_directory "$pathname" 0; done
+    canonical /run/systemd/resolve
+    canonical "$resolver_target"
+    target_uid=$(/usr/bin/stat --format='%u' -- "$resolver_target" 2>/dev/null) || refuse metadata
+    parent_uid=$(/usr/bin/stat --format='%u' -- /run/systemd/resolve 2>/dev/null) || refuse metadata
+    if [[ $target_uid != 0 || $parent_uid != 0 ]]; then
+        ordinary /etc/passwd 0 65536
+        passwd_stamp=$(stamp /etc/passwd)
+        passwd_rows=
+        # NUL, overflow and unterminated records cannot select an account. No
+        # NSS/getent/id lookup, service operation or numeric UID guess is used.
+        if IFS= read -r -d '' -n 65537 passwd_rows < /etc/passwd; then refuse identity; fi
+        [[ $(stamp /etc/passwd) == "$passwd_stamp" ]] || refuse changed
+        service_uid=$(resolver_service_uid "$passwd_rows" "$original_uid") || refuse identity
+        unset passwd_rows
+    fi
+    protected_host_directory /run/systemd/resolve "$service_uid"
+    host_directories+=(/run /run/systemd /run/systemd/resolve)
+fi
+observed_uid=$(/usr/bin/stat --format='%u' -- "$resolver_target" 2>/dev/null) || refuse metadata
+resolver_owner=$(resolver_exact_owner "$resolver_target" "$observed_uid" "$service_uid" "$original_uid") || refuse file-owner
+ordinary "$resolver_target" "$resolver_owner" 65536
+resolver_target_stamp=$(stamp "$resolver_target")
+host_directory_stamps=()
+for pathname in "${host_directories[@]}"; do host_directory_stamps+=("$(stamp "$pathname")"); done
+for pathname in /etc/hosts /etc/nsswitch.conf; do
     case "$pathname" in
         /etc/hosts) diagnostic_stage=host-hosts ;;
         /etc/nsswitch.conf) diagnostic_stage=host-nsswitch ;;
-        *) diagnostic_stage=host-resolver ;;
     esac
     ordinary "$pathname" 0 65536
+done
+diagnostic_stage=host-resolver
+[[ $(stamp /etc/resolv.conf) == "$resolver_alias_stamp"
+    && $(/usr/bin/readlink -e -- /etc/resolv.conf 2>/dev/null) == "$resolver_target"
+    && $(stamp "$resolver_target") == "$resolver_target_stamp" ]] || refuse changed
+for index in "${!host_directories[@]}"; do
+    [[ $(stamp "${host_directories[index]}") == "${host_directory_stamps[index]}" ]] || refuse changed
 done
 
 # These fixed, synchronous system tools start no service and leave no detached

@@ -1,4 +1,4 @@
-"""Fixed synthetic T1--T3 peer. Not a general server or production trust path.
+"""Fixed synthetic T1--T3/T6 peer. Not a general server or production trust path.
 
 SOURCE authoring is not permission to run this file. Only the independently
 admitted disposable Linux namespace entry may start it, with an original Child
@@ -12,19 +12,25 @@ import time
 
 _BEGIN = time.monotonic()
 
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import resource
+import select
 import socket
 import ssl
 import stat
 import sys
 
-CASES = ("T1-source", "T1-zip", "T2-root", "T2-name", "T2-expired",
-         "T3-clean", "T3-ragged", "T3-length", "T3-chunk")
+ORIGINAL_CASES = ("T1-source", "T1-zip", "T2-root", "T2-name", "T2-expired",
+                  "T3-clean", "T3-ragged", "T3-length", "T3-chunk")
+STREAMING_CASES = ("T6-header", "T6-body", "T6-chunk-metadata", "T6-unauthorized",
+                   "T6-rate-expiry", "T6-target", "T6-redirect")
+CASES = ORIGINAL_CASES + STREAMING_CASES
+EARLY_REFUSAL_CASES = frozenset(case for case in STREAMING_CASES if case != "T6-target")
 SCOPE = "github-tls-peer-v1"
 HOST = "api.github.com"
 AUTHORIZATION = b"Bearer INERT_NOT_A_CREDENTIAL"
@@ -33,6 +39,7 @@ WIRE_LIMIT = 128 * 1024
 REPLY_LIMIT = 64 * 1024
 FIXTURE_LIMIT = 16 * 1024
 CASE_SECONDS = 16.0
+REDIRECT_PORT = 18889
 AUTH_ALERTS = frozenset({"TLSV1_ALERT_UNKNOWN_CA", "SSLV3_ALERT_BAD_CERTIFICATE",
                          "TLSV1_ALERT_CERTIFICATE_UNKNOWN", "SSLV3_ALERT_CERTIFICATE_EXPIRED"})
 
@@ -148,31 +155,60 @@ def script(case: str) -> tuple[tuple[bytes, bytes, bool], ...]:
         paths.append(b"/repos/owner/app/actions/workflows?per_page=100&page=2")
         bodies.append({"total_count": 101, "workflows": rows[100:]})
     paths.append(b"/repos/owner/app")
-    bodies.append(repository)
+    bodies.append({**repository, "id": 23} if case == "T6-target" else repository)
     result = []
     for index, (path, body) in enumerate(zip(paths, bodies, strict=True)):
         encoded = json.dumps(body, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
         framing = b""
         payload = encoded
+        status_line = b"HTTP/1.1 200 OK\r\n"
         if index == 0 and case == "T3-length":
             framing = b"Content-Length: " + str(len(encoded) + 1).encode("ascii") + b"\r\n"
         elif index == 0 and case == "T3-chunk":
             framing = b"Transfer-Encoding: chunked\r\n"
             payload = format(len(encoded) + 1, "x").encode("ascii") + b"\r\n" + encoded
-        reply = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n" + framing + b"\r\n" + payload
-        require(len(reply) <= REPLY_LIMIT, "script")
+        elif index == 0 and case == "T6-header":
+            # Five individually valid8107-byte fields cross aggregate32KiB,
+            # not the8KiB line or64-field limit. No malformed syntax substitute.
+            framing = b"".join(b"X-" + str(i).encode("ascii") + b": " + b"a" * 8100 + b"\r\n" for i in range(5))
+        elif index == 0 and case == "T6-body":
+            # Valid JSON if consumed completely, exactly256KiB+1 body bytes.
+            # No Content-Length/chunk precheck: refusal must occur during reads.
+            payload = b'{"pad":"' + b"x" * (256 * 1024 + 1 - 10) + b'"}'
+        elif index == 0 and case == "T6-chunk-metadata":
+            framing = b"Transfer-Encoding: chunked\r\n"
+            decoded = b"{" + b" " * 298 + b"}"
+            # Each extension line is116 bytes, each data chunk one byte. The
+            # supported grammar's35405 framing bytes cross32KiB before4096
+            # chunks, body limits or invalid JSON can determine the result.
+            payload = b"".join(b"1;x=" + b"a" * 110 + b"\r\n" + bytes([byte]) + b"\r\n" for byte in decoded) + b"0\r\n\r\n"
+        elif index == 0 and case == "T6-unauthorized":
+            status_line = b"HTTP/1.1 401 Unauthorized\r\n"
+            payload = b"irrelevant-not-json"
+        elif index == 0 and case == "T6-rate-expiry":
+            status_line = b"HTTP/1.1 429 Too Many Requests\r\n"
+            framing = b"Retry-After: 120\r\nGitHub-Authentication-Token-Expiration: unsupported\r\n"
+            payload = b"irrelevant-not-json"
+        elif index == 0 and case == "T6-redirect":
+            status_line = b"HTTP/1.1 302 Found\r\n"
+            framing = b"Location: https://127.0.0.1:18889/redirect\r\n"
+            payload = b"irrelevant-not-json"
+        reply = status_line + b"Content-Type: application/json\r\nConnection: close\r\n" + framing + b"\r\n" + payload
+        require(len(reply) <= (320 * 1024 if case == "T6-body" else REPLY_LIMIT), "script")
         result.append((path, reply, case != "T3-ragged"))
-        if case.startswith("T2-") or case in {"T3-ragged", "T3-length", "T3-chunk"}:
+        if case.startswith("T2-") or case in {"T3-ragged", "T3-length", "T3-chunk"} or case in EARLY_REFUSAL_CASES:
             break
     require(1 <= len(result) <= 5, "script")
     return tuple(result)
 
 
 class Connection:
-    def __init__(self, original: socket.socket) -> None:
+    def __init__(self, original: socket.socket, *, wire_limit: int = WIRE_LIMIT, reply_limit: int = REPLY_LIMIT) -> None:
         self.original = original
+        self.wire_limit, self.reply_limit = wire_limit, reply_limit
         self.incoming = self.outgoing = self.tls = None
         self.read_bytes = self.written_bytes = self.reply_bytes = 0
+        self.reply_stage, self.reply_stop = "reply", "none"
         self.close_claimed = self.closed = False
 
     def attach(self, context: ssl.SSLContext) -> None:
@@ -185,8 +221,8 @@ class Connection:
     def flush(self) -> None:
         while self.outgoing.pending:
             remaining()
-            require(self.written_bytes < WIRE_LIMIT, "wire-limit")
-            block = self.outgoing.read(min(16384, self.outgoing.pending, WIRE_LIMIT - self.written_bytes))
+            require(self.written_bytes < self.wire_limit, "wire-limit")
+            block = self.outgoing.read(min(16384, self.outgoing.pending, self.wire_limit - self.written_bytes))
             require(bool(block), "wire-limit")
             view = memoryview(block)
             while view:
@@ -199,9 +235,9 @@ class Connection:
 
     def receive(self) -> None:
         self.flush()
-        require(self.read_bytes < WIRE_LIMIT, "wire-limit")
+        require(self.read_bytes < self.wire_limit, "wire-limit")
         self.original.settimeout(remaining())
-        block = self.original.recv(min(16384, WIRE_LIMIT - self.read_bytes))
+        block = self.original.recv(min(16384, self.wire_limit - self.read_bytes))
         remaining()
         if block:
             self.read_bytes += len(block)
@@ -259,13 +295,14 @@ class Connection:
             except ssl.SSLWantWriteError:
                 self.flush()
                 continue
-            require(0 < count <= len(view) and self.reply_bytes + count <= REPLY_LIMIT, "script")
+            require(0 < count <= len(view) and self.reply_bytes + count <= self.reply_limit, "script")
             self.reply_bytes += count
             view = view[count:]
             self.flush()
         if not close_notify:
             # Same application records; no TLS unwrap/close-notify on this path.
             return False
+        self.reply_stage = "notify"
         try:
             self.tls.unwrap()
         except (ssl.SSLWantReadError, ssl.SSLWantWriteError):
@@ -283,6 +320,95 @@ class Connection:
             self.closed = True
 
 
+def reply_close(case: str, connection: Connection, error: BaseException) -> None:
+    """Closed expected client-close categories, only around the actual reply.
+
+    These do not prove what the client read. The separately checked product
+    projection and original settlement remain mandatory. Timeout, arbitrary
+    OSError/SSLError and any handshake/request/sole-close failure are not allowed.
+    """
+    require(case in EARLY_REFUSAL_CASES and connection.reply_stage in {"reply", "notify"}, "reply-close")
+    kind = None
+    if type(error) is BrokenPipeError and error.errno == errno.EPIPE:
+        kind = "broken-pipe"
+    elif type(error) is ConnectionResetError and error.errno == errno.ECONNRESET:
+        kind = "connection-reset"
+    elif type(error) is ssl.SSLEOFError and error.errno == ssl.SSL_ERROR_EOF and error.reason == "UNEXPECTED_EOF_WHILE_READING":
+        kind = "tls-eof"
+    elif type(error) is ssl.SSLZeroReturnError and error.errno == ssl.SSL_ERROR_ZERO_RETURN:
+        kind = "tls-close-notify"
+    require(kind is not None, "reply-close")
+    connection.reply_stop = connection.reply_stage + ":" + kind
+
+
+def no_pending(listener: socket.socket, slot: int, unexpected: list, completion: dict) -> bool:
+    """A single nonblocking accept, retaining any actual original before checks.
+
+    Fixed slots are allocated before readiness. Never drain, replace or discard
+    an accepted socket to turn an unexpected connection into negative evidence.
+    """
+    require(unexpected[slot] is None, "unexpected-connection")
+    try:
+        unexpected[slot], _address = listener.accept()
+    except BlockingIOError:
+        return True
+    if slot == 0:
+        completion["primaryUnexpected"] += 1
+    else:
+        completion["redirect"]["unexpected"] += 1
+    raise Refused("unexpected-connection")
+
+
+def complete_listener_observation(listener: socket.socket, redirect: socket.socket | None,
+                                  control_fd: int, unexpected: list, completion: dict) -> None:
+    """Wait for the original parent's S+EOF, then probe the same endpoints.
+
+    The parent alone correlates this byte with positive original product
+    settlement. Our byte/EOF/probe facts and its retained writer join are distinct.
+    No sleep, renewed endpoint, replacement descriptor or inferred readiness.
+    """
+    listener.setblocking(False)
+    endpoints = (listener, redirect)
+    readers = [listener, control_fd]
+    if redirect is not None:
+        redirect.setblocking(False)
+        readers.append(redirect)
+    signal = bytearray()
+    while True:
+        ready, _, _ = select.select(readers, [], [], remaining())
+        remaining()
+        # An actual pending connection wins even if S/EOF was readable in the
+        # same select observation. Each accepted original stays in its fixed slot.
+        for slot, endpoint in enumerate(endpoints):
+            if endpoint is not None and endpoint in ready:
+                no_pending(endpoint, slot, unexpected, completion)
+        if control_fd not in ready:
+            continue
+        try:
+            block = os.read(control_fd, 2 - len(signal))
+        except BlockingIOError:
+            continue
+        if block:
+            signal.extend(block)
+            completion["bytes"] = len(signal)
+            require(signal == b"S", "control")
+        else:
+            completion["eof"] = True
+            require(signal == b"S", "control")
+            break
+    # Positive finality comes from the parent's original book. Only these real
+    # post-rendezvous BlockingIOError observations establish no pending accepts.
+    for slot, endpoint in enumerate(endpoints):
+        if endpoint is not None:
+            remaining()
+            empty = no_pending(endpoint, slot, unexpected, completion)
+            remaining()
+            if slot == 0:
+                completion["primaryEmpty"] = empty
+            else:
+                completion["redirect"]["empty"] = empty
+
+
 def emit(value: dict) -> None:
     raw = json.dumps(value, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii") + b"\n"
     require(len(raw) <= 4096, "output")
@@ -298,22 +424,41 @@ def main() -> int:
         os.write(2, b"github-tls-peer: admission\n")
         return 71
     case = sys.argv[1]
+    controlled = case in STREAMING_CASES
+    completion = {"bytes": 0, "eof": False, "closed": False,
+                  "primaryEmpty": False, "primaryUnexpected": 0, "primaryClosed": False,
+                  "redirect": {"empty": False, "unexpected": 0, "closed": False}
+                              if case == "T6-redirect" else None} if controlled else None
     base = {"schemaVersion": 1, "scope": SCOPE, "case": case}
     record = {**base, "state": "finished", "status": "failed", "code": "admission",
               "connections": 0, "handshakes": 0, "requests": 0, "decryptedBytes": 0,
               "authBytes": 0, "closeNotify": 0, "tlsRefused": False,
               "wireReadBytes": [], "wireWriteBytes": [], "replyBytes": [], "allSocketsClosed": False}
     listener, listener_closed, connections = None, False, []
+    redirect, redirect_closed = None, False
+    control_fd, control_closed, control_close_claimed = (0 if controlled else None), False, False
+    # Fixed raw-socket custody slots exist before either listener's readiness;
+    # assignment, not a fallible wrapper/list append, retains any extra accept.
+    unexpected, unexpected_closed = [None, None], [False, False]
     unregistered = None  # Original accept result remains owned during allocation.
     complete = False
     try:
         directory = admit()
+        if control_fd is not None:
+            original_control = os.fstat(control_fd)
+            require(stat.S_ISFIFO(original_control.st_mode) and original_control.st_uid == os.geteuid(), "control")
+            os.set_blocking(control_fd, False)
         cert_name = {"T2-name": "wrong-san.pem", "T2-expired": "api-expired.pem"}.get(case, "api-valid.pem")
         certificate, key = directory / cert_name, directory / "server-key.pem"
         before = (fixed_body(certificate, FIXTURE_LIMIT), fixed_body(key, FIXTURE_LIMIT))
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.keylog_filename = None
+        if controlled:
+            # The new receipt's conservative outbound-wire floors assume no
+            # TLS compression. Observe the selected runtime option explicitly;
+            # never infer client consumption from queued TLS plaintext bytes.
+            require(bool(context.options & ssl.OP_NO_COMPRESSION), "tls-state")
         context.set_alpn_protocols(["http/1.1"])
         context.load_cert_chain(str(certificate), str(key))
         require(before == (fixed_body(certificate, FIXTURE_LIMIT), fixed_body(key, FIXTURE_LIMIT)), "inputs")
@@ -337,11 +482,23 @@ def main() -> int:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("127.0.0.1", 443))
         listener.listen(1)
+        if case == "T6-redirect":
+            # Original sink exists before the302 can be consumed. It is plain
+            # TCP intentionally: any redirect connection, not a completed TLS
+            # handshake, fails this fixed no-follow observation.
+            remaining()
+            redirect = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            redirect.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            redirect.bind(("127.0.0.1", REDIRECT_PORT))
+            redirect.listen(1)
+            redirect.setblocking(False)
         emit({**base, "state": "ready"})
         for index, (path, reply, clean) in enumerate(schedule):
             listener.settimeout(remaining())
             unregistered, address = listener.accept()
-            connection = Connection(unregistered)
+            connection = Connection(unregistered,
+                                    wire_limit=512 * 1024 if case == "T6-body" else WIRE_LIMIT,
+                                    reply_limit=320 * 1024 if case == "T6-body" else REPLY_LIMIT)
             connections.append(connection)
             unregistered = None
             record["connections"] += 1
@@ -362,10 +519,21 @@ def main() -> int:
                     require(record["tlsRefused"] and sni_count[0] == 1, "tls-alert")
                 else:
                     require(sni_count[0] == index + 1, "unexpected-request")
-                    record["closeNotify"] += int(connection.respond(reply, clean))
+                    try:
+                        notified = connection.respond(reply, clean)
+                    except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError, ssl.SSLZeroReturnError) as error:
+                        # This narrow catch surrounds ONLY a post-request reply,
+                        # never handshake, request, sole-close or arbitrary IO.
+                        if case not in EARLY_REFUSAL_CASES:
+                            raise  # Preserve the original nine error semantics.
+                        reply_close(case, connection, error)
+                        notified = False
+                    record["closeNotify"] += int(notified)
             finally:
                 connection.close()
         require(record["connections"] == len(schedule), "script")
+        if completion is not None:
+            complete_listener_observation(listener, redirect, control_fd, unexpected, completion)
         complete = True
         record["code"] = None
     except Refused as error:
@@ -393,18 +561,47 @@ def main() -> int:
                 connection.close()
             except BaseException:
                 record["code"] = record["code"] or "close"
+        for slot, original in enumerate(unexpected):
+            if original is not None:
+                try:
+                    original.close()  # Sole attempt; retain on uncertain close.
+                    unexpected_closed[slot] = True
+                except BaseException:
+                    record["code"] = record["code"] or "close"
         if listener is not None:
             try:
                 listener.close()
                 listener_closed = True
             except BaseException:
                 record["code"] = record["code"] or "close"
+        if redirect is not None:
+            try:
+                redirect.close()
+                redirect_closed = True
+            except BaseException:
+                record["code"] = record["code"] or "close"
+        if control_fd is not None and not control_close_claimed:
+            control_close_claimed = True
+            try:
+                os.close(control_fd)  # Original inherited fd0; no dup/reopen.
+                control_closed = True
+            except BaseException:
+                record["code"] = record["code"] or "close"
         record["wireReadBytes"] = [connection.read_bytes for connection in connections]
         record["wireWriteBytes"] = [connection.written_bytes for connection in connections]
         record["replyBytes"] = [connection.reply_bytes for connection in connections]
         record["allSocketsClosed"] = (listener_closed and unregistered_closed
-                                      and all(connection.closed for connection in connections))
-        if complete and record["allSocketsClosed"] and record["code"] is None:
+                                      and all(connection.closed for connection in connections)
+                                      and all(original is None or unexpected_closed[slot] for slot, original in enumerate(unexpected))
+                                      and (redirect is None or redirect_closed))
+        if completion is not None:
+            completion["closed"] = control_closed
+            completion["primaryClosed"] = listener_closed
+            if completion["redirect"] is not None:
+                completion["redirect"]["closed"] = redirect_closed
+            record["completion"] = completion
+            record["replyStops"] = [connection.reply_stop for connection in connections]
+        if complete and record["allSocketsClosed"] and (not controlled or control_closed) and record["code"] is None:
             record["status"] = "passed"
         try:
             emit(record)

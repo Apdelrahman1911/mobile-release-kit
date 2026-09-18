@@ -103,3 +103,28 @@ quit integration, real TLS/socket faults, exact CA/runtime/loader custody and
 each supported platform require separately reviewed disposable native evidence.
 No Linux mock is macOS/Windows evidence. Packaging, credential interoperability,
 GitHub App registration and complete Desktop delivery remain separate work.
+
+The dedicated development TLS fixture now describes sixteen fixed synthetic
+cases: the original nine T1–T3 trust/framing cases plus T6 aggregate headers,
+streamed body, chunk metadata, unauthorized early stop, invalid expiry with a
+preserved 120-second cooldown, closing repository-identity change and redirect
+refusal. This is source preparation, **not a passing native result**. The
+original T1–T3 run `35303950385` / attempt 1 failed in its outer native step;
+cleanup was skipped, and missing diagnostics do not establish its cause.
+
+For the seven new cases, success additionally requires the original product
+settlement, original completion-writer return/join before the unchanged peer
+deadline, and separate peer-observed exact byte+EOF and original-listener
+finality. The fixed redirect sink must independently observe no connection and
+close. Only the body case receives larger byte ceilings. Narrow expected
+client-close categories retain actual sent-byte floors; they do not measure
+client reads or heap allocation. The same workflow compiles once, validates the
+complete closed receipt and independent outer wait, then cleans only its finite
+positively settled inventory. Failed or unknown finality cannot authorize that
+cleanup. No additional workflow, product gate or public output path is added.
+
+Ambient proxy/default-CA/keylog behavior, real network deadlines, native trust
+file faults, packaged SSL-runtime custody and native GUI/document callbacks
+remain unqualified. A sixteen-case receipt would qualify only its exact source,
+fixture and original run—not real GitHub authentication, every supported
+platform, standalone distribution or production activation.
