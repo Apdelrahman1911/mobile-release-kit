@@ -30,6 +30,8 @@ pub(crate) use hosted_tests::github_fixture::{GitHubDocumentFixtureBinding, GitH
 pub(crate) use hosted_tests::github_tls::GitHubTlsRuntime;
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use hosted_tests::session_gtk_probe;
+#[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use hosted_tests::metadata_fixture_probe;
 #[cfg(test)]
 #[path = "passive_management_tests.rs"]
 mod management_tests;

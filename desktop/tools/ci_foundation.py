@@ -75,6 +75,26 @@ WORKFLOW_NATIVE_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target",
 WORKFLOW_OWNER_TEST = "edit_owner::hosted_tests::hosted_workflow_edit_owner_original_resources"
 WORKFLOW_TRANSACTION_EOF_TEST = "edit_owner::hosted_tests::hosted_workflow_transaction_eof_original_resources"
 WORKFLOW_PARTITIONS = ("ordinary", "committed-fsync", "committed-close")
+METADATA_NATIVE_SCOPE = "metadata-text-apply-native-v1"
+METADATA_NATIVE_EVIDENCE_SCOPE = "desktop-metadata-text-apply-native-only-v1"
+METADATA_NATIVE_WORKFLOW = WORKFLOW_NATIVE_WORKFLOW
+METADATA_NATIVE_REF = "refs/heads/verify/desktop-metadata-text-apply-native"
+METADATA_NATIVE_PHASES = ("prepare", "acquire", "compile", "metadata-owner", "metadata-transaction-eof", "metadata-core", "clean")
+METADATA_NATIVE_CHECKS = {
+    "acquire": ("rust-toolchain-install", "rust-version-target", "metadata-locked-headless-metadata"),
+    "compile": ("rust-version-target", "headless-test-compile-only"),
+    "metadata-owner": ("rust-version-target", "metadata-owner-source-native-contract", "metadata-owner-source-receipt",
+                       "metadata-owner-zip-native-contract", "metadata-owner-zip-receipt"),
+    "metadata-transaction-eof": ("rust-version-target", "metadata-transaction-eof-native-contract", "metadata-eof-receipt"),
+    "metadata-core": ("metadata-core-ordinary", "metadata-core-ordinary-receipt",
+                      "metadata-core-committed-fsync", "metadata-core-committed-fsync-receipt",
+                      "metadata-core-committed-close", "metadata-core-committed-close-receipt"),
+}
+METADATA_NATIVE_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target",
+                               "metadata-owner-source", "metadata-owner-zip", "metadata-transaction-eof")
+METADATA_OWNER_TEST = "edit_owner::hosted_tests::hosted_metadata_text_edit_owner_original_resources"
+METADATA_TRANSACTION_EOF_TEST = "edit_owner::hosted_tests::hosted_metadata_text_transaction_eof_original_resources"
+METADATA_PARTITIONS = ("ordinary", "committed-fsync", "committed-close")
 BOUNDARY_PHASES = ("prepare", "acquire", "compile", "native", "config-owner", "config-task-loss",
                    "config-owner-delta", "config-transaction-eof", "config-core", "clean")
 GTK_COMPILE_SOURCES = (
@@ -601,6 +621,168 @@ GITHUB_TLS_TOOLS = {
     "sysctl": "/usr/sbin/sysctl", "setpriv": "/usr/bin/setpriv", "stat": "/usr/bin/stat",
     "sha256sum": "/usr/bin/sha256sum", "readlink": "/usr/bin/readlink", "findmnt": "/usr/bin/findmnt",
 }
+# Closed metadata DATA from the independently fixed fixture contract; never a core import.
+METADATA_CORE_SOURCES = {'apiContracts': 'src/mobile_release/api/contracts.py',
+ 'buildInputs': 'src/mobile_release/build_inputs.py',
+ 'cancellation': 'src/mobile_release/cancellation.py',
+ 'catalogue': 'src/mobile_release/api/_catalog.py',
+ 'configEdit': 'src/mobile_release/config_edit.py',
+ 'configPayloads': 'src/mobile_release/config_payloads.py',
+ 'configuration': 'src/mobile_release/config.py',
+ 'editControl': 'src/mobile_release/_desktop_edit_control.py',
+ 'editEngine': 'src/mobile_release/_desktop_edit_engine.py',
+ 'editProtocol': 'src/mobile_release/_desktop_edit_protocol.py',
+ 'fixture': 'tests/native_desktop_config.py',
+ 'metadataApi': 'src/mobile_release/api/_metadata_text.py',
+ 'metadataEdit': 'src/mobile_release/metadata_text_edit.py',
+ 'metadataPolicy': 'src/mobile_release/metadata.py',
+ 'metadataText': 'src/mobile_release/metadata_text.py',
+ 'passiveEngine': 'src/mobile_release/_desktop_engine.py',
+ 'resource': 'src/mobile_release/api/data/metadata-text-help-v1.json',
+ 'rootCustody': 'src/mobile_release/init_workspace_custody.py',
+ 'snapshot': 'src/mobile_release/api/_snapshot.py',
+ 'transaction': 'src/mobile_release/init_transaction.py'}
+METADATA_PAYLOAD_BINDINGS = {'configHashes': {'publicStore': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94',
+                  'releaseStore': 'caabad94b27c616e9deaf8570ded7edca9a41de86ca3e1982ab6e4a3f57073f1'},
+ 'ignoreSha256': 'e60087ecefac81e23666444e6aea9490b3fc42b2510f566cfd4aa5a36a35b7d4',
+ 'fieldHashes': {'android': {'full_description.txt': '52002e38814d0b0a78bc21cad572d5fa265ad3f9f72a672829982e889a4422fa',
+                             'short_description.txt': '233524e36ed836f2fc5b2754e73ff6f125f443d1bb57770942368c2fb90a0c63',
+                             'title.txt': '17c61ad21566db1d3e8bc33087e2ea25eced56a923addd81a3a80305dea3ee94'},
+                 'ios': {'description.txt': '417b4365404b44f1c83e478dbebb43864924c858fcca7346aac4db1b9f2c6ee5',
+                         'keywords.txt': 'd563110a53a8d4b4e320f549a957fcbc6d0f8ca14a02f77dfce9bdfaa2e0f866',
+                         'privacy_url.txt': '5cb73fc576bb124e3930e583584ad86d8052264a12c273cf207874b3c82aa5ee',
+                         'release_notes.txt': '4ec8e8f6389b0ece64c0f2ada003d134934dccba9c942ebbdfbadeb18c2ae5c9',
+                         'support_url.txt': '0cf21b6bc2716d68e9e9b41edda65445ab46e022fa94eeaa150c3c4045da1104'}}}
+METADATA_CORE_ROWS = {
+    'ordinary': (
+        ('configured-platform-disabled', 'not_started', 'not_created', 'settled', 'invalid_config', False,
+         {'journalAbsent': True, 'revisionAbsent': True, 'scopesClosed': 1, 'snapshotUnchanged': True, 'targetDescriptorAbsent': True}),
+        ('configured-locale-absent', 'not_started', 'not_created', 'settled', 'invalid_config', False,
+         {'journalAbsent': True, 'revisionAbsent': True, 'scopesClosed': 1, 'snapshotUnchanged': True, 'targetDescriptorAbsent': True}),
+        ('legacy-four-ignore-rules-refused', 'not_started', 'not_created', 'settled', 'ignore_conflict', False,
+         {'journalAbsent': True, 'revisionAbsent': True, 'scopesClosed': 1, 'snapshotUnchanged': True, 'targetDescriptorAbsent': True}),
+        ('ambiguous-ignore-negation-refused', 'not_started', 'not_created', 'settled', 'ignore_conflict', False,
+         {'journalAbsent': True, 'revisionAbsent': True, 'scopesClosed': 1, 'snapshotUnchanged': True, 'targetDescriptorAbsent': True}),
+        ('config-retarget-before-prepare', 'not_started', 'not_created', 'settled', 'stale_revision', False,
+         {'authorityRetired': True, 'changeObserved': True, 'journalAbsent': True, 'scopesClosed': 2, 'selectionNotRetargeted': True, 'snapshotUnchanged': True}),
+        ('ignore-bytes-before-apply', 'not_started', 'not_created', 'settled', 'stale_revision', False,
+         {'authorityRetired': True, 'changeObserved': True, 'journalAbsent': True, 'scopesClosed': 3, 'selectionNotRetargeted': True, 'snapshotUnchanged': True}),
+        ('dependency-only-parent-mode-before-apply', 'not_started', 'not_created', 'settled', 'stale_revision', False,
+         {'authorityRetired': True, 'changeObserved': True, 'journalAbsent': True, 'scopesClosed': 3, 'selectionNotRetargeted': True, 'snapshotUnchanged': True}),
+        ('target-parent-inode-before-prepare', 'not_started', 'not_created', 'settled', 'stale_revision', False,
+         {'authorityRetired': True, 'changeObserved': True, 'journalAbsent': True, 'scopesClosed': 2, 'selectionNotRetargeted': True, 'snapshotUnchanged': True}),
+        ('target-parent-mode-before-apply', 'not_started', 'not_created', 'settled', 'stale_revision', False,
+         {'authorityRetired': True, 'changeObserved': True, 'journalAbsent': True, 'scopesClosed': 3, 'selectionNotRetargeted': True, 'snapshotUnchanged': True}),
+        ('missing-target-parent-appears-before-apply', 'not_started', 'not_created', 'settled', 'stale_revision', False,
+         {'authorityRetired': True, 'changeObserved': True, 'journalAbsent': True, 'scopesClosed': 3, 'selectionNotRetargeted': True, 'snapshotUnchanged': True}),
+        ('noop-last-leaf-ctime-after-recheck', 'not_started', 'not_created', 'settled', 'stale_revision', False,
+         {'changedOnlyDeclaredFacts': True, 'consumingTargetChecks': 1, 'injections': 1, 'journalAbsent': True, 'recheckReturns': 1, 'renameProbes': 0, 'scopesClosed': 3, 'snapshotUnchangedAfterInjection': True, 'unchangedMarked': False}),
+        ('noop-target-parent-mode-after-recheck', 'not_started', 'not_created', 'settled', 'stale_revision', False,
+         {'changedOnlyDeclaredFacts': True, 'consumingTargetChecks': 1, 'injections': 1, 'journalAbsent': True, 'recheckReturns': 1, 'renameProbes': 0, 'scopesClosed': 3, 'snapshotUnchangedAfterInjection': True, 'unchangedMarked': False}),
+        ('unreadable-leaf-before-prepare', 'not_started', 'not_created', 'settled', 'filesystem_error', False,
+         {'deniedOriginalReads': 1, 'journalAbsent': True, 'permissionErrorObserved': True, 'scopesClosed': 2, 'snapshotUnchanged': True}),
+        ('first-replacement-installed-rollback', 'rolled_back', 'clean', 'settled', 'filesystem_error', False,
+         {'firstLeafInstalled': True, 'injections': 1, 'journalAbsent': True, 'originalBackupBound': True, 'recoveryAttempts': 1, 'rollbackReturned': True, 'scopesClosed': 3, 'secondApplyNoScope': True, 'secondApplyRefused': True, 'snapshotRestored': True}),
+        ('incomplete-metadata-preparing-retained', 'not_started', 'recovery_required', 'settled', 'filesystem_error', False,
+         {'cleanupUnlinks': 0, 'completeProof': False, 'dependenciesPreserved': True, 'injections': 1, 'numberedSlotRetained': True, 'preparingRetained': True, 'recoverCalls': 0, 'scopesClosed': 3, 'targetsPreserved': True}),
+        ('committed-old-backup-replaced-at-cleanup-entry', 'committed', 'recovery_required', 'settled', 'filesystem_error', False,
+         {'allSelectedPayloadsInstalled': True, 'cleanupUnlinks': 0, 'committedObserved': True, 'dependenciesPreserved': True, 'durabilityConfirmed': True, 'injections': 1, 'originalBackupRetained': True, 'proofRetained': True, 'sameBytesForeignInode': True, 'scopesClosed': 3}),
+        ('legacy-domains-refuse-empty-metadata-prepare', 'not_started', 'not_created', 'settled', 'pending_state', False,
+         {'bothOwnersSettled': True, 'bothRefused': True, 'legacyDomains': ['configuration', 'github_workflows'], 'originalOwners': 2, 'scopesClosed': 2, 'snapshotUnchanged': True, 'stateRetained': True, 'targetDescriptorsAbsent': True}),
+        ('legacy-domains-refuse-header-tmp-metadata-prepare', 'not_started', 'not_created', 'settled', 'pending_state', False,
+         {'bothOwnersSettled': True, 'bothRefused': True, 'legacyDomains': ['configuration', 'github_workflows'], 'originalOwners': 2, 'scopesClosed': 2, 'snapshotUnchanged': True, 'stateRetained': True, 'targetDescriptorsAbsent': True}),
+        ('metadata-refuses-legacy-ready', 'not_started', 'not_created', 'settled', 'pending_state', False,
+         {'legacyStateRetained': True, 'metadataStateAbsent': True, 'scopesClosed': 1, 'snapshotUnchanged': True, 'targetDescriptorAbsent': True}),
+        ('dependency-drift-after-first-replacement', 'unknown', 'recovery_required', 'settled', 'stale_revision', False,
+         {'afterUnknownProbes': 0, 'cleanupUnlinks': 0, 'dependencyChanged': True, 'firstLeafInstalled': True, 'injections': 1, 'laterInstallMoves': 0, 'originalBackupBound': True, 'partialTreeRetainedInsideOriginal': True, 'recoverCalls': 0, 'scopesClosed': 3}),
+    ),
+    'committed-fsync': (
+        ('metadata-committed-fsync-injection', 'committed', 'recovery_required', 'settled', 'filesystem_error', False,
+         {'allSelectedPayloadsInstalled': True, 'committedObserved': True, 'dependenciesPreserved': True, 'durabilityConfirmed': False, 'injections': 1, 'journalRetained': True, 'rollbackCalls': 0, 'scopesClosed': 3}),
+    ),
+    'committed-close': (
+        ('metadata-committed-close-return-injection', 'committed', 'clean', 'unknown', 'cancelled', True,
+         {'actualScopeCloseReturned': True, 'afterUnknownProbes': 0, 'cancelledAfterCommit': 1, 'committedCarrier': True, 'injections': 1, 'scopesClosed': 3}),
+    ),
+}
+METADATA_CORE_INJECTIONS = {
+    "ordinary": "fixed-original-metadata-boundaries",
+    "committed-fsync": "postdecision-pre-fsync",
+    "committed-close": "postcommit-cancellation-and-positive-scope-close-return-loss",
+}
+METADATA_OWNER_CASES = ('android-observe-create',
+ 'ios-observe-create',
+ 'android-observe-noop',
+ 'ios-observe-noop',
+ 'android-observe-replace-preserve',
+ 'ios-observe-mixed-create-replace-preserve',
+ 'observe-without-ignore-save-refused',
+ 'observe-last-sensitive-refused',
+ 'observe-last-nonutf8-refused',
+ 'stale-passive-baseline-refused',
+ 'three-domain-owner-isolation',
+ 'registration-changed-before-apply',
+ 'metadata-terminal-held-after-stop',
+ 'metadata-document-loss-before-apply')
+METADATA_EOF_CASES = ("precommit-eof", "postcommit-eof", "precommit-conflict-eof")
+METADATA_NOT_VERIFIED = (
+    "production-runtime-custody", "production-metadata-save-enablement", "native-gui", "webview-callbacks-or-crash-hook",
+    "parent-death", "native-stuck-wait-close", "persisted-recovery", "macos-windows-metadata-writes",
+    "credentials", "remote-github", "stores", "mobile-builds", "installers",
+)
+
+METADATA_OWNER_SOURCES = {
+    **CONFIG_OWNER_SOURCES,
+    'metadataProtocol': 'desktop/src-tauri/src/metadata_text_edit_protocol.rs',
+    'metadataCommands': 'desktop/src-tauri/src/metadata_text_commands.rs',
+    'workflowProtocol': 'desktop/src-tauri/src/github_workflow_edit_protocol.rs',
+    'bridge': 'desktop/src-tauri/src/bridge.rs',
+    'documentBinding': 'desktop/src-tauri/src/asset_session.rs',
+    'documentLifetime': 'desktop/src-tauri/src/document_lifetime.rs',
+    'assetSource': 'desktop/src-tauri/src/asset_source.rs',
+    'assetCommands': 'desktop/src-tauri/src/asset_commands.rs',
+    'supervisor': 'desktop/src-tauri/src/supervisor.rs',
+    'passiveFixture': 'desktop/src-tauri/src/hosted_tests.rs',
+    'editCommands': 'desktop/src-tauri/src/edit_commands.rs',
+    'githubCommands': 'desktop/src-tauri/src/github_commands.rs',
+    'workflowEdit': 'src/mobile_release/github_workflow_edit.py',
+    'metadataEdit': 'src/mobile_release/metadata_text_edit.py',
+    'metadataText': 'src/mobile_release/metadata_text.py',
+    'metadataPolicy': 'src/mobile_release/metadata.py',
+    'metadataApi': 'src/mobile_release/api/_metadata_text.py',
+    'passiveEngine': 'src/mobile_release/_desktop_engine.py',
+    'catalogue': 'src/mobile_release/api/_catalog.py',
+    'apiContracts': 'src/mobile_release/api/contracts.py',
+    'snapshot': 'src/mobile_release/api/_snapshot.py',
+    'metadataResource': 'src/mobile_release/api/data/metadata-text-help-v1.json',
+    'schemaResource': 'src/mobile_release/api/data/project.schema.json',
+}
+METADATA_TRANSACTION_EOF_SOURCES = {**METADATA_OWNER_SOURCES, "transactionEofShim": "tests/native_desktop_config_eof.py"}
+METADATA_OWNER_PAYLOAD_HASHES = {'configHashes': {'publicStore': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94',
+                  'releaseStore': 'caabad94b27c616e9deaf8570ded7edca9a41de86ca3e1982ab6e4a3f57073f1'},
+ 'ignoreSha256': 'e60087ecefac81e23666444e6aea9490b3fc42b2510f566cfd4aa5a36a35b7d4',
+ 'fieldHashes': {'android': {'full_description.txt': '52002e38814d0b0a78bc21cad572d5fa265ad3f9f72a672829982e889a4422fa',
+                             'short_description.txt': '233524e36ed836f2fc5b2754e73ff6f125f443d1bb57770942368c2fb90a0c63',
+                             'title.txt': '17c61ad21566db1d3e8bc33087e2ea25eced56a923addd81a3a80305dea3ee94'},
+                 'ios': {'description.txt': '417b4365404b44f1c83e478dbebb43864924c858fcca7346aac4db1b9f2c6ee5',
+                         'keywords.txt': 'd563110a53a8d4b4e320f549a957fcbc6d0f8ca14a02f77dfce9bdfaa2e0f866',
+                         'privacy_url.txt': '5cb73fc576bb124e3930e583584ad86d8052264a12c273cf207874b3c82aa5ee',
+                         'release_notes.txt': '4ec8e8f6389b0ece64c0f2ada003d134934dccba9c942ebbdfbadeb18c2ae5c9',
+                         'support_url.txt': '0cf21b6bc2716d68e9e9b41edda65445ab46e022fa94eeaa150c3c4045da1104'}},
+ 'previousFieldHashes': {'android': {'short_description.txt': 'cbdf0b468b435ff530069f1c0f2939371f35500133e65ac3dfc8415bd640aa7f',
+                                     'title.txt': 'c24ad61af30da2a7e7cb7f6b439a0c86c309fde3d258f15fe73dc3b9d8904b7a'},
+                         'ios': {'description.txt': 'b947dab1c1d45c861a524579e10f2e3756ff69840f2ef265d8e76a94fb52b09a',
+                                 'keywords.txt': '1c05802427ca9d2163a1f2f438594fce09f6d5d41aae9289161f903051075227'}},
+ 'unrelatedSha256': '0e4722e0ca13cfc08d5e8bd61c73d37c9880610e1723a8eb1c2363e92e2eebef',
+ 'umaskProbeSha256': '789f106043283b6926a68f03d7e7a41dbd7b7e11168aba08d646dca9d4513804',
+ 'sensitiveSha256': 'c4db49fef28e29dd67d3e6016789fdcefa0f31407ec1eb6eff8e1ae4c982e62c',
+ 'nonutf8Sha256': '9368cb2d470e340ed65f7f91261e3afc6d84011eefddd796a1907481e232126f'}
+# Shared libtest inputs are compile-only; they never select another native lane.
+METADATA_NATIVE_SOURCES = tuple(sorted({
+    *GITHUB_TLS_SOURCES, *METADATA_TRANSACTION_EOF_SOURCES.values(), *METADATA_CORE_SOURCES.values(),
+    METADATA_NATIVE_WORKFLOW,
+}))
+
 TOOL_CHECKS = frozenset({
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
@@ -616,6 +798,9 @@ TOOL_CHECKS = frozenset({
     "workflow-locked-headless-metadata", "workflow-owner-source-native-contract", "workflow-owner-zip-native-contract",
     "workflow-transaction-eof-native-contract", "workflow-core-ordinary", "workflow-core-committed-fsync",
     "workflow-core-committed-close", "workflow-source-status",
+    "metadata-locked-headless-metadata", "metadata-owner-source-native-contract", "metadata-owner-zip-native-contract",
+    "metadata-transaction-eof-native-contract", "metadata-core-ordinary", "metadata-core-committed-fsync",
+    "metadata-core-committed-close", "metadata-source-status",
     "windows-snapshot-native-contract",
     "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
     "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
@@ -633,11 +818,13 @@ def require(condition: bool, message: str) -> None:
 
 def admit_phase(scope: str, phase: str) -> None:
     """Closed scope selection, before context, tools, or native dispatch."""
-    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
+    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
     if scope in COMPILE_PROFILES:
         require(phase in COMPILE_PHASES, "Compiler-only scope cannot execute a native phase")
     elif scope == WORKFLOW_NATIVE_SCOPE:
         require(phase in WORKFLOW_NATIVE_PHASES, "Workflow-only scope cannot execute an unrelated native phase")
+    elif scope == METADATA_NATIVE_SCOPE:
+        require(phase in METADATA_NATIVE_PHASES, "Metadata-only scope cannot execute an unrelated native phase")
     elif scope == WINDOWS_SNAPSHOT_SCOPE:
         require(phase in WINDOWS_SNAPSHOT_PHASES, "Windows snapshot scope cannot execute an unrelated phase")
     elif scope == GITHUB_READONLY_SCOPE:
@@ -652,6 +839,7 @@ def admit_platform(scope: str, platform: str) -> None:
     require(platform in TARGETS, "Unknown desktop verification platform")
     require(scope != GTK_COMPILE_SCOPE or platform == "linux", "SG1 compilation requires Linux")
     require(scope != WORKFLOW_NATIVE_SCOPE or platform == "linux", "Workflow native verification requires Linux")
+    require(scope != METADATA_NATIVE_SCOPE or platform == "linux", "Metadata native verification requires Linux")
     require(scope != WINDOWS_SNAPSHOT_SCOPE or platform == "windows", "Windows snapshot verification requires Windows")
     require(scope != GITHUB_READONLY_SCOPE or platform == "linux", "G1 native verification requires Linux")
     require(scope != GITHUB_TLS_SCOPE or platform == "linux", "TLS verification requires Linux")
@@ -703,6 +891,32 @@ def workflow_native_binding(environment: dict[str, str]) -> dict[str, str]:
     return {"workflowPath": WORKFLOW_NATIVE_WORKFLOW, "workflowSha": sha,
             "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
             "runId": run_id, "attempt": attempt}
+
+
+def metadata_native_binding(environment: dict[str, str]) -> dict[str, str]:
+    """Closed push-only metadata route; neither dispatch nor another lane can opt in."""
+    keys = ("GITHUB_SHA", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_REF",
+            "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF", "GITHUB_EVENT_NAME", "MRK_PUSH_EVENT_AFTER",
+            "MRK_DESKTOP_HOSTED_CHECKS")
+    require(all(type(environment.get(key)) is str for key in keys), "Metadata native binding fields differ")
+    sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
+    run_id, attempt = environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
+    require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None,
+            "Metadata native source identity differs")
+    require(re.fullmatch(r"[1-9][0-9]{0,19}", run_id) is not None and attempt == "1",
+            "Metadata native original run identity differs")
+    require(environment.get("MRK_DESKTOP_HOSTED_CHECKS") == METADATA_NATIVE_SCOPE
+            and environment.get("GITHUB_REF") == METADATA_NATIVE_REF
+            and environment.get("GITHUB_WORKFLOW_SHA") == sha
+            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{METADATA_NATIVE_WORKFLOW}@{METADATA_NATIVE_REF}",
+            "Metadata native workflow/ref/scope binding differs")
+    require(environment.get("GITHUB_EVENT_NAME") == "push" and environment.get("MRK_PUSH_EVENT_AFTER") == sha,
+            "Metadata native push event/source differs")
+    return {"workflowPath": METADATA_NATIVE_WORKFLOW, "workflowSha": sha,
+            "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
+            "runId": run_id, "attempt": attempt, "repository": repository, "event": "push", "ref": METADATA_NATIVE_REF,
+            "pushEventAfter": sha}
 
 
 def same_compile_json(value: object, expected: object) -> bool:
@@ -842,11 +1056,13 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
     return ""
 
 
-def admitted_host() -> str:
+def admitted_host(*, retention_only: bool = False) -> str:
     require(os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
+            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
             "This fixed check requires an explicitly admitted disposable hosted job")
+    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == METADATA_NATIVE_SCOPE,
+            "DATA-only admission is restricted to metadata retention")
     platform = os.environ.get("MRK_DESKTOP_PLATFORM", "")
     require(platform in TARGETS and platform == {
         "linux": "linux", "darwin": "macos", "win32": "windows",
@@ -854,13 +1070,14 @@ def admitted_host() -> str:
     admit_platform(os.environ["MRK_DESKTOP_HOSTED_CHECKS"], platform)
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:
         admitted_scope(platform)
-    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
         require(os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"
-                and os.environ.get("ImageOS") == "ubuntu24" and os.uname().machine == "x86_64"
+                and os.environ.get("ImageOS") == "ubuntu24" and (retention_only or os.uname().machine == "x86_64")
                 and os.geteuid() != 0, "Workflow native checks require the non-root Ubuntu 24 x86_64 runner")
     require(sys.version.split()[0] == PYTHON, "Unexpected selected Python version")
-    selected = Path(os.environ["MRK_PYTHON"]).resolve(strict=True)
-    require(selected == Path(sys.executable).resolve(strict=True), "Python setup output differs")
+    if not retention_only:
+        selected = Path(os.environ["MRK_PYTHON"]).resolve(strict=True)
+        require(selected == Path(sys.executable).resolve(strict=True), "Python setup output differs")
     return platform
 
 
@@ -1203,6 +1420,288 @@ def workflow_transaction_eof_receipt(context: dict) -> dict:
     source = Path(context["source"])
     return validate_workflow_transaction_eof_receipt(workflow_json(Path(context["root"]) / "workflow-transaction-eof/receipt.json", maximum=64 * 1024),
         context=context, source_hashes={name: hash_file(source / relative) for name, relative in WORKFLOW_TRANSACTION_EOF_SOURCES.items()})
+
+
+def metadata_context_binding(context: dict) -> dict:
+    """Recheck the closed original lane when constructing/consuming every phase."""
+    require(type(context) is dict and context.get("executionScope") == METADATA_NATIVE_SCOPE
+            and context.get("platform") == "linux", "Unexpected metadata native context scope")
+    binding = metadata_native_binding({
+        "MRK_DESKTOP_HOSTED_CHECKS": context["executionScope"],
+        "GITHUB_SHA": context.get("sourceSha"), "GITHUB_REPOSITORY": context.get("repository"),
+        "GITHUB_RUN_ID": context.get("runId"), "GITHUB_RUN_ATTEMPT": context.get("attempt"),
+        "GITHUB_WORKFLOW_SHA": context.get("workflowSha"), "GITHUB_WORKFLOW_REF": context.get("workflowRef"),
+        "GITHUB_REF": context.get("ref"), "GITHUB_EVENT_NAME": context.get("event"),
+        "MRK_PUSH_EVENT_AFTER": context.get("pushEventAfter"),
+    })
+    require(context.get("workflowPath") == METADATA_NATIVE_WORKFLOW
+            and type(context.get("sourceTree")) is str
+            and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+            and context["sourceTree"] != "0" * 40 and sha256_value(context.get("workflowSha256")),
+            "Metadata native tree/workflow binding differs")
+    return {**binding, "sourceTree": context["sourceTree"], "workflowSha256": context["workflowSha256"],
+            "platform": "linux"}
+
+
+def metadata_source_files(source: Path) -> list[dict]:
+    files = []
+    for relative in METADATA_NATIVE_SOURCES:
+        path = source / relative
+        ordinary(path)
+        size = path.stat().st_size
+        require(0 < size <= 2 * 1024 * 1024, "Metadata native source exceeds its bound")
+        files.append({"path": relative, "size": size, "sha256": hash_file(path)})
+    return files
+
+
+def metadata_core_metadata(context: dict) -> dict:
+    metadata_context_binding(context)
+    return {**{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+            "ref": METADATA_NATIVE_REF, "coreFiles": context["metadataInputs"]["coreFiles"],
+            "coreZipSha256": context["metadataInputs"]["coreZipSha256"]}
+
+
+def metadata_inputs_unchanged(context: dict) -> None:
+    """Bounded source/receipt DATA only, never a project probe or cleanup right."""
+    metadata_context_binding(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    identities = {"root": workflow_directory_identity(root), "source": workflow_directory_identity(source),
+                  **{name: workflow_directory_identity(root / name) for name in METADATA_NATIVE_DIRECTORIES}}
+    require(same_compile_json(identities, context["originalDirectories"]), "Metadata original directory identity changed")
+    observed = {"sourceFiles": metadata_source_files(source), "coreFiles": workflow_core_inventory(source),
+                "coreZipSha256": hash_file(root / "core.zip"), "pythonSha256": hash_file(Path(context["python"]))}
+    require(same_compile_json(context["metadataInputs"], observed), "Metadata original source/runtime inputs changed")
+    require(same_compile_json(read_bounded_json(root / "metadata.json", 128 * 1024), metadata_core_metadata(context)),
+            "Metadata source/ZIP metadata changed")
+
+
+def metadata_source_unchanged(context: dict) -> None:
+    source_unchanged(context)
+    require(run([context["git"], "status", "--porcelain=v1", "--untracked-files=all"], check="metadata-source-status",
+                cwd=Path(context["source"]), env=clean_environment(Path(context["root"])), timeout=15, capture=True) == "",
+            "Metadata source contains unreviewed or generated inputs")
+    metadata_inputs_unchanged(context)
+
+
+def validate_metadata_core_receipt(receipt: object, partition: str, *, source_sha: str,
+                                   source_hashes: dict[str, str], python_hash: str, host: dict) -> dict:
+    require(partition in METADATA_PARTITIONS and set(source_hashes) == set(METADATA_CORE_SOURCES),
+            "Unknown metadata core partition or source inventory")
+    validate_workflow_host(host)
+    rows = METADATA_CORE_ROWS[partition]
+    expected = {
+        "schemaVersion": 1, "suite": "desktop-metadata-text-native", "domain": "metadata_text",
+        "partition": partition, "status": "passed", "reason": "none", "failedAt": None,
+        "retained": True, "uncertaintyLatched": partition != "committed-fsync",
+        "injection": METADATA_CORE_INJECTIONS[partition], "host": host,
+        "bindings": {"sourceSha": source_sha, "sourceKind": "source", "sourceHashes": source_hashes,
+                     "pythonSha256": python_hash, **METADATA_PAYLOAD_BINDINGS},
+        "completed": [row[0] for row in rows],
+        "cases": [{"case": name, "outcome": {"effect": effect, "journal": journal, "resources": resources, "reason": reason},
+                   "owner": {"closed": True, "handlerRestored": True, "fatal": fatal}, "observed": observed}
+                  for name, effect, journal, resources, reason, fatal, observed in rows],
+    }
+    require(same_compile_json(receipt, expected),
+            "Metadata core original facts, source, retention or ordered case inventory differ")
+    return receipt
+
+
+def metadata_core_receipt(context: dict, partition: str) -> dict:
+    require(partition in METADATA_PARTITIONS, "Unknown metadata core partition")
+    return validate_metadata_core_receipt(read_bounded_json(Path(context["root"]) / f"metadata-{partition}.json", 32 * 1024), partition,
+        source_sha=context["sourceSha"], source_hashes=metadata_bound_source_hashes(context, METADATA_CORE_SOURCES),
+        python_hash=context["metadataInputs"]["pythonSha256"], host=context["observedHost"])
+
+
+def metadata_bound_source_hashes(context: dict, sources: dict[str, str]) -> dict[str, str]:
+    """Original preparation DATA, reverified before native phases, never a post-C22 probe."""
+    metadata_context_binding(context)
+    rows = context["metadataInputs"]["sourceFiles"]
+    require(type(rows) is list and len(rows) == len(METADATA_NATIVE_SOURCES), "Metadata bound source inventory differs")
+    hashes = {}
+    for row, path in zip(rows, METADATA_NATIVE_SOURCES, strict=True):
+        require(type(row) is dict and set(row) == {"path", "size", "sha256"} and row["path"] == path
+                and integer_between(row["size"], 1, 2 * 1024 * 1024) and sha256_value(row["sha256"]),
+                "Metadata bound original source entry differs")
+        hashes[path] = row["sha256"]
+    require(all(path in hashes for path in sources.values()), "Metadata receipt requires an unbound source")
+    return {name: hashes[path] for name, path in sources.items()}
+
+
+def metadata_owner_bindings(context: dict, mode: str, source_hashes: dict[str, str], *, eof: bool = False) -> dict:
+    metadata_context_binding(context)
+    require(mode in ("source", "zip") and (not eof or mode == "source")
+            and type(source_hashes) is dict
+            and set(source_hashes) == set(METADATA_TRANSACTION_EOF_SOURCES if eof else METADATA_OWNER_SOURCES)
+            and all(sha256_value(value) for value in source_hashes.values()),
+            "Metadata owner runtime choice or source inventory differs")
+    inputs = context["metadataInputs"]
+    inventory = json.dumps(inputs["coreFiles"], sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return {**{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")},
+            "ref": METADATA_NATIVE_REF, "domain": "metadata_text", "host": "linux", "target": TARGETS["linux"],
+            "runtimeMode": "trusted-development-only", "runtimeInput": mode, "pythonSha256": inputs["pythonSha256"],
+            "coreZipSha256": inputs["coreZipSha256"], "coreInventorySha256": hashlib.sha256(inventory).hexdigest(),
+            "sourceHashes": source_hashes, "payloadHashes": METADATA_OWNER_PAYLOAD_HASHES,
+            "metadataResourceSha256": source_hashes["metadataResource"], "schemaResourceSha256": source_hashes["schemaResource"],
+            "inheritedFileMaskObserved": True, "requestedCreateMode": 0o644, "observedCreateMode": 0o600, "newDirectoryMode": 0o755,
+            "documentEvidence": "controlled-original-lifetime-not-gui-callbacks"}
+
+
+def validate_metadata_owner_header(receipt: object, context: dict, mode: str, source_hashes: dict[str, str], *, eof: bool = False) -> list:
+    require(type(receipt) is dict and type(receipt.get("cases")) is list, "Unexpected metadata owner receipt")
+    expected = {"schemaVersion": 1, "scope": "metadata-text-transaction-eof-hosted-v1" if eof else "metadata-text-owner-hosted-v1",
+                "domain": "metadata_text", "status": "passed", "allOwnersSettled": not eof, "originalResourcesSettled": True,
+                "ownerDisabled": eof, "retainedEffectUnknown": eof, "failureCode": None, "cases": receipt["cases"],
+                "bindings": metadata_owner_bindings(context, mode, source_hashes, eof=eof), "notVerified": list(METADATA_NOT_VERIFIED)}
+    require(same_compile_json(receipt, expected), "Metadata owner source/runtime/retention or original resource header differs")
+    return receipt["cases"]
+
+
+def metadata_passive_values(values: object, methods: tuple[str, ...], previous: int, *, error: str | None = None) -> int:
+    """Validate original observers in invocation order, not synthetic editor facts."""
+    require(type(values) is list and len(values) == len(methods), "Metadata original passive roster differs")
+    for item, method in zip(values, methods, strict=True):
+        require(type(item) is dict and type(item.get("key")) is str
+                and re.fullmatch(r"[1-9][0-9]{0,19}", item["key"]) is not None
+                and previous < int(item["key"]) <= 2**64 - 1, "Metadata original passive key is missing/replayed")
+        native = item.get("native")
+        require(type(native) is dict and integer_between(native.get("stdout_bytes"), 1, (4 if method == "catalogue" else 2) * 1024 * 1024),
+                "Metadata original passive output accounting differs")
+        expected_native = {**dict.fromkeys(("inspection_joined", "acquisition_joined", "spawned", "waited", "exit_success",
+            "writer_joined", "writer_complete", "stdout_eof", "stderr_eof", "stdout_joined", "stderr_joined",
+            "driver_joined", "watchdog_joined"), True), "stdout_bytes": native["stdout_bytes"], "stderr_bytes": 0}
+        expected = {"method": method, "key": item["key"], "error": error if method == "observe" else None,
+                    "native": expected_native, "observerJoin": "ok", "permitRetired": True, "resourceBookRetired": True}
+        require(same_compile_json(item, expected), "Metadata original passive wait/streams/management/observer retirement differs")
+        previous = int(item["key"])
+    return previous
+
+
+def metadata_native_value(value: object, *, effect: str = "committed", journal: str = "clean", reason: tuple[str, ...] = ("none",),
+                          native_reason: str = "none", applying: bool = True, requests: int = 3, responses: int = 3, sequence: int = 2,
+                          checkout: bool = True, prepared: bool = True, domain: str = "metadata_text", unknown: bool = False, stderr: int = 0) -> dict:
+    require(type(value) is dict and integer_between(value.get("stdoutBytes"), 1, 12 * 1024 * 1024),
+            "Metadata original editor output accounting differs")
+    outcome = value.get("outcome")
+    require(type(outcome) is dict and type(outcome.get("reason")) is str and outcome["reason"] in reason,
+            "Metadata original core reason differs")
+    expected = {"domain": domain, "nativePhase": "unknown" if unknown else "final",
+                "nativeFinality": "unknown" if unknown else "settled", "nativeReason": native_reason,
+                "applySubmitted": applying, "lateSettled": unknown,
+                "outcome": {"effect": effect, "journal": journal, "resources": "settled", "reason": outcome["reason"]},
+                "terminalSeq": sequence, "requestFrames": requests, "responseFrames": responses,
+                "stdoutBytes": value["stdoutBytes"], "stderrBytes": stderr, "forceAttempted": False,
+                **dict.fromkeys(CONFIG_OWNER_FINALITY, True)}
+    if domain == "metadata_text":
+        expected.update(checkoutRetained=checkout, preparedRetained=prepared)
+    require(same_compile_json(value, expected), "Metadata original editor wait/streams/management/correlation differs")
+    return expected
+
+
+def validate_metadata_owner_receipt(receipt: object, mode: str, *, context: dict, source_hashes: dict[str, str]) -> dict:
+    cases = validate_metadata_owner_header(receipt, context, mode, source_hashes)
+    names = METADATA_OWNER_CASES if mode == "source" else (METADATA_OWNER_CASES[5],)
+    require(len(cases) == len(names), "Metadata source/ZIP case inventory differs")
+    previous = 0
+    for name, case in zip(names, cases, strict=True):
+        index = METADATA_OWNER_CASES.index(name)
+        require(type(case) is dict and type(case.get("observations")) is dict, f"Metadata owner {name} row differs")
+        platform = "ios" if index in (1, 3, 5, 8) else "android"
+        locale = "fr-FR" if index == 4 else "en-US"
+        catalogue = index == 0 or mode == "zip"
+        error = "metadata_text_sensitive" if index == 7 else "metadata_text_encoding" if index == 8 else None
+        methods = ("observe",) if error else ("catalogue", "observe", "validate") if catalogue else ("observe", "validate")
+        previous = metadata_passive_values(case.get("passive"), methods, previous, error=error)
+        shared = {"sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        native_options = {}
+        if error:
+            native = None
+            observations = {"closedError": error, "lastFieldRefused": True, "noPartialTextOrDigest": True,
+                            "noEditorAdmitted": True, "treeUnchanged": True, **shared}
+        elif index == 6:
+            native_options = dict(effect="not_started", journal="not_created", reason=("ignore_conflict",), applying=False,
+                                  requests=1, responses=1, sequence=0, checkout=False, prepared=False)
+            observations = {"passiveObserveWithoutIgnore": True, "ignoreStillAbsent": True, "noCheckoutOrPlan": True, "treeUnchanged": True, **shared}
+        elif index == 9:
+            native_options = dict(effect="not_started", journal="not_created", reason=("stale_revision",), applying=False,
+                                  requests=2, responses=2, sequence=1, prepared=False)
+            observations = {"olderPassiveBaselineRejected": True, "newerNativeCheckoutRetained": True, "noPlanOrRebase": True,
+                            "externalChangeRetained": True, "treeUnchanged": True, **shared}
+        elif index in (11, 13):
+            native_options = dict(effect="not_started", journal="not_created", reason=("none", "cancelled"), applying=False,
+                                  native_reason="caller_lost" if index == 11 else "window_lost", requests=2, responses=3, sequence=1)
+            observations = {"preparedCorrelationRetained": True, "treeUnchanged": True, "staleCommandNotSent": True,
+                "newRegistrationPublishedUnderDocumentLock": index == 11, "controlledOriginalDocumentLoss": index == 13,
+                "replacementDocumentRefused": index == 13, "guiCallbacksNotClaimed": True, **shared}
+        else:
+            noop = index in (2, 3)
+            native_options = dict(effect="unchanged" if noop else "committed", journal="not_created" if noop else "clean",
+                                  native_reason="cancelled" if index == 12 else "none")
+            created, replaced, preserved = {0: (3, 0, 0), 1: (5, 0, 0), 2: (0, 0, 3), 3: (0, 0, 5),
+                                           4: (0, 1, 2), 5: (1, 2, 2), 10: (3, 0, 0), 12: (3, 0, 0)}[index]
+            directories = (["release/store", "release/store/ios", "release/store/ios/en-US"] if index == 1 else
+                           ["public", "public/store", "public/store/android", "public/store/android/en-US"] if index in (0, 10, 12) else [])
+            domains = case["observations"].get("domains")
+            require(type(domains) is list and len(domains) == (2 if index == 10 else 0), "Metadata original domain-isolation inventory differs")
+            for item, domain in zip(domains, ("configuration", "github_workflows")):
+                metadata_native_value(item, effect="not_started", journal="not_created", reason=("none", "cancelled"),
+                    native_reason="discarded", applying=False, requests=1, responses=2, sequence=0, domain=domain)
+            observations = {"created": created, "replaced": replaced, "preserved": preserved, "directoriesCreated": directories,
+                "completePreparedBytes": True, "passiveBaselineMatchedCheckout": True, "preparedCorrelationRetained": True,
+                "capturePrepareRawFactsUnchanged": True, "unselectedAndDependenciesPreserved": True, "existingModesPreserved": True,
+                "createModesMasked": True, "directoryModesExact": True, "rawNoopUnchanged": noop, "duplicateApplyObservation": index == 0,
+                "catalogueResourceMatched": catalogue, "sharedStatusRevision": True, "sharedLastTerminalDomainCorrect": True,
+                "threeDomainIsolation": index == 10, "domains": domains, "heldBeforeAcceptance": index == 12,
+                "realStopBeforeRelease": index == 12, "cancelledNotSaved": index == 12, **shared}
+        if not error:
+            native = metadata_native_value(case.get("native"), **native_options)
+        expected = {"name": name, "domain": "metadata_text", "platform": platform, "locale": locale,
+                    "native": native, "passive": case["passive"], "observations": observations}
+        require(same_compile_json(case, expected), f"Metadata owner {name} original observations differ")
+    return receipt
+
+
+def validate_metadata_transaction_eof_receipt(receipt: object, *, context: dict, source_hashes: dict[str, str]) -> dict:
+    cases = validate_metadata_owner_header(receipt, context, "source", source_hashes, eof=True)
+    require(len(cases) == 3, "Metadata EOF case inventory differs")
+    previous = 0
+    for index, (name, case) in enumerate(zip(METADATA_EOF_CASES, cases, strict=True)):
+        require(type(case) is dict, f"Metadata EOF {name} row differs")
+        previous = metadata_passive_values(case.get("passive"), ("observe", "validate"), previous)
+        committed, unknown = index == 1, index == 2
+        boundary, checkpoint = ("after-durable-COMMITTED", "descriptor-close") if committed else ("before-COMMITTED", "publisher-entry")
+        terminal = "UNKNOWN" if unknown else "COMMITTED" if committed else "ROLLED_BACK"
+        records = (f"MRK_METADATA_TEXT_EOF_V1 {name} boundary={boundary}\n"
+            f"MRK_METADATA_TEXT_EOF_V1 {name} eof=1 nonempty=0 readErrors=0 checkpoint={checkpoint} "
+            f"applied=1 committed={int(committed)} rolledBack={int(not committed and not unknown)} terminal={terminal} "
+            f"durable={int(not unknown)} recovery=1 clean={int(not unknown)} settled=1 cancelled=1\n")
+        native = metadata_native_value(case.get("native"), effect="unknown" if unknown else "committed" if committed else "rolled_back",
+            journal="recovery_required" if unknown else "clean", reason=("cancelled",), native_reason="cancelled",
+            unknown=unknown, stderr=len(records.encode("ascii")))
+        observations = {"evidenceKind": "real-stdin-eof-at-controlled-transaction-boundary", "bootstrapMode": "instrumented-genuine-engine",
+            "boundary": boundary, "originalCheckpoint": checkpoint, "closeBeforeActiveDeadline": True, "controlRecords": 2,
+            "actualStdinEof": True, "eofReadCount": 1, "nonemptyReadCount": 0, "readErrorCount": 0, "preparedCorrelationRetained": True,
+            "metadataProfileAndControlProof": True, "committedPublication": committed, "rolledBackPublication": not committed and not unknown,
+            "terminalDurable": not unknown, "fixedRecovery": True, "journalClean": not unknown, "journalAbsent": not unknown,
+            "originalTreeRestored": not committed and not unknown, "selectedPayloadsRemain": committed or unknown,
+            "unselectedAndDependenciesPreserved": True, "unrelatedIntroducedBeforeEof": unknown, "introducedOriginalPreserved": unknown,
+            "recoveryEvidenceRetained": unknown, "sharedBlockedProject": unknown, "allThreeDomainsDisabled": unknown,
+            "noFurtherAdmission": unknown, "sourceProbesSettled": True, "passiveOriginalsSettled": True, "fixtureFilesSettled": True}
+        expected = {"name": name, "domain": "metadata_text", "platform": "ios" if committed else "android", "locale": "en-US",
+                    "native": native, "passive": case["passive"], "observations": observations}
+        require(same_compile_json(case, expected), f"Metadata EOF {name} original observations differ")
+    return receipt
+
+
+def metadata_owner_receipt(context: dict, mode: str) -> dict:
+    require(mode in ("source", "zip"), "Unknown metadata owner runtime form")
+    return validate_metadata_owner_receipt(read_bounded_json(Path(context["root"]) / f"metadata-owner-{mode}/receipt.json", 64 * 1024), mode,
+        context=context, source_hashes=metadata_bound_source_hashes(context, METADATA_OWNER_SOURCES))
+
+
+def metadata_transaction_eof_receipt(context: dict) -> dict:
+    return validate_metadata_transaction_eof_receipt(read_bounded_json(Path(context["root"]) / "metadata-transaction-eof/receipt.json", 64 * 1024),
+        context=context, source_hashes=metadata_bound_source_hashes(context, METADATA_TRANSACTION_EOF_SOURCES))
 
 
 def canonical_json(value: object) -> bytes:
@@ -4251,6 +4750,11 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                 "Workflow-only phase cannot produce compiler or product authority")
         value = workflow_phase_value(context, name, checks)
         validate_workflow_phase_receipt(value, context, name)
+    elif context.get("executionScope") == METADATA_NATIVE_SCOPE:
+        require(node is None and scope == "passive-development-foundation-only" and compiled is None,
+                "Metadata-only phase cannot produce compiler or product authority")
+        value = metadata_phase_value(context, name, checks)
+        validate_metadata_phase_receipt(value, context, name)
     elif context.get("executionScope") == GITHUB_READONLY_SCOPE:
         require(node is None and scope == "passive-development-foundation-only" and compiled is None,
                 "G1 phase cannot produce other native or product authority")
@@ -4288,6 +4792,28 @@ def workflow_public_bindings(context: dict) -> dict:
             "payloadBindings": WORKFLOW_PAYLOAD_BINDINGS, "notVerified": list(WORKFLOW_NOT_VERIFIED)}
 
 
+def prepare_metadata_native_context(context: dict, inventory: list[dict]) -> None:
+    root, source = Path(context["root"]), Path(context["source"])
+    context["metadataInputs"] = {"sourceFiles": metadata_source_files(source), "coreFiles": inventory,
+                                 "coreZipSha256": hash_file(root / "core.zip"), "pythonSha256": hash_file(Path(context["python"]))}
+    context["originalDirectories"] = {"root": workflow_directory_identity(root), "source": workflow_directory_identity(source),
+                                      **{name: workflow_directory_identity(root / name) for name in METADATA_NATIVE_DIRECTORIES}}
+    context["observedHost"] = workflow_host(root)
+    context["metadataInvocation"] = metadata_invocation()
+    # Bind the actual source/ZIP resource closure, not workflow template DATA or
+    # a renderer-supplied configuration/field roster.
+    write_json(root / "metadata.json", metadata_core_metadata(context))
+    metadata_source_unchanged(context)
+
+
+def metadata_public_bindings(context: dict) -> dict:
+    return {"schemaVersion": 1, "scope": METADATA_NATIVE_EVIDENCE_SCOPE,
+            **metadata_context_binding(context), "metadataInputs": context["metadataInputs"],
+            "python": PYTHON, "rust": {"release": RUST, "target": TARGETS["linux"]},
+            "features": ["development-runtime"], "testTarget": "lib", "host": context["observedHost"],
+            "payloadBindings": METADATA_PAYLOAD_BINDINGS, "notVerified": list(METADATA_NOT_VERIFIED)}
+
+
 def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, "prepare")
     admit_platform(scope, platform)
@@ -4296,9 +4822,11 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         require(admitted_scope(platform) == scope, "Windows preparation scope differs")
     profile = compile_profile(scope) if scope in COMPILE_PROFILES else None
     native_workflow = scope == WORKFLOW_NATIVE_SCOPE
+    native_metadata = scope == METADATA_NATIVE_SCOPE
+    native_edit = native_workflow or native_metadata
     native_github = scope == GITHUB_READONLY_SCOPE
     native_tls = scope == GITHUB_TLS_SCOPE
-    binding = (compile_workflow_binding(os.environ, scope) if profile else workflow_native_binding(os.environ)
+    binding = (metadata_native_binding(os.environ) if native_metadata else compile_workflow_binding(os.environ, scope) if profile else workflow_native_binding(os.environ)
                if native_workflow else github_readonly_binding(os.environ) if native_github
                else github_tls_binding(os.environ) if native_tls else {})
     source = Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True)
@@ -4312,22 +4840,22 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
                             temp, *temp.parents))
     for ancestor in (source / "desktop", source, *source.parents):
         require(not (ancestor / ".npmrc").exists(), "Ambient npm project configuration is not admitted")
-    if native_workflow or native_github or native_tls:
+    if native_edit or native_github or native_tls:
         # One original root per actual job attempt. A second prepare must not
         # mint a fresh path to evade a failed/Unknown phase's retained claims.
-        label = "github-tls" if native_tls else "github" if native_github else "workflow"
+        label = "metadata" if native_metadata else "github-tls" if native_tls else "github" if native_github else "workflow"
         root = temp / f"mrk-desktop-foundation-{label}-{binding['runId']}-{binding['attempt']}"
         root.mkdir(mode=0o700)
     else:
         root = Path(tempfile.mkdtemp(prefix="mrk-desktop-foundation-", dir=temp))
     no_cargo_configuration((root,))
-    directories = GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (
+    directories = METADATA_NATIVE_DIRECTORIES if native_metadata else GITHUB_TLS_DIRECTORIES if native_tls else GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (
         "home", "cargo", "rustup", "tmp", "target", "windows-snapshot", "appdata", "localappdata") if windows else (
         "home", "cargo", "rustup", "tmp", "target", "native", "config-owner", "config-driver-loss", "config-watchdog-loss",
         "config-stop", "config-terminal-deadline", "config-startup-stop", "config-transaction-eof", "appdata", "localappdata", "npm-cache")
     for name in directories:
         (root / name).mkdir(mode=0o700)
-    empty_files = ("gitconfig-empty",) if native_workflow or native_github or native_tls or windows else ("npmrc-user", "npmrc-global", "gitconfig-empty")
+    empty_files = ("gitconfig-empty",) if native_edit or native_github or native_tls or windows else ("npmrc-user", "npmrc-global", "gitconfig-empty")
     for name in empty_files:
         (root / name).touch(mode=0o600, exist_ok=False)
     git = shutil.which("git")
@@ -4337,13 +4865,13 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15, capture=True) == sha,
             "Event and checkout source differ")
     tree = run([git, "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=source, env=environment, timeout=15, capture=True)
-    if native_workflow or native_github or native_tls:
+    if native_edit or native_github or native_tls:
         require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40,
                 "Workflow native source tree differs")
     inventory = []
     total = 0
     package = source / "src/mobile_release"
-    input_paths = sorted(package.rglob("*"), key=(lambda path: path.as_posix()) if native_workflow or native_github or native_tls else None)
+    input_paths = sorted(package.rglob("*"), key=(lambda path: path.as_posix()) if native_edit or native_github or native_tls else None)
     with zipfile.ZipFile(root / "core.zip", "x", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in input_paths:
             require(not path.is_symlink(), "Core input contains a symbolic link")
@@ -4368,15 +4896,17 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     context.update(binding)
     if windows:
         context.update(scope=scope, event=os.environ["GITHUB_EVENT_NAME"], ref=os.environ["GITHUB_REF"])
-    workflow = (profile["workflow"] if profile else WORKFLOW_NATIVE_WORKFLOW if native_workflow
+    workflow = (profile["workflow"] if profile else WORKFLOW_NATIVE_WORKFLOW if native_edit
                 else GITHUB_READONLY_WORKFLOW if native_github else GITHUB_TLS_WORKFLOW if native_tls
                 else ".github/workflows/desktop-foundation.yml")
-    if profile or native_workflow or native_github or native_tls:
+    if profile or native_edit or native_github or native_tls:
         context["workflowSha256"] = hash_file(source / workflow)
     if scope == GTK_COMPILE_SCOPE:
         validate_gtk_core_inventory(inventory)
         context["sg1"] = gtk_compile_binding(source)
-    if native_workflow:
+    if native_metadata:
+        prepare_metadata_native_context(context, inventory)
+    elif native_workflow:
         prepare_workflow_native_context(context, inventory)
     elif native_github:
         prepare_github_readonly_context(context, inventory)
@@ -4385,7 +4915,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     source_unchanged(context)
     if not windows:
         write_json(root / "context.json", context)
-    if native_workflow:
+    if native_metadata:
+        public = metadata_public_bindings(context)
+    elif native_workflow:
         public = workflow_public_bindings(context)
     elif native_github:
         public = github_public_bindings(context)
@@ -4426,16 +4958,28 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     print("Prepared bounded source ZIP and source-bound synthetic check inputs.")
 
 
-def load_context(platform: str, scope: str = BOUNDARY_SCOPE) -> dict:
+def metadata_invocation() -> dict:
+    # Exact original invocation strings are private context DATA. Reading them
+    # does not resolve/reopen source/runtime paths after lane-last uncertainty.
+    values = {key: os.environ[key] for key in ("GITHUB_WORKSPACE", "MRK_PYTHON", "RUNNER_TEMP")}
+    values["executable"] = sys.executable
+    require(all(type(value) is str and Path(value).is_absolute() for value in values.values()),
+            "Metadata invocation input is not absolute")
+    return values
+
+
+def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: bool = False) -> dict:
     admit_platform(scope, platform)
+    require(not retention_only or scope == METADATA_NATIVE_SCOPE, "Unexpected DATA-only context route")
+    metadata_binding = metadata_native_binding(os.environ) if scope == METADATA_NATIVE_SCOPE else None
     if scope == WINDOWS_SNAPSHOT_SCOPE:
         require(admitted_scope(platform) == scope, "Windows context scope differs")
     root = Path(os.environ["MRK_DESKTOP_CI_ROOT"])
     require(root.is_absolute() and root.name.startswith("mrk-desktop-foundation-")
-            and root.parent == Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+            and root.parent == (Path(os.environ["RUNNER_TEMP"]) if retention_only else Path(os.environ["RUNNER_TEMP"]).resolve(strict=True))
             and not root.is_symlink(), "Unrecognized task root")
     ordinary(root / "context.json")
-    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}
+    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE}
                else workflow_json(root / "context.json") if scope == WORKFLOW_NATIVE_SCOPE
                else json.loads((root / "context.json").read_text(encoding="utf-8")))
     require(context["root"] == str(root) and context["platform"] == platform and context.get("executionScope") == scope
@@ -4470,6 +5014,23 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE) -> dict:
         workflow_inputs_unchanged(context)
         require(same_compile_json(workflow_json(root / "public-bindings.json"), workflow_public_bindings(context)),
                 "Workflow native public source binding changed")
+    elif scope == METADATA_NATIVE_SCOPE:
+        require(type(context) is dict and all(context.get(key) == value for key, value in metadata_binding.items())
+                and root.name == f"mrk-desktop-foundation-metadata-{metadata_binding['runId']}-{metadata_binding['attempt']}"
+                and same_compile_json(context.get("metadataInvocation"), metadata_invocation()),
+                "Metadata native context/source binding changed")
+        metadata_context_binding(context)
+        validate_workflow_host(context.get("observedHost"))
+        if not retention_only:
+            require(context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
+                    and context.get("python") == str(Path(sys.executable).resolve(strict=True))
+                    and context.get("workflowSha256") == hash_file(Path(context["source"]) / METADATA_NATIVE_WORKFLOW),
+                    "Metadata original source/runtime binding changed")
+            metadata_inputs_unchanged(context)
+        else:
+            metadata_bound_source_hashes(context, METADATA_TRANSACTION_EOF_SOURCES)
+        require(same_compile_json(read_bounded_json(root / "public-bindings.json", 256 * 1024), metadata_public_bindings(context)),
+                "Metadata native public source binding changed")
     elif scope == GITHUB_READONLY_SCOPE:
         binding = github_readonly_binding(os.environ)
         require(type(context) is dict and all(context.get(key) == value for key, value in binding.items())
@@ -4685,6 +5246,159 @@ def phase_workflow_native(name: str, context: dict) -> None:
     phase_receipt(context, name, list(WORKFLOW_NATIVE_CHECKS[name]))
 
 
+def metadata_phase_value(context: dict, name: str, checks: list[str]) -> dict:
+    require(name in METADATA_NATIVE_CHECKS, "Unexpected metadata-only phase receipt")
+    return {"schemaVersion": 1, "scope": METADATA_NATIVE_EVIDENCE_SCOPE, "phase": name, "status": "passed",
+            **metadata_context_binding(context), "metadataInputs": context["metadataInputs"],
+            "rust": {"release": RUST, "target": TARGETS["linux"]}, "python": PYTHON,
+            "features": ["development-runtime"], "testTarget": "lib",
+            "checks": [{"check": check, "exitCode": 0} for check in checks],
+            "notVerified": list(METADATA_NOT_VERIFIED)}
+
+
+def validate_metadata_phase_receipt(value: object, context: dict, name: str) -> dict:
+    require(name in METADATA_NATIVE_CHECKS, "Unknown metadata phase")
+    require(same_compile_json(value, metadata_phase_value(context, name, list(METADATA_NATIVE_CHECKS[name]))),
+            "Metadata phase receipt or original source/check inventory differs")
+    return value
+
+
+def metadata_phase_claim(context: dict, name: str) -> dict:
+    require(name in (*METADATA_NATIVE_CHECKS, "clean"), "Unknown metadata original phase claim")
+    return {"scope": METADATA_NATIVE_SCOPE, "phase": name, **metadata_context_binding(context)}
+
+
+def metadata_predecessors(context: dict, name: str) -> None:
+    """Original endpoints plus exact case/resource facts, never a reusable PASS file."""
+    metadata_context_binding(context)
+    require(name in (*METADATA_NATIVE_CHECKS, "clean"), "Unknown metadata successor")
+    phases, root = list(METADATA_NATIVE_CHECKS), Path(context["root"])
+    previous = phases if name == "clean" else phases[:phases.index(name)]
+    for prior in previous:
+        require(same_compile_json(read_bounded_json(root / f"{prior}-started.json", 4096), metadata_phase_claim(context, prior)),
+                "Metadata original phase claim differs")
+        validate_metadata_phase_receipt(read_bounded_json(root / f"{prior}-checks.json", 256 * 1024), context, prior)
+        if prior == "metadata-owner":
+            metadata_owner_receipt(context, "source")
+            metadata_owner_receipt(context, "zip")
+        elif prior == "metadata-transaction-eof":
+            metadata_transaction_eof_receipt(context)
+        elif prior == "metadata-core":
+            for partition in METADATA_PARTITIONS:
+                metadata_core_receipt(context, partition)
+    # Retention is one-use too. A new helper process or missing pass-shaped
+    # receipt cannot renew a spent invocation or authorize failed-root cleanup.
+    for later in (*phases[len(previous):], "clean"):
+        for suffix in ("started", "checks"):
+            require(not os.path.lexists(root / f"{later}-{suffix}.json"), "Metadata phase was already claimed; retain outputs")
+    require(not os.path.lexists(root / "retention-checks.json"), "Metadata retention was already recorded")
+
+
+def metadata_phase_start(context: dict, name: str) -> None:
+    metadata_predecessors(context, name)
+    write_json(Path(context["root"]) / f"{name}-started.json", metadata_phase_claim(context, name))
+
+
+def clean_metadata_native(context: dict) -> None:
+    """Lane-last resource Unknown licenses DATA retention, never another close."""
+    metadata_phase_start(context, "clean")
+    write_json(Path(context["root"]) / "retention-checks.json", {
+        "schemaVersion": 1, "scope": METADATA_NATIVE_EVIDENCE_SCOPE, "status": "retained",
+        **metadata_context_binding(context), "reason": "lane-last-committed-close-resources-unknown", "deleted": False,
+        "laterNativeWork": False, "projectProbes": False, "vmDisposalRequired": True,
+    })
+    print("Retained metadata roots and compiler/runtime outputs for hosted VM disposal; no Save or production qualification.")
+
+
+def phase_metadata_native(name: str, context: dict) -> None:
+    """Same finite headless runner; metadata never falls through to old native tests."""
+    metadata_context_binding(context)
+    admit_phase(METADATA_NATIVE_SCOPE, name)
+    require(name != "prepare", "Metadata preparation has a separate fixed entry")
+    if name == "clean":
+        clean_metadata_native(context)
+        return
+    metadata_phase_start(context, name)
+    metadata_source_unchanged(context)
+    root, source = Path(context["root"]), Path(context["source"])
+    no_cargo_configuration((root, *root.parents, source / "desktop/src-tauri", source / "desktop", source, *source.parents))
+    environment = clean_environment(root)
+    environment["GITHUB_SHA"] = context["sourceSha"]
+    manifest = source / "desktop/src-tauri/Cargo.toml"
+    if name == "acquire":
+        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+            check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
+        cargo, _ = tools(context, environment)
+        with (root / "cargo-metadata.json").open("x", encoding="utf-8") as output:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                 "--features", "development-runtime", "--filter-platform", TARGETS["linux"],
+                 "--manifest-path", str(manifest)], check="metadata-locked-headless-metadata", cwd=root,
+                env=environment, timeout=600, output=output)
+        ordinary(root / "cargo-metadata.json")
+        require(0 < (root / "cargo-metadata.json").stat().st_size <= 32 * 1024 * 1024, "Metadata compiler metadata exceeds its bound")
+    elif name == "metadata-core":
+        # C20's effect Unknown is invocation-last with distinct positive resource
+        # proof. C21 is resource-settled. C22 is the last native work of the lane.
+        environment.update(MRK_DESKTOP_METADATA_TEXT_NATIVE="1", MRK_DESKTOP_METADATA_TEXT_SOURCE_SHA=context["sourceSha"],
+                           GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="Linux", RUNNER_ARCH="X64",
+                           GITHUB_WORKSPACE=str(source), RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
+        fixture = [context["python"], "-I", "-S", "-B", str(source / "tests/native_desktop_config.py"),
+                   "--task-root", str(root), "--domain", "metadata_text", "--case"]
+        with (root / "metadata-ordinary.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "ordinary"], check="metadata-core-ordinary", cwd=root, env=environment, timeout=90, output=output)
+        metadata_core_receipt(context, "ordinary")
+        metadata_inputs_unchanged(context)
+        with (root / "metadata-committed-fsync.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "committed-fsync"], check="metadata-core-committed-fsync", cwd=root, env=environment, timeout=45, output=output)
+        metadata_core_receipt(context, "committed-fsync")
+        metadata_source_unchanged(context)
+        with (root / "metadata-committed-close.json").open("x", encoding="utf-8") as output:
+            run([*fixture, "committed-close"], check="metadata-core-committed-close", cwd=root, env=environment, timeout=45, output=output)
+        metadata_core_receipt(context, "committed-close")
+        phase_receipt(context, name, list(METADATA_NATIVE_CHECKS[name]))
+        return
+    else:
+        cargo, _ = tools(context, environment)
+        common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["linux"],
+                  "--manifest-path", str(manifest), "--target-dir", str(root / "target")]
+        if name == "compile":
+            run([cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"],
+                check="headless-test-compile-only", cwd=root, env=environment, timeout=600)
+        else:
+            environment.update(MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
+                               MRK_DESKTOP_METADATA_TEXT_HOSTED_CHECKS="metadata-text-v1", MRK_DESKTOP_METADATA_TEXT_INPUT="source",
+                               MRK_DESKTOP_METADATA_TEXT_CORE_METADATA=str(root / "metadata.json"),
+                               MRK_DESKTOP_METADATA_TEXT_CORE_ZIP=str(root / "core.zip"),
+                               MRK_DESKTOP_EDIT_SOURCE_SHA=context["sourceSha"], GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+                               RUNNER_OS="Linux", RUNNER_ARCH="X64", GITHUB_RUN_ID=context["runId"], GITHUB_RUN_ATTEMPT=context["attempt"],
+                               GITHUB_REF=METADATA_NATIVE_REF, GITHUB_EVENT_NAME=context["event"], GITHUB_REPOSITORY=context["repository"],
+                               GITHUB_WORKFLOW_SHA=context["workflowSha"], GITHUB_WORKFLOW_REF=context["workflowRef"],
+                               MRK_PUSH_EVENT_AFTER=context["pushEventAfter"],
+                               RUNNER_TEMP=str(Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)))
+            if name == "metadata-owner":
+                environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "metadata-owner-source")
+                run([cargo, "test", *common, "--lib", "--features", "development-runtime", METADATA_OWNER_TEST,
+                     "--", "--exact", "--ignored", "--test-threads=1"], check="metadata-owner-source-native-contract",
+                    cwd=root, env=environment, timeout=180)
+                metadata_owner_receipt(context, "source")
+                metadata_inputs_unchanged(context)
+                environment.update(MRK_DESKTOP_EDIT_TEST_ROOT=str(root / "metadata-owner-zip"),
+                                   MRK_DESKTOP_DEV_CORE=str(root / "core.zip"), MRK_DESKTOP_METADATA_TEXT_INPUT="zip")
+                run([cargo, "test", *common, "--lib", "--features", "development-runtime", METADATA_OWNER_TEST,
+                     "--", "--exact", "--ignored", "--test-threads=1"], check="metadata-owner-zip-native-contract",
+                    cwd=root, env=environment, timeout=60)
+                metadata_owner_receipt(context, "zip")
+            else:
+                require(name == "metadata-transaction-eof", "Unknown fixed metadata native phase")
+                environment["MRK_DESKTOP_EDIT_TEST_ROOT"] = str(root / "metadata-transaction-eof")
+                run([cargo, "test", *common, "--lib", "--features", "development-runtime", METADATA_TRANSACTION_EOF_TEST,
+                     "--", "--exact", "--ignored", "--test-threads=1"], check="metadata-transaction-eof-native-contract",
+                    cwd=root, env=environment, timeout=90)
+                metadata_transaction_eof_receipt(context)
+    metadata_source_unchanged(context)
+    phase_receipt(context, name, list(METADATA_NATIVE_CHECKS[name]))
+
+
 def clean_compile(context: dict) -> None:
     """Only positively completed compiler work; no fabricated native receipts."""
     profile = compile_profile(context.get("executionScope", ""))
@@ -4784,7 +5498,11 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
 def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, name)
     admit_platform(scope, platform)
-    context = load_context(platform, scope)
+    context = (load_context(platform, scope, retention_only=True) if scope == METADATA_NATIVE_SCOPE and name == "clean"
+               else load_context(platform, scope))
+    if scope == METADATA_NATIVE_SCOPE:
+        phase_metadata_native(name, context)
+        return
     if scope == WORKFLOW_NATIVE_SCOPE:
         phase_workflow_native(name, context)
         return
@@ -5054,14 +5772,15 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline"))
+    parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core",
+                        "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline"))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)
     try:
         scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")
         admit_phase(scope, args.phase)
-        platform = admitted_host()
+        platform = (admitted_host(retention_only=True) if scope == METADATA_NATIVE_SCOPE and args.phase == "clean" else admitted_host())
         prepare(platform, scope) if args.phase == "prepare" else phase(args.phase, platform, scope)
     except Exception as error:
         reason = str(error) if isinstance(error, CheckFailure) else type(error).__name__

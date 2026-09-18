@@ -113,6 +113,50 @@ impl WorkflowFixturePermit {
     }
 }
 
+// Separate, finite metadata fixture authority. The registered root itself,
+// configuration's test flag and a workflow permit are not metadata authority.
+#[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+struct MetadataFixturePermit {
+    owner: std::sync::Weak<Inner>, selections: Vec<(PathBuf, metadata_wire::Platform, String)>,
+    python: PathBuf, core: PathBuf, bootstrap: PathBuf, cwd: PathBuf,
+    binding_sha256: String, zip: bool, eof: bool,
+}
+#[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl MetadataFixturePermit {
+    fn owns(&self, inner: &Inner) -> bool {
+        self.owner.upgrade().is_some_and(|original| std::ptr::eq(Arc::as_ptr(&original), inner))
+            && !self.selections.is_empty() && self.selections.len() <= 15
+            && self.binding_sha256.len() == 64
+            && self.binding_sha256.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+            && (!self.eof || !self.zip)
+    }
+    fn root(&self, inner: &Inner, path: &std::path::Path) -> bool {
+        self.owns(inner) && self.selections.iter().any(|(root, _, _)| root == path)
+    }
+    fn selection(&self, inner: &Inner, path: &std::path::Path, context: &metadata_wire::Context) -> bool {
+        self.owns(inner) && self.selections.iter().any(|(root, platform, locale)|
+            root == path && *platform == context.platform && *locale == context.locale)
+    }
+    fn bootstrap_case(eof: bool, path: &std::path::Path, case: Option<hosted_tests::EofCase>) -> bool {
+        match (eof, case) {
+            (false, None) => true,
+            (true, Some(case)) => case.domain() == EditDomain::MetadataText
+                && path.file_name().and_then(|name| name.to_str()) == Some(case.name()),
+            _ => false,
+        }
+    }
+    fn spawn(&self, inner: &Inner, session: &Session, runtime: &VerifiedRuntime) -> bool {
+        session.domain == EditDomain::MetadataText
+            && session.registration.as_ref().is_some_and(|registration|
+                session.fixture_metadata_context.as_ref().is_some_and(|context|
+                    self.selection(inner, &registration.root.path, context))
+                && Self::bootstrap_case(self.eof, &registration.root.path, session.fixture_schedule.eof_case()))
+            && runtime.python == self.python && runtime.core == self.core
+            && runtime.bootstrap == self.bootstrap && runtime.cwd == self.cwd
+            && runtime.core.file_name().and_then(|name| name.to_str()) == Some(if self.zip { "core.zip" } else { "src" })
+    }
+}
+
 // Value-only clock decisions shared by the real lock-held admission/expiry
 // paths and inert boundary tests. No alternate clock source or owner exists.
 fn claim_phase(review_end: Instant, now: Instant) -> Option<Instant> {
@@ -135,6 +179,8 @@ struct Inner {
     fixture_authorized: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fixture_workflow: Mutex<Option<Arc<WorkflowFixturePermit>>>,
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fixture_metadata: Mutex<Option<Arc<MetadataFixturePermit>>>,
     #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
     fixture_next_schedule: Mutex<Option<Arc<hosted_tests::Schedule>>>,
 }
@@ -161,6 +207,10 @@ struct Session {
     domain: EditDomain, registration: Option<WorkflowRegistration>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fixture_workflow: Option<Arc<WorkflowFixturePermit>>,
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fixture_metadata: Option<Arc<MetadataFixturePermit>>,
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fixture_metadata_context: Option<metadata_wire::Context>,
     id: String, commands: mpsc::Sender<Vec<u8>>, receiver: AsyncMutex<Option<mpsc::Receiver<Vec<u8>>>>,
     stop: watch::Sender<bool>, wake: Notify, force_due: AtomicBool, driver_done: AtomicBool,
     pipes: watch::Sender<PipeAcquisition>, frames: mpsc::Sender<ChildFrame>,
@@ -212,6 +262,9 @@ impl Inner {
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if domain == EditDomain::GitHubWorkflows
             && self.fixture_workflow.lock().is_ok_and(|permit| permit.as_ref().is_some_and(|permit| permit.owns(self))) { return true; }
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if domain == EditDomain::MetadataText
+            && self.fixture_metadata.lock().is_ok_and(|permit| permit.as_ref().is_some_and(|permit| permit.owns(self))) { return true; }
         #[cfg(all(test, feature = "development-runtime"))]
         { qualified(domain, self.fixture_authorized.load(Ordering::SeqCst)) }
         #[cfg(not(all(test, feature = "development-runtime")))]
@@ -364,6 +417,8 @@ impl EditOwner {
             fixture_authorized: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             fixture_workflow: Mutex::new(None),
+            #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            fixture_metadata: Mutex::new(None),
             #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
             fixture_next_schedule: Mutex::new(None),
             registry: Mutex::new(Registry { generation, loss_generation, window: None, document_bound: false, document_lost: false,
@@ -379,6 +434,10 @@ impl EditOwner {
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn workflow_fixture_registration_permitted(&self, path: &std::path::Path) -> bool {
         self.inner.fixture_workflow.lock().is_ok_and(|permit| permit.as_ref().is_some_and(|permit| permit.root(&self.inner, path)))
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn metadata_fixture_registration_permitted(&self, path: &std::path::Path) -> bool {
+        self.inner.fixture_metadata.lock().is_ok_and(|permit| permit.as_ref().is_some_and(|permit| permit.root(&self.inner, path)))
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn session_gtk_idle(&self, stopping: bool) -> Result<serde_json::Value, &'static str> {
@@ -452,6 +511,12 @@ impl EditOwner {
             if !permit.root(&self.inner, &root) { return Err(invalid_owner()); }
             Some(permit) // This exact immutable original permit travels to spawn.
         } else { None };
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let fixture_metadata = if domain == EditDomain::MetadataText && !NATIVE_METADATA_TEXT_EDIT_QUALIFIED {
+            let permit = self.inner.fixture_metadata.lock().map_err(|_| edit_unknown())?.clone().ok_or_else(invalid_owner)?;
+            if !metadata.as_ref().is_some_and(|context| permit.selection(&self.inner, &root, context)) { return Err(invalid_owner()); }
+            Some(permit)
+        } else { None };
         if project_id.is_empty() || project_id.len() > 128 { return Err(BridgeError::invalid()); }
         let root = root.to_str().filter(|s| s.len() <= 4096).ok_or_else(BridgeError::invalid)?;
         let (id, executor) = match (domain, ticket) {
@@ -478,6 +543,10 @@ impl EditOwner {
         let session = Arc::new(Session { domain, registration, id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             fixture_workflow,
+            #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            fixture_metadata,
+            #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            fixture_metadata_context: metadata.clone(),
             wake: Notify::new(), force_due: AtomicBool::new(false), driver_done: AtomicBool::new(false), resource_unknown: AtomicBool::new(false),
             pipes, frames, driver_joined: AtomicBool::new(false), driver_join_failed: AtomicBool::new(false),
             watchdog_joined: AtomicBool::new(false), watchdog_join_failed: AtomicBool::new(false), manager_join_failed: AtomicBool::new(false),
@@ -1068,8 +1137,8 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
                     a.projection.core_outcome = Some(core);
                     a.terminal = true;
                     terminal = true;
-                    // Existing configuration/workflow fixture scheduling does
-                    // not acquire any metadata-writer qualification here.
+                    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    owner.fixture_schedule.accepted_terminal(seq);
                 }
             }
         }
@@ -1137,10 +1206,16 @@ fn spawn_original(runtime: VerifiedRuntime, inner: &Inner, owner: &Session) {
         inner.fixture_workflow.lock().is_ok_and(|current| current.as_ref().is_some_and(|current| Arc::ptr_eq(current, original)))
             && original.spawn(inner, owner, &runtime)
     });
+    let metadata_allowed = NATIVE_METADATA_TEXT_EDIT_QUALIFIED;
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let metadata_allowed = metadata_allowed || owner.fixture_metadata.as_ref().is_some_and(|original| {
+        inner.fixture_metadata.lock().is_ok_and(|current| current.as_ref().is_some_and(|current| Arc::ptr_eq(current, original)))
+            && original.spawn(inner, owner, &runtime)
+    });
     let domain_allowed = match owner.domain {
         EditDomain::Configuration => true, // Existing separate configuration admission/spawn policy follows.
         EditDomain::GitHubWorkflows => workflow_allowed && cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
-        EditDomain::MetadataText => NATIVE_METADATA_TEXT_EDIT_QUALIFIED
+        EditDomain::MetadataText => metadata_allowed
             && cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
     };
     if !domain_allowed {

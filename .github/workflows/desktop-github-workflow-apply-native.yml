@@ -2,7 +2,7 @@ name: Desktop GitHub workflow Apply native verification
 
 on:
   push:
-    branches: [verify/desktop-github-workflow-apply-native]
+    branches: [verify/desktop-github-workflow-apply-native, verify/desktop-metadata-text-apply-native]
     paths:
       - desktop/**
       - src/mobile_release/**
@@ -33,10 +33,11 @@ jobs:
     timeout-minutes: 45
     env:
       MRK_DESKTOP_PLATFORM: linux
-      MRK_DESKTOP_HOSTED_CHECKS: github-workflow-apply-native-v1
       MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
     steps:
       - name: Require exact disposable non-root Linux verification source
+        id: lane
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -44,14 +45,23 @@ jobs:
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == X64 ]]
           [[ "$ImageOS" == ubuntu24 && "$EUID" -ne 0 ]]
-          [[ "$GITHUB_REF" == refs/heads/verify/desktop-github-workflow-apply-native ]]
-          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" != 0000000000000000000000000000000000000000 && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-github-workflow-apply-native.yml@$GITHUB_REF" ]]
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
-            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
-          else
-            [[ "$GITHUB_EVENT_NAME" == push ]]
-          fi
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF" in
+            push:refs/heads/verify/desktop-github-workflow-apply-native)
+              scope=github-workflow-apply-native-v1 ;;
+            workflow_dispatch:refs/heads/verify/desktop-github-workflow-apply-native)
+              [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+              scope=github-workflow-apply-native-v1 ;;
+            push:refs/heads/verify/desktop-metadata-text-apply-native)
+              [[ "$GITHUB_RUN_ATTEMPT" == 1 && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
+              scope=metadata-text-apply-native-v1 ;;
+            *) exit 1 ;;
+          esac
+          printf 'scope=%s\n' "$scope" >> "$GITHUB_OUTPUT"
+          printf 'MRK_DESKTOP_HOSTED_CHECKS=%s\n' "$scope" >> "$GITHUB_ENV"
       - name: Check out exact candidate without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         env:
@@ -91,6 +101,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
       - name: Verify original bridge owners and one separate ZIP parity case
+        if: steps.lane.outputs.scope == 'github-workflow-apply-native-v1'
         timeout-minutes: 5
         shell: bash
         env:
@@ -99,6 +110,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py workflow-owner'
       - name: Verify original transaction EOF and retain the final recovery conflict
+        if: steps.lane.outputs.scope == 'github-workflow-apply-native-v1'
         timeout-minutes: 3
         shell: bash
         env:
@@ -107,6 +119,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py workflow-transaction-eof'
       - name: Verify core partitions with uncertain-close strictly last
+        if: steps.lane.outputs.scope == 'github-workflow-apply-native-v1'
         timeout-minutes: 5
         shell: bash
         env:
@@ -114,6 +127,33 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py workflow-core'
+      - name: Verify metadata bridge owners and one separate ZIP parity case
+        if: steps.lane.outputs.scope == 'metadata-text-apply-native-v1'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py metadata-owner'
+      - name: Verify metadata transaction EOF and retain the final recovery conflict
+        if: steps.lane.outputs.scope == 'metadata-text-apply-native-v1'
+        timeout-minutes: 3
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py metadata-transaction-eof'
+      - name: Verify metadata core partitions with uncertain-close strictly last
+        if: steps.lane.outputs.scope == 'metadata-text-apply-native-v1'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py metadata-core'
       - name: Validate DATA receipts only and retain all outputs for VM disposal
         if: success()
         timeout-minutes: 2
@@ -124,7 +164,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py clean'
       - name: Retain only allowlisted synthetic receipts
-        if: always() && steps.prepare.outcome == 'success'
+        if: always() && steps.prepare.outcome == 'success' && steps.lane.outputs.scope == 'github-workflow-apply-native-v1'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-github-workflow-apply-native-linux-${{ github.run_id }}-${{ github.run_attempt }}
@@ -141,6 +181,28 @@ jobs:
             ${{ steps.prepare.outputs.root }}/workflow-ordinary.json
             ${{ steps.prepare.outputs.root }}/workflow-committed-fsync.json
             ${{ steps.prepare.outputs.root }}/workflow-committed-close.json
+            ${{ steps.prepare.outputs.root }}/retention-checks.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+      - name: Retain only allowlisted synthetic metadata receipts
+        if: always() && steps.prepare.outcome == 'success' && steps.lane.outputs.scope == 'metadata-text-apply-native-v1'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-metadata-text-apply-native-linux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.prepare.outputs.root }}/public-bindings.json
+            ${{ steps.prepare.outputs.root }}/acquire-checks.json
+            ${{ steps.prepare.outputs.root }}/compile-checks.json
+            ${{ steps.prepare.outputs.root }}/metadata-owner-checks.json
+            ${{ steps.prepare.outputs.root }}/metadata-owner-source/receipt.json
+            ${{ steps.prepare.outputs.root }}/metadata-owner-zip/receipt.json
+            ${{ steps.prepare.outputs.root }}/metadata-transaction-eof-checks.json
+            ${{ steps.prepare.outputs.root }}/metadata-transaction-eof/receipt.json
+            ${{ steps.prepare.outputs.root }}/metadata-core-checks.json
+            ${{ steps.prepare.outputs.root }}/metadata-ordinary.json
+            ${{ steps.prepare.outputs.root }}/metadata-committed-fsync.json
+            ${{ steps.prepare.outputs.root }}/metadata-committed-close.json
             ${{ steps.prepare.outputs.root }}/retention-checks.json
           if-no-files-found: error
           retention-days: 14

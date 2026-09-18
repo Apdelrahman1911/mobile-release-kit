@@ -6,10 +6,10 @@ There is no subprocess controller, credential input, recovery command or
 alternative transaction engine. Uncertainty ends native admission in this
 interpreter; the workflow disposes the retained synthetic case directory/VM.
 
-The separate github_workflows domain is source-only core qualification, not a
-production permit. Its closed argv/env/receipt inventory never accepts a caller
-path roster, replacement policy or ZIP selector. Rust owns the one ZIP parity
-case and real bridge/owner/EOF fixtures; this file does not spawn a process.
+The separate github_workflows and metadata_text domains are source-only core
+qualification, not production permits. Their closed argv/env/receipt inventories
+never accept a caller path roster, replacement policy or ZIP selector. Rust owns
+the ZIP parity cases and real bridge/owner/EOF fixtures; this file spawns no process.
 """
 from __future__ import annotations
 
@@ -86,6 +86,383 @@ _WORKFLOW_PAYLOAD_SHA256 = (
 )
 
 
+# Literal metadata fixture DATA, shared with the SOURCE coordination contract.
+# Expected bytes/rows are independent constants, never product-generated truth.
+_METADATA_CASES = {'committed-close': ('metadata-committed-close-return-injection',),
+ 'committed-fsync': ('metadata-committed-fsync-injection',),
+ 'ordinary': ('configured-platform-disabled',
+              'configured-locale-absent',
+              'legacy-four-ignore-rules-refused',
+              'ambiguous-ignore-negation-refused',
+              'config-retarget-before-prepare',
+              'ignore-bytes-before-apply',
+              'dependency-only-parent-mode-before-apply',
+              'target-parent-inode-before-prepare',
+              'target-parent-mode-before-apply',
+              'missing-target-parent-appears-before-apply',
+              'noop-last-leaf-ctime-after-recheck',
+              'noop-target-parent-mode-after-recheck',
+              'unreadable-leaf-before-prepare',
+              'first-replacement-installed-rollback',
+              'incomplete-metadata-preparing-retained',
+              'committed-old-backup-replaced-at-cleanup-entry',
+              'legacy-domains-refuse-empty-metadata-prepare',
+              'legacy-domains-refuse-header-tmp-metadata-prepare',
+              'metadata-refuses-legacy-ready',
+              'dependency-drift-after-first-replacement')}
+
+_METADATA_SOURCES = {'apiContracts': 'src/mobile_release/api/contracts.py',
+ 'buildInputs': 'src/mobile_release/build_inputs.py',
+ 'cancellation': 'src/mobile_release/cancellation.py',
+ 'catalogue': 'src/mobile_release/api/_catalog.py',
+ 'configEdit': 'src/mobile_release/config_edit.py',
+ 'configPayloads': 'src/mobile_release/config_payloads.py',
+ 'configuration': 'src/mobile_release/config.py',
+ 'editControl': 'src/mobile_release/_desktop_edit_control.py',
+ 'editEngine': 'src/mobile_release/_desktop_edit_engine.py',
+ 'editProtocol': 'src/mobile_release/_desktop_edit_protocol.py',
+ 'fixture': 'tests/native_desktop_config.py',
+ 'metadataApi': 'src/mobile_release/api/_metadata_text.py',
+ 'metadataEdit': 'src/mobile_release/metadata_text_edit.py',
+ 'metadataPolicy': 'src/mobile_release/metadata.py',
+ 'metadataText': 'src/mobile_release/metadata_text.py',
+ 'passiveEngine': 'src/mobile_release/_desktop_engine.py',
+ 'resource': 'src/mobile_release/api/data/metadata-text-help-v1.json',
+ 'rootCustody': 'src/mobile_release/init_workspace_custody.py',
+ 'snapshot': 'src/mobile_release/api/_snapshot.py',
+ 'transaction': 'src/mobile_release/init_transaction.py'}
+
+_METADATA_FILES = {'android': ('title.txt', 'short_description.txt', 'full_description.txt'),
+ 'ios': ('description.txt', 'keywords.txt', 'privacy_url.txt', 'support_url.txt', 'release_notes.txt')}
+
+_METADATA_CONFIG_TEXT = {'publicStore': '{"android":{"applicationId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"ios":{"bundleId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"metadata":{"androidLocales":["en-US","fr-FR"],"iosLocales":["en-US"],"root":"public/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},"schemaVersion":1,"services":{"androidFirebase":"disabled","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"production"},"version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"release/version.properties"}}\n',
+ 'releaseStore': '{"android":{"applicationId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"ios":{"bundleId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"metadata":{"androidLocales":["en-US","fr-FR"],"iosLocales":["en-US"],"root":"release/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},"schemaVersion":1,"services":{"androidFirebase":"disabled","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"production"},"version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"release/version.properties"}}\n'}
+
+_METADATA_CONFIG_HASHES = {'publicStore': '1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94',
+ 'releaseStore': 'caabad94b27c616e9deaf8570ded7edca9a41de86ca3e1982ab6e4a3f57073f1'}
+
+_METADATA_IGNORE = (b'.mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n.mobi'
+ b'le-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n')
+
+_METADATA_IGNORE_SHA256 = 'e60087ecefac81e23666444e6aea9490b3fc42b2510f566cfd4aa5a36a35b7d4'
+
+_METADATA_TEXT = {'android': {'full_description.txt': 'Public release details: café.\nSecond line.\n',
+             'short_description.txt': 'A fixed public description.\r\n',
+             'title.txt': 'Fixture public title\n'},
+ 'ios': {'description.txt': 'Public iOS description: café.\r\nSecond line.\r\n',
+         'keywords.txt': 'public,fixture,release',
+         'privacy_url.txt': 'https://public.invalid/privacy',
+         'release_notes.txt': '  Public release notes.\nNo private content.\n',
+         'support_url.txt': 'https://public.invalid/support'}}
+
+_METADATA_FIELD_HASHES = {'android': {'full_description.txt': '52002e38814d0b0a78bc21cad572d5fa265ad3f9f72a672829982e889a4422fa',
+             'short_description.txt': '233524e36ed836f2fc5b2754e73ff6f125f443d1bb57770942368c2fb90a0c63',
+             'title.txt': '17c61ad21566db1d3e8bc33087e2ea25eced56a923addd81a3a80305dea3ee94'},
+ 'ios': {'description.txt': '417b4365404b44f1c83e478dbebb43864924c858fcca7346aac4db1b9f2c6ee5',
+         'keywords.txt': 'd563110a53a8d4b4e320f549a957fcbc6d0f8ca14a02f77dfce9bdfaa2e0f866',
+         'privacy_url.txt': '5cb73fc576bb124e3930e583584ad86d8052264a12c273cf207874b3c82aa5ee',
+         'release_notes.txt': '4ec8e8f6389b0ece64c0f2ada003d134934dccba9c942ebbdfbadeb18c2ae5c9',
+         'support_url.txt': '0cf21b6bc2716d68e9e9b41edda65445ab46e022fa94eeaa150c3c4045da1104'}}
+
+_METADATA_PREVIOUS_TEXT = {'android': {'short_description.txt': 'Previous public description.\n', 'title.txt': 'Previous public title\n'},
+ 'ios': {'description.txt': 'Previous public iOS description.\n', 'keywords.txt': 'previous,public'}}
+
+_METADATA_EXPECTED = {'configured-platform-disabled': {'case': 'configured-platform-disabled',
+                                  'observed': {'journalAbsent': True,
+                                               'revisionAbsent': True,
+                                               'scopesClosed': 1,
+                                               'snapshotUnchanged': True,
+                                               'targetDescriptorAbsent': True},
+                                  'outcome': {'effect': 'not_started',
+                                              'journal': 'not_created',
+                                              'reason': 'invalid_config',
+                                              'resources': 'settled'},
+                                  'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'configured-locale-absent': {'case': 'configured-locale-absent',
+                              'observed': {'journalAbsent': True,
+                                           'revisionAbsent': True,
+                                           'scopesClosed': 1,
+                                           'snapshotUnchanged': True,
+                                           'targetDescriptorAbsent': True},
+                              'outcome': {'effect': 'not_started',
+                                          'journal': 'not_created',
+                                          'reason': 'invalid_config',
+                                          'resources': 'settled'},
+                              'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'legacy-four-ignore-rules-refused': {'case': 'legacy-four-ignore-rules-refused',
+                                      'observed': {'journalAbsent': True,
+                                                   'revisionAbsent': True,
+                                                   'scopesClosed': 1,
+                                                   'snapshotUnchanged': True,
+                                                   'targetDescriptorAbsent': True},
+                                      'outcome': {'effect': 'not_started',
+                                                  'journal': 'not_created',
+                                                  'reason': 'ignore_conflict',
+                                                  'resources': 'settled'},
+                                      'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'ambiguous-ignore-negation-refused': {'case': 'ambiguous-ignore-negation-refused',
+                                       'observed': {'journalAbsent': True,
+                                                    'revisionAbsent': True,
+                                                    'scopesClosed': 1,
+                                                    'snapshotUnchanged': True,
+                                                    'targetDescriptorAbsent': True},
+                                       'outcome': {'effect': 'not_started',
+                                                   'journal': 'not_created',
+                                                   'reason': 'ignore_conflict',
+                                                   'resources': 'settled'},
+                                       'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'config-retarget-before-prepare': {'case': 'config-retarget-before-prepare',
+                                    'observed': {'authorityRetired': True,
+                                                 'changeObserved': True,
+                                                 'journalAbsent': True,
+                                                 'scopesClosed': 2,
+                                                 'selectionNotRetargeted': True,
+                                                 'snapshotUnchanged': True},
+                                    'outcome': {'effect': 'not_started',
+                                                'journal': 'not_created',
+                                                'reason': 'stale_revision',
+                                                'resources': 'settled'},
+                                    'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'ignore-bytes-before-apply': {'case': 'ignore-bytes-before-apply',
+                               'observed': {'authorityRetired': True,
+                                            'changeObserved': True,
+                                            'journalAbsent': True,
+                                            'scopesClosed': 3,
+                                            'selectionNotRetargeted': True,
+                                            'snapshotUnchanged': True},
+                               'outcome': {'effect': 'not_started',
+                                           'journal': 'not_created',
+                                           'reason': 'stale_revision',
+                                           'resources': 'settled'},
+                               'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'dependency-only-parent-mode-before-apply': {'case': 'dependency-only-parent-mode-before-apply',
+                                              'observed': {'authorityRetired': True,
+                                                           'changeObserved': True,
+                                                           'journalAbsent': True,
+                                                           'scopesClosed': 3,
+                                                           'selectionNotRetargeted': True,
+                                                           'snapshotUnchanged': True},
+                                              'outcome': {'effect': 'not_started',
+                                                          'journal': 'not_created',
+                                                          'reason': 'stale_revision',
+                                                          'resources': 'settled'},
+                                              'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'target-parent-inode-before-prepare': {'case': 'target-parent-inode-before-prepare',
+                                        'observed': {'authorityRetired': True,
+                                                     'changeObserved': True,
+                                                     'journalAbsent': True,
+                                                     'scopesClosed': 2,
+                                                     'selectionNotRetargeted': True,
+                                                     'snapshotUnchanged': True},
+                                        'outcome': {'effect': 'not_started',
+                                                    'journal': 'not_created',
+                                                    'reason': 'stale_revision',
+                                                    'resources': 'settled'},
+                                        'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'target-parent-mode-before-apply': {'case': 'target-parent-mode-before-apply',
+                                     'observed': {'authorityRetired': True,
+                                                  'changeObserved': True,
+                                                  'journalAbsent': True,
+                                                  'scopesClosed': 3,
+                                                  'selectionNotRetargeted': True,
+                                                  'snapshotUnchanged': True},
+                                     'outcome': {'effect': 'not_started',
+                                                 'journal': 'not_created',
+                                                 'reason': 'stale_revision',
+                                                 'resources': 'settled'},
+                                     'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'missing-target-parent-appears-before-apply': {'case': 'missing-target-parent-appears-before-apply',
+                                                'observed': {'authorityRetired': True,
+                                                             'changeObserved': True,
+                                                             'journalAbsent': True,
+                                                             'scopesClosed': 3,
+                                                             'selectionNotRetargeted': True,
+                                                             'snapshotUnchanged': True},
+                                                'outcome': {'effect': 'not_started',
+                                                            'journal': 'not_created',
+                                                            'reason': 'stale_revision',
+                                                            'resources': 'settled'},
+                                                'owner': {'closed': True,
+                                                          'fatal': False,
+                                                          'handlerRestored': True}},
+ 'noop-last-leaf-ctime-after-recheck': {'case': 'noop-last-leaf-ctime-after-recheck',
+                                        'observed': {'changedOnlyDeclaredFacts': True,
+                                                     'consumingTargetChecks': 1,
+                                                     'injections': 1,
+                                                     'journalAbsent': True,
+                                                     'recheckReturns': 1,
+                                                     'renameProbes': 0,
+                                                     'scopesClosed': 3,
+                                                     'snapshotUnchangedAfterInjection': True,
+                                                     'unchangedMarked': False},
+                                        'outcome': {'effect': 'not_started',
+                                                    'journal': 'not_created',
+                                                    'reason': 'stale_revision',
+                                                    'resources': 'settled'},
+                                        'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'noop-target-parent-mode-after-recheck': {'case': 'noop-target-parent-mode-after-recheck',
+                                           'observed': {'changedOnlyDeclaredFacts': True,
+                                                        'consumingTargetChecks': 1,
+                                                        'injections': 1,
+                                                        'journalAbsent': True,
+                                                        'recheckReturns': 1,
+                                                        'renameProbes': 0,
+                                                        'scopesClosed': 3,
+                                                        'snapshotUnchangedAfterInjection': True,
+                                                        'unchangedMarked': False},
+                                           'outcome': {'effect': 'not_started',
+                                                       'journal': 'not_created',
+                                                       'reason': 'stale_revision',
+                                                       'resources': 'settled'},
+                                           'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'unreadable-leaf-before-prepare': {'case': 'unreadable-leaf-before-prepare',
+                                    'observed': {'deniedOriginalReads': 1,
+                                                 'journalAbsent': True,
+                                                 'permissionErrorObserved': True,
+                                                 'scopesClosed': 2,
+                                                 'snapshotUnchanged': True},
+                                    'outcome': {'effect': 'not_started',
+                                                'journal': 'not_created',
+                                                'reason': 'filesystem_error',
+                                                'resources': 'settled'},
+                                    'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'first-replacement-installed-rollback': {'case': 'first-replacement-installed-rollback',
+                                          'observed': {'firstLeafInstalled': True,
+                                                       'injections': 1,
+                                                       'journalAbsent': True,
+                                                       'originalBackupBound': True,
+                                                       'recoveryAttempts': 1,
+                                                       'rollbackReturned': True,
+                                                       'scopesClosed': 3,
+                                                       'secondApplyNoScope': True,
+                                                       'secondApplyRefused': True,
+                                                       'snapshotRestored': True},
+                                          'outcome': {'effect': 'rolled_back',
+                                                      'journal': 'clean',
+                                                      'reason': 'filesystem_error',
+                                                      'resources': 'settled'},
+                                          'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'incomplete-metadata-preparing-retained': {'case': 'incomplete-metadata-preparing-retained',
+                                            'observed': {'cleanupUnlinks': 0,
+                                                         'completeProof': False,
+                                                         'dependenciesPreserved': True,
+                                                         'injections': 1,
+                                                         'numberedSlotRetained': True,
+                                                         'preparingRetained': True,
+                                                         'recoverCalls': 0,
+                                                         'scopesClosed': 3,
+                                                         'targetsPreserved': True},
+                                            'outcome': {'effect': 'not_started',
+                                                        'journal': 'recovery_required',
+                                                        'reason': 'filesystem_error',
+                                                        'resources': 'settled'},
+                                            'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'committed-old-backup-replaced-at-cleanup-entry': {'case': 'committed-old-backup-replaced-at-cleanup-entry',
+                                                    'observed': {'allSelectedPayloadsInstalled': True,
+                                                                 'cleanupUnlinks': 0,
+                                                                 'committedObserved': True,
+                                                                 'dependenciesPreserved': True,
+                                                                 'durabilityConfirmed': True,
+                                                                 'injections': 1,
+                                                                 'originalBackupRetained': True,
+                                                                 'proofRetained': True,
+                                                                 'sameBytesForeignInode': True,
+                                                                 'scopesClosed': 3},
+                                                    'outcome': {'effect': 'committed',
+                                                                'journal': 'recovery_required',
+                                                                'reason': 'filesystem_error',
+                                                                'resources': 'settled'},
+                                                    'owner': {'closed': True,
+                                                              'fatal': False,
+                                                              'handlerRestored': True}},
+ 'legacy-domains-refuse-empty-metadata-prepare': {'case': 'legacy-domains-refuse-empty-metadata-prepare',
+                                                  'observed': {'bothOwnersSettled': True,
+                                                               'bothRefused': True,
+                                                               'legacyDomains': ['configuration',
+                                                                                 'github_workflows'],
+                                                               'originalOwners': 2,
+                                                               'scopesClosed': 2,
+                                                               'snapshotUnchanged': True,
+                                                               'stateRetained': True,
+                                                               'targetDescriptorsAbsent': True},
+                                                  'outcome': {'effect': 'not_started',
+                                                              'journal': 'not_created',
+                                                              'reason': 'pending_state',
+                                                              'resources': 'settled'},
+                                                  'owner': {'closed': True,
+                                                            'fatal': False,
+                                                            'handlerRestored': True}},
+ 'legacy-domains-refuse-header-tmp-metadata-prepare': {'case': 'legacy-domains-refuse-header-tmp-metadata-prepare',
+                                                       'observed': {'bothOwnersSettled': True,
+                                                                    'bothRefused': True,
+                                                                    'legacyDomains': ['configuration',
+                                                                                      'github_workflows'],
+                                                                    'originalOwners': 2,
+                                                                    'scopesClosed': 2,
+                                                                    'snapshotUnchanged': True,
+                                                                    'stateRetained': True,
+                                                                    'targetDescriptorsAbsent': True},
+                                                       'outcome': {'effect': 'not_started',
+                                                                   'journal': 'not_created',
+                                                                   'reason': 'pending_state',
+                                                                   'resources': 'settled'},
+                                                       'owner': {'closed': True,
+                                                                 'fatal': False,
+                                                                 'handlerRestored': True}},
+ 'metadata-refuses-legacy-ready': {'case': 'metadata-refuses-legacy-ready',
+                                   'observed': {'legacyStateRetained': True,
+                                                'metadataStateAbsent': True,
+                                                'scopesClosed': 1,
+                                                'snapshotUnchanged': True,
+                                                'targetDescriptorAbsent': True},
+                                   'outcome': {'effect': 'not_started',
+                                               'journal': 'not_created',
+                                               'reason': 'pending_state',
+                                               'resources': 'settled'},
+                                   'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'dependency-drift-after-first-replacement': {'case': 'dependency-drift-after-first-replacement',
+                                              'observed': {'afterUnknownProbes': 0,
+                                                           'cleanupUnlinks': 0,
+                                                           'dependencyChanged': True,
+                                                           'firstLeafInstalled': True,
+                                                           'injections': 1,
+                                                           'laterInstallMoves': 0,
+                                                           'originalBackupBound': True,
+                                                           'partialTreeRetainedInsideOriginal': True,
+                                                           'recoverCalls': 0,
+                                                           'scopesClosed': 3},
+                                              'outcome': {'effect': 'unknown',
+                                                          'journal': 'recovery_required',
+                                                          'reason': 'stale_revision',
+                                                          'resources': 'settled'},
+                                              'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'metadata-committed-fsync-injection': {'case': 'metadata-committed-fsync-injection',
+                                        'observed': {'allSelectedPayloadsInstalled': True,
+                                                     'committedObserved': True,
+                                                     'dependenciesPreserved': True,
+                                                     'durabilityConfirmed': False,
+                                                     'injections': 1,
+                                                     'journalRetained': True,
+                                                     'rollbackCalls': 0,
+                                                     'scopesClosed': 3},
+                                        'outcome': {'effect': 'committed',
+                                                    'journal': 'recovery_required',
+                                                    'reason': 'filesystem_error',
+                                                    'resources': 'settled'},
+                                        'owner': {'closed': True, 'fatal': False, 'handlerRestored': True}},
+ 'metadata-committed-close-return-injection': {'case': 'metadata-committed-close-return-injection',
+                                               'observed': {'actualScopeCloseReturned': True,
+                                                            'afterUnknownProbes': 0,
+                                                            'cancelledAfterCommit': 1,
+                                                            'committedCarrier': True,
+                                                            'injections': 1,
+                                                            'scopesClosed': 3},
+                                               'outcome': {'effect': 'committed',
+                                                           'journal': 'clean',
+                                                           'reason': 'cancelled',
+                                                           'resources': 'unknown'},
+                                               'owner': {'closed': True, 'fatal': True, 'handlerRestored': True}}}
+
 class FixtureRefused(Exception):
     pass
 
@@ -121,10 +498,13 @@ class Runtime:
     cancellation: Any
     errors: Any
     payloads: Any
+    domain: str = "configuration"
     workflow: Any = None
     workflow_payloads: Any = None
     workflow_setup: Any = None
     workflow_bytes: tuple[bytes, ...] = ()
+    metadata: Any = None
+    metadata_text: Any = None
 
     @property
     def ignore_bytes(self) -> bytes:
@@ -135,6 +515,7 @@ class Runtime:
 class Owner:
     guard: Any
     lease: Any
+    domain: str = "configuration"
     outcome: Any = None
     closed: bool = False
     restored: bool = False
@@ -178,13 +559,15 @@ class Batch:
 
 @contextmanager
 def owned_lease(batch: Batch, root: Path, *, expected_unknown: bool = False,
-                registered_identity: dict[str, int] | None = None):
+                registered_identity: dict[str, int] | None = None, domain: str | None = None):
     """Prearmed real guard/lease, with unconditional original cleanup dispatch."""
     if batch.blocked:
         raise FixtureUnknown()
     runtime = batch.runtime
+    selected_domain = runtime.domain if domain is None else domain
+    require(selected_domain in {"configuration", "github_workflows", "metadata_text"})
     guard = runtime.cancellation.DefaultCancellation(runtime.errors.ValidationError, _GUARD_MESSAGE)
-    if runtime.workflow is None:
+    if selected_domain == "configuration":
         require(registered_identity is None)
         lease = runtime.custody.InitRootLease(root, cancellation=guard)
     else:
@@ -192,8 +575,9 @@ def owned_lease(batch: Batch, root: Path, *, expected_unknown: bool = False,
         # argv, environment or supplied digest can provide root authority.
         identity = workflow_root_identity(root) if registered_identity is None else registered_identity
         lease = runtime.custody.InitRootLease(root, cancellation=guard,
-            profile=runtime.transaction.TypedEditProfile.GITHUB_WORKFLOWS, registered_identity=identity)
-    owner = Owner(guard, lease)
+            profile=(runtime.transaction.TypedEditProfile.GITHUB_WORKFLOWS if selected_domain == "github_workflows"
+                     else runtime.transaction.TypedEditProfile.METADATA_TEXT), registered_identity=identity)
+    owner = Owner(guard, lease, domain=selected_domain)
     batch.owners.append(owner)  # Retain even an incomplete/uncertain original.
     cleanup = runtime.cancellation.CleanupScope(
         guard, lease.close, owns_cancellation=True, first_primary=True)
@@ -687,7 +1071,7 @@ def workflow_document() -> dict[str, Any]:
 
 
 def workflow_root_identity(root: Path) -> dict[str, int]:
-    if type(_RETAINED_BATCH) is Batch and _RETAINED_BATCH.runtime.workflow is not None:
+    if type(_RETAINED_BATCH) is Batch and _RETAINED_BATCH.runtime.domain in {"github_workflows", "metadata_text"}:
         workflow_probe(_RETAINED_BATCH)
     value = root.stat(follow_symlinks=False)
     require(stat.S_ISDIR(value.st_mode))
@@ -697,7 +1081,7 @@ def workflow_root_identity(root: Path) -> dict[str, int]:
 
 def workflow_read(path: Path, limit: int) -> bytes:
     """Bounded fixture DATA only; no symlink/special-file read or chmod retry."""
-    if type(_RETAINED_BATCH) is Batch and _RETAINED_BATCH.runtime.workflow is not None:
+    if type(_RETAINED_BATCH) is Batch and _RETAINED_BATCH.runtime.domain in {"github_workflows", "metadata_text"}:
         workflow_probe(_RETAINED_BATCH)
     before = path.stat(follow_symlinks=False)
     require(stat.S_ISREG(before.st_mode) and 0 <= before.st_size <= limit)
@@ -720,14 +1104,14 @@ def workflow_read(path: Path, limit: int) -> bytes:
 
 
 def workflow_probe(batch: Batch) -> None:
-    # Workflow DATA readers/snapshot helpers deny probes after the outcome latch.
+    # Shared fixed native DATA readers deny probes after the outcome latch.
     # The original prearmed native closes are not fixture probes or new owners.
     if batch.blocked:
         batch.workflow_after_unknown_probes += 1
         raise FixtureUnknown()
 
 
-def workflow_snapshot(batch: Batch, root: Path) -> tuple[Any, ...]:
+def workflow_snapshot(batch: Batch, root: Path, *, raw_files: bool = False) -> tuple[Any, ...]:
     """Small private tree, lstat traversal; bytes/paths never enter the receipt.
 
     Directory timestamps/size are deliberately not equality evidence: a clean
@@ -754,7 +1138,8 @@ def workflow_snapshot(batch: Batch, root: Path) -> tuple[Any, ...]:
             data = workflow_read(path, 2 * 1024 * 1024) if value.st_mode & 0o444 else None
             total += len(data) if data is not None else 0
             require(total <= 16 * 1024 * 1024)
-            rows.append((name, identity, value.st_size, data))
+            row = (name, identity, value.st_size, data)
+            rows.append((*row, value.st_mtime_ns, value.st_ctime_ns) if raw_files else row)
         elif stat.S_ISLNK(value.st_mode):
             target = os.readlink(path)
             require(len(os.fsencode(target)) <= 4096)
@@ -842,7 +1227,8 @@ def workflow_finish(batch: Batch, owner: Owner, outcome: Any, expected: tuple[st
                                       "fatal": expected[2] == "unknown"}))
     uncertain = expected[0] == "unknown" or expected[2] == "unknown"
     require(batch.blocked is uncertain and (not uncertain or batch.retain))
-    names = _WORKFLOW_CASES[batch.partition]
+    require(batch.runtime.domain in {"github_workflows", "metadata_text"})
+    names = (_METADATA_CASES if batch.runtime.domain == "metadata_text" else _WORKFLOW_CASES)[batch.partition]
     require(len(batch.workflow_rows) < len(names) and batch.current == names[len(batch.workflow_rows)])
     row = {"case": batch.current,
            "outcome": dict(zip(("effect", "journal", "resources", "reason"), actual)),
@@ -1601,6 +1987,832 @@ def workflow_committed_close_case(batch: Batch) -> None:
          "injections": 1, "afterUnknownProbes": 0})
 
 
+def metadata_snapshot(batch: Batch, root: Path) -> tuple[Any, ...]:
+    # Raw equality spans no writer-owned file rename. Rollback and moved selected
+    # leaves use separately documented projections rather than old ctime claims.
+    return workflow_snapshot(batch, root, raw_files=True)
+
+
+def metadata_unselected_snapshot(batch: Batch, root: Path, seed_data: dict[str, Any], *,
+                                 retained_backup: bool = False) -> tuple[Any, ...]:
+    """Exact unselected inventory, excluding only fixed writer/fixture slots.
+
+    A retained metadata journal changes its parent's link count. Directory
+    device/inode/full-mode/uid/gid remain evidence; raw file facts stay exact.
+    These fixed cases have existing target parents, so no new target directory
+    is omitted. Foreign legacy state or any unselected extra file fails equality.
+    """
+    selected = set(seed_data["paths"])
+    states = batch.runtime.transaction.METADATA_STATE_NAMES
+    rows = []
+    for row in metadata_snapshot(batch, root):
+        name, identity = row[:2]
+        if (name in selected or retained_backup and name == "fixture-original-old-0"
+                or any(name == state or name.startswith(state + "/") for state in states)):
+            continue
+        rows.append((name, identity[:5]) if stat.S_ISDIR(identity[2]) else row)
+    return tuple(rows)
+
+
+def metadata_facts(batch: Batch, path: Path) -> tuple[Any, ...] | None:
+    workflow_probe(batch)
+    try:
+        value = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    require(stat.S_ISREG(value.st_mode))
+    raw = workflow_read(path, 1024 * 1024) if value.st_mode & 0o444 else None
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+            value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns, raw)
+
+
+def metadata_dependencies(batch: Batch, root: Path) -> tuple[Any, ...]:
+    leaves = tuple(metadata_facts(batch, root / path) for path in ("release/mobile-release.json", ".gitignore"))
+    parent = (root / "release").stat(follow_symlinks=False)
+    require(stat.S_ISDIR(parent.st_mode))
+    return (*leaves, (parent.st_dev, parent.st_ino, parent.st_mode, parent.st_uid, parent.st_gid))
+
+
+def metadata_no_state(batch: Batch, root: Path, *, metadata_only: bool = False) -> bool:
+    names = (batch.runtime.transaction.METADATA_STATE_NAMES if metadata_only
+             else batch.runtime.transaction.ALL_STATE_NAMES)
+    return all(workflow_absent(batch, root / name) for name in names)
+
+
+def metadata_directory(batch: Batch, root: Path, relative: str) -> Path:
+    """Only finite fixture seed ancestry, never a product-supplied target path."""
+    workflow_probe(batch)
+    current = root
+    for part in relative.split("/"):
+        require(part not in {"", ".", ".."})
+        current = current / part
+        if workflow_absent(batch, current):
+            current.mkdir(mode=0o750)
+            current.chmod(0o750)
+        else:
+            require(stat.S_ISDIR(current.stat(follow_symlinks=False).st_mode))
+    return current
+
+
+def metadata_seed(batch: Batch, root: Path, *, platform: str = "android", locale: str = "en-US",
+                  metadata_root: str = "public/store", variant: str = "replace",
+                  ignore_kind: str = "current", disabled: bool = False,
+                  writable_config: bool = False, writable_ignore: bool = False) -> dict[str, Any]:
+    workflow_probe(batch)
+    require(platform in _METADATA_FILES and locale in {"en-US", "fr-FR"}
+            and (platform == "android" or locale == "en-US")
+            and metadata_root in {"public/store", "release/store"}
+            and variant in {"replace", "noop", "mixed", "missing-locale"}
+            and ignore_kind in {"current", "legacy", "ambiguous"})
+    config = _METADATA_CONFIG_TEXT["publicStore" if metadata_root == "public/store" else "releaseStore"].encode("utf-8")
+    if disabled:
+        value = json.loads(config)
+        value[platform]["enabled"] = False
+        config = (json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":")) + "\n").encode("utf-8")
+    ignore = (_METADATA_IGNORE if ignore_kind == "current" else
+              b"\n".join(_METADATA_IGNORE.splitlines()[:4]) + b"\n" if ignore_kind == "legacy" else
+              _METADATA_IGNORE + b"!.mobile-release-metadata-text*/\n")
+    metadata_directory(batch, root, "release")
+    config_path = root / "release/mobile-release.json"
+    config_path.write_bytes(config)
+    config_path.chmod(0o640 if writable_config else 0o440)
+    (root / ".gitignore").write_bytes(ignore)
+    (root / ".gitignore").chmod(0o600 if writable_ignore else 0o400)
+    (root / "unrelated.txt").write_bytes(b"fixed metadata fixture public sibling\n")
+    (root / "release/unrelated.json").write_bytes(b'{"fixed":"unselected configuration sibling"}\n')
+    metadata_directory(batch, root, ".github/workflows")
+    (root / ".github/workflows/unrelated.yml").write_bytes(b"# fixed unselected workflow sibling\n")
+    ids = _METADATA_FILES[platform]
+    fields = [{"id": identity, "text": _METADATA_TEXT[platform][identity]} for identity in ids]
+    payloads = tuple(row["text"].encode("utf-8") for row in fields)
+    originals: list[bytes | None] = list(payloads)
+    if variant in {"replace", "mixed"}:
+        originals[0] = _METADATA_PREVIOUS_TEXT[platform][ids[0]].encode("utf-8")
+    if variant == "mixed":
+        originals[1] = _METADATA_PREVIOUS_TEXT[platform][ids[1]].encode("utf-8")
+        if platform == "ios":
+            originals[2] = None
+    if variant == "missing-locale":
+        originals = [None] * len(ids)
+    paths = tuple(f"{metadata_root}/{platform}/{locale}/{identity}" for identity in ids)
+    if variant != "missing-locale":
+        metadata_directory(batch, root, f"{metadata_root}/{platform}/{locale}")
+        for index, (relative, raw) in enumerate(zip(paths, originals)):
+            if raw is not None:
+                leaf = root / relative
+                leaf.write_bytes(raw)
+                leaf.chmod(0o640 if index == 0 else 0o600)
+    # Genuine unselected locale/platform files participate in every preservation
+    # snapshot; none is part of the adapter's submitted finite field bundle.
+    other_platform, other_locale = ("android", "fr-FR") if platform == "ios" or locale == "en-US" else ("ios", "en-US")
+    sibling = metadata_directory(batch, root, f"{metadata_root}/{other_platform}/{other_locale}")
+    for identity in _METADATA_FILES[other_platform]:
+        (sibling / identity).write_bytes(_METADATA_TEXT[other_platform][identity].encode("utf-8"))
+    if variant == "missing-locale":
+        metadata_directory(batch, root, f"{metadata_root}/{platform}")
+        require(workflow_absent(batch, root / f"{metadata_root}/{platform}/{locale}"))
+    return {"platform": platform, "locale": locale, "metadataRoot": metadata_root, "config": config,
+            "ignore": ignore, "ids": ids, "paths": paths, "fields": fields,
+            "payloads": payloads, "originals": tuple(originals),
+            "originalFacts": tuple(metadata_facts(batch, root / path) for path in paths)}
+
+
+def metadata_baseline(seed_data: dict[str, Any]) -> dict[str, Any]:
+    def digest(raw: bytes) -> dict[str, Any]:
+        return {"byteLength": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+    return {"config": digest(seed_data["config"]), "fields": [
+        {"id": identity, "state": "absent"} if raw is None else
+        {"id": identity, "state": "present", **digest(raw)}
+        for identity, raw in zip(seed_data["ids"], seed_data["originals"])]}
+
+
+def metadata_capture(batch: Batch, owner: Owner, seed_data: dict[str, Any]):
+    before = metadata_snapshot(batch, owner.lease.root)
+    checkout = batch.runtime.metadata.capture_metadata_text_edit(owner.lease, seed_data["platform"], seed_data["locale"])
+    require(type(checkout) is batch.runtime.metadata.MetadataCheckout
+            and checkout._lease is owner.lease and checkout._revision is owner.lease._revision
+            and checkout._selection is owner.lease._metadata_targets.selection
+            and checkout._selection.paths == seed_data["paths"]
+            and workflow_equal(checkout.baseline, metadata_baseline(seed_data))
+            and metadata_snapshot(batch, owner.lease.root) == before)
+    return checkout
+
+
+def metadata_prepare(batch: Batch, owner: Owner, seed_data: dict[str, Any], checkout=None):
+    if checkout is None:
+        checkout = metadata_capture(batch, owner, seed_data)
+    before = metadata_snapshot(batch, owner.lease.root)
+    plan = batch.runtime.metadata.prepare_metadata_text_edit(owner.lease, checkout, checkout.revision,
+        metadata_baseline(seed_data), seed_data["fields"])
+    require(type(plan) is batch.runtime.metadata.PreparedMetadataEdit and plan._checkout is checkout)
+    view = plan.view
+    expected_files = []
+    for identity, path, old, new in zip(seed_data["ids"], seed_data["paths"], seed_data["originals"], seed_data["payloads"]):
+        def digest(raw):
+            return {"byteLength": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        def styles(raw):
+            found = {"crlf"} if b"\r\n" in raw else set()
+            rest = raw.replace(b"\r\n", b"")
+            return found | ({"cr"} if b"\r" in rest else set()) | ({"lf"} if b"\n" in rest else set())
+        expected_files.append({"id": identity, "path": path,
+            "action": "create" if old is None else "preserve" if old == new else "replace",
+            "before": {"state": "absent"} if old is None else {"state": "present", "text": old.decode("utf-8"), **digest(old)},
+            "after": {"text": new.decode("utf-8"), **digest(new)}, "lineEndingsChanged": styles(old or b"") != styles(new)})
+    expected_directories = [f'{seed_data["metadataRoot"]}/{seed_data["platform"]}/{seed_data["locale"]}'] if all(
+        raw is None for raw in seed_data["originals"]) else []
+    require(set(view) == {"schemaVersion", "platform", "locale", "metadataRoot", "files", "createDirectories", "validation"}
+            and view["schemaVersion"] == 1 and view["platform"] == seed_data["platform"]
+            and view["locale"] == seed_data["locale"] and view["metadataRoot"] == seed_data["metadataRoot"]
+            and workflow_equal(view["files"], expected_files) and view["createDirectories"] == expected_directories
+            and view["validation"]["valid"] is True
+            and tuple(row["id"] for row in view["validation"]["fields"]) == seed_data["ids"]
+            and metadata_snapshot(batch, owner.lease.root) == before)
+    return checkout, plan
+
+
+def metadata_original(batch: Batch, owner: Owner, workspace: Any, *, typed: bool = True) -> None:
+    runtime = batch.runtime
+    scope = workspace._scope
+    require(runtime.domain == owner.domain == "metadata_text"
+            and type(workspace) is runtime.transaction.InitWorkspace
+            and type(scope) is runtime.custody.LockedInitScope and scope is owner.lease._active
+            and scope.lease is owner.lease and scope.workspace is workspace and scope.locked
+            and not scope.claimed and not scope.closed and workspace._guard is owner.guard
+            and type(owner.guard) is runtime.cancellation.DefaultCancellation
+            and not owner.guard.lifetime_ledger.fatal
+            and workspace._typed_profile is owner.lease.profile is runtime.transaction.TypedEditProfile.METADATA_TEXT
+            and workspace._typed_claimed is typed
+            and type(workspace._rooted_revision) is runtime.custody.RootedRevision
+            and workspace._rooted_revision is owner.lease._revision
+            and type(workspace._metadata_targets) is runtime.custody.MetadataTargets
+            and workspace._metadata_targets is owner.lease._metadata_targets
+            and workspace._rooted_revision._metadata_targets is workspace._metadata_targets)
+    workspace._metadata_targets._check_workspace(workspace)  # Actual unchanged identity admission.
+
+
+def metadata_scopes_closed(owner: Owner) -> int:
+    return sum(scope.closed is True and scope.claimed is True
+               and scope.lock.close_state == "CLOSED" and scope.meta.close_state == "CLOSED"
+               and (scope.workspace is None or all(slot.close_state == "CLOSED" for slot in scope.workspace._slots))
+               for scope in owner.lease._scopes)
+
+
+def metadata_finish(batch: Batch, owner: Owner, outcome: Any, observed: dict[str, Any]) -> None:
+    expected = _METADATA_EXPECTED[batch.current]
+    workflow_finish(batch, owner, outcome, tuple(expected["outcome"][key] for key in ("effect", "journal", "resources", "reason")),
+                    observed, expected["observed"])
+
+
+def metadata_installed(batch: Batch, root: Path, workspace: Any, seed_data: dict[str, Any]) -> bool:
+    workflow_probe(batch)
+    require(workspace is not None and workspace._workflow_complete and workspace._workflow_plan is not None
+            and workspace._workflow_header is not None)
+    header, manifest = json.loads(workspace._workflow_header), json.loads(workspace._workflow_plan)
+    require(header["domain"] == manifest["domain"] == "metadata_text"
+            and tuple(row["path"] for row in manifest["files"]) == seed_data["paths"])
+    for path, raw, prior, captured, row in zip(seed_data["paths"], seed_data["payloads"],
+            seed_data["originals"], seed_data["originalFacts"], manifest["files"]):
+        before = None if captured is None else {
+            "device": captured[0], "inode": captured[1], "mode": stat.S_IMODE(captured[2]),
+            "size": len(prior), "sha256": hashlib.sha256(prior).hexdigest()}
+        if not workflow_equal(row["before"], before):
+            return False
+        changed, after = prior != raw, row["after"]
+        if changed:
+            mode = 0o600 if captured is None else stat.S_IMODE(captured[2])
+            if (type(after) is not dict or after["mode"] != mode or after["size"] != len(raw)
+                    or after["sha256"] != hashlib.sha256(raw).hexdigest()):
+                return False
+        elif after is not None or metadata_facts(batch, root / path) != captured:
+            return False
+        expected = after if changed else before
+        value = (root / path).stat(follow_symlinks=False)
+        if (workflow_read(root / path, 32 * 1024) != raw
+                or (value.st_dev, value.st_ino, stat.S_IMODE(value.st_mode), value.st_size)
+                != (expected["device"], expected["inode"], expected["mode"], len(raw))
+                or value.st_uid != os.geteuid() or value.st_gid != os.getegid() or value.st_nlink != 1):
+            return False
+    return True
+
+
+def metadata_selection_refusals(batch: Batch) -> None:
+    runtime = batch.runtime
+    for name in _METADATA_CASES["ordinary"][:4]:
+        root = batch.case_root(name)
+        seed_data = metadata_seed(batch, root, disabled=name == "configured-platform-disabled",
+            ignore_kind="legacy" if name == "legacy-four-ignore-rules-refused" else
+                        "ambiguous" if name == "ambiguous-ignore-negation-refused" else "current")
+        before = metadata_snapshot(batch, root)
+        with owned_lease(batch, root) as owner:
+            reason = _METADATA_EXPECTED[name]["outcome"]["reason"]
+            result = refusal(batch, owner, reason, lambda: runtime.metadata.capture_metadata_text_edit(
+                owner.lease, seed_data["platform"], "de-DE" if name == "configured-locale-absent" else seed_data["locale"]))
+        metadata_finish(batch, owner, result, {
+            "snapshotUnchanged": metadata_snapshot(batch, root) == before,
+            "journalAbsent": metadata_no_state(batch, root),
+            "targetDescriptorAbsent": owner.lease._metadata_targets is None,
+            "revisionAbsent": owner.lease._revision is None, "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def metadata_stale_cases(batch: Batch) -> None:
+    runtime = batch.runtime
+    for name in _METADATA_CASES["ordinary"][4:10]:
+        root = batch.case_root(name)
+        seed_data = metadata_seed(batch, root,
+            platform="ios" if name == "dependency-only-parent-mode-before-apply" else "android",
+            variant="missing-locale" if name == "missing-target-parent-appears-before-apply" else "replace",
+            writable_config=name == "config-retarget-before-prepare",
+            writable_ignore=name == "ignore-bytes-before-apply")
+        before = metadata_snapshot(batch, root)
+        prepare_failure = name in {"config-retarget-before-prepare", "target-parent-inode-before-prepare"}
+        plan = None
+        with owned_lease(batch, root) as owner:
+            checkout = metadata_capture(batch, owner, seed_data)
+            targets = owner.lease._metadata_targets
+            if not prepare_failure:
+                _, plan = metadata_prepare(batch, owner, seed_data, checkout)
+            require(metadata_snapshot(batch, root) == before and metadata_no_state(batch, root))
+            if name == "config-retarget-before-prepare":
+                require(workflow_absent(batch, root / "release/store"))
+                raw = _METADATA_CONFIG_TEXT["releaseStore"].encode("utf-8")
+                (root / "release/mobile-release.json").write_bytes(raw)
+                change_observed = (workflow_read(root / "release/mobile-release.json", 512 * 1024) == raw
+                                   and raw != seed_data["config"] and workflow_absent(batch, root / "release/store"))
+            elif name == "ignore-bytes-before-apply":
+                raw = seed_data["ignore"] + b"# fixed external metadata ignore drift\n"
+                (root / ".gitignore").write_bytes(raw)
+                change_observed = workflow_read(root / ".gitignore", 1024 * 1024) == raw != seed_data["ignore"]
+            elif name in {"dependency-only-parent-mode-before-apply", "target-parent-mode-before-apply"}:
+                parent = root / ("release" if name == "dependency-only-parent-mode-before-apply" else
+                                 f'{seed_data["metadataRoot"]}/{seed_data["platform"]}')
+                old = parent.stat(follow_symlinks=False)
+                require(stat.S_IMODE(old.st_mode) == 0o750)
+                parent.chmod(0o700)
+                new = parent.stat(follow_symlinks=False)
+                change_observed = (new.st_dev == old.st_dev and new.st_ino == old.st_ino
+                                   and stat.S_IMODE(new.st_mode) == 0o700 and new.st_uid == old.st_uid and new.st_gid == old.st_gid)
+            elif name == "target-parent-inode-before-prepare":
+                parent = (root / seed_data["paths"][0]).parent
+                old = parent.stat(follow_symlinks=False)
+                retained = root / "fixture-original-target-parent"
+                parent.rename(retained)
+                parent.mkdir(mode=0o750)
+                parent.chmod(stat.S_IMODE(old.st_mode))
+                for identity in seed_data["ids"]:
+                    original = retained / identity
+                    replacement = parent / identity
+                    replacement.write_bytes(workflow_read(original, 32 * 1024))
+                    replacement.chmod(stat.S_IMODE(original.stat(follow_symlinks=False).st_mode))
+                new = parent.stat(follow_symlinks=False)
+                change_observed = (new.st_dev == old.st_dev and new.st_ino != old.st_ino
+                    and new.st_mode == old.st_mode and retained.stat(follow_symlinks=False).st_ino == old.st_ino
+                    and all(workflow_read(parent / identity, 32 * 1024) == workflow_read(retained / identity, 32 * 1024)
+                            for identity in seed_data["ids"]))
+            else:
+                parent = (root / seed_data["paths"][0]).parent
+                require(workflow_absent(batch, parent))
+                parent.mkdir(mode=0o700)
+                change_observed = stat.S_ISDIR(parent.stat(follow_symlinks=False).st_mode)
+            changed = metadata_snapshot(batch, root)
+            if prepare_failure:
+                result = refusal(batch, owner, "stale_revision", lambda: metadata_prepare(batch, owner, seed_data, checkout))
+            else:
+                result = batch.record(owner, runtime.metadata.apply_metadata_text_edit(owner.lease, plan))
+                count = len(owner.lease._scopes)
+                require(runtime.metadata.apply_metadata_text_edit(owner.lease, plan).reason == "invalid_params"
+                        and len(owner.lease._scopes) == count)
+            selection_retained = (owner.lease._metadata_targets is targets and checkout._selection is targets.selection
+                                  and targets.paths == seed_data["paths"])
+            retired = checkout._state == runtime.edit._RETIRED and (plan is None or plan._state == runtime.edit._RETIRED)
+        metadata_finish(batch, owner, result, {"snapshotUnchanged": metadata_snapshot(batch, root) == changed,
+            "journalAbsent": metadata_no_state(batch, root), "selectionNotRetargeted": selection_retained,
+            "changeObserved": change_observed, "authorityRetired": retired, "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def metadata_late_noop_cases(batch: Batch) -> None:
+    runtime = batch.runtime
+    for name in _METADATA_CASES["ordinary"][10:12]:
+        root = batch.case_root(name)
+        seed_data = metadata_seed(batch, root, variant="noop")
+        lease_type, workspace_type = runtime.custody.InitRootLease, runtime.transaction.InitWorkspace
+        recheck_original, current_original = lease_type._recheck, workspace_type._current
+        rename_original = runtime.transaction._rename_function
+        events = {"recheckReturns": 0, "injections": 0, "changedOnlyDeclaredFacts": False,
+                  "consumingTargetChecks": 0, "renameProbes": 0}
+        active_workspace = None
+        changed = None
+
+        def recheck(lease, workspace, revision):
+            nonlocal active_workspace, changed
+            value = recheck_original(lease, workspace, revision)
+            if lease is owner.lease and lease._rechecks == 2:
+                with workflow_witness(batch):
+                    metadata_original(batch, owner, workspace, typed=False)
+                    require(active_workspace is None and revision is checkout._revision)
+                    active_workspace = workspace
+                    events["recheckReturns"] += 1
+                    if name == "noop-last-leaf-ctime-after-recheck":
+                        leaf = root / seed_data["paths"][-1]
+                        old = metadata_facts(batch, leaf)
+                        leaf.chmod(stat.S_IMODE(old[2]))  # Same mode; actual Linux ctime must change.
+                        new = metadata_facts(batch, leaf)
+                        events["changedOnlyDeclaredFacts"] = old[:8] == new[:8] and old[9:] == new[9:] and old[8] != new[8]
+                    else:
+                        parent = (root / seed_data["paths"][0]).parent
+                        old = parent.stat(follow_symlinks=False)
+                        parent.chmod(0o700)
+                        new = parent.stat(follow_symlinks=False)
+                        events["changedOnlyDeclaredFacts"] = (old.st_dev == new.st_dev and old.st_ino == new.st_ino
+                            and old.st_uid == new.st_uid and old.st_gid == new.st_gid
+                            and stat.S_IMODE(old.st_mode) == 0o750 and stat.S_IMODE(new.st_mode) == 0o700)
+                    require(events["changedOnlyDeclaredFacts"])  # No fabricated ctime, sleep or retry.
+                    changed = metadata_snapshot(batch, root)
+                    events["injections"] += 1
+            return value
+
+        def current(workspace, path, *, directory=False):
+            target = seed_data["paths"][-1] if name == "noop-last-leaf-ctime-after-recheck" else seed_data["paths"][0]
+            if workspace is active_workspace and path == target and not directory:
+                with workflow_witness(batch):
+                    metadata_original(batch, owner, workspace)
+                    events["consumingTargetChecks"] += 1
+            return current_original(workspace, path, directory=directory)  # Actual consuming _parent/_binding/raw facts.
+
+        def rename():
+            events["renameProbes"] += 1
+            return rename_original()
+
+        before = metadata_snapshot(batch, root)
+        with owned_lease(batch, root) as owner:
+            checkout, plan = metadata_prepare(batch, owner, seed_data)
+            require(metadata_snapshot(batch, root) == before)
+            with patch.object(lease_type, "_recheck", recheck), patch.object(workspace_type, "_current", current), \
+                 patch.object(runtime.transaction, "_rename_function", rename):
+                result = batch.record(owner, runtime.metadata.apply_metadata_text_edit(owner.lease, plan))
+        metadata_finish(batch, owner, result, {**events,
+            "unchangedMarked": active_workspace is not None and active_workspace._unchanged,
+            "journalAbsent": metadata_no_state(batch, root),
+            "snapshotUnchangedAfterInjection": changed is not None and metadata_snapshot(batch, root) == changed,
+            "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def metadata_unreadable_case(batch: Batch) -> None:
+    root = batch.case_root("unreadable-leaf-before-prepare")
+    seed_data = metadata_seed(batch, root)
+    runtime = batch.runtime
+    read_original = runtime.transaction.InitWorkspace._read
+    events = {"permissionErrorObserved": False, "deniedOriginalReads": 0}
+
+    def read(workspace, fd, name, limit=runtime.transaction.MAX_FILE_BYTES):
+        try:
+            return read_original(workspace, fd, name, limit)
+        except PermissionError:
+            if workspace._scope is not None and workspace._scope.lease is owner.lease and name == seed_data["ids"][0]:
+                with workflow_witness(batch):
+                    require(workspace._typed_profile is runtime.transaction.TypedEditProfile.METADATA_TEXT
+                            and workspace._scope is owner.lease._active and os.geteuid() != 0)
+                    events["permissionErrorObserved"] = True
+                    events["deniedOriginalReads"] += 1
+            raise  # Genuine unchanged original exception, not an injected IO error.
+
+    with owned_lease(batch, root) as owner:
+        checkout = metadata_capture(batch, owner, seed_data)
+        (root / seed_data["paths"][0]).chmod(0)
+        changed = metadata_snapshot(batch, root)  # Unreadable leaf is lstat-only.
+        with patch.object(runtime.transaction.InitWorkspace, "_read", read):
+            result = refusal(batch, owner, "filesystem_error", lambda: metadata_prepare(batch, owner, seed_data, checkout))
+    metadata_finish(batch, owner, result, {**events, "snapshotUnchanged": metadata_snapshot(batch, root) == changed,
+        "journalAbsent": metadata_no_state(batch, root), "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def metadata_original_backup(batch: Batch, root: Path, seed_data: dict[str, Any], *, index: int = 0) -> bool:
+    require(type(index) is int and 0 <= index < len(seed_data["ids"]))
+    value = metadata_facts(batch, root / batch.runtime.transaction.METADATA_READY / f"old-{index}")
+    original = seed_data["originalFacts"][index]
+    # Renaming the actual old leaf changes ctime; it must preserve every other
+    # captured raw fact, including original mtime/ownership/mode, and its bytes.
+    return value is not None and original is not None and value[:8] == original[:8] and value[9:] == original[9:]
+
+
+def metadata_partial_rollback_case(batch: Batch) -> None:
+    root = batch.case_root("first-replacement-installed-rollback")
+    seed_data = metadata_seed(batch, root)
+    before = workflow_snapshot(batch, root)  # Owned rename/restore may change original file ctime.
+    dependencies = metadata_dependencies(batch, root)
+    runtime = batch.runtime
+    workspace_type = runtime.transaction.InitWorkspace
+    move_original, rollback_original = workspace_type._move, workspace_type._rollback
+    recovery_original = workspace_type._fixed_recovery
+    events = {"firstLeafInstalled": False, "originalBackupBound": False,
+              "rollbackReturned": False, "recoveryAttempts": 0, "injections": 0}
+
+    def move(workspace, source_fd, source, destination_fd, destination, expected, **kwargs):
+        value = move_original(workspace, source_fd, source, destination_fd, destination, expected, **kwargs)
+        if workspace._installing and source == "new-0" and events["injections"] == 0:
+            with workflow_witness(batch):
+                metadata_original(batch, owner, workspace)
+                require(workspace._workflow_complete and workspace._install_started and destination == seed_data["ids"][0])
+                leaf = root / seed_data["paths"][0]
+                installed = leaf.stat(follow_symlinks=False)
+                events["firstLeafInstalled"] = (workflow_read(leaf, 32 * 1024) == seed_data["payloads"][0]
+                    and (installed.st_dev, installed.st_ino, stat.S_IMODE(installed.st_mode))
+                    == (expected["device"], expected["inode"], expected["mode"]))
+                events["originalBackupBound"] = metadata_original_backup(batch, root, seed_data)
+                require(events["firstLeafInstalled"] and events["originalBackupBound"])
+                events["injections"] += 1
+            raise OSError("fixed first metadata replacement installed injection")
+        return value
+
+    def rollback(workspace, *args):
+        value = rollback_original(workspace, *args)
+        with workflow_witness(batch):
+            metadata_original(batch, owner, workspace)
+            events["rollbackReturned"] = workspace._terminal_seen == "ROLLED_BACK" and workspace._terminal_durable
+        return value
+
+    def recovery(workspace):
+        events["recoveryAttempts"] += 1
+        return recovery_original(workspace)
+
+    with owned_lease(batch, root) as owner:
+        _, plan = metadata_prepare(batch, owner, seed_data)
+        require(workflow_snapshot(batch, root) == before and metadata_dependencies(batch, root) == dependencies)
+        with patch.object(workspace_type, "_move", move), patch.object(workspace_type, "_rollback", rollback), \
+             patch.object(workspace_type, "_fixed_recovery", recovery):
+            result = batch.record(owner, runtime.metadata.apply_metadata_text_edit(owner.lease, plan))
+        scope_count = len(owner.lease._scopes)
+        again = runtime.metadata.apply_metadata_text_edit(owner.lease, plan)
+        second_refused = (again.effect, again.journal, again.resources, again.reason) == (
+            "not_started", "not_created", "settled", "invalid_params")
+        no_scope = len(owner.lease._scopes) == scope_count
+    require(metadata_dependencies(batch, root) == dependencies)
+    metadata_finish(batch, owner, result, {**events, "snapshotRestored": workflow_snapshot(batch, root) == before,
+        "journalAbsent": metadata_no_state(batch, root), "secondApplyRefused": second_refused,
+        "secondApplyNoScope": no_scope, "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def metadata_incomplete_case(batch: Batch) -> None:
+    root = batch.case_root("incomplete-metadata-preparing-retained")
+    seed_data = metadata_seed(batch, root)
+    runtime = batch.runtime
+    workspace_type = runtime.transaction.InitWorkspace
+    write_original, recover_original, unlink_original = workspace_type._write, workspace_type.recover, workspace_type._unlink
+    dependencies = metadata_dependencies(batch, root)
+    originals = tuple(metadata_facts(batch, root / path) for path in seed_data["paths"])
+    unselected = metadata_unselected_snapshot(batch, root, seed_data)
+    events = {"recoverCalls": 0, "cleanupUnlinks": 0, "injections": 0}
+    active_workspace = None
+
+    def write(workspace, fd, name, data, mode=0o600, **kwargs):
+        nonlocal active_workspace
+        value = write_original(workspace, fd, name, data, mode, **kwargs)
+        if name == "new-0" and events["injections"] == 0:
+            with workflow_witness(batch):
+                metadata_original(batch, owner, workspace)
+                require(not workspace._workflow_complete and workspace._workflow_header is None)
+                active_workspace = workspace
+                events["injections"] += 1
+            raise OSError("fixed incomplete metadata preparation injection")
+        return value
+
+    def recover(workspace):
+        events["recoverCalls"] += 1
+        return recover_original(workspace)
+
+    def unlink(workspace, *args, **kwargs):
+        if events["injections"]:
+            events["cleanupUnlinks"] += 1
+        return unlink_original(workspace, *args, **kwargs)
+
+    with owned_lease(batch, root) as owner:
+        _, plan = metadata_prepare(batch, owner, seed_data)
+        with patch.object(workspace_type, "_write", write), patch.object(workspace_type, "recover", recover), \
+             patch.object(workspace_type, "_unlink", unlink):
+            result = batch.record(owner, runtime.metadata.apply_metadata_text_edit(owner.lease, plan))
+    preparing = root / runtime.transaction.METADATA_PREPARING
+    require(all(workflow_absent(batch, root / name) for name in runtime.transaction.STATE_NAMES))
+    require(metadata_unselected_snapshot(batch, root, seed_data) == unselected)
+    metadata_finish(batch, owner, result, {"preparingRetained": stat.S_ISDIR(preparing.stat(follow_symlinks=False).st_mode),
+        "completeProof": active_workspace is not None and active_workspace._workflow_complete,
+        "numberedSlotRetained": workflow_read(preparing / "new-0", 32 * 1024) == seed_data["payloads"][0],
+        "targetsPreserved": tuple(metadata_facts(batch, root / path) for path in seed_data["paths"]) == originals,
+        "dependenciesPreserved": metadata_dependencies(batch, root) == dependencies,
+        **events, "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def metadata_cleanup_backup_case(batch: Batch) -> None:
+    root = batch.case_root("committed-old-backup-replaced-at-cleanup-entry")
+    seed_data = metadata_seed(batch, root, platform="ios")
+    runtime = batch.runtime
+    workspace_type = runtime.transaction.InitWorkspace
+    cleanup_original, unlink_original = workspace_type._cleanup, workspace_type._unlink
+    dependencies = metadata_dependencies(batch, root)
+    unselected = metadata_unselected_snapshot(batch, root, seed_data)
+    events = {"committedObserved": False, "durabilityConfirmed": False, "sameBytesForeignInode": False,
+              "originalBackupRetained": False, "cleanupUnlinks": 0, "injections": 0}
+    active_workspace = None
+    mutated = None
+    original_backup = None
+
+    def cleanup(workspace):
+        nonlocal active_workspace, mutated, original_backup
+        with workflow_witness(batch):
+            metadata_original(batch, owner, workspace)
+            require(active_workspace is None and workspace._workflow_complete and workspace._cleanup_mode
+                    and workspace._recovery_claimed and workspace._terminal_seen == "COMMITTED" and workspace._terminal_durable)
+            active_workspace = workspace
+            journal = root / runtime.transaction.METADATA_CLEANUP
+            require(stat.S_ISDIR(journal.stat(follow_symlinks=False).st_mode))
+            original = journal / "old-0"
+            raw = workflow_read(original, 32 * 1024)
+            before = original.stat(follow_symlinks=False)
+            original_backup = root / "fixture-original-old-0"
+            original.rename(original_backup)
+            with original.open("xb") as stream:
+                stream.write(raw)
+            original.chmod(stat.S_IMODE(before.st_mode))
+            after = original.stat(follow_symlinks=False)
+            events["committedObserved"] = workspace._terminal_seen == "COMMITTED"
+            events["durabilityConfirmed"] = workspace._terminal_durable
+            events["sameBytesForeignInode"] = (workflow_read(original, 32 * 1024) == raw
+                and after.st_dev == before.st_dev and after.st_ino != before.st_ino and after.st_mode == before.st_mode
+                and after.st_uid == before.st_uid and after.st_gid == before.st_gid and after.st_nlink == before.st_nlink == 1)
+            saved = metadata_facts(batch, original_backup)
+            captured = seed_data["originalFacts"][0]
+            events["originalBackupRetained"] = (saved[:8] == captured[:8] and saved[9:] == captured[9:])
+            require(events["sameBytesForeignInode"] and events["originalBackupRetained"])
+            mutated = metadata_snapshot(batch, journal)
+            events["injections"] += 1
+        return cleanup_original(workspace)  # Its original entry capture must reject before any unlink.
+
+    def unlink(workspace, *args, **kwargs):
+        if workspace is active_workspace:
+            events["cleanupUnlinks"] += 1
+        return unlink_original(workspace, *args, **kwargs)
+
+    with owned_lease(batch, root) as owner:
+        _, plan = metadata_prepare(batch, owner, seed_data)
+        with patch.object(workspace_type, "_cleanup", cleanup), patch.object(workspace_type, "_unlink", unlink):
+            result = batch.record(owner, runtime.metadata.apply_metadata_text_edit(owner.lease, plan))
+    require(original_backup is not None and workflow_read(original_backup, 32 * 1024) == seed_data["originals"][0])
+    require(metadata_unselected_snapshot(batch, root, seed_data, retained_backup=True) == unselected)
+    metadata_finish(batch, owner, result, {**events,
+        "allSelectedPayloadsInstalled": metadata_installed(batch, root, active_workspace, seed_data),
+        "proofRetained": mutated is not None and metadata_snapshot(batch, root / runtime.transaction.METADATA_CLEANUP) == mutated,
+        "dependenciesPreserved": metadata_dependencies(batch, root) == dependencies,
+        "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def metadata_pending_cases(batch: Batch) -> None:
+    runtime = batch.runtime
+    for name in _METADATA_CASES["ordinary"][16:18]:
+        root = batch.case_root(name)
+        originals = []
+        unchanged = retained = True
+        for domain in ("configuration", "github_workflows"):
+            child = root / domain
+            child.mkdir(mode=0o700)
+            metadata_seed(batch, child)
+            pending = child / runtime.transaction.METADATA_PREPARING
+            pending.mkdir(mode=0o700)
+            if name == "legacy-domains-refuse-header-tmp-metadata-prepare":
+                (pending / "header.tmp").write_bytes(b'{"fixed":"incomplete metadata preparation"}\n')
+            before = metadata_snapshot(batch, child)
+            state_before = metadata_snapshot(batch, pending)
+            with owned_lease(batch, child, domain=domain) as owner:
+                capture = runtime.edit.capture_config_edit if domain == "configuration" else runtime.workflow.capture_github_workflow_edit
+                result = refusal(batch, owner, "pending_state", lambda: capture(owner.lease))
+            originals.append(owner)
+            unchanged = unchanged and metadata_snapshot(batch, child) == before
+            retained = retained and metadata_snapshot(batch, pending) == state_before
+        metadata_finish(batch, originals[-1], result, {"legacyDomains": [owner.domain for owner in originals],
+            "originalOwners": len(originals),
+            "bothOwnersSettled": all(owner.closed and owner.restored and not owner.fatal for owner in originals),
+            "bothRefused": all(owner.outcome.reason == "pending_state" for owner in originals),
+            "stateRetained": retained, "snapshotUnchanged": unchanged,
+            "targetDescriptorsAbsent": all(owner.lease._metadata_targets is None for owner in originals),
+            "scopesClosed": sum(metadata_scopes_closed(owner) for owner in originals)})
+    root = batch.case_root("metadata-refuses-legacy-ready")
+    seed_data = metadata_seed(batch, root)
+    pending = root / runtime.transaction.READY
+    pending.mkdir(mode=0o700)
+    (pending / "header.json").write_bytes(b'{"fixed":"foreign legacy READY, must not be parsed"}\n')
+    before, state_before = metadata_snapshot(batch, root), metadata_snapshot(batch, pending)
+    with owned_lease(batch, root) as owner:
+        result = refusal(batch, owner, "pending_state", lambda: metadata_capture(batch, owner, seed_data))
+    metadata_finish(batch, owner, result, {"legacyStateRetained": metadata_snapshot(batch, pending) == state_before,
+        "snapshotUnchanged": metadata_snapshot(batch, root) == before,
+        "metadataStateAbsent": metadata_no_state(batch, root, metadata_only=True),
+        "targetDescriptorAbsent": owner.lease._metadata_targets is None, "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def metadata_dependency_drift_case(batch: Batch) -> None:
+    root = batch.case_root("dependency-drift-after-first-replacement")
+    seed_data = metadata_seed(batch, root, variant="mixed", writable_config=True)
+    runtime = batch.runtime
+    workspace_type = runtime.transaction.InitWorkspace
+    move_original, recover_original, unlink_original = workspace_type._move, workspace_type.recover, workspace_type._unlink
+    events = {"firstLeafInstalled": False, "originalBackupBound": False, "dependencyChanged": False,
+              "partialTreeRetainedInsideOriginal": False, "laterInstallMoves": 0,
+              "recoverCalls": 0, "cleanupUnlinks": 0, "injections": 0}
+    changed = None
+
+    def move(workspace, source_fd, source, destination_fd, destination, expected, **kwargs):
+        nonlocal changed
+        already_injected = events["injections"] == 1
+        try:
+            value = move_original(workspace, source_fd, source, destination_fd, destination, expected, **kwargs)
+        except runtime.transaction.InitConflict:
+            if already_injected:
+                with workflow_witness(batch):
+                    metadata_original(batch, owner, workspace)
+                    require(workspace._installing and workspace._install_started and not workspace._recovery_claimed)
+                    events["partialTreeRetainedInsideOriginal"] = changed is not None and metadata_snapshot(batch, root) == changed
+            raise
+        if already_injected and workspace._installing:
+            events["laterInstallMoves"] += 1  # Only an actual returned original move is an effect receipt.
+        if workspace._installing and source == "new-0" and events["injections"] == 0:
+            with workflow_witness(batch):
+                metadata_original(batch, owner, workspace)
+                require(workspace._workflow_complete and workspace._install_started and destination == seed_data["ids"][0])
+                leaf = root / seed_data["paths"][0]
+                value_stat = leaf.stat(follow_symlinks=False)
+                events["firstLeafInstalled"] = (workflow_read(leaf, 32 * 1024) == seed_data["payloads"][0]
+                    and (value_stat.st_dev, value_stat.st_ino, stat.S_IMODE(value_stat.st_mode))
+                    == (expected["device"], expected["inode"], expected["mode"]))
+                events["originalBackupBound"] = metadata_original_backup(batch, root, seed_data)
+                raw = seed_data["config"] + b" \n"
+                (root / "release/mobile-release.json").write_bytes(raw)
+                events["dependencyChanged"] = workflow_read(root / "release/mobile-release.json", 512 * 1024) == raw != seed_data["config"]
+                require(events["firstLeafInstalled"] and events["originalBackupBound"] and events["dependencyChanged"])
+                changed = metadata_snapshot(batch, root)
+                events["injections"] += 1
+        return value
+
+    def recover(workspace):
+        events["recoverCalls"] += 1
+        return recover_original(workspace)
+
+    def unlink(workspace, *args, **kwargs):
+        if events["injections"]:
+            events["cleanupUnlinks"] += 1
+        return unlink_original(workspace, *args, **kwargs)
+
+    with owned_lease(batch, root, expected_unknown=True) as owner:
+        _, plan = metadata_prepare(batch, owner, seed_data)
+        with patch.object(workspace_type, "_move", move), patch.object(workspace_type, "recover", recover), \
+             patch.object(workspace_type, "_unlink", unlink):
+            result = batch.record(owner, runtime.metadata.apply_metadata_text_edit(owner.lease, plan), expected_unknown=True)
+        # Effect-Unknown is already sticky. Only this original prearmed lease
+        # cleanup may continue; no new fixture read/probe/owner or recovery.
+    metadata_finish(batch, owner, result, {**events, "afterUnknownProbes": batch.workflow_after_unknown_probes,
+        "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def metadata_committed_fsync_case(batch: Batch) -> None:
+    root = batch.case_root("metadata-committed-fsync-injection")
+    seed_data = metadata_seed(batch, root, platform="ios", metadata_root="release/store", variant="mixed")
+    runtime = batch.runtime
+    workspace_type = runtime.transaction.InitWorkspace
+    fsync_original, rollback_original = workspace_type._fsync, workspace_type._rollback
+    dependencies = metadata_dependencies(batch, root)
+    unselected = metadata_unselected_snapshot(batch, root, seed_data)
+    events = {"rollbackCalls": 0, "injections": 0}
+    active_workspace = None
+    retained = None
+
+    def fsync(workspace, fd):
+        nonlocal active_workspace, retained
+        if (workspace._publishing_terminal == "COMMITTED" and workspace._terminal_seen == "COMMITTED"
+                and not workspace._terminal_durable and events["injections"] == 0):
+            with workflow_witness(batch):
+                metadata_original(batch, owner, workspace)
+                require(workspace._workflow_complete and workspace._install_started)
+                active_workspace = workspace
+                retained = metadata_snapshot(batch, root / runtime.transaction.METADATA_READY)
+                events["injections"] += 1
+            raise OSError("fixed metadata postdecision pre-fsync injection")
+        return fsync_original(workspace, fd)
+
+    def rollback(workspace, *args):
+        events["rollbackCalls"] += 1
+        return rollback_original(workspace, *args)
+
+    with owned_lease(batch, root) as owner:
+        _, plan = metadata_prepare(batch, owner, seed_data)
+        with patch.object(workspace_type, "_fsync", fsync), patch.object(workspace_type, "_rollback", rollback):
+            result = batch.record(owner, runtime.metadata.apply_metadata_text_edit(owner.lease, plan))
+    marker = root / runtime.transaction.METADATA_READY / "COMMITTED"
+    require(retained is not None and metadata_snapshot(batch, marker.parent) == retained
+            and all(metadata_original_backup(batch, root, seed_data, index=index) for index in (0, 1))
+            and metadata_unselected_snapshot(batch, root, seed_data) == unselected)
+    metadata_finish(batch, owner, result, {
+        "committedObserved": active_workspace is not None and active_workspace._terminal_seen == "COMMITTED",
+        "durabilityConfirmed": active_workspace is not None and active_workspace._terminal_durable,
+        "allSelectedPayloadsInstalled": metadata_installed(batch, root, active_workspace, seed_data),
+        "journalRetained": stat.S_ISREG(marker.stat(follow_symlinks=False).st_mode),
+        "dependenciesPreserved": metadata_dependencies(batch, root) == dependencies,
+        **events, "scopesClosed": metadata_scopes_closed(owner)})
+
+
+def metadata_committed_close_case(batch: Batch) -> None:
+    root = batch.case_root("metadata-committed-close-return-injection")
+    seed_data = metadata_seed(batch, root)
+    runtime = batch.runtime
+    workspace_type = runtime.transaction.InitWorkspace
+    close_original = runtime.custody.LockedInitScope.close
+    publish_original, apply_original = workspace_type._publish_terminal, workspace_type.apply_metadata_text_typed
+    dependencies = metadata_dependencies(batch, root)
+    unselected = metadata_unselected_snapshot(batch, root, seed_data)
+    events = {"actualScopeCloseReturned": False, "cancelledAfterCommit": 0, "committedCarrier": False, "injections": 0}
+    with owned_lease(batch, root, expected_unknown=True) as owner:
+        _, plan = metadata_prepare(batch, owner, seed_data)
+
+        def publish(workspace, fd, manifest, state):
+            value = publish_original(workspace, fd, manifest, state)
+            if state == "COMMITTED":
+                with workflow_witness(batch):
+                    metadata_original(batch, owner, workspace)
+                    require(workspace._terminal_seen == "COMMITTED" and workspace._terminal_durable)
+                    events["cancelledAfterCommit"] += 1
+                    owner.guard.cancelled = True
+                raise KeyboardInterrupt  # Labelled original-guard injection, never stdin-EOF evidence.
+            return value
+
+        def apply(workspace, changes):
+            try:
+                return apply_original(workspace, changes)
+            except runtime.transaction.InitOperationFailure as error:
+                with workflow_witness(batch):
+                    metadata_original(batch, owner, workspace)
+                    events["committedCarrier"] = (error.outcome.effect == "committed"
+                        and error.outcome.journal == "clean" and error.outcome.reason == "cancelled")
+                    require(metadata_installed(batch, root, workspace, seed_data)
+                            and metadata_dependencies(batch, root) == dependencies
+                            and metadata_unselected_snapshot(batch, root, seed_data) == unselected
+                            and metadata_no_state(batch, root))
+                raise
+
+        def close(scope):
+            terminal = scope.workspace is not None and scope.workspace._terminal_seen == "COMMITTED"
+            if scope.lease is owner.lease and terminal and events["injections"] == 0:
+                close_original(scope)
+                with workflow_witness(batch):
+                    events["actualScopeCloseReturned"] = scope.closed is True
+                    events["injections"] += 1
+                raise OSError("fixed metadata positive scope-close return loss injection")
+            return close_original(scope)
+
+        with patch.object(workspace_type, "_publish_terminal", publish), \
+             patch.object(workspace_type, "apply_metadata_text_typed", apply), \
+             patch.object(runtime.custody.LockedInitScope, "close", close):
+            result = batch.record(owner, runtime.metadata.apply_metadata_text_edit(owner.lease, plan), expected_unknown=True)
+        # Lane-last resource Unknown: no filesystem probe, read, retry, second
+        # controller, recovery or cleanup adoption after this original result.
+    metadata_finish(batch, owner, result, {**events, "afterUnknownProbes": batch.workflow_after_unknown_probes,
+        "scopesClosed": metadata_scopes_closed(owner)})
+
+
 def hosted_parameters(argv: list[str]) -> tuple[Path, str]:
     if (not sys.flags.isolated or not sys.flags.no_site or not sys.dont_write_bytecode
             or os.environ.get("MRK_DESKTOP_CONFIG_NATIVE") != "1"
@@ -1637,15 +2849,29 @@ def workflow_selection(argv: list[str]) -> tuple[str, str] | None:
     return argv[1], argv[5]
 
 
-def workflow_hosted_parameters(argv: list[str]) -> tuple[Path, str, Path, str, dict[str, Any]]:
-    selected = workflow_selection(argv)
-    source_sha = os.environ.get("MRK_DESKTOP_WORKFLOW_SOURCE_SHA", "")
+def metadata_selection(argv: list[str]) -> tuple[str, str] | None:
+    """Only the existing core partitions in the closed third domain."""
+    if (type(argv) is not list or len(argv) != 6 or any(type(item) is not str for item in argv)
+            or argv[0] != "--task-root" or argv[2:5] != ["--domain", "metadata_text", "--case"]
+            or argv[5] not in _PARTITIONS):
+        return None
+    return argv[1], argv[5]
+
+
+def workflow_hosted_parameters(argv: list[str], *, domain: str = "github_workflows") -> tuple[Path, str, Path, str, dict[str, Any]]:
+    # Reuse the same original hosted/root/host admission, not another native
+    # launcher. The default workflow entry keeps its exact original contract.
+    if domain not in {"github_workflows", "metadata_text"}:
+        raise FixtureRefused()
+    selected = metadata_selection(argv) if domain == "metadata_text" else workflow_selection(argv)
+    prefix = "MRK_DESKTOP_METADATA_TEXT" if domain == "metadata_text" else "MRK_DESKTOP_WORKFLOW"
+    source_sha = os.environ.get(prefix + "_SOURCE_SHA", "")
     if (selected is None or sys.version_info < (3, 11)
             or not sys.flags.isolated or not sys.flags.no_site or not sys.dont_write_bytecode
             or sys.platform != "linux" or os.uname().machine != "x86_64"
             or os.getuid() == 0 or os.geteuid() != os.getuid()
             or threading.current_thread() is not threading.main_thread()
-            or os.environ.get("MRK_DESKTOP_WORKFLOW_NATIVE") != "1"
+            or os.environ.get(prefix + "_NATIVE") != "1"
             or os.environ.get("GITHUB_ACTIONS") != "true"
             or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"
             or os.environ.get("RUNNER_OS") != "Linux" or os.environ.get("RUNNER_ARCH") != "X64"
@@ -1708,6 +2934,7 @@ def workflow_runtime(repository: Path, source_sha: str) -> tuple[Runtime, dict[s
     runtime = Runtime(*(importlib.import_module("mobile_release." + name) for name in (
         "config_edit", "init_transaction", "init_workspace_custody", "build_inputs",
         "cancellation", "errors", "config_payloads")))
+    runtime.domain = "github_workflows"
     runtime.workflow = importlib.import_module("mobile_release.github_workflow_edit")
     runtime.workflow_payloads = importlib.import_module("mobile_release.workflow_payloads")
     runtime.workflow_setup = importlib.import_module("mobile_release.api._github_setup")
@@ -1752,6 +2979,125 @@ def workflow_runtime(repository: Path, source_sha: str) -> tuple[Runtime, dict[s
                 "draftSha256": draft_digest, "toolingRepository": _WORKFLOW_REPOSITORY,
                 "toolingSha": _WORKFLOW_SHA, "templateSet": proposal["templateSet"], "payloadHashes": payload_hashes}
     return runtime, bindings
+
+
+def metadata_runtime(repository: Path, source_sha: str) -> tuple[Runtime, dict[str, Any]]:
+    source = repository / "src"
+    if not source.is_dir() or source.resolve(strict=True) != source:
+        raise FixtureRefused()
+    originals: dict[str, bytes] = {}
+    for identity, relative in _METADATA_SOURCES.items():
+        path = repository / relative
+        value = path.stat(follow_symlinks=False)
+        if (path.resolve(strict=True) != path or not stat.S_ISREG(value.st_mode)
+                or value.st_uid != os.geteuid() or value.st_mode & 0o022):
+            raise FixtureRefused()
+        originals[identity] = workflow_read(path, 1024 * 1024)
+    # Sole source path, established before any subject import. Helper binds the
+    # complete package closure; these twenty named keys are the component map,
+    # not a claim that only twenty files can be reached by ordinary imports.
+    sys.path.insert(0, str(source))
+    runtime = Runtime(*(importlib.import_module("mobile_release." + name) for name in (
+        "config_edit", "init_transaction", "init_workspace_custody", "build_inputs",
+        "cancellation", "errors", "config_payloads")))
+    runtime.domain = "metadata_text"
+    runtime.metadata = importlib.import_module("mobile_release.metadata_text_edit")
+    runtime.metadata_text = importlib.import_module("mobile_release.metadata_text")
+    runtime.workflow = importlib.import_module("mobile_release.github_workflow_edit")  # Only C17/C18 foreign-state admission.
+    policy = importlib.import_module("mobile_release.metadata")
+    modules = ((runtime.edit, "config_edit.py"), (runtime.transaction, "init_transaction.py"),
+               (runtime.custody, "init_workspace_custody.py"), (runtime.build, "build_inputs.py"),
+               (runtime.cancellation, "cancellation.py"), (runtime.errors, "errors.py"),
+               (runtime.payloads, "config_payloads.py"), (runtime.metadata, "metadata_text_edit.py"),
+               (runtime.metadata_text, "metadata_text.py"), (runtime.workflow, "github_workflow_edit.py"),
+               (policy, "metadata.py"))
+    for module, relative in modules:
+        require(Path(module.__file__).resolve(strict=True) == source / "mobile_release" / relative)
+    require(workflow_equal(policy.REQUIRED_LOCALE_TEXT, _METADATA_FILES)
+            and runtime.metadata_text.DEPENDENCY_PATHS == ("release/mobile-release.json", ".gitignore")
+            and runtime.metadata_text.MAX_TEXT_BYTES == 32 * 1024
+            and ("\n".join(runtime.transaction.IGNORE_LINES) + "\n").encode("utf-8") == _METADATA_IGNORE)
+    config_hashes = {key: hashlib.sha256(raw.encode("utf-8")).hexdigest() for key, raw in _METADATA_CONFIG_TEXT.items()}
+    field_hashes = {platform: {identity: hashlib.sha256(_METADATA_TEXT[platform][identity].encode("utf-8")).hexdigest()
+                              for identity in ids} for platform, ids in _METADATA_FILES.items()}
+    ignore_sha = hashlib.sha256(_METADATA_IGNORE).hexdigest()
+    require(workflow_equal(config_hashes, _METADATA_CONFIG_HASHES)
+            and workflow_equal(field_hashes, _METADATA_FIELD_HASHES) and ignore_sha == _METADATA_IGNORE_SHA256)
+    python = Path(sys.executable).resolve(strict=True)
+    bindings = {"sourceSha": source_sha, "sourceKind": "source",
+                "sourceHashes": {identity: hashlib.sha256(raw).hexdigest() for identity, raw in originals.items()},
+                "pythonSha256": hashlib.sha256(workflow_read(python, 64 * 1024 * 1024)).hexdigest(),
+                "configHashes": config_hashes, "ignoreSha256": ignore_sha, "fieldHashes": field_hashes}
+    return runtime, bindings
+
+
+def metadata_main(argv: list[str]) -> int:
+    global _RUN_CLAIMED, _RETAINED_BATCH
+    batch = None
+    bindings = host = None
+    partition = "unadmitted"
+    status, reason = "failed", "unexpected_failure"
+    try:
+        if _RUN_CLAIMED:
+            raise FixtureRefused()
+        _RUN_CLAIMED = True
+        task_root, partition, repository, source_sha, host = workflow_hosted_parameters(argv, domain="metadata_text")
+        runtime, bindings = metadata_runtime(repository, source_sha)
+        root = task_root / ("python-metadata-text-edit-" + partition)
+        root.mkdir(mode=0o700)
+        batch = Batch(runtime, root, partition)
+        batch.retain = True  # Every metadata partition retains its original synthetic tree for VM disposal.
+        _RETAINED_BATCH = batch
+        if partition == "ordinary":
+            for case in (metadata_selection_refusals, metadata_stale_cases, metadata_late_noop_cases,
+                         metadata_unreadable_case, metadata_partial_rollback_case, metadata_incomplete_case,
+                         metadata_cleanup_backup_case, metadata_pending_cases):
+                if batch.blocked:
+                    raise FixtureUnknown()
+                case(batch)
+            metadata_dependency_drift_case(batch)  # Ordinary invocation-last effect Unknown.
+        elif partition == "committed-fsync":
+            metadata_committed_fsync_case(batch)
+        else:
+            metadata_committed_close_case(batch)  # Entire lane-last resources Unknown.
+        # Only already retained original DATA follows either Unknown. No file,
+        # source, tool, process or cleanup observer can start another operation.
+        require(tuple(batch.completed) == _METADATA_CASES[partition]
+                and len(batch.workflow_rows) == len(batch.completed)
+                and not batch.workflow_fixture_failed and batch.retain
+                and batch.blocked is (partition != "committed-fsync")
+                and all(owner.closed and owner.restored for owner in batch.owners))
+        require(all(not owner.fatal for owner in batch.owners) if partition != "committed-close"
+                else len(batch.owners) == 1 and batch.owners[0].fatal)
+        status, reason = "passed", "none"
+    except FixtureRefused:
+        reason = "hosted_guard_refused"
+    except FixtureUnknown:
+        reason = "original_custody_unknown"
+    except AssertionError:
+        reason = "fixed_case_failed"
+    except BaseException:
+        pass
+    report = {
+        "schemaVersion": 1, "suite": "desktop-metadata-text-native", "domain": "metadata_text",
+        "partition": partition, "status": status, "reason": reason, "bindings": bindings, "host": host,
+        "completed": batch.completed if batch is not None else [],
+        "cases": batch.workflow_rows if batch is not None else [],
+        "failedAt": batch.current if batch is not None and status != "passed" else None,
+        "retained": batch is not None and (batch.retain or status != "passed"),
+        "uncertaintyLatched": batch.blocked if batch is not None else False,
+        "injection": {"ordinary": "fixed-original-metadata-boundaries", "committed-fsync": "postdecision-pre-fsync",
+                      "committed-close": "postcommit-cancellation-and-positive-scope-close-return-loss"}.get(partition),
+    }
+    encoded = json.dumps(report, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > 32 * 1024:
+        report.update(status="failed", reason="fixed_case_failed", bindings=None, host=None,
+                      completed=[], cases=[], failedAt=batch.current if batch is not None else None,
+                      retained=batch is not None)
+        encoded = json.dumps(report, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+        status = "failed"
+    print(encoded)
+    return 0 if status == "passed" else 1
 
 
 def workflow_main(argv: list[str]) -> int:
@@ -1829,6 +3175,8 @@ def workflow_main(argv: list[str]) -> int:
 def main(argv: list[str]) -> int:
     global _RUN_CLAIMED, _RETAINED_BATCH
     if type(argv) is list and "--domain" in argv:
+        if argv[2:4] == ["--domain", "metadata_text"]:
+            return metadata_main(argv)
         return workflow_main(argv)
     batch = None
     status, reason = "failed", "unexpected_failure"

@@ -6,12 +6,14 @@ main thread and three pipes. No extra reader, cancellation setter, transaction,
 thread, child, descriptor or rendezvous file is introduced. This is NOT ordinary
 bootstrap-startup evidence or permission to enable production configuration Save.
 
-The optional, exact github_workflows selector has a separate receipt prefix and
-three fixed cases. Its conflict sibling is inserted by the original parent
-fixture's file ledger, never by this shim. Configuration argv/records stay exact.
+The optional, exact github_workflows and metadata_text selectors have separate
+receipt prefixes and three fixed cases each. Their conflict sibling is inserted
+by the original parent fixture's file ledger, never by this shim. Existing
+configuration/workflow argv and two-record bytes stay exact.
 """
 from __future__ import annotations
 
+import json
 import os
 import select
 import sys
@@ -29,6 +31,8 @@ def _selection(arguments):
         return False, arguments[1]
     if len(arguments) == 3 and arguments[1] == "github_workflows" and arguments[2] in _WORKFLOW_CASES:
         return True, arguments[2]
+    if len(arguments) == 3 and arguments[1] == "metadata_text" and arguments[2] in _WORKFLOW_CASES:
+        return "metadata_text", arguments[2]
     return None
 
 
@@ -38,9 +42,13 @@ def _need(condition: bool) -> None:
 
 
 class _Observation:
-    def __init__(self, case, control, transaction, cancellation, descriptors, *, workflows=False):
+    def __init__(self, case, control, transaction, cancellation, descriptors, *, workflows=False, metadata=False, custody=None):
+        _need(type(workflows) is bool and type(metadata) is bool and not (workflows and metadata))
         self.case = case
         self.workflows = workflows
+        self.metadata = metadata
+        self.custody = custody
+        self.metadata_binding = None
         self.control = control
         self.transaction = transaction
         self.cancellation = cancellation
@@ -63,11 +71,11 @@ class _Observation:
 
     @property
     def precommit(self):
-        return self.case == "precommit-eof" or self.workflows and self.case == "precommit-conflict-eof"
+        return self.case == "precommit-eof" or (self.workflows or self.metadata) and self.case == "precommit-conflict-eof"
 
     @property
     def prefix(self):
-        return "MRK_WORKFLOW_EOF_V1" if self.workflows else "MRK_CONFIG_EOF_V1"
+        return "MRK_METADATA_TEXT_EOF_V1" if self.metadata else "MRK_WORKFLOW_EOF_V1" if self.workflows else "MRK_CONFIG_EOF_V1"
 
     def retain_boundary(self, workspace, fd) -> None:
         guard = workspace._guard
@@ -95,6 +103,32 @@ class _Observation:
                   and scope.lease.profile is self.transaction.TypedEditProfile.GITHUB_WORKFLOWS
                   and workspace._workflow_complete and workspace._workflow_header is not None
                   and workspace._workflow_plan is not None)
+        if self.metadata:
+            lease, targets, revision = scope.lease, workspace._metadata_targets, workspace._rooted_revision
+            _need(self.custody is not None and type(scope) is self.custody.LockedInitScope
+                  and type(lease) is self.custody.InitRootLease and scope is lease._active
+                  and workspace._typed_profile is lease.profile is self.transaction.TypedEditProfile.METADATA_TEXT
+                  and type(targets) is self.custody.MetadataTargets and targets is lease._metadata_targets
+                  and type(revision) is self.custody.RootedRevision and revision is lease._revision
+                  and revision._metadata_targets is targets
+                  and source.protocol == self.control.METADATA_PROTOCOL == "mrk-metadata-text/1"
+                  and workspace._state_names == self.transaction.METADATA_STATE_NAMES
+                  and workspace._workflow_complete and type(workspace._workflow_header) is bytes
+                  and type(workspace._workflow_plan) is bytes)
+            targets._check_workspace(workspace)  # Genuine original active scope/lease identity, never an inert stand-in.
+            header, plan = json.loads(workspace._workflow_header), json.loads(workspace._workflow_plan)
+            selection = targets.selection
+            expected_platform = "ios" if self.case == "postcommit-eof" else "android"
+            expected_root = "release/store" if self.case == "postcommit-eof" else "public/store"
+            expected_ids = (("description.txt", "keywords.txt", "privacy_url.txt", "support_url.txt", "release_notes.txt")
+                            if expected_platform == "ios" else ("title.txt", "short_description.txt", "full_description.txt"))
+            _need(header["domain"] == plan["domain"] == "metadata_text"
+                  and selection.platform == expected_platform and selection.locale == "en-US"
+                  and selection.metadata_root == expected_root and selection.ids == expected_ids
+                  and selection.paths == tuple(f"{expected_root}/{expected_platform}/en-US/{name}" for name in expected_ids)
+                  and tuple(row["path"] for row in plan["files"]) == targets.paths
+                  and tuple(row["path"] for row in plan["directories"]) == targets.directories)
+            self.metadata_binding = (lease, scope, revision, targets)
         slots = [slot for slot in workspace._slots if slot.number == fd]
         _need(len(slots) == 1 and type(slots[0]) is self.descriptors._FD
               and slots[0].guard is guard and slots[0].open_state == "OPEN"
@@ -170,6 +204,14 @@ class _Observation:
                      and not source.close_claimed and not guard.cancelled
                      and guard._edit_source is source and source.guard is guard
                      and time.monotonic() < source.active_end)
+            if self.metadata:
+                binding = self.metadata_binding
+                valid = (valid and binding is not None and binding[0]._active is binding[1]
+                         and binding[1] is workspace._scope and binding[1].workspace is workspace
+                         and binding[2] is workspace._rooted_revision is binding[0]._revision
+                         and binding[3] is workspace._metadata_targets is binding[0]._metadata_targets
+                         and workspace._typed_profile is self.transaction.TypedEditProfile.METADATA_TEXT
+                         and source.protocol == self.control.METADATA_PROTOCOL)
             # Fixed-depth ORIGINAL call-chain observation, not a replacement
             # poll/checkpoint. Do not retain frames or inspect caller payloads.
             frame = sys._getframe(2)  # record_read <- facade.read <- EditInput.poll
@@ -212,6 +254,17 @@ class _Observation:
                    and workspace._typed_claimed and workspace._install_started)
         if self.workflows:
             applied = applied and engine.workflows is True and source.protocol == self.control.WORKFLOW_PROTOCOL
+        if self.metadata:
+            binding = self.metadata_binding
+            applied = (applied and binding is not None and engine.domain == "metadata_text" and engine.workflows is False
+                       and source.protocol == self.control.METADATA_PROTOCOL == "mrk-metadata-text/1"
+                       and engine.lease is binding[0] and workspace._scope is binding[1]
+                       and binding[1].workspace is workspace and binding[1].lease is binding[0]
+                       and workspace._rooted_revision is binding[2] is binding[0]._revision
+                       and workspace._metadata_targets is binding[3] is binding[0]._metadata_targets
+                       and binding[2]._metadata_targets is binding[3]
+                       and workspace._typed_profile is binding[0].profile is self.transaction.TypedEditProfile.METADATA_TEXT
+                       and workspace._workflow_complete and workspace._state_names == self.transaction.METADATA_STATE_NAMES)
         terminal = workspace._terminal_seen if workspace._terminal_seen in {"COMMITTED", "ROLLED_BACK"} else "UNKNOWN"
         durable = workspace._terminal_durable and not workspace._terminal_ambiguous
         recovery = workspace._recovery_claimed and not workspace._cleanup_mode
@@ -222,7 +275,7 @@ class _Observation:
                    and guard.handler_state == "RESTORED" and not guard.lifetime_ledger.fatal
                    and outcome is not None and outcome.resources == "settled")
         cancelled = guard.cancelled and source.stopped and outcome is not None and outcome.reason == "cancelled"
-        # A workflow precommit conflict is NOT rolled-back success. Original
+        # A workflow/metadata precommit conflict is NOT rolled-back success. Original
         # _locations refuses the sibling before rollback moves: terminal UNKNOWN,
         # recovery-required, resources settled, cancelled. Rust validates that
         # distinct exact record and ends the original invocation after it.
@@ -261,15 +314,20 @@ def main() -> int:
             or not (sys.platform.startswith("linux") or sys.platform == "darwin")
             or threading.current_thread() is not threading.main_thread()):
         return 78
-    workflows, case = selected
-    if workflows and (sys.platform != "linux" or os.uname().machine != "x86_64"):
+    selector, case = selected
+    workflows, metadata = selector is True, selector == "metadata_text"
+    if (workflows or metadata) and (sys.platform != "linux" or os.uname().machine != "x86_64"):
         return 78
     sys.path.insert(0, sys.argv[1])
     from mobile_release import _desktop_edit_control as control
     from mobile_release import _desktop_edit_engine as engine
     from mobile_release import build_inputs, cancellation, init_transaction
+    custody = None
+    if metadata:
+        from mobile_release import init_workspace_custody as custody
 
-    observation = _Observation(case, control, init_transaction, cancellation, build_inputs, workflows=workflows)
+    observation = _Observation(case, control, init_transaction, cancellation, build_inputs,
+                               workflows=workflows, metadata=metadata, custody=custody)
     original_os = control.os
     original_terminal = engine._Engine.terminal
 
@@ -287,6 +345,8 @@ def main() -> int:
         control.os = _ControlOS(original_os, observation)
         init_transaction.InitWorkspace._publish_terminal = publish
         engine._Engine.terminal = terminal
+        if metadata:
+            return engine.main(started=started, domain="metadata_text")
         return engine.main(started=started, workflows=True) if workflows else engine.main(started=started)
     finally:
         engine._Engine.terminal = original_terminal
