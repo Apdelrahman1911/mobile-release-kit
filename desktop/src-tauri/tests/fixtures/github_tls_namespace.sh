@@ -55,6 +55,59 @@ mntns=$(/usr/bin/readlink -- /proc/self/ns/mnt 2>/dev/null) || refuse namespace
     && $netns != "$parent_netns" && $mntns != "$parent_mntns" ]] || refuse namespace
 umask 077
 
+# BEGIN FIXED TLS RESOURCE LIMIT POLICY
+# Only these builtins run here. Inert tests supply an in-memory ulimit function;
+# they never source this namespace entry or change a real process resource limit.
+tls_limit_value() {
+    [[ $# == 1 ]] || return 1
+    [[ $1 == unlimited ]] && return 0
+    [[ $1 =~ ^(0|[1-9][0-9]{0,19})$ ]] || return 1
+    [[ ${#1} -lt 20 || $1 == 18446744073709551615 || $1 < 18446744073709551615 ]]
+}
+
+tls_limit_at_least() {
+    [[ $# == 2 ]] || return 1
+    tls_limit_value "$1" && tls_limit_value "$2" || return 1
+    [[ $1 == unlimited ]] && return 0
+    [[ $2 != unlimited ]] || return 1
+    [[ ${#1} -gt ${#2} || ( ${#1} == ${#2} && ( $1 == "$2" || $1 > "$2" ) ) ]]
+}
+
+tls_limit_pair() {
+    [[ $# == 3 && ( $3 == enforce || $3 == verify ) ]] || return 1
+    local flag=$1 expected=$2 action=$3 soft hard
+    case "$flag:$expected" in -c:0|-f:1024|-n:128|-v:1048576) ;; *) return 1 ;; esac
+    soft=$(ulimit -S "$flag" 2>/dev/null) || return 1
+    hard=$(ulimit -H "$flag" 2>/dev/null) || return 1
+    if [[ $action == enforce ]]; then
+        # Refuse a stricter inherited side rather than raising it, even as root.
+        # String ordering avoids signed arithmetic overflow on kernel u64 limits.
+        tls_limit_at_least "$hard" "$soft" && tls_limit_at_least "$soft" "$expected" || return 1
+        ulimit -S "$flag" "$expected" 2>/dev/null || return 1
+        ulimit -H "$flag" "$expected" 2>/dev/null || return 1
+        soft=$(ulimit -S "$flag" 2>/dev/null) || return 1
+        hard=$(ulimit -H "$flag" 2>/dev/null) || return 1
+    fi
+    [[ $soft == "$expected" && $hard == "$expected" ]]
+}
+
+fixed_tls_resource_limits() {
+    [[ $# == 1 && ( $1 == enforce || $1 == verify ) ]] || refuse limit-units
+    # env-i clears POSIXLY_CORRECT and shell startup hooks. Do not silently
+    # change modes: -c/-f and -v use KiB here; -n counts descriptors.
+    [[ ! -o posix && ${LANG-} == C && ${LC_ALL-} == C ]] || refuse limit-units
+    tls_limit_pair -c 0 "$1" || refuse limit-core
+    tls_limit_pair -f 1024 "$1" || refuse limit-file
+    tls_limit_pair -n 128 "$1" || refuse limit-descriptors
+    tls_limit_pair -v 1048576 "$1" || refuse limit-address-space
+}
+# END FIXED TLS RESOURCE LIMIT POLICY
+
+# sudo/PAM is an intervening launch boundary: outer preexec limits alone do
+# not establish the budgets used by this script or the final dropped artifact.
+diagnostic_stage=resource-limits
+fixed_tls_resource_limits enforce
+
 canonical() {
     local value=$1 actual
     [[ ${#value} -le 4096 && $value =~ ^/[A-Za-z0-9_./-]+$ && $value != /
@@ -387,6 +440,9 @@ if [[ $profile == hosts ]]; then
         "SSL_CERT_DIR=$ambient/empty-ca-dir" "SSLKEYLOGFILE=$ambient/owner-clear.keylog")
 fi
 cd -- "$root"
+
+diagnostic_stage=final-resource-limits
+fixed_tls_resource_limits verify
 
 # Both privilege drop and the exact artifact are mandatory. No PATH, HOME,
 # loader, proxy, TLS-default, Python or account environment is inherited. Only

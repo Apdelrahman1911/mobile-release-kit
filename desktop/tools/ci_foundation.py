@@ -3771,11 +3771,13 @@ def github_tls_namespace_refusal(raw: bytes | None) -> dict | None:
     stages = frozenset(("admission", "initial-namespace", "source-paths", "layout", "source-inputs",
         "manifest", "artifact", "resolver-inputs", "host-resolver-path", "host-hosts", "host-resolver",
         "host-nsswitch", "mount-propagation", "mount-hosts", "mount-resolver", "mount-nsswitch",
-        "mounted-configuration", "loopback", "routes", "port-policy", "final-bindings"))
+        "mounted-configuration", "loopback", "routes", "port-policy", "final-bindings",
+        "resource-limits", "final-resource-limits"))
     codes = frozenset(("admission", "identity", "binding", "namespace", "path", "metadata", "file",
         "file-type", "file-permissions", "file-links", "file-owner", "file-size", "directory", "hash",
         "configuration", "layout", "artifact", "entry", "resolver", "propagation", "mount", "readonly",
-        "loopback", "route", "port", "changed", "profile", "resolver-cache", "ambient"))
+        "loopback", "route", "port", "changed", "profile", "resolver-cache", "ambient",
+        "limit-units", "limit-core", "limit-file", "limit-descriptors", "limit-address-space"))
     if type(raw) is not bytes or not 0 < len(raw) <= 256:
         return None
     # No strip(), substring match, generic exception or best-effort decoding.
@@ -3807,6 +3809,7 @@ GITHUB_TLS_ADMISSION_CODES = frozenset((
     "tls_proc_close_unknown", "tls_proc_open", "tls_proc_read", "tls_proc_role", "tls_profile", "tls_resolver_alias",
     "tls_resolver_cache_present", "tls_resolver_config_metadata", "tls_resolver_config_not_supported",
     "tls_resolver_config_role", "tls_resolver_descriptor_scope", "tls_resolver_profile", "tls_resolver_role",
+    "tls_resource_address_space", "tls_resource_core", "tls_resource_descriptors", "tls_resource_file",
     "tls_role_missing", "tls_role_unbound", "tls_source_layout", "tls_source_name", "tls_source_roster", "unsupported_host",
 ))
 

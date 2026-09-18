@@ -3071,6 +3071,7 @@ pub(crate) mod github_tls {
         "tls_proc_close_unknown", "tls_proc_open", "tls_proc_read", "tls_proc_role", "tls_profile", "tls_resolver_alias",
         "tls_resolver_cache_present", "tls_resolver_config_metadata", "tls_resolver_config_not_supported",
         "tls_resolver_config_role", "tls_resolver_descriptor_scope", "tls_resolver_profile", "tls_resolver_role",
+        "tls_resource_address_space", "tls_resource_core", "tls_resource_descriptors", "tls_resource_file",
         "tls_role_missing", "tls_role_unbound", "tls_source_layout", "tls_source_name", "tls_source_roster", "unsupported_host",
     ];
     fn admission_frame(profile: Option<&str>, code: &str) -> String {
@@ -3191,6 +3192,24 @@ pub(crate) mod github_tls {
         pub(crate) fn bootstrap(&self) -> &Path { &self.original.bootstrap }
         pub(crate) fn trust(&self) -> &[u8] { &self.original.trust }
     }
+    const RESOURCE_LIMITS: &[(rustix::process::Resource, u64, &str)] = &[
+        (rustix::process::Resource::Core, 0, "tls_resource_core"),
+        (rustix::process::Resource::Fsize, 1024 * 1024, "tls_resource_file"),
+        (rustix::process::Resource::Nofile, 128, "tls_resource_descriptors"),
+        (rustix::process::Resource::As, 1024 * 1024 * 1024, "tls_resource_address_space"),
+    ];
+    fn exact_resource_limit(limit: rustix::process::Rlimit, expected: u64) -> bool {
+        limit.current == Some(expected) && limit.maximum == Some(expected)
+    }
+    fn admit_resource_limits() -> Check<()> {
+        // Independent actual post-drop observation, never repair or inheritance
+        // inference. All profiles check before any case/peer/product is created.
+        for &(resource, expected, code) in RESOURCE_LIMITS {
+            require(exact_resource_limit(rustix::process::getrlimit(resource), expected), code)?;
+        }
+        Ok(())
+    }
+
     struct Admitted { inputs: Inputs, common: Arc<Common> }
     impl Admitted {
         fn new() -> Check<Self> {
@@ -3203,6 +3222,7 @@ pub(crate) mod github_tls {
             require(crate::runtime::COMPILED_TARGET == "x86_64-unknown-linux-gnu"
                 && !crate::runtime::GITHUB_TLS_PROFILE_QUALIFIED && lock(&RETAINED).is_none()
                 && environment("GITHUB_REF")? == "refs/heads/verify/desktop-github-connection-tls", "tls_host_or_route")?;
+            admit_resource_limits()?;
             let anchor = (if profile.is_some() { DEADLINE_INPUTS_ANCHOR } else { INPUTS_ANCHOR })
                 .filter(|value| sha(value, 64)).ok_or("tls_compile_anchor_missing")?;
             let input_path = PathBuf::from(environment("MRK_GITHUB_TLS_INPUTS")?);
@@ -5338,6 +5358,22 @@ pub(crate) mod github_tls {
             // DATA-only predicates. These tests create no Child, descriptor,
             // socket, namespace, file or certificate and certify no native run.
             use super::*;
+
+            #[test]
+            fn resource_limits_require_both_exact_finite_sides() {
+                use rustix::process::Rlimit;
+                assert_eq!(RESOURCE_LIMITS.iter().map(|(_, expected, _)| *expected).collect::<Vec<_>>(),
+                    [0, 1048576, 128, 1073741824]);
+                for &(_, expected, _) in RESOURCE_LIMITS {
+                    assert!(exact_resource_limit(Rlimit { current: Some(expected), maximum: Some(expected) }, expected));
+                    for wrong in [None, Some(u64::MAX), Some(expected + 1), Some(expected.saturating_sub(1)), Some(0)] {
+                        if wrong == Some(expected) { continue; }
+                        assert!(!exact_resource_limit(Rlimit { current: wrong, maximum: Some(expected) }, expected));
+                        assert!(!exact_resource_limit(Rlimit { current: Some(expected), maximum: wrong }, expected));
+                    }
+                    assert!(!exact_resource_limit(Rlimit { current: None, maximum: None }, expected));
+                }
+            }
 
             fn privilege_status_fixture(group_padding: &str) -> String {
                 format!(concat!("Name:\tinert-status-model\n", "CapInh:\t0000000000000000\n",

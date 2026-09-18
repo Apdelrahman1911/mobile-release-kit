@@ -4742,7 +4742,9 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         expected = {"stage": "host-resolver", "code": "file-owner"}
         frame = b"github-tls-namespace: host-resolver/file-owner\n"
         self.assertEqual(helper.github_tls_namespace_refusal(frame), expected)
-        for stage, code in (("admission", "profile"), ("resolver-inputs", "resolver-cache"), ("final-bindings", "ambient")):
+        for stage, code in (("admission", "profile"), ("resolver-inputs", "resolver-cache"), ("final-bindings", "ambient"),
+                            *((stage, code) for stage in ("resource-limits", "final-resource-limits")
+                              for code in ("limit-units", "limit-core", "limit-file", "limit-descriptors", "limit-address-space"))):
             self.assertEqual(helper.github_tls_namespace_refusal(f"github-tls-namespace: {stage}/{code}\n".encode("ascii")),
                              {"stage": stage, "code": code})
         for raw in (None, "github-tls-namespace: host-resolver/file-owner\n", b"", frame[:-1],
@@ -4783,6 +4785,11 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                          "tls_deadline_privilege_effective", "tls_deadline_privilege_bounding",
                          "tls_deadline_privilege_ambient", "tls_deadline_privilege_nonewprivs",
                          "tls_deadline_privilege_groups", "tls_deadline_privilege_drop"}.issubset(codes))
+        self.assertTrue({"tls_resource_core", "tls_resource_file", "tls_resource_descriptors",
+                         "tls_resource_address_space"}.issubset(codes))
+        common = rust[rust.index("    struct Admitted { inputs: Inputs, common: Arc<Common> }"):]
+        self.assertLess(common.index("admit_resource_limits()?;"), common.index("let anchor ="))
+        self.assertEqual(rust.count("admit_resource_limits()?;"), 1)
         self.assertEqual(rust.count("refuse_before_cases("), 3)  # Definition + exactly two pre-case calls.
         self.assertIn("Err(code) => refuse_before_cases(None, code)", rust)
         self.assertIn("Err(code) => refuse_before_cases(Some(profile), code)", rust)
