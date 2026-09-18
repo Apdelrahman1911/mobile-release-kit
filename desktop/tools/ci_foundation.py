@@ -3255,6 +3255,68 @@ def github_tls_outer_base(context: dict, compiled: dict) -> dict:
             "artifactIdentitySha256": hashlib.sha256(canonical_json(compiled["identity"])).hexdigest()}
 
 
+def github_tls_namespace_refusal(raw: bytes | None) -> dict | None:
+    """Classify one complete, literal diagnostic frame; never reflect raw output."""
+    stages = frozenset(("admission", "initial-namespace", "source-paths", "layout", "source-inputs",
+        "manifest", "artifact", "resolver-inputs", "host-resolver-path", "host-hosts", "host-resolver",
+        "host-nsswitch", "mount-propagation", "mount-hosts", "mount-resolver", "mount-nsswitch",
+        "mounted-configuration", "loopback", "routes", "port-policy", "final-bindings"))
+    codes = frozenset(("admission", "identity", "binding", "namespace", "path", "metadata", "file",
+        "file-type", "file-permissions", "file-links", "file-owner", "file-size", "directory", "hash",
+        "configuration", "layout", "artifact", "entry", "resolver", "propagation", "mount", "readonly",
+        "loopback", "route", "port", "changed"))
+    if type(raw) is not bytes or not 0 < len(raw) <= 256:
+        return None
+    # No strip(), substring match, generic exception or best-effort decoding.
+    for stage in stages:
+        for code in codes:
+            if raw == f"github-tls-namespace: {stage}/{code}\n".encode("ascii"):
+                return {"stage": stage, "code": code}
+    return None
+
+
+def github_tls_stderr_snapshot(path: Path) -> bytes | None:
+    """Bounded original-output observation, not producer finality or cleanup."""
+    def stamp(info: os.stat_result) -> tuple:
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_uid, info.st_gid,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 <= before.st_size <= 64 * 1024:
+            return None
+        with path.open("rb") as stream:
+            if stamp(os.fstat(stream.fileno())) != stamp(before):
+                return None
+            raw = stream.read(64 * 1024 + 1)
+            if len(raw) != before.st_size or stamp(os.fstat(stream.fileno())) != stamp(before):
+                return None
+        if stamp(path.lstat()) != stamp(before):
+            return None
+        return raw
+    except OSError:
+        return None
+
+
+def github_tls_failure_diagnostics(context: dict, compiled: dict, outer: dict, launch_error: str) -> None:
+    """Failed-only public projection; success/cleanup parsers cannot consume it."""
+    require(launch_error in {"none", "timeout", "oserror", "subprocess-error"}, "Unknown TLS launch diagnostic")
+    root = Path(context["root"])
+    raw = github_tls_stderr_snapshot(root / "github-tls.stderr") if outer["waitObserved"] is True else None
+    value = {"schemaVersion": 1, "scope": GITHUB_TLS_EVIDENCE_SCOPE, "phase": "github-tls", "status": "failed",
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "tlsInputsSha256")},
+        "compiledTest": github_tls_compiled_public(compiled), "launchError": launch_error,
+        "namespaceRefusal": github_tls_namespace_refusal(raw),
+        "outerObservation": {key: outer[key] for key in ("status", "waitObserved", "exitCode", "timedOut",
+            "elapsedMs", "stdoutBytes", "stderrBytes")}}
+    # Original private outer receipt was written first. A missing diagnostic
+    # cannot erase it or suppress the original fatal outcome.
+    try:
+        write_json(root / "github-tls-checks.json", value)
+    except OSError:
+        print("TLS failed-only diagnostic artifact unavailable; original failure retained.", flush=True)
+    print("TLS failed-only diagnostic: " + canonical_json(value).decode("ascii"), flush=True)
+
+
 def github_tls_run_outer(context: dict, compiled: dict) -> dict:
     """Only this original CompletedProcess supplies an outer-wait observation.
 
@@ -3268,6 +3330,7 @@ def github_tls_run_outer(context: dict, compiled: dict) -> dict:
     require(not os.path.lexists(destination), "TLS outer attempt was already recorded")
     value = {**github_tls_outer_base(context, compiled), "status": "unknown", "waitObserved": False,
              "exitCode": None, "timedOut": False, "elapsedMs": 0, "stdoutBytes": None, "stderrBytes": None}
+    launch_error = "none"
     start = time.monotonic()
     with (root / "github-tls.stdout").open("x", encoding="utf-8") as output, \
             (root / "github-tls.stderr").open("x", encoding="utf-8") as diagnostics:
@@ -3277,8 +3340,11 @@ def github_tls_run_outer(context: dict, compiled: dict) -> dict:
                 check=False, timeout=300, preexec_fn=github_tls_outer_limits)
         except subprocess.TimeoutExpired:
             value["timedOut"] = True
-        except (OSError, subprocess.SubprocessError):
-            pass
+            launch_error = "timeout"
+        except OSError:
+            launch_error = "oserror"
+        except subprocess.SubprocessError:
+            launch_error = "subprocess-error"
         else:
             require(type(original.returncode) is int, "TLS original outer return differs")
             value.update(status="passed" if original.returncode == 0 else "failed",
@@ -3288,7 +3354,16 @@ def github_tls_run_outer(context: dict, compiled: dict) -> dict:
         value.update(stdoutBytes=(root / "github-tls.stdout").stat().st_size,
                      stderrBytes=(root / "github-tls.stderr").stat().st_size)
     write_json(destination, value)  # Exclusive original record, never overwritten by a receipt projection.
-    validate_github_tls_outer(value, context=context, compiled=compiled)
+    try:
+        validate_github_tls_outer(value, context=context, compiled=compiled)
+    except CheckFailure:
+        try:
+            github_tls_failure_diagnostics(context, compiled, value, launch_error)
+        except Exception:
+            # Diagnostics are best-effort only. Their own read/projection/write
+            # or log failure must never replace the original fatal observation.
+            pass
+        raise
     return value
 
 

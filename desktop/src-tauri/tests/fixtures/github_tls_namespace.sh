@@ -4,9 +4,11 @@
 # The original CI observer owns sudo/unshare and its wait. This entry cannot
 # certify that outer wait, retire another task's resources or authorize cleanup.
 set -euo pipefail
+diagnostic_stage=admission
 
 refuse() {
-    printf 'github-tls-namespace: %s\n' "$1" >&2
+    # Both fields are literal source labels, never pathname/identity/input data.
+    printf 'github-tls-namespace: %s/%s\n' "$diagnostic_stage" "$1" >&2
     exit 71
 }
 
@@ -36,6 +38,7 @@ mnt_pattern='^mnt:\[[1-9][0-9]{0,19}\]$'
 # Observe the followed kernel namespace labels, NOT the proc symlink inodes.
 # This is before any mount, interface or sysctl change. There is no fallback to
 # host isolation, a caller-selected destination, a PID namespace or an endpoint.
+diagnostic_stage=initial-namespace
 netns=$(/usr/bin/readlink -- /proc/self/ns/net 2>/dev/null) || refuse namespace
 mntns=$(/usr/bin/readlink -- /proc/self/ns/mnt 2>/dev/null) || refuse namespace
 [[ $netns =~ $net_pattern && $mntns =~ $mnt_pattern
@@ -62,8 +65,11 @@ ordinary() {
     metadata=$(/usr/bin/stat --format='%f %h %u %g %s' -- "$pathname" 2>/dev/null) || refuse metadata
     [[ $metadata =~ ^[0-9a-f]+\ [0-9]+\ [0-9]+\ [0-9]+\ [0-9]+$ ]] || refuse metadata
     IFS=' ' read -r mode links uid gid size <<< "$metadata"
-    (( (16#$mode & 0170000) == 0100000 && (16#$mode & 07022) == 0
-        && links == 1 && uid == owner && size > 0 && size <= maximum )) || refuse file
+    (( (16#$mode & 0170000) == 0100000 )) || refuse file-type
+    (( (16#$mode & 07022) == 0 )) || refuse file-permissions
+    (( links == 1 )) || refuse file-links
+    (( uid == owner )) || refuse file-owner
+    (( size > 0 && size <= maximum )) || refuse file-size
 }
 
 directory() {
@@ -95,9 +101,11 @@ exact_config() {
     [[ $value == "$expected" && $(stamp "$pathname") == "$before" ]] || refuse configuration
 }
 
+diagnostic_stage=source-paths
 for pathname in "$source" "$root" "$artifact" "$python"; do
     canonical "$pathname"
 done
+diagnostic_stage=layout
 [[ $source != "$root" && $source != "$root/"* && $root != "$source/"* ]] || refuse layout
 root_name=${root##*/}
 [[ $root_name =~ ^mrk-desktop-foundation-github-tls-([1-9][0-9]{0,19})-([1-9][0-9]{0,19})$ ]] || refuse layout
@@ -106,6 +114,7 @@ attempt=${BASH_REMATCH[2]}
 artifact_name=${artifact##*/}
 [[ ${artifact%/*} == "$root/target/x86_64-unknown-linux-gnu/debug/deps"
     && $artifact_name =~ ^mobile_release_desktop-[0-9a-f]{16}$ ]] || refuse artifact
+diagnostic_stage=source-inputs
 entry=$source/desktop/src-tauri/tests/fixtures/github_tls_namespace.sh
 [[ $0 == "$entry" && -x $python ]] || refuse entry
 ordinary "$entry" "$original_uid" 65536
@@ -115,17 +124,20 @@ for pathname in "$source" "$source/src" "$root" "$root/github-tls" "$root/github
     directory "$pathname"
 done
 
+diagnostic_stage=manifest
 manifest=$root/github-tls-inputs.json
 ordinary "$manifest" "$original_uid" 1048576
 manifest_stamp=$(stamp "$manifest")
 hash_is "$manifest" "$inputs_sha"
 [[ $(stamp "$manifest") == "$manifest_stamp" ]] || refuse binding
+diagnostic_stage=artifact
 ordinary "$artifact" "$original_uid" 536870912
 [[ -x $artifact && $(/usr/bin/stat --format='%s' -- "$artifact" 2>/dev/null) == "$artifact_bytes" ]] || refuse artifact
 artifact_stamp=$(stamp "$artifact")
 hash_is "$artifact" "$artifact_sha"
 [[ $(stamp "$artifact") == "$artifact_stamp" ]] || refuse artifact
 
+diagnostic_stage=resolver-inputs
 hosts=$'127.0.0.1 api.github.com localhost\n::1 localhost\n'
 resolver=$'# Synthetic namespace: DNS is disabled by hosts: files.\nnameserver 127.0.0.1\noptions timeout:1 attempts:1\n'
 nsswitch=$'passwd: files\ngroup: files\nhosts: files\n'
@@ -137,18 +149,25 @@ exact_config "$config_root/nsswitch.conf" "$nsswitch"
 # Ubuntu's resolver is sometimes a systemd-owned symlink. Only these literal
 # canonical target spellings are admitted; never remove/replace that link or
 # write through it. hosts/nsswitch do not receive a generic alias exception.
+diagnostic_stage=host-resolver-path
 resolver_target=$(/usr/bin/readlink -e -- /etc/resolv.conf 2>/dev/null) || refuse resolver
 case "$resolver_target" in
     /etc/resolv.conf|/run/systemd/resolve/stub-resolv.conf|/run/systemd/resolve/resolv.conf) ;;
     *) refuse resolver ;;
 esac
 for pathname in /etc/hosts "$resolver_target" /etc/nsswitch.conf; do
+    case "$pathname" in
+        /etc/hosts) diagnostic_stage=host-hosts ;;
+        /etc/nsswitch.conf) diagnostic_stage=host-nsswitch ;;
+        *) diagnostic_stage=host-resolver ;;
+    esac
     ordinary "$pathname" 0 65536
 done
 
 # These fixed, synchronous system tools start no service and leave no detached
 # worker. --no-mtab/--internal-only prevent userspace mount-file updates or a
 # filesystem helper. Every target is a private-namespace read-only bind mount.
+diagnostic_stage=mount-propagation
 /usr/bin/mount --no-mtab --internal-only --make-rprivate / 2>/dev/null || refuse propagation
 propagation=$(/usr/bin/findmnt --noheadings --raw --mountpoint / --output PROPAGATION 2>/dev/null) || refuse propagation
 [[ $propagation == private ]] || refuse propagation
@@ -162,20 +181,26 @@ bind_readonly() {
     [[ $options != *$'\n'* && ,$options, == *,ro,* && ,$options, != *,rw,*
         && ,$options, == *,nosuid,* && ,$options, == *,nodev,* && ,$options, == *,noexec,* ]] || refuse readonly
 }
+diagnostic_stage=mount-hosts
 bind_readonly "$config_root/hosts" /etc/hosts
+diagnostic_stage=mount-resolver
 bind_readonly "$config_root/resolv.conf" "$resolver_target"
+diagnostic_stage=mount-nsswitch
 bind_readonly "$config_root/nsswitch.conf" /etc/nsswitch.conf
+diagnostic_stage=mounted-configuration
 [[ $(/usr/bin/readlink -e -- /etc/resolv.conf 2>/dev/null) == "$resolver_target" ]] || refuse resolver
 exact_config /etc/hosts "$hosts"
 exact_config "$resolver_target" "$resolver"
 exact_config /etc/nsswitch.conf "$nsswitch"
 
+diagnostic_stage=loopback
 /usr/bin/ip link set dev lo up 2>/dev/null || refuse loopback
 interfaces=$(/usr/bin/ip -o link show 2>/dev/null) || refuse loopback
 [[ $interfaces == '1: lo: '* && $interfaces != *$'\n'* ]] || refuse loopback
 flags=${interfaces#*<}
 flags=${flags%%>*}
 [[ ,$flags, == *,LOOPBACK,* && ,$flags, == *,UP,* ]] || refuse loopback
+diagnostic_stage=routes
 for family in -4 -6; do
     routes=$(/usr/bin/ip "$family" route show table all 2>/dev/null) || refuse route
     while IFS= read -r route; do
@@ -183,12 +208,14 @@ for family in -4 -6; do
         [[ $route != *default* && $route != *' via '* && " $route " == *' dev lo '* ]] || refuse route
     done <<< "$routes"
 done
+diagnostic_stage=port-policy
 /usr/sbin/sysctl --quiet --write net.ipv4.ip_unprivileged_port_start=0 2>/dev/null || refuse port
 [[ $(/usr/sbin/sysctl --values net.ipv4.ip_unprivileged_port_start 2>/dev/null) == 0 ]] || refuse port
 
 # Recheck retained source/artifact identities before exec. The compile-anchored
 # Rust manifest checks the complete Python/SSL/source/CA/tool closure after drop;
 # no privileged JSON parser/import or caller-supplied executable selection here.
+diagnostic_stage=final-bindings
 [[ $(/usr/bin/readlink -- /proc/self/ns/net 2>/dev/null) == "$netns"
     && $(/usr/bin/readlink -- /proc/self/ns/mnt 2>/dev/null) == "$mntns" ]] || refuse namespace
 ordinary "$artifact" "$original_uid" 536870912

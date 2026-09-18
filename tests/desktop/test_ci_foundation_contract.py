@@ -4320,8 +4320,10 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         root = PurePosixPath(context["root"])
         manifest, expected = self.manifest(context), self.outer(context)
         base_environment = {"PATH": "/inert/no-executables", "HOME": str(root / "home")}
-        for outcome in (0, 7, "timeout", "oserror", "existing"):
-            events, streams, written = [], {}, {}
+        original_validate = helper.validate_github_tls_outer
+        diagnostic_faults = {"diagnostic-pipe": BrokenPipeError, "diagnostic-shape": ValueError}
+        for outcome in (0, 7, "timeout", "oserror", "subprocess-error", *diagnostic_faults, "existing"):
+            events, streams, written, diagnostics, failures = [], {}, {}, [], []
             class Writer(io.StringIO):
                 def __init__(self, name):
                     super().__init__(); self.name = name
@@ -4357,16 +4359,31 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     raise subprocess.TimeoutExpired("private-inert-command", 300)
                 if outcome == "oserror":
                     raise OSError("private-inert-error")
-                return subprocess.CompletedProcess(argv, outcome)
+                if outcome == "subprocess-error":
+                    raise subprocess.SubprocessError("private-inert-preexec")
+                return subprocess.CompletedProcess(argv, 7 if outcome in diagnostic_faults else outcome)
             def emit(path, value):
                 test.assertEqual(path, root / "github-tls-outer.json")
                 test.assertTrue(all(stream.closed for stream in streams.values()))
                 test.assertFalse(written)
                 written.update(deepcopy(value))
                 events.append(("write", "original-outer"))
+            def diagnose(actual_context, actual_compiled, original, launch_error):
+                test.assertEqual((actual_context, actual_compiled), (context, compiled))
+                test.assertEqual(original, written)  # Only after exclusive original record.
+                diagnostics.append((deepcopy(original), launch_error))
+                if outcome in diagnostic_faults:
+                    raise diagnostic_faults[outcome]("private-inert-diagnostics")
+            def validate(value, **kwargs):
+                try:
+                    return original_validate(value, **kwargs)
+                except helper.CheckFailure as original_failure:
+                    failures.append(original_failure)
+                    raise
             with self.subTest(outer=outcome), patch.multiple(helper, Path=OuterPath, read_bounded_json=read,
                     write_json=emit, run=forbidden, tools=forbidden, github_tls_result=forbidden,
-                    github_tls_runtime=forbidden, hash_file=forbidden), \
+                    github_tls_runtime=forbidden, hash_file=forbidden, github_tls_failure_diagnostics=diagnose,
+                    validate_github_tls_outer=validate), \
                     patch.object(helper, "clean_environment", return_value=base_environment), \
                     patch.object(helper.time, "monotonic", side_effect=[10.0, 10.125]), \
                     patch.object(helper.os.path, "lexists", return_value=outcome == "existing"), \
@@ -4378,19 +4395,27 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     with self.assertRaises(helper.CheckFailure) as caught:
                         helper.github_tls_run_outer(context, compiled)
                     self.assertNotIn("private-inert", str(caught.exception))
+                    if outcome != "existing":
+                        self.assertEqual(len(failures), 1)
+                        self.assertIs(caught.exception, failures[0])
             if outcome == "existing":
                 self.assertEqual(events, [])
                 self.assertEqual(written, {})
+                self.assertEqual(diagnostics, [])
                 continue
             self.assertEqual(events, [("open", "github-tls.stdout"), ("open", "github-tls.stderr"),
                 ("run", "original-outer"), ("close", "github-tls.stderr"), ("close", "github-tls.stdout"), ("write", "original-outer")])
             if outcome == 0:
                 self.assertEqual(written, expected)
-            elif outcome == 7:
+                self.assertEqual(diagnostics, [])
+            elif outcome == 7 or outcome in diagnostic_faults:
                 self.assertEqual(written, {**expected, "status": "failed", "exitCode": 7})
             else:
                 self.assertEqual(written, {**expected, "status": "unknown", "waitObserved": False,
                     "exitCode": None, "timedOut": outcome == "timeout", "stdoutBytes": None, "stderrBytes": None})
+            if outcome != 0:
+                self.assertEqual(diagnostics, [(written,
+                    "none" if outcome == 7 or outcome in diagnostic_faults else outcome)])
         for key, value in (("waitObserved", 1), ("status", "unknown"), ("exitCode", False), ("timedOut", True),
                 ("elapsedMs", 300001), ("stdoutBytes", 1048577), ("artifactIdentitySha256", "f" * 64),
                 ("tlsInputsSha256", "f" * 64), ("outerWait", "passed")):
@@ -4405,6 +4430,105 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             helper.github_tls_outer_limits()
         self.assertEqual(limits, [("core", (0, 0)), ("file", (1048576, 1048576)),
                                  ("fds", (128, 128)), ("address-space", (1073741824, 1073741824))])
+
+    def test_tls_namespace_diagnostics_accept_only_complete_literal_frames(self):
+        expected = {"stage": "host-resolver", "code": "file-owner"}
+        frame = b"github-tls-namespace: host-resolver/file-owner\n"
+        self.assertEqual(helper.github_tls_namespace_refusal(frame), expected)
+        for raw in (None, "github-tls-namespace: host-resolver/file-owner\n", b"", frame[:-1],
+                b"private-path\n" + frame, frame + b"private-token", frame * 2,
+                frame.replace(b"host-resolver", b"private-identity"), frame.replace(b"file-owner", b"unknown"),
+                frame.replace(b"/", b"\xff"), frame + b"\0", b"x" * 65537):
+            with self.subTest(kind=type(raw).__name__, size=len(raw) if raw is not None else None):
+                self.assertIsNone(helper.github_tls_namespace_refusal(raw))
+
+    def test_tls_diagnostic_snapshot_requires_bounded_unchanged_original_regular_output(self):
+        test, frame = self, b"github-tls-namespace: host-resolver/file-owner\n"
+        for fault in (None, "link", "symlink", "oversize", "opened-replacement", "read-change", "path-change",
+                      "short", "overflow", "unavailable", "close"):
+            info = dict(st_dev=7, st_ino=9, st_mode=stat.S_IFREG | 0o600, st_nlink=1, st_uid=1000,
+                        st_gid=1000, st_size=len(frame), st_mtime_ns=10, st_ctime_ns=11)
+            if fault == "link": info["st_nlink"] = 2
+            if fault == "symlink": info["st_mode"] = stat.S_IFLNK | 0o777
+            if fault == "oversize": info["st_size"] = 65537
+            events, lstat_calls, fstat_calls = [], [], []
+            class Stream(io.BytesIO):
+                def fileno(self): return 777  # Supplied identity, never an actual descriptor operation.
+                def read(self, size):
+                    test.assertEqual(size, 65537)
+                    events.append("read")
+                    return super().read(size)
+                def __exit__(self, *args):
+                    super().__exit__(*args)
+                    events.append("close")
+                    if fault == "close": raise OSError("private-close-detail")
+            class OutputPath(PurePosixPath):
+                def lstat(self):
+                    lstat_calls.append(None)
+                    if fault == "unavailable": raise OSError("private-path")
+                    return SimpleNamespace(**{**info, **({"st_ino": 99} if fault == "path-change" and len(lstat_calls) > 1 else {})})
+                def open(self, mode):
+                    test.assertEqual(mode, "rb")
+                    events.append("open")
+                    body = frame[:-1] if fault == "short" else frame + b"x" if fault == "overflow" else frame
+                    return Stream(body)
+            def fstat(descriptor):
+                test.assertEqual(descriptor, 777)
+                fstat_calls.append(None)
+                changed = fault == "opened-replacement" or fault == "read-change" and len(fstat_calls) > 1
+                return SimpleNamespace(**{**info, **({"st_ino": 99} if changed else {})})
+            with self.subTest(fault=fault), patch.object(helper.os, "fstat", side_effect=fstat):
+                self.assertEqual(helper.github_tls_stderr_snapshot(OutputPath("/inert/original-stderr")),
+                                 frame if fault is None else None)
+            if "open" in events: self.assertIn("close", events)
+            if fault in {"link", "symlink", "oversize", "unavailable"}: self.assertEqual(events, [])
+
+    def test_tls_failed_diagnostics_are_redacted_non_authorizing_projections(self):
+        context, compiled, test = self.context(), self.artifact(), self
+        outer = {**self.outer(context), "status": "failed", "exitCode": 71, "stderrBytes": 53}
+        # A private field in an observation must not be copied into public output.
+        outer["private"] = "private-token-and-path"
+        for raw, write_fails in ((b"github-tls-namespace: host-resolver/file-owner\n", False),
+                                 (b"private-token-and-path", False), (b"", True)):
+            writes, output = [], io.StringIO()
+            def emit(path, value):
+                test.assertEqual(path, PurePosixPath(context["root"]) / "github-tls-checks.json")
+                writes.append(deepcopy(value))
+                if write_fails: raise OSError("private-token-and-path")
+            with patch.multiple(helper, write_json=emit, github_tls_stderr_snapshot=lambda path: raw), redirect_stdout(output):
+                helper.github_tls_failure_diagnostics(context, compiled, outer, "none")
+            self.assertEqual(len(writes), 1)
+            value = writes[0]
+            self.assertEqual(set(value), {"schemaVersion", "scope", "phase", "status", "sourceSha", "sourceTree",
+                "workflowSha256", "runId", "attempt", "tlsInputsSha256", "compiledTest", "launchError",
+                "namespaceRefusal", "outerObservation"})
+            self.assertEqual((value["scope"], value["phase"], value["status"], value["launchError"]),
+                             (self.EVIDENCE, "github-tls", "failed", "none"))
+            self.assertEqual(value["outerObservation"], {key: outer[key] for key in (
+                "status", "waitObserved", "exitCode", "timedOut", "elapsedMs", "stdoutBytes", "stderrBytes")})
+            self.assertEqual(value["namespaceRefusal"], {"stage": "host-resolver", "code": "file-owner"} if raw.startswith(b"github-tls-") else None)
+            self.assertNotIn("private", output.getvalue())
+            self.assertNotIn(context["root"], output.getvalue())
+            self.assertNotIn(compiled["path"], output.getvalue())
+            lines = output.getvalue().splitlines()
+            self.assertEqual(json.loads(lines[-1].removeprefix("TLS failed-only diagnostic: ")), value)
+            self.assertEqual(len(lines), 2 if write_fails else 1)
+            with patch.object(helper, "github_tls_phase_value", return_value={"status": "passed"}):
+                with self.assertRaises(helper.CheckFailure):
+                    helper.validate_github_tls_phase_receipt(value, context, "github-tls")
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_github_tls_outer(value, context=context, compiled=compiled)
+        for launch_error in ("timeout", "oserror", "subprocess-error"):
+            unknown = {**outer, "status": "unknown", "waitObserved": False, "exitCode": None,
+                       "timedOut": launch_error == "timeout", "stdoutBytes": None, "stderrBytes": None}
+            writes, output = [], io.StringIO()
+            with patch.multiple(helper, github_tls_stderr_snapshot=self.forbidden,
+                    write_json=lambda path, value: writes.append(value)), redirect_stdout(output):
+                helper.github_tls_failure_diagnostics(context, compiled, unknown, launch_error)
+            self.assertEqual((writes[0]["status"], writes[0]["namespaceRefusal"], writes[0]["launchError"]),
+                             ("failed", None, launch_error))
+            self.assertFalse(writes[0]["outerObservation"]["waitObserved"])
+            self.assertIsNone(writes[0]["outerObservation"]["exitCode"])
 
     def test_tls_predecessors_require_own_claims_inner_and_outer_before_cleanup(self):
         context, compiled, test, forbidden = self.context(), self.artifact(), self, self.forbidden
