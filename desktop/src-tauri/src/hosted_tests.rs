@@ -3047,6 +3047,45 @@ pub(crate) mod github_tls {
         "tool:sudo", "tool:unshare", "tool:env", "tool:bash", "tool:mount", "tool:ip", "tool:sysctl", "tool:setpriv",
         "tool:stat", "tool:sha256sum", "tool:readlink", "tool:findmnt"];
 
+    // Closed public diagnostics only. This finite roster is also checked by the
+    // inert Python contract; no arbitrary error, pathname or environment value
+    // can be reflected through an admission failure.
+    const ADMISSION_CODES: &[&str] = &[
+        "core_not_exact_checkout", "core_zip_layout", "hash_input_changed", "hash_input_limit",
+        "hash_input_read_failed", "hash_input_unavailable", "hosted_admission_required", "hosted_input_not_absolute",
+        "hosted_input_unavailable", "hosted_scope", "hosted_scope_not_fresh", "missing_hosted_input",
+        "python_not_regular", "source_layout", "source_sha_shape", "test_root_not_fresh", "test_root_unavailable",
+        "tls_admission_unclassified", "tls_artifact_size", "tls_compile_anchor_missing", "tls_compiled_fixture_binding",
+        "tls_compiled_pem_binding", "tls_current_artifact", "tls_deadline_fixed_resolver_bytes", "tls_deadline_original_identity",
+        "tls_deadline_privilege_drop", "tls_deadline_privilege_status", "tls_deadline_profile_layout", "tls_dynamic_nss_unsupported",
+        "tls_file_bound", "tls_file_changed", "tls_file_metadata", "tls_file_open", "tls_file_read", "tls_file_size",
+        "tls_fixed_pem", "tls_fixed_role", "tls_genuine_ssl_binding", "tls_host_or_route", "tls_input_bytes", "tls_input_limit",
+        "tls_input_order", "tls_input_path", "tls_input_roster", "tls_inputs_binding", "tls_inputs_compile_binding",
+        "tls_inputs_json", "tls_inputs_schema", "tls_libc_backing_file", "tls_libc_map_device", "tls_libc_map_inode",
+        "tls_libc_map_limit", "tls_libc_maps", "tls_libc_metadata", "tls_libc_original_mapping", "tls_namespace_binding",
+        "tls_original_artifact_binding", "tls_parent_environment", "tls_parent_environment_path", "tls_path_not_canonical",
+        "tls_path_shape", "tls_path_symlink", "tls_path_unavailable", "tls_private_layout", "tls_private_resolver_bytes",
+        "tls_proc_close_unknown", "tls_proc_open", "tls_proc_read", "tls_proc_role", "tls_profile", "tls_resolver_alias",
+        "tls_resolver_cache_present", "tls_resolver_config_metadata", "tls_resolver_config_not_supported",
+        "tls_resolver_config_role", "tls_resolver_descriptor_scope", "tls_resolver_profile", "tls_resolver_role",
+        "tls_role_missing", "tls_role_unbound", "tls_source_layout", "tls_source_name", "tls_source_roster", "unsupported_host",
+    ];
+    fn admission_frame(profile: Option<&str>, code: &str) -> String {
+        let profile = match profile { None => "original", Some("hosts") => "hosts", Some("dns-withhold") => "dns-withhold",
+            _ => "unclassified" };
+        let code = ADMISSION_CODES.iter().copied().find(|known| *known == code).unwrap_or("tls_admission_unclassified");
+        format!("github-tls-admission: {profile}/{code}\n")
+    }
+    fn refuse_before_cases(profile: Option<&str>, code: &str) -> ! {
+        // ONLY the initial Admitted::new[_profile] Err arms call this. No case,
+        // product/probe/peer or retained task book has been constructed. Partial
+        // admission directories stay retained. This original process's nonzero
+        // exit is a failure, never a finality or cleanup receipt.
+        let frame = admission_frame(profile, code);
+        if frame.len() <= 256 { let _ = std::io::stderr().lock().write_all(frame.as_bytes()); }
+        std::process::exit(101); // Still fails if the diagnostic write failed.
+    }
+
     fn sha(value: &str, length: usize) -> bool {
         value.len() == length && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     }
@@ -4095,7 +4134,7 @@ pub(crate) mod github_tls {
         }
     }
     pub(super) async fn run() {
-        let admitted = match Admitted::new() { Ok(value) => value, Err(code) => panic!("TLS hosted admission failed: {code}") };
+        let admitted = match Admitted::new() { Ok(value) => value, Err(code) => refuse_before_cases(None, code) };
         let mut receipt = TlsReceipt { path: admitted.inputs.root.join("receipt.json"), bindings: admitted.common.bindings.clone(), cases: Vec::new() };
         if receipt.write("running", None).is_err() { panic!("TLS receipt unavailable before native work"); }
         for scenario in CASES {
@@ -4459,6 +4498,54 @@ pub(crate) mod github_tls {
             require(result.is_ok() && !bytes.is_empty() && bytes.len() <= limit, "tls_proc_read")?;
             Ok(bytes)
         }
+        #[derive(Debug, PartialEq)]
+        struct MapRow<'a> { major: u64, minor: u64, inode: u64, remainder: &'a str }
+        fn map_row(line: &str) -> Check<MapRow<'_>> {
+            require(!line.is_empty() && line.len() <= 512 * 1024
+                && !line.bytes().any(|byte| matches!(byte, 0 | b'\n')), "tls_libc_maps")?;
+            let mut rest = line;
+            let mut columns = [""; 5];
+            for column in &mut columns {
+                rest = rest.trim_start_matches([' ', '\t']);
+                let end = rest.find([' ', '\t']).unwrap_or(rest.len());
+                require(end > 0, "tls_libc_maps")?;
+                *column = &rest[..end];
+                rest = &rest[end..];
+            }
+            let hexadecimal = |value: &str, code: &'static str| -> Check<u64> {
+                require(!value.is_empty() && value.len() <= 16 && value.bytes().all(|byte| byte.is_ascii_hexdigit()), code)?;
+                u64::from_str_radix(value, 16).map_err(|_| code)
+            };
+            let (start, end) = columns[0].split_once('-').ok_or("tls_libc_maps")?;
+            require(hexadecimal(start, "tls_libc_maps")? < hexadecimal(end, "tls_libc_maps")?, "tls_libc_maps")?;
+            let permissions = columns[1].as_bytes();
+            require(permissions.len() == 4 && matches!(permissions[0], b'r' | b'-')
+                && matches!(permissions[1], b'w' | b'-') && matches!(permissions[2], b'x' | b'-')
+                && matches!(permissions[3], b'p' | b's'), "tls_libc_maps")?;
+            let _ = hexadecimal(columns[2], "tls_libc_maps")?;
+            let (major, minor) = columns[3].split_once(':').ok_or("tls_libc_map_device")?;
+            let major = hexadecimal(major, "tls_libc_map_device")?;
+            let minor = hexadecimal(minor, "tls_libc_map_device")?;
+            require(!columns[4].is_empty() && columns[4].len() <= 20
+                && columns[4].bytes().all(|byte| byte.is_ascii_digit()), "tls_libc_map_inode")?;
+            let inode = columns[4].parse::<u64>().map_err(|_| "tls_libc_map_inode")?;
+            // Linux has five columns followed by an opaque label/pathname, NOT
+            // six whitespace tokens. Preserve trailing bytes of that remainder.
+            Ok(MapRow { major, minor, inode, remainder: rest.trim_start_matches([' ', '\t']) })
+        }
+        fn mapped_libc_path<'a>(row: &MapRow<'a>) -> Check<Option<&'a Path>> {
+            if !row.remainder.starts_with('/') { return Ok(None); }
+            let (spelling, deleted) = row.remainder.strip_suffix(" (deleted)")
+                .map_or((row.remainder, false), |name| (name, true));
+            let mapped = Path::new(spelling);
+            let name = mapped.file_name().and_then(|name| name.to_str()).ok_or("tls_libc_maps")?;
+            // Deleted modules remain modules: the suffix must not hide NSS or
+            // a stale libc from the same policy that rejects their live names.
+            require(!name.starts_with("libnss_"), "tls_dynamic_nss_unsupported")?;
+            if name != "libc.so.6" && !name.starts_with("libc-") { return Ok(None); }
+            require(!deleted, "tls_libc_backing_file")?;
+            Ok(Some(mapped))
+        }
         fn mapped_libc(manifest: &Manifest) -> Check<()> {
             let libc = manifest.role("libc")?;
             let record = manifest.record(libc)?;
@@ -4470,21 +4557,14 @@ pub(crate) mod github_tls {
             let text = std::str::from_utf8(&bytes).map_err(|_| "tls_libc_maps")?;
             let mut identities = BTreeSet::new();
             let mut segments = 0usize;
-            for line in text.lines() {
-                let words = line.split_ascii_whitespace().collect::<Vec<_>>();
-                require((5..=6).contains(&words.len()), "tls_libc_maps")?;
-                if words.len() == 5 || !words[5].starts_with('/') { continue; }
-                let mapped = Path::new(words[5]);
-                let name = mapped.file_name().and_then(|name| name.to_str()).ok_or("tls_libc_maps")?;
-                require(!name.starts_with("libnss_"), "tls_dynamic_nss_unsupported")?;
-                if name != "libc.so.6" && !name.starts_with("libc-") { continue; }
+            require(text.ends_with('\n'), "tls_libc_maps")?;
+            for line in text.split_terminator('\n') {
+                let row = map_row(line)?;
+                let Some(mapped) = mapped_libc_path(&row)? else { continue; };
                 segments += 1;
                 require(segments <= 16, "tls_libc_map_limit")?;
                 let mapped = mapped.canonicalize().map_err(|_| "tls_libc_backing_file")?;
-                let (major, minor) = words[3].split_once(':').ok_or("tls_libc_map_device")?;
-                let major = u64::from_str_radix(major, 16).map_err(|_| "tls_libc_map_device")?;
-                let minor = u64::from_str_radix(minor, 16).map_err(|_| "tls_libc_map_device")?;
-                let inode = words[4].parse::<u64>().map_err(|_| "tls_libc_map_inode")?;
+                let MapRow { major, minor, inode, .. } = row;
                 require(mapped == libc && inode == metadata.ino() && major == nix::sys::stat::major(metadata.dev())
                     && minor == nix::sys::stat::minor(metadata.dev()), "tls_libc_original_mapping")?;
                 identities.insert((major, minor, inode, mapped));
@@ -5171,7 +5251,7 @@ pub(crate) mod github_tls {
         }
         pub(super) async fn run(profile: &'static str) {
             let admitted = match Admitted::new_profile(Some(profile)) {
-                Ok(admitted) => admitted, Err(code) => panic!("TLS deadline admission failed: {code}"),
+                Ok(admitted) => admitted, Err(code) => refuse_before_cases(Some(profile), code),
             };
             let mut receipt = DeadlineReceipt { path: admitted.inputs.root.join("receipt.json"), profile,
                 bindings: admitted.common.bindings.clone(), cases: Vec::new() };
@@ -5232,6 +5312,60 @@ pub(crate) mod github_tls {
             // DATA-only predicates. These tests create no Child, descriptor,
             // socket, namespace, file or certificate and certify no native run.
             use super::*;
+
+            #[test]
+            fn maps_rows_preserve_opaque_names_and_original_backing_columns() {
+                let prefix = "7f000000-7f001000 r--p 00001000 08:02 1234";
+                let plain = map_row(prefix).unwrap();
+                assert_eq!((plain.major, plain.minor, plain.inode, plain.remainder), (8, 2, 1234, ""));
+                assert_eq!(mapped_libc_path(&plain), Ok(None));
+                for label in ["[anon: glibc: pthread stack]", "[anon: glibc: malloc arena]",
+                    "/opt/unrelated folder/ordinary file "] {
+                    let line = format!("{prefix}     {label}");
+                    let row = map_row(&line).unwrap();
+                    assert_eq!(row.remainder, label); // Including the trailing space.
+                    assert_eq!(mapped_libc_path(&row), Ok(None));
+                }
+                let row = map_row("7f000000-7f001000 r-xp 00001000 08:02 1234 /usr/lib/libc.so.6").unwrap();
+                assert_eq!((row.major, row.minor, row.inode), (8, 2, 1234));
+                assert_eq!(mapped_libc_path(&row), Ok(Some(Path::new("/usr/lib/libc.so.6"))));
+            }
+            #[test]
+            fn maps_rows_reject_malformed_columns_and_deleted_runtime_modules() {
+                for line in ["", "1000-2000 r--p 0 00:00", "1000-1000 r--p 0 00:00 0",
+                    "-1000-2000 r--p 0 00:00 0", "1000-2000 r--q 0 00:00 0", "1000-2000 r--p z 00:00 0",
+                    "1000-2000 r--p 0 00:zz 0", "1000-2000 r--p 0 00:00 -1",
+                    "1000-2000 r--p 0 00:00 18446744073709551616", "1000-2000 r--p 0 00:00 0\0",
+                    "1000-2000 r--p 0 00:00 0\n"] {
+                    assert!(map_row(line).is_err(), "{line:?}");
+                }
+                for (name, error) in [("libnss_dns.so.2", "tls_dynamic_nss_unsupported"),
+                    ("libnss_dns.so.2 (deleted)", "tls_dynamic_nss_unsupported"),
+                    ("libc.so.6 (deleted)", "tls_libc_backing_file"), ("libc-2.39.so (deleted)", "tls_libc_backing_file")] {
+                    let line = format!("1000-2000 r--p 0 00:01 1234 /usr/lib/{name}");
+                    let row = map_row(&line).unwrap();
+                    assert_eq!(mapped_libc_path(&row), Err(error));
+                }
+                let row = map_row("1000-2000 r--p 0 00:01 1234 /unrelated file (deleted)").unwrap();
+                assert_eq!(mapped_libc_path(&row), Ok(None));
+            }
+            #[test]
+            fn admission_frames_are_closed_bounded_data_only() {
+                let unique = ADMISSION_CODES.iter().copied().collect::<BTreeSet<_>>();
+                assert_eq!(unique.len(), ADMISSION_CODES.len());
+                for profile in [None, Some("hosts"), Some("dns-withhold")] {
+                    for code in ADMISSION_CODES {
+                        let frame = admission_frame(profile, code);
+                        assert!(frame.is_ascii() && frame.len() <= 256 && frame.ends_with('\n'));
+                        assert_eq!(frame, format!("github-tls-admission: {}/{code}\n", profile.unwrap_or("original")));
+                    }
+                    let frame = admission_frame(profile, "private-path/token\nsecond-frame");
+                    assert!(frame.ends_with("/tls_admission_unclassified\n") && !frame.contains("private"));
+                }
+                assert_eq!(admission_frame(Some("private-profile"), "private-code"),
+                    "github-tls-admission: unclassified/tls_admission_unclassified\n");
+                // This pure codec test never calls refuse_before_cases or exit.
+            }
 
             fn progress_until(launch: Instant, seconds: u64) -> Vec<Instant> {
                 (0..seconds).map(|second| launch + Duration::from_millis(200) + Duration::from_secs(second)).collect()

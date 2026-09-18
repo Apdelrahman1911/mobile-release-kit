@@ -4752,6 +4752,43 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             with self.subTest(kind=type(raw).__name__, size=len(raw) if raw is not None else None):
                 self.assertIsNone(helper.github_tls_namespace_refusal(raw))
 
+    def test_tls_admission_diagnostics_accept_only_original_closed_profile_frames(self):
+        for profile in (None, "hosts", "dns-withhold"):
+            selected = "original" if profile is None else profile
+            for code in helper.GITHUB_TLS_ADMISSION_CODES:
+                frame = f"github-tls-admission: {selected}/{code}\n".encode("ascii")
+                self.assertLessEqual(len(frame), 256)
+                self.assertEqual(helper.github_tls_admission_refusal(frame, profile=profile),
+                                 {"stage": "admission", "profile": selected, "code": code})
+            frame = f"github-tls-admission: {selected}/tls_libc_maps\n".encode("ascii")
+            other = "hosts" if profile != "hosts" else "dns-withhold"
+            for raw in (None, frame.decode(), b"", frame[:-1], b"private-path\n" + frame,
+                        frame + b"private-token", frame * 2, frame.replace(b"tls_libc_maps", b"private_identity"),
+                        frame.replace(b"/", b"\xff"), frame + b"\0", b"x" * 257,
+                        f"github-tls-admission: {other}/tls_libc_maps\n".encode("ascii")):
+                with self.subTest(profile=profile, raw_kind=type(raw).__name__):
+                    self.assertIsNone(helper.github_tls_admission_refusal(raw, profile=profile))
+        for profile in (True, "dns", "", "unclassified", "hosts/other", ["hosts"]):
+            self.assertIsNone(helper.github_tls_admission_refusal(b"github-tls-admission: hosts/tls_libc_maps\n", profile=profile))
+
+    def test_tls_admission_diagnostic_vocabulary_and_exit_are_source_bound(self):
+        rust = (SOURCE / "desktop/src-tauri/src/hosted_tests.rs").read_text(encoding="utf-8")
+        start = rust.index("    const ADMISSION_CODES: &[&str] = &[")
+        literal = rust[start:rust.index("    ];", start)]
+        codes = literal.split('"')[1::2]
+        self.assertEqual(len(codes), len(set(codes)))
+        self.assertEqual(set(codes), helper.GITHUB_TLS_ADMISSION_CODES)
+        self.assertIn("tls_admission_unclassified", codes)
+        self.assertEqual(rust.count("refuse_before_cases("), 3)  # Definition + exactly two pre-case calls.
+        self.assertIn("Err(code) => refuse_before_cases(None, code)", rust)
+        self.assertIn("Err(code) => refuse_before_cases(Some(profile), code)", rust)
+        start = rust.index("    fn refuse_before_cases(")
+        refusal = rust[start:rust.index("    fn sha(value:", start)]
+        self.assertIn("write_all(frame.as_bytes())", refusal)
+        self.assertIn("std::process::exit(101)", refusal)
+        self.assertNotIn("eprintln!", refusal)
+        self.assertNotIn("set_hook", refusal)
+
     def test_tls_diagnostic_snapshot_requires_bounded_unchanged_original_regular_output(self):
         test, frame = self, b"github-tls-namespace: host-resolver/file-owner\n"
         for fault in (None, "link", "symlink", "oversize", "opened-replacement", "read-change", "path-change",
@@ -4801,8 +4838,9 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
             outer = {**self.outer(context, profile), "status": "failed", "exitCode": 71, "stderrBytes": 53}
             # A private field in an observation must not be copied into public output.
             outer["private"] = "private-token-and-path"
+            admission = f"github-tls-admission: {'original' if profile is None else profile}/tls_libc_maps\n".encode("ascii")
             for raw, write_fails in ((b"github-tls-namespace: host-resolver/file-owner\n", False),
-                                     (b"private-token-and-path", False), (b"", True)):
+                                     (admission, False), (b"private-token-and-path", False), (b"", True)):
                 writes, snapshots, output = [], [], io.StringIO()
                 def snapshot(path):
                     test.assertEqual(path, PurePosixPath(context["root"]) / f"{stem}.stderr")
@@ -4820,14 +4858,17 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 value = writes[0]
                 self.assertEqual(set(value), {"schemaVersion", "scope", "phase", "status", "sourceSha", "sourceTree",
                     "workflowSha256", "runId", "attempt", "tlsInputsSha256", "compiledTest", "launchError",
-                    "namespaceRefusal", "outerObservation"} | ({"profile"} if profile is not None else set()))
+                    "namespaceRefusal", "admissionRefusal", "outerObservation"} | ({"profile"} if profile is not None else set()))
                 self.assertEqual((value["scope"], value["phase"], value["status"], value["launchError"]),
                                  (self.EVIDENCE, phase, "failed", "none"))
                 self.assertEqual(value.get("profile"), profile)
                 self.assertEqual(value["tlsInputsSha256"], context["tlsInputsSha256" if profile is None else "tlsDeadlineInputsSha256"])
                 self.assertEqual(value["outerObservation"], {key: outer[key] for key in (
                     "status", "waitObserved", "exitCode", "timedOut", "elapsedMs", "stdoutBytes", "stderrBytes")})
-                self.assertEqual(value["namespaceRefusal"], {"stage": "host-resolver", "code": "file-owner"} if raw.startswith(b"github-tls-") else None)
+                self.assertEqual(value["namespaceRefusal"], {"stage": "host-resolver", "code": "file-owner"}
+                                 if raw.startswith(b"github-tls-namespace:") else None)
+                self.assertEqual(value["admissionRefusal"], {"stage": "admission", "profile": "original" if profile is None else profile,
+                                 "code": "tls_libc_maps"} if raw == admission else None)
                 self.assertNotIn("private", output.getvalue())
                 self.assertNotIn(context["root"], output.getvalue())
                 self.assertNotIn(compiled["path"], output.getvalue())
@@ -4851,6 +4892,7 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                                  ("failed", None, launch_error))
                 self.assertFalse(writes[0]["outerObservation"]["waitObserved"])
                 self.assertIsNone(writes[0]["outerObservation"]["exitCode"])
+                self.assertIsNone(writes[0]["admissionRefusal"])
         # Unknown selectors refuse before observing a stream or emitting a
         # diagnostic, rather than becoming arbitrary path/report routing.
         for profile in (True, "dns", "", "hosts/other", ["hosts"]):

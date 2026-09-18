@@ -3786,6 +3786,40 @@ def github_tls_namespace_refusal(raw: bytes | None) -> dict | None:
     return None
 
 
+GITHUB_TLS_ADMISSION_CODES = frozenset((
+    "core_not_exact_checkout", "core_zip_layout", "hash_input_changed", "hash_input_limit",
+    "hash_input_read_failed", "hash_input_unavailable", "hosted_admission_required", "hosted_input_not_absolute",
+    "hosted_input_unavailable", "hosted_scope", "hosted_scope_not_fresh", "missing_hosted_input",
+    "python_not_regular", "source_layout", "source_sha_shape", "test_root_not_fresh", "test_root_unavailable",
+    "tls_admission_unclassified", "tls_artifact_size", "tls_compile_anchor_missing", "tls_compiled_fixture_binding",
+    "tls_compiled_pem_binding", "tls_current_artifact", "tls_deadline_fixed_resolver_bytes", "tls_deadline_original_identity",
+    "tls_deadline_privilege_drop", "tls_deadline_privilege_status", "tls_deadline_profile_layout", "tls_dynamic_nss_unsupported",
+    "tls_file_bound", "tls_file_changed", "tls_file_metadata", "tls_file_open", "tls_file_read", "tls_file_size",
+    "tls_fixed_pem", "tls_fixed_role", "tls_genuine_ssl_binding", "tls_host_or_route", "tls_input_bytes", "tls_input_limit",
+    "tls_input_order", "tls_input_path", "tls_input_roster", "tls_inputs_binding", "tls_inputs_compile_binding",
+    "tls_inputs_json", "tls_inputs_schema", "tls_libc_backing_file", "tls_libc_map_device", "tls_libc_map_inode",
+    "tls_libc_map_limit", "tls_libc_maps", "tls_libc_metadata", "tls_libc_original_mapping", "tls_namespace_binding",
+    "tls_original_artifact_binding", "tls_parent_environment", "tls_parent_environment_path", "tls_path_not_canonical",
+    "tls_path_shape", "tls_path_symlink", "tls_path_unavailable", "tls_private_layout", "tls_private_resolver_bytes",
+    "tls_proc_close_unknown", "tls_proc_open", "tls_proc_read", "tls_proc_role", "tls_profile", "tls_resolver_alias",
+    "tls_resolver_cache_present", "tls_resolver_config_metadata", "tls_resolver_config_not_supported",
+    "tls_resolver_config_role", "tls_resolver_descriptor_scope", "tls_resolver_profile", "tls_resolver_role",
+    "tls_role_missing", "tls_role_unbound", "tls_source_layout", "tls_source_name", "tls_source_roster", "unsupported_host",
+))
+
+
+def github_tls_admission_refusal(raw: bytes | None, *, profile: str | None = None) -> dict | None:
+    """One complete finite pre-case failure frame; never parse panic prose."""
+    selected = "original" if profile is None else profile
+    if (type(selected) is not str or selected not in {"original", "hosts", "dns-withhold"}
+            or type(raw) is not bytes or not 0 < len(raw) <= 256):
+        return None
+    for code in GITHUB_TLS_ADMISSION_CODES:
+        if raw == f"github-tls-admission: {selected}/{code}\n".encode("ascii"):
+            return {"stage": "admission", "profile": selected, "code": code}
+    return None
+
+
 def github_tls_stderr_snapshot(path: Path) -> bytes | None:
     """Bounded original-output observation, not producer finality or cleanup."""
     def stamp(info: os.stat_result) -> tuple:
@@ -3822,6 +3856,7 @@ def github_tls_failure_diagnostics(context: dict, compiled: dict, outer: dict, l
         "tlsInputsSha256": context["tlsInputsSha256" if profile is None else "tlsDeadlineInputsSha256"],
         "compiledTest": github_tls_compiled_public(compiled), "launchError": launch_error,
         "namespaceRefusal": github_tls_namespace_refusal(raw),
+        "admissionRefusal": github_tls_admission_refusal(raw, profile=profile),
         "outerObservation": {key: outer[key] for key in ("status", "waitObserved", "exitCode", "timedOut",
             "elapsedMs", "stdoutBytes", "stderrBytes")}}
     # Original private outer receipt was written first. A missing diagnostic
