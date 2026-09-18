@@ -2,6 +2,8 @@ name: Desktop environment diagnostics native verification
 
 on:
   push:
+    # Initial ref creation is not verification evidence: require an observed run.
+    # Publish ordinary updates to this dedicated ref without rewriting its history.
     branches: [verify/desktop-environment-diagnostics-native]
     paths:
       - desktop/**
