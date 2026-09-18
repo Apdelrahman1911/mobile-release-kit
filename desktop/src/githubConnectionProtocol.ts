@@ -1,7 +1,7 @@
 // Closed public DATA admission. No invoke, fetch, browser fallback or credential
 // collection. Native must separately enforce document/operation/expiry authority.
 import { GITHUB_WORKFLOWS } from './githubSetupProtocol.ts';
-import type { GitHubConnectionHelp, GitHubConnectionReason, GitHubConnectionStatus } from './githubConnectionTypes.ts';
+import type { GitHubConnectionError, GitHubConnectionHelp, GitHubConnectionReason, GitHubConnectionStatus } from './githubConnectionTypes.ts';
 
 export const GITHUB_CONNECTION_ENTRY_AVAILABLE = false;
 export const GITHUB_CONNECTION_EVENT = 'github-connection-status';
@@ -30,6 +30,34 @@ export const GITHUB_CONNECTION_REASON_HELP: Readonly<Record<GitHubConnectionReas
   cancelled: 'Local retirement was requested; actual original settlement must still be observed.',
   'cleanup-unknown': 'Original cleanup is unknown. Further requests stay blocked even after late success.',
 });
+
+// These nine codes alone mean that THIS command installed no native ticket.
+// Do not trust a caller-supplied admission marker, message or generic error code.
+const REFUSALS: Readonly<Record<string, GitHubConnectionReason>> = Object.freeze({
+  github_connection_refused_unqualified: 'unqualified',
+  github_connection_refused_runtime_unavailable: 'runtime-unavailable',
+  github_connection_refused_invalid_input: 'invalid-input',
+  github_connection_refused_busy: 'busy',
+  github_connection_refused_target_changed: 'target-changed',
+  github_connection_refused_rate_limited: 'rate-limited',
+  github_connection_refused_expired: 'expired',
+  github_connection_refused_cancelled: 'cancelled',
+  github_connection_refused_cleanup_unknown: 'cleanup-unknown',
+});
+export function githubConnectionError(value: unknown): GitHubConnectionError {
+  try {
+    if (value !== null && typeof value === 'object') {
+      const field = Object.getOwnPropertyDescriptor(value, 'code');
+      const code: unknown = field && Object.hasOwn(field, 'value') ? field.value : null;
+      if (typeof code === 'string' && Object.hasOwn(REFUSALS, code)) {
+        const reason = REFUSALS[code]!;
+        return { code, message: GITHUB_CONNECTION_REASON_HELP[reason], retryable: false, reason, admission: 'not-admitted' };
+      }
+    }
+  } catch { /* No getter, exception text or raw rejection becomes guidance. */ }
+  return { code: 'GitHubConnectionResponseUnavailable', message: 'No usable acknowledgement was received. Read retained Status or retire the identified original session; do not replay the request.',
+    retryable: false, reason: 'response-invalid', admission: 'unknown' };
+}
 
 const encoder = new TextEncoder();
 const RECORD = Object.prototype;
@@ -188,21 +216,43 @@ export function connectionProgress(old: GitHubConnectionStatus, next: GitHubConn
   if (first && second) {
     if (first.id !== second.id || first.projectId !== second.projectId || first.targetRepository !== second.targetRepository) return false;
     if (first.expiresAt !== null && (second.expiresAt === null || second.expiresAt > first.expiresAt)) return false;
-    if (['expired', 'failed', 'disconnecting'].includes(first.state) && ['checking', 'connected'].includes(second.state)) return false;
+    if (first.state === 'expired' && !['expired', 'disconnecting', 'cleanup-unknown'].includes(second.state)) return false;
+    const op = old.operation; const after = next.operation;
+    if (first.state === 'disconnecting' && !['disconnecting', 'cleanup-unknown'].includes(second.state)) {
+      // Automatic retirement stays Running until the original owner settles.
+      // Its same Disconnect may then expose expiry/context retirement, never
+      // new facts, usable credentials, a replacement operation or read revival.
+      if (op?.kind !== 'disconnect' || op.phase !== 'running' || after?.id !== op.id || after.kind !== 'disconnect' || after.phase !== 'settled' ||
+          !(second.state === 'expired' && after.reason === 'expired' || second.state === 'failed' && ['cancelled', 'target-changed'].includes(after.reason)) ||
+          next.capability.readOnlySessionAvailable ||
+          [next.account, next.repository, next.automation].some((f) => f.state === 'observed') ||
+          !sameConnectionData(old.account, next.account) || !sameConnectionData(old.repository, next.repository) || !sameConnectionData(old.automation, next.automation)) return false;
+    }
+    if (first.state === 'failed' && ['checking', 'connected'].includes(second.state) &&
+        (!connectionRetryable(old) || next.operation?.kind !== 'refresh' || next.operation.id === old.operation?.id)) return false;
     if (old.account.value && next.account.value && old.account.value.id !== next.account.value.id ||
         old.repository.value && next.repository.value && old.repository.value.id !== next.repository.value.id) return false;
-    const op = old.operation; const after = next.operation;
+    if (op && !after) return false;
     if (op && after) {
-      if (op.id === after.id && (op.kind !== after.kind || op.phase === 'settled' && after.phase === 'running' ||
+      if (op.id === after.id && (op.kind !== after.kind || op.phase === 'settled' && (after.phase !== 'settled' || after.reason !== op.reason) ||
           op.phase === 'cleanup-unknown' && after.phase !== 'cleanup-unknown')) return false;
-      if (op.id !== after.id && op.phase !== 'settled' && after.kind !== 'disconnect') return false;
+      if (op.id !== after.id && (after.kind === 'connect' || op.phase !== 'settled' && after.kind !== 'disconnect' ||
+          after.kind === 'refresh' && first.state === 'failed' && !connectionRetryable(old))) return false;
     }
   }
   return true;
 }
 
+export function connectionRetryable(status: GitHubConnectionStatus): boolean {
+  return status.capability.readOnlySessionAvailable && status.session?.state === 'failed' && status.session.expiresAt !== null &&
+    status.operation?.phase === 'settled' && status.operation.kind !== 'disconnect' &&
+    ['network-unavailable', 'tls-failed', 'response-limit', 'rate-limited', 'forbidden', 'not-found-or-inaccessible'].includes(status.operation.reason);
+  // response-invalid retires credential use under the accepted control policy.
+  // An expired/unknown operation, or the same settled ID, can never run again.
+}
+
 // This validator returns only a Boolean, never an echo, retained private object
-// or Debug diagnostic. No renderer token collection/callable bridge is added.
+// or Debug diagnostic. It is not native admission or credential ownership.
 export function githubConnectionRequestFits(command: unknown, args: unknown): boolean {
   try {
     if (!oneOf(command, ['github_connection_status', 'github_connection_connect_token', 'github_connection_refresh', 'github_connection_disconnect']) ||

@@ -8,6 +8,8 @@ use crate::{
     bridge::{AppInfo, DesktopBridge, Project},
     edit_commands, edit_owner::EditOwner, edit_protocol::ConfigEditStatus,
     github_workflow_edit_protocol::WorkflowEditStatus,
+    github_connection_protocol::{self as github_connection_wire, Status as GitHubConnectionStatus, Reason as GitHubConnectionReason},
+    github_connection_session,
     error::BridgeError,
 };
 
@@ -198,6 +200,36 @@ async fn github_workflow_edit_status(webview: Webview, request: tauri::ipc::Requ
     state.bridge.edits.workflow_status()
 }
 
+fn github_connection_body<'a>(webview: &Webview, request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, BridgeError> {
+    if webview.label() != MAIN_WINDOW { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); }
+    request_body(request).map_err(|_| github_connection_session::refused(GitHubConnectionReason::InvalidInput))
+}
+#[tauri::command]
+async fn github_connection_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
+    let body = github_connection_body(&webview, &request)?;
+    github_connection_wire::decode_command_value("github_connection_status", body)
+        .map_err(|_| github_connection_session::refused(GitHubConnectionReason::InvalidInput))?;
+    Ok(state.document.github_connection_status())
+}
+#[tauri::command]
+async fn github_connection_connect_token(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
+    // No await before native synchronous registration. Qualification/admission
+    // is checked by that SAME document gate before its decoder copies a token.
+    state.document.github_connection_connect_token(github_connection_body(&webview, &request)?)
+}
+#[tauri::command]
+async fn github_connection_refresh(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
+    state.document.github_connection_refresh(github_connection_body(&webview, &request)?)
+}
+#[tauri::command]
+async fn github_connection_disconnect(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<GitHubConnectionStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, github_connection_session::refused(GitHubConnectionReason::Unqualified));
+    state.document.github_connection_disconnect(github_connection_body(&webview, &request)?)
+}
+
 fn asset_window(webview: &Webview) -> Result<(), AssetError> {
     if webview.label() == MAIN_WINDOW { Ok(()) } else { Err(AssetError::invalid()) }
 }
@@ -344,6 +376,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if let Ok(status) = edits.workflow_status() { let _ = app.emit_to(MAIN_WINDOW, WORKFLOW_EDIT_EVENT, &status); }
             let status = document.status();
             let _ = app.emit_to(MAIN_WINDOW, ASSET_EVENT, &status);
+            let status = document.github_connection_status();
+            let _ = app.emit_to(MAIN_WINDOW, github_connection_wire::EVENT, &status);
             tokio::select! {
                 biased;
                 result = stop.changed() => { if result.is_err() || *stop.borrow() { return; } },
@@ -1016,6 +1050,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,
             github_workflow_edit_open, github_workflow_edit_prepare, github_workflow_edit_apply,
             github_workflow_edit_close, github_workflow_edit_status,
+            github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
             vault_status, vault_open, asset_context, asset_choose, credential_prepare,
             vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,
         ])

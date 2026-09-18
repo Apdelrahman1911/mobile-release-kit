@@ -11,6 +11,7 @@
     "allow-close-config-edit", "allow-config-edit-status",
     "allow-github-workflow-edit-open", "allow-github-workflow-edit-prepare", "allow-github-workflow-edit-apply",
     "allow-github-workflow-edit-close", "allow-github-workflow-edit-status",
+    "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
     "allow-vault-status", "allow-vault-open", "allow-asset-context", "allow-asset-choose", "allow-credential-prepare",
     "allow-vault-prepare-delete", "allow-vault-commit", "allow-vault-bind", "allow-vault-discard", "allow-vault-lock",
     "core:event:allow-listen", "core:event:allow-unlisten"

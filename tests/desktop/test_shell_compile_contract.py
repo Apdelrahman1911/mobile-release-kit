@@ -40,7 +40,7 @@ class ShellCompileContractTests(unittest.TestCase):
         with patch.object(helper, "load_context", side_effect=AssertionError("context must not be opened")), \
                 patch.object(helper, "tools", side_effect=AssertionError("no tool may be selected")):
             for phase in ("native", "config-owner", "config-task-loss", "config-owner-delta",
-                          "config-transaction-eof", "config-core", "unexpected"):
+                          "config-transaction-eof", "config-core", "windows-snapshot", "unexpected"):
                 with self.subTest(phase=phase), self.assertRaises(helper.CheckFailure):
                     helper.phase(phase, "linux", helper.COMPILE_SCOPE)
         for phase in helper.COMPILE_PHASES:

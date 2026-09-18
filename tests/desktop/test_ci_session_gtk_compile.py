@@ -5,6 +5,7 @@ from copy import deepcopy
 import importlib.util
 import json
 from pathlib import Path
+import re
 import unittest
 from unittest.mock import patch
 
@@ -42,11 +43,78 @@ def receipt(phase: str) -> dict:
 
 
 class SessionGtkCompileContractTests(unittest.TestCase):
+    def test_core_inventory_rejects_substitutions_and_malformed_rows(self):
+        original = [{"path": path, "size": 1, "sha256": "4" * 64} for path in helper.GTK_CORE_PATHS]
+        helper.validate_gtk_core_inventory(original)
+        self.assertEqual(len(original), 72)
+        variants = (None, {}, tuple(original), original[:-1], original + [original[0]],
+                    [original[0]] + original[:-1], list(reversed(original)))
+        for value in variants:
+            with self.subTest(value_type=type(value).__name__), self.assertRaises(helper.CheckFailure):
+                helper.validate_gtk_core_inventory(value)
+        for key, value in (("path", "mobile_release/substituted.py"), ("path", 1),
+                           ("size", True), ("size", 1.0), ("size", -1), ("size", 8 * 1024 * 1024 + 1),
+                           ("sha256", "A" * 64), ("sha256", "4" * 63), ("sha256", None), ("extra", False)):
+            broken = deepcopy(original)
+            broken[0][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(helper.CheckFailure):
+                helper.validate_gtk_core_inventory(broken)
+        for row in (None, {}, {"path": original[0]["path"], "size": 1}):
+            with self.subTest(row=row), self.assertRaises(helper.CheckFailure):
+                helper.validate_gtk_core_inventory([row, *original[1:]])
+        broken = deepcopy(original)
+        for row in broken[:5]:
+            row["size"] = 8 * 1024 * 1024
+        with self.assertRaises(helper.CheckFailure):
+            helper.validate_gtk_core_inventory(broken)
+
+    def test_qualification_rosters_cover_current_core_and_integration_modules(self):
+        # Fixed SOURCE reads only: never import the native driver or execute GTK.
+        root = HELPER.parents[2]
+        driver = (root / "desktop/tools/qualify_session_gtk.py").read_text(encoding="utf-8")
+        native = (root / "desktop/src-tauri/src/session_gtk_qualification.rs").read_text(encoding="utf-8")
+        python_block = driver.split("\nSOURCES = (\n", 1)[1].split("\n)\n", 1)[0]
+        rust_block = native.split("const SOURCES: &[Source] = &[\n", 1)[1].split("\n];", 1)[0]
+        python_paths = re.findall(r"^    '([^']+)',$", python_block, re.MULTILINE)
+        rust_paths = re.findall(r'^    source!\("([^\"]+)"\),$', rust_block, re.MULTILINE)
+        self.assertEqual(python_paths, rust_paths)
+        self.assertEqual(python_paths, sorted(set(python_paths)))
+        self.assertEqual(len(python_paths), 173)
+        self.assertNotIn("len(SOURCES) == 154", driver)
+        self.assertEqual(driver.count("len(SOURCES) == 173"), 2)
+        self.assertEqual(tuple(path.removeprefix("src/") for path in python_paths if path.startswith("src/")),
+                         helper.GTK_CORE_PATHS)
+        package = root / "src/mobile_release"
+        observed = []
+        for path in package.rglob("*"):
+            self.assertFalse(path.is_symlink())
+            if path.is_file():
+                observed.append(path.relative_to(root / "src").as_posix())
+        self.assertEqual(tuple(sorted(observed)), helper.GTK_CORE_PATHS)
+        library = (root / "desktop/src-tauri/src/lib.rs").read_text(encoding="utf-8")
+        integration = (root / "desktop/src-tauri/tests/session_gtk_qualification.rs").read_text(encoding="utf-8")
+        modules = re.findall(r"^(?:pub )?mod ([a-z_]+);$", library, re.MULTILINE)
+        registrations = re.findall(r'#\[path = "\.\./src/([a-z_]+)\.rs"\] mod ([a-z_]+);', integration)
+        self.assertEqual(sorted(modules), sorted(name for _, name in registrations))
+        for filename, name in registrations:
+            self.assertEqual(filename, name)
+            self.assertIn(f"desktop/src-tauri/src/{name}.rs", python_paths)
+        for name in ("github_workflow_edit_protocol", "github_connection_protocol", "github_connection_session"):
+            self.assertIn(f"desktop/src-tauri/src/{name}.rs", helper.GTK_COMPILE_SOURCES)
+        # These test-cfg owners and includes also compile in the SG1 target;
+        # do not infer completeness from the consumer's own roster constant.
+        for relative in ("desktop/github_connection_bootstrap.py",
+                         "desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py",
+                         "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/supervisor.rs",
+                         "desktop/src-tauri/src/hosted_tests.rs", "desktop/src-tauri/src/asset_session.rs"):
+            self.assertIn(relative, python_paths)
+            self.assertIn(relative, helper.GTK_COMPILE_SOURCES)
+
     def test_native_phases_and_non_linux_profiles_refuse_before_context_or_tools(self):
         with patch.object(helper, "load_context", side_effect=AssertionError("no context IO")), \
                 patch.object(helper, "tools", side_effect=AssertionError("no compiler selection")):
             for name in ("native", "config-owner", "config-task-loss", "config-owner-delta",
-                         "config-transaction-eof", "config-core", "windows-snapshot", "unknown"):
+                         "config-transaction-eof", "config-core", "windows-snapshot", "github-owner", "unknown"):
                 with self.subTest(phase=name), self.assertRaises(helper.CheckFailure):
                     helper.phase(name, "linux", helper.GTK_COMPILE_SCOPE)
             for platform in ("macos", "windows", "unknown"):

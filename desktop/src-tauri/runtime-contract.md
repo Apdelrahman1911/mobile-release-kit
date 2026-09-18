@@ -1,7 +1,7 @@
 # Desktop Rust bridge and runtime contract
 
-This is a passive foundation plus an independently gated configuration-edit
-implementation, not a shipping standalone runtime, Windows native release
+This is a passive foundation plus independently gated configuration-edit and
+GitHub read-only source implementations, not a shipping standalone runtime, Windows native release
 backend, or replacement for the audited CLI's ownership services.
 
 ## Current executable scope
@@ -13,8 +13,9 @@ The eight passive renderer commands are `app_info`, `choose_project`,
 Snapshot and draft validation return the core result without inventing verified
 facts or saving files. Project IDs refer to Rust-held native picker selections;
 renderer-provided roots/executables/command lines/method names are not admitted.
-There are also five closed configuration-edit commands, described below; their
-native qualification gate remains disabled. There are no generic shell,
+There are also five closed configuration-edit commands and four fixed GitHub
+connection commands, described below; their native qualification gates remain
+disabled. There are no generic shell,
 filesystem, opener, build, Store, credential, or recovery commands/plugins.
 The sole local webview denies remote/new-window navigation.
 The CSP allows only local assets and Tauri IPC, not project-provided web content.
@@ -29,8 +30,8 @@ or runtime environment override that enables it. `app_info` remains usable and
 reports unavailable, with null capabilities; it never falls back to source,
 PATH, an ambient Python, browser preview, or synthetic successful core output.
 `inspect_bundle_for_packaging` is explicitly **unqualified preparation work**;
-its result contains no executable/core/bootstrap paths and app commands never
-call it. Its current pathname-based reads are not a safe execution admission
+its result contains no executable/core/bootstrap paths and active app commands
+never reach it. Its current pathname-based reads are not a safe execution admission
 backend and are not authorized native tests.
 
 Only `--features development-runtime` **with debug assertions enabled** compiles
@@ -55,6 +56,8 @@ ignored generated files in a clean checkout. The fixed intended payload names:
 - `manifest.json` (excluded from its own inventory);
 - `engine_bootstrap.py`;
 - `config_edit_bootstrap.py` (a separately gated configuration-only entry point);
+- `github_connection_bootstrap.py` (the separately gated read-only GitHub entry);
+- `github-ca.pem` (fixed nonempty CA payload, at most512KiB; no OS trust fallback);
 - `core.zip`;
 - `python/bin/python3` on Unix, or `python/python.exe` on Windows;
 - the explicitly inventoried interpreter/stdlib payload.
@@ -73,9 +76,12 @@ Manifest exact keys:
 `target` is the exact Cargo target triple. `protocolSha256` hashes the exact
 `src/mobile_release/_desktop_engine.py` stored inside the core ZIP.
 `coreSha256` must equal the core ZIP inventory digest. The inventory includes
-both fixed bootstraps; their bytes and the complete core ZIP are
-bound by the compiled manifest digest. Including an edit entry point does not
-qualify its owner or permit execution. The file list is strictly
+all three fixed bootstraps and the fixed CA; their bytes and the complete core
+ZIP are bound by the compiled manifest digest. The new engine/transport sources
+are in that complete ZIP. `protocolSha256` retains its passive-engine meaning;
+there is no separately inferred CA anchor or runtime trust environment override.
+Including these payloads does not qualify an owner, CA, TLS profile or execution.
+The file list is strictly
 sorted by ASCII relative path. Inventory SHA-256 hashes compact UTF-8 JSON of
 that array, object keys ordered `path,sha256,size` (Python `sort_keys=True`,
 `separators=(",", ":")`, `ensure_ascii=False`). Hashes are lowercase 64-hex.
@@ -95,6 +101,70 @@ never generates an inventory, hashes an adjacent untrusted manifest into an
 anchor, downloads a runtime, or reads these environment variables at app runtime.
 These bindings and `desktop/tools/prepare_runtime.py` are preparation assets,
 not a bypass of M1's production execution gate.
+
+Publisher preparation admits every fixed source bootstrap and the bounded,
+nonempty `desktop/github-ca.pem` before its first output write. The checkout does
+not carry a placeholder CA: missing trust intentionally refuses preparation,
+preserving publisher inputs. CA bytes are opaque inventory inputs; preparation
+does not acquire a bundle, load TLS, validate certificate chains or grant trust.
+Payload/entry reservations include all three bootstraps, core ZIP, CA and final
+manifest. Inert preparation fixtures contain explicitly non-certificate data,
+not a substitute trust store or native qualification.
+
+## Separately gated GitHub read-only profile
+
+The fixed command names are `github_connection_status`,
+`github_connection_connect_token`, `github_connection_refresh`, and
+`github_connection_disconnect`. The public DTO/event remains the closed G1
+status graph, not private helper controls or raw headers. The native session gate
+and `runtime::GITHUB_TLS_PROFILE_QUALIFIED` remain false. A handler registration,
+passing passive query, valid manifest or developer-selected interpreter is not
+activation, token interoperability or TLS/exit evidence.
+
+`resolve_github_readonly` refuses its closed profile gate before filesystem or
+native work. Its strictly latent positive branch is Linux x86_64 GNU only,
+`development-runtime` plus debug assertions. That branch requires the complete
+inventory bound by the **existing explicit compiled manifest/protocol anchors**
+and exact development Python/core selections equal to the inventoried bundle
+`python/bin/python3` and `core.zip`. It selects the fixed bundled
+`github_connection_bootstrap.py` and runtime-directory cwd; `github-ca.pem` is
+that bootstrap's fixed sibling, never a supplied argument or ambient trust
+path. The inventory remains a preparation check, not a new custody constructor
+or authority to open the false gate. Production and other-target branches refuse.
+
+The private synchronous `Supervisor::start_github_readonly` uses the same two
+permits, original10s operation and immutable2s cleanup allowance, owner roster,
+driver/watchdog/final observer as passive reads. It does not wrap a lazy query
+future in another task. Its ticket exposes only the original operation ID,
+fixed cancellation and a safe-data mailbox: Pending, RetainedUnknown, or
+Settled with typed outcome, original `settled_at` and monotonic `was_unknown`.
+Stop, ticket drop, output readiness and an early unknown notification are not
+settlement. Only original `Owner::retire`, after actual native/management checks
+and releasing bookkeeping locks, seals final receipt data. Status/relay reads
+never renew that time. There is no document callback under supervisor locks.
+
+The one private request is at most8KiB including newline. Its dedicated encoder
+does not create a serializable/debuggable/clonable credential DTO or request
+Value. The actual IPC Value path validates the tiny borrowed command shape and
+encoded-size ceiling before copying a token; it does not claim to recover
+lexical duplicate keys already consumed by Tauri. Private byte framing remains
+strict and duplicate-free. The GitHub stdout frame is at most64KiB including
+newline,2000 nodes/depth12, using closed typed facts/control rather than the
+passive generic result; stderr remains separately bounded/discarded at64KiB.
+
+Private controls have exact reason, required nullable canonical expiry, required nullable
+integer cooldown1..604800 and mandatory `cooldownBlocked`. Rate limiting must
+supply a known/default delay or a known-overflow block. `response-invalid` may
+retain independently justified cooldown; all other reasons require null/false.
+Unknown/malformed control data cannot create a grant or a new block. A null new
+hint does not clear the existing outside-token deadline/block. A recognized
+known long/unrepresentable delay blocks the original document, never clamps to
+the credential's60-minute ceiling. Canonical expiry syntax is reserved private
+data support only: the live helper currently emits null and refuses a present
+unsupported expiration header instead of guessing GitHub's wire grammar.
+Response-invalid retires credential use while preserving original settlement
+custody and independently justified cooldowns. None of this qualifies an actual
+token, socket, CA, installed runtime or native document lifecycle.
 
 ## Passive protocol and original child owner
 

@@ -1,5 +1,6 @@
-//! Original-child owner for the closed passive API methods only. Never reuse this
-//! for builds, hooks, signing, or an engine that can spawn descendants.
+//! Original-child owner for closed passive API methods and the fixed GitHub
+//! read-only profile. Never reuse this for builds, hooks, signing, or an engine
+//! that can spawn descendants.
 //!
 //! An independent watchdog includes blocking runtime inspection and spawn time.
 //! Renderer cancellation only drops a reply receiver, never these owner tasks.
@@ -13,7 +14,8 @@ use serde_json::Value;
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::Child, sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore}, task::JoinHandle};
 #[cfg(all(feature = "development-runtime", debug_assertions))]
 use tokio::process::Command;
-use crate::{error::BridgeError, protocol::{self, Method}, runtime::{RuntimeConfig, VerifiedRuntime}};
+use crate::{error::BridgeError, github_connection_protocol::{self as github_protocol, GitHubReadOutcome},
+    protocol::{self, Method}, runtime::{RuntimeConfig, VerifiedRuntime}};
 
 pub const OPERATION_TIME: Duration = Duration::from_secs(10);
 pub const CLEANUP_TIME: Duration = Duration::from_secs(2);
@@ -22,6 +24,8 @@ const ACTIVE_LIMIT: usize = 2;
 #[cfg(all(test, feature = "development-runtime"))]
 #[path = "hosted_tests.rs"]
 mod hosted_tests;
+#[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use hosted_tests::github_fixture::{GitHubDocumentFixtureBinding, GitHubDocumentFixturePermit, GitHubFixtureRuntime};
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use hosted_tests::session_gtk_probe;
 #[cfg(test)]
@@ -44,7 +48,9 @@ struct Inner {
     test: hosted_tests::Hooks,
 }
 struct Owner {
-    key: u64, id: String, state: Mutex<OwnerState>, resources: AsyncMutex<Resources>,
+    key: u64, id: String, profile: Profile,
+    github_receipt: Option<Arc<Mutex<GitHubReadReceipt>>>,
+    state: Mutex<OwnerState>, resources: AsyncMutex<Resources>,
     stop: watch::Sender<bool>, changed: Notify, permit: Mutex<Option<OwnedSemaphorePermit>>,
     driver: AsyncMutex<Option<JoinHandle<DriverEnd>>>, watchdog: AsyncMutex<Option<JoinHandle<WatchdogEnd>>>,
     observer: AsyncMutex<Option<JoinHandle<()>>>,
@@ -70,7 +76,67 @@ impl ManagementJoin {
         if error.is_cancelled() { Self::Cancelled } else if error.is_panic() { Self::Panicked } else { Self::Failed }
     }
 }
-enum DriverEnd { Ready(Result<Value, BridgeError>), RetainedUnknown }
+#[derive(Debug, PartialEq)]
+enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome) }
+enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
+
+#[derive(Clone, Copy)]
+enum Profile { Passive(Method), GitHubReadOnly }
+impl Profile {
+    fn stdout_limit(self) -> usize {
+        match self { Self::Passive(_) => protocol::RESPONSE_LIMIT, Self::GitHubReadOnly => github_protocol::RESPONSE_LIMIT }
+    }
+    fn decode(self, bytes: &[u8], id: &str) -> Result<ReadOutcome, BridgeError> {
+        match self {
+            Self::Passive(_) => protocol::decode_response(bytes, id).map(ReadOutcome::Passive),
+            Self::GitHubReadOnly => github_protocol::decode_private_response(id, bytes).map(ReadOutcome::GitHub),
+        }
+    }
+}
+
+// Borrowed admission only, never retained by an owner/task or derived as
+// Debug/Clone/Serialize. The one credential copy is the bounded writer buffer.
+enum AdmissionRequest<'a> {
+    Passive { method: Method, params: &'a Value },
+    GitHub { repository: &'a str, expected_account_id: Option<&'a str>, expected_repository_id: Option<&'a str>, token: &'a str },
+}
+impl AdmissionRequest<'_> {
+    fn profile(&self) -> Profile {
+        match self { Self::Passive { method, .. } => Profile::Passive(*method), Self::GitHub { .. } => Profile::GitHubReadOnly }
+    }
+    fn encode(self, id: &str) -> Result<Vec<u8>, BridgeError> {
+        match self {
+            Self::Passive { method, params } => protocol::encode_request(id, method, params),
+            Self::GitHub { repository, expected_account_id, expected_repository_id, token } =>
+                github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token),
+        }
+    }
+}
+enum CompletionTarget {
+    Passive(oneshot::Sender<Result<Value, BridgeError>>),
+    GitHub(Arc<Mutex<GitHubReadReceipt>>),
+}
+
+/// A bounded native-only mailbox. Early unknown is not original resource
+/// retirement; only Owner::retire may install Settled after its checked joins.
+#[derive(Clone, Debug)]
+pub(crate) enum GitHubReadReceipt {
+    Pending,
+    RetainedUnknown,
+    Settled { outcome: Result<GitHubReadOutcome, BridgeError>, settled_at: Instant, was_unknown: bool },
+}
+/// Exact original owner reference, not a PID, renderer handle or new joiner.
+/// Drop neither stops nor settles. No token-bearing Debug/Clone/Serialize DTO.
+pub(crate) struct GitHubReadTicket {
+    owner: Arc<Owner>, receipt: Arc<Mutex<GitHubReadReceipt>>,
+}
+impl GitHubReadTicket {
+    pub(crate) fn operation_id(&self) -> &str { &self.owner.id }
+    pub(crate) fn stop(&self) {
+        self.owner.fail(BridgeError::new("cancelled", "The GitHub read-only observation was cancelled."));
+    }
+    pub(crate) fn receipt(&self) -> GitHubReadReceipt { lock(&self.receipt).clone() }
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WatchdogEnd {
     DriverObserved(ManagementJoin),
@@ -101,7 +167,7 @@ impl OwnerState {
                 && self.cleanup_endpoint == Some(endpoint) && observed_at >= endpoint,
         }
     }
-    fn retirement_result(&mut self, now: Instant, stopping: bool) -> Option<Result<Value, BridgeError>> {
+    fn retirement_result(&mut self, now: Instant, stopping: bool) -> Option<Result<ReadOutcome, BridgeError>> {
         // The caller holds registry -> state while sampling the real clock and
         // shutdown latch. This small decision also admits fixed-value tests of
         // simultaneous-ready joins/deadlines without replacing the product clock.
@@ -144,8 +210,16 @@ impl Owner {
         inner.disabled.store(true, Ordering::SeqCst);
         state.unknown = true;
         state.fail_at(BridgeError::cleanup_unknown(), Instant::now());
-        if let Some(reply) = state.reply.take() { let _ = reply.send(Err(BridgeError::cleanup_unknown())); }
+        let reply = state.reply.take();
         drop(state);
+        // No supervisor bookkeeping lock is held while publishing safe data.
+        // A racing actual retirement may already have sealed the final receipt;
+        // an earlier unknown reporter must never overwrite that final state.
+        if let Some(receipt) = &self.github_receipt {
+            let mut receipt = lock(receipt);
+            if matches!(&*receipt, GitHubReadReceipt::Pending) { *receipt = GitHubReadReceipt::RetainedUnknown; }
+        }
+        if let Some(reply) = reply { let _ = reply.send(Err(BridgeError::cleanup_unknown())); }
         self.stop.send_replace(true);
         inner.changed.notify_waiters();
         self.changed.notify_waiters();
@@ -172,8 +246,10 @@ impl Owner {
         if !owners.get(&self.key).is_some_and(|original| Arc::ptr_eq(original, self)) { return false; }
         // If joins and a timer are ready together, selection order grants no
         // success window beyond either original endpoint.
-        let Some(result) = state.retirement_result(Instant::now(), inner.stopping.load(Ordering::SeqCst)) else { return false; };
+        let settled_at = Instant::now();
+        let Some(result) = state.retirement_result(settled_at, inner.stopping.load(Ordering::SeqCst)) else { return false; };
         if state.unknown { inner.disabled.store(true, Ordering::SeqCst); }
+        let was_unknown = state.unknown;
         state.terminal = true;
         let reply = state.reply.take();
         lock(&self.permit).take();
@@ -183,7 +259,32 @@ impl Owner {
         // Deliberate end of the management join chain: all original native and
         // required management operations are settled. Only bounded data delivery,
         // notifications and drops remain; no observer-of-observer is required.
-        if let Some(reply) = reply { let _ = reply.send(result); }
+        match self.profile {
+            Profile::Passive(_) => {
+                let result = result.and_then(|value| match value {
+                    ReadOutcome::Passive(value) => Ok(value), ReadOutcome::GitHub(_) => Err(BridgeError::protocol()),
+                });
+                if let Some(reply) = reply { let _ = reply.send(result); }
+            }
+            Profile::GitHubReadOnly => {
+                // A private typed result never passes through passive Value or
+                // its public query response channel, even on a profile mismatch.
+                drop(reply);
+                let outcome = result.and_then(|value| match value {
+                    ReadOutcome::GitHub(value) => Ok(value), ReadOutcome::Passive(_) => Err(BridgeError::protocol()),
+                });
+                if let Some(receipt) = &self.github_receipt {
+                    let mut receipt = lock(receipt);
+                    let was_unknown = was_unknown || matches!(&*receipt, GitHubReadReceipt::RetainedUnknown);
+                    if !matches!(&*receipt, GitHubReadReceipt::Settled { .. }) {
+                        *receipt = GitHubReadReceipt::Settled {
+                            outcome: if was_unknown { Err(BridgeError::cleanup_unknown()) } else { outcome },
+                            settled_at, was_unknown,
+                        };
+                    }
+                }
+            }
+        }
         inner.changed.notify_waiters();
         self.changed.notify_waiters();
         true
@@ -219,7 +320,36 @@ impl Supervisor {
     pub fn can_exit(&self) -> bool { lock(&self.inner.owners).is_empty() }
 
     pub async fn query(&self, method: Method, params: Value) -> Result<Value, BridgeError> {
+        let (reply, receiver) = oneshot::channel();
+        let owner = self.admit(AdmissionRequest::Passive { method, params: &params }, CompletionTarget::Passive(reply))?;
+        // No owner/task cancellation on receiver abandonment. The registry retains
+        // Child, IO tasks, startup handles and permits until actual settlement.
+        receiver.await.unwrap_or_else(|_| {
+            owner.unknown(&self.inner);
+            Err(BridgeError::cleanup_unknown())
+        })
+    }
+
+    /// Synchronous admission: the original roster exists before a native session
+    /// stores this ticket. No wrapping query future, separate token owner or task.
+    pub(crate) fn start_github_readonly(&self, repository: &str, expected_account_id: Option<&str>,
+        expected_repository_id: Option<&str>, token: &str) -> Result<GitHubReadTicket, BridgeError> {
+        let receipt = Arc::new(Mutex::new(GitHubReadReceipt::Pending));
+        let owner = self.admit(AdmissionRequest::GitHub { repository, expected_account_id, expected_repository_id, token },
+            CompletionTarget::GitHub(receipt.clone()))?;
+        // No fallible operation follows registration. A ready/unknown original
+        // remains observable even if its first data delivery won this race.
+        Ok(GitHubReadTicket { owner, receipt })
+    }
+
+    fn admit(&self, request: AdmissionRequest<'_>, completion: CompletionTarget) -> Result<Arc<Owner>, BridgeError> {
         let endpoint = Instant::now() + OPERATION_TIME;
+        let profile = request.profile();
+        let (reply, github_receipt) = match (profile, completion) {
+            (Profile::Passive(_), CompletionTarget::Passive(reply)) => (Some(reply), None),
+            (Profile::GitHubReadOnly, CompletionTarget::GitHub(receipt)) => (None, Some(receipt)),
+            _ => return Err(BridgeError::invalid()),
+        };
         let executor = tokio::runtime::Handle::try_current()
             .map_err(|_| BridgeError::unavailable("The asynchronous query owner is unavailable."))?;
         if self.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -228,12 +358,11 @@ impl Supervisor {
             .map_err(|_| BridgeError::new("busy", "Two read-only queries already own the available slots."))?;
         let key = self.inner.next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
             .map_err(|_| BridgeError::new("unavailable", "The query identity space is exhausted."))?;
-        let id = format!("query-{key}");
-        let bytes = protocol::encode_request(&id, method, &params)?;
-        let (reply, receiver) = oneshot::channel();
+        let id = match profile { Profile::Passive(_) => format!("query-{key}"), Profile::GitHubReadOnly => format!("github-read-{key}") };
+        let bytes = request.encode(&id)?;
         let (stop, _) = watch::channel(false);
         let owner = Arc::new(Owner {
-            key, id, state: Mutex::new(OwnerState::new(endpoint, Some(reply))),
+            key, id, profile, github_receipt, state: Mutex::new(OwnerState::new(endpoint, reply)),
             resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(),
             permit: Mutex::new(Some(permit)), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
             #[cfg(all(test, feature = "development-runtime"))]
@@ -287,12 +416,7 @@ impl Supervisor {
         drop(watchdog_slot);
         drop(driver);
         drop(resources);
-        // No owner/task cancellation on receiver abandonment. The registry retains
-        // Child, IO tasks, startup handles and permits until actual settlement.
-        receiver.await.unwrap_or_else(|_| {
-            owner.unknown(&self.inner);
-            Err(BridgeError::cleanup_unknown())
-        })
+        Ok(owner)
     }
 
     pub async fn shutdown(&self) -> Result<(), BridgeError> {
@@ -509,12 +633,35 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     }
     let config = inner.runtime.clone();
     let endpoint = owner.endpoint();
+    let profile = owner.profile;
     #[cfg(all(test, feature = "development-runtime"))]
     let inspection_gate = inner.test.inspection.clone();
+    #[cfg(all(windows, test, feature = "development-runtime"))]
+    let windows_bootstrap = lock(&inner.test.windows_bootstrap).clone();
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let github_fixture = lock(&inner.test.github_fixture).clone();
     resources.inspection = Some(tokio::task::spawn_blocking(move || {
         #[cfg(all(test, feature = "development-runtime"))]
         inspection_gate.wait();
-        config.resolve(endpoint)
+        let runtime = match profile {
+            Profile::Passive(_) => config.resolve(endpoint)?,
+            Profile::GitHubReadOnly => {
+                // The same original inspection and endpoint. This private
+                // test-only value exists only after the fixed hosted Case has
+                // bound its inputs; ordinary development retains the TLS gate.
+                #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(selection) = &github_fixture {
+                    return config.resolve_github_fixture(endpoint, selection);
+                }
+                config.resolve_github_readonly(endpoint)?
+            },
+        };
+        #[cfg(all(windows, test, feature = "development-runtime"))]
+        let runtime = match profile {
+            Profile::Passive(_) => hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?,
+            Profile::GitHubReadOnly => runtime, // Never a fixture override for GitHub/TLS qualification.
+        };
+        Ok(runtime)
     }));
     let inspected = join_slot(&mut resources.inspection).await;
     #[cfg(all(test, feature = "development-runtime"))]
@@ -535,7 +682,15 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     // Blocking startup cannot starve the independent deadline watchdog. Its
     // original result/Child remains in this retained acquisition handle.
     let acquiring_owner = owner.clone();
-    resources.acquisition = Some(tokio::task::spawn_blocking(move || spawn_original(runtime, acquiring_owner)));
+    #[cfg(all(test, feature = "development-runtime"))]
+    let acquisition_gate = inner.test.acquisition.clone();
+    resources.acquisition = Some(tokio::task::spawn_blocking(move || {
+        // Scheduling instrumentation inside THIS retained original task,
+        // before spawn_original's two final creation checks. No new deadline.
+        #[cfg(all(test, feature = "development-runtime"))]
+        acquisition_gate.wait();
+        spawn_original(runtime, acquiring_owner)
+    }));
     let acquired = join_slot(&mut resources.acquisition).await;
     #[cfg(all(test, feature = "development-runtime"))]
     if acquired.is_ok() { lock(&owner.observation).acquisition_joined = true; }
@@ -559,9 +714,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     if let Some(stdin) = stdin { resources.writer = Some(tokio::spawn(write_request(stdin, bytes, owner.stop.subscribe(), faults.clone()))); }
     if let Some(stdout) = stdout {
         #[cfg(all(test, feature = "development-runtime"))]
-        { resources.stdout = Some(tokio::spawn(hosted_tests::observed_read(stdout, protocol::RESPONSE_LIMIT, faults.clone(), owner.observation.clone(), Some(inner.test.stdout_join.clone()), false))); }
+        { resources.stdout = Some(tokio::spawn(hosted_tests::observed_read(stdout, profile.stdout_limit(), faults.clone(), owner.observation.clone(), Some(inner.test.stdout_join.clone()), false))); }
         #[cfg(not(all(test, feature = "development-runtime")))]
-        { resources.stdout = Some(tokio::spawn(read_bounded(stdout, protocol::RESPONSE_LIMIT, faults.clone()))); }
+        { resources.stdout = Some(tokio::spawn(read_bounded(stdout, profile.stdout_limit(), faults.clone()))); }
     }
     if let Some(stderr) = stderr {
         #[cfg(all(test, feature = "development-runtime"))]
@@ -586,7 +741,11 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             match child.try_wait() {
                 Ok(Some(status)) => {
                     #[cfg(all(test, feature = "development-runtime"))]
-                    { let mut observed = lock(&owner.observation); observed.waited = true; observed.exit_success = Some(status.success()); }
+                    {
+                        let mut observed = lock(&owner.observation); observed.waited = true; observed.exit_success = Some(status.success());
+                        #[cfg(windows)]
+                        { observed.windows_exit_code = status.code(); }
+                    }
                     resources.waited = Some(status);
                 }
                 Ok(None) => { if child.start_kill().is_err() { owner.fail(BridgeError::cleanup_unknown()); } }
@@ -612,7 +771,11 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         match event {
             Event::Wait(Ok(status)) => {
                 #[cfg(all(test, feature = "development-runtime"))]
-                { let mut observed = lock(&owner.observation); observed.waited = true; observed.exit_success = Some(status.success()); }
+                {
+                    let mut observed = lock(&owner.observation); observed.waited = true; observed.exit_success = Some(status.success());
+                    #[cfg(windows)]
+                    { observed.windows_exit_code = status.code(); }
+                }
                 if !status.success() { owner.fail(BridgeError::new("engine_failed", "The isolated core exited unsuccessfully.")); }
                 resources.waited = Some(status);
             }
@@ -667,7 +830,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     // reaped. Diagnostics are never emitted to renderer/logs as raw contents.
     drop(diagnostics);
     resources.child.take();
-    let result = match output { Some(output) => protocol::decode_response(&output.bytes, &owner.id), None => Err(BridgeError::protocol()) };
+    let result = match output { Some(output) => profile.decode(&output.bytes, &owner.id), None => Err(BridgeError::protocol()) };
     if let Err(error) = &result { owner.fail(error.clone()); }
     DriverEnd::Ready(result)
 }
@@ -681,7 +844,7 @@ mod tests {
         let (stop, receiver) = watch::channel(false);
         drop(receiver);
         Owner {
-            key: 1, id: "query-1".into(),
+            key: 1, id: "query-1".into(), profile: Profile::Passive(Method::Capabilities), github_receipt: None,
             state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
             resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(),
             permit: Mutex::new(None), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
@@ -704,5 +867,14 @@ mod tests {
         let state = lock(&owner.state);
         assert_eq!(state.cleanup_endpoint, first);
         assert_eq!(state.error.as_ref().map(|error| error.code.as_str()), Some("query_timeout"));
+    }
+    #[test]
+    fn closed_profile_changes_only_the_private_channel_bound() {
+        assert_eq!(Profile::Passive(Method::Capabilities).stdout_limit(), protocol::RESPONSE_LIMIT);
+        assert_eq!(Profile::GitHubReadOnly.stdout_limit(), 64 * 1024);
+        assert_eq!(protocol::STDERR_LIMIT, 64 * 1024);
+        assert_eq!(ACTIVE_LIMIT, 2);
+        assert_eq!(OPERATION_TIME, Duration::from_secs(10));
+        assert_eq!(CLEANUP_TIME, Duration::from_secs(2));
     }
 }

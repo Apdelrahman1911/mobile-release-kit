@@ -1,9 +1,11 @@
-// Inert-port UI coordination only. No live bridge, Connect/token method, timers,
-// credential storage or optimistic native settlement. Native owns all admission.
+// Renderer coordination only. One original observer and bounded nonsecret
+// intent survive lost replies/view invalidation. Native owns all admission,
+// credentials, clocks and finality; neither a Promise nor JS cleanup is receipt.
 import type { GitHubConnectionContext, GitHubConnectionObservationPort, GitHubConnectionReason,
-  GitHubConnectionStatus, GitHubConnectionViewState } from './githubConnectionTypes.ts';
-import { connectionOpaqueId, connectionProgress, connectionRepository, connectionRevision,
-  parseGitHubConnectionHelp, parseGitHubConnectionStatus, sameConnectionData } from './githubConnectionProtocol.ts';
+  GitHubConnectionStatus, GitHubConnectionTokenHandoff, GitHubConnectionViewState } from './githubConnectionTypes.ts';
+import { connectionOpaqueId, connectionProgress, connectionRepository, connectionRetryable, connectionRevision,
+  githubConnectionError, githubConnectionRequestFits, parseGitHubConnectionHelp, parseGitHubConnectionStatus,
+  sameConnectionData } from './githubConnectionProtocol.ts';
 
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -12,32 +14,40 @@ function freeze<T>(value: T): T {
   return value;
 }
 function contextCopy(value: GitHubConnectionContext | null): GitHubConnectionContext | null {
-  if (value === null) return null;
-  if (Object.keys(value).length !== 4 || !connectionOpaqueId(value.documentId) || !connectionOpaqueId(value.projectId) ||
-      !connectionRevision(value.projectGeneration) || !connectionRepository(value.repository)) return null;
-  return { documentId: value.documentId, projectId: value.projectId, projectGeneration: value.projectGeneration, repository: value.repository };
+  if (value === null || typeof value !== 'object') return null;
+  const fields = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(fields).length !== 4 || !['documentId', 'projectId', 'projectGeneration', 'repository'].every((key) =>
+    fields[key]?.enumerable && Object.hasOwn(fields[key]!, 'value'))) return null;
+  const documentId: unknown = fields.documentId!.value; const projectId: unknown = fields.projectId!.value;
+  const projectGeneration: unknown = fields.projectGeneration!.value; const repository: unknown = fields.repository!.value;
+  return connectionOpaqueId(documentId) && connectionOpaqueId(projectId) && connectionRevision(projectGeneration) && connectionRepository(repository) ?
+    { documentId, projectId, projectGeneration, repository } : null;
+}
+interface Observation {
+  port: GitHubConnectionObservationPort; active: boolean; listening: boolean; subscriptionFailed: boolean; unlisten: (() => void) | null;
+  ready: Promise<void> | null; reading: Promise<void> | null; serial: object;
+  accepted: GitHubConnectionStatus | null;
+  identity: { sessionId: string; accountId: string | null; repositoryId: string | null } | null;
+  retiredSessionId: string | null;
 }
 interface Pending {
-  write: number; sessionId: string; baseRevision: number; oldOperationId: string | null;
-  operationId: string | null; uncertain: boolean;
+  kind: 'connect' | 'refresh'; observer: Observation; epoch: object; context: GitHubConnectionContext;
+  baseRevision: number; oldOperationId: string | null; sessionId: string | null;
+  operationId: string | null; admittedRevision: number | null;
+  sent: boolean; retiring: boolean; uncertain: boolean; done: boolean;
 }
+interface Retirement { observer: Observation; sessionId: string; revision: number }
 
 export class GitHubConnectionController {
   private state: GitHubConnectionViewState = freeze({ mode: 'unavailable', context: null, status: null, retained: null,
     help: null, helpState: 'missing', observing: false, busy: null, uncertain: false, blocked: false, retirementPending: false, error: null });
   private port: GitHubConnectionObservationPort | null = null;
+  private observer: Observation | null = null;
   private listeners = new Set<() => void>();
-  private unlisten: (() => void) | null = null;
-  private epoch = 0;
-  private write = 0;
-  private serial = 0;
+  private epoch: object = {};
   private disposed = false;
-  private reading: { epoch: number; work: Promise<void> } | null = null;
-  private accepted: GitHubConnectionStatus | null = null;
-  private identity: { sessionId: string; accountId: string | null; repositoryId: string | null } | null = null;
   private pending: Pending | null = null;
-  private retirement: { port: GitHubConnectionObservationPort; sessionId: string; revision: number } | null = null;
-  private retiredSessionId: string | null = null;
+  private retirement: Retirement | null = null;
 
   getSnapshot = (): GitHubConnectionViewState => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -45,203 +55,318 @@ export class GitHubConnectionController {
     if (this.disposed) return;
     this.state = freeze({ ...this.state, ...patch }); this.listeners.forEach((listener) => listener());
   }
-  private current(epoch: number, port: GitHubConnectionObservationPort): boolean { return !this.disposed && epoch === this.epoch && port === this.port; }
-  private invalidate(): void {
-    this.epoch += 1; this.write += 1; this.pending = null; this.reading = null;
-    const unlisten = this.unlisten; this.unlisten = null;
-    // Detaching a renderer listener is not native cancellation or settlement.
-    try { unlisten?.(); } catch { /* No raw callback diagnostic is rendered. */ }
-  }
   private fail(reason: GitHubConnectionReason, block = false): void {
-    this.serial += 1;
-    this.update({ error: reason, blocked: this.state.blocked || block });
+    if (block && this.pending) this.pending.uncertain = true;
+    this.update({ error: reason, blocked: this.state.blocked || block, uncertain: this.state.uncertain || block && this.pending !== null });
+  }
+  private needsOriginal(observer: Observation): boolean {
+    return this.retirement?.observer === observer || !!this.pending && this.pending.observer === observer && this.pending.sent && !this.pending.done;
+  }
+  private detach(observer: Observation): void {
+    observer.active = false; observer.listening = false;
+    const unlisten = observer.unlisten; observer.unlisten = null;
+    try { unlisten?.(); } catch { /* A listener close is not native settlement. */ }
+  }
+  private maintainObserver(): Observation | null {
+    if (this.observer && (this.disposed || this.observer.port !== this.port)) {
+      if (this.needsOriginal(this.observer)) return this.observer;
+      this.detach(this.observer); this.observer = null;
+    }
+    if (!this.observer && !this.disposed && this.port?.mode === 'native') {
+      const observer: Observation = { port: this.port, active: true, listening: false, subscriptionFailed: false, unlisten: null, ready: null, reading: null,
+        serial: {}, accepted: null, identity: null, retiredSessionId: null };
+      this.observer = observer; observer.ready = this.monitor(observer);
+    }
+    return this.observer;
+  }
+  private invalidateView(patch: Partial<GitHubConnectionViewState>): void {
+    this.epoch = {};
+    const pending = this.pending;
+    if (pending) {
+      pending.retiring = true;
+      // No token handoff has occurred yet; synchronous subscriber invalidation
+      // can retire this unsent intent without inventing a native operation.
+      if (!pending.sent) { pending.done = true; this.pending = null; }
+    }
+    const observer = this.observer;
+    if (observer && !this.needsOriginal(observer) && !observer.accepted?.session) {
+      // Before the first accepted Status, coordinates alone cannot bind an
+      // observation to this view. Retire the unneeded callback/read before
+      // notifying subscribers; away-and-back cannot make its result current.
+      // A sent Connect's original retirement-only observer is NOT replaced.
+      this.observer = null; this.detach(observer);
+      patch = { ...patch, observing: false };
+    }
+    const mustRetire = !!this.retirement || !!this.pending || !!this.observer?.accepted?.session;
+    this.update({ ...patch, status: null, retained: this.state.status ?? this.state.retained,
+      retirementPending: mustRetire, busy: mustRetire ? 'disconnect' : null,
+      uncertain: this.pending?.uncertain ?? (!!this.retirement && this.state.uncertain), error: null });
+    this.retireOriginal(); this.maintainObserver();
   }
   setHelp(value: unknown): void {
     if (this.disposed) return;
     const help = parseGitHubConnectionHelp(value);
-    this.update(help ? { help, helpState: 'current' } : { helpState: this.state.help ? 'previous' : 'missing' });
+    const patch: Partial<GitHubConnectionViewState> = help ? { help, helpState: 'current' } : { helpState: this.state.help ? 'previous' : 'missing' };
+    if (this.state.helpState === 'current' && (!help || !sameConnectionData(help, this.state.help))) this.invalidateView(patch);
+    else this.update(patch);
   }
   setContext(value: GitHubConnectionContext | null): void {
     if (this.disposed) return;
     let context: GitHubConnectionContext | null;
     try { context = contextCopy(value); } catch { context = null; }
-    if (sameConnectionData(context, this.state.context)) return;
-    const old = this.state.status; const port = this.port;
-    this.invalidate(); // Away-and-back changes invalidate before any async work.
-    this.update({ context, status: null, retained: old ?? this.state.retained, observing: false,
-      busy: this.retirement ? 'disconnect' : null, uncertain: false, error: null });
-    if (old?.session && port?.mode === 'native') this.beginDisconnect(old, port, false);
-    if (port?.mode === 'native') void this.monitor(port, this.epoch);
+    if (!sameConnectionData(context, this.state.context)) this.invalidateView({ context });
   }
   async attach(port: GitHubConnectionObservationPort | null): Promise<void> {
     if (this.disposed || this.port === port) return;
-    const old = this.state.status; const previous = this.port;
-    this.invalidate();
-    if (old?.session && previous?.mode === 'native') this.beginDisconnect(old, previous, false);
-    this.port = port; this.accepted = null;
-    this.update({ mode: port?.mode ?? 'unavailable', status: null, retained: old ?? this.state.retained, observing: false,
-      busy: this.retirement ? 'disconnect' : null, uncertain: false, error: null,
-      blocked: this.state.blocked || this.retirement !== null && this.retirement.port !== port });
-    if (port?.mode === 'native') await this.monitor(port, this.epoch);
+    this.port = port;
+    this.invalidateView({ mode: port?.mode ?? 'unavailable', observing: false });
+    // When an old Connect is still unacknowledged this is its ORIGINAL observer,
+    // not a replacement subscription that could guess which session to cancel.
+    await this.maintainObserver()?.ready;
   }
-  private async monitor(port: GitHubConnectionObservationPort, epoch: number): Promise<void> {
+  private async monitor(observer: Observation): Promise<void> {
     try {
-      const unlisten = await port.subscribe((value) => { if (this.current(epoch, port)) this.receive(value); });
-      if (!this.current(epoch, port)) { try { unlisten(); } catch { /* Old teardown, not current state. */ } return; }
-      this.unlisten = unlisten;
-      await this.checkStatus(); // Subscribe before the first read; no auth retry.
+      const unlisten = await observer.port.subscribe((value) => { if (observer.active) this.receive(observer, value); });
+      if (!observer.active) { try { unlisten(); } catch { /* Retired subscription only. */ } return; }
+      observer.unlisten = unlisten; observer.listening = true;
+      await this.readStatus(observer); // Subscribe before first Status; no read/auth retry.
     } catch {
-      if (this.current(epoch, port)) this.fail('runtime-unavailable');
+      observer.subscriptionFailed = true;
+      if (observer.active) this.fail('runtime-unavailable');
+      // Explicit Status remains usable even after subscription failure. It is
+      // not proof of refusal and does not release an unacknowledged intent.
     }
   }
   private matches(status: GitHubConnectionStatus): boolean {
     const context = this.state.context; const session = status.session;
     return session === null || !!context && context.projectId === session.projectId && context.repository === session.targetRepository;
   }
-  private receive(value: unknown, readSerial?: number): GitHubConnectionStatus | null {
+  private originMatches(pending: Pending, status: GitHubConnectionStatus): boolean {
+    const session = status.session; const operation = status.operation;
+    return status.revision > pending.baseRevision && !!session && !!operation &&
+      session.projectId === pending.context.projectId && session.targetRepository === pending.context.repository &&
+      operation.kind === pending.kind && operation.id !== pending.oldOperationId &&
+      (pending.sessionId === null || pending.sessionId === session.id) &&
+      (pending.operationId === null || pending.operationId === operation.id);
+  }
+  private correlate(observer: Observation, status: GitHubConnectionStatus): void {
+    const pending = this.pending;
+    if (!pending || pending.observer !== observer || !pending.sent || !this.originMatches(pending, status)) return;
+    pending.sessionId = status.session!.id; pending.operationId = status.operation!.id;
+    pending.admittedRevision ??= status.revision;
+    if (pending.retiring) this.retireOriginal();
+    else this.settlePending(observer.accepted);
+  }
+  private receive(observer: Observation, value: unknown, readSerial?: object): GitHubConnectionStatus | null {
+    if (!observer.active) return null;
     const status = parseGitHubConnectionStatus(value);
     if (!status) {
-      // A malformed reply to an older retained read is an old error too. A
-      // current event/reply still fails closed; valid revision conflicts do not
-      // get this exemption merely because their request began earlier.
-      if (readSerial === undefined || readSerial === this.serial) this.fail('response-invalid', true);
+      if (readSerial === undefined || readSerial === observer.serial) this.fail('response-invalid', true);
       return null;
     }
-    const old = this.accepted;
-    if (old && status.revision < old.revision) return status;
+    const old = observer.accepted;
+    if (old && status.revision < old.revision) {
+      // The admitted reply may be behind its own settled event. A coherent
+      // earlier frame can bind the origin, but can never replace newer DATA.
+      if (connectionProgress(status, old)) this.correlate(observer, status);
+      return status;
+    }
+    if (status.session?.id === observer.retiredSessionId && ['checking', 'connected'].includes(status.session.state)) return status;
     if (old && !connectionProgress(old, status)) { this.fail('response-invalid', true); return null; }
-    // Never resurrect the original session after a local retirement request,
-    // even if its late refresh success has a greater status revision.
-    if (status.session?.id === this.retiredSessionId && ['checking', 'connected'].includes(status.session.state)) return status;
-    if (this.retirement && this.retirement.port === this.port && status.session && status.session.id !== this.retirement.sessionId) {
+    if (this.retirement?.observer === observer && status.session && status.session.id !== this.retirement.sessionId) {
       this.fail('target-changed', true); return null;
     }
-    const pinned = this.identity;
+    const pending = this.pending;
+    if (old?.session === null && status.session && (!pending || pending.observer !== observer || !pending.sent || !this.originMatches(pending, status))) {
+      this.fail('target-changed', true); return null;
+    }
+    const pinned = observer.identity;
     if (status.session && pinned?.sessionId === status.session.id &&
         (pinned.accountId && status.account.value && pinned.accountId !== status.account.value.id ||
          pinned.repositoryId && status.repository.value && pinned.repositoryId !== status.repository.value.id)) {
       this.fail('target-changed', true); return null;
     }
-    // Remember original immutable identities across temporarily unavailable
-    // facts; comparing only the immediately previous DTO loses that binding.
-    this.identity = status.session === null ? null : {
+    observer.identity = status.session === null ? null : {
       sessionId: status.session.id,
       accountId: (pinned?.sessionId === status.session.id ? pinned.accountId : null) ?? status.account.value?.id ?? null,
       repositoryId: (pinned?.sessionId === status.session.id ? pinned.repositoryId : null) ?? status.repository.value?.id ?? null,
     };
-    this.accepted = status; this.serial += 1;
-    if (this.retirement?.port === this.port && status.session === null && status.revision > this.retirement.revision) {
-      this.retirement = null; this.pending = null;
-      this.update({ retirementPending: false, busy: null, uncertain: false });
+    observer.accepted = status; observer.serial = {};
+    this.correlate(observer, status);
+    if (this.retirement?.observer === observer && status.session === null && status.revision > this.retirement.revision) {
+      this.finishRetirement();
+      if (this.observer !== observer || !observer.active) return status;
     }
     const blocked = this.state.blocked || status.session?.state === 'cleanup-unknown';
-    if (this.matches(status)) this.update({ status, blocked, error: blocked ? this.state.error ?? 'cleanup-unknown' : null });
-    else this.update({ retained: status, status: null, blocked, error: 'target-changed' });
-    this.settlePending();
+    const blockingReason = status.session?.state === 'cleanup-unknown' ? 'cleanup-unknown' : this.state.error;
+    const retiring = this.pending?.retiring || this.retirement?.observer === observer;
+    if (observer.port === this.port && this.matches(status) && !retiring) {
+      this.update({ status, blocked, error: blocked ? blockingReason ?? 'cleanup-unknown' : this.state.uncertain ? this.state.error : null });
+    } else {
+      this.update({ retained: status, status: null, blocked,
+        error: blocked ? blockingReason ?? 'cleanup-unknown' : retiring ? this.state.error : 'target-changed' });
+    }
+    this.settlePending(observer.accepted);
     return status;
   }
-  private settlePending(): void {
-    const pending = this.pending; const operation = this.accepted?.operation;
-    if (pending && !pending.uncertain && pending.operationId && this.accepted?.session?.id === pending.sessionId &&
-        operation?.id === pending.operationId && operation.phase === 'settled') {
-      this.pending = null; this.update({ busy: null, uncertain: false });
-    }
+  private settlePending(status: GitHubConnectionStatus | null): void {
+    const pending = this.pending;
+    if (!pending || pending.retiring || pending.done || !pending.sent || !status || !this.originMatches(pending, status) ||
+        pending.operationId === null || status.operation?.phase !== 'settled' || this.disposed ||
+        pending.epoch !== this.epoch || pending.observer.port !== this.port || !sameConnectionData(pending.context, this.state.context)) return;
+    pending.done = true; this.pending = null;
+    this.update({ busy: null, uncertain: false, error: this.state.blocked ? this.state.error : null });
+    this.maintainObserver();
   }
-  async checkStatus(): Promise<void> {
-    const port = this.port; const epoch = this.epoch;
-    if (this.disposed || port?.mode !== 'native' || !this.unlisten) return;
-    if (this.reading?.epoch === epoch) return this.reading.work;
-    const serial = this.serial;
+  private async readStatus(observer: Observation): Promise<void> {
+    if (!observer.active || !observer.listening && !observer.subscriptionFailed || this.disposed && !this.needsOriginal(observer)) return;
+    if (observer.reading) return observer.reading;
+    const serial = observer.serial;
     const work = Promise.resolve().then(async () => {
-      // A queued read can be retired before its microtask gets a turn. Checking
-      // only the eventual reply would still invoke an abandoned native port.
-      if (!this.current(epoch, port) || !this.unlisten) return;
-      try {
-        const value = await port.status();
-        if (this.current(epoch, port)) this.receive(value, serial);
-      } catch {
-        // A newer original event outranks an older read's failure too.
-        if (this.current(epoch, port) && serial === this.serial) this.fail('response-invalid');
-      }
+      if (!observer.active || this.disposed && !this.needsOriginal(observer)) return;
+      try { this.receive(observer, await observer.port.status(), serial); }
+      catch { if (observer.active && serial === observer.serial) this.fail('response-invalid'); }
     });
-    this.reading = { epoch, work }; this.update({ observing: true });
+    observer.reading = work; this.update({ observing: true });
     try { await work; } finally {
-      if (this.current(epoch, port) && this.reading?.work === work) { this.reading = null; this.update({ observing: false }); }
+      if (observer.reading === work) {
+        observer.reading = null;
+        if (this.observer === observer) this.update({ observing: false });
+      }
     }
   }
-  private refreshContextReady(): boolean {
-    const status = this.state.status;
-    return !this.disposed && this.port?.mode === 'native' && !!this.unlisten && !!status && this.matches(status) &&
-      status.capability.readOnlySessionAvailable && status.session?.state === 'connected' && this.state.helpState === 'current' &&
-      !this.state.blocked && !this.state.error && !this.state.uncertain && !this.retirement;
+  checkStatus(): Promise<void> {
+    const observer = this.maintainObserver();
+    return observer ? this.readStatus(observer) : Promise.resolve();
   }
-  canRefresh(): boolean { return !this.state.busy && this.refreshContextReady(); }
-  refresh(): boolean {
-    const port = this.port; const status = this.state.status;
-    if (!this.canRefresh() || !port || !status?.session) return false;
-    const epoch = this.epoch; const write = ++this.write;
-    const pending: Pending = { write, sessionId: status.session.id, baseRevision: status.revision,
-      oldOperationId: status.operation?.id ?? null, operationId: null, uncertain: false };
-    this.pending = pending; this.update({ busy: 'refresh', uncertain: false, error: null });
-    const failed = () => {
-      if (this.current(epoch, port) && this.write === write && this.pending === pending) {
-        pending.uncertain = true; this.update({ uncertain: true }); this.fail('response-invalid');
-      }
-    };
+  canCheckStatus(): boolean { return !this.disposed && !!this.observer?.active && (this.observer.listening || this.observer.subscriptionFailed); }
+  private contextReady(): boolean {
+    const observer = this.observer; const status = this.state.status;
+    return !this.disposed && this.port?.mode === 'native' && !!observer && observer.port === this.port && observer.listening &&
+      !!this.state.context && !!status && observer.accepted?.revision === status.revision && this.matches(status) && status.capability.readOnlySessionAvailable &&
+      this.state.helpState === 'current' && !this.state.blocked && !this.state.error && !this.state.uncertain &&
+      !this.retirement && !this.state.retirementPending;
+  }
+  // Logical eligibility only. The component AND bridge independently enforce
+  // the compiled entry gate; native qualification is never a renderer Boolean.
+  canConnect(): boolean { return !this.pending && !this.state.busy && this.contextReady() && this.state.status?.session === null; }
+  connectToken(token: string, handoff: GitHubConnectionTokenHandoff): boolean {
+    if (!this.canConnect() || handoff.port !== this.port || !this.observer || !this.state.context || !this.state.status) return false;
+    const context = this.state.context;
+    if (!githubConnectionRequestFits('github_connection_connect_token', { projectId: context.projectId, repository: context.repository, token })) {
+      this.fail('invalid-input'); return false;
+    }
+    const pending = this.newPending('connect', this.observer, context, this.state.status);
+    this.pending = pending; this.update({ busy: 'connect', uncertain: false, error: null });
+    if (!this.unsentCurrent(pending) || !this.contextReady() || this.state.status?.session !== null || handoff.port !== this.port) {
+      this.discardUnsent(pending); return false;
+    }
+    pending.sent = true;
     try {
-      // update() synchronously notifies listeners. They may retire the context,
-      // request Disconnect, invalidate help or publish a newer native status.
-      // Re-admit the exact unsent request, not merely its eventual callback.
-      if (!this.current(epoch, port) || this.write !== write || this.pending !== pending) return false;
-      if (!this.refreshContextReady() || this.state.status?.revision !== pending.baseRevision ||
-          this.state.status?.session?.id !== pending.sessionId) {
-        this.pending = null; this.update({ busy: null }); return false;
-      }
-      void port.refresh({ sessionId: pending.sessionId, expectedRevision: pending.baseRevision }).then((value) => {
-        if (!this.current(epoch, port) || this.write !== write || this.pending !== pending) return;
-        const reply = parseGitHubConnectionStatus(value);
-        if (!reply || reply.revision <= pending.baseRevision || reply.session?.id !== pending.sessionId ||
-            reply.operation?.kind !== 'refresh' || reply.operation.id === pending.oldOperationId) { failed(); return; }
-        pending.operationId = reply.operation.id;
-        this.receive(reply); this.settlePending();
-      }, failed);
-    } catch { failed(); }
+      // No async function/callback here retains token or args. Only this one
+      // synchronous handoff receives them. observeReply captures safe metadata.
+      this.observeReply(pending, handoff.submit({ projectId: context.projectId, repository: context.repository, token }));
+    } catch (error) { this.originRejected(pending, error); }
     return true;
   }
+  private newPending(kind: Pending['kind'], observer: Observation, context: GitHubConnectionContext, status: GitHubConnectionStatus): Pending {
+    return { kind, observer, epoch: this.epoch, context, baseRevision: status.revision, oldOperationId: status.operation?.id ?? null,
+      sessionId: kind === 'refresh' ? status.session!.id : null, operationId: null, admittedRevision: null,
+      sent: false, retiring: false, uncertain: false, done: false };
+  }
+  private unsentCurrent(pending: Pending): boolean {
+    return !this.disposed && this.pending === pending && !pending.retiring && !pending.done && pending.epoch === this.epoch &&
+      pending.observer.port === this.port && sameConnectionData(pending.context, this.state.context) && this.state.status?.revision === pending.baseRevision;
+  }
+  private discardUnsent(pending: Pending): void {
+    if (pending.sent || pending.done) return;
+    pending.done = true;
+    if (this.pending === pending) { this.pending = null; this.update({ busy: this.retirement ? 'disconnect' : null }); }
+    this.maintainObserver();
+  }
+  private refreshReady(): boolean {
+    const status = this.state.status;
+    return this.contextReady() && !!status && (status.session?.state === 'connected' || connectionRetryable(status));
+  }
+  canRefresh(): boolean { return !this.pending && !this.state.busy && this.refreshReady(); }
+  refresh(): boolean {
+    if (!this.canRefresh() || !this.observer || !this.state.status?.session || !this.state.context) return false;
+    const pending = this.newPending('refresh', this.observer, this.state.context, this.state.status);
+    this.pending = pending; this.update({ busy: 'refresh', uncertain: false, error: null });
+    if (!this.unsentCurrent(pending) || !this.refreshReady() || this.state.status?.session?.id !== pending.sessionId) {
+      this.discardUnsent(pending); return false;
+    }
+    pending.sent = true;
+    try { this.observeReply(pending, pending.observer.port.refresh({ sessionId: pending.sessionId!, expectedRevision: pending.baseRevision })); }
+    catch (error) { this.originRejected(pending, error); }
+    return true;
+  }
+  private observeReply(pending: Pending, work: Promise<unknown>): void {
+    // This method's lexical environment contains no token/private request.
+    void work.then((value) => {
+      if (pending.done || this.pending !== pending || !pending.observer.active) return;
+      const reply = this.receive(pending.observer, value);
+      if (!pending.done && (!reply || !this.originMatches(pending, reply))) this.originRejected(pending, null);
+    }, (error) => this.originRejected(pending, error));
+  }
+  private originRejected(pending: Pending, value: unknown): void {
+    if (pending.done || this.pending !== pending) return;
+    const error = githubConnectionError(value);
+    if (error.admission === 'not-admitted' && pending.operationId === null) {
+      pending.done = true; this.pending = null;
+      this.update({ busy: this.retirement ? 'disconnect' : null, retirementPending: !!this.retirement,
+        uncertain: !!this.retirement && this.state.uncertain,
+        error: pending.retiring || pending.observer.port !== this.port ? this.state.error : error.reason });
+      this.maintainObserver(); return;
+    }
+    pending.uncertain = true;
+    this.update({ uncertain: true }); this.fail('response-invalid', error.admission === 'not-admitted');
+    // A refused code contradicting an already identified admission cannot undo
+    // the latter. Keep the original session available for exact retirement.
+  }
   canDisconnect(): boolean {
-    const session = this.state.status?.session;
-    // Busy, capability/help failure and a pending Status do not block retirement.
-    return !this.disposed && this.port?.mode === 'native' && !!session && this.matches(this.state.status!) &&
-      session.state !== 'cleanup-unknown' && session.state !== 'disconnecting' && !this.retirement;
+    const observer = this.observer;
+    if (this.disposed || !observer?.active || observer.port.mode !== 'native' || this.retirement) return false;
+    if (this.pending?.kind === 'connect' && this.pending.sessionId === null) return false;
+    return !!observer.accepted?.session;
   }
   disconnect(): boolean {
-    if (!this.canDisconnect() || !this.port || !this.state.status) return false;
-    this.beginDisconnect(this.state.status, this.port, true); return true;
+    if (!this.canDisconnect()) return false;
+    if (this.pending) this.pending.retiring = true;
+    this.retireOriginal(); return true;
   }
-  private beginDisconnect(status: GitHubConnectionStatus, port: GitHubConnectionObservationPort, report: boolean): void {
-    const session = status.session;
-    if (!session || this.retirement || session.id === this.retiredSessionId) return;
-    const epoch = this.epoch; const write = ++this.write;
-    this.pending = null; this.retiredSessionId = session.id;
-    this.retirement = { port, sessionId: session.id, revision: status.revision };
-    this.update({ busy: 'disconnect', retirementPending: true, uncertain: false, error: 'cancelled' });
+  private retireOriginal(): void {
+    if (this.retirement) return;
+    const pending = this.pending; const observer = this.observer;
+    if (!observer?.active) return;
+    if (pending?.retiring && pending.kind === 'connect' && pending.sessionId === null) return;
+    const sessionId = pending?.retiring ? pending.sessionId : observer.accepted?.session?.id;
+    const accepted = observer.accepted;
+    const revision = accepted?.session && accepted.session.id === sessionId ? accepted.revision : pending?.admittedRevision ?? pending?.baseRevision;
+    if (!sessionId || revision === undefined || observer.retiredSessionId === sessionId) return;
+    observer.retiredSessionId = sessionId;
+    const retirement: Retirement = { observer, sessionId, revision }; this.retirement = retirement;
+    this.update({ busy: 'disconnect', retirementPending: true, error: 'cancelled' });
     const failed = () => {
-      if (report && this.current(epoch, port) && this.write === write && this.retirement) {
-        this.update({ uncertain: true }); this.fail('response-invalid');
-      }
+      if (this.retirement === retirement) { this.update({ uncertain: true }); this.fail('response-invalid'); }
     };
-    try {
-      void port.disconnect({ sessionId: session.id }).then((value) => {
-        if (report && this.current(epoch, port) && this.write === write) this.receive(value);
-      }, failed);
-    } catch { failed(); }
+    try { void observer.port.disconnect({ sessionId }).then((value) => { if (this.retirement === retirement) this.receive(observer, value); }, failed); }
+    catch { failed(); }
+    if (observer.accepted?.session === null && observer.accepted.revision > retirement.revision) this.finishRetirement();
+  }
+  private finishRetirement(): void {
+    const retirement = this.retirement;
+    if (!retirement) return;
+    if (this.pending?.observer === retirement.observer) { this.pending.done = true; this.pending = null; }
+    this.retirement = null;
+    this.update({ busy: null, retirementPending: false, uncertain: false, error: this.state.blocked ? this.state.error : null });
+    this.maintainObserver();
   }
   dispose(): void {
     if (this.disposed) return;
-    const status = this.state.status; const port = this.port;
-    this.invalidate();
-    if (status?.session && port?.mode === 'native') this.beginDisconnect(status, port, false);
-    this.disposed = true; this.listeners.clear();
-    // The original native owner still owes settlement. No erasure claim here.
+    this.invalidateView({});
+    this.disposed = true; this.listeners.clear(); this.maintainObserver();
+    // Retain at most the original reply/listener for exact late retirement.
+    // Document destruction independently retires native state, not JS success.
   }
 }

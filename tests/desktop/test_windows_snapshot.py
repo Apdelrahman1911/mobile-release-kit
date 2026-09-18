@@ -1,23 +1,29 @@
-"""Sixteen inert Windows reader contracts, not Windows qualification.
+"""Inert Windows reader contracts, not Windows qualification.
 
 Only dictionaries, synthetic handle numbers and bounded byte buffers are used.
 Native calls/exit are substituted or refused before entry; no DLL is loaded. Fake
 relative opens/mutations prove call ordering, not NTFS, ABI, ACL or reparse
 semantics. A substituted fail-stop proves retained references, not process/IO
 finality or successful native CloseHandle receipts. No filesystem fixtures.
+Focused leaves read bound fixture source and select named pure reducers. The
+ACL ordering leaf also selects named original methods with exclusively fake
+capabilities; no fixture module, native observer or constructor is imported/run.
 """
 from __future__ import annotations
 
+import ast
 import copy
 import importlib
 import json
 import os
+import stat
 import struct
 import sys
 import unittest
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -273,6 +279,754 @@ def _shim(error: int = 0, **functions) -> native.Native:
 
 
 class WindowsSnapshotPureTests(unittest.TestCase):
+    def test_fixture_ordinary_bytes_reads_observed_size_and_preserves_custody(self):
+        source = (Path(__file__).resolve().parents[1] / "native_desktop_snapshot_windows.py").read_bytes()
+        self.assertLessEqual(len(source), 128 * 1024)
+        parsed = ast.parse(source, filename="reviewed-fixture-sized-read-source")
+        selected = [node for node in parsed.body if getattr(node, "name", None) == "ordinary_bytes"]
+        self.assertEqual(len(selected), 1)
+        definition = selected[0]
+        self.assertIs(type(definition), ast.FunctionDef)
+        self.assertFalse(definition.decorator_list or definition.type_comment or getattr(definition, "type_params", []))
+        self.assertEqual([arg.arg for arg in definition.args.args], ["path", "limit"])
+        self.assertEqual([arg.arg for arg in definition.args.kwonlyargs], ["single_link"])
+        self.assertFalse(definition.args.posonlyargs or definition.args.vararg or definition.args.kwarg or definition.args.defaults)
+        self.assertEqual([ast.literal_eval(value) for value in definition.args.kw_defaults], [True])
+        self.assertEqual([arg.annotation.id for arg in (*definition.args.args, *definition.args.kwonlyargs)], ["Path", "int", "bool"])
+        self.assertEqual(definition.returns.id, "bytes")
+        allowed_nodes = (ast.FunctionDef, ast.arguments, ast.arg, ast.Assign, ast.Expr, ast.With, ast.withitem,
+                         ast.Return, ast.Call, ast.Name, ast.Attribute, ast.Constant, ast.Load, ast.Store,
+                         ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare, ast.operator, ast.unaryop,
+                         ast.boolop, ast.cmpop)
+        calls = {("path", "lstat"), ("path", "open"), ("stream", "read"),
+                 ("stream", "fileno"), ("os", "fstat"), ("stat", "S_ISREG")}
+        for node in ast.walk(definition):
+            self.assertIsInstance(node, allowed_nodes)
+            if isinstance(node, ast.Name):
+                self.assertFalse(node.id.startswith("__"))
+            if isinstance(node, ast.Attribute):
+                self.assertIsInstance(node.value, ast.Name)
+                self.assertIn((node.value.id, node.attr), calls | {
+                    (who, field) for who in ("before", "after")
+                    for field in ("st_mode", "st_nlink", "st_size", "st_ino", "st_mtime_ns")})
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    self.assertIn(node.func.id, ("require", "getattr", "len"))
+                else:
+                    self.assertIsInstance(node.func, ast.Attribute)
+                    self.assertIn((node.func.value.id, node.func.attr), calls)
+
+        class Refused(Exception):
+            pass
+
+        class Injected(Exception):
+            pass
+
+        def require(ok, reason):
+            if not ok:
+                raise Refused(reason)
+
+        namespace = {"__builtins__": {"getattr": getattr, "len": len, "int": int, "bool": bool, "bytes": bytes},
+                     "Path": object, "require": require, "stat": SimpleNamespace(S_ISREG=stat.S_ISREG)}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-fixture-sized-read-fake-capabilities",
+                     "exec", dont_inherit=True), namespace)
+
+        def exercise(*, size=1, data=b"x", limit=8 * 1024 * 1024, before=None, after=None,
+                     single_link=True, failure=None, refusal=None):
+            events = []
+            original = {"st_mode": stat.S_IFREG | 0o600, "st_nlink": 1, "st_size": size,
+                        "st_ino": 41, "st_mtime_ns": 1234, "st_file_attributes": 0}
+            original.update(before or {})
+            final = {**original, **(after or {})}
+
+            class Stream:
+                def __enter__(self):
+                    events.append(("enter",))
+                    return self
+
+                def __exit__(self, *_error):
+                    events.append(("close",))
+                    if failure == "close":
+                        raise Injected("close")
+                    return False
+
+                def read(self, count):
+                    events.append(("read", count))
+                    if failure == "read":
+                        raise Injected("read")
+                    return data[:count]
+
+                def fileno(self):
+                    events.append(("fileno",))
+                    return 23
+
+            stream = Stream()
+
+            class FakePath:
+                def lstat(self):
+                    events.append(("lstat",))
+                    return SimpleNamespace(**original)
+
+                def open(self, mode):
+                    events.append(("open", mode))
+                    return stream
+
+            def fstat(fd):
+                events.append(("fstat", fd))
+                if failure == "fstat":
+                    raise Injected("fstat")
+                return SimpleNamespace(**final)
+
+            namespace["os"] = SimpleNamespace(fstat=fstat)
+            if refusal or failure:
+                with self.assertRaisesRegex(Refused if refusal else Injected, refusal or failure):
+                    namespace["ordinary_bytes"](FakePath(), limit, single_link=single_link)
+            else:
+                self.assertEqual(namespace["ordinary_bytes"](FakePath(), limit, single_link=single_link), data)
+            expected = [("lstat",)]
+            if refusal != "ordinary_data_required":
+                expected += [("open", "rb"), ("enter",), ("read", original["st_size"] + 1)]
+                if failure != "read":
+                    expected += [("fileno",), ("fstat", 23)]
+                expected += [("close",)]
+            self.assertEqual(events, expected)
+
+        for options in ({"size": 0, "data": b""}, {}, {"size": 8, "data": b"abcdefgh", "limit": 8},
+                        {"single_link": False, "before": {"st_nlink": 2}}):
+            with self.subTest(positive=options):
+                exercise(**options)
+        for original in ({"st_size": -2}, {"st_size": -1}, {"st_size": 8 * 1024 * 1024 + 1},
+                         {"st_mode": stat.S_IFDIR | 0o700}, {"st_file_attributes": 0x400}, {"st_nlink": 2}):
+            with self.subTest(unsafe=original):
+                exercise(before=original, refusal="ordinary_data_required")
+        for options in ({"data": b"xy"}, {"data": b""}, {"size": 0, "data": b"x"},
+                        {"size": 8, "data": b"abcdefghi", "limit": 8},
+                        {"after": {"st_size": 2}}, {"after": {"st_ino": 42}}, {"after": {"st_mtime_ns": 1235}}):
+            with self.subTest(changed=options):
+                exercise(**options, refusal="data_input_changed")
+        for failure in ("read", "fstat", "close"):
+            with self.subTest(failure=failure):
+                exercise(failure=failure)
+
+    def _dacl_reducers(self):
+        signatures = {"_dacl_policy": ("data",), "_dacl_comparison": ("saved", "observed", "role"),
+                      "_dacl_comparison_valid": ("value",), "_installed_deny_data_dacl": ("data",),
+                      "_failure_diagnostic": ("case", "nonce", "stage", "reason", "fixture_state",
+                                              "reader_state", "output_state", "comparison")}
+        source = (Path(__file__).resolve().parents[1] / "native_desktop_snapshot_windows.py").read_bytes()
+        self.assertLessEqual(len(source), 128 * 1024)
+        parsed = ast.parse(source, filename="reviewed-dacl-restoration-source")
+        selected = [node for node in parsed.body if getattr(node, "name", None) in signatures]
+        self.assertCountEqual([node.name for node in selected], signatures)
+        safe = {"type": type, "str": str, "dict": dict, "tuple": tuple, "bytes": bytes, "bool": bool,
+                "int": int, "len": len, "range": range, "any": any}
+        nodes = (ast.FunctionDef, ast.arguments, ast.arg, ast.Expr, ast.Constant, ast.Name, ast.Load, ast.Store,
+                 ast.Assign, ast.AugAssign, ast.For, ast.If, ast.IfExp, ast.Return, ast.Call, ast.Attribute,
+                 ast.Tuple, ast.List, ast.Dict, ast.Subscript, ast.Slice, ast.BoolOp, ast.BinOp, ast.UnaryOp,
+                 ast.Compare, ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
+        for definition in selected:
+            self.assertIs(type(definition), ast.FunctionDef)
+            self.assertFalse(definition.decorator_list or definition.returns or definition.type_comment
+                             or getattr(definition, "type_params", []))
+            args = definition.args
+            self.assertEqual(tuple(arg.arg for arg in args.args), signatures[definition.name])
+            self.assertFalse(args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg or args.kw_defaults)
+            self.assertTrue(all(arg.annotation is None and arg.type_comment is None for arg in args.args))
+            self.assertEqual([ast.literal_eval(value) for value in args.defaults],
+                             [None] if definition.name == "_failure_diagnostic" else [])
+            self.assertEqual(sum(isinstance(node, ast.FunctionDef) for node in ast.walk(definition)), 1)
+            for node in ast.walk(definition):
+                self.assertIsInstance(node, nodes)
+                if isinstance(node, ast.Name):
+                    self.assertFalse(node.id.startswith("__"))
+                if isinstance(node, ast.Attribute):
+                    self.assertIn(node.attr, ("from_bytes", "append", "encode"))
+                    if node.attr != "encode":
+                        self.assertIsInstance(node.value, ast.Name)
+                        self.assertEqual((node.value.id, node.attr),
+                                         ("int", "from_bytes") if node.attr == "from_bytes" else ("aces", "append"))
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    self.assertIn(node.func.id, {*safe, *signatures})
+        namespace = {"__builtins__": safe}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-dacl-pure-reducers", "exec",
+                     dont_inherit=True), namespace)
+        self.assertEqual(set(namespace), {"__builtins__", *signatures})
+        return namespace, parsed
+
+    def _dacl_bytes(self, *, aces=None, control=0x9004, revision=2, offset=20, capacity=None, tail=b""):
+        world = bytes.fromhex("010100000000000100000000")
+        if aces is None:
+            aces = (struct.pack("<BBHI", 1, 0, 20, 1) + world,
+                    struct.pack("<BBHI", 0, 0, 20, 0x1F01FF) + world)
+        header = struct.pack("<BBHIIII", 1, 0, control, 0, 0, 0, offset)
+        if not offset:
+            return header + tail
+        used = 8 + sum(map(len, aces))
+        capacity = used if capacity is None else capacity
+        return (header + b"\xa5" * (offset - 20) + struct.pack("<BBHHH", revision, 0, capacity, len(aces), 0)
+                + b"".join(aces) + b"\x5a" * (capacity - used) + tail)
+
+    def test_dacl_restoration_compares_complete_policy_not_placement(self):
+        reducers, _ = self._dacl_reducers()
+        parse, compare, scalar = (reducers[name] for name in ("_dacl_policy", "_dacl_comparison", "_dacl_comparison_valid"))
+        original = self._dacl_bytes()
+        policy = parse(original)
+        self.assertEqual(policy[:4], (0x9004, True, False, 2))
+        self.assertEqual(tuple(map(len, policy[4])), (20, 20))
+        for variant in (original, self._dacl_bytes(offset=24), self._dacl_bytes(offset=64, capacity=256),
+                        self._dacl_bytes(capacity=256, tail=b"unused capacity")):
+            facts, equal = compare(original, variant, "denied-directory")
+            self.assertIs(equal, True)
+            self.assertTrue(scalar(facts))
+            self.assertEqual(facts["lengthEqual"], len(original) == len(variant))
+            self.assertEqual(facts["bytesEqual"], original == variant)
+            self.assertTrue(all(value is True for key, value in facts.items()
+                                if key not in ("role", "lengthEqual", "bytesEqual")))
+        placed = self._dacl_bytes(offset=24)
+        alternate_gap = placed[:20] + b"\x11" * 4 + placed[24:]
+        facts, equal = compare(placed, alternate_gap, "denied-file")
+        self.assertTrue(equal and facts["lengthEqual"] and not facts["bytesEqual"])
+        for bit, field in ((0x1000, "protectedEqual"), (8, "defaultedEqual"),
+                           (0x100, "autoInheritanceEqual"), (0x400, "autoInheritanceEqual")):
+            facts, equal = compare(original, self._dacl_bytes(control=0x9004 ^ bit), "denied-file")
+            self.assertFalse(equal)
+            self.assertTrue(scalar(facts))
+            self.assertIs(facts["controlEqual"], False)
+            self.assertIs(facts[field], False)  # Including resulting 0x0400, never masked.
+        aces = policy[4]
+        variants = [(aces[::-1], "orderedAcesEqual"), (aces[:1], "orderedAcesEqual"),
+                    (aces + aces[:1], "orderedAcesEqual")]
+        for offset in (0, 1, 4, 10, 15, 16, 19):
+            changed = bytearray(aces[0]); changed[offset] ^= 1
+            variants.append(((bytes(changed), aces[1]), "orderedAcesEqual"))
+        for changed, field in variants:
+            facts, equal = compare(original, self._dacl_bytes(aces=changed), "denied-file")
+            self.assertFalse(equal)
+            self.assertTrue(facts["savedShapeValid"] and facts["observedShapeValid"] and scalar(facts))
+            self.assertIs(facts[field], False)
+        for flags in (1, 2, 4, 8, 16, 31):
+            changed = aces[0][:1] + bytes([flags]) + aces[0][2:]
+            facts, equal = compare(original, self._dacl_bytes(aces=(changed, aces[1])), "denied-file")
+            self.assertFalse(equal)
+            self.assertIs(facts["orderedAcesEqual"], False)
+        for count in (2, 15):
+            sid = bytes([1, count]) + b"\0\0\0\0\0\x05" + struct.pack("<" + "I" * count, *range(count))
+            ace = struct.pack("<BBHI", 0, 0, 8 + len(sid), 0x1F01FF) + sid
+            descriptor = self._dacl_bytes(aces=(ace,))
+            self.assertEqual(parse(descriptor)[4], (ace,))
+            self.assertTrue(compare(descriptor, self._dacl_bytes(aces=(ace,), offset=24, capacity=256), "denied-file")[1])
+        facts, equal = compare(original, self._dacl_bytes(revision=4), "denied-file")
+        self.assertFalse(equal)
+        self.assertIs(facts["aclRevisionEqual"], False)
+        self.assertIs(facts["orderedAcesEqual"], True)
+        states = [self._dacl_bytes(control=0x8000, offset=0), self._dacl_bytes(offset=0),
+                  self._dacl_bytes(aces=()), original]
+        for index, left in enumerate(states):
+            self.assertIsNotNone(parse(left))
+            for other, right in enumerate(states):
+                facts, equal = compare(left, right, "denied-file")
+                self.assertEqual(equal, index == other)
+                self.assertTrue(scalar(facts))
+        # Counted ACEs, not allocated bytes: lowering AceCount is a policy change,
+        # even when the former next ACE is now valid unused ACL capacity.
+        changed = bytearray(original); struct.pack_into("<H", changed, 24, 1)
+        self.assertIsNotNone(parse(bytes(changed)))
+        self.assertFalse(compare(original, bytes(changed), "denied-file")[1])
+
+    def test_dacl_restoration_rejects_malformed_and_unsupported_layouts(self):
+        reducers, _ = self._dacl_reducers()
+        parse, compare = reducers["_dacl_policy"], reducers["_dacl_comparison"]
+        original = self._dacl_bytes()
+
+        def changed(offset, replacement):
+            return original[:offset] + replacement + original[offset + len(replacement):]
+
+        invalid = [None, True, 1, "descriptor", bytearray(original), memoryview(original), original + bytes(16385),
+                   changed(0, b"\x02"), changed(1, b"\x01"), changed(21, b"\x01"), changed(26, b"\x01\x00")]
+        for control in (0, 0x1004, 0x9000, 0x8004 | 1, 0x8004 | 2, 0x8004 | 0x10,
+                        0x8004 | 0x20, 0x8004 | 0x40, 0x8004 | 0x80, 0x8004 | 0x200,
+                        0x8004 | 0x800, 0x8004 | 0x2000, 0x8004 | 0x4000):
+            invalid.append(changed(2, struct.pack("<H", control)))
+        for field in (4, 8, 12):  # No owner/group/SACL projection or hidden overlap.
+            for offset in (1, 4, 16, 20, 28, 0xFFFFFFFC):
+                invalid.append(changed(field, struct.pack("<I", offset)))
+        for offset in (4, 16, 21, 64, 0xFFFFFFFC):
+            invalid.append(changed(16, struct.pack("<I", offset)))
+        for revision in (0, 1, 3, 5, 255):
+            invalid.append(changed(20, bytes([revision])))
+        for size in (0, 4, 8, 28, 47, 49, 52, 65532):
+            invalid.append(changed(22, struct.pack("<H", size)))
+        for count in (3, 65535):
+            invalid.append(changed(24, struct.pack("<H", count)))
+        for offset in (28, 48):
+            for flag in (0x20, 0x40, 0x80, 0xFF):
+                invalid.append(changed(offset + 1, bytes([flag])))
+            for length in (0, 4, 16, 19, 21, 24, 65532):
+                invalid.append(changed(offset + 2, struct.pack("<H", length)))
+            for revision in (0, 2):
+                invalid.append(changed(offset + 8, bytes([revision])))
+            for count in (0, 2, 16, 255):
+                invalid.append(changed(offset + 9, bytes([count])))
+        sid = original[36:48]
+        for ace_type in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 17, 18, 19, 20, 21, 255):
+            # Even a bounded, aligned body is not an opaque supported ACE.
+            body = (struct.pack("<I", 3) + b"g" * 32 + sid if ace_type in (5, 6)
+                    else sid + b"artx\0\0\0\0" if ace_type in (9, 10, 11, 12) else sid)
+            ace = struct.pack("<BBHI", ace_type, 0, 8 + len(body), 1) + body
+            invalid.append(self._dacl_bytes(aces=(ace,)))
+        padded = bytearray(original[28:48] + b"\0" * 4); struct.pack_into("<H", padded, 2, 24)
+        invalid.append(self._dacl_bytes(aces=(bytes(padded),)))  # In-ACE surplus cannot be normalized.
+        invalid.extend(original[:end] for end in range(len(original)))
+        for value in invalid:
+            with self.subTest(kind=type(value).__name__, size=len(value) if isinstance(value, (bytes, bytearray)) else None):
+                self.assertIsNone(parse(value))
+                facts, equal = compare(original, value, "denied-file")
+                self.assertFalse(equal)
+                self.assertIs(facts["savedShapeValid"], True)
+                self.assertIs(facts["observedShapeValid"], False)
+                self.assertTrue(reducers["_dacl_comparison_valid"](facts))
+                self.assertTrue(all(facts[key] is None for key in ("presenceEqual", "nullEqual", "controlEqual",
+                    "protectedEqual", "defaultedEqual", "autoInheritanceEqual", "aclRevisionEqual", "orderedAcesEqual")))
+
+    def test_created_denial_requires_absence_and_original_delete_custody(self):
+        reducers, parsed = self._dacl_reducers()
+        classes = {node.name: node for node in parsed.body if isinstance(node, ast.ClassDef)}
+        names = {"Fixture": {"deny_data", "restore", "_finish", "completed_open_error"},
+                 "FixtureNative": {"open", "absent", "close", "identity", "delete"}}
+        selected = [node for owner, methods in names.items() for node in classes[owner].body
+                    if isinstance(node, ast.FunctionDef) and node.name in methods]
+        self.assertCountEqual([node.name for node in selected], set.union(*names.values()))
+        checks = next(node.value for node in parsed.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "CHECKS" for target in node.targets))
+        # Original methods, exclusively sealed fake capabilities: no fixture
+        # constructor/module, ctypes/DLL, real path operation, IO or process exit.
+        class Refused(Exception):
+            pass
+        class Unknown(BaseException):
+            pass
+        class NativeError(Refused):
+            def __init__(self, api_name, code):
+                self.api, self.code = api_name, code
+                super().__init__("mock_native_error")
+        def require(value, code):
+            if not value:
+                raise Refused(code)
+
+        test, active = self, [None]
+        paths = ("read-denied/build.gradle", "list-denied")
+        class Label:
+            def __init__(self, value):
+                self.value = value
+            def __str__(self):
+                return self.value
+            @property
+            def parent(self):
+                return "read-denied" if self.value == paths[0] else "@project"
+        class Project:
+            def __truediv__(self, relative):
+                test.assertIn(relative, paths)
+                return Label(relative)
+        def ordinary_directory(parent):
+            test.assertIn(parent, ("read-denied", "@project"))
+            active[0].events.append(("parent", parent))
+            if active[0].options.get("missing_parent") == parent:
+                raise Refused("mock_parent_missing")
+        def no_io(*_args):
+            raise AssertionError("inactive fixture branch acquired an IO capability")
+
+        safe = {name: value for name, value in (("len", len), ("str", str), ("bytes", bytes), ("bool", bool),
+                ("int", int), ("tuple", tuple), ("dict", dict), ("set", set), ("list", list), ("type", type), ("any", any),
+                ("all", all), ("sum", sum), ("range", range), ("getattr", getattr), ("reversed", reversed),
+                ("Exception", Exception), ("BaseException", BaseException))}
+        namespace = {"__builtins__": safe, "require": require, "FixtureFailure": Refused,
+                     "NativeFailure": NativeError, "Path": Label, "READ_ATTRIBUTES": 0x80,
+                     "DELETE": 0x10000, "BACKUP": 0x02000000, "NOFOLLOW": 0x00200000,
+                     "ordinary_directory": ordinary_directory, "ordinary_bytes": no_io, "strict": no_io,
+                     "canonical": lambda value: json.dumps(value, sort_keys=True).encode("ascii"),
+                     "struct": SimpleNamespace(pack=struct.pack), "CHECKS": ast.literal_eval(checks),
+                     **{key: reducers[key] for key in ("_dacl_policy", "_installed_deny_data_dacl")}}
+        for definition in selected:
+            self.assertFalse(definition.decorator_list)
+            self.assertFalse(any(isinstance(node, (ast.Import, ast.ImportFrom, ast.ClassDef, ast.Global, ast.Nonlocal))
+                                 for node in ast.walk(definition)))
+            for call in (node for node in ast.walk(definition) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                self.assertIn(call.func.id, {*safe, *namespace, "read"})
+            self.assertFalse(any(isinstance(node, ast.Attribute) and node.attr == "SetSecurityInfo"
+                                 for node in ast.walk(definition)))
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-created-denial-fake-flow", "exec",
+                     dont_inherit=True), namespace)
+
+        class Buffer:
+            def __init__(self, value, size=None):
+                self.raw = bytes(value) if type(value) is int else value
+                if size is not None:
+                    test.assertLessEqual(len(self.raw), size)
+                    self.raw += bytes(size - len(self.raw))
+            def __len__(self):
+                return len(self.raw)
+        class Attributes:
+            def __init__(self, length, descriptor, inherit):
+                self.nLength, self.lpSecurityDescriptor, self.bInheritHandle = length, descriptor, inherit
+        scalar = lambda value=0: SimpleNamespace(value=value)
+        def sizeof(value):
+            return 24 if value is Attributes or isinstance(value, Attributes) else len(value) if isinstance(value, Buffer) else 4
+
+        class Native:
+            open, absent, close, identity, delete = (namespace[name] for name in ("open", "absent", "close", "identity", "delete"))
+            def __init__(self, **options):
+                self.options, self.events, self.nodes = options, [], {}
+                self.c = SimpleNamespace(create_string_buffer=Buffer, byref=lambda value: value, c_void_p="VOID",
+                                         cast=lambda value, kind: value, sizeof=sizeof, c_int32=scalar)
+                self.Security, self.U32, self.Standard, self.Tag, self.Id = Attributes, scalar, "Standard", "Tag", "Id"
+                self.k = SimpleNamespace(**{name: name for name in ("CreateFileW", "CreateDirectoryW", "GetHandleInformation",
+                                                                   "SetFileInformationByHandle", "CloseHandle")})
+                self.a = SimpleNamespace(GetKernelObjectSecurity="GetKernelObjectSecurity")
+                self.held, self.os_handles, self.retained_arenas = {}, {}, {}
+                self.lock, self.reader_settled, self.serial = nullcontext(), False, 100
+                self.counts = dict.fromkeys(("acquired", "closeAttempts", "closeSucceeded", "closeFailed", "live", "maxLive"), 0)
+                for path in options.get("occupied", ()):
+                    self.nodes[path] = self.node(path)
+            def node(self, path):
+                return SimpleNamespace(path=path, directory=path == paths[1], identity=paths.index(path) + 1, pending=False)
+            def retain(self, label, items):
+                test.assertNotIn(label, self.retained_arenas)
+                self.retained_arenas[label] = items
+            def security(self, attributes):
+                descriptor, kept = self.retained_arenas["created-denial"]
+                test.assertIs(attributes, kept)
+                test.assertEqual((attributes.nLength, attributes.bInheritHandle), (24, 0))
+                test.assertIs(attributes.lpSecurityDescriptor, descriptor)
+                test.assertEqual(descriptor.raw, test._dacl_bytes())
+                test.assertEqual(len(descriptor.raw), 68)
+            def call(self, function, args, keep=(), *, kind="boolean"):
+                if function == "CreateDirectoryW":
+                    path, attributes = args
+                    test.assertEqual((path, kind), (paths[1], "boolean"))
+                    self.security(attributes)
+                    test.assertEqual(keep, self.retained_arenas["created-denial"])
+                    self.events.append(("create", path))
+                    if path in self.nodes or self.options.get("collision") == path:
+                        raise NativeError(function, 183)
+                    self.nodes[path] = self.node(path)
+                elif function == "CreateFileW":
+                    path, access, sharing, attributes, creation, flags, template = args
+                    test.assertIn(path, paths)
+                    test.assertEqual((sharing, flags, template, kind), (7, 0x02200000, None, "handle"))
+                    self.events.append(("open", path, access, creation))
+                    if creation == 1:
+                        test.assertEqual((path, access), (paths[0], 0x20080))
+                        self.security(attributes)
+                        test.assertEqual(keep, (attributes,))
+                        self.events.append(("create", path))
+                        if path in self.nodes or self.options.get("collision") == path:
+                            raise NativeError(function, 80)
+                        self.nodes[path] = self.node(path)
+                    else:
+                        test.assertEqual(creation, 3)
+                        test.assertIsNone(attributes)
+                    if access == 0x80 and self.options.get("absence_error"):
+                        api_name, code = self.options["absence_error"]
+                        raise NativeError(api_name, code)
+                    if path not in self.nodes:
+                        self.events.append(("missing", path))
+                        raise NativeError(function, 2)
+                    if access == 0x20080 and path == paths[1] and self.options.get("directory_open_failure"):
+                        raise NativeError(function, 5)
+                    node = self.nodes[path]
+                    if node.pending:
+                        raise NativeError(function, 5)
+                    role = "delete" if access == 0x10080 else "creator" if access == 0x20080 else "probe"
+                    if role == "delete":
+                        test.assertTrue(self.reader_settled)
+                        test.assertTrue(any(record[0] is node and record[1] == "creator"
+                                            for handle, record in self.os_handles.items() if handle in self.held))
+                        self.events.append(("delete-open", path, tuple(self.held)))
+                        if self.options.get("swap_delete") == path:
+                            node = self.node(path); node.identity += 1000
+                    self.serial += 1
+                    self.held[self.serial] = self.serial
+                    self.os_handles[self.serial] = (node, role)
+                    self.counts["acquired"] += 1
+                    self.counts["live"] = len(self.held)
+                    self.counts["maxLive"] = max(self.counts["maxLive"], len(self.held))
+                    return self.serial
+                elif function == "GetHandleInformation":
+                    test.assertIn(args[0], self.held)
+                    if self.options.get("handle_information_error"):
+                        raise NativeError(function, 2)
+                    args[1].value = self.options.get("inherited_handle", 0)
+                elif function == "GetKernelObjectSecurity":
+                    handle, flags, buffer, limit, needed = args
+                    test.assertEqual((flags, limit), (4, 16384))
+                    test.assertIn(handle, self.held)
+                    path = self.os_handles[handle][0].path
+                    data = self.options.get("readbacks", {}).get(path, test._dacl_bytes())
+                    buffer.raw = data[:limit] + bytes(max(0, limit - len(data)))
+                    needed.value = self.options.get("reported", {}).get(path, len(data))
+                    self.events.append(("policy", path))
+                elif function == "SetFileInformationByHandle":
+                    handle, info, flag, size = args
+                    node, role = self.os_handles[handle]
+                    test.assertEqual((role, info, flag.value, size), ("delete", 4, 1, 4))
+                    self.events.append(("disposition", node.path))
+                    if self.options.get("delete_unknown") == node.path:
+                        raise Unknown()
+                    if self.options.get("delete_failure") == node.path:
+                        raise NativeError(function, 145)  # Nonempty directory/returned refusal is not cleanup.
+                    node.pending = True
+                elif function == "CloseHandle":
+                    handle = args[0]
+                    test.assertNotIn(handle, self.held)  # Original method retired before sole close.
+                    node, role = self.os_handles[handle]
+                    self.events.append(("close", node.path, role, handle))
+                    if self.options.get("close_failure") == (node.path, role):
+                        raise NativeError(function, 6)
+                    del self.os_handles[handle]
+                    if node.pending and not any(record[0] is node for record in self.os_handles.values()):
+                        if self.options.get("remain_pending") != node.path:
+                            del self.nodes[node.path]
+                else:
+                    raise AssertionError("unexpected fake native API")
+                return 1
+            def info(self, handle, info, cls):
+                test.assertIn(handle, self.held)
+                node, role = self.os_handles[handle]
+                self.events.append(("info", node.path, cls))
+                if cls == "Id":
+                    identity = 0 if self.options.get("zero_identity") == node.path else node.identity
+                    if self.reader_settled and role == "creator" and self.options.get("changed_original") == node.path:
+                        identity += 1000
+                    return SimpleNamespace(VolumeSerialNumber=17, FileId=identity.to_bytes(16, "little"))
+                if cls == "Standard":
+                    values = {"Directory": int(node.directory), "DeletePending": 0, "NumberOfLinks": 1, "EndOfFile": 0}
+                    values.update(self.options.get("standard", {}).get(node.path, {}))
+                    return SimpleNamespace(**values)
+                test.assertEqual(cls, "Tag")
+                return SimpleNamespace(FileAttributes=self.options.get("attributes", {}).get(node.path, 0x10 if node.directory else 0x20))
+            def abort(self, arena):
+                self.events.append(("abort",))
+                raise Unknown()
+            def close_all(self):
+                test.assertEqual((self.held, self.os_handles), ({}, {}))
+                self.events.append(("all-closed",))
+
+        def make(**options):
+            n = Native(**options); active[0] = n
+            owner = SimpleNamespace(native=n, project=Project(), journal=[], thread=None, alias=None, case="acl-type",
+                restored=False, dacl_comparison=None, checks=dict.fromkeys(namespace["CHECKS"]["acl-type"]),
+                request_root="project", request_config=CONFIG, project_nt=r"\Device\HarddiskVolume7\project")
+            reader = {**dict.fromkeys(("live", "closeFailed", "violations", "outsideReads", "outsideDescent", "outsideAcquired",
+                                     "aliasMetadataAcquired"), 0), "acquired": 3, "closeAttempts": 3, "closeSucceeded": 3,
+                      "calls": [{"entered": 1, "returned": 1, "completed": 1}]}
+            scan = {"entries": 3, "sourceFiles": 1, "sourceBytes": 1, "excludedEntries": 0}
+            owner.trace = SimpleNamespace(snapshot=lambda: reader, counts={"readBytes": 1},
+                inventory=SimpleNamespace(counts=scan, sources={"sibling/build.gradle": "x"}),
+                reads={"sibling/build.gradle": {"eof": 1}}, config_opened=False,
+                entry_kinds={owner.project_nt + "\\release\\mobile-release.json": True},
+                handles={17: {"path": "project"}, 18: {"path": "project\\read-denied"}},
+                role=lambda path: path.removeprefix("project\\").replace("\\", "/"))
+            result = {"root": "project", "observedAt": "synthetic-not-native", "observationScope": "single-request-non-atomic",
+                "config": {"path": CONFIG, "state": "unavailable", "data": None, "issues": []},
+                "discovery": {"state": "unverified", "partial": True, "hints": {}, "scan": scan, "limits": {}},
+                "assurance": {"basis": "static-text", "projectCodeExecuted": False, "toolsProbed": False,
+                              "credentialsRead": False, "gitObserved": False, "storeContacted": False,
+                              "writesPerformed": False, "releaseReadiness": "unknown"},
+                "issues": [{"code": "snapshot.unreadable"}]}
+            def restore():
+                n.reader_settled = True
+                n.events.append(("reader-finality",))
+                namespace["restore"](owner)
+            owner.restore, owner.emit = restore, lambda state: n.events.append(("emit", state))
+            owner.diagnose_failure = lambda stage, error: n.events.append(("diagnostic", stage))
+            return owner, reader, result
+        def denials(owner):
+            for parent, name in ((18, "build.gradle"), (17, "list-denied")):
+                namespace["completed_open_error"](owner, SimpleNamespace(parent=parent, name=name), 0xC0000022, "denied")
+        def finish(owner, result):
+            namespace["_finish"](owner, result, None, SimpleNamespace(LIMITS={}))
+
+        for controls in ((0x9004, 0x9404), (0x9404, 0x9004)):
+            owner, reader, result = make(readbacks={path: self._dacl_bytes(control=control, offset=24, capacity=256)
+                                                   for path, control in zip(paths, controls)})
+            namespace["deny_data"](owner)
+            self.assertEqual(owner.checks["denialPoliciesConfirmed"], 2)
+            self.assertTrue(all(value is None for key, value in owner.checks.items() if key != "denialPoliciesConfirmed"))
+            events = owner.native.events
+            first_create = next(index for index, event in enumerate(events) if event[0] == "create")
+            self.assertEqual([event for event in events[:first_create] if event[0] == "missing"], [("missing", path) for path in paths])
+            for status in (0, 0xC0000034, 0xC0000043, 5):
+                for parent, name in ((18, "build.gradle"), (17, "list-denied")):
+                    namespace["completed_open_error"](owner, SimpleNamespace(parent=parent, name=name), status, "denied")
+                self.assertIsNone(owner.checks["fileAccessDenied"])
+                self.assertIsNone(owner.checks["directoryAccessDenied"])
+            denials(owner)
+            finish(owner, result)
+            self.assertEqual(owner.checks, {**dict.fromkeys(("fileAccessDenied", "directoryAccessDenied", "accessibleSiblingRead",
+                "configDirectoryRefused", "initialAbsenceRestored"), True), "denialPoliciesConfirmed": 2, "createdObjectsRemoved": 2})
+            self.assertEqual((owner.journal, owner.native.nodes, owner.native.retained_arenas), ([], {}, {}))
+            self.assertTrue(owner.restored)
+            self.assertEqual(owner.native.counts["acquired"], 4)
+            for path, original in ((paths[1], 102), (paths[0], 101)):
+                delete = next(event for event in events if event[:2] == ("delete-open", path))
+                self.assertIn(original, delete[2])
+                tail = [event[0] if event[0] != "close" else event[2] for event in events[events.index(delete):]
+                        if len(event) > 1 and event[1] == path and event[0] in ("disposition", "close", "missing")]
+                self.assertEqual(tail, ["disposition", "delete", "creator", "missing"])
+            self.assertEqual(events[-1], ("emit", "complete"))
+
+        for options in ({"occupied": (paths[0],)}, {"occupied": (paths[1],)}, {"missing_parent": "read-denied"},
+                        {"occupied": (paths[0],), "handle_information_error": True},
+                        *({"absence_error": pair} for pair in (("CreateFileW", 3), ("CreateFileW", 5), ("CreateFileW", 32),
+                                                              ("GetHandleInformation", 2)))):
+            owner, _, _ = make(**options)
+            with self.subTest(options=options), self.assertRaises(Refused):
+                namespace["deny_data"](owner)
+            self.assertFalse(any(event[0] in ("create", "disposition", "close") for event in owner.native.events))
+        bad_policy = [b"malformed", self._dacl_bytes(control=0x8004), self._dacl_bytes(control=0x8404),
+                      self._dacl_bytes(control=0x9504), self._dacl_bytes(control=0x940C), self._dacl_bytes(aces=())]
+        setup_errors = [{"collision": path} for path in paths] + [{"directory_open_failure": True}, {"inherited_handle": 1},
+            {"zero_identity": paths[1]}, {"attributes": {paths[1]: 0x410}}, {"standard": {paths[1]: {"Directory": 0}}},
+            {"standard": {paths[0]: {"EndOfFile": 1}}}, {"standard": {paths[0]: {"NumberOfLinks": 2}}},
+            {"standard": {paths[1]: {"DeletePending": 1}}}, {"reported": {paths[1]: 16385}}]
+        setup_errors.extend({"readbacks": {path: data}} for path in paths for data in bad_policy)
+        for options in setup_errors:
+            owner, _, _ = make(**options)
+            with self.subTest(options=options), self.assertRaises(Refused):
+                namespace["deny_data"](owner)
+            self.assertFalse(any(event[0] in ("disposition", "close") for event in owner.native.events))
+            self.assertFalse(owner.restored)
+            self.assertIsNone(owner.checks["createdObjectsRemoved"])
+            if options == {"directory_open_failure": True}:
+                self.assertIn(paths[1], owner.native.nodes)
+                self.assertEqual(len(owner.native.held), 1)  # No invented CreateDirectoryW handle.
+                self.assertEqual(len(owner.journal), 1)
+        for field, value in (("live", 1), ("closeFailed", 1), ("violations", 1), ("closeSucceeded", 2),
+                             ("calls", [{"entered": 1, "returned": 0, "completed": 0}]),
+                             ("calls", [{"entered": 1, "returned": 1, "completed": 0}])):
+            owner, reader, result = make()
+            namespace["deny_data"](owner); denials(owner); reader[field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(Refused):
+                finish(owner, result)
+            self.assertFalse(owner.native.reader_settled)
+            self.assertFalse(any(event[0] in ("delete-open", "disposition", "close") for event in owner.native.events))
+        for options in ({"changed_original": paths[1]}, {"swap_delete": paths[1]}, {"delete_failure": paths[1]},
+                        {"delete_unknown": paths[1]}, {"close_failure": (paths[1], "delete")},
+                        {"close_failure": (paths[1], "creator")}, {"remain_pending": paths[1]}):
+            owner, _, result = make(**options)
+            namespace["deny_data"](owner); denials(owner)
+            with self.subTest(options=options), self.assertRaises((Refused, Unknown)):
+                finish(owner, result)
+            self.assertFalse(owner.restored)
+            self.assertIsNone(owner.checks["createdObjectsRemoved"])
+            self.assertIsNone(owner.checks["initialAbsenceRestored"])
+            self.assertTrue(owner.journal and owner.native.retained_arenas)
+            events = owner.native.events
+            self.assertNotIn(("emit", "complete"), events)
+            self.assertEqual(len([event for event in events if event[0] == "missing"]), 2)
+            if "close_failure" in options:
+                self.assertEqual(events[-1], ("abort",))  # No probe after uncertain consuming close.
+            if "changed_original" in options or "swap_delete" in options:
+                self.assertFalse(any(event[0] == "disposition" for event in events))
+
+    def test_created_denial_declares_attributes_and_preserves_closed_scope(self):
+        _, parsed = self._dacl_reducers()
+        fixture_native = next(node for node in parsed.body if isinstance(node, ast.ClassDef) and node.name == "FixtureNative")
+        init = next(node for node in fixture_native.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+        security = next(node for node in init.body if isinstance(node, ast.ClassDef) and node.name == "Security")
+        fields = security.body[0].value.elts
+        self.assertEqual([(ast.literal_eval(pair.elts[0]), pair.elts[1].id) for pair in fields],
+                         [("nLength", "U32"), ("lpSecurityDescriptor", "VOID"), ("bInheritHandle", "BOOL")])
+        kernel = next(node.value for node in init.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "kernel" for target in node.targets))
+        declarations = {ast.literal_eval(key): value for key, value in zip(kernel.keys, kernel.values)}
+        for name, arguments, result in (("CreateDirectoryW", ["WCHAR", "VOID"], "BOOL"),
+                                       ("CreateFileW", ["WCHAR", "U32", "U32", "VOID", "U32", "U32", "HANDLE"], "HANDLE")):
+            declaration = declarations[name]
+            self.assertEqual(([arg.id for arg in declaration.elts[0].elts], declaration.elts[1].id), (arguments, result))
+        guard = next(node for node in ast.walk(init) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                     and node.func.id == "require" and isinstance(node.args[-1], ast.Constant)
+                     and node.args[-1].value == "fixture_structure_abi")
+        self.assertEqual(ast.literal_eval(guard.args[0].comparators[0])["Security"], [24, 8, [0, 8, 16]])
+        checks = next(node.value for node in parsed.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "CHECKS" for target in node.targets))
+        self.assertEqual(ast.literal_eval(checks)["acl-type"], ("fileAccessDenied", "directoryAccessDenied", "accessibleSiblingRead",
+                         "configDirectoryRefused", "denialPoliciesConfirmed", "createdObjectsRemoved", "initialAbsenceRestored"))
+        groups = next(node.value for node in parsed.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "GROUPS" for target in node.targets))
+        self.assertEqual(tuple(len(names) for _, names in ast.literal_eval(groups)), (3, 10, 4, 6, 5, 3))
+
+    def test_dacl_comparison_diagnostic_schema_and_budgets(self):
+        reducers, _ = self._dacl_reducers()
+        compare, scalar, reduce = (reducers[name] for name in ("_dacl_comparison", "_dacl_comparison_valid", "_failure_diagnostic"))
+        original = self._dacl_bytes(control=0x8404)
+        mismatch = self._dacl_bytes(control=0x8004)
+        facts, equal = compare(original, mismatch, "denied-directory")
+        self.assertFalse(equal)
+        arguments = {"case": "acl-type", "nonce": "a" * 64, "stage": "restoration",
+            "reason": "dacl_restoration_not_confirmed", "fixture_state": (True, True, True, True, True, False, True, False),
+            "reader_state": (1, True, True, False, True), "output_state": (False, 0, 0), "comparison": facts}
+        prefix = b"MRK_WINDOWS_SNAPSHOT_FAILURE_V1 "
+        raw = reduce(**arguments)
+        self.assertLessEqual(len(raw), 1024)
+        parsed = json.loads(raw[len(prefix):-1])
+        self.assertEqual(parsed["comparison"], facts)
+        self.assertEqual(set(parsed), {"schemaVersion", "scope", "id", "nonce", "stage", "code", "comparison"})
+        self.assertEqual(set(facts), {"role", "savedShapeValid", "observedShapeValid", "lengthEqual", "bytesEqual",
+            "presenceEqual", "nullEqual", "controlEqual", "protectedEqual", "defaultedEqual", "autoInheritanceEqual",
+            "aclRevisionEqual", "orderedAcesEqual"})
+        policy = tuple(key for key in facts if key not in ("role", "savedShapeValid", "observedShapeValid", "lengthEqual", "bytesEqual"))
+        for observed in (b"", b"invalid", bytes([2]) + original[1:], None, original + bytes(16385)):
+            unknown, equal = compare(original, observed, "denied-file")
+            self.assertFalse(equal)
+            self.assertTrue(scalar(unknown))
+            self.assertTrue(all(unknown[key] is None for key in policy))
+            frame = reduce(**{**arguments, "comparison": unknown})
+            self.assertEqual(json.loads(frame[len(prefix):-1])["comparison"], unknown)
+            for key in policy:
+                self.assertIsNone(reduce(**{**arguments, "comparison": {**unknown, key: True}}))
+        for saved, observed in ((b"", b""), (b"invalid", b"invalid"), (b"invalid", None), (b"", original)):
+            unknown, equal = compare(saved, observed, "denied-file")
+            self.assertFalse(equal)
+            self.assertTrue(scalar(unknown))
+            self.assertEqual(json.loads(reduce(**{**arguments, "comparison": unknown})[len(prefix):-1])["comparison"], unknown)
+        bad_objects = [None, [], True, {}, {**facts, "extra": "private-canary"}, {**facts, "role": "private-canary"}]
+        for key in facts:
+            bad_objects.append({name: value for name, value in facts.items() if name != key})
+            for value in (0, 1, 0.0, "true", [], {}, "private-canary"):
+                bad_objects.append({**facts, key: value})
+        bad_objects.extend(({**facts, "lengthEqual": None}, {**facts, "bytesEqual": True},
+                            {**facts, "savedShapeValid": False}, {**facts, "controlEqual": True}))
+        for malformed in bad_objects:
+            self.assertFalse(scalar(malformed))
+            if malformed is not None:  # None omits the optional object, never encodes JSON null.
+                self.assertIsNone(reduce(**{**arguments, "comparison": malformed}))
+        for key, value in (("case", "short-alias"), ("stage", "setup"), ("reason", "fixture_dacl_not_effective")):
+            self.assertIsNone(reduce(**{**arguments, key: value}))
+        for index in range(8):
+            changed = list(arguments["fixture_state"]); changed[index] = not changed[index]
+            self.assertIsNone(reduce(**{**arguments, "fixture_state": tuple(changed)}))
+        for reader in ((1, False, None, None, None), (1, True, False, False, True),
+                       (1, True, True, True, True), (1, True, True, False, False)):
+            self.assertIsNone(reduce(**{**arguments, "reader_state": reader}))
+        engine_error = b"Mobile Release Kit desktop engine rejected the request or transport.\n"
+        available = 65536 - len(raw) - len(engine_error)
+        self.assertEqual(reduce(**{**arguments, "output_state": (False, 3, available)}), raw)
+        self.assertIsNone(reduce(**{**arguments, "output_state": (False, 3, available + 1)}))
+        self.assertIsNone(reduce(**{**arguments, "output_state": (True, 0, 0)}))
+        # Literal maximum-width DATA, not the Rust reducer or any native process.
+        widest = {key: ("denied-directory" if key == "role" else False) for key in facts}
+        widest["savedShapeValid"] = widest["observedShapeValid"] = True
+        self.assertTrue(scalar(widest))
+        marker = reduce(**{**arguments, "comparison": widest})
+        self.assertLessEqual(len(marker), 1024)
+        summary = {"schemaVersion": 1, "scope": "windows-static-snapshot-native-v1", "id": "acl-type",
+            "exitCode": -2147483648, "ownerErrorCode": "snapshot_unavailable",
+            "fixtureFailure": {"status": "valid", "stage": "restoration", "code": "dacl_restoration_not_confirmed",
+                               "comparison": widest}}
+        outer = b"MRK_WINDOWS_SNAPSHOT_EXIT_DIAGNOSTIC_V1 " + json.dumps(summary, separators=(",", ":")).encode("ascii") + b"\n"
+        self.assertLessEqual(len(outer), 1024)
+        self.assertNotIn(b"private-canary", marker + outer)
+
     def _run(self, fake: _Fake, config_path=CONFIG, clock=None) -> dict:
         def factory(inventory):
             fake.inventory = inventory
@@ -456,6 +1210,487 @@ class WindowsSnapshotPureTests(unittest.TestCase):
         self.assertIn("snapshot.changed", {issue["code"] for issue in result["issues"]})
         self.assertFalse(any(event[0] == "read" for event in fake.trace))
 
+    def test_reparse_witnesses_require_fixed_identity_and_original_refusal(self):
+        # Only these unannotated/default-free definitions enter the inert
+        # namespace. No fixture module, require(), constructor or native seam.
+        signatures = {
+            "_reparse_witness_state": ("expected",),
+            "_reparse_witness_entry": ("state", "relative", "parent", "name", "file_id", "directory", "attributes", "tag"),
+            "_reparse_witness_refusal": ("state", "relative", "name", "directory", "entered_parent", "completed_parent",
+                                         "owned", "classified", "status", "category"),
+        }
+        source = (Path(__file__).resolve().parents[1] / "native_desktop_snapshot_windows.py").read_bytes()
+        self.assertLessEqual(len(source), 128 * 1024)
+        parsed = ast.parse(source, filename="reviewed-reparse-fixture-source")
+        selected = [node for node in parsed.body if getattr(node, "name", None) in signatures]
+        self.assertCountEqual([node.name for node in selected], signatures)
+        safe = {"ValueError": ValueError, "type": type, "dict": dict, "tuple": tuple, "bytes": bytes,
+                "bool": bool, "int": int, "len": len, "set": set, "any": any}
+        methods = {"get", "items", "rsplit", "pop", "discard", "add"}
+        nodes = (ast.FunctionDef, ast.arguments, ast.arg, ast.Expr, ast.Constant, ast.Name, ast.Load, ast.Store,
+                 ast.Assign, ast.For, ast.If, ast.IfExp, ast.Return, ast.Raise, ast.Call, ast.Attribute, ast.Tuple,
+                 ast.Set, ast.Dict, ast.Subscript, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
+                 ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
+        for definition in selected:
+            self.assertIs(type(definition), ast.FunctionDef)
+            self.assertFalse(definition.decorator_list or definition.returns or definition.type_comment
+                             or getattr(definition, "type_params", []))
+            args = definition.args
+            self.assertEqual(tuple(arg.arg for arg in args.args), signatures[definition.name])
+            self.assertFalse(args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg
+                             or args.defaults or args.kw_defaults)
+            self.assertTrue(all(arg.annotation is None and arg.type_comment is None for arg in args.args))
+            self.assertEqual(sum(isinstance(node, ast.FunctionDef) for node in ast.walk(definition)), 1)
+            for node in ast.walk(definition):
+                self.assertIsInstance(node, nodes)
+                if isinstance(node, ast.Name):
+                    self.assertFalse(node.id.startswith("__"))
+                if isinstance(node, ast.Attribute):
+                    self.assertIn(node.attr, methods)
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name):
+                        self.assertIn(node.func.id, safe)
+                    else:
+                        self.assertIsInstance(node.func, ast.Attribute)
+                        self.assertIn(node.func.attr, methods)
+        namespace = {"__builtins__": safe}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-reparse-reducers", "exec",
+                     dont_inherit=True), namespace)
+        self.assertEqual(set(namespace), {"__builtins__", *signatures})
+        make = namespace["_reparse_witness_state"]
+        observe = namespace["_reparse_witness_entry"]
+        refuse = namespace["_reparse_witness_refusal"]
+        expected = {
+            "linked-file/build.gradle": ((17, b"f" * 16), False, 0xA000000C),
+            "linked-dir": ((17, b"d" * 16), True, 0xA000000C),
+            "junction-dir": ((17, b"j" * 16), True, 0xA0000003),
+        }
+        parent = (100, 1, (17, b"p" * 16))
+        file_parent = (104, 2, (17, b"q" * 16))
+
+        def entry_args(role, advertised=True):
+            identity, directory, tag = expected[role]
+            return {"relative": role, "parent": file_parent if role.startswith("linked-file/") else parent,
+                    "name": role.rsplit("/", 1)[-1], "file_id": identity[1], "directory": directory,
+                    "attributes": (0x10 if directory else 0x20) | (0x400 if advertised else 0),
+                    "tag": tag if advertised else None}
+
+        def refusal_args(role):
+            entry = entry_args(role, False)
+            return {"relative": role, "name": entry["name"], "directory": entry["directory"],
+                    "entered_parent": entry["parent"], "completed_parent": entry["parent"],
+                    "owned": True, "classified": True, "status": 0xC000050B, "category": "unsafe"}
+
+        state = make(expected)
+        self.assertEqual((state["entries"], state["credited"], state["invalid"]), ({}, set(), set()))
+        for role in expected:
+            self.assertTrue(observe(state, **entry_args(role)))
+            self.assertTrue(observe(state, **entry_args(role)))
+        self.assertEqual(state["credited"], set(expected))
+        for refused_role in expected:
+            state = make(expected)
+            for role in expected:
+                self.assertEqual(observe(state, **entry_args(role, role != refused_role)), role != refused_role)
+            self.assertEqual(len(state["credited"]), 2)
+            self.assertTrue(refuse(state, **refusal_args(refused_role)))
+            self.assertTrue(refuse(state, **refusal_args(refused_role)))
+            self.assertEqual(state["credited"], set(expected))  # Three identities, not three events.
+        state = make(expected)
+        for unrelated in ("other-link", "hardlinked/build.gradle", "@root"):
+            self.assertFalse(observe(state, **{**entry_args("linked-dir"), "relative": unrelated}))
+            self.assertFalse(refuse(state, **{**refusal_args("linked-dir"), "relative": unrelated}))
+        self.assertEqual((state["entries"], state["credited"]), ({}, set()))
+
+        bad_setups = [{key: value for key, value in expected.items() if key != "junction-dir"},
+                      {**expected, "other": expected["linked-dir"]}]
+        for identity, directory, tag in (((0, b"f" * 16), False, 0xA000000C),
+                ((17, b"\0" * 16), False, 0xA000000C), ((17, b"f"), False, 0xA000000C),
+                ((17, b"d" * 16), False, 0xA000000C), ((17, b"f" * 16), True, 0xA000000C),
+                ((17, b"f" * 16), False, 0xA0000003)):
+            bad_setups.append({**expected, "linked-file/build.gradle": (identity, directory, tag)})
+        for malformed in bad_setups:
+            with self.assertRaises(ValueError):
+                make(malformed)
+
+        bad_entries = ({"file_id": b"x" * 16}, {"directory": True}, {"name": "BUILD.GRADLE"},
+                       {"tag": 0xA0000003}, {"attributes": True}, {"attributes": 0x20},
+                       {"attributes": 0x20, "tag": None},
+                       {"parent": None}, {"parent": (0, 2, (17, b"q" * 16))},
+                       {"parent": (104, 0, (17, b"q" * 16))},
+                       {"parent": (104, 2, (18, b"q" * 16))},
+                       {"parent": (104, 2, (17, b"\0" * 16))},
+                       {"parent": (104, 3, (17, b"q" * 16))},
+                       {"parent": (104, 2, (17, b"r" * 16))})
+        role = "linked-file/build.gradle"
+        for changed in bad_entries:
+            state = make(expected)
+            observe(state, **entry_args(role))
+            with self.assertRaises(ValueError):
+                observe(state, **{**entry_args(role), **changed})
+            self.assertNotIn(role, state["entries"])
+            self.assertNotIn(role, state["credited"])
+            self.assertIn(role, state["invalid"])
+            with self.assertRaises(ValueError):
+                observe(state, **entry_args(role))  # A matching later sample cannot revive a conflict.
+            with self.assertRaises(ValueError):
+                refuse(state, **refusal_args(role))
+        bad_refusals = ({"status": 0}, {"status": 0x103}, {"status": 0xC0000034}, {"status": 0xC0000022},
+                        {"category": "unavailable"}, {"name": "other.gradle"}, {"directory": True},
+                        {"owned": False}, {"classified": False}, {"entered_parent": None},
+                        {"completed_parent": None}, {"entered_parent": parent},
+                        {"completed_parent": (104, 3, (17, b"q" * 16))},
+                        {"entered_parent": (104, 3, (17, b"q" * 16)),
+                         "completed_parent": (104, 3, (17, b"q" * 16))})
+        for changed in bad_refusals:
+            state = make(expected)
+            observe(state, **entry_args(role, False))
+            with self.assertRaises(ValueError):
+                refuse(state, **{**refusal_args(role), **changed})
+            self.assertNotIn(role, state["entries"])
+            self.assertNotIn(role, state["credited"])
+            with self.assertRaises(ValueError):
+                refuse(state, **refusal_args(role))
+        for advertised in (None, True):
+            state = make(expected)
+            if advertised is not None:
+                observe(state, **entry_args(role))
+            with self.assertRaises(ValueError):
+                refuse(state, **refusal_args(role))  # Missing/advertised is not an unflagged candidate.
+            self.assertFalse(state["credited"])
+
+        # Actual shared collector, only existing in-memory adapters. These two
+        # routes model ordering, not measured NTFS statuses or the failed run.
+        for advertised in (True, False):
+            fake = _Fake()
+            fake.config()
+            blocked = []
+            for relative, (_identity, directory, tag) in expected.items():
+                node = fake.add(relative, None if directory else b"unread-link-canary")
+                blocked.append(node)
+                if directory:
+                    fake.add(relative + "/build.gradle", b"unread-outside-canary")
+                if advertised:
+                    node.meta = replace(node.meta, attributes=node.meta.attributes | 0x400, reparse_tag=tag)
+                else:
+                    fake.open_errors[node.path] = "unsafe"
+            sibling = fake.add("sibling/build.gradle", GRADLE)
+            result = self._run(fake)
+            self.assertTrue(result["discovery"]["partial"])
+            required = "snapshot.link-excluded" if advertised else "snapshot.unsafe-file"
+            self.assertIn(required, {item["code"] for item in result["issues"]})
+            reads = [fake.handles[event[1]] for event in fake.trace if event[0] == "read"]
+            self.assertTrue(any(node is sibling for node in reads))
+            self.assertFalse(any(node.data in (b"unread-link-canary", b"unread-outside-canary") for node in reads))
+            self.assertFalse(any(node is blocked_node for node in fake.handles.values() for blocked_node in blocked))
+            attempts = []
+            for spec, owned in zip(fake.specs, fake.open_lifetimes):
+                if spec.parent is None:
+                    continue
+                path = fake.handles[spec.parent].path.rstrip("\\") + "\\" + spec.name
+                if path in {node.path for node in blocked}:
+                    attempts.append(path)
+                    self.assertIn(spec.parent, owned)
+                    self.assertEqual(spec.attributes, 0x1000)
+                    self.assertNotIn("\\", spec.name)
+                    self.assertNotIn("/", spec.name)
+            self.assertCountEqual(attempts, [] if advertised else [node.path for node in blocked])
+            closed = [event[1] for event in fake.trace if event[0] == "close"]
+            self.assertCountEqual(closed, fake.handles)
+            self.assertEqual(len(closed), len(set(closed)))
+            self.assertEqual(fake._owned, [])
+
+    def test_short_alias_selection_and_returned_failure_classification(self):
+        # Only these two reviewed scalar definitions execute. Neither the
+        # fixture module nor its DLL/handle/setter/restore code is imported.
+        source = (Path(__file__).resolve().parents[1] / "native_desktop_snapshot_windows.py").read_bytes()
+        self.assertLessEqual(len(source), 128 * 1024)
+        parsed = ast.parse(source, filename="reviewed-short-alias-fixture-source")
+        signatures = {"_short_alias_selection": ("exact_name", "observed_name"),
+                      "_short_alias_error_reason": ("api", "code")}
+        selected = [node for node in parsed.body if getattr(node, "name", None) in signatures]
+        self.assertEqual(len(selected), 2)
+        safe = {"type": type, "str": str, "int": int, "len": len}
+        nodes = (ast.FunctionDef, ast.arguments, ast.arg, ast.Expr, ast.Constant, ast.Name, ast.Load, ast.Store,
+                 ast.Assign, ast.For, ast.If, ast.Return, ast.Call, ast.Attribute, ast.Tuple, ast.Dict,
+                 ast.Subscript, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
+                 ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
+        for definition in selected:
+            self.assertIs(type(definition), ast.FunctionDef)
+            self.assertFalse(definition.decorator_list or definition.returns or definition.type_comment
+                             or getattr(definition, "type_params", []))
+            args = definition.args
+            self.assertEqual(tuple(arg.arg for arg in args.args), signatures[definition.name])
+            self.assertFalse(args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg or args.defaults or args.kw_defaults)
+            self.assertTrue(all(arg.annotation is None and arg.type_comment is None for arg in args.args))
+            self.assertEqual(sum(isinstance(node, ast.FunctionDef) for node in ast.walk(definition)), 1)
+            for node in ast.walk(definition):
+                self.assertIsInstance(node, nodes)
+                if isinstance(node, ast.Name):
+                    self.assertFalse(node.id.startswith("__"))
+                if isinstance(node, ast.Attribute):
+                    self.assertIsInstance(node.value, ast.Name)
+                    self.assertIn((node.value.id, node.attr), {("observed_name", "split"), ("reasons", "get")})
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    self.assertIn(node.func.id, safe)
+        namespace = {"__builtins__": safe}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-short-alias-reducers", "exec",
+                     dont_inherit=True), namespace)
+        self.assertEqual(set(namespace), {"__builtins__", *signatures})
+        select, classify = (namespace[name] for name in signatures)
+        exact = "LongSnapshotDirectory"
+        self.assertEqual(select(exact, exact), "absent")
+        for name in ("LONGSN~1", "MRKSNP~1", "FOO.BAR", "a"):
+            self.assertEqual(select(exact, name), "existing")
+        for name in (None, 1, b"MRKSNP~1", "", ".", "..", "A.", ".A", "A.B.C", "NINECHARS",
+                     "A.LONG", "A/B", "A\\B", "A:B", "A B", "\u00e9", exact.lower(), "A" * 8192):
+            self.assertIsNone(select(exact, name))
+        self.assertIsNone(select("DifferentDirectory", "MRKSNP~1"))
+        expected = {5: "short_alias_access_denied", 32: "short_alias_sharing_violation",
+                    50: "short_alias_not_supported", 87: "short_alias_invalid_parameter",
+                    183: "short_alias_name_collision", 305: "short_alias_volume_disabled",
+                    1314: "short_alias_privilege_unavailable"}
+        for api_name in ("CreateFileW", "GetHandleInformation", "GetFileInformationByHandleEx",
+                         "GetShortPathNameW", "SetFileShortNameW"):
+            for code, reason in expected.items():
+                self.assertEqual(classify(api_name, code), reason)
+            self.assertEqual(classify(api_name, 123), "short_alias_other_refused")
+            self.assertIsNone(classify(api_name, 997))
+        self.assertEqual(classify("ReadFile", 5), "fixture_native_unavailable")
+        for code in (None, True, "5", 5.0, -1, 1 << 32):
+            self.assertIsNone(classify("SetFileShortNameW", code))
+        for api_name in (None, 1, b"SetFileShortNameW"):
+            self.assertIsNone(classify(api_name, 5))
+
+    def test_installed_dacl_policy_requires_exact_protected_world_aces(self):
+        # Execute only the scalar bytes predicate, never the fixture's native
+        # module/constructor/open/setter/readback or restoration code.
+        name = "_installed_deny_data_dacl"
+        source = (Path(__file__).resolve().parents[1] / "native_desktop_snapshot_windows.py").read_bytes()
+        self.assertLessEqual(len(source), 128 * 1024)
+        parsed = ast.parse(source, filename="reviewed-dacl-fixture-source")
+        selected = [node for node in parsed.body if getattr(node, "name", None) == name]
+        self.assertEqual(len(selected), 1)
+        definition = selected[0]
+        self.assertIs(type(definition), ast.FunctionDef)
+        self.assertFalse(definition.decorator_list or definition.returns or definition.type_comment
+                         or getattr(definition, "type_params", []))
+        args = definition.args
+        self.assertEqual(tuple(arg.arg for arg in args.args), ("data",))
+        self.assertFalse(args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg or args.defaults or args.kw_defaults)
+        self.assertIsNone(args.args[0].annotation)
+        self.assertEqual(sum(isinstance(node, ast.FunctionDef) for node in ast.walk(definition)), 1)
+        safe = {"type": type, "bytes": bytes, "int": int, "len": len}
+        nodes = (ast.FunctionDef, ast.arguments, ast.arg, ast.Expr, ast.Constant, ast.Name, ast.Load, ast.Store,
+                 ast.Assign, ast.AugAssign, ast.For, ast.If, ast.Return, ast.Call, ast.Attribute, ast.Tuple,
+                 ast.Subscript, ast.Slice, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare,
+                 ast.operator, ast.unaryop, ast.boolop, ast.cmpop)
+        for node in ast.walk(definition):
+            self.assertIsInstance(node, nodes)
+            if isinstance(node, ast.Name):
+                self.assertFalse(node.id.startswith("__"))
+            if isinstance(node, ast.Attribute):
+                self.assertIsInstance(node.value, ast.Name)
+                self.assertEqual((node.value.id, node.attr), ("int", "from_bytes"))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                self.assertIn(node.func.id, safe)
+        namespace = {"__builtins__": safe}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "reviewed-dacl-policy-predicate", "exec",
+                     dont_inherit=True), namespace)
+        self.assertEqual(set(namespace), {"__builtins__", name})
+        check = namespace[name]
+        world = bytes.fromhex("010100000000000100000000")
+        deny = struct.pack("<BBHI", 1, 0, 20, 1) + world
+        allow = struct.pack("<BBHI", 0, 0, 20, 0x1F01FF) + world
+
+        def descriptor(*, offset=20, capacity=48):
+            return (struct.pack("<BBHIIII", 1, 0, 0x9004, 0, 0, 0, offset) + bytes(offset - 20)
+                    + struct.pack("<BBHHH", 2, 0, capacity, 2, 0) + deny + allow
+                    + b"\xa5" * (capacity - 48))
+
+        valid = descriptor()
+        for data in (valid, descriptor(offset=24), descriptor(capacity=256)):
+            self.assertIs(check(data), True)
+
+        def changed(offset, replacement):
+            return valid[:offset] + replacement + valid[offset + len(replacement):]
+
+        malformed = [changed(0, b"\x02"), changed(20, b"\x04"),
+                     valid[:28] + allow + deny, valid[:28] + deny + allow[:-1]]
+        for control in (0, 0x8004, 0x9000, 0x1004):
+            malformed.append(changed(2, struct.pack("<H", control)))
+        for offset in (0, 4, 16, 21, 64, 0xFFFFFFFC):
+            malformed.append(changed(16, struct.pack("<I", offset)))
+        for size in (0, 4, 8, 28, 47, 49, 52, 65532):
+            malformed.append(changed(22, struct.pack("<H", size)))
+        for count in (0, 1, 3, 65535):
+            malformed.append(changed(24, struct.pack("<H", count)))
+        for offset in (28, 48):
+            malformed.extend((changed(offset, b"\x05"), changed(offset + 1, b"\x10"),
+                              changed(offset + 2, struct.pack("<H", 24)),
+                              changed(offset + 4, struct.pack("<I", 2)),
+                              changed(offset + 8, b"\x02"), changed(offset + 9, b"\x02"),
+                              changed(offset + 15, b"\x05"), changed(offset + 16, b"\x01")))
+        malformed.append(changed(22, struct.pack("<HH", 68, 3)) + allow)
+        for data in malformed:
+            with self.subTest(data=data.hex()):
+                self.assertIs(check(data), False)
+        for end in range(len(valid)):
+            self.assertIs(check(valid[:end]), False)
+        for data in (None, True, 1, "descriptor", bytearray(valid), memoryview(valid), valid + bytes(16384)):
+            self.assertIs(check(data), False)
+
+    def test_failure_diagnostic_is_closed_bounded_and_unknown_silent(self):
+        # Only reviewed scalar definitions execute, never fixture/emitter/observer.
+        name = "_failure_diagnostic"
+        namespace, parsed = self._dacl_reducers()
+        reduce = namespace[name]
+        fixture_state = (True, True, True, True, True, False, True, False)
+        reader_state = (0, False, None, None, None)
+        arguments = {"case": "short-alias", "nonce": "a" * 64, "stage": "setup",
+                     "reason": "real_short_alias_unavailable", "fixture_state": fixture_state,
+                     "reader_state": reader_state, "output_state": (False, 0, 0)}
+        prefix = b"MRK_WINDOWS_SNAPSHOT_FAILURE_V1 "
+        raw = reduce(**arguments)
+        self.assertTrue(raw.startswith(prefix) and raw.endswith(b"\n") and raw.isascii())
+        self.assertEqual(raw.count(b"\n"), 1)
+        self.assertLessEqual(len(raw), 1024)
+        expected = {"schemaVersion": 1, "scope": "windows-static-snapshot-native-v1", "id": "short-alias",
+                    "nonce": "a" * 64, "stage": "setup", "code": "real_short_alias_unavailable"}
+        self.assertEqual(json.loads(raw[len(prefix):-1]), expected)
+        reasons = ("short_alias_bound", "real_short_alias_unavailable", "real_alias_required",
+                   "normalized_alias_veto_required", "fixture_native_unavailable", "fixture_failure",
+                   "short_alias_access_denied", "short_alias_sharing_violation", "short_alias_not_supported",
+                   "short_alias_invalid_parameter", "short_alias_name_collision", "short_alias_volume_disabled",
+                   "short_alias_privilege_unavailable", "short_alias_other_refused",
+                   "saved_dacl_bound", "saved_dacl_unsupported", "world_sid_bound", "fixture_dacl_denial_required", "fixture_dacl_not_effective",
+                   "dacl_restore_original_object", "saved_dacl_present", "dacl_restoration_not_confirmed",
+                   "fixture_restoration_bound", "fixture_retained_arena_bound", "fixture_arena_bound",
+                   "fixture_path_bound", "fixture_inherited_handle", "fixture_zero_file_id")
+        for stage in ("setup", "reader", "reduction", "restoration"):
+            for reason in reasons:
+                marker = reduce(**{**arguments, "stage": stage, "reason": reason})
+                self.assertEqual(json.loads(marker[len(prefix):-1]), {**expected, "stage": stage, "code": reason})
+        for stage, reason in (("setup", "fixture_dacl_not_effective"),
+                              ("restoration", "dacl_restoration_not_confirmed")):
+            marker = reduce(**{**arguments, "case": "acl-type", "stage": stage, "reason": reason})
+            self.assertEqual(json.loads(marker[len(prefix):-1]),
+                             {**expected, "id": "acl-type", "stage": stage, "code": reason})
+        # Literal-only roster extraction, not module execution or a native fixture.
+        groups = [node for node in parsed.body if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Name) and target.id == "GROUPS" for target in node.targets)]
+        self.assertEqual(len(groups), 1)
+        cases = tuple(case for _group, cases in ast.literal_eval(groups[0].value) for case in cases)
+        self.assertEqual(len(cases), 31)
+        for case in cases:
+            marker = reduce(**{**arguments, "case": case})
+            self.assertEqual(json.loads(marker[len(prefix):-1]), {**expected, "id": case})
+
+        class Unrenderable:
+            def __str__(self):
+                raise AssertionError("must not render a diagnostic argument")
+            __repr__ = __str__
+            def __eq__(self, other):
+                raise AssertionError("must not compare an unknown diagnostic argument")
+
+        class NonExactString(str):
+            def __eq__(self, other):
+                raise AssertionError("must require exact strings before comparison")
+
+        poison = Unrenderable()
+        for reason in (None, "private-canary/path\nsecret", b"private-canary", poison,
+                       NonExactString("short_alias_bound"), ["short_alias_bound"]):
+            marker = reduce(**{**arguments, "reason": reason})
+            self.assertEqual(json.loads(marker[len(prefix):-1]), {**expected, "code": "fixture_failure"})
+            self.assertNotIn(b"private-canary", marker)
+        for key, values in (
+                ("case", (None, "private-canary", "short-alias\n", NonExactString("short-alias"), poison)),
+                ("nonce", (None, "A" * 64, "a" * 63, "a" * 65, "g" * 64, "\u00e9" * 64, poison)),
+                ("stage", (None, "admission", "complete", "setup\n", NonExactString("setup"), poison))):
+            for value in values:
+                self.assertIsNone(reduce(**{**arguments, key: value}))
+        for index in range(8):
+            for value in (not fixture_state[index], None, 0, 1, "clear", poison):
+                changed = list(fixture_state); changed[index] = value
+                self.assertIsNone(reduce(**{**arguments, "fixture_state": tuple(changed)}))
+        for state in (None, [], {}, fixture_state[:-1], (*fixture_state, True)):
+            self.assertIsNone(reduce(**{**arguments, "fixture_state": state}))
+        attached = (1, True, True, False, True)
+        for state in (reader_state, attached):
+            self.assertEqual(reduce(**{**arguments, "reader_state": state}), raw)
+        for state in (None, [], (0, False), (True, False, None, None, None),
+                      (1, False, None, None, None), (2, False, None, None, None),
+                      (0, False, True, None, None), (0, False, None, False, None), (0, False, None, None, True),
+                      (0, True, True, False, True), (1, 1, True, False, True), (2, True, True, False, True),
+                      (1, True, False, False, True), (1, True, None, False, True), (1, True, 1, False, True),
+                      (1, True, True, True, True), (1, True, True, None, True), (1, True, True, 0, True),
+                      (1, True, True, False, False), (1, True, True, False, None), (1, True, True, False, 1)):
+            self.assertIsNone(reduce(**{**arguments, "reader_state": state}))
+        # Already classified pending completion / already joined observer only;
+        # the helper never performs completion or a join to reach these tuples.
+        for state in ((True, True, True, True, False, True, True, False),
+                      (True, True, True, True, False, True, False, True)):
+            self.assertEqual(reduce(**{**arguments, "fixture_state": state, "reader_state": attached}), raw)
+        for state in (None, [], (False, 0), (True, 0, 0), (None, 0, 0), (0, 0, 0),
+                      (False, -1, 0), (False, 4, 0), (False, True, 0), (False, 1.0, 0),
+                      (False, 0, -1), (False, 0, 65537), (False, 0, False), (False, 0, 0.0)):
+            self.assertIsNone(reduce(**{**arguments, "output_state": state}))
+        engine_error = b"Mobile Release Kit desktop engine rejected the request or transport.\n"
+        available = 65536 - len(raw) - len(engine_error)
+        self.assertEqual(reduce(**{**arguments, "output_state": (False, 3, available)}), raw)
+        self.assertIsNone(reduce(**{**arguments, "output_state": (False, 3, available + 1)}))
+
+        # Inspect, but NEVER compile/execute, the effectful diagnostic seam.
+        fixture = next(node for node in parsed.body if isinstance(node, ast.ClassDef) and node.name == "Fixture")
+        methods = {node.name: node for node in fixture.body if isinstance(node, ast.FunctionDef)}
+        emitter = methods["diagnose_failure"]
+        self.assertFalse(any(isinstance(node, (ast.With, ast.For, ast.While, ast.Await)) for node in ast.walk(emitter)))
+        attribute_calls = [node.func for node in ast.walk(emitter)
+                           if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)]
+        self.assertEqual([(call.value.id, call.attr) for call in attribute_calls], [("os", "write")])
+        write = next(node for node in ast.walk(emitter) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and node.func.attr == "write")
+        self.assertEqual(write.args[0].value, 2)
+        self.assertEqual(write.args[1].id, "raw")
+        for call in (node for node in ast.walk(emitter) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            self.assertIn(call.func.id, {"type", "len", name, "_short_alias_error_reason"})
+        self.assertFalse(any(isinstance(node, ast.Attribute) and node.attr in ("snapshot", "join", "restore")
+                             for node in ast.walk(emitter)))
+        native_labels = [node for node in ast.walk(emitter) if isinstance(node, ast.Call)
+                         and isinstance(node.func, ast.Name) and node.func.id == "_short_alias_error_reason"]
+        self.assertEqual(len(native_labels), 1)
+        self.assertEqual([(arg.value.id, arg.attr) for arg in native_labels[0].args], [("error", "api"), ("error", "code")])
+        guarded = next(node for node in emitter.body if isinstance(node, ast.Try))
+        self.assertEqual(guarded.body[1].targets[0].attr, "diagnostic_attempted")
+        self.assertIs(guarded.body[1].value.value, True)
+        self.assertEqual(guarded.handlers[0].type.id, "BaseException")
+        self.assertIsInstance(guarded.handlers[0].body[0], ast.Return)
+        self.assertEqual(methods["__init__"].body[-2].targets[0].attr, "diagnostic_ready")
+        self.assertIs(methods["__init__"].body[-2].value.value, True)
+        self.assertEqual(methods["__init__"].body[-1].targets[0].attr, "diagnostic_attempted")
+        self.assertIs(methods["__init__"].body[-1].value.value, False)
+        for method, stage in (("finish", "reduction"), ("_finish", "restoration")):
+            calls = [node for node in ast.walk(methods[method]) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and node.func.attr == "diagnose_failure"]
+            self.assertEqual([call.args[0].value for call in calls], [stage])
+        main = next(node for node in parsed.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        dispatch = next(node for node in ast.walk(main) if isinstance(node, ast.FunctionDef) and node.name == "dispatch")
+        refusals = [node for node in ast.walk(dispatch) if isinstance(node, ast.ExceptHandler)
+                    and isinstance(node.type, ast.Attribute) and node.type.attr == "ApiError"]
+        self.assertEqual(len(refusals), 1)
+        self.assertEqual(refusals[0].body[-3].value.func.attr, "finish")
+        self.assertEqual(refusals[0].body[-2].targets[0].id, "validated_refusal")
+        self.assertEqual(refusals[0].body[-2].value.id, "error")
+        self.assertIsInstance(refusals[0].body[-1], ast.Raise)
+        self.assertIsNone(refusals[0].body[-1].exc)
+        guarded_refusals = [node for node in ast.walk(dispatch) if isinstance(node, ast.If)
+                            and isinstance(node.test, ast.Compare) and isinstance(node.test.left, ast.Name)
+                            and node.test.left.id == "error"]
+        self.assertEqual(len(guarded_refusals), 1)
+        self.assertIsInstance(guarded_refusals[0].test.ops[0], ast.IsNot)
+        self.assertEqual(guarded_refusals[0].test.comparators[0].id, "validated_refusal")
+        self.assertEqual(guarded_refusals[0].body[0].value.func.attr, "diagnose_failure")
+        self.assertEqual(guarded_refusals[0].body[0].value.args[0].value, "reader")
+
     def test_normalized_name_and_case_are_only_vetoes(self):
         for spelling in ("Build.Gradle", "BUILD~1.GRA", r"\Device\HarddiskVolume8\build.gradle", ""):
             fake = _Fake()
@@ -559,7 +1794,9 @@ class WindowsSnapshotPureTests(unittest.TestCase):
         parser.assert_called_once()
         self.assertEqual(parser.call_args.args[0], sources)
         self.assertEqual(parser.call_args.args[1], {"App.xcodeproj", "App.xcworkspace"})
-        self.assertEqual(result["discovery"]["hints"]["android"]["applicationId"], "org.fixture.app")
+        self.assertEqual(result["discovery"]["hints"]["android"], {
+            "module": ":app", "buildFile": "app/build.gradle.kts", "applicationId": "org.fixture.app",
+        })
         self.assertEqual(result["discovery"]["hints"]["ios"]["bundleId"], "org.fixture.ios")
         self.assertEqual(result["config"]["state"], "format-valid")
         opened = {spec.name for spec in fake.specs}
@@ -568,6 +1805,17 @@ class WindowsSnapshotPureTests(unittest.TestCase):
         self.assertNotIn("private-canary", json.dumps(result))
         self.assertNotIn("9.9.9", json.dumps(result["discovery"]))
         self.assertFalse(result["discovery"]["partial"])
+
+        # The public DTO omits absent optional hints; it must not omit an
+        # actually observed value. This is the same shared sanitizer exercised
+        # by the genuine hosted source/ZIP fixtures, not a native qualification.
+        explicit = _Fake()
+        explicit.config()
+        explicit.add("app/build.gradle.kts", GRADLE + b'namespace = "org.fixture.code"\napplicationIdSuffix = ".debug"\n')
+        self.assertEqual(self._run(explicit)["discovery"]["hints"]["android"], {
+            "module": ":app", "buildFile": "app/build.gradle.kts", "applicationId": "org.fixture.app",
+            "namespace": "org.fixture.code", "debugApplicationIdSuffix": ".debug",
+        })
 
     def test_original_reads_require_bounds_and_eof(self):
         fake = _Fake()

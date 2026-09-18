@@ -32,6 +32,7 @@ fn main() {
             "close_config_edit", "config_edit_status",
             "github_workflow_edit_open", "github_workflow_edit_prepare", "github_workflow_edit_apply",
             "github_workflow_edit_close", "github_workflow_edit_status",
+            "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
             "vault_status", "vault_open", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
         ];

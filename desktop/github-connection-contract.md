@@ -1,0 +1,105 @@
+# GitHub connection: session-only read profile
+
+**Status: implemented source under review, unavailable in production.** The
+native document gate, runtime/TLS gate and renderer credential-entry gate remain
+closed. A registered command or a passing supplied-data test is not native
+qualification. Preferred GitHub App/device login is separately unavailable.
+
+The guided screen distinguishes local workflow-file planning from GitHub
+observations. Enter the **application** repository as `OWNER/REPO`; it is not the
+toolkit repository. Help explains where to find each value and that observed
+account/repository metadata does not establish effective token grants, Actions
+policy, correct workflow contents, installed secrets or release readiness.
+
+## Implemented interface
+
+- `github_connection_status {}` observes retained native state only.
+- `github_connection_connect_token {projectId,repository,token}` admits one
+  explicit advanced-token read under the original document's mutex. It never
+  replaces another session. The native project ID comes from the picker registry,
+  not a renderer path or a Git remote.
+- `github_connection_refresh {sessionId,expectedRevision}` is one new explicit
+  observation, not a replay. Original account/repository IDs stay pinned.
+- `github_connection_disconnect {sessionId}` immediately retires credential use
+  and stops only that session's original ticket. It remains available when new
+  reads are refused. It neither revokes a GitHub grant nor affects Store state.
+- `github-connection-status` is best-effort safe status data from the existing
+  100ms relay. Status repairs missed events; neither event nor UI arrival order
+  is authority.
+
+Only the nine `github_connection_refused_*` codes documented in the native
+session module establish definite **pre-admission** refusal. Later startup,
+transport and cleanup failures are retained session outcomes. Generic IPC errors,
+an overtaking idle Status, an event subscription failure or a timeout must not
+cause token replay or inferred refusal. One nonsecret retirement intent survives
+lost Connect replies, context changes and UI disposal; a late exact session is
+usable only for retirement, not restoring an abandoned connection.
+
+## Credential and transport boundaries
+
+The password input is uncontrolled and cleared synchronously after its one
+handoff and on context/gate loss. No token belongs in React/controller/draft
+state, public DTOs, event/error text, files, logs, Git, environment or arguments.
+Native state retains at most one credential and one original read ticket. The
+private request uses one bounded buffer, a fixed helper and private stdin; this
+does not claim complete allocator, framework or operating-system erasure.
+
+Only fixed GitHub.com HTTPS GETs are implemented: account, explicit repository,
+up to two workflow-metadata pages and the closing repository-identity bracket.
+At most five calls, no arbitrary URL, redirects, automatic retries, CLI helpers,
+ambient proxy/CA/credential lookup, remote HTML or Store/mutation/dispatch path.
+The bundled CA is a separate required, bounded packaging input. No CA has been
+shipped or native TLS profile qualified merely by adding its inventory contract.
+
+The read shares the existing Supervisor's two slots, original startup-inclusive
+10-second endpoint and first immutable 2-second cleanup allowance. No session
+driver, watchdog, extra periodic task, guessed PID/group or replacement joiner is
+introduced. Pending and RetainedUnknown are not final receipts. Only original
+resource/IO/management settlement can produce Settled; late settlement may free
+material, never erase prior cleanup uncertainty.
+
+## Lifetime, errors and recovery
+
+The native 60-minute ceiling starts at admission using one full-precision
+monotonic/wall-clock pair. Known expiry may only shorten it. Refresh, Status,
+clock changes, page navigation and help reload cannot renew it. The displayed
+UTC value is informational, not a renderer timer or an observed server expiry.
+
+The current live transport has no evidenced GitHub expiration-header grammar:
+an absent header means unknown, while a present unsupported/duplicate header
+refuses with `response-invalid` and retires the credential. Independently valid
+rate-limit information survives that refusal. Known retry-not-before delays up
+to seven days use the original native settlement time, not a delayed Status
+sample. Longer/unrepresentable limits and native deadline overflow block the
+original document. Disconnect/replacement credentials cannot reset those limits.
+
+HTTP401 anywhere, identity change, response-invalid, document loss, admitted
+project selection and accepted quit retire credential use. A cancelled picker
+does not restore it. Declining quit preserves the existing connection without
+renewing its clock. A fixed failed read can be explicitly refreshed only after
+actual settlement, while the original credential/pins remain valid, cooldown
+has elapsed and native capability permits it. Helper work timeout is not proof
+that the credential itself expired.
+
+A fresh account may remain connected when repository/workflow observations are
+unavailable. Old valued facts become stale; unavailable or skipped observations
+must never look fresh. A settled operation's identity/reason is immutable.
+Subsequent retirement uses a distinct preallocated Disconnect identity. A later
+absorbing cleanup uncertainty uses its own preallocated identity if the visible
+operation was already settled; it never rewrites that earlier terminal result.
+Pending retirement remains nonterminal until its original final receipt.
+
+Document loss, poison and counter exhaustion cannot create a new owner or wrap
+revision authority. Exhaustion freezes one redacted unavailable snapshot while
+retaining unresolved material for genuine settlement. Quit/exit additionally
+requires GitHub material and original ticket settlement; ordinary vault locking
+does not require GitHub disconnection.
+
+## Verification still required
+
+Supplied-byte/projection/clock/controller tests cover the stated logical
+contracts only. Original helper/process/pipe lifecycle, native document/picker/
+quit integration, real TLS/socket faults, exact CA/runtime/loader custody and
+each supported platform require separately reviewed disposable native evidence.
+No Linux mock is macOS/Windows evidence. Packaging, credential interoperability,
+GitHub App registration and complete Desktop delivery remain separate work.

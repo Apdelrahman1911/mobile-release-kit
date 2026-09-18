@@ -7,7 +7,7 @@ import { githubSetupError, parseGitHubSetupHelp } from './githubSetupProtocol.ts
 import { parseCredentialGuide } from './credentialGuide.ts';
 import { assetError } from './assetSessionProtocol.ts';
 import { workflowEditError } from './githubWorkflowEditProtocol.ts';
-import { parseGitHubConnectionHelp } from './githubConnectionProtocol.ts';
+import { githubConnectionError, parseGitHubConnectionHelp } from './githubConnectionProtocol.ts';
 import type { ApiError, Assurance, Catalog, DesktopApi, FieldHelp, JsonObject, ProjectSnapshot } from './types.ts';
 
 // Inert, explicit browser-design fixture. Nothing here is a project observation.
@@ -60,6 +60,7 @@ const editUnavailable = async (): Promise<never> => {
 };
 const assetUnavailable = async (): Promise<never> => { throw assetError({ code: 'AssetSessionUnavailable' }); };
 const workflowUnavailable = async (): Promise<never> => { throw workflowEditError({ code: 'PreviewOnly' }); };
+const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
 
 export const previewApi: DesktopApi = {
   mode: 'preview',
@@ -93,6 +94,11 @@ export const previewApi: DesktopApi = {
   closeGitHubWorkflowEdit: workflowUnavailable,
   githubWorkflowEditStatus: workflowUnavailable,
   subscribeGitHubWorkflowEdit: workflowUnavailable,
+  githubConnectionStatus: connectionUnavailable,
+  connectGitHubToken: connectionUnavailable,
+  refreshGitHubConnection: connectionUnavailable,
+  disconnectGitHubConnection: connectionUnavailable,
+  subscribeGitHubConnection: connectionUnavailable,
   assetStatus: assetUnavailable,
   openAssetSession: assetUnavailable,
   setAssetContext: assetUnavailable,

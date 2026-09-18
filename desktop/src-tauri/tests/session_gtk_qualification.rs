@@ -18,6 +18,9 @@ compile_error!("SG1 requires debug test + desktop-shell + development-runtime, L
 #[path = "../src/asset_source.rs"] mod asset_source;
 #[path = "../src/asset_session.rs"] mod asset_session;
 #[path = "../src/edit_protocol.rs"] mod edit_protocol;
+#[path = "../src/github_workflow_edit_protocol.rs"] mod github_workflow_edit_protocol;
+#[path = "../src/github_connection_protocol.rs"] mod github_connection_protocol;
+#[path = "../src/github_connection_session.rs"] mod github_connection_session;
 #[path = "../src/edit_owner.rs"] mod edit_owner;
 #[path = "../src/shell.rs"] mod shell;
 fn main() -> std::process::ExitCode { shell::qualification::main() }

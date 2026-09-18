@@ -7,10 +7,19 @@ import type { AssetStatus } from './assetSessionTypes.ts';
 import { parseGitHubWorkflowEditStatus, workflowEditError, workflowEditRequestFits } from './githubWorkflowEditProtocol.ts';
 import type { GitHubWorkflowEditCommand } from './githubWorkflowEditProtocol.ts';
 import type { GitHubWorkflowEditStatus } from './githubWorkflowEditTypes.ts';
-import { parseGitHubConnectionHelp } from './githubConnectionProtocol.ts';
+import { GITHUB_CONNECTION_ENTRY_AVAILABLE, GITHUB_CONNECTION_EVENT, githubConnectionError, githubConnectionRequestFits,
+  parseGitHubConnectionHelp, parseGitHubConnectionStatus } from './githubConnectionProtocol.ts';
+import type { GitHubConnectionStatus } from './githubConnectionTypes.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status', onStatus: (status: unknown) => void) => Promise<() => void>;
+
+function connectionReply(value: unknown): GitHubConnectionStatus {
+  const status = parseGitHubConnectionStatus(value);
+  if (!status) throw githubConnectionError(null);
+  return status;
+}
+function connectionRejection(error: unknown): never { throw githubConnectionError(error); }
 
 export function bridgeMode(previewFlag: unknown, isNative: boolean): BridgeMode {
   if (previewFlag === '1') return 'preview';
@@ -52,6 +61,17 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!status) throw { code: 'GitHubWorkflowStatusInvalid' };
       return structuredClone(status);
     } catch (error) { throw workflowEditError(error); }
+  };
+  const connectionCall = (command: 'github_connection_status' | 'github_connection_connect_token' | 'github_connection_refresh' | 'github_connection_disconnect', args: Record<string, unknown>): Promise<GitHubConnectionStatus> => {
+    // Deliberately not async and not the generic call/apiError route. Start one
+    // invoke synchronously; its callbacks do not close over the token arguments.
+    // The false compiled gate is independent of renderer/native capability DATA.
+    if (mode !== 'native') return Promise.reject(githubConnectionError({ code: 'github_connection_refused_runtime_unavailable' }));
+    if ((command === 'github_connection_connect_token' || command === 'github_connection_refresh') && !GITHUB_CONNECTION_ENTRY_AVAILABLE)
+      return Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
+    if (!githubConnectionRequestFits(command, args)) return Promise.reject(githubConnectionError({ code: 'github_connection_refused_invalid_input' }));
+    try { return invoke<unknown>(command, args).then(connectionReply, connectionRejection); }
+    catch (error) { return Promise.reject(githubConnectionError(error)); }
   };
   return {
     mode,
@@ -104,6 +124,15 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (mode !== 'native' || !listen) throw { code: 'NativeBridgeRequired' };
         return await listen('github-workflow-edit-status', onStatus);
       } catch (error) { throw workflowEditError(error); }
+    },
+    githubConnectionStatus: () => connectionCall('github_connection_status', {}),
+    connectGitHubToken: (args) => connectionCall('github_connection_connect_token', args),
+    refreshGitHubConnection: (args) => connectionCall('github_connection_refresh', args),
+    disconnectGitHubConnection: (args) => connectionCall('github_connection_disconnect', args),
+    subscribeGitHubConnection: (onStatus) => {
+      if (mode !== 'native' || !listen) return Promise.reject(githubConnectionError({ code: 'github_connection_refused_runtime_unavailable' }));
+      try { return listen(GITHUB_CONNECTION_EVENT, (value) => onStatus(parseGitHubConnectionStatus(value))).catch(connectionRejection); }
+      catch (error) { return Promise.reject(githubConnectionError(error)); }
     },
     assetStatus: () => assetCall('vault_status', {}),
     openAssetSession: () => assetCall('vault_open', { mode: 'session' }),

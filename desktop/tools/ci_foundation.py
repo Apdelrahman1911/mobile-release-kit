@@ -77,16 +77,98 @@ WORKFLOW_PARTITIONS = ("ordinary", "committed-fsync", "committed-close")
 BOUNDARY_PHASES = ("prepare", "acquire", "compile", "native", "config-owner", "config-task-loss",
                    "config-owner-delta", "config-transaction-eof", "config-core", "clean")
 GTK_COMPILE_SOURCES = (
+    "desktop/github_connection_bootstrap.py",
     "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock",
     "desktop/src-tauri/src/asset_session.rs", "desktop/src-tauri/src/asset_source.rs",
     "desktop/src-tauri/src/edit_owner.rs", "desktop/src-tauri/src/hosted_tests.rs",
+    "desktop/src-tauri/src/github_workflow_edit_protocol.rs",
+    "desktop/src-tauri/src/github_connection_protocol.rs",
+    "desktop/src-tauri/src/github_connection_session.rs",
+    "desktop/src-tauri/src/runtime.rs",
     "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/src/supervisor.rs",
     "desktop/src-tauri/src/session_gtk_qualification.rs",
     "desktop/src-tauri/src/session_gtk_qualification/native_contract.rs",
+    "desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py",
     "desktop/src-tauri/tests/session_gtk_qualification.rs",
     "desktop/src-tauri/tests/session_gtk_recipe.js",
     "desktop/native/session_gtk_input_linux.c", "desktop/tools/qualify_session_gtk.py",
     "desktop/tools/ci_foundation.py", GTK_COMPILE_WORKFLOW,
+)
+# Reviewed package-member DATA, not a roster inferred from the candidate zip or
+# an import of the native qualification driver. Keep aligned with its SOURCES.
+GTK_CORE_PATHS = (
+    "mobile_release/__init__.py",
+    "mobile_release/__main__.py",
+    "mobile_release/_command_process.py",
+    "mobile_release/_desktop_edit_control.py",
+    "mobile_release/_desktop_edit_engine.py",
+    "mobile_release/_desktop_edit_protocol.py",
+    "mobile_release/_desktop_engine.py",
+    "mobile_release/_desktop_github_engine.py",
+    "mobile_release/_github_connection_transport.py",
+    "mobile_release/_lifetime_evidence.py",
+    "mobile_release/_native_process.py",
+    "mobile_release/_profile_callers.py",
+    "mobile_release/_profile_process.py",
+    "mobile_release/_store_lane_contract.py",
+    "mobile_release/_store_lane_evidence.py",
+    "mobile_release/_store_lane_files.py",
+    "mobile_release/android.py",
+    "mobile_release/android_upload_validation.py",
+    "mobile_release/api/__init__.py",
+    "mobile_release/api/_catalog.py",
+    "mobile_release/api/_credential_assessment.py",
+    "mobile_release/api/_credential_guide.py",
+    "mobile_release/api/_github_connection.py",
+    "mobile_release/api/_github_setup.py",
+    "mobile_release/api/_json.py",
+    "mobile_release/api/_preview.py",
+    "mobile_release/api/_snapshot.py",
+    "mobile_release/api/_snapshot_windows.py",
+    "mobile_release/api/_snapshot_windows_native.py",
+    "mobile_release/api/contracts.py",
+    "mobile_release/api/data/credential-guide-v1.json",
+    "mobile_release/api/data/field-help.json",
+    "mobile_release/api/data/github-connection-v1.json",
+    "mobile_release/api/data/github-setup-v1.json",
+    "mobile_release/api/data/project.schema.json",
+    "mobile_release/build_inputs.py",
+    "mobile_release/cancellation.py",
+    "mobile_release/checked_files.py",
+    "mobile_release/cli.py",
+    "mobile_release/config.py",
+    "mobile_release/config_edit.py",
+    "mobile_release/config_payloads.py",
+    "mobile_release/credential_policy.py",
+    "mobile_release/credential_requirements.py",
+    "mobile_release/credentials.py",
+    "mobile_release/data/apple-profile-roots.pem",
+    "mobile_release/discovery.py",
+    "mobile_release/errors.py",
+    "mobile_release/github_workflow_edit.py",
+    "mobile_release/init_transaction.py",
+    "mobile_release/init_workspace_custody.py",
+    "mobile_release/inspection.py",
+    "mobile_release/ios.py",
+    "mobile_release/ios_artifacts.py",
+    "mobile_release/ios_der.py",
+    "mobile_release/ios_entitlements.py",
+    "mobile_release/ios_plist_binary.py",
+    "mobile_release/ios_profile_auth.py",
+    "mobile_release/ios_profile_trust.py",
+    "mobile_release/ios_profiles.py",
+    "mobile_release/ios_upload_validation.py",
+    "mobile_release/local_signing.py",
+    "mobile_release/macho.py",
+    "mobile_release/metadata.py",
+    "mobile_release/owned_process.py",
+    "mobile_release/preflight.py",
+    "mobile_release/provenance.py",
+    "mobile_release/reporting.py",
+    "mobile_release/stores.py",
+    "mobile_release/tooling.py",
+    "mobile_release/workflow.py",
+    "mobile_release/workflow_payloads.py",
 )
 EMPTY_NATIVE_DIRECTORIES = (
     "native", "config-owner", "config-driver-loss", "config-watchdog-loss", "config-stop",
@@ -96,6 +178,70 @@ COMPILER_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target", "appdata", "
 COMPILER_PRIVATE_FILES = ("context.json", "core.zip", "metadata.json", "npmrc-user", "npmrc-global", "gitconfig-empty")
 COMPILE_PUBLIC_FILES = ("public-bindings.json", "acquire-checks.json", "compile-checks.json")
 NATIVE_TEST = "supervisor::hosted_tests::passive_hosted_contract"
+WINDOWS_SNAPSHOT_TEST = "supervisor::hosted_tests::windows_static_snapshot_hosted_contract"
+FOUNDATION_SCOPE = "passive-v1"
+WINDOWS_SNAPSHOT_SCOPE = "windows-snapshot-v1"
+WINDOWS_SNAPSHOT_PUBLIC_SCOPE = "windows-static-snapshot-native-only-not-desktop-enablement"
+WINDOWS_SNAPSHOT_PHASES = frozenset({"prepare", "acquire", "compile", "windows-snapshot", "clean"})
+WINDOWS_SNAPSHOT_RECEIPT_SCOPE = "windows-static-snapshot-native-v1"
+WINDOWS_SDK_VERSION = "10.0.26100.0"
+WINDOWS_SDK_HEADERS = tuple(sorted((
+    "shared/ntdef.h", "shared/ntstatus.h", "shared/winerror.h", "um/winternl.h", "um/winnt.h",
+    "um/minwinbase.h", "um/WinBase.h", "um/winioctl.h", "um/ioapiset.h", "um/fileapi.h",
+    "um/securitybaseapi.h", "um/aclapi.h",
+)))
+WINDOWS_SNAPSHOT_SOURCES = tuple(sorted((
+    "src/mobile_release/api/_snapshot_windows_native.py", "src/mobile_release/api/_snapshot_windows.py",
+    "src/mobile_release/api/_snapshot.py", "src/mobile_release/api/__init__.py",
+    "tests/desktop/test_windows_snapshot.py", "tests/desktop/test_api.py", "docs/desktop.md",
+    "desktop/src-tauri/runtime-contract.md", "tests/native_desktop_snapshot_windows.py",
+    "desktop/src-tauri/src/hosted_tests.rs", "desktop/src-tauri/src/supervisor.rs",
+    "desktop/tools/ci_foundation.py", ".github/workflows/desktop-foundation.yml",
+    "tests/desktop/test_ci_foundation_contract.py", "src/mobile_release/__init__.py",
+    "src/mobile_release/_desktop_engine.py", "src/mobile_release/api/contracts.py",
+    "src/mobile_release/api/_json.py", "src/mobile_release/config.py", "src/mobile_release/discovery.py",
+    "src/mobile_release/init_transaction.py", "src/mobile_release/errors.py", "desktop/engine_bootstrap.py",
+    "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/protocol.rs", "desktop/src-tauri/src/error.rs",
+    "desktop/src-tauri/src/bridge.rs", "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/build.rs",
+    "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock",
+)))
+WINDOWS_SNAPSHOT_GROUPS = (
+    ("W1", ("ordinary-source", "ordinary-zip", "closed-gate")),
+    ("W2", ("link-children", "reparse-root", "reparse-ancestor", "short-alias", "case-alias", "case-collision",
+            "subst-drive", "unc", "device", "ads")),
+    ("W3", ("root-reparse-race", "config-reparse-race", "walk-reparse-race", "case-mode-race")),
+    ("W4", ("acl-type", "read-eof-size", "entry-limit", "candidate-limit", "aggregate-limit", "depth-path-limit")),
+    ("W5", ("replace", "disappear", "config-disappear", "ending-metadata-case", "drive-map-change")),
+    ("W6", ("oplock-release", "oplock-withhold", "pending-failstop")),
+)
+WINDOWS_SNAPSHOT_NOT_VERIFIED = (
+    "production-windows-enablement", "production-runtime-custody", "stateful-or-descendant-backends",
+    "configuration-saving", "native-gui", "installers", "mobile-builds", "stores", "atomic-snapshot",
+)
+WINDOWS_READER_APIS = (
+    "GetCurrentProcess", "IsWow64Process2", "QueryDosDeviceW", "NtCreateFile", "GetHandleInformation",
+    "GetFileType", "GetFileInformationByHandleEx", "GetVolumeInformationByHandleW", "GetFinalPathNameByHandleW",
+    "ReadFile", "CloseHandle", "DeviceIoControl",
+)
+WINDOWS_READER_COUNTERS = (
+    "acquired", "closeAttempts", "closeSucceeded", "closeFailed", "live", "maxLive", "maxBufferBytes",
+    "rootOpens", "relativeOpens", "metadataChecks", "identitiesMatched", "readCalls", "readBytes", "readEof",
+    "directoryCalls", "directoryRecords", "directoryEof", "outsideAcquired", "outsideReads", "outsideDescent",
+    "aliasMetadataAcquired", "violations", "eventCount",
+)
+WINDOWS_ORIGINAL_FLAGS = (
+    "inspectionJoined", "acquisitionJoined", "spawned", "waited", "writerJoined", "writerComplete",
+    "stdoutEof", "stderrEof", "stdoutJoined", "stderrJoined", "driverReturned", "watchdogReturned",
+    "observerReturned", "terminal", "permitReleased", "registryEmpty",
+)
+WINDOWS_FIXTURE_COUNTERS = ("acquired", "closeAttempts", "closeSucceeded", "closeFailed", "live", "maxLive", "maxArenaBytes")
+WINDOWS_SNAPSHOT_ISSUES = frozenset({
+    "config.missing", "config.invalid", "snapshot.scan-stopped", "snapshot.entry-limit", "snapshot.changed",
+    "snapshot.file-limit", "snapshot.file-size", "snapshot.byte-limit", "snapshot.encoding", "snapshot.unsafe-file",
+    "snapshot.unsupported", "snapshot.handle-limit", "snapshot.unreadable", "snapshot.config-output-limit",
+    "snapshot.path-limit", "snapshot.link-excluded", "snapshot.depth-limit", "snapshot.container-limit",
+    "snapshot.output-limit",
+})
 CONFIG_OWNER_TEST = "edit_owner::hosted_tests::hosted_config_edit_owner_original_resources"
 CONFIG_DRIVER_LOSS_TEST = "edit_owner::hosted_tests::hosted_config_driver_loss_original_resources"
 CONFIG_WATCHDOG_LOSS_TEST = "edit_owner::hosted_tests::hosted_config_watchdog_loss_original_resources"
@@ -338,6 +484,28 @@ WORKFLOW_NATIVE_SOURCES = tuple(sorted({
     "desktop/tools/ci_foundation.py", "tests/desktop/test_ci_foundation_contract.py", "pyproject.toml",
     WORKFLOW_NATIVE_WORKFLOW,
 }))
+GITHUB_READONLY_SCOPE = "github-readonly-native-v1"
+GITHUB_READONLY_EVIDENCE_SCOPE = "desktop-github-readonly-native-only-v1"
+GITHUB_READONLY_WORKFLOW = ".github/workflows/desktop-github-connection-native.yml"
+GITHUB_READONLY_REF = "refs/heads/verify/desktop-github-connection-native"
+GITHUB_READONLY_TEST = "supervisor::hosted_tests::github_readonly_hosted_contract"
+GITHUB_READONLY_PHASES = ("prepare", "acquire", "compile", "github-owner", "clean")
+GITHUB_READONLY_CHECKS = {
+    "acquire": ("rust-toolchain-install", "rust-version-target", "github-locked-headless-metadata"),
+    "compile": ("rust-version-target", "github-headless-test-compile-only", "github-compiled-artifact"),
+    "github-owner": ("github-original-artifact", "github-owner-native-contract", "github-owner-receipt"),
+}
+GITHUB_READONLY_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target", "github-owner")
+# The workflow/configuration fixture modules are compile-time inputs to this
+# libtest, NOT permission to execute their tests. Reuse that reviewed closure.
+GITHUB_READONLY_SOURCES = tuple(sorted({
+    *WORKFLOW_NATIVE_SOURCES, GITHUB_READONLY_WORKFLOW,
+    "desktop/github_connection_bootstrap.py",
+    "desktop/src-tauri/src/github_connection_protocol.rs",
+    "desktop/src-tauri/src/github_connection_session.rs",
+    "desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py",
+    "tests/desktop/test_github_connection_native_contract.py",
+}))
 TOOL_CHECKS = frozenset({
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
@@ -353,6 +521,8 @@ TOOL_CHECKS = frozenset({
     "workflow-locked-headless-metadata", "workflow-owner-source-native-contract", "workflow-owner-zip-native-contract",
     "workflow-transaction-eof-native-contract", "workflow-core-ordinary", "workflow-core-committed-fsync",
     "workflow-core-committed-close", "workflow-source-status",
+    "windows-snapshot-native-contract",
+    "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
 })
 
 
@@ -367,11 +537,15 @@ def require(condition: bool, message: str) -> None:
 
 def admit_phase(scope: str, phase: str) -> None:
     """Closed scope selection, before context, tools, or native dispatch."""
-    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
+    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
     if scope in COMPILE_PROFILES:
         require(phase in COMPILE_PHASES, "Compiler-only scope cannot execute a native phase")
     elif scope == WORKFLOW_NATIVE_SCOPE:
         require(phase in WORKFLOW_NATIVE_PHASES, "Workflow-only scope cannot execute an unrelated native phase")
+    elif scope == WINDOWS_SNAPSHOT_SCOPE:
+        require(phase in WINDOWS_SNAPSHOT_PHASES, "Windows snapshot scope cannot execute an unrelated phase")
+    elif scope == GITHUB_READONLY_SCOPE:
+        require(phase in GITHUB_READONLY_PHASES, "G1 scope cannot execute an unrelated phase")
     else:
         require(phase in BOUNDARY_PHASES, "Foundation scope cannot execute a workflow-only phase")
 
@@ -380,6 +554,8 @@ def admit_platform(scope: str, platform: str) -> None:
     require(platform in TARGETS, "Unknown desktop verification platform")
     require(scope != GTK_COMPILE_SCOPE or platform == "linux", "SG1 compilation requires Linux")
     require(scope != WORKFLOW_NATIVE_SCOPE or platform == "linux", "Workflow native verification requires Linux")
+    require(scope != WINDOWS_SNAPSHOT_SCOPE or platform == "windows", "Windows snapshot verification requires Windows")
+    require(scope != GITHUB_READONLY_SCOPE or platform == "linux", "G1 native verification requires Linux")
 
 
 def compile_profile(scope: str) -> dict:
@@ -513,6 +689,26 @@ def gtk_compile_binding(source: Path) -> dict:
             "execution": "no-run", "sources": sources}
 
 
+def validate_gtk_core_inventory(value: object) -> None:
+    """Pure exact-name/shape check; byte identities still come from prepare()."""
+    require(type(value) is list and len(value) == len(GTK_CORE_PATHS),
+            "SG1 requires its complete reviewed core inventory")
+    names = []
+    total = 0
+    for row in value:
+        require(type(row) is dict and set(row) == {"path", "sha256", "size"},
+                "SG1 core inventory entry differs")
+        require(type(row["path"]) is str and type(row["sha256"]) is str
+                and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None
+                and type(row["size"]) is int and 0 <= row["size"] <= 8 * 1024 * 1024,
+                "SG1 core inventory entry is malformed")
+        names.append(row["path"])
+        total += row["size"]
+    require(len(set(names)) == len(names) and tuple(names) == GTK_CORE_PATHS,
+            "SG1 core inventory has missing, duplicate, extra, or reordered paths")
+    require(total <= 32 * 1024 * 1024, "SG1 core aggregate bound exceeded")
+
+
 def write_json(path: Path, value: object) -> None:
     with path.open("x", encoding="utf-8", newline="\n") as stream:
         json.dump(value, stream, sort_keys=True, separators=(",", ":"))
@@ -520,15 +716,18 @@ def write_json(path: Path, value: object) -> None:
 
 
 def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout: int,
-        capture: bool = False, output: TextIO | None = None) -> str:
+        capture: bool = False, output: TextIO | None = None, diagnostics: TextIO | None = None) -> str:
     # Only fixed commands below reach this internal helper. No shell, inherited
     # credentials, renderer input, project hook or arbitrary command selection.
     require(check in TOOL_CHECKS, "Unknown fixed compiler check")
     require(not (capture and output is not None), "Conflicting compiler output destinations")
+    require(diagnostics is None or (output is not None and check in {
+        "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract"}),
+        "Unexpected private diagnostic destination")
     print(f"Fixed check: {check}", flush=True)
     try:
         result = subprocess.run(argv, cwd=cwd, env=env, check=True, timeout=timeout,
-                                text=True, stdout=subprocess.PIPE if capture else output)
+                                text=True, stdout=subprocess.PIPE if capture else output, stderr=diagnostics)
     except subprocess.CalledProcessError as error:
         # Do not interpolate exception text: it includes argv and may contain
         # local paths or captured output. These labels come only from fixed code.
@@ -546,14 +745,16 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
 def admitted_host() -> str:
     require(os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, *COMPILE_PROFILES},
+            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
             "This fixed check requires an explicitly admitted disposable hosted job")
     platform = os.environ.get("MRK_DESKTOP_PLATFORM", "")
     require(platform in TARGETS and platform == {
         "linux": "linux", "darwin": "macos", "win32": "windows",
     }.get(sys.platform), "Unexpected host platform")
     admit_platform(os.environ["MRK_DESKTOP_HOSTED_CHECKS"], platform)
-    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WORKFLOW_NATIVE_SCOPE:
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:
+        admitted_scope(platform)
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, GITHUB_READONLY_SCOPE}:
         require(os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"
                 and os.environ.get("ImageOS") == "ubuntu24" and os.uname().machine == "x86_64"
                 and os.geteuid() != 0, "Workflow native checks require the non-root Ubuntu 24 x86_64 runner")
@@ -561,6 +762,29 @@ def admitted_host() -> str:
     selected = Path(os.environ["MRK_PYTHON"]).resolve(strict=True)
     require(selected == Path(sys.executable).resolve(strict=True), "Python setup output differs")
     return platform
+
+
+def admitted_scope(platform: str) -> str:
+    """Recheck the fixed workflow route, not a user-selectable execution grant."""
+    scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")
+    require(scope in {FOUNDATION_SCOPE, WINDOWS_SNAPSHOT_SCOPE}, "Unexpected fixed verification scope")
+    windows = scope == WINDOWS_SNAPSHOT_SCOPE
+    if windows:
+        require(platform == "windows" and os.environ.get("RUNNER_OS") == "Windows"
+                and os.environ.get("RUNNER_ARCH") == "X64", "Windows snapshot requires the native X64 job")
+    sha = os.environ.get("GITHUB_SHA", "")
+    require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None, "Invalid exact event source")
+    event = os.environ.get("GITHUB_EVENT_NAME", "")
+    if event == "push":
+        expected_ref = ("refs/heads/verify/desktop-windows-snapshot" if windows
+                        else "refs/heads/feature/desktop-application")
+        require(os.environ.get("GITHUB_REF") == expected_ref, "Push ref and fixed verification scope differ")
+    else:
+        require(event == "workflow_dispatch", "Unexpected verification event")
+        require(os.environ.get("MRK_DESKTOP_DISPATCH_SCOPE") == ("windows-snapshot" if windows else "foundation")
+                and os.environ.get("MRK_DESKTOP_EXPECTED_SHA") == sha,
+                "Dispatch scope or reviewed source differs")
+    return scope
 
 
 def clean_environment(root: Path) -> dict[str, str]:
@@ -879,6 +1103,665 @@ def workflow_transaction_eof_receipt(context: dict) -> dict:
     source = Path(context["source"])
     return validate_workflow_transaction_eof_receipt(workflow_json(Path(context["root"]) / "workflow-transaction-eof/receipt.json", maximum=64 * 1024),
         context=context, source_hashes={name: hash_file(source / relative) for name, relative in WORKFLOW_TRANSACTION_EOF_SOURCES.items()})
+
+
+def canonical_json(value: object) -> bytes:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("utf-8")
+    except (ValueError, TypeError, RecursionError):
+        raise CheckFailure("Invalid canonical fixed JSON data") from None
+
+
+def closed_object(value: object, keys: set[str], diagnostic: str) -> dict:
+    require(type(value) is dict and set(value) == keys, diagnostic)
+    return value
+
+
+def integer_between(value: object, minimum: int, maximum: int) -> bool:
+    return type(value) is int and minimum <= value <= maximum
+
+
+def sha256_value(value: object) -> bool:
+    return type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def bounded_json(data: bytes, limit: int) -> object:
+    require(len(data) <= limit, "Fixed JSON input exceeds its bound")
+
+    def pairs(items: list[tuple[str, object]]) -> dict:
+        result = {}
+        for key, value in items:
+            require(key not in result, "Duplicate fixed JSON field")
+            result[key] = value
+        return result
+
+    def constant(_: str) -> None:
+        raise CheckFailure("Nonfinite fixed JSON number")
+
+    try:
+        result = json.loads(data.decode("utf-8", errors="strict"), object_pairs_hook=pairs, parse_constant=constant)
+    except (ValueError, UnicodeError, RecursionError):
+        raise CheckFailure("Invalid fixed JSON encoding") from None
+    pending, nodes = [(result, 0)], 0
+    while pending:
+        value, depth = pending.pop()
+        nodes += 1
+        require(depth <= 16 and nodes <= 50000, "Fixed JSON structure exceeds its bound")
+        if type(value) is dict:
+            pending.extend((child, depth + 1) for child in value.values())
+        elif type(value) is list:
+            pending.extend((child, depth + 1) for child in value)
+        else:
+            require(type(value) in {str, bool, int, type(None)}, "Unexpected fixed JSON scalar")
+    return result
+
+
+def read_bounded_json(path: Path, limit: int) -> object:
+    ordinary(path)
+    before = path.stat()
+    require(before.st_size <= limit, "Fixed JSON file exceeds its bound")
+    with path.open("rb") as stream:
+        data = stream.read(limit + 1)
+    after = path.stat()
+    require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            and len(data) == before.st_size, "Fixed JSON file changed")
+    return bounded_json(data, limit)
+
+
+def fixed_file_inventory(root: Path, names: tuple[str, ...]) -> list[dict]:
+    inventory = []
+    require(len(names) <= 2048 and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9_./-]+", name) is not None
+            and not name.startswith("/") and not any(part in {"", ".", ".."} for part in name.split("/")) for name in names),
+            "Fixed input roster contains an unsafe path")
+    require(names == tuple(sorted(set(names))), "Fixed input roster is not unique and ordered")
+    for name in names:
+        path = root / name
+        ordinary(path)
+        before = path.stat()
+        require(before.st_size <= 8 * 1024 * 1024, "Fixed input file exceeds its bound")
+        digest = hash_file(path)
+        after = path.stat()
+        require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns), "Fixed input file changed")
+        inventory.append({"path": name, "sha256": digest, "size": before.st_size})
+    return inventory
+
+
+def windows_sdk_root() -> Path:
+    # Explicit installed SDK, not latest/version discovery or an SDK download.
+    program_files = Path(os.environ["ProgramFiles(x86)"])
+    require(program_files.is_absolute(), "Windows Program Files root is unavailable")
+    root = program_files / "Windows Kits" / "10" / "Include" / WINDOWS_SDK_VERSION
+    for path in (program_files, *[program_files.joinpath(*root.relative_to(program_files).parts[:length])
+                                for length in range(1, len(root.relative_to(program_files).parts) + 1)]):
+        details = path.lstat()
+        require(stat.S_ISDIR(details.st_mode) and not getattr(details, "st_file_attributes", 0) & 0x400,
+                "The fixed installed Windows SDK is unavailable or redirected")
+    return root
+
+
+def windows_prepare_bindings(context: dict, public: dict) -> None:
+    source = Path(context["source"])
+    sdk = windows_sdk_root()
+    context["sdkRoot"] = str(sdk)
+    public["windowsSnapshot"] = {
+        "sources": fixed_file_inventory(source, WINDOWS_SNAPSHOT_SOURCES),
+        "sdk": {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(sdk, WINDOWS_SDK_HEADERS)},
+        "pythonSha256": hash_file(Path(context["python"])),
+        "coreInventorySha256": hashlib.sha256(canonical_json(public["coreFiles"])).hexdigest(),
+        "job": os.environ["GITHUB_JOB"],
+    }
+    require(public["windowsSnapshot"]["job"] == "windows-snapshot", "Windows job identity differs")
+    public["notQualified"] = list(WINDOWS_SNAPSHOT_NOT_VERIFIED)
+
+
+def windows_executable_path(value: object, *, target_root: Path) -> Path:
+    """Admit the compiler's exact spelling without resolving a different file."""
+    require(type(value) is str and 0 < len(value) <= 32768 and "\0" not in value
+            and not any(part in {".", ".."} for part in re.split(r"[\\/]", value)),
+            "Original executable artifact has an unsafe path")
+    executable = Path(value)
+    require(target_root.is_absolute() and executable.is_absolute() and executable != target_root
+            and executable.is_relative_to(target_root) and executable.suffix == ".exe",
+            "Original executable artifact left its target root")
+    require(all(part not in {"", ".", ".."} and ":" not in part and "\\" not in part
+                for part in executable.relative_to(target_root).parts),
+            "Original executable artifact has an alternate path or stream")
+    return executable
+
+
+def ordinary_windows_executable(value: object, *, target_root: Path) -> Path:
+    executable = windows_executable_path(value, target_root=target_root)
+    relative = executable.relative_to(target_root)
+    for length in range(len(relative.parts)):
+        directory = target_root.joinpath(*relative.parts[:length])
+        details = directory.lstat()
+        require(stat.S_ISDIR(details.st_mode) and not getattr(details, "st_file_attributes", 0) & 0x400,
+                "Original compiler target ancestry is redirected or unavailable")
+    ordinary(executable)
+    return executable
+
+
+def compiled_windows_test(messages: bytes, *, target_root: Path) -> Path:
+    """Read only the original successful Cargo no-run output; never scan/run bins."""
+    require(len(messages) <= 16 * 1024 * 1024, "Original compiler message stream exceeds its bound")
+    executables = []
+    finished = 0
+    for line in messages.splitlines():
+        message = bounded_json(line, 1024 * 1024)
+        require(type(message) is dict and type(message.get("reason")) is str, "Unexpected original compiler message")
+        if message["reason"] == "compiler-artifact" and message.get("executable") is not None:
+            target, profile = message.get("target"), message.get("profile")
+            require(type(target) is dict and target.get("name") == "mobile_release_desktop" and target.get("kind") == ["lib"]
+                    and type(profile) is dict and profile.get("test") is True
+                    and message.get("features") == ["development-runtime"]
+                    and type(message["executable"]) is str, "Unexpected original executable artifact")
+            executable = windows_executable_path(message["executable"], target_root=target_root)
+            executables.append(executable)
+        elif message["reason"] == "build-finished":
+            require(message.get("success") is True, "Original compiler did not finish successfully")
+            finished += 1
+    require(finished == 1 and len(executables) == 1, "Original no-run compilation did not identify exactly one test executable")
+    return executables[0]
+
+
+def windows_compile_record(context: dict, argv: list[str], messages: Path) -> dict:
+    root = Path(context["root"])
+    ordinary(messages)
+    require(messages.stat().st_size <= 16 * 1024 * 1024, "Original compiler output exceeds its bound")
+    with messages.open("rb") as stream:
+        original = stream.read(16 * 1024 * 1024 + 1)
+    executable = compiled_windows_test(original, target_root=root / "target")
+    ordinary_windows_executable(str(executable), target_root=root / "target")
+    compiled = {"schemaVersion": 1, "sourceSha": context["sourceSha"], "path": str(executable),
+                "size": executable.stat().st_size, "sha256": hash_file(executable),
+                "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest()}
+    write_json(root / "windows-compiled-test.json", compiled)
+    return compiled
+
+
+def windows_inputs(context: dict, *, create: bool) -> dict:
+    root, source = Path(context["root"]), Path(context["source"])
+    public = read_bounded_json(root / "public-bindings.json", 1024 * 1024)
+    require(type(public) is dict and public.get("scope") == WINDOWS_SNAPSHOT_PUBLIC_SCOPE
+            and public.get("sourceSha") == context["sourceSha"] and public.get("sourceTree") == context["sourceTree"]
+            and public.get("runId") == context["runId"] and public.get("attempt") == context["attempt"],
+            "Original Windows preparation bindings differ")
+    prepared = closed_object(public.get("windowsSnapshot"), {"sources", "sdk", "pythonSha256", "coreInventorySha256", "job"},
+                             "Original Windows preparation fields differ")
+    sdk_root = windows_sdk_root()
+    require(str(sdk_root) == context["sdkRoot"], "Original Windows SDK selection changed")
+    require(fixed_file_inventory(source, WINDOWS_SNAPSHOT_SOURCES) == prepared["sources"]
+            and {"version": WINDOWS_SDK_VERSION, "headers": fixed_file_inventory(sdk_root, WINDOWS_SDK_HEADERS)} == prepared["sdk"]
+            and hash_file(Path(context["python"])) == prepared["pythonSha256"], "Prepared source/Python/SDK inputs changed")
+    inventory = public["coreFiles"]
+    require(type(inventory) is list and 0 < len(inventory) <= 2048
+            and hashlib.sha256(canonical_json(inventory)).hexdigest() == prepared["coreInventorySha256"]
+            and hash_file(root / "core.zip") == public["coreZipSha256"], "Prepared whole-core inventory/ZIP changed")
+    names = tuple(entry["path"] for entry in inventory)
+    require(fixed_file_inventory(source / "src", names) == inventory, "Prepared whole-core source members changed")
+    actual_names = tuple(sorted(path.relative_to(source / "src").as_posix()
+                               for path in (source / "src/mobile_release").rglob("*") if not path.is_dir()))
+    require(actual_names == names, "Packaged core gained or lost members")
+    compiled = closed_object(read_bounded_json(root / "windows-compiled-test.json", 8192),
+                             {"schemaVersion", "sourceSha", "path", "size", "sha256", "invocationSha256"},
+                             "Original compiled test record differs")
+    executable = ordinary_windows_executable(compiled["path"], target_root=root / "target")
+    require(type(compiled["schemaVersion"]) is int and compiled["schemaVersion"] == 1
+            and compiled["sourceSha"] == context["sourceSha"] and sha256_value(compiled["invocationSha256"])
+            and type(compiled["size"]) is int and compiled["size"] > 0 and sha256_value(compiled["sha256"])
+            and executable.stat().st_size == compiled["size"] and hash_file(executable) == compiled["sha256"],
+            "Original compiled test identity changed")
+    bindings = {
+        "sourceSha": context["sourceSha"], "sourceTree": context["sourceTree"], "target": TARGETS["windows"],
+        "pythonVersion": PYTHON, "rustVersion": RUST, "runId": context["runId"], "attempt": context["attempt"],
+        "job": prepared["job"], "image": public["image"], "architecture": "X64", "coreZipSha256": public["coreZipSha256"],
+        "coreInventorySha256": prepared["coreInventorySha256"], "sources": prepared["sources"],
+        "pythonSha256": prepared["pythonSha256"], "compiledTestSha256": compiled["sha256"],
+        "compileInvocationSha256": compiled["invocationSha256"], "sdk": prepared["sdk"],
+    }
+    inputs = {"schemaVersion": 1, "scope": WINDOWS_SNAPSHOT_RECEIPT_SCOPE, "bindings": bindings,
+              "coreFiles": inventory, "sdkRoot": str(sdk_root)}
+    require(len(canonical_json(inputs)) <= 1024 * 1024, "Windows native inputs exceed their bound")
+    path = root / "windows-snapshot-inputs.json"
+    if create:
+        write_json(path, inputs)
+    else:
+        require(canonical_json(read_bounded_json(path, 1024 * 1024)) == canonical_json(inputs),
+                "Original Windows native input binding changed")
+    return inputs
+
+
+def windows_snapshot_receipt(context: dict) -> dict:
+    inputs = windows_inputs(context, create=False)
+    report = read_bounded_json(Path(context["root"]) / "windows-snapshot/receipt.json", 256 * 1024)
+    return validate_windows_snapshot_receipt(report, bindings=inputs["bindings"])
+
+
+def _windows_cleanup_kind(metadata: object) -> str:
+    """Classify only ordinary entries and the two exact link-like Windows tags."""
+    mode = getattr(metadata, "st_mode", None)
+    attributes = getattr(metadata, "st_file_attributes", None)
+    require(type(mode) is int and mode >= 0 and type(attributes) is int and 0 <= attributes <= 0xFFFFFFFF,
+            "Windows task cleanup encountered incoherent type metadata")
+    directory = bool(attributes & 0x10)
+    if not attributes & 0x400:
+        # The tag is not meaningful when FILE_ATTRIBUTE_REPARSE_POINT is clear.
+        if stat.S_ISDIR(mode) and directory:
+            return "directory"
+        if stat.S_ISREG(mode) and not directory:
+            return "regular"
+        require(not (stat.S_ISDIR(mode) or stat.S_ISREG(mode) or stat.S_ISLNK(mode)),
+                "Windows task cleanup encountered incoherent type metadata")
+        raise CheckFailure("Windows task cleanup encountered an unsupported file type")
+    tag = getattr(metadata, "st_reparse_tag", None)
+    require(type(tag) is int and tag in {0xA000000C, 0xA0000003},
+            "Windows task cleanup encountered an unsupported reparse tag")
+    if tag == 0xA000000C:
+        require(stat.S_ISLNK(mode), "Windows task cleanup encountered incoherent reparse metadata")
+        return "directory-symlink" if directory else "file-symlink"
+    require(directory and stat.S_ISDIR(mode), "Windows task cleanup encountered incoherent reparse metadata")
+    return "junction"
+
+
+def clean_windows_outputs(context: dict) -> None:
+    # This is ordinary finite post-verification cleanup, NOT a cleanup remedy for
+    # native failure/uncertainty. The original root/ancestry remain ordinary and
+    # no additional writer is admitted; known reparse entries are leaves only.
+    windows_snapshot_receipt(context)
+    root = Path(context["root"])
+    leaves, directories, pending = [], [], [(root, 0)]
+    seen, groups, members = {str(root)}, {}, {}
+    count = 0
+    while pending:
+        directory, depth = pending.pop()
+        try:
+            info = directory.lstat()
+        except OSError:
+            raise CheckFailure("Windows cleanup inventory directory metadata failed") from None
+        require(_windows_cleanup_kind(info) == "directory" and depth <= 64,
+                "Windows cleanup directory is redirected or too deep")
+        directories.append((directory, info.st_dev, info.st_ino))
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    count += 1
+                    require(count <= 500000, "Windows task cleanup inventory exceeded its bound")
+                    require(entry.path not in seen, "Windows task cleanup inventory repeated a path")
+                    seen.add(entry.path)
+                    path = Path(entry.path)
+                    # CPython 3.14.7 caches raw Windows enumeration attributes/tag.
+                    # Screen them before lstat, which may process non-name-surrogate
+                    # tags. Cached zero dev/inode/nlink NEVER supplies group authority.
+                    # This screen is not atomic custody against an additional writer.
+                    try:
+                        cached_kind = _windows_cleanup_kind(entry.stat(follow_symlinks=False))
+                        metadata = path.lstat()
+                    except OSError:
+                        raise CheckFailure("Windows cleanup inventory entry metadata failed") from None
+                    kind = _windows_cleanup_kind(metadata)
+                    require(kind == cached_kind, "Windows task cleanup inventory entry classification changed")
+                    if kind == "directory":
+                        pending.append((path, depth + 1))
+                    else:
+                        links = getattr(metadata, "st_nlink", None)
+                        require(type(links) is int and 1 <= links <= 500000,
+                                "Windows task cleanup inventory has an invalid link count")
+                        device, inode = getattr(metadata, "st_dev", None), getattr(metadata, "st_ino", None)
+                        require(type(device) is int and device >= 0 and type(inode) is int and inode > 0,
+                                "Windows task cleanup inventory has an unusable file identity")
+                        identity = (device, inode)
+                        reparse = ((metadata.st_file_attributes, metadata.st_reparse_tag) if kind != "regular" else None)
+                        binding = (links, metadata.st_size, metadata.st_mtime_ns, kind, reparse)
+                        if identity in groups:
+                            require(groups[identity] == binding, "Windows task cleanup hardlink metadata disagrees")
+                        else:
+                            groups[identity] = binding
+                        members[identity] = members.get(identity, 0) + 1
+                        leaves.append((path, identity))
+        except OSError:
+            raise CheckFailure("Windows cleanup inventory enumeration failed") from None
+    # The complete manifest never descends into known reparse leaves. All original
+    # owners are already joined; every leaf group closes before the first deletion.
+    for identity, binding in groups.items():
+        require(members[identity] == binding[0],
+                "Windows task cleanup hardlink group is not closed inside the original root")
+    remaining = {identity: binding[0] for identity, binding in groups.items()}
+    for path, identity in leaves:
+        try:
+            info = path.lstat()
+        except OSError:
+            raise CheckFailure("Windows cleanup before-unlink metadata failed") from None
+        _, size, modified, kind, reparse = groups[identity]
+        observed_kind = _windows_cleanup_kind(info)
+        device, inode = getattr(info, "st_dev", None), getattr(info, "st_ino", None)
+        require(observed_kind == kind and type(device) is int and type(inode) is int
+                and (device, inode, info.st_size, info.st_mtime_ns) == (*identity, size, modified)
+                and (reparse is None or (info.st_file_attributes, info.st_reparse_tag) == reparse),
+                "Windows task cleanup file identity changed" if kind == "regular"
+                else "Windows task cleanup reparse leaf binding changed")
+        links = getattr(info, "st_nlink", None)
+        require(type(links) is int and links == remaining[identity], "Windows task cleanup remaining link count changed")
+        # An earlier successful unlink may change this inode's ctime, not its
+        # retained size/mtime. Never replace this counter with later metadata.
+        # Pinned CPython's unlink dispatch removes directory symlinks/junctions
+        # with RemoveDirectoryW, not their targets. No fallback is permitted.
+        try:
+            path.unlink()
+        except OSError:
+            raise CheckFailure("Windows task cleanup original unlink failed; remaining outputs retained") from None
+        remaining[identity] -= 1
+    require(all(value == 0 for value in remaining.values()), "Windows task cleanup hardlink accounting did not settle")
+    for path, device, inode in sorted(directories, key=lambda item: len(item[0].parts), reverse=True):
+        try:
+            info = path.lstat()
+        except OSError:
+            raise CheckFailure("Windows cleanup final directory metadata failed") from None
+        require(_windows_cleanup_kind(info) == "directory"
+                and (info.st_dev, info.st_ino) == (device, inode), "Windows task cleanup directory identity changed")
+        try:
+            path.rmdir()
+        except OSError:
+            raise CheckFailure("Windows task cleanup original directory removal failed; remaining outputs retained") from None
+    print("Removed only the fully settled Windows job's inventoried compiler/dependency and synthetic fixture outputs.")
+
+
+def validate_windows_checks(name: str, value: object) -> None:
+    """Closed case predicates, not a generic passed flag or a fixture log parser."""
+    def truths(names: str) -> dict:
+        return dict.fromkeys(names.split(), True)
+
+    race = {**truths("parentIdSame mutationSucceeded originalRelativeEntry entryBeforeDeadline unsafeControlMatched "
+                    "sharingWriteDenied sharingDeleteDenied reparseRestored"),
+            "mutationAccess": 256, "mutationTag": 0xA0000003, "outsideAcquired": 0, "outsideReadBytes": 0}
+    expected = {
+        "ordinary-source": {**truths("genuineCore configExact androidExact iosExact versionNotDisclosed"),
+                            "unicodeOpens": (1, 1000000), "spelling": "ordinary"},
+        "ordinary-zip": {**truths("genuineCore configExact androidExact iosExact versionNotDisclosed"),
+                         "unicodeOpens": (1, 1000000), "spelling": "verbatim"},
+        "closed-gate": {},
+        "link-children": {"fileSymlinkTag": 0xA000000C, "directorySymlinkTag": 0xA000000C,
+                          "junctionTag": 0xA0000003, "hardlinkCount": (2, 1024), "hardlinkIdMatch": True,
+                          "excludedReparses": (3, 10000), "hardlinkReadBytes": 0, "restoredLinks": 4},
+        "reparse-root": {"junctionTag": 0xA0000003, "unsafeControlMatched": True, "rootRefused": True, "reparseRestored": 1},
+        "reparse-ancestor": {"junctionTag": 0xA0000003, "unsafeControlMatched": True, "rootRefused": True, "reparseRestored": 1},
+        "short-alias": {**truths("aliasObserved spellingDiffers sameObject"), "aliasAcquired": (0, 1), "aliasReadBytes": 0},
+        "case-alias": {**truths("aliasObserved spellingDiffers sameObject"), "aliasAcquired": (0, 1), "aliasReadBytes": 0},
+        "case-collision": {"enabledFlags": 1, "distinctIds": True, "collisionFiles": 2,
+                           "collisionDirectoryBatches": 0, "caseRestored": True},
+        "subst-drive": {**truths("aliasInitiallyAbsent localNonSystemToken subtreeMappingObserved mappingRemoved"), "rootOpens": 0},
+        "unc": {"readerFfiEntries": 0, "readerInstances": 0, "unsafePathRefused": True},
+        "device": {"readerFfiEntries": 0, "readerInstances": 0, "unsafePathRefused": True},
+        "ads": {"readerFfiEntries": 0, "readerInstances": 0, "unsafePathRefused": True},
+        "root-reparse-race": {**race, "preparatoryDeletes": 0},
+        "config-reparse-race": {**race, "preparatoryDeletes": 0},
+        "walk-reparse-race": {**race, "preparatoryDeletes": 1},
+        "case-mode-race": {**truths("parentIdSame originalRelativeEntry entryBeforeDeadline missingNotTrusted caseRestored"),
+                           "mutationAccess": 256, "enabledFlags": 1},
+        "acl-type": {**truths("fileAccessDenied directoryAccessDenied accessibleSiblingRead configDirectoryRefused initialAbsenceRestored"),
+                     "denialPoliciesConfirmed": 2, "createdObjectsRemoved": 2},
+        "read-eof-size": {**truths("emptyEof invalidUtf8Refused shortFinalRead multichunkEof exactLimitEof"),
+                          "oversizeReadBytes": 0, "largestRequest": (1, 65536), "largestReturn": (1, 65536)},
+        "entry-limit": {"returnedRecords": (10000, 1000000), "chargedEntries": 10000, "overBudgetChildOpens": 0, "entryLimitIssue": True},
+        "candidate-limit": {"chargedCandidates": 128, "refusedExtraCandidate": True, "sourceFileLimitIssue": True},
+        "aggregate-limit": {"chargedBytes": (0, 8388608), "extraByteRead": 0, "capNotEof": True, "byteLimitIssue": True},
+        "depth-path-limit": {"deepestAdmitted": (0, 12), "depth13Opens": 0, "oversizedPathOpens": 0,
+                             **truths("depthIssue pathIssue siblingRead")},
+        "replace": {**truths("entryObserved originalIdDiffers changedIssue"), "replacementReadBytes": 0},
+        "disappear": truths("entryObserved actualMissingReturn changedIssue missingNotTrusted"),
+        "config-disappear": truths("entryObserved actualMissingReturn changedIssue missingNotTrusted"),
+        "ending-metadata-case": truths("genuineFileEof writeMetadataChanged fileChangeVeto genuineDirectoryEof "
+                                       "caseFlagsChanged directoryCaseVeto attributesRestored"),
+        "drive-map-change": {**truths("aliasInitiallyAbsent localNonSystemToken initialVolumeMapping endingSubtreeMapping "
+                                     "changedIssue mappingRemoved"), "laterProjectOpens": 0},
+        "oplock-release": truths("grantPending originalReaderEntered breakSignalled completionKnown blockedBeforeRelease "
+                                 "holderCloseReturned observerJoined eventCloseReturned originalReaderReturned"),
+        "oplock-withhold": {**truths("grantPending originalReaderEntered breakSignalled completionKnown originalProcessStopped"),
+                            "readerReturnedBeforeStop": False, "holderReleasedBeforeStop": False},
+        "pending-failstop": {"originalParentHeld": True, "realFsctlEntry": True, "afterCallMarker": False, "originalExitCode": 70},
+    }[name]
+    checks = closed_object(value, set(expected), "Windows case-check fields differ")
+    for field, rule in expected.items():
+        actual = checks[field]
+        require(integer_between(actual, *rule) if type(rule) is tuple else type(actual) is type(rule) and actual == rule,
+                "A required Windows native predicate is not established")
+
+
+def validate_windows_result(name: str, value: object) -> str | None:
+    result = closed_object(value, {"return", "code", "configState", "partial", "scan", "issueCodes", "dtoSha256"},
+                           "Windows result fields differ")
+    errors = {
+        "closed-gate": {"platform_unavailable"}, "reparse-root": {"unsafe_path", "snapshot_unavailable"},
+        "reparse-ancestor": {"unsafe_path", "snapshot_unavailable"},
+        "root-reparse-race": {"unsafe_path", "snapshot_unavailable"},
+        "short-alias": {"unsafe_path", "snapshot_unavailable"}, "case-alias": {"unsafe_path", "snapshot_unavailable"},
+        "subst-drive": {"snapshot_unavailable"}, "unc": {"unsafe_path"}, "device": {"unsafe_path"}, "ads": {"unsafe_path"},
+        "oplock-withhold": {"query_timeout"}, "pending-failstop": {"engine_failed"},
+    }
+    if name in errors:
+        require(result["return"] == "error" and type(result["code"]) is str and result["code"] in errors[name]
+                and all(result[field] is None for field in ("configState", "partial", "scan", "dtoSha256"))
+                and result["issueCodes"] == [], "Windows required refusal/owner failure differs")
+        return result["code"]
+    require(result["return"] == "ok" and result["code"] is None and type(result["configState"]) is str
+            and result["configState"] in {"missing", "format-valid", "invalid", "unavailable"}
+            and type(result["partial"]) is bool and sha256_value(result["dtoSha256"]), "Windows snapshot result differs")
+    scan = closed_object(result["scan"], {"entries", "sourceFiles", "sourceBytes", "excludedEntries"}, "Windows scan fields differ")
+    for field, limit in (("entries", 10000), ("sourceFiles", 128), ("sourceBytes", 8388608), ("excludedEntries", 10000)):
+        require(integer_between(scan[field], 0, limit), "Windows snapshot scan bound differs")
+    codes = result["issueCodes"]
+    require(type(codes) is list and len(codes) <= 64
+            and all(type(code) is str and code in WINDOWS_SNAPSHOT_ISSUES for code in codes), "Windows issue-code vocabulary differs")
+    if name in {"ordinary-source", "ordinary-zip"}:
+        require(result["configState"] == "format-valid" and result["partial"] is False and not codes,
+                "Ordinary Windows snapshot was not complete")
+    elif name != "oplock-release":
+        require(result["partial"] is True and bool(codes), "A changed/excluded Windows input was reported as complete")
+    if name in {"config-reparse-race", "case-mode-race", "acl-type", "config-disappear", "drive-map-change"}:
+        require(result["configState"] == "unavailable", "Unavailable configuration was treated as trustworthy")
+    required_codes = {
+        "entry-limit": {"snapshot.entry-limit"}, "candidate-limit": {"snapshot.file-limit"},
+        "aggregate-limit": {"snapshot.byte-limit"}, "depth-path-limit": {"snapshot.depth-limit", "snapshot.path-limit"},
+        "replace": {"snapshot.changed"}, "disappear": {"snapshot.changed"}, "config-disappear": {"snapshot.changed"},
+        "ending-metadata-case": {"snapshot.changed"}, "drive-map-change": {"snapshot.changed"},
+        "read-eof-size": {"snapshot.encoding", "snapshot.file-size"},
+    }.get(name, set())
+    require(required_codes <= set(codes), "Windows result does not contain the control's actual required issue")
+    return None
+
+
+def validate_windows_original(name: str, value: object, error: str | None) -> None:
+    original = closed_object(value, {"id", *WINDOWS_ORIGINAL_FLAGS, "waitExitCode", "exitSuccess", "stdoutBytes",
+                                    "stderrBytes", "unknownLatched", "disabled", "errorCode"},
+                             "Windows original-owner fields differ")
+    require(original["id"] == "query-1" and all(original[field] is True for field in WINDOWS_ORIGINAL_FLAGS)
+            and original["unknownLatched"] is False and original["disabled"] is False
+            and original["errorCode"] == error, "Windows original ownership or sticky outcome is incomplete")
+    abnormal = name in {"oplock-withhold", "pending-failstop"}
+    require(type(original["exitSuccess"]) is bool and original["exitSuccess"] is not abnormal
+            and integer_between(original["waitExitCode"], -(2**31), 2**32 - 1)
+            and (original["waitExitCode"] != 0 if abnormal else original["waitExitCode"] == 0),
+            "Windows original process status differs")
+    if name == "pending-failstop":
+        require(original["waitExitCode"] == 70, "Windows pending classifier did not return its fixed process status")
+    require(integer_between(original["stdoutBytes"], 0 if abnormal else 1, 4 * 1024 * 1024)
+            and integer_between(original["stderrBytes"], 0, 64 * 1024), "Windows original stream observations exceed bounds")
+
+
+def validate_windows_reader(name: str, value: object) -> None:
+    reader = closed_object(value, {"state", "calls", *WINDOWS_READER_COUNTERS, "eventSha256", "closeDisposition"},
+                           "Windows reader fields differ")
+    if name == "closed-gate":
+        require(reader["state"] == reader["closeDisposition"] == "uninstrumented" and reader["calls"] == []
+                and all(reader[field] is None for field in (*WINDOWS_READER_COUNTERS, "eventSha256")),
+                "Uninstrumented Windows refusal invented native observations")
+        return
+    abnormal = name in {"oplock-withhold", "pending-failstop"}
+    require(reader["state"] == ("prefix" if abnormal else "complete")
+            and reader["closeDisposition"] == ("not-observed-after-abnormal-exit" if abnormal else "returned-once")
+            and sha256_value(reader["eventSha256"]), "Windows reader observation scope differs")
+    for field in WINDOWS_READER_COUNTERS:
+        maximum = {"maxLive": 144, "live": 144, "maxBufferBytes": 65536, "readBytes": 8388608}.get(field, 1000000)
+        require(integer_between(reader[field], 0, maximum), "Windows reader counter exceeds its bound")
+    calls = reader["calls"]
+    require(type(calls) is list and len(calls) == len(WINDOWS_READER_APIS), "Windows reader API roster differs")
+    for call, api in zip(calls, WINDOWS_READER_APIS, strict=True):
+        call = closed_object(call, {"api", "entered", "returned", "completed", "errors"}, "Windows reader API fields differ")
+        require(call["api"] == api and all(integer_between(call[field], 0, 1000000)
+                for field in ("entered", "returned", "completed", "errors")), "Windows reader API counter differs")
+        require(call["errors"] <= call["completed"] <= call["returned"] <= call["entered"], "Windows call classification order differs")
+        if not abnormal:
+            require(call["entered"] == call["returned"] == call["completed"], "Windows entered call is not classified")
+    require(reader["outsideReads"] == reader["outsideDescent"] == reader["violations"] == 0,
+            "Windows reader crossed an excluded input boundary")
+    require(reader["outsideAcquired"] == reader["aliasMetadataAcquired"]
+            and (name == "link-children" or reader["outsideAcquired"] == 0), "Windows outside referent was acquired")
+    by_api = {call["api"]: call for call in calls}
+    opens, closes = by_api["NtCreateFile"], by_api["CloseHandle"]
+    reads, information = by_api["ReadFile"], by_api["GetFileInformationByHandleEx"]
+    require(reader["rootOpens"] + reader["relativeOpens"] == opens["entered"]
+            and reader["acquired"] == opens["completed"] - opens["errors"]
+            and reader["closeAttempts"] == closes["entered"]
+            and reader["closeSucceeded"] == closes["completed"] - closes["errors"]
+            and reader["closeFailed"] == closes["errors"] == 0
+            and reader["closeSucceeded"] == reader["closeAttempts"] <= reader["acquired"]
+            and reader["live"] == reader["acquired"] - reader["closeAttempts"]
+            and reader["live"] <= reader["maxLive"] <= reader["acquired"],
+            "Windows reader original-open/close accounting is inconsistent")
+    require(reader["identitiesMatched"] == reader["metadataChecks"] <= by_api["GetFileType"]["completed"]
+            and 4 * reader["metadataChecks"] + reader["directoryEof"] <= information["completed"]
+            and reader["readEof"] <= reads["completed"] - reads["errors"] <= reads["entered"] <= reader["readCalls"]
+            and reader["readBytes"] <= 65536 * (reads["completed"] - reads["errors"] - reader["readEof"])
+            and reader["directoryEof"] <= reader["directoryCalls"]
+            and reader["directoryEof"] <= information["errors"]
+            and reader["eventCount"] >= sum(call["completed"] for call in calls),
+            "Windows reader identity/read/EOF observations contradict original calls")
+    if reader["acquired"]:
+        require(reader["maxLive"] > 0 and reader["eventCount"] > 0, "Windows reader acquisition has no resource observations")
+    if reader["readCalls"] or reader["directoryCalls"] or reader["metadataChecks"]:
+        require(reader["acquired"] > 0 and reader["maxBufferBytes"] > 0,
+                "Windows reader IO has no acquired original or output arena")
+    if not abnormal:
+        require(reader["acquired"] == reader["closeAttempts"] == reader["closeSucceeded"]
+                and reader["closeFailed"] == reader["live"] == 0, "Windows reader original closes are incomplete")
+    if name in {"ordinary-source", "ordinary-zip", "oplock-release"}:
+        require(reader["rootOpens"] == 1 and reader["relativeOpens"] > 0 and reader["metadataChecks"] > 0
+                and reader["identitiesMatched"] > 0 and reader["readEof"] > 0 and reader["directoryEof"] > 0,
+                "Ordinary Windows handles, identity or EOF were not observed")
+    if name in {"unc", "device", "ads"}:
+        require(all(call["entered"] == 0 for call in calls) and reader["acquired"] == 0,
+                "Unsafe Windows namespace reached the reader API")
+    else:
+        require(by_api["GetCurrentProcess"]["completed"] == by_api["IsWow64Process2"]["completed"] == 1
+                and by_api["QueryDosDeviceW"]["completed"] > 0, "Windows reader native admission was not observed")
+    if abnormal:
+        pending_api = "NtCreateFile" if name == "oplock-withhold" else "DeviceIoControl"
+        require(reader["rootOpens"] == 1 and reader["relativeOpens"] > 0 and reader["live"] > 0
+                and reader["identitiesMatched"] > 0
+                and all(call["entered"] - call["returned"] == (1 if call["api"] == pending_api else 0)
+                        and call["returned"] == call["completed"] for call in calls),
+                "Windows abnormal prefix lacks its retained parent or exact unmatched native entry")
+
+
+def validate_windows_fixture(name: str, value: object, bindings: dict) -> None:
+    fixture = closed_object(value, {"state", *WINDOWS_FIXTURE_COUNTERS, "pending", "thread", "event", "restored",
+                                   "resourcesSettledBy", "data", "profile", "checks"}, "Windows fixture fields differ")
+    validate_windows_checks(name, fixture["checks"])
+    if name == "closed-gate":
+        require(fixture["state"] == fixture["resourcesSettledBy"] == "uninstrumented"
+                and all(fixture[field] is None for field in (*WINDOWS_FIXTURE_COUNTERS, "restored", "data", "profile"))
+                and all(fixture[field] == "none" for field in ("pending", "thread", "event")),
+                "Uninstrumented Windows refusal invented fixture observations")
+        return
+    abnormal = name in {"oplock-withhold", "pending-failstop"}
+    require(fixture["state"] == ("prefix" if abnormal else "complete")
+            and fixture["resourcesSettledBy"] == ("original-process" if abnormal else "returned-closes"),
+            "Windows fixture settlement class differs")
+    for field in WINDOWS_FIXTURE_COUNTERS:
+        require(integer_between(fixture[field], 0, {"live": 32, "maxLive": 32, "maxArenaBytes": 131072}.get(field, 1000000)),
+                "Windows fixture counter exceeds its bound")
+    require(fixture["closeSucceeded"] == fixture["closeAttempts"] <= fixture["acquired"]
+            and fixture["closeFailed"] == 0 and fixture["live"] == fixture["acquired"] - fixture["closeAttempts"]
+            and fixture["live"] <= fixture["maxLive"] <= fixture["acquired"]
+            and fixture["maxLive"] > 0 and fixture["maxArenaBytes"] > 0, "Windows fixture accounting is inconsistent")
+    if abnormal:
+        require(fixture["restored"] is None and fixture["event"] == "retained"
+                and fixture["pending"] == ("completed" if name == "oplock-withhold" else "retained")
+                and fixture["thread"] == ("not-observed" if name == "oplock-withhold" else "none"),
+                "Abnormal Windows exit invented in-process cleanup")
+        require(fixture["live"] >= 2 and fixture["maxLive"] >= 2 and fixture["maxArenaBytes"] >= 36,
+                "Windows pending prefix lacks its retained holder/event/OVERLAPPED resources")
+    else:
+        require(fixture["restored"] is True and fixture["acquired"] == fixture["closeAttempts"] == fixture["closeSucceeded"]
+                and fixture["live"] == fixture["closeFailed"] == 0, "Windows fixture restoration/closes are incomplete")
+        require((fixture["pending"], fixture["thread"], fixture["event"])
+                == (("completed", "joined", "closed") if name == "oplock-release" else ("none", "none", "none")),
+                "Windows pending IO or thread/event settlement differs")
+        if name == "oplock-release":
+            require(fixture["acquired"] >= 2 and fixture["maxLive"] >= 2 and fixture["maxArenaBytes"] >= 36,
+                    "Windows released oplock lacks its original resource observations")
+    data = closed_object(fixture["data"], {"entries", "bytes", "maxDepth", "manifestSha256", "after"}, "Windows fixture data fields differ")
+    require(integer_between(data["entries"], 3, 12000) and integer_between(data["bytes"], 0, 32 * 1024 * 1024)
+            and integer_between(data["maxDepth"], 0, 14) and sha256_value(data["manifestSha256"]), "Windows fixture data exceeds its bound")
+    after = closed_object(data["after"], {"entries", "bytes", "maxDepth", "inventorySha256"}, "Windows final payload inventory is missing")
+    require(integer_between(after["entries"], 3, 12000) and integer_between(after["bytes"], 0, 32 * 1024 * 1024)
+            and integer_between(after["maxDepth"], 0, 14) and sha256_value(after["inventorySha256"]),
+            "Windows actual post-settlement payload exceeds its bound")
+    profile = closed_object(fixture["profile"], {"pointerBytes", "processMachine", "nativeMachine", "filesystem",
+                                              "pythonSha256", "ctypesSha256", "dlls", "layoutSha256", "sdkSha256"},
+                            "Windows native profile fields differ")
+    require(type(profile["pointerBytes"]) is int and profile["pointerBytes"] == 8
+            and type(profile["processMachine"]) is int and profile["processMachine"] == 0
+            and type(profile["nativeMachine"]) is int and profile["nativeMachine"] == 34404
+            and profile["filesystem"] == "NTFS" and profile["pythonSha256"] == bindings["pythonSha256"]
+            and all(sha256_value(profile[field]) for field in ("ctypesSha256", "layoutSha256", "sdkSha256"))
+            and profile["sdkSha256"] == hashlib.sha256(canonical_json(bindings["sdk"])).hexdigest(),
+            "Windows native architecture/SDK profile differs")
+    dlls = profile["dlls"]
+    require(type(dlls) is list and len(dlls) == 3, "Windows selected DLL roster differs")
+    for dll, expected in zip(dlls, ("kernel32.dll", "ntdll.dll", "advapi32.dll"), strict=True):
+        dll = closed_object(dll, {"name", "sha256", "size"}, "Windows selected DLL fields differ")
+        require(dll["name"] == expected and sha256_value(dll["sha256"]) and integer_between(dll["size"], 1, 64 * 1024 * 1024),
+                "Windows selected DLL identity differs")
+
+
+def validate_windows_snapshot_receipt(receipt: object, *, bindings: dict) -> dict:
+    report = closed_object(receipt, {"schemaVersion", "scope", "status", "failureCode", "bindings", "groups",
+                                    "allOwnersSettled", "allFixtureResourcesSettled", "allFixturesRestored",
+                                    "cleanupDisposition", "notVerified"}, "Windows receipt fields differ")
+    require(type(report["schemaVersion"]) is int and report["schemaVersion"] == 1
+            and report["scope"] == WINDOWS_SNAPSHOT_RECEIPT_SCOPE and report["status"] == "passed"
+            and report["failureCode"] is None and report["cleanupDisposition"] == "proven-settled"
+            and all(report[field] is True for field in ("allOwnersSettled", "allFixtureResourcesSettled", "allFixturesRestored"))
+            and report["notVerified"] == list(WINDOWS_SNAPSHOT_NOT_VERIFIED), "Windows receipt is not a complete bounded pass")
+    # Byte equality of closed canonical data also distinguishes bool from int.
+    require(canonical_json(report["bindings"]) == canonical_json(bindings), "Windows receipt source/run/profile bindings differ")
+    groups = report["groups"]
+    require(type(groups) is list and len(groups) == len(WINDOWS_SNAPSHOT_GROUPS), "Windows native group roster is incomplete")
+    for group, (expected_group, names) in zip(groups, WINDOWS_SNAPSHOT_GROUPS, strict=True):
+        group = closed_object(group, {"id", "controls"}, "Windows native group fields differ")
+        require(group["id"] == expected_group and type(group["controls"]) is list and len(group["controls"]) == len(names),
+                "Windows native controls are missing, reordered or duplicated")
+        for control, name in zip(group["controls"], names, strict=True):
+            control = closed_object(control, {"id", "coreMode", "bootstrapMode", "evidenceKind", "result", "reader", "fixture",
+                                              "original", "elapsedMs", "failureCode"}, "Windows native control fields differ")
+            evidence = {"closed-gate": "uninstrumented-public-refusal", "oplock-withhold": "original-process-oplock-stop",
+                        "pending-failstop": "instrumented-pending-classifier-exit"}.get(name, "native-static-reader")
+            require(control["id"] == name and control["coreMode"] == ("zip" if name == "ordinary-zip" else "source")
+                    and control["bootstrapMode"] == ("ordinary" if name == "closed-gate" else "windows-snapshot")
+                    and control["evidenceKind"] == evidence and control["failureCode"] is None
+                    and integer_between(control["elapsedMs"], 0, 45000), "Windows native control scope differs")
+            error = validate_windows_result(name, control["result"])
+            validate_windows_original(name, control["original"], error)
+            validate_windows_reader(name, control["reader"])
+            validate_windows_fixture(name, control["fixture"], bindings)
+            charged = {"entry-limit": ("entries", "chargedEntries"), "candidate-limit": ("sourceFiles", "chargedCandidates"),
+                       "aggregate-limit": ("sourceBytes", "chargedBytes")}.get(name)
+            if charged:
+                require(control["result"]["scan"][charged[0]] == control["fixture"]["checks"][charged[1]],
+                        "Windows native charged count and genuine snapshot scan differ")
+    return report
 
 
 def validate_native_receipt(receipt: object, *, source_sha: str, platform: str, core_zip_hash: str) -> dict:
@@ -1257,8 +2140,604 @@ def config_delta_receipt(context: dict, kind: str) -> dict:
         python_hash=hash_file(Path(context["python"])))
 
 
+GITHUB_READONLY_RECEIPT_LIMIT = 128 * 1024
+GITHUB_READONLY_CASES = (
+    "g1-correct", "g1-passive-envelope", "g1-wrong-id", "g1-wrong-protocol",
+    "g1-truncated", "g1-extra-frames", "g1-nonzero-exit", "g1-delay-exit",
+    "g1-stdout-limit", "g1-stderr-limit", "g1-stalled-input", "g1-mixed-abandon",
+    "g1-controlled-inspection", "g1-controlled-acquisition", "g1-controlled-io-join",
+    "g1-controlled-management", "g1-controlled-management-late",
+    "g1-document-connect-refresh", "g1-document-disconnect-held",
+    "g1-document-registry-change", "g1-document-loss", "g1-document-unknown-late",
+    "g1-document-terminal-unknown",
+)
+GITHUB_READONLY_NOT_VERIFIED = (
+    "live-transport", "authenticated-remote-facts", "native-gui",
+    "webview-callbacks-or-crash-hook", "production-runtime-custody",
+    "production-github-enablement", "native-stuck-wait-close", "macos-windows-github",
+    "credentials", "stores", "mobile-builds", "installers",
+)
+GITHUB_READONLY_HASH_BINDINGS = (
+    "coreZipSha256", "engineSha256", "bootstrapSha256", "cargoLockSha256",
+    "fixtureSha256", "githubBootstrapSha256", "githubFixtureSha256", "packageSha256",
+    "pythonSha256",
+)
+GITHUB_READONLY_BINDINGS = {
+    "sourceSha", "host", "target", "runtimeMode", "pythonBytes",
+    *GITHUB_READONLY_HASH_BINDINGS,
+}
+_GITHUB_READONLY_OWNER_LATE = frozenset({
+    "g1-controlled-inspection", "g1-controlled-acquisition", "g1-controlled-io-join",
+    "g1-controlled-management-late",
+})
+_GITHUB_READONLY_STICKY = _GITHUB_READONLY_OWNER_LATE | {
+    "g1-document-unknown-late", "g1-document-terminal-unknown",
+}
+_GITHUB_READONLY_FIRST_ERRORS = {
+    **dict.fromkeys(("g1-passive-envelope", "g1-wrong-id", "g1-wrong-protocol",
+                    "g1-truncated", "g1-extra-frames"), "protocol_error"),
+    "g1-nonzero-exit": "engine_failed",
+    "g1-stdout-limit": "output_limit", "g1-stderr-limit": "output_limit",
+    "g1-stalled-input": "query_timeout",
+    **dict.fromkeys(_GITHUB_READONLY_OWNER_LATE, "shutting_down"),
+    "g1-document-disconnect-held": "cancelled", "g1-document-loss": "cancelled",
+    "g1-document-unknown-late": "cancelled",
+    "g1-document-terminal-unknown": "shutting_down",
+}
+_GITHUB_READONLY_LATE_NOTES = (
+    "retainedWhileUnknown", "newPassiveAndGitHubAdmissionRefused",
+    "originalCleanupEndpointUnchanged", "lateJoinPreservedFailure",
+    "terminalReceiptAndSettledAtImmutable",
+)
+_GITHUB_READONLY_NOTES = {
+    "g1-correct": ("typedGitHubMailbox", "terminalReceiptAndSettledAtImmutable"),
+    "g1-nonzero-exit": ("validOutputDidNotSalvageFailedExit",),
+    "g1-delay-exit": ("mailboxPendingAfterBothEofs",),
+    "g1-stalled-input": ("originalOperationDeadlineObserved", "originalCleanupEndpointUnchanged",
+                         "unreadInputIsNotBlockedWriterEvidence"),
+    "g1-mixed-abandon": ("sharedTwoSlotLimit", "originalRetainedAfterTicketDrop",
+                         "droppedTicketOriginalReturnedTypedSuccess"),
+    "g1-controlled-inspection": (*_GITHUB_READONLY_LATE_NOTES,
+        "noChildBeforeHeldStartupReturn", "noLateChildAfterCleanupExpiry"),
+    "g1-controlled-acquisition": (*_GITHUB_READONLY_LATE_NOTES,
+        "noChildBeforeHeldStartupReturn", "noLateChildAfterCleanupExpiry"),
+    "g1-controlled-io-join": (*_GITHUB_READONLY_LATE_NOTES,
+        "nativeExitAndEofBeforeStdoutJoin", "lateOriginalStdoutJoined"),
+    "g1-controlled-management": ("nativeSettledBeforeManagementReturns", "driverReturnHeldBeforeMailbox",
+                                 "watchdogReturnHeldBeforeMailbox", "terminalReceiptAndSettledAtImmutable"),
+    "g1-controlled-management-late": (*_GITHUB_READONLY_LATE_NOTES, "nativeSettledBeforeWatchdogReturn"),
+    "g1-document-connect-refresh": ("ordinaryAndUnrelatedRefusedBeforeDecode", "statusStartsNoRead",
+                                    "refreshPinsAndOriginalExpiryPreserved"),
+    "g1-document-disconnect-held": ("wrongSessionUnchanged", "pendingMaterialRetained",
+                                    "originalCleanupEndpointUnchanged", "lateReceiptCannotRestoreSession"),
+    "g1-document-registry-change": ("registryRecheckedBeforePositiveReceipt",),
+    "g1-document-loss": ("actualLossPathRetiredSynchronously", "newAdmissionRefusedAfterLoss",
+                         "lateReceiptCannotRestoreSession"),
+    "g1-document-unknown-late": ("pendingMaterialRetained", "originalCleanupEndpointUnchanged",
+                                 "lateSettlementPreservedUnknown", "originalSettledAtImmutable"),
+    "g1-document-terminal-unknown": ("terminalOperationUsesReservedUnknownIdentity",
+                                     "settledDocumentDoesNotReplaceOwnerFinality"),
+}
+
+
+def _github_readonly_terminal(first_error: str | None, unknown: bool) -> dict:
+    if unknown:
+        return {"return": "error", "code": "cleanup_unknown", "wasUnknown": True}
+    if first_error is not None:
+        return {"return": "error", "code": first_error, "wasUnknown": False}
+    return {"return": "github-facts", "wasUnknown": False}
+
+
+def _validate_github_readonly_native(value: object, name: str, profile: str) -> None:
+    diagnostic = f"GitHub readonly {name} original native observations differ"
+    native = closed_object(value, {
+        "inspection_joined", "acquisition_joined", "spawned", "waited", "exit_success",
+        "writer_joined", "writer_complete", "stdout_eof", "stderr_eof", "stdout_joined",
+        "stderr_joined", "stdout_bytes", "stderr_bytes", "driver_joined", "watchdog_joined",
+    }, diagnostic)
+    startup = name in {"g1-controlled-inspection", "g1-controlled-acquisition"}
+    for field in ("inspection_joined", "driver_joined", "watchdog_joined"):
+        require(native[field] is True, diagnostic)
+    require(native["acquisition_joined"] is (name != "g1-controlled-inspection"), diagnostic)
+    for field in ("spawned", "waited", "writer_joined", "stdout_eof", "stderr_eof", "stdout_joined", "stderr_joined"):
+        require(native[field] is (not startup), diagnostic)
+    if name == "g1-stalled-input":
+        # Unread <=8KiB can fit into a pipe. This row proves the real operation
+        # deadline and original writer JOIN, not a blocked/incomplete write.
+        require(type(native["writer_complete"]) is bool, diagnostic)
+    else:
+        require(native["writer_complete"] is (not startup), diagnostic)
+    if startup:
+        require(native["exit_success"] is None, diagnostic)
+    elif name in {"g1-stdout-limit", "g1-stderr-limit"}:
+        # The real child may finish or be stopped after the output limit latches.
+        # Neither exit status can turn the required typed failure into success.
+        require(type(native["exit_success"]) is bool, diagnostic)
+    else:
+        require(native["exit_success"] is (name not in {
+            "g1-nonzero-exit", "g1-stalled-input", "g1-document-loss",
+        }), diagnostic)
+    zero_stdout = startup or name in {"g1-stalled-input", "g1-stderr-limit", "g1-document-loss"}
+    stdout_limit = 4 * 1024 * 1024 if profile == "passive" else 64 * 1024
+    require(integer_between(native["stdout_bytes"], 0 if zero_stdout else 1,
+                            0 if zero_stdout else stdout_limit), diagnostic)
+    require(integer_between(native["stderr_bytes"], 1 if name == "g1-stderr-limit" else 0,
+                            64 * 1024 if name == "g1-stderr-limit" else 0), diagnostic)
+
+
+def validate_github_readonly_receipt(value: object, *, bindings: dict) -> dict:
+    """Closed redacted G1 DATA contract; expected bindings come from outside it.
+
+    Never derive ``bindings`` from the received receipt. The caller must bind
+    them to the admitted original source, runtime and compiled fixture bytes,
+    and separately retain the workflow/run/attempt and full source inventory.
+    Passing this consumer is not native or production-enablement evidence.
+    """
+    expected = closed_object(bindings, GITHUB_READONLY_BINDINGS, "GitHub readonly expected bindings differ")
+    require(type(expected["sourceSha"]) is str and re.fullmatch(r"[0-9a-f]{40}", expected["sourceSha"]) is not None
+            and expected["sourceSha"] != "0" * 40, "GitHub readonly expected source identity differs")
+    require(same_compile_json({key: expected[key] for key in ("host", "target", "runtimeMode")}, {
+        "host": "linux", "target": "x86_64-unknown-linux-gnu", "runtimeMode": "trusted-development-only",
+    }), "GitHub readonly expected platform or runtime differs")
+    require(all(sha256_value(expected[key]) for key in GITHUB_READONLY_HASH_BINDINGS)
+            and integer_between(expected["pythonBytes"], 1, 512 * 1024 * 1024),
+            "GitHub readonly expected input hashes or Python size differ")
+    receipt = closed_object(value, {
+        "schemaVersion", "scope", "status", "allOwnersSettled", "failureCode", "bindings", "cases", "notVerified",
+    }, "GitHub readonly receipt fields differ")
+    require(same_compile_json({key: receipt[key] for key in (
+        "schemaVersion", "scope", "status", "allOwnersSettled", "failureCode", "notVerified",
+    )}, {
+        "schemaVersion": 1, "scope": "github-readonly-hosted-v1", "status": "passed",
+        "allOwnersSettled": True, "failureCode": None, "notVerified": list(GITHUB_READONLY_NOT_VERIFIED),
+    }), "GitHub readonly receipt header or limitations differ")
+    require(same_compile_json(receipt["bindings"], expected), "GitHub readonly independently bound inputs differ")
+    require(type(receipt["cases"]) is list and len(receipt["cases"]) == len(GITHUB_READONLY_CASES),
+            "GitHub readonly receipt case roster differs")
+    for name, supplied in zip(GITHUB_READONLY_CASES, receipt["cases"], strict=True):
+        diagnostic = f"GitHub readonly {name} case contract differs"
+        case = closed_object(supplied, {
+            "case", "passed", "failureCode", "elapsedMs", "evidenceKind", "results", "notes",
+            "owners", "registeredOwners", "disabled",
+        }, diagnostic)
+        document = name.startswith("g1-document-")
+        sticky = name in _GITHUB_READONLY_STICKY
+        kind = ("controlled-document-original-owner" if document else
+                "scheduling-control-not-os-fault" if name.startswith("g1-controlled-") else "actual-private-frame-child")
+        require(same_compile_json({key: case[key] for key in (
+            "case", "passed", "failureCode", "evidenceKind", "registeredOwners", "disabled",
+        )}, {"case": name, "passed": True, "failureCode": None, "evidenceKind": kind,
+             "registeredOwners": 0, "disabled": sticky}), diagnostic)
+        # No small machine-speed upper bound; the original native finality and
+        # byte/structure bounds still apply. A shortened original clock cannot pass.
+        minimum_ms = 10000 if name == "g1-stalled-input" else 2000 if sticky else 0
+        require(type(case["elapsedMs"]) is int and case["elapsedMs"] >= minimum_ms, diagnostic)
+        notes = {"originalRetentionSettled": True, **dict.fromkeys(_GITHUB_READONLY_NOTES.get(name, ()), True)}
+        if document:
+            notes.update(documentEvidence="controlled-original-lifetime-not-gui-callbacks",
+                         sourceBooksSettled=2 if name == "g1-document-registry-change" else 1,
+                         documentMaterialSettled=True)
+        require(same_compile_json(case["notes"], notes), f"GitHub readonly {name} lifecycle evidence differs")
+        owner_specs = [("github-read-1", "github-readonly")]
+        if name == "g1-mixed-abandon":
+            owner_specs.append(("query-2", "passive"))
+        elif name in {"g1-document-connect-refresh", "g1-document-terminal-unknown"}:
+            owner_specs.append(("github-read-2", "github-readonly"))
+        require(type(case["owners"]) is list and len(case["owners"]) == len(owner_specs),
+                f"GitHub readonly {name} original owner roster differs")
+        for index, ((identity, profile), supplied_owner) in enumerate(zip(owner_specs, case["owners"], strict=True)):
+            owner = closed_object(supplied_owner, {
+                "id", "terminal", "unknownLatched", "permitRetained", "native", "profile",
+                "observerJoined", "firstError", "receipt",
+            }, f"GitHub readonly {name} original owner fields differ")
+            earlier_healthy = name == "g1-document-terminal-unknown" and index == 0
+            unknown = sticky and not earlier_healthy
+            first_error = None if earlier_healthy else _GITHUB_READONLY_FIRST_ERRORS.get(name)
+            terminal = None if profile == "passive" else _github_readonly_terminal(first_error, unknown)
+            require(same_compile_json({key: owner[key] for key in owner if key != "native"}, {
+                "id": identity, "terminal": True, "unknownLatched": unknown, "permitRetained": False,
+                "profile": profile, "observerJoined": True, "firstError": first_error, "receipt": terminal,
+            }), f"GitHub readonly {name} original finality or typed receipt differs")
+            _validate_github_readonly_native(owner["native"], name, profile)
+        if document:
+            results = []  # Document receipts live on the same original owners.
+        elif name == "g1-mixed-abandon":
+            results = [{"return": "error", "code": "busy"},
+                       {"return": "ticket-dropped", "ownerRetained": True}, {"return": "ok"}]
+        else:
+            results = [_github_readonly_terminal(_GITHUB_READONLY_FIRST_ERRORS.get(name), sticky)]
+            if name in _GITHUB_READONLY_OWNER_LATE:
+                results.insert(0, {"return": "retained-unknown"})
+        require(same_compile_json(case["results"], results), f"GitHub readonly {name} ordered results differ")
+    require(len(canonical_json(receipt)) <= GITHUB_READONLY_RECEIPT_LIMIT, "GitHub readonly receipt exceeds its bound")
+    return receipt
+
+
+def parse_github_readonly_receipt(raw: bytes, *, bindings: dict) -> dict:
+    """No IO: bound the actual bytes before decoding the closed DATA contract."""
+    require(type(raw) is bytes and 0 < len(raw) <= GITHUB_READONLY_RECEIPT_LIMIT,
+            "GitHub readonly receipt bytes exceed their bound or differ in type")
+    return validate_github_readonly_receipt(bounded_json(raw, GITHUB_READONLY_RECEIPT_LIMIT), bindings=bindings)
+
+
+def github_readonly_binding(environment: dict[str, str]) -> dict[str, str]:
+    """Exact private fixture lane, never a token/product or release capability."""
+    sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
+    run_id, attempt = environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
+    require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None,
+            "G1 source identity differs")
+    require(all(re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None for value in (run_id, attempt)),
+            "G1 run identity differs")
+    require(environment.get("GITHUB_REF") == GITHUB_READONLY_REF
+            and environment.get("GITHUB_WORKFLOW_SHA") == sha
+            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{GITHUB_READONLY_WORKFLOW}@{GITHUB_READONLY_REF}",
+            "G1 workflow/ref binding differs")
+    event = environment.get("GITHUB_EVENT_NAME")
+    require(event == "push" or event == "workflow_dispatch" and environment.get("MRK_EXPECTED_SHA") == sha,
+            "G1 event or exact dispatch source differs")
+    return {"workflowPath": GITHUB_READONLY_WORKFLOW, "workflowSha": sha,
+            "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
+            "runId": run_id, "attempt": attempt}
+
+
+def github_original_directories(context: dict) -> dict:
+    root = Path(context["root"])
+    return {"root": workflow_directory_identity(root), "source": workflow_directory_identity(Path(context["source"])),
+            **{name: workflow_directory_identity(root / name) for name in GITHUB_READONLY_DIRECTORIES}}
+
+
+def github_input_bindings(context: dict) -> dict:
+    source, root, python = Path(context["source"]), Path(context["root"]), Path(context["python"])
+    core = workflow_core_inventory(source)
+    validate_gtk_core_inventory(core)  # The same literal 72-file core inventory; no GTK execution.
+    ordinary(python)
+    size = python.stat().st_size
+    require(0 < size <= 512 * 1024 * 1024, "G1 Python executable size differs")
+    return {"sourceFiles": fixed_file_inventory(source, GITHUB_READONLY_SOURCES), "coreFiles": core,
+            "coreZipSha256": hash_file(root / "core.zip"), "pythonSha256": hash_file(python), "pythonBytes": size}
+
+
+def github_inputs_unchanged(context: dict) -> None:
+    """DATA-only observation: never invoke a tool after uncertain native work."""
+    require(context.get("executionScope") == GITHUB_READONLY_SCOPE and context.get("platform") == "linux",
+            "Wrong G1 input scope")
+    require(same_compile_json(github_original_directories(context), context["originalDirectories"]),
+            "G1 original directory identity changed")
+    require(same_compile_json(github_input_bindings(context), context["githubInputs"]),
+            "G1 original source/runtime inputs changed")
+
+
+def github_source_unchanged(context: dict) -> None:
+    source_unchanged(context)
+    environment = clean_environment(Path(context["root"]))
+    require(run([context["git"], "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=Path(context["source"]),
+                env=environment, timeout=15, capture=True) == context["sourceTree"], "G1 source tree changed")
+    require(run([context["git"], "status", "--porcelain=v1", "--untracked-files=all"], check="workflow-source-status",
+                cwd=Path(context["source"]), env=environment, timeout=15, capture=True) == "",
+            "G1 source contains unreviewed or generated inputs")
+    github_inputs_unchanged(context)
+
+
+def prepare_github_readonly_context(context: dict, inventory: list[dict]) -> None:
+    context["originalDirectories"] = github_original_directories(context)
+    context["observedHost"] = workflow_host(Path(context["root"]))
+    context["githubInputs"] = github_input_bindings(context)
+    require(same_compile_json(inventory, context["githubInputs"]["coreFiles"]), "G1 original ZIP/source inventory differs")
+    github_source_unchanged(context)
+
+
+def github_public_bindings(context: dict) -> dict:
+    return {"schemaVersion": 1, "scope": GITHUB_READONLY_EVIDENCE_SCOPE,
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha",
+                                           "workflowRef", "workflowSha256", "runId", "attempt", "githubInputs")},
+            "python": PYTHON, "rust": {"release": RUST, "target": TARGETS["linux"]},
+            "features": ["development-runtime"], "testTarget": "lib", "host": context["observedHost"],
+            "notVerified": list(GITHUB_READONLY_NOT_VERIFIED)}
+
+
+def github_owner_bindings(context: dict) -> dict:
+    inputs = context["githubInputs"]
+    files = {row["path"]: row["sha256"] for row in inputs["sourceFiles"]}
+    core = {row["path"]: row["sha256"] for row in inputs["coreFiles"]}
+    return {"sourceSha": context["sourceSha"], "host": "linux", "target": TARGETS["linux"],
+            "runtimeMode": "trusted-development-only", "coreZipSha256": inputs["coreZipSha256"],
+            "engineSha256": core["mobile_release/_desktop_engine.py"],
+            "bootstrapSha256": files["desktop/engine_bootstrap.py"],
+            "cargoLockSha256": files["desktop/src-tauri/Cargo.lock"],
+            "fixtureSha256": files["desktop/src-tauri/tests/fixtures/passive_core/_desktop_engine.py"],
+            "githubBootstrapSha256": files["desktop/github_connection_bootstrap.py"],
+            "githubFixtureSha256": files["desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py"],
+            "packageSha256": files["desktop/src-tauri/tests/fixtures/passive_core/__init__.py"],
+            "pythonSha256": inputs["pythonSha256"], "pythonBytes": inputs["pythonBytes"]}
+
+
+def github_owner_receipt(context: dict) -> dict:
+    return validate_github_readonly_receipt(
+        read_bounded_json(Path(context["root"]) / "github-owner/receipt.json", 128 * 1024),
+        bindings=github_owner_bindings(context))
+
+
+def github_executable_path(value: object, *, target_root: Path) -> Path:
+    require(type(value) is str and 0 < len(value) <= 16384 and "\0" not in value
+            and not any(part in {"", ".", ".."} for part in value.split("/")[1:]),
+            "G1 compiler executable path differs")
+    path = Path(value)
+    require(path.is_absolute() and target_root.is_absolute()
+            and path.parent == target_root / TARGETS["linux"] / "debug/deps"
+            and re.fullmatch(r"mobile_release_desktop-[0-9a-f]{16}", path.name) is not None,
+            "G1 compiler executable left the exact original target")
+    return path
+
+
+def github_compiled_test(messages: bytes, *, source: Path, target_root: Path) -> Path:
+    """One original Cargo result, not a glob, newest output or second build."""
+    require(type(messages) is bytes and 0 < len(messages) <= 16 * 1024 * 1024,
+            "G1 original compiler messages exceed their bound")
+    executable, finished = None, False
+    for line in messages.splitlines():
+        require(not finished, "G1 compiler data followed the final result")
+        row = bounded_json(line, 1024 * 1024)
+        require(type(row) is dict and type(row.get("reason")) is str, "Malformed G1 compiler message")
+        if row["reason"] == "compiler-artifact" and row.get("executable") is not None:
+            target, profile = row.get("target"), row.get("profile")
+            require(executable is None and type(target) is dict and target.get("kind") == ["lib"]
+                    and target.get("name") == "mobile_release_desktop"
+                    and target.get("src_path") == str(source / "desktop/src-tauri/src/lib.rs")
+                    and row.get("manifest_path") == str(source / "desktop/src-tauri/Cargo.toml")
+                    and type(profile) is dict and profile.get("test") is True and profile.get("debug_assertions") is True
+                    and row.get("features") == ["development-runtime"] and row.get("fresh") is False,
+                    "G1 original executable is not the requested fresh libtest")
+            executable = github_executable_path(row["executable"], target_root=target_root)
+        elif row["reason"] == "build-finished":
+            require(row.get("success") is True, "G1 original compilation failed")
+            finished = True
+    require(finished and executable is not None, "G1 original compilation did not yield exactly one libtest")
+    return executable
+
+
+def github_file_identity(path: Path) -> dict:
+    ordinary(path)
+    info = path.lstat()
+    return {"device": str(info.st_dev), "inode": str(info.st_ino), "mode": info.st_mode,
+            "uid": info.st_uid, "gid": info.st_gid, "size": info.st_size, "mtimeNs": info.st_mtime_ns}
+
+
+def github_artifact_identity(path: Path, root: Path) -> dict:
+    require(github_executable_path(str(path), target_root=root / "target") == path, "G1 artifact path differs")
+    for directory in (root, root / "target", root / "target" / TARGETS["linux"],
+                      root / "target" / TARGETS["linux"] / "debug", path.parent):
+        workflow_directory_identity(directory)
+    before = github_file_identity(path)
+    require(0 < before["size"] <= 512 * 1024 * 1024 and before["mode"] & 0o111
+            and before["uid"] == os.geteuid(), "G1 artifact kind, owner or size differs")
+    digest = hash_file(path)
+    require(same_compile_json(before, github_file_identity(path)), "G1 artifact changed while binding")
+    return {"identity": before, "size": before["size"], "sha256": digest}
+
+
+def github_compile_record(context: dict, argv: list[str], messages: Path) -> dict:
+    ordinary(messages)
+    require(messages.stat().st_size <= 16 * 1024 * 1024, "G1 compiler output exceeds its bound")
+    with messages.open("rb") as stream:
+        raw = stream.read(16 * 1024 * 1024 + 1)
+    root = Path(context["root"])
+    path = github_compiled_test(raw, source=Path(context["source"]), target_root=root / "target")
+    value = {"schemaVersion": 1, "sourceSha": context["sourceSha"], "sourceTree": context["sourceTree"],
+             "path": str(path), **github_artifact_identity(path, root),
+             "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(),
+             "messagesSha256": hashlib.sha256(raw).hexdigest()}
+    write_json(root / "github-compiled-test.json", value)
+    return value
+
+
+def github_original_artifact(context: dict) -> dict:
+    root = Path(context["root"])
+    value = closed_object(read_bounded_json(root / "github-compiled-test.json", 16384),
+        {"schemaVersion", "sourceSha", "sourceTree", "path", "identity", "size", "sha256", "invocationSha256", "messagesSha256"},
+        "G1 compiled artifact record differs")
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+            and value["sourceSha"] == context["sourceSha"] and value["sourceTree"] == context["sourceTree"]
+            and sha256_value(value["invocationSha256"]) and sha256_value(value["messagesSha256"]),
+            "G1 compiled artifact source differs")
+    path = github_executable_path(value["path"], target_root=root / "target")
+    require(same_compile_json({key: value[key] for key in ("identity", "size", "sha256")}, github_artifact_identity(path, root)),
+            "G1 original compiled artifact changed")
+    return value
+
+
+def github_phase_value(context: dict, name: str, checks: list[str]) -> dict:
+    require(name in GITHUB_READONLY_CHECKS, "Unknown G1 phase receipt")
+    value = {"schemaVersion": 1, "scope": GITHUB_READONLY_EVIDENCE_SCOPE, "phase": name, "status": "passed",
+             **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha",
+                                            "workflowRef", "workflowSha256", "runId", "attempt")},
+             "inputSha256": hashlib.sha256(canonical_json(context["githubInputs"])).hexdigest(),
+             "rust": {"release": RUST, "target": TARGETS["linux"]},
+             "checks": [{"check": check, "exitCode": 0} for check in checks]}
+    if name in {"compile", "github-owner"}:
+        compiled = github_original_artifact(context)
+        value["compiledTest"] = {key: compiled[key] for key in ("size", "sha256", "invocationSha256", "messagesSha256")}
+    return value
+
+
+def validate_github_phase_receipt(value: object, context: dict, name: str) -> dict:
+    require(name in GITHUB_READONLY_CHECKS and context.get("executionScope") == GITHUB_READONLY_SCOPE,
+            "Unexpected G1 receipt scope or phase")
+    require(same_compile_json(value, github_phase_value(context, name, list(GITHUB_READONLY_CHECKS[name]))),
+            "G1 original phase receipt is incomplete or changed")
+    return value
+
+
+def github_phase_claim(context: dict, name: str) -> dict:
+    return {"scope": GITHUB_READONLY_SCOPE, "phase": name,
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")}}
+
+
+def github_predecessors(context: dict, name: str) -> None:
+    require(name in (*GITHUB_READONLY_CHECKS, "clean"), "Unknown G1 successor")
+    phases, root = list(GITHUB_READONLY_CHECKS), Path(context["root"])
+    previous = phases if name == "clean" else phases[:phases.index(name)]
+    for prior in previous:
+        require(same_compile_json(read_bounded_json(root / f"{prior}-started.json", 4096), github_phase_claim(context, prior)),
+                "G1 original phase claim differs")
+        validate_github_phase_receipt(read_bounded_json(root / f"{prior}-checks.json", 16384), context, prior)
+        if prior == "github-owner":
+            github_owner_receipt(context)  # Original joins/material finality, not the outer exit.
+    for later in (*phases[len(previous):], "clean"):
+        for suffix in ("started", "checks"):
+            path = root / f"{later}-{suffix}.json"
+            require(not path.exists() and not path.is_symlink(), "G1 phase was already claimed; retain outputs")
+
+
+def phase_github_readonly(name: str, context: dict) -> None:
+    require(context.get("executionScope") == GITHUB_READONLY_SCOPE and context.get("platform") == "linux",
+            "Wrong G1 native scope")
+    admit_phase(GITHUB_READONLY_SCOPE, name)
+    require(name != "prepare", "G1 preparation has a separate fixed entry")
+    if name == "clean":
+        clean_github_readonly(context)
+        return
+    github_predecessors(context, name)
+    root, source = Path(context["root"]), Path(context["source"])
+    write_json(root / f"{name}-started.json", github_phase_claim(context, name))
+    github_source_unchanged(context)
+    no_cargo_configuration((root, *root.parents, source / "desktop/src-tauri", source / "desktop", source, *source.parents))
+    environment = clean_environment(root)
+    environment["GITHUB_SHA"] = context["sourceSha"]
+    manifest = source / "desktop/src-tauri/Cargo.toml"
+    if name == "acquire":
+        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+            check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
+        cargo, _ = tools(context, environment)
+        with (root / "cargo-metadata.json").open("x", encoding="utf-8") as output, \
+                (root / "acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                 "--features", "development-runtime", "--filter-platform", TARGETS["linux"], "--manifest-path", str(manifest)],
+                check="github-locked-headless-metadata", cwd=root, env=environment, timeout=600,
+                output=output, diagnostics=diagnostics)
+    elif name == "compile":
+        cargo, _ = tools(context, environment)
+        argv = [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features",
+                "--features", "development-runtime", "--target", TARGETS["linux"], "--manifest-path", str(manifest),
+                "--target-dir", str(root / "target"), "--lib", "--no-run", "--message-format=json"]
+        messages = root / "github-compile-messages.jsonl"
+        with messages.open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "compile.stderr").open("x", encoding="utf-8") as diagnostics:
+            run(argv, check="github-headless-test-compile-only", cwd=root, env=environment, timeout=600,
+                output=output, diagnostics=diagnostics)
+        github_compile_record(context, argv, messages)
+    else:
+        require(name == "github-owner", "Unknown G1 native phase")
+        compiled = github_original_artifact(context)
+        environment.update(MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
+                           MRK_DESKTOP_TEST_CORE_ZIP=str(root / "core.zip"), MRK_DESKTOP_TEST_ROOT=str(root / "github-owner"),
+                           MRK_DESKTOP_HOSTED_CHECKS="github-readonly-v1", GITHUB_ACTIONS="true",
+                           RUNNER_ENVIRONMENT="github-hosted", RUNNER_OS="Linux", RUNNER_ARCH="X64")
+        with (root / "github-owner.stdout").open("x", encoding="utf-8") as output, \
+                (root / "github-owner.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([compiled["path"], GITHUB_READONLY_TEST, "--exact", "--ignored", "--test-threads=1"],
+                check="github-owner-native-contract", cwd=root, env=environment, timeout=180,
+                output=output, diagnostics=diagnostics)
+        github_owner_receipt(context)
+    # A missing or failed native receipt raises above. No later git/tool call or
+    # deletion is authorized by process exit alone or by a positive frame.
+    github_source_unchanged(context)
+    phase_receipt(context, name, list(GITHUB_READONLY_CHECKS[name]))
+
+
+def github_cleanup_identity(info: object, *, directory: bool = False) -> tuple:
+    base = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+    # Removing our own entries changes parent timestamps/link counts. File
+    # ctime also changes when another inventoried hard link is unlinked.
+    return base if directory else (*base, info.st_size, info.st_mtime_ns)
+
+
+def clean_github_readonly(context: dict) -> None:
+    """Positive original finality only; finite no-follow deletion, no process scan.
+
+    On failure retain all remaining names for disposable-host teardown. This is
+    a cooperative, private job namespace, not an atomic unlink against a hostile
+    same-user renamer. Unknown/new entries are never added to the deletion plan.
+    """
+    github_predecessors(context, "clean")
+    github_inputs_unchanged(context)
+    root = Path(context["root"])
+    write_json(root / "clean-started.json", github_phase_claim(context, "clean"))
+    private_files = ("core.zip", "gitconfig-empty", "cargo-metadata.json", "acquire.stderr",
+                     "github-compile-messages.jsonl", "compile.stderr", "github-compiled-test.json",
+                     "github-owner.stdout", "github-owner.stderr")
+    evidence = ("context.json", "public-bindings.json", "clean-started.json",
+                *(f"{phase}-{suffix}.json" for phase in GITHUB_READONLY_CHECKS for suffix in ("started", "checks")))
+    require({path.name for path in root.iterdir()} == set((*GITHUB_READONLY_DIRECTORIES, *private_files, *evidence)),
+            "G1 task cleanup has missing or unexpected top-level entries; retain outputs")
+    native = root / "github-owner"
+    require({path.name for path in native.iterdir()} == {"receipt.json", *GITHUB_READONLY_CASES},
+            "G1 settled fixture inventory differs; retain outputs")
+    original_root = root.lstat()
+    directories = {root: original_root, native: native.lstat()}
+    leaves, removals, total = [], [], 0
+    pending = [(root / name, 0) for name in GITHUB_READONLY_DIRECTORIES if name != "github-owner"]
+    pending.extend((native / name, 0) for name in GITHUB_READONLY_CASES)
+    pending.extend((root / name, 0) for name in private_files)
+    while pending:
+        path, depth = pending.pop()
+        info = path.lstat()
+        require(depth <= 32 and len(leaves) + len(removals) < 100000
+                and info.st_dev == original_root.st_dev and info.st_uid == os.geteuid(),
+                "G1 cleanup crossed its original filesystem, owner or inventory bound")
+        if stat.S_ISDIR(info.st_mode):
+            directories[path] = info
+            removals.append(path)
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    require(len(pending) + len(leaves) + len(removals) < 100000, "G1 cleanup inventory exceeds its bound")
+                    pending.append((path / entry.name, depth + 1))
+            require(github_cleanup_identity(path.lstat(), directory=True) == github_cleanup_identity(info, directory=True),
+                    "G1 cleanup directory changed during inventory")
+        else:
+            require(stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode),
+                    "G1 cleanup found an unexpected file kind; retain outputs")
+            total += info.st_size
+            require(total <= 8 * 1024 * 1024 * 1024, "G1 cleanup output size exceeds its bound")
+            leaves.append((path, info))
+    # The whole finite plan is admitted before the first unlink. Keep the
+    # original parent identities, never follow a link or sweep a changed tree.
+    removed_links: dict[tuple[int, int], int] = {}
+    def parent_unchanged(path: Path) -> None:
+        for parent in (path.parent, *path.parent.parents):
+            if parent not in directories:
+                break
+            require(github_cleanup_identity(parent.lstat(), directory=True)
+                    == github_cleanup_identity(directories[parent], directory=True), "G1 cleanup original parent changed")
+            if parent == root:
+                break
+    for path, original in leaves:
+        parent_unchanged(path)
+        current, key = path.lstat(), (original.st_dev, original.st_ino)
+        require(github_cleanup_identity(current) == github_cleanup_identity(original)
+                and current.st_nlink == original.st_nlink - removed_links.get(key, 0), "G1 cleanup original leaf changed")
+        path.unlink()  # A link is removed as a leaf; its target is never opened.
+        removed_links[key] = removed_links.get(key, 0) + 1
+    for path in sorted(removals, key=lambda item: len(item.parts), reverse=True):
+        parent_unchanged(path)
+        require(github_cleanup_identity(path.lstat(), directory=True)
+                == github_cleanup_identity(directories[path], directory=True), "G1 cleanup original directory changed")
+        path.rmdir()  # Unknown/new content fails closed rather than being swept.
+    require({path.name for path in root.iterdir()} == {"github-owner", *evidence}
+            and {path.name for path in native.iterdir()} == {"receipt.json"}, "G1 cleanup postcondition differs")
+    write_json(root / "clean-checks.json", {
+        "schemaVersion": 1, "scope": GITHUB_READONLY_EVIDENCE_SCOPE, "phase": "clean", "status": "passed",
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef",
+                                       "workflowSha256", "runId", "attempt")},
+        "allOriginalOwnersSettled": True, "documentMaterialSettled": True, "observerJoinsComplete": True,
+        "removedFiles": len(leaves), "removedDirectories": len(removals), "inventoriedBytes": total,
+        "retained": ["redacted-evidence", "private-original-context"], "productionQualified": False,
+    })
+    print("Removed only positively settled G1 compiler and fixture outputs; original evidence retained.")
+
+
 def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | None = None,
-                  scope: str = "passive-development-foundation-only") -> None:
+                  scope: str = "passive-development-foundation-only", compiled: dict | None = None) -> None:
     # Only called after the fixed phase and final source check actually succeed.
     # Missing files on failed/skipped phases cannot become passing evidence.
     value = {
@@ -1267,6 +2746,13 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
         "rust": {"release": RUST, "target": TARGETS[context["platform"]]}, "node": node,
         "checks": [{"check": check, "exitCode": 0} for check in checks],
     }
+    if compiled is not None:
+        require(context.get("executionScope") == WINDOWS_SNAPSHOT_SCOPE
+                and context.get("scope") == WINDOWS_SNAPSHOT_SCOPE and name == "compile"
+                and scope == WINDOWS_SNAPSHOT_PUBLIC_SCOPE and node is None,
+                "Unexpected compiler artifact receipt")
+        value["compiledTest"] = {"sha256": compiled["sha256"], "size": compiled["size"],
+                                 "invocationSha256": compiled["invocationSha256"]}
     if context.get("executionScope") in COMPILE_PROFILES:
         profile = compile_profile(context["executionScope"])
         require(name in profile["checks"] and scope == "passive-development-foundation-only",
@@ -1281,6 +2767,11 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                 "Workflow-only phase cannot produce compiler or product authority")
         value = workflow_phase_value(context, name, checks)
         validate_workflow_phase_receipt(value, context, name)
+    elif context.get("executionScope") == GITHUB_READONLY_SCOPE:
+        require(node is None and scope == "passive-development-foundation-only" and compiled is None,
+                "G1 phase cannot produce other native or product authority")
+        value = github_phase_value(context, name, checks)
+        validate_github_phase_receipt(value, context, name)
     write_json(Path(context["root"]) / f"{name}-checks.json", value)
 
 
@@ -1311,9 +2802,14 @@ def workflow_public_bindings(context: dict) -> dict:
 def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, "prepare")
     admit_platform(scope, platform)
+    windows = scope == WINDOWS_SNAPSHOT_SCOPE
+    if windows:
+        require(admitted_scope(platform) == scope, "Windows preparation scope differs")
     profile = compile_profile(scope) if scope in COMPILE_PROFILES else None
     native_workflow = scope == WORKFLOW_NATIVE_SCOPE
-    binding = compile_workflow_binding(os.environ, scope) if profile else workflow_native_binding(os.environ) if native_workflow else {}
+    native_github = scope == GITHUB_READONLY_SCOPE
+    binding = (compile_workflow_binding(os.environ, scope) if profile else workflow_native_binding(os.environ)
+               if native_workflow else github_readonly_binding(os.environ) if native_github else {})
     source = Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True)
     temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
     sha = os.environ["GITHUB_SHA"]
@@ -1325,20 +2821,22 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
                             temp, *temp.parents))
     for ancestor in (source / "desktop", source, *source.parents):
         require(not (ancestor / ".npmrc").exists(), "Ambient npm project configuration is not admitted")
-    if native_workflow:
+    if native_workflow or native_github:
         # One original root per actual job attempt. A second prepare must not
         # mint a fresh path to evade a failed/Unknown phase's retained claims.
-        root = temp / f"mrk-desktop-foundation-workflow-{binding['runId']}-{binding['attempt']}"
+        label = "github" if native_github else "workflow"
+        root = temp / f"mrk-desktop-foundation-{label}-{binding['runId']}-{binding['attempt']}"
         root.mkdir(mode=0o700)
     else:
         root = Path(tempfile.mkdtemp(prefix="mrk-desktop-foundation-", dir=temp))
     no_cargo_configuration((root,))
-    directories = WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (
+    directories = GITHUB_READONLY_DIRECTORIES if native_github else WORKFLOW_NATIVE_DIRECTORIES if native_workflow else (
+        "home", "cargo", "rustup", "tmp", "target", "windows-snapshot", "appdata", "localappdata") if windows else (
         "home", "cargo", "rustup", "tmp", "target", "native", "config-owner", "config-driver-loss", "config-watchdog-loss",
         "config-stop", "config-terminal-deadline", "config-startup-stop", "config-transaction-eof", "appdata", "localappdata", "npm-cache")
     for name in directories:
         (root / name).mkdir(mode=0o700)
-    empty_files = ("gitconfig-empty",) if native_workflow else ("npmrc-user", "npmrc-global", "gitconfig-empty")
+    empty_files = ("gitconfig-empty",) if native_workflow or native_github or windows else ("npmrc-user", "npmrc-global", "gitconfig-empty")
     for name in empty_files:
         (root / name).touch(mode=0o600, exist_ok=False)
     git = shutil.which("git")
@@ -1348,13 +2846,13 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15, capture=True) == sha,
             "Event and checkout source differ")
     tree = run([git, "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=source, env=environment, timeout=15, capture=True)
-    if native_workflow:
+    if native_workflow or native_github:
         require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40,
                 "Workflow native source tree differs")
     inventory = []
     total = 0
     package = source / "src/mobile_release"
-    input_paths = sorted(package.rglob("*"), key=(lambda path: path.as_posix()) if native_workflow else None)
+    input_paths = sorted(package.rglob("*"), key=(lambda path: path.as_posix()) if native_workflow or native_github else None)
     with zipfile.ZipFile(root / "core.zip", "x", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in input_paths:
             require(not path.is_symlink(), "Core input contains a symbolic link")
@@ -1377,21 +2875,29 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
                "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                "git": git, "rustup": rustup, "python": str(Path(sys.executable).resolve(strict=True))}
     context.update(binding)
-    workflow = profile["workflow"] if profile else WORKFLOW_NATIVE_WORKFLOW if native_workflow else ".github/workflows/desktop-foundation.yml"
-    if profile or native_workflow:
+    if windows:
+        context.update(scope=scope, event=os.environ["GITHUB_EVENT_NAME"], ref=os.environ["GITHUB_REF"])
+    workflow = (profile["workflow"] if profile else WORKFLOW_NATIVE_WORKFLOW if native_workflow
+                else GITHUB_READONLY_WORKFLOW if native_github else ".github/workflows/desktop-foundation.yml")
+    if profile or native_workflow or native_github:
         context["workflowSha256"] = hash_file(source / workflow)
     if scope == GTK_COMPILE_SCOPE:
-        require(len(inventory) == 67, "SG1 requires its complete reviewed 67-file core")
+        validate_gtk_core_inventory(inventory)
         context["sg1"] = gtk_compile_binding(source)
     if native_workflow:
         prepare_workflow_native_context(context, inventory)
+    elif native_github:
+        prepare_github_readonly_context(context, inventory)
     source_unchanged(context)
-    write_json(root / "context.json", context)
+    if not windows:
+        write_json(root / "context.json", context)
     if native_workflow:
         public = workflow_public_bindings(context)
+    elif native_github:
+        public = github_public_bindings(context)
     else:
         public = {
-            "scope": profile["evidence"] if profile else "passive-development-foundation-only", "sourceSha": sha, "sourceTree": tree,
+            "scope": profile["evidence"] if profile else WINDOWS_SNAPSHOT_PUBLIC_SCOPE if windows else "passive-development-foundation-only", "sourceSha": sha, "sourceTree": tree,
             "workflowSha256": hash_file(source / workflow),
             "runId": context["runId"], "attempt": context["attempt"], "platform": platform,
             "image": os.environ.get("ImageOS", "") + "/" + os.environ.get("ImageVersion", ""),
@@ -1415,6 +2921,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if scope == GTK_COMPILE_SCOPE:
         public["sg1"] = context["sg1"]
         public["notQualified"].extend(("SG1-native-qualification", "installed-API-loader-writer-admission"))
+    if windows:
+        windows_prepare_bindings(context, public)
+        write_json(root / "context.json", context)
     write_json(root / "public-bindings.json", public)
     with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
         output.write(f"root={root}\n")
@@ -1423,16 +2932,23 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
 
 def load_context(platform: str, scope: str = BOUNDARY_SCOPE) -> dict:
     admit_platform(scope, platform)
+    if scope == WINDOWS_SNAPSHOT_SCOPE:
+        require(admitted_scope(platform) == scope, "Windows context scope differs")
     root = Path(os.environ["MRK_DESKTOP_CI_ROOT"])
     require(root.is_absolute() and root.name.startswith("mrk-desktop-foundation-")
             and root.parent == Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
             and not root.is_symlink(), "Unrecognized task root")
     ordinary(root / "context.json")
-    context = workflow_json(root / "context.json") if scope == WORKFLOW_NATIVE_SCOPE else json.loads((root / "context.json").read_text(encoding="utf-8"))
+    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope == GITHUB_READONLY_SCOPE
+               else workflow_json(root / "context.json") if scope == WORKFLOW_NATIVE_SCOPE
+               else json.loads((root / "context.json").read_text(encoding="utf-8")))
     require(context["root"] == str(root) and context["platform"] == platform and context.get("executionScope") == scope
             and context["sourceSha"] == os.environ["GITHUB_SHA"]
             and context["runId"] == os.environ["GITHUB_RUN_ID"]
             and context["attempt"] == os.environ["GITHUB_RUN_ATTEMPT"], "Task context differs")
+    if scope == WINDOWS_SNAPSHOT_SCOPE:
+        require(context.get("scope") == scope and context.get("event") == os.environ["GITHUB_EVENT_NAME"]
+                and context.get("ref") == os.environ["GITHUB_REF"], "Windows task event binding differs")
     if scope in COMPILE_PROFILES:
         profile = compile_profile(scope)
         binding = compile_workflow_binding(os.environ, scope)
@@ -1458,6 +2974,20 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE) -> dict:
         workflow_inputs_unchanged(context)
         require(same_compile_json(workflow_json(root / "public-bindings.json"), workflow_public_bindings(context)),
                 "Workflow native public source binding changed")
+    elif scope == GITHUB_READONLY_SCOPE:
+        binding = github_readonly_binding(os.environ)
+        require(type(context) is dict and all(context.get(key) == value for key, value in binding.items())
+                and root.name == f"mrk-desktop-foundation-github-{binding['runId']}-{binding['attempt']}"
+                and context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
+                and context.get("python") == str(Path(sys.executable).resolve(strict=True))
+                and type(context.get("sourceTree")) is str and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+                and context["sourceTree"] != "0" * 40
+                and context.get("workflowSha256") == hash_file(Path(context["source"]) / GITHUB_READONLY_WORKFLOW),
+                "G1 context/source binding changed")
+        validate_workflow_host(context.get("observedHost"))
+        github_inputs_unchanged(context)
+        require(same_compile_json(read_bounded_json(root / "public-bindings.json", 256 * 1024), github_public_bindings(context)),
+                "G1 public source binding changed")
     return context
 
 
@@ -1748,6 +3278,10 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if scope == WORKFLOW_NATIVE_SCOPE:
         phase_workflow_native(name, context)
         return
+    if scope == GITHUB_READONLY_SCOPE:
+        phase_github_readonly(name, context)
+        return
+    windows = scope == WINDOWS_SNAPSHOT_SCOPE
     root, source = Path(context["root"]), Path(context["source"])
     environment = clean_environment(root)
     # The owner fixture binds its compiled source to this exact event commit.
@@ -1763,13 +3297,18 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
             check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
         cargo, _ = tools(context, environment)
-        features = "desktop-shell,development-runtime"
+        features = "development-runtime" if windows else "desktop-shell,development-runtime"
         # Metadata filters acquisition to this platform and active feature graph.
         with (root / "metadata.json").open("x", encoding="utf-8") as output:
             run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
                  "--features", features, "--filter-platform", TARGETS[platform],
                  "--manifest-path", str(manifest)], check="locked-platform-metadata", cwd=root,
-                env=environment, timeout=600, output=output)
+                 env=environment, timeout=600, output=output)
+        if windows:
+            source_unchanged(context)
+            phase_receipt(context, name, ["rust-toolchain-install", "rust-version-target", "locked-platform-metadata"],
+                          scope=WINDOWS_SNAPSHOT_PUBLIC_SCOPE)
+            return
         node = shutil.which("node")
         require(node is not None, "Selected Node unavailable")
         observed_node = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=15, capture=True)
@@ -1795,6 +3334,17 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         phase_receipt(context, name, list(GTK_COMPILE_CHECKS["compile"]), node=observed_node)
         return
     if name == "compile":
+        if windows:
+            argv = [cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"]
+            argv.append("--message-format=json")
+            messages = root / "windows-compile-messages.jsonl"
+            with messages.open("x", encoding="utf-8", newline="\n") as output:
+                run(argv, check="headless-test-compile-only", cwd=root, env=environment, timeout=600, output=output)
+            compiled = windows_compile_record(context, argv, messages)
+            source_unchanged(context)
+            phase_receipt(context, name, ["rust-version-target", "headless-test-compile-only"],
+                          scope=WINDOWS_SNAPSHOT_PUBLIC_SCOPE, compiled=compiled)
+            return
         run([cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"],
             check="headless-test-compile-only", cwd=root, env=environment, timeout=600)
         node = shutil.which("node")
@@ -1812,6 +3362,20 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         source_unchanged(context)
         phase_receipt(context, name, ["rust-version-target", "headless-test-compile-only"]
                       + ["node-version", "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"], node=observed_node)
+    elif name == "windows-snapshot":
+        require(windows and platform == "windows", "Windows snapshot phase requires its dedicated scope")
+        windows_inputs(context, create=True)
+        environment.update(MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
+                           MRK_DESKTOP_TEST_ROOT=str(root / "windows-snapshot"), MRK_DESKTOP_TEST_CORE_ZIP=str(root / "core.zip"),
+                           MRK_DESKTOP_HOSTED_CHECKS=WINDOWS_SNAPSHOT_SCOPE, GITHUB_ACTIONS="true",
+                           RUNNER_ENVIRONMENT="github-hosted", GITHUB_SHA=context["sourceSha"])
+        run([cargo, "test", *common, "--lib", "--features", "development-runtime", WINDOWS_SNAPSHOT_TEST,
+             "--", "--exact", "--ignored", "--test-threads=1"], check="windows-snapshot-native-contract",
+            cwd=root, env=environment, timeout=300)
+        source_unchanged(context)
+        windows_snapshot_receipt(context)
+        phase_receipt(context, name, ["rust-version-target", WINDOWS_SNAPSHOT_TEST, "windows-snapshot-original-resource-receipt-acceptance"],
+                      scope=WINDOWS_SNAPSHOT_PUBLIC_SCOPE)
     elif name == "native":
         environment.update(MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
                            MRK_DESKTOP_TEST_ROOT=str(root / "native"), MRK_DESKTOP_TEST_CORE_ZIP=str(root / "core.zip"),
@@ -1942,6 +3506,9 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
                       scope="configuration-core-native-only-not-desktop-enablement")
     else:
         require(name == "clean", "Unknown fixed phase")
+        if windows:
+            clean_windows_outputs(context)
+            return
         native_receipt(context)
         retained = False
         if platform in {"linux", "macos"}:
@@ -1974,7 +3541,7 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core"))
+    parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core", "windows-snapshot", "github-owner"))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)

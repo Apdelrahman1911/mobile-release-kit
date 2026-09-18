@@ -7,7 +7,9 @@ use serde_json::{Map, Value};
 use tokio::{sync::{Mutex as AsyncMutex, Notify, oneshot, watch}, task::JoinHandle};
 use crate::{asset_commands::{self as commands, AssetError, CommandError, Fields, Kind, Platform, Purpose, Reason, Stage}, asset_source::{self, OriginWitness, SourceBook},
     bridge::{DesktopBridge, Project, ProjectRoster}, credential_assessment::{AssessmentRequest, AssessmentResult, assess_supplied}, credential_format::{self, FileObservation},
-    document_lifetime::{DocumentAction, DocumentLifetime}, error::BridgeError};
+    document_lifetime::{DocumentAction, DocumentLifetime}, error::BridgeError,
+    github_connection_protocol::{self as github_wire, Reason as GitHubReason},
+    github_connection_session::{self as github_session, ConnectionState}};
 
 const MAIN: &str = "main";
 const WORK: Duration = Duration::from_secs(10);
@@ -317,6 +319,7 @@ struct DocumentState {
     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
     context: Option<Arc<NativeContext>>, slot: Option<Slot>, records: Vec<Record>, assignments: Vec<Assignment>,
     quit: Option<Arc<OriginalWork>>, quit_accepted: bool, quit_cleanup_end: Option<Instant>,
+    github: ConnectionState,
 }
 // A late observer/lifecycle callback cannot move an already-due work or review
 // endpoint forward. The first STOP owns the only cleanup clock.
@@ -361,6 +364,8 @@ struct Inner {
     state: Mutex<DocumentState>, bridge: Arc<DesktopBridge>, changes: watch::Sender<u32>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fixture: Option<Weak<Qualification>>,
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    github_fixture: Option<crate::supervisor::GitHubDocumentFixtureBinding>,
 }
 #[derive(Clone)]
 pub(crate) struct DocumentBinding { inner: Arc<Inner> }
@@ -371,9 +376,12 @@ impl DocumentBinding {
         Self { inner: Arc::new(Inner { bridge, changes,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             fixture: None,
+            #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            github_fixture: None,
             state: Mutex::new(DocumentState { lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None }) }) }
+            context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+            github: ConnectionState::new() }) }) }
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn for_fixture(bridge: Arc<DesktopBridge>, permit: FixtureAdmission) -> Result<Self, &'static str> {
@@ -382,6 +390,25 @@ impl DocumentBinding {
         Arc::get_mut(&mut document.inner).ok_or("sg1_new_document_not_exclusive")?.fixture = Some(Arc::downgrade(&context));
         context.bind_original(document.clone())?;
         Ok(document)
+    }
+    /// One consumed G1 permission for this new document and its original
+    /// Supervisor only. No asset/workflow/GUI qualification is conferred.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn for_github_fixture(bridge: Arc<DesktopBridge>, permit: crate::supervisor::GitHubDocumentFixturePermit) -> Result<Self, &'static str> {
+        let binding = permit.consume(&bridge.supervisor)?;
+        let mut document = Self::new(bridge);
+        Arc::get_mut(&mut document.inner).ok_or("g1_new_document_not_exclusive")?.github_fixture = Some(binding);
+        Ok(document)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn github_fixture_permitted(&self) -> bool {
+        self.inner.github_fixture.as_ref().is_some_and(|binding| binding.permits(&self.inner.bridge.supervisor))
+    }
+    fn github_qualified(&self) -> bool {
+        if github_session::qualified() { return true; }
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if self.github_fixture_permitted() { return true; }
+        false
     }
     fn native_qualified(&self) -> bool {
         if NATIVE_QUALIFIED { return true; }
@@ -404,6 +431,7 @@ impl DocumentBinding {
     }
     fn bump(&self, state: &mut DocumentState) {
         if state.exhausted { return; }
+        if state.unknown { state.github.unknown(); }
         match status_successor(state.revision) {
             Some(next) => { state.revision = next; self.inner.changes.send_replace(next); }
             None => self.exhaust(state),
@@ -411,6 +439,7 @@ impl DocumentBinding {
     }
     fn exhaust(&self, state: &mut DocumentState) {
         state.exhausted = true; state.unknown = true; state.stopping = true; state.lost_observed = true;
+        state.github.exhaust();
         state.lifetime.invalidate(); invalidate_all(state);
         if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::CleanupUnknown, Instant::now()); slot.phase = Phase::Unknown; }
         stop_quit(state, Instant::now());
@@ -424,6 +453,7 @@ impl DocumentBinding {
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
     fn loss_locked(&self, state: &mut DocumentState) {
         state.lost_observed = true;
+        state.github.retire(GitHubReason::Cancelled);
         invalidate_all(state);
         if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::DocumentLost, Instant::now()); }
         stop_quit(state, Instant::now());
@@ -460,6 +490,96 @@ impl DocumentBinding {
     fn registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Result<T, AssetError> {
         if result.as_ref().is_err_and(|error| error.reason == Reason::CleanupUnknown) { self.coordinator_failed(state); }
         result
+    }
+    fn github_gate(&self, state: &DocumentState) -> GitHubReason {
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() { return GitHubReason::CleanupUnknown; }
+        if !self.github_qualified() { return GitHubReason::Unqualified; }
+        if !state.lifetime.original_bound() || state.lost_observed || state.stopping
+            || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() { return GitHubReason::Cancelled; }
+        if state.quit_pending || state.retiring || state.lock_pending || state.slot.as_ref().is_some_and(|slot|
+            slot.operation == Operation::ChooseProject && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return GitHubReason::Busy; }
+        GitHubReason::None
+    }
+    fn github_observe_locked(&self, state: &mut DocumentState, now: Instant) {
+        // Recheck the real document and native ID registry BEFORE consuming a
+        // positive receipt. This does not inspect a path, launch work or acquire
+        // another document owner; lock order stays document -> registry -> owner.
+        if state.exhausted { state.github.exhaust(); }
+        else if state.unknown || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() { state.github.unknown(); }
+        else if state.lost_observed || !state.lifetime.original_bound() || state.stopping
+            || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() { state.github.retire(GitHubReason::Cancelled); }
+        let registration = state.github.registration().map(|(id, generation)| (id.to_owned(), generation));
+        if let Some((id, original)) = registration {
+            match self.registry_result(state, self.inner.bridge.github_registration(&id)) {
+                Ok(generation) if generation == original => {},
+                Err(error) if error.reason == Reason::CleanupUnknown => state.github.unknown(),
+                _ => state.github.retire(GitHubReason::TargetChanged),
+            }
+        }
+        let gate = self.github_gate(state);
+        state.github.reconcile(now, gate);
+    }
+    pub(crate) fn github_connection_status(&self) -> github_wire::Status {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now()); state.github.snapshot()
+    }
+    pub(crate) fn github_connection_connect_token(&self, value: &Value) -> Result<github_wire::Status, BridgeError> {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        let gate = self.github_gate(&state);
+        // This is BEFORE the borrowed decoder makes its single native-owned
+        // credential copy. Unqualified builds never collect a private session.
+        if gate != GitHubReason::None { return Err(github_session::refused(gate)); }
+        let github_wire::Command::ConnectToken(args) = github_wire::decode_command_value("github_connection_connect_token", value)
+            .map_err(|_| github_session::refused(GitHubReason::InvalidInput))? else { return Err(github_session::refused(GitHubReason::InvalidInput)); };
+        let generation = self.registry_result(&mut state, self.inner.bridge.github_registration(&args.project_id))
+            .map_err(|error| github_session::refused(if error.reason == Reason::CleanupUnknown { GitHubReason::CleanupUnknown } else { GitHubReason::TargetChanged }))?;
+        let now = Instant::now(); let wall = std::time::SystemTime::now();
+        state.github.connect(args, generation, &self.inner.bridge.supervisor, now, wall)
+    }
+    pub(crate) fn github_connection_refresh(&self, value: &Value) -> Result<github_wire::Status, BridgeError> {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        let gate = self.github_gate(&state);
+        if gate != GitHubReason::None { return Err(github_session::refused(gate)); }
+        let github_wire::Command::Refresh(args) = github_wire::decode_command_value("github_connection_refresh", value)
+            .map_err(|_| github_session::refused(GitHubReason::InvalidInput))? else { return Err(github_session::refused(GitHubReason::InvalidInput)); };
+        state.github.refresh(&args.session_id, args.expected_revision, &self.inner.bridge.supervisor, Instant::now())
+    }
+    pub(crate) fn github_connection_disconnect(&self, value: &Value) -> Result<github_wire::Status, BridgeError> {
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        let github_wire::Command::Disconnect(args) = github_wire::decode_command_value("github_connection_disconnect", value)
+            .map_err(|_| github_session::refused(GitHubReason::InvalidInput))? else { return Err(github_session::refused(GitHubReason::InvalidInput)); };
+        // No new admission gate: exact retirement stays usable during Busy,
+        // quit, expiry, document loss or retained Unknown. Never sessionless STOP.
+        let gate = self.github_gate(&state);
+        state.github.disconnect(&args.session_id, Instant::now(), gate)
+    }
+    /// Controlled integration only: the retained original SourceBook produced
+    /// this proof after its own successful terminal checks and closes. Publish
+    /// through the real registry under the same document admission mutex; no
+    /// workflow permission, fabricated identity or registry repair is involved.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn github_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32) -> Result<Project, AssetError> {
+        let mut state = self.lock();
+        if !state.lifetime.original_bound() || state.lost_observed { return Err(AssetError::new(Reason::DocumentLost)); }
+        if state.unknown || state.exhausted { return Err(AssetError::new(Reason::CleanupUnknown)); }
+        if state.stopping || state.quit_pending || state.retiring || state.lock_pending || state.slot.is_some()
+            || state.session || state.context.is_some() || !state.records.is_empty() || !state.assignments.is_empty()
+            || self.inner.bridge.supervisor.stopping() || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.stopping() || self.inner.bridge.edits.disabled() || !self.github_fixture_permitted() {
+            return Err(AssetError::new(Reason::Unqualified));
+        }
+        // Do not consume a ready G1 receipt before this registration change.
+        // The next actual status/reconciliation rechecks this registry first.
+        // This supplied event is not native picker-admission/callback evidence.
+        let published = self.registry_result(&mut state, self.inner.bridge.publish_checked_project(proof, generation))?;
+        self.bump(&mut state);
+        Ok(published)
+    }
+    /// Observation only: never reconcile, retire, consume a receipt, erase a
+    /// token, or mark an original settled on the finalizer's behalf. Contention
+    /// and poison remain unconfirmed; the caller retains the original document.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn github_fixture_material_settled(&self) -> bool {
+        self.github_fixture_permitted() && self.inner.state.try_lock().is_ok_and(|state| state.github.material_settled())
     }
     /// Workflow admission uses this actual document/selection mutex, not a
     /// separate lock or an unlocked not_quitting observation. Both callbacks
@@ -566,6 +686,7 @@ impl DocumentBinding {
                 if slot.cleanup_end.is_none() && slot.phase != Phase::Idle { slot.stop(Reason::CleanupUnknown, now); changed = true; }
             }
         }
+        self.github_observe_locked(state, now);
         if changed { self.bump(state); }
     }
     fn snapshot(&self, state: &DocumentState) -> AssetStatus {
@@ -807,6 +928,7 @@ impl DocumentBinding {
                 // dialog-return or renderer callback. Cancel changes none of
                 // the settled assignments and never renews review time.
                 state.quit_accepted = true; state.stopping = true; invalidate_all(&mut state);
+                state.github.retire(GitHubReason::Cancelled);
                 if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::Shutdown, now); }
                 stop_quit(&mut state, now);
                 fixture_event!(owner, QuitStop, 1);
@@ -1494,6 +1616,7 @@ impl DocumentBinding {
         // A later registration probes every retained source. Its admission,
         // not only success, revokes old use; cancel/refusal never restores it.
         invalidate_all(&mut state);
+        state.github.retire(GitHubReason::TargetChanged);
         let start = self.install(&mut state, slot, Job::Project { app, generation, origins })?;
         drop(state); let _ = start.send(()); Ok(id)
     }
@@ -1523,6 +1646,9 @@ impl DocumentBinding {
     pub(crate) fn assets_can_exit(&self) -> bool {
         self.reconcile(); assets_can_exit_locked(&self.lock())
     }
+    fn retained_material_can_exit(&self) -> bool {
+        self.reconcile(); let state = self.lock(); assets_can_exit_locked(&state) && state.github.material_settled()
+    }
     async fn shutdown_assets(&self) -> Result<(), AssetError> {
         // Native OK set stopping/revoked authority under the real gate before
         // this future exists. This observer never grants a new cleanup endpoint.
@@ -1530,7 +1656,7 @@ impl DocumentBinding {
             self.reconcile();
             {
                 let state = self.lock();
-                if assets_can_exit_locked(&state) { return Ok(()); }
+                if assets_can_exit_locked(&state) && state.github.material_settled() { return Ok(()); }
                 if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1539,7 +1665,7 @@ impl DocumentBinding {
     pub(crate) fn can_exit(&self) -> bool {
         let (ready, quit) = {
             let state = self.lock();
-            (state.stopping && state.quit_accepted && assets_can_exit_locked(&state), state.quit.clone())
+            (state.stopping && state.quit_accepted && assets_can_exit_locked(&state) && state.github.material_settled(), state.quit.clone())
         };
         // The app's data-only observer does not run general session publication.
         // Only this already-ended quit original is joined here.
@@ -1610,7 +1736,7 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     }
     // Late all-positive settlement may permit exit, never a successful import,
     // new owner, reassignment or reuse of this unknown session.
-    while !(document.assets_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit()) {
+    while !(document.retained_material_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit()) {
         tokio::select! {
             _ = owner.wake.notified() => document.tick(),
             _ = tokio::time::sleep(Duration::from_millis(50)) => document.tick(),
@@ -1703,7 +1829,8 @@ mod tests {
     fn empty_state() -> DocumentState {
         DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
-            context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None }
+            context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+            github: ConnectionState::new() }
     }
     fn scalar() -> Arc<Payload> { Arc::new(Payload { kind: Kind::GoogleWif, material: None, fields: None }) }
     fn slot(target: Option<RecordKey>, review: Option<Instant>) -> Slot {

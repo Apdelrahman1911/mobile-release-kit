@@ -1,4 +1,5 @@
-// Isolated G1 wire/view contracts. No DesktopApi route, secret store or owner.
+// Closed G1 wire/view contracts. The renderer owns neither native admission nor
+// credentials after the single synchronous input handoff.
 import type { GITHUB_WORKFLOWS } from './githubSetupProtocol.ts';
 
 export type GitHubConnectionReason = 'none' | 'unqualified' | 'runtime-unavailable' | 'publisher-unconfigured' |
@@ -48,8 +49,20 @@ export interface GitHubConnectionHelp {
 export interface GitHubConnectionContext {
   documentId: string; projectId: string; projectGeneration: number; repository: string;
 }
-// Deliberately NO token/Connect method. Only a future separately reviewed owner
-// may implement a live port. This interface is used by inert tests, not bridge.ts.
+export interface GitHubConnectionApi {
+  githubConnectionStatus(): Promise<GitHubConnectionStatus>;
+  connectGitHubToken(args: { projectId: string; repository: string; token: string }): Promise<GitHubConnectionStatus>;
+  refreshGitHubConnection(args: { sessionId: string; expectedRevision: number }): Promise<GitHubConnectionStatus>;
+  disconnectGitHubConnection(args: { sessionId: string }): Promise<GitHubConnectionStatus>;
+  // null is a fixed invalid-event marker, never the rejected payload.
+  subscribeGitHubConnection(listener: (status: GitHubConnectionStatus | null) => void): Promise<() => void>;
+}
+export interface GitHubConnectionError {
+  code: string; message: string; retryable: false;
+  reason: GitHubConnectionReason; admission: 'not-admitted' | 'unknown';
+}
+// Deliberately NO token/Connect method: retained observation and retirement must
+// not retain the input or an invocation's private arguments.
 export interface GitHubConnectionObservationPort {
   mode: 'native' | 'preview' | 'unavailable';
   subscribe: (listener: (value: unknown) => void) => Promise<() => void>;
@@ -57,10 +70,16 @@ export interface GitHubConnectionObservationPort {
   refresh: (args: { sessionId: string; expectedRevision: number }) => Promise<unknown>;
   disconnect: (args: { sessionId: string }) => Promise<unknown>;
 }
+// Separate synchronous entry, bound to the exact observation port. It is never
+// put in view state or retained with a pending operation's private arguments.
+export interface GitHubConnectionTokenHandoff {
+  port: GitHubConnectionObservationPort;
+  submit: (args: { projectId: string; repository: string; token: string }) => Promise<unknown>;
+}
 export interface GitHubConnectionViewState {
   mode: 'native' | 'preview' | 'unavailable'; context: GitHubConnectionContext | null;
   status: GitHubConnectionStatus | null; retained: GitHubConnectionStatus | null;
   help: GitHubConnectionHelp | null; helpState: 'missing' | 'current' | 'previous';
-  observing: boolean; busy: 'refresh' | 'disconnect' | null; uncertain: boolean;
+  observing: boolean; busy: 'connect' | 'refresh' | 'disconnect' | null; uncertain: boolean;
   blocked: boolean; retirementPending: boolean; error: GitHubConnectionReason | null;
 }

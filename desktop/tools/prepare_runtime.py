@@ -31,7 +31,9 @@ MAX_PATH_PARTS = 16
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_CORE_BYTES = 32 * 1024 * 1024
-BOOTSTRAPS = ("engine_bootstrap.py", "config_edit_bootstrap.py")
+BOOTSTRAPS = ("engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py")
+GITHUB_CA_NAME = "github-ca.pem"
+MAX_GITHUB_CA_BYTES = 512 * 1024
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 
 
@@ -149,10 +151,9 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
     executable = python / ("python.exe" if "windows" in target else "bin/python3")
     _ordinary(executable)
     _root(executable.parent)
-    # Both fixed entry points and the core ZIP are payload. Merely shipping the
-    # passive bootstrap would leave a future qualified edit owner unusable.
-    # None of these packaging assets enables either native execution gate.
-    generated_payloads = len(BOOTSTRAPS) + 1
+    # Every fixed entry point, the core ZIP and the fixed CA are payload. Their
+    # presence/digests do not qualify an owner, TLS, or native execution custody.
+    generated_payloads = len(BOOTSTRAPS) + 2
     # Reserve every generated payload and the final manifest before any write.
     # This is only publisher preparation, not runtime-custody admission.
     if len(files(runtime, reserve_entries=generated_payloads + 1)) > MAX_FILES - generated_payloads:
@@ -172,12 +173,19 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
     if version is None:
         raise PreparationError("Core version must be an explicit package version")
     desktop = _root(source / "desktop")
-    # Admit every fixed source before creating output. A missing edit bootstrap
-    # must not leave a deceptively complete passive-only prepared directory.
+    # Admit every fixed source before creating output. In particular an absent
+    # GitHub bootstrap/CA must not leave a deceptively complete passive bundle.
+    # CA bytes are opaque publisher input, not an acquired trust store or proof
+    # of certificate correctness. Never synthesize a placeholder or use the OS.
     bootstraps = [(name, read_checked(desktop / name, limit=64 * 1024)) for name in BOOTSTRAPS]
+    github_ca = read_checked(desktop / GITHUB_CA_NAME, limit=MAX_GITHUB_CA_BYTES)
+    if not github_ca:
+        raise PreparationError("The fixed GitHub CA payload is empty")
     for name, content in bootstraps:
         with (runtime / name).open("xb") as stream:
             stream.write(content)
+    with (runtime / GITHUB_CA_NAME).open("xb") as stream:
+        stream.write(github_ca)
     with zipfile.ZipFile(runtime / "core.zip", "x", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for name, content in core:
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))

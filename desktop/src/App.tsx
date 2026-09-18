@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react';
 import { desktopApi } from './api.ts';
 import { apiError } from './bridge.ts';
 import { emptyDraft } from './catalog.ts';
@@ -9,6 +9,8 @@ import { configurationOwnerReason, editRetainsDraft, editStartReason } from './c
 import { ConfigEditController } from './configEditController.ts';
 import { GitHubSetupController } from './githubSetupController.ts';
 import { GitHubConnectionController } from './githubConnectionController.ts';
+import { connectionRepository } from './githubConnectionProtocol.ts';
+import type { GitHubConnectionObservationPort, GitHubConnectionTokenHandoff } from './githubConnectionTypes.ts';
 import { workflowOwnerReason, workflowRetainsDraft } from './githubWorkflowEdit.ts';
 import { GitHubWorkflowEditController } from './githubWorkflowEditController.ts';
 import { AssetSessionController } from './assetSessionController.ts';
@@ -54,6 +56,16 @@ export function App() {
   const [help, setHelp] = useState<HelpContent | null>(null);
   const [discardProject, setDiscardProject] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState(initialWorkspace);
+  // Explicit application coordinates, never the toolkit inputs or a guessed Git
+  // remote. This nonsecret field is in-memory and cleared on project switches.
+  const [applicationRepository, setApplicationRepository] = useState('');
+  const applicationRepositoryRef = useRef('');
+  const connectionDocumentId = useId().replace(/[^A-Za-z0-9_-]/g, '-');
+  const connectionProjectGeneration = useRef(1);
+  const connectionGenerationLost = useRef(false);
+  const connectionPicking = useRef(false);
+  const connectionPortRef = useRef<GitHubConnectionObservationPort | null>(null);
+  const connectionHandoffRef = useRef<GitHubConnectionTokenHandoff | null>(null);
   const workspaceRef = useRef(workspace);
   const editControllerRef = useRef<ConfigEditController | null>(null);
   const githubControllerRef = useRef<GitHubSetupController | null>(null);
@@ -61,6 +73,21 @@ export function App() {
   const connectionHelpGeneration = useRef<object>({});
   const workflowControllerRef = useRef<GitHubWorkflowEditController | null>(null);
   const assetControllerRef = useRef<AssetSessionController | null>(null);
+  const syncConnectionContext = useCallback(() => {
+    const selected = workspaceRef.current.selectedId;
+    const project = selected && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] : null;
+    // Renderer IDs/generations correlate the view only. The native command gets
+    // neither documentId nor projectGeneration and rechecks its actual owner.
+    connectionControllerRef.current?.setContext(project && !connectionPicking.current && connectionPortRef.current?.mode === 'native' &&
+      !connectionGenerationLost.current && connectionRepository(applicationRepositoryRef.current) ? {
+        documentId: connectionDocumentId, projectId: project.project.id,
+        projectGeneration: connectionProjectGeneration.current, repository: applicationRepositoryRef.current,
+      } : null);
+  }, [connectionDocumentId]);
+  const advanceConnectionContext = () => {
+    if (connectionProjectGeneration.current === 0xffff_ffff) connectionGenerationLost.current = true;
+    else connectionProjectGeneration.current += 1;
+  };
   // Keep the reducer's latest state synchronously visible to save admission.
   // A React render/effect delay must not let an older review authorize Apply.
   const dispatch = useCallback((action: WorkspaceAction) => {
@@ -73,6 +100,9 @@ export function App() {
       connectionHelpGeneration.current = {};
       connectionControllerRef.current?.setHelp(null);
       connectionControllerRef.current?.setContext(null);
+      if (connectionProjectGeneration.current === 0xffff_ffff) connectionGenerationLost.current = true;
+      else connectionProjectGeneration.current += 1;
+      applicationRepositoryRef.current = ''; setApplicationRepository('');
     }
     workspaceRef.current = next;
     assetControllerRef.current?.syncProject();
@@ -80,7 +110,8 @@ export function App() {
     githubControllerRef.current?.syncProject();
     workflowControllerRef.current?.syncContext();
     editControllerRef.current?.syncDraft();
-  }, []);
+    syncConnectionContext();
+  }, [syncConnectionContext]);
   const [configEdit] = useState(() => new ConfigEditController({
     project: (projectId) => Object.hasOwn(workspaceRef.current.projects, projectId) ? workspaceRef.current.projects[projectId] ?? null : null,
     otherEditReason: (projectId) => workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null,
@@ -95,7 +126,7 @@ export function App() {
   }, () => workflowControllerRef.current?.syncContext()));
   githubControllerRef.current = githubSetup;
   const githubState = useSyncExternalStore(githubSetup.subscribe, githubSetup.getSnapshot, githubSetup.getSnapshot);
-  // Guidance is reachable now, but there is deliberately no native port.
+  // Safe observation is separate from the compiled-disabled token entry path.
   const [githubConnection] = useState(() => new GitHubConnectionController());
   connectionControllerRef.current = githubConnection;
   const connectionState = useSyncExternalStore(githubConnection.subscribe, githubConnection.getSnapshot, githubConnection.getSnapshot);
@@ -134,6 +165,8 @@ export function App() {
     connectionHelpGeneration.current = helpGeneration;
     githubConnection.setHelp(null);
     githubConnection.setContext(null);
+    connectionHandoffRef.current = null; connectionPortRef.current = null;
+    void githubConnection.attach(null);
     githubSetup.beginConnection();
     setLoading(true);
     setBootError(null);
@@ -142,6 +175,15 @@ export function App() {
       const connection = await desktopApi();
       if (generation !== bootGeneration.current) return;
       setApi(connection);
+      const port: GitHubConnectionObservationPort = {
+        mode: connection.mode, subscribe: connection.subscribeGitHubConnection, status: connection.githubConnectionStatus,
+        refresh: connection.refreshGitHubConnection, disconnect: connection.disconnectGitHubConnection,
+      };
+      connectionPortRef.current = port;
+      connectionHandoffRef.current = connection.mode === 'native' ? { port, submit: connection.connectGitHubToken } : null;
+      // Fixed read-only Status may expose an unavailable native gate. Working
+      // passive appInfo is neither credential admission nor TLS qualification.
+      void githubConnection.attach(port);
       const appInfo = await connection.appInfo();
       if (generation !== bootGeneration.current) return;
       setInfo(appInfo);
@@ -152,7 +194,9 @@ export function App() {
           if (generation === bootGeneration.current) {
             if (!githubSetup.admitHelp(result.githubSetup)) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
             setCatalog(result);
-            if (helpGeneration === connectionHelpGeneration.current) githubConnection.setHelp(result.githubConnection);
+            if (helpGeneration === connectionHelpGeneration.current) {
+              githubConnection.setHelp(result.githubConnection); syncConnectionContext();
+            }
           }
         } catch (error) {
           if (generation === bootGeneration.current) { setCatalog(null); githubSetup.helpUnavailable(); setCatalogError(apiError(error)); }
@@ -162,11 +206,15 @@ export function App() {
         githubSetup.helpUnavailable();
       }
     } catch (error) {
-      if (generation === bootGeneration.current) { setInfo(null); setCatalog(null); githubSetup.connectionUnavailable(); setBootError(apiError(error)); }
+      if (generation === bootGeneration.current) {
+        connectionHandoffRef.current = null; connectionPortRef.current = null;
+        githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null);
+        setInfo(null); setCatalog(null); githubSetup.connectionUnavailable(); setBootError(apiError(error));
+      }
     } finally {
       if (generation === bootGeneration.current) setLoading(false);
     }
-  }, [githubSetup, githubConnection]);
+  }, [githubSetup, githubConnection, syncConnectionContext]);
 
   useEffect(() => {
     void bootstrap();
@@ -217,7 +265,10 @@ export function App() {
   };
 
   const chooseProject = async () => {
-    if (!api || chooseDisabled) return;
+    if (!api || chooseDisabled || connectionPicking.current) return;
+    // Admission of the native picker retires the original GitHub context even
+    // if selection later cancels/fails. Do not wait for a successful folder.
+    connectionPicking.current = true; advanceConnectionContext(); githubConnection.setContext(null);
     setChoosing(true);
     setChooseError(null);
     try {
@@ -227,7 +278,14 @@ export function App() {
       dispatch({ type: 'select', project });
       if (!alreadyLoaded) await loadSnapshot(project.id);
     } catch (error) { setChooseError(apiError(error)); }
-    finally { setChoosing(false); }
+    finally { connectionPicking.current = false; setChoosing(false); syncConnectionContext(); }
+  };
+
+  const changeApplicationRepository = (value: string) => {
+    if (value === applicationRepositoryRef.current) return;
+    advanceConnectionContext(); applicationRepositoryRef.current = value;
+    // Invalidate synchronously, before React can publish this input edit.
+    syncConnectionContext(); setApplicationRepository(value);
   };
 
   const validate = async () => {
@@ -328,7 +386,9 @@ export function App() {
         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} onHelp={setHelp} />}
         {page === 'metadata' && <Metadata catalog={catalog}>{editor(true)}</Metadata>}
         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} nativeReview={workflowPanel(true)}
-          connectionView={<><GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp} />
+          connectionView={<><GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp}
+            repositoryInput={applicationRepository} onRepository={changeApplicationRepository} projectSelected={session !== null && !choosing}
+            handoff={connectionHandoffRef.current} />
             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}</>} />}
         {page === 'releases' && <Releases info={info} />}
         {page === 'artifacts' && <Artifacts info={info} />}

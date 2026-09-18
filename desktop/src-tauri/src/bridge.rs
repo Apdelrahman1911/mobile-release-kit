@@ -128,6 +128,19 @@ impl DesktopBridge {
             path: project.root.clone(), identity: project.identity.ok_or_else(|| AssetError::new(Reason::Unqualified))?,
         }))
     }
+    /// In-memory native registration only. GitHub observations receive neither
+    /// a root/path nor filesystem authority. Hold the real registry mutex while
+    /// checking membership and its generation; an atomic sample alone is not
+    /// a registration and poisoned state must never be recovered as usable.
+    pub(crate) fn github_registration(&self, id: &str) -> Result<u32, crate::asset_commands::AssetError> {
+        use crate::asset_commands::{AssetError, Reason};
+        if !crate::protocol::valid_id(id) { return Err(AssetError::invalid()); }
+        let projects = self.projects.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?;
+        if !projects.contains_key(id) { return Err(AssetError::invalid()); }
+        let generation = self.project_generation.load(Ordering::SeqCst);
+        if generation == 0 { return Err(AssetError::new(Reason::CleanupUnknown)); }
+        Ok(generation)
+    }
     pub(crate) fn registry_generation(&self) -> u32 { self.project_generation.load(Ordering::SeqCst) }
     pub(crate) fn native_generation(&self) -> Result<u32, crate::asset_commands::AssetError> {
         let _projects = self.projects.lock().map_err(|_| crate::asset_commands::AssetError::new(crate::asset_commands::Reason::CleanupUnknown))?;

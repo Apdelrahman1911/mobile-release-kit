@@ -11,19 +11,41 @@ struct Rig {
     receiver: Option<oneshot::Receiver<Result<Value, BridgeError>>>,
 }
 fn rig() -> Rig {
+    rig_profile(Profile::Passive(Method::Capabilities), None)
+}
+fn rig_profile(profile: Profile, github_receipt: Option<Arc<Mutex<GitHubReadReceipt>>>) -> Rig {
     let supervisor = Supervisor::new(RuntimeConfig::packaged(PathBuf::from("/inert-never-resolved")));
     let permit = supervisor.inner.permits.clone().try_acquire_owned().unwrap();
     let (reply, receiver) = oneshot::channel();
+    let (reply, receiver) = if matches!(profile, Profile::Passive(_)) { (Some(reply), Some(receiver)) }
+        else { (None, None) };
     let (stop, _) = watch::channel(false);
     let owner = Arc::new(Owner {
-        key: 1, id: "inert-only-1".into(), state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, Some(reply))),
+        key: 1, id: "inert-only-1".into(), profile, github_receipt,
+        state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, reply)),
         resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(), permit: Mutex::new(Some(permit)),
         driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
         #[cfg(all(feature = "development-runtime"))]
         observation: Arc::new(Mutex::new(hosted_tests::Observation::default())),
     });
     lock(&supervisor.inner.owners).insert(owner.key, owner.clone());
-    Rig { supervisor, owner, receiver: Some(receiver) }
+    Rig { supervisor, owner, receiver }
+}
+fn github_rig() -> (Rig, GitHubReadTicket) {
+    let receipt = Arc::new(Mutex::new(GitHubReadReceipt::Pending));
+    let rig = rig_profile(Profile::GitHubReadOnly, Some(receipt.clone()));
+    let ticket = GitHubReadTicket { owner: rig.owner.clone(), receipt };
+    (rig, ticket)
+}
+fn inert_github_outcome() -> GitHubReadOutcome {
+    use crate::github_connection_protocol::{Fact, FactState, GitHubReadControl, GitHubReadFacts, Reason};
+    GitHubReadOutcome {
+        facts: GitHubReadFacts { schema_version: 1,
+            account: Fact { state: FactState::Unavailable, value: None, observed_at: None, reason: Reason::Cancelled },
+            repository: Fact { state: FactState::Unavailable, value: None, observed_at: None, reason: Reason::Cancelled },
+            automation: Fact { state: FactState::Unavailable, value: None, observed_at: None, reason: Reason::Cancelled } },
+        control: GitHubReadControl { reason: Reason::Cancelled, credential_expires_at: None, cooldown_seconds: None, cooldown_blocked: false },
+    }
 }
 fn start_observer(rig: &Rig) {
     let owner = rig.owner.clone();
@@ -37,9 +59,13 @@ fn start_observer(rig: &Rig) {
 fn staged_tasks(rig: &Rig) -> (oneshot::Sender<()>, oneshot::Sender<()>) {
     let (release_driver, driver) = oneshot::channel();
     let (release_watchdog, watchdog_return) = oneshot::channel();
+    let outcome = match rig.owner.profile {
+        Profile::Passive(_) => ReadOutcome::Passive(Value::String("inert-result".into())),
+        Profile::GitHubReadOnly => ReadOutcome::GitHub(inert_github_outcome()),
+    };
     *rig.owner.driver.try_lock().unwrap() = Some(tokio::spawn(async move {
         driver.await.unwrap();
-        DriverEnd::Ready(Ok(Value::String("inert-result".into())))
+        DriverEnd::Ready(Ok(outcome))
     }));
     let owner = rig.owner.clone();
     let inner = rig.supervisor.inner.clone();
@@ -156,7 +182,7 @@ async fn actual_driver_and_watchdog_panics_are_observed_without_repoll_or_retire
             let owner = rig.owner.clone();
             *rig.owner.driver.try_lock().unwrap() = Some(tokio::spawn(async move {
                 let _book = owner.resources.lock().await;
-                DriverEnd::Ready(Ok(Value::Null))
+                DriverEnd::Ready(Ok(ReadOutcome::Passive(Value::Null)))
             }));
             *rig.owner.watchdog.try_lock().unwrap() = Some(tokio::spawn(async { panic!("inert watchdog failure") }));
         }
@@ -223,7 +249,7 @@ async fn incomplete_roster_locks_prevent_even_fast_originals_from_retiring() {
     let mut rig = rig();
     let mut driver = rig.owner.driver.try_lock().unwrap();
     let mut watch_slot = rig.owner.watchdog.try_lock().unwrap();
-    *driver = Some(tokio::spawn(async { DriverEnd::Ready(Ok(Value::Null)) }));
+    *driver = Some(tokio::spawn(async { DriverEnd::Ready(Ok(ReadOutcome::Passive(Value::Null))) }));
     let owner = rig.owner.clone(); let inner = rig.supervisor.inner.clone();
     *watch_slot = Some(tokio::spawn(watchdog(inner, owner)));
     start_observer(&rig);
@@ -282,6 +308,9 @@ fn executor_refusal_precedes_registration_or_native_work() {
     assert!(matches!(result, Poll::Ready(Err(_))));
     assert!(supervisor.can_exit());
     assert_eq!(supervisor.inner.permits.available_permits(), ACTIVE_LIMIT);
+    assert!(supervisor.start_github_readonly("owner/app", None, None, "INERT_ONLY").is_err());
+    assert!(supervisor.can_exit());
+    assert_eq!(supervisor.inner.permits.available_permits(), ACTIVE_LIMIT);
 }
 
 #[test]
@@ -290,7 +319,7 @@ fn serialized_retirement_rechecks_same_clock_and_shutdown_with_ready_joins() {
         let mut state = OwnerState::new(endpoint, None);
         state.driver_join = ManagementJoin::Returned;
         state.watchdog_join = ManagementJoin::Returned;
-        state.driver_end = Some(DriverEnd::Ready(Ok(Value::Null)));
+        state.driver_end = Some(DriverEnd::Ready(Ok(ReadOutcome::Passive(Value::Null))));
         state.watchdog_end = Some(WatchdogEnd::DriverObserved(ManagementJoin::Returned));
         state
     }
@@ -299,7 +328,7 @@ fn serialized_retirement_rechecks_same_clock_and_shutdown_with_ready_joins() {
     // These synthetic management receipts test only the actual final locked
     // decision. No child, native lifetime, elapsed timeout or exit is claimed.
     let mut before = ready(endpoint);
-    assert_eq!(before.retirement_result(endpoint - Duration::from_nanos(1), false).unwrap().unwrap(), Value::Null);
+    assert_eq!(before.retirement_result(endpoint - Duration::from_nanos(1), false).unwrap().unwrap(), ReadOutcome::Passive(Value::Null));
     assert!(before.cleanup_endpoint.is_none());
 
     let mut at = ready(endpoint);
@@ -328,4 +357,81 @@ fn serialized_retirement_rechecks_same_clock_and_shutdown_with_ready_joins() {
     unknown.unknown = true;
     assert_eq!(unknown.retirement_result(start, false).unwrap().unwrap_err().code, "cleanup_unknown");
     assert!(unknown.unknown);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn github_receipt_waits_for_original_management_and_keeps_original_settlement_time() {
+    let (mut rig, ticket) = github_rig();
+    let (driver, watchdog) = staged_tasks(&rig);
+    assert_eq!(ticket.operation_id(), "inert-only-1");
+    driver.send(()).unwrap();
+    turns_until(|| lock(&rig.owner.state).driver_join == ManagementJoin::Returned).await;
+    assert_retained(&mut rig);
+    assert!(matches!(ticket.receipt(), GitHubReadReceipt::Pending));
+    watchdog.send(()).unwrap();
+    join_settled_observer(&rig).await;
+    let GitHubReadReceipt::Settled { outcome, settled_at, was_unknown } = ticket.receipt() else {
+        panic!("original retirement did not seal its safe-data mailbox");
+    };
+    assert_eq!(outcome.unwrap(), inert_github_outcome());
+    assert!(!was_unknown);
+    let GitHubReadReceipt::Settled { settled_at: repeated, .. } = ticket.receipt() else { panic!("receipt regressed"); };
+    assert_eq!(settled_at, repeated); // Observation never renews time authority.
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn github_stop_and_ticket_drop_are_not_original_settlement() {
+    let (rig, ticket) = github_rig();
+    let (driver, watchdog) = staged_tasks(&rig);
+    let receipt = ticket.receipt.clone();
+    ticket.stop();
+    let original_cleanup = lock(&rig.owner.state).cleanup_endpoint;
+    assert!(original_cleanup.is_some());
+    assert!(matches!(ticket.receipt(), GitHubReadReceipt::Pending));
+    ticket.stop();
+    assert_eq!(lock(&rig.owner.state).cleanup_endpoint, original_cleanup);
+    assert!(!rig.supervisor.can_exit());
+    drop(ticket);
+    assert!(!rig.supervisor.can_exit());
+    assert_eq!(rig.supervisor.inner.permits.available_permits(), ACTIVE_LIMIT - 1);
+    driver.send(()).unwrap(); watchdog.send(()).unwrap();
+    join_settled_observer(&rig).await;
+    let retained = lock(&receipt).clone();
+    let GitHubReadReceipt::Settled { outcome, was_unknown, .. } = retained else { panic!("no original retirement"); };
+    assert_eq!(outcome.unwrap_err().code, "cancelled");
+    assert!(!was_unknown);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn github_unknown_mailbox_can_finish_but_never_regains_success() {
+    let (rig, ticket) = github_rig();
+    let (driver, watchdog) = staged_tasks(&rig);
+    driver.send(()).unwrap();
+    turns_until(|| lock(&rig.owner.state).driver_join == ManagementJoin::Returned).await;
+    rig.owner.unknown(&rig.supervisor.inner);
+    assert!(matches!(ticket.receipt(), GitHubReadReceipt::RetainedUnknown));
+    assert!(!rig.supervisor.can_exit());
+    watchdog.send(()).unwrap();
+    join_settled_observer(&rig).await;
+    let GitHubReadReceipt::Settled { outcome, settled_at, was_unknown } = ticket.receipt() else { panic!("no late original receipt"); };
+    assert!(was_unknown);
+    assert_eq!(outcome.unwrap_err().code, "cleanup_unknown");
+    rig.owner.unknown(&rig.supervisor.inner);
+    let GitHubReadReceipt::Settled { settled_at: repeated, was_unknown: repeated_unknown, .. } = ticket.receipt() else { panic!("late unknown regressed finality"); };
+    assert_eq!(settled_at, repeated);
+    assert!(repeated_unknown && rig.supervisor.disabled());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn github_guard_loss_only_reports_retained_unknown_and_never_fabricates_a_receipt() {
+    let (rig, ticket) = github_rig();
+    let guard = FinalObserverGuard { inner: rig.supervisor.inner.clone(), owner: rig.owner.clone(), retired: false };
+    let original = tokio::spawn(async move { let _guard = guard; pending::<()>().await; });
+    // As in the passive guard fixture: an unpolled synthetic future with no
+    // runtime inspection/native resources. Never a production cleanup strategy.
+    original.abort();
+    assert!(original.await.unwrap_err().is_cancelled());
+    assert!(matches!(ticket.receipt(), GitHubReadReceipt::RetainedUnknown));
+    assert!(rig.supervisor.disabled() && !rig.supervisor.can_exit());
+    assert_eq!(rig.supervisor.inner.permits.available_permits(), ACTIVE_LIMIT - 1);
 }

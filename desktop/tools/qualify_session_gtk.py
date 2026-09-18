@@ -47,6 +47,7 @@ ROSTER = ("picker-cancel", "picker-select", "source-select", "quit-cancel", "qui
 SOURCES = (
     'desktop/config_edit_bootstrap.py',
     'desktop/engine_bootstrap.py',
+    'desktop/github_connection_bootstrap.py',
     'desktop/index.html',
     'desktop/native/linux-mount-observation/Cargo.toml',
     'desktop/native/linux-mount-observation/src/lib.rs',
@@ -74,6 +75,9 @@ SOURCES = (
     'desktop/src-tauri/src/edit_protocol.rs',
     'desktop/src-tauri/src/error.rs',
     'desktop/src-tauri/src/github_commands.rs',
+    'desktop/src-tauri/src/github_connection_protocol.rs',
+    'desktop/src-tauri/src/github_connection_session.rs',
+    'desktop/src-tauri/src/github_workflow_edit_protocol.rs',
     'desktop/src-tauri/src/hosted_tests.rs',
     'desktop/src-tauri/src/installed_runtime.rs',
     'desktop/src-tauri/src/lib.rs',
@@ -86,6 +90,7 @@ SOURCES = (
     'desktop/src-tauri/src/shell.rs',
     'desktop/src-tauri/src/supervisor.rs',
     'desktop/src-tauri/tauri.conf.json',
+    'desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py',
     'desktop/src-tauri/tests/fixtures/passive_core/__init__.py',
     'desktop/src-tauri/tests/fixtures/passive_core/_desktop_engine.py',
     'desktop/src-tauri/tests/session_gtk_qualification.rs',
@@ -106,6 +111,8 @@ SOURCES = (
     'desktop/src/components/DraftReview.tsx',
     'desktop/src/components/DraftSuggestions.tsx',
     'desktop/src/components/Fields.tsx',
+    'desktop/src/components/GitHubConnection.tsx',
+    'desktop/src/components/GitHubWorkflowApply.tsx',
     'desktop/src/components/Icon.tsx',
     'desktop/src/components/RemovedFields.tsx',
     'desktop/src/configEdit.ts',
@@ -113,8 +120,15 @@ SOURCES = (
     'desktop/src/configEditProtocol.ts',
     'desktop/src/credentialGuide.ts',
     'desktop/src/drafts.ts',
+    'desktop/src/githubConnectionController.ts',
+    'desktop/src/githubConnectionProtocol.ts',
+    'desktop/src/githubConnectionTypes.ts',
     'desktop/src/githubSetupController.ts',
     'desktop/src/githubSetupProtocol.ts',
+    'desktop/src/githubWorkflowEdit.ts',
+    'desktop/src/githubWorkflowEditController.ts',
+    'desktop/src/githubWorkflowEditProtocol.ts',
+    'desktop/src/githubWorkflowEditTypes.ts',
     'desktop/src/main.tsx',
     'desktop/src/pages/Credentials.tsx',
     'desktop/src/pages/Dashboard.tsx',
@@ -137,6 +151,8 @@ SOURCES = (
     'src/mobile_release/_desktop_edit_engine.py',
     'src/mobile_release/_desktop_edit_protocol.py',
     'src/mobile_release/_desktop_engine.py',
+    'src/mobile_release/_desktop_github_engine.py',
+    'src/mobile_release/_github_connection_transport.py',
     'src/mobile_release/_lifetime_evidence.py',
     'src/mobile_release/_native_process.py',
     'src/mobile_release/_profile_callers.py',
@@ -150,6 +166,7 @@ SOURCES = (
     'src/mobile_release/api/_catalog.py',
     'src/mobile_release/api/_credential_assessment.py',
     'src/mobile_release/api/_credential_guide.py',
+    'src/mobile_release/api/_github_connection.py',
     'src/mobile_release/api/_github_setup.py',
     'src/mobile_release/api/_json.py',
     'src/mobile_release/api/_preview.py',
@@ -159,6 +176,7 @@ SOURCES = (
     'src/mobile_release/api/contracts.py',
     'src/mobile_release/api/data/credential-guide-v1.json',
     'src/mobile_release/api/data/field-help.json',
+    'src/mobile_release/api/data/github-connection-v1.json',
     'src/mobile_release/api/data/github-setup-v1.json',
     'src/mobile_release/api/data/project.schema.json',
     'src/mobile_release/build_inputs.py',
@@ -174,6 +192,7 @@ SOURCES = (
     'src/mobile_release/data/apple-profile-roots.pem',
     'src/mobile_release/discovery.py',
     'src/mobile_release/errors.py',
+    'src/mobile_release/github_workflow_edit.py',
     'src/mobile_release/init_transaction.py',
     'src/mobile_release/init_workspace_custody.py',
     'src/mobile_release/inspection.py',
@@ -271,7 +290,7 @@ class FiniteJson:
 
     Only an already bounded string token is passed to json.loads. Native DTOs
     require canonical declaration order and one LF. DATA has a larger key/map
-    budget for all154 source names; final/prefix additionally require their
+    budget for all173 source names; final/prefix additionally require their
     producer's sorted compact encoding with no LF. Freeze DATA may be spaced.
     """
     def __init__(self, data: bytes, *, native: bool, large: bool = False):
@@ -1522,7 +1541,7 @@ class Freeze:
         require(Path(__file__).resolve(strict=True) == launcher and os.getcwd() == str(repository / "desktop/src-tauri"), "fixed actual launcher source/cwd")
         require(type(v["display"]) is str and re.fullmatch(r":[1-9][0-9]{0,3}", v["display"]) is not None
                 and os.environ.get("DISPLAY") == v["display"], "fixed inherited display number")
-        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 154, "complete frozen154 source roster")
+        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 173, "complete frozen173 source roster")
         for path in SOURCES:
             h(v["sourceHashes"][path])
             actual, st = book.hash_file(exact_path(repository / path), 2 * 1024 * 1024)
@@ -2569,7 +2588,7 @@ def inert_source_tests() -> None:
     raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
     fixed(FiniteJson(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
     longest = max(SOURCES, key=len)
-    assert len(SOURCES) == 154 and 64 < len(longest) <= 128 and len(WITNESS) == 18
+    assert len(SOURCES) == 173 and 64 < len(longest) <= 128 and len(WITNESS) == 18
     raw = (json.dumps({longest: "a" * 64}, separators=(",", ":")) + "\n").encode("ascii")
     rejects(lambda data: FiniteJson(data, native=True).parse(lf=True), raw)
     base = {"response-decision": 1, "response-leave": 3, "close-dispatch": 2, "close-enter": 4, "close-ack": 5, "close-leave": 6,
