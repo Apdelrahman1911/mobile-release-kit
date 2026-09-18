@@ -561,7 +561,7 @@ class FixedCompilerHelperTests(unittest.TestCase):
                                 env=environment, timeout=15, capture=True)
             self.assertEqual(result, "1.98.0")
             called.assert_called_once_with(argv, cwd=Path("/unused"), env=environment,
-                                           check=True, timeout=15, text=True, stdout=subprocess.PIPE)
+                                           check=True, timeout=15, text=True, stdout=subprocess.PIPE, stderr=None)
             self.assertEqual(logs.getvalue(), "Fixed check: rust-version-target\n")
         with patch.object(helper.subprocess, "run", return_value=completed) as called, redirect_stdout(io.StringIO()):
             destination = io.StringIO()
@@ -1237,13 +1237,678 @@ class WorkflowNativeHelperTests(unittest.TestCase):
             self.assertNotIn(forbidden, workflow)
         positions = [workflow.index(f"ci_foundation.py {phase}'") for phase in helper.WORKFLOW_NATIVE_PHASES]
         self.assertEqual(positions, sorted(positions))
-        self.assertEqual(workflow.count("ci_foundation.py "), len(helper.WORKFLOW_NATIVE_PHASES))
+        self.assertEqual(workflow.count("ci_foundation.py "), len(helper.WORKFLOW_NATIVE_PHASES) + 3)
+        # The new push-only metadata selection shares this compile, not the old
+        # workflow-domain native sequence. Keep the original upload unchanged.
+        workflow_upload = workflow.split("      - name: Retain only allowlisted synthetic receipts\n", 1)[1].split(
+            "      - name: Retain only allowlisted synthetic metadata receipts\n", 1)[0]
         allowlist = [line.strip().split("${{ steps.prepare.outputs.root }}/", 1)[1]
-                     for line in workflow.splitlines() if line.strip().startswith("${{ steps.prepare.outputs.root }}/")]
+                     for line in workflow_upload.splitlines() if line.strip().startswith("${{ steps.prepare.outputs.root }}/")]
         self.assertEqual(allowlist, ["public-bindings.json", "acquire-checks.json", "compile-checks.json", "workflow-owner-checks.json",
             "workflow-owner-source/receipt.json", "workflow-owner-zip/receipt.json", "workflow-transaction-eof-checks.json",
             "workflow-transaction-eof/receipt.json", "workflow-core-checks.json", "workflow-ordinary.json",
             "workflow-committed-fsync.json", "workflow-committed-close.json", "retention-checks.json"])
+
+
+def metadata_environment() -> dict[str, str]:
+    """Inert route data, not GitHub admission or an executed job."""
+    return {"GITHUB_SHA": "1" * 40, "GITHUB_REPOSITORY": "Example/project", "GITHUB_RUN_ID": "123",
+            "GITHUB_RUN_ATTEMPT": "1", "GITHUB_EVENT_NAME": "push", "MRK_PUSH_EVENT_AFTER": "1" * 40,
+            "MRK_DESKTOP_HOSTED_CHECKS": "metadata-text-apply-native-v1",
+            "GITHUB_REF": "refs/heads/verify/desktop-metadata-text-apply-native", "GITHUB_WORKFLOW_SHA": "1" * 40,
+            "GITHUB_WORKFLOW_REF": "Example/project/.github/workflows/desktop-github-workflow-apply-native.yml@refs/heads/verify/desktop-metadata-text-apply-native"}
+
+
+def metadata_context() -> dict:
+    return {"root": "/never-opened/task", "source": "/never-opened/source", "sourceSha": "1" * 40, "sourceTree": "3" * 40,
+            "platform": "linux", "executionScope": "metadata-text-apply-native-v1", "workflowSha": "1" * 40,
+            "workflowPath": ".github/workflows/desktop-github-workflow-apply-native.yml", "workflowSha256": "4" * 64,
+            "workflowRef": metadata_environment()["GITHUB_WORKFLOW_REF"], "repository": "Example/project",
+            "runId": "123", "attempt": "1", "event": "push", "ref": "refs/heads/verify/desktop-metadata-text-apply-native",
+            "pushEventAfter": "1" * 40, "observedHost": workflow_host_report(),
+            "metadataInputs": {"sourceFiles": [{"path": path, "size": 123, "sha256": "3" * 64} for path in helper.METADATA_NATIVE_SOURCES],
+                               "coreFiles": [{"path": "mobile_release/metadata_text.py", "size": 10, "sha256": "6" * 64}],
+                               "coreZipSha256": "7" * 64, "pythonSha256": "2" * 64}}
+
+
+def metadata_core_report(partition: str) -> dict:
+    """Consumer test data only. The separately fixed oracle hash is checked below."""
+    rows = helper.METADATA_CORE_ROWS[partition]
+    return {"schemaVersion": 1, "suite": "desktop-metadata-text-native", "domain": "metadata_text",
+            "partition": partition, "status": "passed", "reason": "none", "failedAt": None,
+            "retained": True, "uncertaintyLatched": partition != "committed-fsync",
+            "injection": helper.METADATA_CORE_INJECTIONS[partition], "host": workflow_host_report(),
+            "bindings": {"sourceSha": "1" * 40, "sourceKind": "source", "sourceHashes": dict.fromkeys(helper.METADATA_CORE_SOURCES, "3" * 64),
+                         "pythonSha256": "2" * 64, **deepcopy(helper.METADATA_PAYLOAD_BINDINGS)},
+            "completed": [row[0] for row in rows],
+            "cases": [{"case": name, "outcome": {"effect": effect, "journal": journal, "resources": resources, "reason": reason},
+                       "owner": {"closed": True, "handlerRestored": True, "fatal": fatal}, "observed": deepcopy(observed)}
+                      for name, effect, journal, resources, reason, fatal, observed in rows]}
+
+
+def validate_metadata_core(report: object, partition: str) -> dict:
+    return helper.validate_metadata_core_receipt(report, partition, source_sha="1" * 40,
+        source_hashes=dict.fromkeys(helper.METADATA_CORE_SOURCES, "3" * 64), python_hash="2" * 64, host=workflow_host_report())
+
+
+def metadata_phase_report(name: str) -> dict:
+    context = metadata_context()
+    return {"schemaVersion": 1, "scope": "desktop-metadata-text-apply-native-only-v1", "phase": name, "status": "passed",
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha", "workflowRef",
+                "workflowSha256", "repository", "runId", "attempt", "event", "ref", "pushEventAfter", "metadataInputs")},
+            "rust": {"release": helper.RUST, "target": "x86_64-unknown-linux-gnu"}, "python": helper.PYTHON,
+            "features": ["development-runtime"], "testTarget": "lib",
+            "checks": [{"check": key, "exitCode": 0} for key in helper.METADATA_NATIVE_CHECKS[name]],
+            "notVerified": list(helper.METADATA_NOT_VERIFIED)}
+
+
+def metadata_native_facts(*, domain="metadata_text", effect="committed", journal="clean", reason="none", native_reason="none",
+                          applied=True, requests=3, responses=3, sequence=2, checkout=True, prepared=True, unknown=False, stderr=0):
+    """Independent inert wire DATA; never an original resource/native receipt."""
+    facts = {"originalWait": True, "stdoutEof": True, "stderrEof": True, "stdinClosed": True, "stdoutClosed": True,
+             "stderrClosed": True, "startupJoined": True, "ioJoined": True, "driverJoined": True, "watchdogJoined": True,
+             "managerJoined": True, "requestFrames": requests, "responseFrames": responses, "stdoutBytes": 100,
+             "stderrBytes": stderr, "forceAttempted": False, "domain": domain, "nativePhase": "unknown" if unknown else "final",
+             "nativeFinality": "unknown" if unknown else "settled", "nativeReason": native_reason, "applySubmitted": applied,
+             "lateSettled": unknown, "outcome": {"effect": effect, "journal": journal, "resources": "settled", "reason": reason},
+             "terminalSeq": sequence}
+    if domain == "metadata_text":
+        facts.update(checkoutRetained=checkout, preparedRetained=prepared)
+    return facts
+
+
+def metadata_passive_facts(methods, start, error=None):
+    return [{"method": method, "key": str(start + index), "error": error if method == "observe" else None,
+             "observerJoin": "ok", "permitRetired": True, "resourceBookRetired": True,
+             "native": {"inspection_joined": True, "acquisition_joined": True, "spawned": True, "waited": True, "exit_success": True,
+                "writer_joined": True, "writer_complete": True, "stdout_eof": True, "stderr_eof": True, "stdout_joined": True,
+                "stderr_joined": True, "stdout_bytes": 100, "stderr_bytes": 0, "driver_joined": True, "watchdog_joined": True}}
+            for index, method in enumerate(methods)]
+
+
+def metadata_owner_report(mode="source", *, eof=False):
+    """Handwritten consumer examples following the independently fixed Rust wire contract."""
+    context = metadata_context()
+    inputs = context["metadataInputs"]
+    source_hashes = dict.fromkeys(helper.METADATA_TRANSACTION_EOF_SOURCES if eof else helper.METADATA_OWNER_SOURCES, "3" * 64)
+    bindings = {"sourceSha": "1" * 40, "sourceTree": "3" * 40, "workflowSha256": "4" * 64, "runId": "123", "attempt": "1",
+        "ref": "refs/heads/verify/desktop-metadata-text-apply-native", "coreZipSha256": "7" * 64,
+        "coreInventorySha256": hashlib.sha256(json.dumps(inputs["coreFiles"], sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest(),
+        "domain": "metadata_text", "host": "linux", "target": "x86_64-unknown-linux-gnu", "runtimeMode": "trusted-development-only",
+        "runtimeInput": mode, "pythonSha256": "2" * 64, "sourceHashes": source_hashes, "payloadHashes": deepcopy(helper.METADATA_OWNER_PAYLOAD_HASHES),
+        "metadataResourceSha256": "3" * 64, "schemaResourceSha256": "3" * 64, "inheritedFileMaskObserved": True,
+        "requestedCreateMode": 420, "observedCreateMode": 384, "newDirectoryMode": 493,
+        "documentEvidence": "controlled-original-lifetime-not-gui-callbacks"}
+    report = {"schemaVersion": 1, "scope": "metadata-text-transaction-eof-hosted-v1" if eof else "metadata-text-owner-hosted-v1",
+        "domain": "metadata_text", "status": "passed", "allOwnersSettled": not eof, "originalResourcesSettled": True,
+        "ownerDisabled": eof, "retainedEffectUnknown": eof, "failureCode": None, "bindings": bindings, "cases": [],
+        "notVerified": ["production-runtime-custody", "production-metadata-save-enablement", "native-gui", "webview-callbacks-or-crash-hook",
+            "parent-death", "native-stuck-wait-close", "persisted-recovery", "macos-windows-metadata-writes", "credentials", "remote-github",
+            "stores", "mobile-builds", "installers"]}
+    names = ("android-observe-create", "ios-observe-create", "android-observe-noop", "ios-observe-noop", "android-observe-replace-preserve",
+             "ios-observe-mixed-create-replace-preserve", "observe-without-ignore-save-refused", "observe-last-sensitive-refused",
+             "observe-last-nonutf8-refused", "stale-passive-baseline-refused", "three-domain-owner-isolation",
+             "registration-changed-before-apply", "metadata-terminal-held-after-stop", "metadata-document-loss-before-apply")
+    if eof:
+        names = ("precommit-eof", "postcommit-eof", "precommit-conflict-eof")
+    start = 1
+    for index, name in enumerate(names):
+        if mode == "zip" and index != 5:
+            continue
+        platform = "ios" if (index == 1 if eof else index in (1, 3, 5, 8)) else "android"
+        locale = "fr-FR" if not eof and index == 4 else "en-US"
+        error = None if eof else "metadata_text_sensitive" if index == 7 else "metadata_text_encoding" if index == 8 else None
+        catalogue = not eof and (index == 0 or mode == "zip")
+        methods = ["observe"] if error else ["catalogue", "observe", "validate"] if catalogue else ["observe", "validate"]
+        passive = metadata_passive_facts(methods, start, error)
+        start += len(methods)
+        common = {"sourceProbesSettled": True, "passiveOriginalsSettled": True}
+        if eof:
+            committed, unknown = index == 1, index == 2
+            boundary, checkpoint = (("before-COMMITTED", "publisher-entry"), ("after-durable-COMMITTED", "descriptor-close"),
+                                    ("before-COMMITTED", "publisher-entry"))[index]
+            # Exact original two-record wire text, not a native execution result.
+            lines = [f"MRK_METADATA_TEXT_EOF_V1 {name} boundary={boundary}\n",
+                     f"MRK_METADATA_TEXT_EOF_V1 {name} eof=1 nonempty=0 readErrors=0 checkpoint={checkpoint} applied=1 "
+                     + ("committed=0 rolledBack=1 terminal=ROLLED_BACK durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+                        "committed=1 rolledBack=0 terminal=COMMITTED durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+                        "committed=0 rolledBack=0 terminal=UNKNOWN durable=0 recovery=1 clean=0 settled=1 cancelled=1\n")[index]]
+            native = metadata_native_facts(effect=("rolled_back", "committed", "unknown")[index],
+                journal="recovery_required" if unknown else "clean", reason="cancelled", native_reason="cancelled", unknown=unknown,
+                stderr=len("".join(lines).encode("ascii")))
+            observed = {"evidenceKind": "real-stdin-eof-at-controlled-transaction-boundary", "bootstrapMode": "instrumented-genuine-engine",
+                "boundary": boundary, "originalCheckpoint": checkpoint, "closeBeforeActiveDeadline": True, "controlRecords": 2,
+                "actualStdinEof": True, "eofReadCount": 1, "nonemptyReadCount": 0, "readErrorCount": 0, "preparedCorrelationRetained": True,
+                "metadataProfileAndControlProof": True, "committedPublication": committed, "rolledBackPublication": index == 0,
+                "terminalDurable": not unknown, "fixedRecovery": True, "journalClean": not unknown, "journalAbsent": not unknown,
+                "originalTreeRestored": index == 0, "selectedPayloadsRemain": index != 0, "unselectedAndDependenciesPreserved": True,
+                "unrelatedIntroducedBeforeEof": unknown, "introducedOriginalPreserved": unknown, "recoveryEvidenceRetained": unknown,
+                "sharedBlockedProject": unknown, "allThreeDomainsDisabled": unknown, "noFurtherAdmission": unknown, "fixtureFilesSettled": True, **common}
+        elif error:
+            native = None
+            observed = {"closedError": error, "lastFieldRefused": True, "noPartialTextOrDigest": True, "noEditorAdmitted": True, "treeUnchanged": True, **common}
+        elif index == 6:
+            native = metadata_native_facts(effect="not_started", journal="not_created", reason="ignore_conflict", applied=False,
+                requests=1, responses=1, sequence=0, checkout=False, prepared=False)
+            observed = {"passiveObserveWithoutIgnore": True, "ignoreStillAbsent": True, "noCheckoutOrPlan": True, "treeUnchanged": True, **common}
+        elif index == 9:
+            native = metadata_native_facts(effect="not_started", journal="not_created", reason="stale_revision", applied=False,
+                requests=2, responses=2, sequence=1, prepared=False)
+            observed = {"olderPassiveBaselineRejected": True, "newerNativeCheckoutRetained": True, "noPlanOrRebase": True,
+                        "externalChangeRetained": True, "treeUnchanged": True, **common}
+        elif index in (11, 13):
+            native = metadata_native_facts(effect="not_started", journal="not_created", reason="cancelled", applied=False,
+                native_reason="caller_lost" if index == 11 else "window_lost", requests=2, responses=3, sequence=1)
+            observed = {"preparedCorrelationRetained": True, "treeUnchanged": True, "staleCommandNotSent": True,
+                "newRegistrationPublishedUnderDocumentLock": index == 11, "controlledOriginalDocumentLoss": index == 13,
+                "replacementDocumentRefused": index == 13, "guiCallbacksNotClaimed": True, **common}
+        else:
+            counts = ((3, 0, 0), (5, 0, 0), (0, 0, 3), (0, 0, 5), (0, 1, 2), (1, 2, 2))[index] if index < 6 else (3, 0, 0)
+            noop = index in (2, 3)
+            native = metadata_native_facts(effect="unchanged" if noop else "committed", journal="not_created" if noop else "clean",
+                                          native_reason="cancelled" if index == 12 else "none")
+            directories = ["release/store", "release/store/ios", "release/store/ios/en-US"] if index == 1 else (
+                ["public", "public/store", "public/store/android", "public/store/android/en-US"] if index in (0, 10, 12) else [])
+            domains = [metadata_native_facts(domain=domain, effect="not_started", journal="not_created", reason="cancelled",
+                native_reason="discarded", applied=False, requests=1, responses=2, sequence=0) for domain in ("configuration", "github_workflows")] if index == 10 else []
+            observed = {"created": counts[0], "replaced": counts[1], "preserved": counts[2], "directoriesCreated": directories,
+                "completePreparedBytes": True, "passiveBaselineMatchedCheckout": True, "preparedCorrelationRetained": True,
+                "capturePrepareRawFactsUnchanged": True, "unselectedAndDependenciesPreserved": True, "existingModesPreserved": True,
+                "createModesMasked": True, "directoryModesExact": True, "rawNoopUnchanged": noop, "duplicateApplyObservation": index == 0,
+                "catalogueResourceMatched": catalogue, "sharedStatusRevision": True, "sharedLastTerminalDomainCorrect": True,
+                "threeDomainIsolation": index == 10, "domains": domains, "heldBeforeAcceptance": index == 12,
+                "realStopBeforeRelease": index == 12, "cancelledNotSaved": index == 12, **common}
+        report["cases"].append({"name": name, "domain": "metadata_text", "platform": platform, "locale": locale,
+                                "native": native, "passive": passive, "observations": observed})
+    return report
+
+
+def validate_metadata_owner(report, mode="source", *, eof=False):
+    sources = dict.fromkeys(helper.METADATA_TRANSACTION_EOF_SOURCES if eof else helper.METADATA_OWNER_SOURCES, "3" * 64)
+    if eof:
+        return helper.validate_metadata_transaction_eof_receipt(report, context=metadata_context(), source_hashes=sources)
+    return helper.validate_metadata_owner_receipt(report, mode, context=metadata_context(), source_hashes=sources)
+
+
+class MetadataNativeHelperTests(unittest.TestCase):
+    """Closed metadata grammar/lifecycle consumers; no real tools or subjects."""
+
+    def test_core_rows_sources_and_seeds_match_the_independently_fixed_metadata_contract(self):
+        # Digests were derived from the accepted literal cross-language contract,
+        # not from the candidate/helper generator. No native result is claimed.
+        canonical = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")).hexdigest()
+        cases = [case for partition in ("ordinary", "committed-fsync", "committed-close") for case in metadata_core_report(partition)["cases"]]
+        self.assertEqual(len(cases), 22)
+        self.assertEqual(canonical(cases), "1adb3df36daed910279f776cf1683367b0b85c73cba13057fa1e7967b18b2601")
+        self.assertEqual(canonical(helper.METADATA_CORE_SOURCES), "d812ffa8c1a5e9a0798dd3736572ad16ba435dd62d9a5af07c8c74c9c66b9c2b")
+        self.assertEqual(canonical(helper.METADATA_PAYLOAD_BINDINGS), "a0d9844865eed8a49f98ddbc640a9ebcb04c9c31e48774a83281dad5c45beb92")
+        # Independent author oracle: literal seed bytes and the actual Rust
+        # SOURCES26/EXTRA23 map, not this helper's receipt constructor.
+        self.assertEqual(canonical(helper.METADATA_OWNER_PAYLOAD_HASHES), "3ab3654346ac8bc3d740c77e51e6313bce70cc2dbb2dc1817a2f552c669f05aa")
+        self.assertEqual(canonical(helper.METADATA_OWNER_SOURCES), "0e18075b26b15a528a8f283ced045a0292252d5289ac60307d151a18502930e1")
+        self.assertEqual(set(helper.METADATA_PAYLOAD_BINDINGS), {"configHashes", "ignoreSha256", "fieldHashes"})
+        self.assertEqual(len(helper.METADATA_CORE_SOURCES), 20)
+        self.assertEqual(len(helper.METADATA_OWNER_SOURCES), 49)
+        self.assertEqual(len(helper.METADATA_TRANSACTION_EOF_SOURCES), 50)
+        self.assertEqual(helper.METADATA_NATIVE_SOURCES, tuple(sorted(set(helper.METADATA_NATIVE_SOURCES))))
+        for path in (*helper.METADATA_CORE_SOURCES.values(), *helper.METADATA_TRANSACTION_EOF_SOURCES.values(),
+                     helper.METADATA_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py"):
+            self.assertIn(path, helper.METADATA_NATIVE_SOURCES)
+        for path in ("desktop/package-lock.json", "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/tests/session_gtk_qualification.rs"):
+            self.assertNotIn(path, helper.METADATA_NATIVE_SOURCES)
+
+    def test_core_exact_rows_separate_unknown_effect_resources_and_original_fatal_latch(self):
+        for partition in ("ordinary", "committed-fsync", "committed-close"):
+            report = metadata_core_report(partition)
+            with patch.object(helper, "run", side_effect=AssertionError("no subprocess")), \
+                    patch.object(helper, "hash_file", side_effect=AssertionError("no filesystem")):
+                self.assertIs(validate_metadata_core(report, partition), report)
+            for changed in ({"schemaVersion": True}, {"suite": "desktop-workflow-native"}, {"domain": "github_workflows"},
+                            {"status": "failed"}, {"failedAt": "unobserved"}, {"retained": False}, {"reason": "filesystem_error"},
+                            {"completed": []}, {"cases": []}, {"bindings": {}}, {"extra": True}):
+                with self.subTest(partition=partition, change=changed), self.assertRaises(helper.CheckFailure):
+                    validate_metadata_core({**report, **changed}, partition)
+            for index, case in enumerate(report["cases"]):
+                for section, key, value in (("owner", "closed", False), ("owner", "handlerRestored", 1),
+                                             ("owner", "fatal", not case["owner"]["fatal"]),
+                                             ("outcome", "resources", "settled" if partition == "committed-close" else "unknown"),
+                                             ("outcome", "effect", "unchanged")):
+                    changed = deepcopy(report)
+                    changed["cases"][index][section][key] = value
+                    with self.subTest(partition=partition, case=index, section=section, key=key), self.assertRaises(helper.CheckFailure):
+                        validate_metadata_core(changed, partition)
+                for key, original in case["observed"].items():
+                    changed = deepcopy(report)
+                    changed["cases"][index]["observed"][key] = int(original) if type(original) is bool else None
+                    with self.subTest(partition=partition, case=index, observation=key), self.assertRaises(helper.CheckFailure):
+                        validate_metadata_core(changed, partition)
+        ordinary = metadata_core_report("ordinary")
+        self.assertEqual(ordinary["completed"][-1], "dependency-drift-after-first-replacement")
+        self.assertEqual(ordinary["cases"][-1]["outcome"], {"effect": "unknown", "journal": "recovery_required", "resources": "settled", "reason": "stale_revision"})
+        for cases in (ordinary["cases"][:-1], list(reversed(ordinary["cases"])), [*ordinary["cases"], ordinary["cases"][-1]]):
+            with self.assertRaises(helper.CheckFailure):
+                validate_metadata_core({**ordinary, "cases": cases}, "ordinary")
+        last = metadata_core_report("committed-close")["cases"][0]
+        self.assertEqual(last["outcome"], {"effect": "committed", "journal": "clean", "resources": "unknown", "reason": "cancelled"})
+        self.assertIs(last["owner"]["fatal"], True)
+        self.assertEqual(last["observed"]["afterUnknownProbes"], 0)
+
+    def test_core_bindings_reject_workflow_templates_and_json_aliases(self):
+        report = metadata_core_report("ordinary")
+        for key, value in (("sourceKind", "zip"), ("sourceSha", "2" * 40), ("sourceHashes", {}), ("pythonSha256", "0" * 64),
+                           ("configHashes", {}), ("ignoreSha256", "0" * 64), ("fieldHashes", {}), ("templateSet", {})):
+            changed = deepcopy(report)
+            changed["bindings"][key] = value
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                validate_metadata_core(changed, "ordinary")
+        raw = json.dumps(report, separators=(",", ":")).encode("utf-8")
+        self.assertEqual(helper.bounded_json(raw, 32 * 1024), report)
+        for invalid in (b'{"status":"failed","status":"passed"}', b'{"schemaVersion":NaN}', b'\xff', b'{}' * 17000):
+            with self.assertRaises(helper.CheckFailure):
+                helper.bounded_json(invalid, 32 * 1024)
+        with patch.object(helper, "ordinary"), patch.object(Path, "stat") as details, \
+                patch.object(Path, "open", side_effect=AssertionError("oversized data cannot be opened")):
+            details.return_value.st_size = 32769
+            with self.assertRaises(helper.CheckFailure):
+                helper.read_bounded_json(Path("/never-opened/metadata-ordinary.json"), 32768)
+
+    def test_owner_source_zip_and_eof_examples_preserve_exact_original_fact_shapes(self):
+        for mode, eof, expected_count in (("source", False, 14), ("zip", False, 1), ("source", True, 3)):
+            report = metadata_owner_report(mode, eof=eof)
+            with patch.object(helper, "run", side_effect=AssertionError("no process")), \
+                    patch.object(helper, "hash_file", side_effect=AssertionError("no source/runtime probe")):
+                self.assertIs(validate_metadata_owner(report, mode, eof=eof), report)
+            self.assertEqual(len(report["cases"]), expected_count)
+            self.assertLess(len(json.dumps(report, separators=(",", ":")).encode("ascii")), 64 * 1024)
+            self.assertEqual(sum(len(row["passive"]) for row in report["cases"]), 6 if eof else 27 if mode == "source" else 3)
+        source = metadata_owner_report()
+        self.assertIsNone(source["cases"][7]["native"])
+        self.assertIsNone(source["cases"][8]["native"])
+        self.assertEqual(len(source["cases"][0]["native"]), 26)
+        self.assertEqual(len(source["cases"][0]["passive"][0]["native"]), 15)
+        self.assertEqual([len(row) for row in source["cases"][10]["observations"]["domains"]], [24, 24])
+        self.assertEqual(metadata_owner_report("zip")["cases"][0]["name"], "ios-observe-mixed-create-replace-preserve")
+        self.assertEqual([row["native"]["stderrBytes"] for row in metadata_owner_report(eof=True)["cases"]], [268, 276, 282])
+
+    def test_owner_headers_bind_domain_source_runtime_mask_and_no_production_claim(self):
+        report = metadata_owner_report()
+        changes = {"schemaVersion": True, "scope": "github-workflow-owner-hosted-v1", "domain": "github_workflows", "status": "failed",
+            "failureCode": "not_completed", "allOwnersSettled": False, "originalResourcesSettled": False, "ownerDisabled": True,
+            "retainedEffectUnknown": True, "notVerified": [], "extra": True}
+        for key, value in changes.items():
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner({**report, key: value})
+        for key, value in (("ref", helper.WORKFLOW_NATIVE_REF), ("runtimeInput", "zip"), ("runtimeMode", "packaged"),
+                           ("attempt", "2"), ("sourceSha", "2" * 40), ("sourceTree", "2" * 40), ("workflowSha256", "0" * 64),
+                           ("sourceHashes", {}), ("payloadHashes", {}), ("pythonSha256", "0" * 64), ("coreZipSha256", "0" * 64),
+                           ("coreInventorySha256", "0" * 64), ("metadataResourceSha256", "0" * 64), ("schemaResourceSha256", "0" * 64),
+                           ("requestedCreateMode", 384), ("observedCreateMode", 420), ("newDirectoryMode", 448),
+                           ("inheritedFileMaskObserved", 1), ("documentEvidence", "native-gui")):
+            changed = deepcopy(report)
+            changed["bindings"][key] = value
+            with self.subTest(binding=key), self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner(changed)
+        for rows in (report["cases"][:-1], list(reversed(report["cases"])), [*report["cases"], report["cases"][-1]]):
+            with self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner({**report, "cases": rows})
+        for mode in ("zip", "packaged", "other"):
+            with self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner(report, mode)
+
+    def test_passive_originals_require_ordered_keys_all_joins_exact_errors_and_output_bounds(self):
+        report = metadata_owner_report()
+        changes = [("method", "observe"), ("observerJoin", "missing"), ("permitRetired", False), ("resourceBookRetired", False),
+                   ("error", "metadata_text_sensitive"), ("key", "0"), ("key", "01"), ("key", str(2**64)), ("key", True)]
+        changes.extend((f"native.{key}", None) for key in report["cases"][0]["passive"][0]["native"])
+        changes.extend((f"native.{key}", value) for key, value in (("exit_success", 1), ("stdout_bytes", True),
+            ("stdout_bytes", 0), ("stdout_bytes", 4 * 1024 * 1024 + 1), ("stderr_bytes", 1), ("observer_joined", True)))
+        for key, value in changes:
+            changed = deepcopy(report)
+            item = changed["cases"][0]["passive"][0]
+            if key.startswith("native."):
+                item["native"][key.split(".")[1]] = value
+            else:
+                item[key] = value
+            with self.subTest(field=key, value=value), self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner(changed)
+        for index in (1, 7, 8):
+            changed = deepcopy(report)
+            changed["cases"][index]["passive"][0]["key"] = "1"
+            with self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner(changed)
+        for value in ("metadata_text_sensitive", "metadata_text_encoding", None):
+            index = 8 if value == "metadata_text_sensitive" else 7
+            changed = deepcopy(report)
+            changed["cases"][index]["passive"][0]["error"] = value
+            with self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner(changed)
+        for index in (0, 1):
+            changed = deepcopy(report)
+            changed["cases"][index]["passive"][-1]["native"]["stdout_bytes"] = 2 * 1024 * 1024 + 1
+            with self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner(changed)
+
+    def test_owner_observations_cannot_hide_no_editor_stale_cancelled_or_domain_loss(self):
+        report = metadata_owner_report()
+        for index, original in enumerate(report["cases"]):
+            for key, value in (("domain", "github_workflows"), ("platform", "ios" if original["platform"] == "android" else "android"),
+                               ("locale", "fr-FR" if original["locale"] == "en-US" else "en-US")):
+                changed = deepcopy(report)
+                changed["cases"][index][key] = value
+                with self.subTest(case=index, field=key), self.assertRaises(helper.CheckFailure):
+                    validate_metadata_owner(changed)
+            for key, value in original["observations"].items():
+                changed = deepcopy(report)
+                changed["cases"][index]["observations"][key] = int(value) if type(value) is bool else None
+                with self.subTest(case=index, observation=key), self.assertRaises(helper.CheckFailure):
+                    validate_metadata_owner(changed)
+            if original["native"] is None:
+                changed = deepcopy(report)
+                changed["cases"][index]["native"] = metadata_native_facts()
+                with self.assertRaises(helper.CheckFailure):
+                    validate_metadata_owner(changed)
+            else:
+                for key in original["native"]:
+                    changed = deepcopy(report)
+                    changed["cases"][index]["native"][key] = None
+                    with self.subTest(case=index, native=key), self.assertRaises(helper.CheckFailure):
+                        validate_metadata_owner(changed)
+        for index in (0, 1):
+            changed = deepcopy(report)
+            changed["cases"][10]["observations"]["domains"][index]["managerJoined"] = False
+            with self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner(changed)
+        changed = deepcopy(report)
+        changed["cases"][10]["observations"]["domains"].reverse()
+        with self.assertRaises(helper.CheckFailure):
+            validate_metadata_owner(changed)
+        # A terminal's preserved committed core outcome cannot erase real STOP.
+        self.assertEqual(report["cases"][12]["native"]["outcome"]["effect"], "committed")
+        self.assertEqual(report["cases"][12]["native"]["nativeReason"], "cancelled")
+
+    def test_eof_effect_unknown_stays_last_disabled_with_separate_original_resource_proof(self):
+        report = metadata_owner_report(eof=True)
+        for key in ("allOwnersSettled", "originalResourcesSettled", "ownerDisabled", "retainedEffectUnknown"):
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner({**report, key: not report[key]}, eof=True)
+        for index, row in enumerate(report["cases"]):
+            for key, original in row["observations"].items():
+                changed = deepcopy(report)
+                changed["cases"][index]["observations"][key] = int(original) if type(original) is bool else None
+                with self.subTest(case=index, field=key), self.assertRaises(helper.CheckFailure):
+                    validate_metadata_owner(changed, eof=True)
+            changed = deepcopy(report)
+            changed["cases"][index]["native"]["stderrBytes"] -= 1
+            with self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner(changed, eof=True)
+        for key, value in (("nativePhase", "final"), ("nativeFinality", "settled"), ("lateSettled", False), ("managerJoined", False)):
+            changed = deepcopy(report)
+            changed["cases"][-1]["native"][key] = value
+            with self.subTest(key=key), self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner(changed, eof=True)
+        changed = deepcopy(report)
+        changed["cases"][-1]["native"]["outcome"]["resources"] = "unknown"
+        with self.assertRaises(helper.CheckFailure):
+            validate_metadata_owner(changed, eof=True)
+        for rows in (report["cases"][:-1], list(reversed(report["cases"]))):
+            with self.assertRaises(helper.CheckFailure):
+                validate_metadata_owner({**report, "cases": rows}, eof=True)
+
+    def test_push_only_binding_rejects_rerun_dispatch_cross_domain_and_source_mismatch(self):
+        environment = metadata_environment()
+        expected = helper.metadata_native_binding(environment)
+        self.assertEqual((expected["ref"], expected["event"], expected["attempt"], expected["sourceSha"], expected["pushEventAfter"]),
+                         ("refs/heads/verify/desktop-metadata-text-apply-native", "push", "1", "1" * 40, "1" * 40))
+        for key, value in (("GITHUB_SHA", "0" * 40), ("GITHUB_SHA", "A" * 40), ("GITHUB_SHA", "1" * 39),
+                           ("GITHUB_WORKFLOW_SHA", "2" * 40), ("GITHUB_REF", helper.WORKFLOW_NATIVE_REF),
+                           ("MRK_DESKTOP_HOSTED_CHECKS", helper.WORKFLOW_NATIVE_SCOPE), ("GITHUB_REF", "refs/heads/main"),
+                           ("GITHUB_WORKFLOW_REF", "other/workflow"), ("GITHUB_REPOSITORY", "other/project"),
+                           ("GITHUB_REPOSITORY", "invalid"), ("GITHUB_RUN_ID", "0"), ("GITHUB_RUN_ID", "1" * 21),
+                           ("GITHUB_RUN_ATTEMPT", "2"), ("GITHUB_RUN_ATTEMPT", "01"), ("GITHUB_EVENT_NAME", "pull_request"),
+                           ("MRK_PUSH_EVENT_AFTER", "2" * 40), ("MRK_PUSH_EVENT_AFTER", "0" * 40),
+                           ("GITHUB_EVENT_NAME", "workflow_dispatch")):
+            with self.subTest(key=key, value=value), self.assertRaises(helper.CheckFailure):
+                helper.metadata_native_binding({**environment, key: value, "MRK_EXPECTED_SHA": "1" * 40})
+        for key in environment:
+            for value in (None, True):
+                with self.subTest(key=key, value=value), self.assertRaises(helper.CheckFailure):
+                    helper.metadata_native_binding({**environment, key: value})
+        with self.assertRaises(helper.CheckFailure):
+            helper.workflow_native_binding(environment)
+        for scope in helper.COMPILE_PROFILES:
+            with self.assertRaises(helper.CheckFailure):
+                helper.compile_workflow_binding(environment, scope)
+        old = workflow_environment()
+        self.assertEqual(helper.workflow_native_binding(old)["workflowPath"], helper.WORKFLOW_NATIVE_WORKFLOW)
+        self.assertEqual(helper.workflow_native_binding({**old, "GITHUB_EVENT_NAME": "workflow_dispatch", "MRK_EXPECTED_SHA": "1" * 40})["sourceSha"], "1" * 40)
+
+    def test_metadata_scope_refuses_foreign_phases_platforms_and_compiler_profiles_before_io(self):
+        self.assertNotIn(helper.METADATA_NATIVE_SCOPE, helper.COMPILE_PROFILES)
+        with patch.object(helper, "load_context", side_effect=AssertionError("no context IO")), \
+                patch.object(helper, "tools", side_effect=AssertionError("no compiler selection")):
+            for name in ("native", "config-owner", "config-core", "workflow-owner", "workflow-transaction-eof", "workflow-core",
+                         "github-owner", "github-tls", "github-tls-deadline", "windows-snapshot", "unknown"):
+                with self.subTest(phase=name), self.assertRaises(helper.CheckFailure):
+                    helper.phase(name, "linux", helper.METADATA_NATIVE_SCOPE)
+            for scope in (*helper.COMPILE_PROFILES, helper.BOUNDARY_SCOPE, helper.WORKFLOW_NATIVE_SCOPE,
+                          helper.WINDOWS_SNAPSHOT_SCOPE, helper.GITHUB_READONLY_SCOPE, helper.GITHUB_TLS_SCOPE):
+                for name in ("metadata-owner", "metadata-transaction-eof", "metadata-core"):
+                    with self.subTest(scope=scope, phase=name), self.assertRaises(helper.CheckFailure):
+                        helper.phase(name, "linux", scope)
+            for platform in ("macos", "windows", "unexpected"):
+                with self.subTest(platform=platform), self.assertRaises(helper.CheckFailure):
+                    helper.prepare(platform, helper.METADATA_NATIVE_SCOPE)
+        for name in ("prepare", "acquire", "compile", "metadata-owner", "metadata-transaction-eof", "metadata-core", "clean"):
+            helper.admit_phase(helper.METADATA_NATIVE_SCOPE, name)
+        with patch.object(helper.Path, "resolve", side_effect=AssertionError("bad route must refuse before IO")), \
+                patch.dict(helper.os.environ, {**metadata_environment(), "GITHUB_EVENT_NAME": "workflow_dispatch"}, clear=True):
+            with self.assertRaises(helper.CheckFailure):
+                helper.load_context("linux", helper.METADATA_NATIVE_SCOPE)
+
+    def test_phase_and_claim_repeat_original_event_source_and_scope_binding(self):
+        context = metadata_context()
+        for name in helper.METADATA_NATIVE_CHECKS:
+            report = metadata_phase_report(name)
+            self.assertIs(helper.validate_metadata_phase_receipt(report, context, name), report)
+            for key, value in (("scope", helper.WORKFLOW_NATIVE_EVIDENCE_SCOPE), ("schemaVersion", True), ("status", "failed"),
+                               ("sourceTree", "0" * 40), ("attempt", "2"), ("event", "workflow_dispatch"), ("ref", helper.WORKFLOW_NATIVE_REF),
+                               ("pushEventAfter", "2" * 40), ("metadataInputs", {}), ("checks", []), ("extra", True)):
+                with self.subTest(phase=name, key=key), self.assertRaises(helper.CheckFailure):
+                    helper.validate_metadata_phase_receipt({**report, key: value}, context, name)
+            wrong_type = deepcopy(report)
+            wrong_type["checks"][0]["exitCode"] = False
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_metadata_phase_receipt(wrong_type, context, name)
+            for key, value in (("executionScope", helper.WORKFLOW_NATIVE_SCOPE), ("ref", helper.WORKFLOW_NATIVE_REF),
+                               ("event", "workflow_dispatch"), ("attempt", "2"), ("pushEventAfter", "2" * 40),
+                               ("workflowPath", helper.COMPILE_WORKFLOW), ("platform", "macos"), ("sourceTree", "0" * 40)):
+                with self.subTest(context_key=key), self.assertRaises(helper.CheckFailure):
+                    helper.validate_metadata_phase_receipt(report, {**context, key: value}, name)
+        claim = helper.metadata_phase_claim(context, "metadata-core")
+        for key in ("event", "ref", "pushEventAfter", "workflowSha256", "sourceTree", "sourceSha", "runId", "attempt"):
+            self.assertEqual(claim[key], context[key])
+        metadata = helper.metadata_core_metadata(context)
+        self.assertEqual(set(metadata), {"sourceSha", "sourceTree", "workflowSha256", "runId", "attempt", "ref", "coreFiles", "coreZipSha256"})
+        self.assertEqual(metadata["ref"], "refs/heads/verify/desktop-metadata-text-apply-native")
+        self.assertEqual(metadata["coreFiles"], context["metadataInputs"]["coreFiles"])
+
+    def test_predecessors_require_original_source_zip_eof_before_core_and_refuse_replay(self):
+        context, observed = metadata_context(), []
+        def data(path, _limit):
+            if path.name.endswith("-started.json"):
+                return helper.metadata_phase_claim(context, path.name.removesuffix("-started.json"))
+            return metadata_phase_report(path.name.removesuffix("-checks.json"))
+        with patch.object(helper, "read_bounded_json", side_effect=data), patch.object(helper.os.path, "lexists", return_value=False), \
+                patch.object(helper, "metadata_owner_receipt", side_effect=lambda _, mode: observed.append(mode)), \
+                patch.object(helper, "metadata_transaction_eof_receipt", side_effect=lambda _: observed.append("eof")), \
+                patch.object(helper, "metadata_core_receipt", side_effect=AssertionError("core has not run")), \
+                patch.object(helper, "run", side_effect=AssertionError("no subprocess")):
+            helper.metadata_predecessors(context, "metadata-core")
+        self.assertEqual(observed, ["source", "zip", "eof"])
+        def wrong_claim(path, limit):
+            value = data(path, limit)
+            if path.name == "compile-started.json":
+                value["scope"] = helper.WORKFLOW_NATIVE_SCOPE
+            return value
+        with patch.object(helper, "read_bounded_json", side_effect=wrong_claim), \
+                patch.object(helper, "metadata_owner_receipt", side_effect=AssertionError("no owner after foreign claim")):
+            with self.assertRaises(helper.CheckFailure):
+                helper.metadata_predecessors(context, "metadata-core")
+        with patch.object(helper, "read_bounded_json", side_effect=data), \
+                patch.object(helper, "metadata_owner_receipt", side_effect=helper.CheckFailure("unsettled original")), \
+                patch.object(helper, "metadata_transaction_eof_receipt", side_effect=AssertionError("no EOF after unsettled owner")):
+            with self.assertRaises(helper.CheckFailure):
+                helper.metadata_predecessors(context, "metadata-core")
+        with patch.object(helper.os.path, "lexists", return_value=True), patch.object(helper, "write_json") as emit:
+            with self.assertRaises(helper.CheckFailure):
+                helper.metadata_phase_start(context, "acquire")
+        emit.assert_not_called()
+
+    def test_fixed_metadata_sequence_has_no_unrelated_native_invocation_or_new_clock(self):
+        source = HELPER.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        phase = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "phase_metadata_native")
+        calls = [node for node in ast.walk(phase) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "run"]
+        by_label = {next(keyword.value.value for keyword in call.keywords if keyword.arg == "check"): call for call in calls}
+        bounds = {"rust-toolchain-install": 600, "metadata-locked-headless-metadata": 600, "headless-test-compile-only": 600,
+                  "metadata-owner-source-native-contract": 180, "metadata-owner-zip-native-contract": 60,
+                  "metadata-transaction-eof-native-contract": 90, "metadata-core-ordinary": 90,
+                  "metadata-core-committed-fsync": 45, "metadata-core-committed-close": 45}
+        self.assertEqual(set(by_label), set(bounds))
+        self.assertEqual(len(calls), len(bounds))
+        for label, timeout in bounds.items():
+            self.assertEqual(next(keyword.value.value for keyword in by_label[label].keywords if keyword.arg == "timeout"), timeout)
+        text = ast.get_source_segment(source, phase)
+        for forbidden in ("npm", "vite", "desktop-shell", "WORKFLOW_OWNER_TEST", "CONFIG_OWNER_TEST", "GITHUB_TLS_TEST", "NATIVE_TEST",
+                          "MRK_DESKTOP_WORKFLOW_NATIVE", "MRK_DESKTOP_CONFIG_NATIVE", "MRK_DESKTOP_EDIT_HOSTED_CHECKS"):
+            self.assertNotIn(forbidden, text)
+        self.assertIn('"--domain", "metadata_text", "--case"', text)
+        self.assertIn('"--locked", "--offline", "--jobs", "1", "--no-default-features"', text)
+        for label in ("metadata-owner-source-native-contract", "metadata-owner-zip-native-contract", "metadata-transaction-eof-native-contract"):
+            constants = [node.value for node in by_label[label].args[0].elts if isinstance(node, ast.Constant)]
+            self.assertEqual(constants, ["test", "--lib", "--features", "development-runtime", "--", "--exact", "--ignored", "--test-threads=1"])
+        core = text.split('elif name == "metadata-core":', 1)[1].split('    else:', 1)[0]
+        self.assertLess(core.index('check="metadata-core-ordinary"'), core.index('check="metadata-core-committed-fsync"'))
+        self.assertLess(core.index('check="metadata-core-committed-fsync"'), core.index('check="metadata-core-committed-close"'))
+        tail = core.split('check="metadata-core-committed-close"', 1)[1]
+        for forbidden in ("run(", "source_unchanged(", "metadata_inputs_unchanged(", "hash_file(", "tools(", "rmtree", "unlink"):
+            self.assertNotIn(forbidden, tail)
+        self.assertIn('metadata_core_receipt(context, "committed-close")', tail)
+
+    def test_retention_only_finish_never_probes_project_deletes_or_selects_tools(self):
+        context = metadata_context()
+        with patch.object(helper, "metadata_phase_start") as start, \
+                patch.object(helper, "metadata_inputs_unchanged", side_effect=AssertionError("no source/runtime probes")), \
+                patch.object(helper, "write_json") as emit, patch.object(helper, "run", side_effect=AssertionError("no subprocess")), \
+                patch.object(helper, "tools", side_effect=AssertionError("no tools")), \
+                patch.object(helper.shutil, "rmtree", side_effect=AssertionError("no deletion")), redirect_stdout(io.StringIO()):
+            helper.clean_metadata_native(context)
+        start.assert_called_once_with(context, "clean")
+        receipt = emit.call_args.args[1]
+        self.assertEqual(receipt["status"], "retained")
+        self.assertEqual(receipt["reason"], "lane-last-committed-close-resources-unknown")
+        for key in ("deleted", "laterNativeWork", "projectProbes"):
+            self.assertIs(receipt[key], False)
+        self.assertIs(receipt["vmDisposalRequired"], True)
+
+    def test_receipt_wrappers_use_previously_bound_data_without_rehashing_subjects(self):
+        context, reads = metadata_context(), []
+        reports = {"metadata-owner-source/receipt.json": metadata_owner_report(),
+                   "metadata-owner-zip/receipt.json": metadata_owner_report("zip"),
+                   "metadata-transaction-eof/receipt.json": metadata_owner_report(eof=True),
+                   **{f"metadata-{part}.json": metadata_core_report(part) for part in ("ordinary", "committed-fsync", "committed-close")}}
+        def read(path, maximum):
+            relative = path.relative_to(Path(context["root"])).as_posix()
+            self.assertEqual(maximum, 64 * 1024 if relative.endswith("/receipt.json") else 32 * 1024)
+            reads.append(relative)
+            return reports[relative]
+        with patch.object(helper, "read_bounded_json", side_effect=read), \
+                patch.object(helper, "hash_file", side_effect=AssertionError("no source/runtime rehash")), \
+                patch.object(helper, "metadata_inputs_unchanged", side_effect=AssertionError("no original input re-probe")), \
+                patch.object(helper, "run", side_effect=AssertionError("no process")):
+            helper.metadata_owner_receipt(context, "source")
+            helper.metadata_owner_receipt(context, "zip")
+            helper.metadata_transaction_eof_receipt(context)
+            for partition in ("ordinary", "committed-fsync", "committed-close"):
+                helper.metadata_core_receipt(context, partition)
+        self.assertEqual(set(reads), set(reports))
+        for rows in ([], context["metadataInputs"]["sourceFiles"][:-1], list(reversed(context["metadataInputs"]["sourceFiles"]))):
+            changed = deepcopy(context)
+            changed["metadataInputs"]["sourceFiles"] = rows
+            with self.assertRaises(helper.CheckFailure):
+                helper.metadata_bound_source_hashes(changed, helper.METADATA_CORE_SOURCES)
+
+    def test_retention_entry_uses_original_invocation_and_receipt_data_not_source_or_tool_probes(self):
+        context = metadata_context()
+        context["root"] = "/never-opened/runner-temp/mrk-desktop-foundation-metadata-123-1"
+        environment = {**metadata_environment(), "GITHUB_WORKSPACE": "/never-opened/source", "MRK_PYTHON": "/never-opened/setup-python",
+            "RUNNER_TEMP": "/never-opened/runner-temp", "MRK_DESKTOP_CI_ROOT": context["root"], "GITHUB_ACTIONS": "true",
+            "RUNNER_ENVIRONMENT": "github-hosted", "MRK_DESKTOP_PLATFORM": "linux", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64", "ImageOS": "ubuntu24"}
+        context["metadataInvocation"] = {key: environment[key] for key in ("GITHUB_WORKSPACE", "MRK_PYTHON", "RUNNER_TEMP")}
+        context["metadataInvocation"]["executable"] = "/never-opened/python-executable"
+        public = helper.metadata_public_bindings(context)
+        reads = []
+        def read(path, maximum):
+            self.assertEqual(path.parent, Path(context["root"]))
+            self.assertEqual(maximum, 256 * 1024)
+            reads.append(path.name)
+            return context if path.name == "context.json" else public if path.name == "public-bindings.json" else self.fail("unexpected receipt")
+        with patch.dict(helper.os.environ, environment, clear=True), patch.object(helper.sys, "executable", "/never-opened/python-executable"), \
+                patch.object(helper.sys, "version", helper.PYTHON + " inert"), patch.object(helper.sys, "platform", "linux"), \
+                patch.object(helper.os, "geteuid", return_value=1000), patch.object(helper.os, "uname", side_effect=AssertionError("no new host probe")), \
+                patch.object(Path, "resolve", side_effect=AssertionError("no source/runtime resolution")), patch.object(Path, "is_symlink", return_value=False), \
+                patch.object(helper, "ordinary"), patch.object(helper, "read_bounded_json", side_effect=read), \
+                patch.object(helper, "metadata_inputs_unchanged", side_effect=AssertionError("no inputs re-probe")), \
+                patch.object(helper, "hash_file", side_effect=AssertionError("no rehash")), patch.object(helper, "run", side_effect=AssertionError("no tool")):
+            self.assertEqual(helper.admitted_host(retention_only=True), "linux")
+            self.assertIs(helper.load_context("linux", helper.METADATA_NATIVE_SCOPE, retention_only=True), context)
+            with patch.object(helper, "phase_metadata_native") as execute:
+                helper.phase("clean", "linux", helper.METADATA_NATIVE_SCOPE)
+                execute.assert_called_once_with("clean", context)
+            for key in ("GITHUB_WORKSPACE", "MRK_PYTHON", "RUNNER_TEMP"):
+                with patch.dict(helper.os.environ, {key: "/never-opened/changed"}), self.assertRaises(helper.CheckFailure):
+                    helper.load_context("linux", helper.METADATA_NATIVE_SCOPE, retention_only=True)
+            with self.assertRaises(helper.CheckFailure):
+                helper.load_context("linux", helper.WORKFLOW_NATIVE_SCOPE, retention_only=True)
+        self.assertEqual(reads[:4], ["context.json", "public-bindings.json", "context.json", "public-bindings.json"])
+
+    def test_workflow_selects_one_domain_before_checkout_and_compiles_only_once(self):
+        workflow = (SOURCE / helper.METADATA_NATIVE_WORKFLOW).read_text(encoding="utf-8")
+        self.assertIn("branches: [verify/desktop-github-workflow-apply-native, verify/desktop-metadata-text-apply-native]", workflow)
+        self.assertNotIn("qualification_domain", workflow)
+        guard = workflow.split("        run: |\n", 1)[1].split("      - name:", 1)[0]
+        for pair in ("push:refs/heads/verify/desktop-github-workflow-apply-native)",
+                     "workflow_dispatch:refs/heads/verify/desktop-github-workflow-apply-native)",
+                     "push:refs/heads/verify/desktop-metadata-text-apply-native)"):
+            self.assertIn(pair, guard)
+        self.assertEqual(guard.count("scope="), 4)  # Three assignments plus one fixed output line.
+        for exact in ('[[ "$GITHUB_RUN_ATTEMPT" == 1 && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]',
+                      '[[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]', '*) exit 1 ;;',
+                      '[[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]',
+                      '[[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$', '"$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA"',
+                      'printf \'MRK_DESKTOP_HOSTED_CHECKS=%s\\n\' "$scope" >> "$GITHUB_ENV"'):
+            self.assertIn(exact, guard)
+        self.assertNotIn("MRK_EXPECTED_SHA=$GITHUB_SHA", workflow)
+        for phase in ("prepare", "acquire", "compile", "clean"):
+            self.assertEqual(workflow.count(f"ci_foundation.py {phase}'"), 1)
+        steps = workflow.split("      - name: ")
+        for scope, phases in (("github-workflow-apply-native-v1", ("workflow-owner", "workflow-transaction-eof", "workflow-core")),
+                              ("metadata-text-apply-native-v1", ("metadata-owner", "metadata-transaction-eof", "metadata-core"))):
+            for phase in phases:
+                matching = [step for step in steps if f"ci_foundation.py {phase}'" in step]
+                self.assertEqual(len(matching), 1)
+                self.assertIn(f"if: steps.lane.outputs.scope == '{scope}'", matching[0])
+        self.assertEqual(workflow.count("runs-on:"), 1)
+        for forbidden in ("strategy:", "matrix:", "continue-on-error", "secrets.", "workflow_dispatch:refs/heads/verify/desktop-metadata"):
+            self.assertNotIn(forbidden, workflow)
+        upload = workflow.split("      - name: Retain only allowlisted synthetic metadata receipts\n", 1)[1]
+        self.assertIn("if: always() && steps.prepare.outcome == 'success' && steps.lane.outputs.scope == 'metadata-text-apply-native-v1'", upload)
+        files = [line.strip().split("${{ steps.prepare.outputs.root }}/", 1)[1]
+                 for line in upload.splitlines() if line.strip().startswith("${{ steps.prepare.outputs.root }}/")]
+        self.assertEqual(files, ["public-bindings.json", "acquire-checks.json", "compile-checks.json", "metadata-owner-checks.json",
+            "metadata-owner-source/receipt.json", "metadata-owner-zip/receipt.json", "metadata-transaction-eof-checks.json",
+            "metadata-transaction-eof/receipt.json", "metadata-core-checks.json", "metadata-ordinary.json",
+            "metadata-committed-fsync.json", "metadata-committed-close.json", "retention-checks.json"])
 
 
 def windows_test_checks(name: str) -> dict:

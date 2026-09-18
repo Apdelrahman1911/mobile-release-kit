@@ -30,6 +30,8 @@ pub(crate) use hosted_tests::github_fixture::{GitHubDocumentFixtureBinding, GitH
 pub(crate) use hosted_tests::github_tls::GitHubTlsRuntime;
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use hosted_tests::session_gtk_probe;
+#[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use hosted_tests::metadata_fixture_probe;
 #[cfg(test)]
 #[path = "passive_management_tests.rs"]
 mod management_tests;
@@ -86,10 +88,14 @@ enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
 enum Profile { Passive(Method), GitHubReadOnly }
 impl Profile {
     fn stdout_limit(self) -> usize {
-        match self { Self::Passive(_) => protocol::RESPONSE_LIMIT, Self::GitHubReadOnly => github_protocol::RESPONSE_LIMIT }
+        match self {
+            Self::Passive(Method::MetadataTextObserve | Method::MetadataTextValidate) => crate::metadata_text_edit_protocol::RESPONSE_LIMIT,
+            Self::Passive(_) => protocol::RESPONSE_LIMIT, Self::GitHubReadOnly => github_protocol::RESPONSE_LIMIT,
+        }
     }
     fn decode(self, bytes: &[u8], id: &str) -> Result<ReadOutcome, BridgeError> {
         match self {
+            Self::Passive(Method::MetadataTextObserve | Method::MetadataTextValidate) => crate::metadata_text_edit_protocol::decode_passive_envelope(bytes, id).map(ReadOutcome::Passive),
             Self::Passive(_) => protocol::decode_response(bytes, id).map(ReadOutcome::Passive),
             Self::GitHubReadOnly => github_protocol::decode_private_response(id, bytes).map(ReadOutcome::GitHub),
         }
@@ -905,6 +911,8 @@ mod tests {
     #[test]
     fn closed_profile_changes_only_the_private_channel_bound() {
         assert_eq!(Profile::Passive(Method::Capabilities).stdout_limit(), protocol::RESPONSE_LIMIT);
+        assert_eq!(Profile::Passive(Method::MetadataTextObserve).stdout_limit(), 2 * 1024 * 1024);
+        assert_eq!(Profile::Passive(Method::MetadataTextValidate).stdout_limit(), 2 * 1024 * 1024);
         assert_eq!(Profile::GitHubReadOnly.stdout_limit(), 64 * 1024);
         assert_eq!(protocol::STDERR_LIMIT, 64 * 1024);
         assert_eq!(ACTIVE_LIMIT, 2);

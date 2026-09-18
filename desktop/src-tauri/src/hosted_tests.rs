@@ -1582,6 +1582,93 @@ pub(crate) mod session_gtk_probe {
     }
 }
 
+/// Observation only, for the genuine metadata Observe/Validate/Catalogue path.
+/// It retains the existing Supervisor and its original Hooks owners before the
+/// first query. No query, process, gate, fake engine or cleanup is created here.
+#[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) mod metadata_fixture_probe {
+    use super::*;
+    pub(crate) struct Probe { supervisor: Supervisor, tails: Mutex<Vec<u64>>, failed: AtomicBool }
+    struct Tail<'a> { probe: &'a Probe, done: bool }
+    impl Drop for Tail<'_> { fn drop(&mut self) { if !self.done { self.probe.failed.store(true, Ordering::SeqCst); } } }
+
+    fn native(owner: &Owner) -> bool {
+        let state = lock(&owner.state);
+        let o = lock(&owner.observation);
+        state.terminal && !state.unknown && state.driver_join == ManagementJoin::Returned
+            && state.watchdog_join == ManagementJoin::Returned && lock(&owner.permit).is_none()
+            && o.inspection_joined && o.acquisition_joined && o.spawned && o.waited && o.exit_success == Some(true)
+            && o.writer_joined && o.writer_complete && o.stdout_eof && o.stderr_eof && o.stdout_joined && o.stderr_joined
+            && o.stdout_bytes > 0 && o.stdout_bytes <= owner.profile.stdout_limit() && o.stderr_bytes == 0
+            && o.driver_joined && o.watchdog_joined
+    }
+    fn book_retired(owner: &Owner) -> bool {
+        owner.resources.try_lock().is_ok_and(|r| r.inspection.is_none() && r.acquisition.is_none()
+            && r.github_environment.is_none() && r.child.is_none() && r.writer.is_none() && r.stdout.is_none() && r.stderr.is_none()
+            && r.failed_writer.is_none() && r.failed_stdout.is_none() && r.failed_stderr.is_none()
+            && r.waited.as_ref().is_some_and(ExitStatus::success) && r.write_end.is_some_and(|end| end.complete)
+            && r.out_end.is_none() && r.err_end.is_none() && !r.kill_attempted)
+            && owner.driver.try_lock().is_ok_and(|slot| slot.is_none())
+            && owner.watchdog.try_lock().is_ok_and(|slot| slot.is_none())
+    }
+    impl Probe {
+        pub(crate) fn attach(supervisor: &Supervisor) -> Check<Self> {
+            require(supervisor.can_exit() && !supervisor.disabled() && !supervisor.stopping()
+                && supervisor.inner.test.owners().is_empty()
+                && supervisor.inner.permits.available_permits() == ACTIVE_LIMIT, "metadata_passive_not_fresh")?;
+            Ok(Self { supervisor:supervisor.clone(), tails:Mutex::new(Vec::new()), failed:AtomicBool::new(false) })
+        }
+        pub(crate) fn settled(&self) -> bool {
+            if self.failed.load(Ordering::SeqCst) || !self.supervisor.can_exit() || self.supervisor.disabled()
+                || self.supervisor.inner.permits.available_permits() != ACTIVE_LIMIT { return false; }
+            let owners = self.supervisor.inner.test.owners();
+            let Ok(tails) = self.tails.lock() else { return false; };
+            owners.len() == tails.len() && owners.iter().zip(tails.iter()).all(|(owner, key)|
+                owner.key == *key && native(owner) && book_retired(owner)
+                    && lock(&owner.observation).observer_joined
+                    && owner.observer.try_lock().is_ok_and(|slot| slot.is_none()))
+        }
+        pub(crate) fn count(&self) -> usize { self.supervisor.inner.test.owners().len() }
+        pub(crate) async fn next(&self, method: Method, expected_error: Option<&'static str>) -> Check<Value> {
+            // Any missing/failed observation is sticky, including an abandoned
+            // future while joining the original now-resource-free observer tail.
+            let mut guard = Tail { probe:self, done:false };
+            require(!self.failed.load(Ordering::SeqCst) && !self.supervisor.stopping()
+                && !self.supervisor.disabled() && self.supervisor.can_exit()
+                && self.supervisor.inner.permits.available_permits() == ACTIVE_LIMIT, "metadata_passive_registry")?;
+            require(matches!((method, expected_error),
+                (Method::MetadataTextObserve, None | Some("metadata_text_sensitive" | "metadata_text_encoding"))
+                | (Method::MetadataTextValidate | Method::Catalog, None)), "metadata_passive_method")?;
+            let owners = self.supervisor.inner.test.owners();
+            let done = self.tails.lock().map_err(|_| "metadata_passive_tail_poison")?.len();
+            require(owners.len() == done + 1 && owners.len() <= 40, "metadata_passive_roster")?;
+            let owner = owners.last().ok_or("metadata_passive_original_missing")?;
+            require(matches!((owner.profile, method),
+                (Profile::Passive(Method::MetadataTextObserve), Method::MetadataTextObserve)
+                | (Profile::Passive(Method::MetadataTextValidate), Method::MetadataTextValidate)
+                | (Profile::Passive(Method::Catalog), Method::Catalog))
+                && native(owner) && lock(&owner.state).error.as_ref().map(|error| error.code.as_str()) == expected_error,
+                "metadata_passive_original_unsettled")?;
+            let mut slot = owner.observer.lock().await;
+            let task = slot.as_mut().ok_or("metadata_passive_tail_missing")?;
+            // This is not a new operation/cleanup clock. The original native
+            // owner already retired; only its existing final observer is joined.
+            require(matches!(tokio::time::timeout(CLEANUP_TIME, task).await, Ok(Ok(()))), "metadata_passive_tail_unknown")?;
+            slot.take(); drop(slot);
+            require(book_retired(owner), "metadata_passive_original_book")?;
+            lock(&owner.observation).observer_joined = true;
+            self.tails.lock().map_err(|_| "metadata_passive_tail_poison")?.push(owner.key);
+            let name = match method { Method::MetadataTextObserve => "observe", Method::MetadataTextValidate => "validate",
+                Method::Catalog => "catalogue", _ => return Err("metadata_passive_method") };
+            let value = json!({"method":name,"key":owner.key.to_string(),"error":expected_error,
+                "native":lock(&owner.observation).clone(),"observerJoin":"ok","permitRetired":true,"resourceBookRetired":true});
+            require(self.settled(), "metadata_passive_original_roster_unsettled")?;
+            guard.done = true;
+            Ok(value)
+        }
+    }
+}
+
 // Pure log-only decoding. This module never observes a process, grants cleanup,
 // parses success telemetry, or adds a row/field to the accepted-prefix receipt.
 mod windows_snapshot_failure_diagnostics {

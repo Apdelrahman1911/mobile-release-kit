@@ -13,7 +13,8 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
-from ._desktop_edit_protocol import EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL, REQUEST_LIMIT, parse_request
+from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL,
+                                     METADATA_PROTOCOL, REQUEST_LIMIT, parse_request)
 
 if TYPE_CHECKING:
     from .cancellation import DefaultCancellation
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 
 class EditInput:
     def __init__(self, started: float, *, protocol: str = PROTOCOL) -> None:
-        if protocol not in {PROTOCOL, WORKFLOW_PROTOCOL}:
+        if type(protocol) is not str or protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL}:
             raise ProtocolError("Invalid fixed edit domain")
         self.protocol = protocol
         self.pid = os.getpid()

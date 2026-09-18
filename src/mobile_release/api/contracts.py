@@ -481,6 +481,106 @@ class CapabilitiesResult(TypedDict):
     limitations: list[str]
 
 
+MetadataPlatform = Literal["android", "ios"]
+
+
+class MetadataTextIssue(TypedDict):
+    code: Literal["metadata.empty-text", "metadata.nul", "metadata.placeholder",
+                  "metadata.secret-pattern", "metadata.url", "metadata.length"]
+    status: Literal["INVALID", "FAIL"]
+    message: str
+
+
+class MetadataTextFieldValidation(TypedDict):
+    id: str
+    valid: bool
+    characterCount: int
+    limit: int
+    issues: list[MetadataTextIssue]
+
+
+class MetadataValidationResult(TypedDict):
+    schemaVersion: Literal[1]
+    platform: MetadataPlatform
+    valid: bool
+    state: Literal["format-valid", "invalid"]
+    fields: list[MetadataTextFieldValidation]
+    assurance: Assurance
+
+
+class MetadataContentDigest(TypedDict):
+    byteLength: int
+    sha256: str
+
+
+class MetadataAbsentBaselineField(TypedDict):
+    id: str
+    state: Literal["absent"]
+
+
+class MetadataPresentBaselineField(MetadataContentDigest):
+    id: str
+    state: Literal["present"]
+
+
+class MetadataBaseline(TypedDict):
+    config: MetadataContentDigest
+    fields: list[MetadataAbsentBaselineField | MetadataPresentBaselineField]
+
+
+class MetadataAbsentObservedField(MetadataAbsentBaselineField):
+    path: str
+
+
+class MetadataPresentObservedField(MetadataPresentBaselineField):
+    path: str
+    text: str
+
+
+class MetadataObservationResult(TypedDict):
+    schemaVersion: Literal[1]
+    platform: MetadataPlatform
+    locale: str
+    metadataRoot: str
+    observationScope: Literal["single-request-non-atomic"]
+    baseline: MetadataBaseline
+    fields: list[MetadataAbsentObservedField | MetadataPresentObservedField]
+    assurance: Assurance
+
+
+class MetadataTextHelpText(TypedDict):
+    id: str
+    requiredWhen: str
+    label: str
+    what: str
+    why: str
+    where: str
+    format: str
+    failure: str
+
+
+class MetadataTextFieldHelp(MetadataTextHelpText):
+    platform: MetadataPlatform
+    requiredness: Literal["required"]
+
+
+class MetadataTextActionHelp(MetadataTextHelpText):
+    requiredness: Literal["optional"]
+
+
+class MetadataTextGuideLimits(TypedDict):
+    maxTextBytes: Literal[32768]
+    maxCachedLocales: Literal[32]
+    maxCachedTextBytes: Literal[8388608]
+
+
+class MetadataTextGuide(TypedDict):
+    schemaVersion: Literal[1]
+    fields: list[MetadataTextFieldHelp]
+    actions: list[MetadataTextActionHelp]
+    limits: MetadataTextGuideLimits
+
+
 class CatalogResult(TypedDict):
     schemaVersion: Literal[1]
     schema: dict[str, Any]
@@ -488,6 +588,7 @@ class CatalogResult(TypedDict):
     credentials: list[CredentialHelp]
     credentialGuide: CredentialGuide | None
     metadata: dict[str, Any]
+    metadataText: MetadataTextGuide | None
     githubSetup: GitHubSetupHelp
     githubConnection: GitHubConnectionHelp | None
     assurance: Assurance

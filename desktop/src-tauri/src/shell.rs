@@ -8,6 +8,7 @@ use crate::{
     bridge::{AppInfo, DesktopBridge, Project},
     edit_commands, edit_owner::EditOwner, edit_protocol::ConfigEditStatus,
     github_workflow_edit_protocol::WorkflowEditStatus,
+    metadata_text_commands, metadata_text_edit_protocol::{self as metadata_text_wire, MetadataTextEditStatus},
     github_connection_protocol::{self as github_connection_wire, Status as GitHubConnectionStatus, Reason as GitHubConnectionReason},
     github_connection_session,
     error::BridgeError,
@@ -200,6 +201,59 @@ async fn github_workflow_edit_status(webview: Webview, request: tauri::ipc::Requ
     state.bridge.edits.workflow_status()
 }
 
+#[tauri::command]
+async fn metadata_text_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<metadata_text_wire::Observation, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    let args = metadata_text_commands::open(request_body(&request)?)?;
+    not_closing(&state)?;
+    state.bridge.observe_metadata_text(args).await
+}
+#[tauri::command]
+async fn metadata_text_validate(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<metadata_text_wire::ValidationResult, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    let args = metadata_text_commands::validate(request_body(&request)?)?;
+    not_closing(&state)?;
+    state.bridge.validate_metadata_text(args).await
+}
+#[tauri::command]
+async fn metadata_text_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = metadata_text_commands::open(request_body(&request)?)?;
+    state.bridge.open_metadata_text_edit(&state.document, window, args)
+}
+#[tauri::command]
+async fn metadata_text_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = metadata_text_commands::prepare(request_body(&request)?)?;
+    state.bridge.prepare_metadata_text_edit(&state.document, window, args)
+}
+#[tauri::command]
+async fn metadata_text_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::apply(request_body(&request)?)?;
+    state.bridge.apply_metadata_text_edit(&state.document, window, &args.session_id, &args.plan_token)
+}
+#[tauri::command]
+async fn metadata_text_edit_close(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::close(request_body(&request)?)?;
+    // Original STOP remains available during quit without a new root lookup.
+    state.bridge.edits.close_metadata_text(window, &args.session_id)
+}
+#[tauri::command]
+async fn metadata_text_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    edit_commands::status(request_body(&request)?)?;
+    state.bridge.edits.metadata_text_status()
+}
+
 fn github_connection_body<'a>(webview: &Webview, request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, BridgeError> {
     if webview.label() != MAIN_WINDOW { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); }
     request_body(request).map_err(|_| github_connection_session::refused(GitHubConnectionReason::InvalidInput))
@@ -367,6 +421,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let (start, enter) = oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
         if enter.await.is_err() { return; }
+        let mut metadata_revision = None;
         loop {
             if *stop.borrow() { return; }
             // status() releases its native locks before any renderer callback.
@@ -374,6 +429,17 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             // orders both by native revision, never by arrival time.
             if let Ok(status) = edits.status() { let _ = app.emit_to(MAIN_WINDOW, EDIT_EVENT, &status); }
             if let Ok(status) = edits.workflow_status() { let _ = app.emit_to(MAIN_WINDOW, WORKFLOW_EDIT_EVENT, &status); }
+            // Public before/after text can be large. Emit metadata only when
+            // original owner state changes, not on each 100ms observer tick.
+            // Clients subscribe first, fetch status, and count down from that
+            // receipt. Native deadlines still belong to the original owner.
+            let revision = *revisions.borrow();
+            if metadata_revision != Some(revision) {
+                if let Ok(status) = edits.metadata_text_status() {
+                    metadata_revision = Some(status.status_revision);
+                    let _ = app.emit_to(MAIN_WINDOW, metadata_text_wire::EVENT, &status);
+                }
+            }
             let status = document.status();
             let _ = app.emit_to(MAIN_WINDOW, ASSET_EVENT, &status);
             let status = document.github_connection_status();
@@ -1050,6 +1116,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,
             github_workflow_edit_open, github_workflow_edit_prepare, github_workflow_edit_apply,
             github_workflow_edit_close, github_workflow_edit_status,
+            metadata_text_observe, metadata_text_validate, metadata_text_edit_open, metadata_text_edit_prepare,
+            metadata_text_edit_apply, metadata_text_edit_close, metadata_text_edit_status,
             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
             vault_status, vault_open, asset_context, asset_choose, credential_prepare,
             vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,

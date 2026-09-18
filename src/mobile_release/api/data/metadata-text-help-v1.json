@@ -1,0 +1,128 @@
+{
+  "schemaVersion": 1,
+  "fields": [
+    {
+      "id": "title.txt", "platform": "android", "requiredness": "required",
+      "requiredWhen": "Each configured locale of an enabled Android app.",
+      "label": "App title",
+      "what": "The public name shown in the Google Play listing for this locale.",
+      "why": "A localized title helps people recognize the intended app.",
+      "where": "Use the approved public app name, localized by your content owner.",
+      "format": "UTF-8 plain text. The shared core checks the 30-character Store limit. Raw line endings and whitespace are saved exactly as reviewed.",
+      "failure": "Empty text, placeholders, possible secrets or an excessive title block this text save. This is not Store approval."
+    },
+    {
+      "id": "short_description.txt", "platform": "android", "requiredness": "required",
+      "requiredWhen": "Each configured locale of an enabled Android app.",
+      "label": "Short description",
+      "what": "A short public summary of the Android app.",
+      "why": "It tells people the primary benefit of the app before they read the full listing.",
+      "where": "Write or obtain approved localized public marketing copy.",
+      "format": "UTF-8 plain text. The shared core checks the 80-character Store limit; it does not translate or rewrite your text.",
+      "failure": "Missing or format-invalid text blocks this text save. Keep credentials and private review instructions out of public copy."
+    },
+    {
+      "id": "full_description.txt", "platform": "android", "requiredness": "required",
+      "requiredWhen": "Each configured locale of an enabled Android app.",
+      "label": "Full description",
+      "what": "The full public Android app description for this locale.",
+      "why": "It explains supported features and expectations to prospective users.",
+      "where": "Use the current approved public product description and a reviewed localization.",
+      "format": "UTF-8 plain text with a shared-core 4000-character limit. Validation uses the existing generic newline-counting policy; Save preserves the exact reviewed bytes.",
+      "failure": "Empty content, unresolved placeholders, possible secrets or excess length block this save. Android changelog and build selection are separate."
+    },
+    {
+      "id": "description.txt", "platform": "ios", "requiredness": "required",
+      "requiredWhen": "Each configured locale of an enabled iOS app.",
+      "label": "App description",
+      "what": "The public App Store description for this locale.",
+      "why": "It describes what the released app offers to users.",
+      "where": "Use the approved public product description and a reviewed localization.",
+      "format": "UTF-8 plain text with a shared-core 4000-character limit. This editor does not modify categories or optional app-information fields.",
+      "failure": "Missing or format-invalid public text blocks this save. Private review contacts, demo credentials and TestFlight instructions do not belong here."
+    },
+    {
+      "id": "keywords.txt", "platform": "ios", "requiredness": "required",
+      "requiredWhen": "Each configured locale of an enabled iOS app.",
+      "label": "Keywords",
+      "what": "The public search keywords supplied for the iOS listing.",
+      "why": "Approved localized keywords help relevant users find the app.",
+      "where": "Obtain the intended keyword list from the public listing owner.",
+      "format": "UTF-8 text, typically comma-separated keywords. The shared core checks the existing 100-character limit, not search ranking or Store acceptance.",
+      "failure": "Empty, placeholder, secret-like or overly long text blocks this save. No keyword generation or automatic translation is performed."
+    },
+    {
+      "id": "privacy_url.txt", "platform": "ios", "requiredness": "required",
+      "requiredWhen": "Each configured locale of an enabled iOS app.",
+      "label": "Privacy policy URL",
+      "what": "The public HTTPS address of the app's privacy policy.",
+      "why": "Users need an accessible statement of the app's data practices.",
+      "where": "Ask the app owner for the approved public privacy-policy page for this locale.",
+      "format": "An absolute credential-free HTTPS URL, no query or fragment, within the shared core's 2048-character URL bound. The page is not contacted.",
+      "failure": "Malformed URLs, surrounding whitespace, placeholders or possible secrets block this save. Format validity does not establish reachability or legal adequacy."
+    },
+    {
+      "id": "support_url.txt", "platform": "ios", "requiredness": "required",
+      "requiredWhen": "Each configured locale of an enabled iOS app.",
+      "label": "Support URL",
+      "what": "The public HTTPS support page for the app.",
+      "why": "Users need a public place to obtain support.",
+      "where": "Use the app owner's approved support page for this locale, not a signed or authenticated private link.",
+      "format": "An absolute credential-free HTTPS URL, no query or fragment, within the shared core's 2048-character URL bound. Validation does not visit the page.",
+      "failure": "Invalid or secret-bearing URLs block this save. This does not verify support availability or Store acceptance."
+    },
+    {
+      "id": "release_notes.txt", "platform": "ios", "requiredness": "required",
+      "requiredWhen": "Each configured locale of an enabled iOS app.",
+      "label": "Public release notes",
+      "what": "The public iOS release notes shown to users for the release.",
+      "why": "Users should understand the changes in the version they receive.",
+      "where": "Use the approved user-facing change summary and a reviewed localization.",
+      "format": "UTF-8 plain text with a shared-core 4000-character limit. These are public notes, not private TestFlight what-to-test or App Review instructions.",
+      "failure": "Empty text, unresolved placeholders, possible secrets or excess length block this save. No build, upload or release operation is performed."
+    }
+  ],
+  "actions": [
+    {
+      "id": "load", "requiredness": "optional", "requiredWhen": "Before reviewing one enabled platform and locale from the saved configuration.",
+      "label": "Load saved text", "what": "Read only the known public text files for this selection.",
+      "why": "A fresh bounded observation gives this draft a comparison baseline without scanning private metadata.",
+      "where": "Choose an enabled platform and a locale already saved in project configuration. Save root or locale configuration changes separately first.",
+      "format": "Missing known files are shown as absent. Unsafe, changed, oversized, unreadable, non-UTF-8 or possible-secret files return no text result.",
+      "failure": "Loading is non-atomic and cannot authorize a later write. Dirty drafts are retained; unavailable browser or native services do not supply successful fixture text."
+    },
+    {
+      "id": "validate", "requiredness": "optional", "requiredWhen": "After editing the selected locale's public text bundle.",
+      "label": "Validate text", "what": "Ask the shared core to check the supplied text without reading or writing project files.",
+      "why": "The CLI and desktop use the same generic empty, NUL, placeholder, secret, URL and character-limit policy.",
+      "where": "Use the validation action after supplying every required field for the selected platform.",
+      "format": "Core counts use universal-newline conversion and remove trailing LF only for validation. Draft and saved payload bytes are not normalized.",
+      "failure": "Invalid text must be corrected before preparing a save. Format-valid does not mean translated, legally reviewed, Store-accepted or release-ready."
+    },
+    {
+      "id": "review", "requiredness": "optional", "requiredWhen": "Before an app-managed save when the qualified native edit service is available.",
+      "label": "Review text save", "what": "Capture an original typed edit and preview the exact create, replace or preserve actions.",
+      "why": "The original saved configuration fixes the writable roster; a renderer path or baseline cannot grant filesystem authority.",
+      "where": "Review each path, before and after content, raw line-ending changes and new target directories in the prepared view.",
+      "format": "One platform and locale per operation. Configuration and .gitignore are read-only dependencies; safe ignore coverage must already exist.",
+      "failure": "Stale observations, changed configuration, pending state or insufficient ignore coverage refuse preparation. Correct configuration separately; do not retry a possibly submitted save."
+    },
+    {
+      "id": "save", "requiredness": "optional", "requiredWhen": "Only after reviewing an all-valid original prepared plan and when the native metadata edit gate is qualified.",
+      "label": "Save reviewed text", "what": "Submit the original one-use plan to the app-managed local transaction.",
+      "why": "A settled original owner keeps exact-byte creation, replacement, rollback and cleanup facts distinct.",
+      "where": "Use Save on the prepared review, never an arbitrary path writer or manual command fallback.",
+      "format": "Only the selected public text bundle may change. No configuration, ignore rules, screenshots, private notes, Git, Store or release operation is written or executed.",
+      "failure": "A timeout or lost reply is not proof of success or failure. Observe the original owner, preserve the draft, and require settled finality; source presence alone does not enable this gate."
+    },
+    {
+      "id": "discard", "requiredness": "optional", "requiredWhen": "When you decide not to use a local draft or an unsubmitted prepared review.",
+      "label": "Discard draft or review", "what": "Explicitly retire local draft or unsubmitted review state.",
+      "why": "Changing a tab, locale or project must not silently erase unsaved work.",
+      "where": "Use the explicit discard action for the selected draft or close an unsubmitted review.",
+      "format": "Discarding in-memory authority performs no transaction cleanup. Already-submitted Apply must settle through its original owner.",
+      "failure": "Do not infer cancellation, rollback or cleanup from closing a view. Unknown outcomes preserve the reviewed draft and original status."
+    }
+  ],
+  "limits": {"maxTextBytes": 32768, "maxCachedLocales": 32, "maxCachedTextBytes": 8388608}
+}

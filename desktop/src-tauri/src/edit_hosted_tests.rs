@@ -21,8 +21,8 @@ const EOF_SCOPE: &str = "configuration-transaction-eof-hosted-v1";
 const OBSERVATION: Duration = Duration::from_secs(45);
 const NOT_VERIFIED: &[&str] = &["production-runtime-custody", "production-save-enablement", "native-gui", "window-reload-crash",
     "parent-death", "native-stuck-wait-close", "windows-filesystem", "stores", "mobile-builds", "installers"];
-const IGNORE: &[u8] = b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n";
-const NOOP_IGNORE: &[u8] = b"# fixed synthetic comment\r\n/.mobile-release/\r\n/.mobile-release-init-prepare/\r\n/.mobile-release-init/\r\n/.mobile-release-init-cleanup/\r\n";
+const IGNORE: &[u8] = b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n";
+const NOOP_IGNORE: &[u8] = b"# fixed synthetic comment\r\n/.mobile-release/\r\n/.mobile-release-init-prepare/\r\n/.mobile-release-init/\r\n/.mobile-release-init-cleanup/\r\n/.mobile-release-metadata-text-prepare/\r\n/.mobile-release-metadata-text/\r\n/.mobile-release-metadata-text-cleanup/\r\n";
 const UNRELATED: &[u8] = b"fixed synthetic unrelated content\n";
 const EOF_IGNORE_BASE: &[u8] = b"# fixed synthetic EOF ignore\n";
 static BATCH_CLAIMED: AtomicBool = AtomicBool::new(false);
@@ -35,7 +35,18 @@ static FIXTURE_FILES: FixtureFiles = FixtureFiles {
 // Keeping original books is separate from claiming their resources settled.
 // Ambiguous custody never returns and drops the Tokio runtime. The fixed
 // expected-loss exception below requires complete original-resource proof.
-struct Retention { _owner: EditOwner, originals: Vec<Arc<Session>> }
+struct Retention {
+    _owner: EditOwner, originals: Vec<Arc<Session>>,
+    #[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    metadata_passive: Option<(Arc<crate::bridge::DesktopBridge>, Arc<crate::supervisor::metadata_fixture_probe::Probe>)>,
+}
+impl Retention {
+    fn new(owner: &EditOwner) -> Self {
+        Self { _owner:owner.clone(), originals:Vec::new(),
+            #[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            metadata_passive:None }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -101,25 +112,31 @@ impl BlockingGate {
 // mode. No renderer/environment method can select it. Its separate source hash
 // is admitted before this Schedule can be queued for an original Session.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum EofCase { Precommit, Postcommit, WorkflowPrecommit, WorkflowPostcommit, WorkflowConflict }
+pub(super) enum EofCase { Precommit, Postcommit, WorkflowPrecommit, WorkflowPostcommit, WorkflowConflict,
+    MetadataPrecommit, MetadataPostcommit, MetadataConflict }
 impl EofCase {
     pub(super) fn name(self) -> &'static str {
-        match self { Self::Precommit | Self::WorkflowPrecommit => "precommit-eof",
-            Self::Postcommit | Self::WorkflowPostcommit => "postcommit-eof", Self::WorkflowConflict => "precommit-conflict-eof" }
+        match self { Self::Precommit | Self::WorkflowPrecommit | Self::MetadataPrecommit => "precommit-eof",
+            Self::Postcommit | Self::WorkflowPostcommit | Self::MetadataPostcommit => "postcommit-eof",
+            Self::WorkflowConflict | Self::MetadataConflict => "precommit-conflict-eof" }
     }
     pub(super) fn domain(self) -> EditDomain {
-        match self { Self::Precommit | Self::Postcommit => EditDomain::Configuration, _ => EditDomain::GitHubWorkflows }
+        match self { Self::Precommit | Self::Postcommit => EditDomain::Configuration,
+            Self::WorkflowPrecommit | Self::WorkflowPostcommit | Self::WorkflowConflict => EditDomain::GitHubWorkflows,
+            Self::MetadataPrecommit | Self::MetadataPostcommit | Self::MetadataConflict => EditDomain::MetadataText }
     }
     fn project(self) -> &'static str {
         match self { Self::Precommit => "project-config-precommit-eof", Self::Postcommit => "project-config-postcommit-eof",
             Self::WorkflowPrecommit => "project-workflow-precommit-eof", Self::WorkflowPostcommit => "project-workflow-postcommit-eof",
-            Self::WorkflowConflict => "project-workflow-precommit-conflict-eof" }
+            Self::WorkflowConflict => "project-workflow-precommit-conflict-eof",
+            Self::MetadataPrecommit => "project-metadata-precommit-eof", Self::MetadataPostcommit => "project-metadata-postcommit-eof",
+            Self::MetadataConflict => "project-metadata-precommit-conflict-eof" }
     }
     fn boundary(self) -> &'static str {
-        match self { Self::Postcommit | Self::WorkflowPostcommit => "after-durable-COMMITTED", _ => "before-COMMITTED" }
+        match self { Self::Postcommit | Self::WorkflowPostcommit | Self::MetadataPostcommit => "after-durable-COMMITTED", _ => "before-COMMITTED" }
     }
     fn checkpoint(self) -> &'static str {
-        match self { Self::Postcommit | Self::WorkflowPostcommit => "descriptor-close", _ => "publisher-entry" }
+        match self { Self::Postcommit | Self::WorkflowPostcommit | Self::MetadataPostcommit => "descriptor-close", _ => "publisher-entry" }
     }
     fn marker(self) -> &'static [u8] {
         match self {
@@ -128,6 +145,9 @@ impl EofCase {
             Self::WorkflowPrecommit => b"MRK_WORKFLOW_EOF_V1 precommit-eof boundary=before-COMMITTED\n",
             Self::WorkflowPostcommit => b"MRK_WORKFLOW_EOF_V1 postcommit-eof boundary=after-durable-COMMITTED\n",
             Self::WorkflowConflict => b"MRK_WORKFLOW_EOF_V1 precommit-conflict-eof boundary=before-COMMITTED\n",
+            Self::MetadataPrecommit => b"MRK_METADATA_TEXT_EOF_V1 precommit-eof boundary=before-COMMITTED\n",
+            Self::MetadataPostcommit => b"MRK_METADATA_TEXT_EOF_V1 postcommit-eof boundary=after-durable-COMMITTED\n",
+            Self::MetadataConflict => b"MRK_METADATA_TEXT_EOF_V1 precommit-conflict-eof boundary=before-COMMITTED\n",
         }
     }
     fn summary(self) -> &'static [u8] {
@@ -137,6 +157,9 @@ impl EofCase {
             Self::WorkflowPrecommit => b"MRK_WORKFLOW_EOF_V1 precommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=1 terminal=ROLLED_BACK durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
             Self::WorkflowPostcommit => b"MRK_WORKFLOW_EOF_V1 postcommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=descriptor-close applied=1 committed=1 rolledBack=0 terminal=COMMITTED durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
             Self::WorkflowConflict => b"MRK_WORKFLOW_EOF_V1 precommit-conflict-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=0 terminal=UNKNOWN durable=0 recovery=1 clean=0 settled=1 cancelled=1\n",
+            Self::MetadataPrecommit => b"MRK_METADATA_TEXT_EOF_V1 precommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=1 terminal=ROLLED_BACK durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+            Self::MetadataPostcommit => b"MRK_METADATA_TEXT_EOF_V1 postcommit-eof eof=1 nonempty=0 readErrors=0 checkpoint=descriptor-close applied=1 committed=1 rolledBack=0 terminal=COMMITTED durable=1 recovery=1 clean=1 settled=1 cancelled=1\n",
+            Self::MetadataConflict => b"MRK_METADATA_TEXT_EOF_V1 precommit-conflict-eof eof=1 nonempty=0 readErrors=0 checkpoint=publisher-entry applied=1 committed=0 rolledBack=0 terminal=UNKNOWN durable=0 recovery=1 clean=0 settled=1 cancelled=1\n",
         }
     }
     fn stderr_bytes(self) -> usize { self.marker().len() + self.summary().len() }
@@ -215,6 +238,7 @@ impl Schedule {
         let terminal = match frame {
             ChildFrame::Terminal(sequence, terminal) => Some((*sequence, terminal.outcome())),
             ChildFrame::WorkflowTerminal(sequence, terminal) => Some((*sequence, terminal.outcome())),
+            ChildFrame::MetadataTextTerminal(sequence, terminal) => Some((*sequence, terminal.outcome())),
             _ => None,
         };
         if let Some((sequence, outcome)) = terminal {
@@ -265,6 +289,7 @@ impl GateGuard {
             match domain {
                 EditDomain::Configuration => { let _ = self.owner.close("main", &id); },
                 EditDomain::GitHubWorkflows => { let _ = self.owner.close_workflow("main", &id); },
+                EditDomain::MetadataText => { let _ = self.owner.close_metadata_text("main", &id); },
             }
         }
         self.schedule.release();
@@ -940,7 +965,7 @@ async fn hosted_management_loss_original_resources(loss: ManagementLoss) {
     }
     let owner = EditOwner::new(RuntimeConfig::packaged(inputs.root.clone()));
     match RETAINED.lock() {
-        Ok(mut retained) => *retained = Some(Retention { _owner:owner.clone(), originals:Vec::new() }),
+        Ok(mut retained) => *retained = Some(Retention::new(&owner)),
         Err(_) => panic!("hosted configuration retention unavailable before native admission"),
     }
     owner.inner.fixture_authorized.store(true, Ordering::SeqCst);
@@ -1001,7 +1026,7 @@ async fn hosted_config_edit_owner_original_resources() {
     }
     let owner = EditOwner::new(RuntimeConfig::packaged(inputs.root.clone()));
     match RETAINED.lock() {
-        Ok(mut retained) => *retained = Some(Retention { _owner:owner.clone(), originals:Vec::new() }),
+        Ok(mut retained) => *retained = Some(Retention::new(&owner)),
         Err(_) => panic!("hosted configuration retention unavailable before native admission"),
     }
     // This private cfg(test,development-runtime) seam is the ONLY gate override,
@@ -1093,7 +1118,7 @@ fn delta_batch(inputs: &Inputs) -> Check<Batch> {
     {
         let mut retained = RETAINED.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
         require(retained.is_none(), Failure::OriginalCustodyUnknown)?;
-        *retained = Some(Retention { _owner:owner.clone(), originals:Vec::new() });
+        *retained = Some(Retention::new(&owner));
     }
     owner.inner.fixture_authorized.store(true, Ordering::SeqCst);
     owner.initial_document("main").map_err(|_| Failure::NativeCommandRejected)?;
@@ -1912,7 +1937,7 @@ mod workflow {
             {
                 let mut retained = RETAINED.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
                 require(retained.is_none(), Failure::OriginalCustodyUnknown)?;
-                *retained = Some(Retention { _owner:owner.clone(), originals:Vec::new() });
+                *retained = Some(Retention::new(&owner));
             }
             input.permit(&owner)?;
             let document = DocumentBinding::new(bridge.clone());
@@ -2539,6 +2564,1175 @@ fn workflow_eof_records_are_domain_distinct_and_exact() {
         for index in 0..bytes.len() {
             let mut changed = bytes.clone(); changed[index] = b'!';
             let mut control = EofControl::default(); assert!(!control.observe(case,&changed));
+        }
+    }
+}
+
+// One finite metadata branch of the existing hosted original-owner fixture.
+// Its payloads are literal synthetic DATA, not output of the product renderer.
+#[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod metadata {
+    use super::*;
+    use crate::{asset_session::DocumentBinding, asset_source::{self, SourceBook}, bridge::{DesktopBridge, Project},
+        metadata_text_commands, metadata_text_edit_protocol::Platform, protocol::Method,
+        supervisor::metadata_fixture_probe::Probe};
+
+    const OWNER_SCOPE: &str = "metadata-text-owner-hosted-v1";
+    const TRANSACTION_SCOPE: &str = "metadata-text-transaction-eof-hosted-v1";
+    const DOMAIN: &str = "metadata_text";
+    const REFERENCE: &str = "refs/heads/verify/desktop-metadata-text-apply-native";
+    const WORKFLOW_PATH: &str = ".github/workflows/desktop-github-workflow-apply-native.yml";
+    const WORKFLOW_SOURCE: &[u8] = include_bytes!("../../../.github/workflows/desktop-github-workflow-apply-native.yml");
+    const RESOURCE: &[u8] = include_bytes!("../../../src/mobile_release/api/data/metadata-text-help-v1.json");
+    const SCHEMA: &[u8] = include_bytes!("../../../src/mobile_release/api/data/project.schema.json");
+    const UMASK_PROBE: &[u8] = b"fixed metadata fixture umask\n";
+    const SENSITIVE: &[u8] = b"password=fixed-synthetic-not-a-credential\n";
+    const NONUTF8: &[u8] = b"fixed public notes \xff\n";
+    const CONFIG_PUBLIC: &[u8] = concat!(r#"{"android":{"applicationId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"ios":{"bundleId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"metadata":{"androidLocales":["en-US","fr-FR"],"iosLocales":["en-US"],"root":"public/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},"schemaVersion":1,"services":{"androidFirebase":"disabled","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"production"},"version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"release/version.properties"}}"#, "\n").as_bytes();
+    const CONFIG_RELEASE: &[u8] = concat!(r#"{"android":{"applicationId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"ios":{"bundleId":"org.fixture.app","enabled":true,"identityStatus":"unverified"},"metadata":{"androidLocales":["en-US","fr-FR"],"iosLocales":["en-US"],"root":"release/store"},"projectChecks":{"androidArtifact":[],"iosArtifact":[],"preflight":[]},"schemaVersion":1,"services":{"androidFirebase":"disabled","iosFirebase":"disabled"},"source":{"candidateBranch":"main","productionBranch":"production"},"version":{"buildKey":"BUILD_NUMBER","nameKey":"VERSION_NAME","source":"release/version.properties"}}"#, "\n").as_bytes();
+    const ANDROID_NAMES: [&str;3] = ["title.txt","short_description.txt","full_description.txt"];
+    const IOS_NAMES: [&str;5] = ["description.txt","keywords.txt","privacy_url.txt","support_url.txt","release_notes.txt"];
+    const ANDROID_TEXT: [&str;3] = ["Fixture public title\n","A fixed public description.\r\n","Public release details: café.\nSecond line.\n"];
+    const IOS_TEXT: [&str;5] = ["Public iOS description: café.\r\nSecond line.\r\n","public,fixture,release","https://public.invalid/privacy",
+        "https://public.invalid/support","  Public release notes.\nNo private content.\n"];
+    const OLD_ANDROID_TITLE: &str = "Previous public title\n";
+    const OLD_ANDROID_SHORT: &str = "Previous public description.\n";
+    const OLD_IOS_DESCRIPTION: &str = "Previous public iOS description.\n";
+    const OLD_IOS_KEYWORDS: &str = "previous,public";
+    const NOT_VERIFIED: &[&str] = &["production-runtime-custody","production-metadata-save-enablement","native-gui",
+        "webview-callbacks-or-crash-hook","parent-death","native-stuck-wait-close","persisted-recovery",
+        "macos-windows-metadata-writes","credentials","remote-github","stores","mobile-builds","installers"];
+    const EXTRA_SOURCES: &[Source] = &[
+        Source { id:"metadataProtocol", relative:"desktop/src-tauri/src/metadata_text_edit_protocol.rs", compiled:include_bytes!("metadata_text_edit_protocol.rs") },
+        Source { id:"metadataCommands", relative:"desktop/src-tauri/src/metadata_text_commands.rs", compiled:include_bytes!("metadata_text_commands.rs") },
+        Source { id:"workflowProtocol", relative:"desktop/src-tauri/src/github_workflow_edit_protocol.rs", compiled:include_bytes!("github_workflow_edit_protocol.rs") },
+        Source { id:"bridge", relative:"desktop/src-tauri/src/bridge.rs", compiled:include_bytes!("bridge.rs") },
+        Source { id:"documentBinding", relative:"desktop/src-tauri/src/asset_session.rs", compiled:include_bytes!("asset_session.rs") },
+        Source { id:"documentLifetime", relative:"desktop/src-tauri/src/document_lifetime.rs", compiled:include_bytes!("document_lifetime.rs") },
+        Source { id:"assetSource", relative:"desktop/src-tauri/src/asset_source.rs", compiled:include_bytes!("asset_source.rs") },
+        Source { id:"assetCommands", relative:"desktop/src-tauri/src/asset_commands.rs", compiled:include_bytes!("asset_commands.rs") },
+        Source { id:"supervisor", relative:"desktop/src-tauri/src/supervisor.rs", compiled:include_bytes!("supervisor.rs") },
+        Source { id:"passiveFixture", relative:"desktop/src-tauri/src/hosted_tests.rs", compiled:include_bytes!("hosted_tests.rs") },
+        Source { id:"editCommands", relative:"desktop/src-tauri/src/edit_commands.rs", compiled:include_bytes!("edit_commands.rs") },
+        Source { id:"githubCommands", relative:"desktop/src-tauri/src/github_commands.rs", compiled:include_bytes!("github_commands.rs") },
+        Source { id:"workflowEdit", relative:"src/mobile_release/github_workflow_edit.py", compiled:include_bytes!("../../../src/mobile_release/github_workflow_edit.py") },
+        Source { id:"metadataEdit", relative:"src/mobile_release/metadata_text_edit.py", compiled:include_bytes!("../../../src/mobile_release/metadata_text_edit.py") },
+        Source { id:"metadataText", relative:"src/mobile_release/metadata_text.py", compiled:include_bytes!("../../../src/mobile_release/metadata_text.py") },
+        Source { id:"metadataPolicy", relative:"src/mobile_release/metadata.py", compiled:include_bytes!("../../../src/mobile_release/metadata.py") },
+        Source { id:"metadataApi", relative:"src/mobile_release/api/_metadata_text.py", compiled:include_bytes!("../../../src/mobile_release/api/_metadata_text.py") },
+        Source { id:"passiveEngine", relative:"src/mobile_release/_desktop_engine.py", compiled:include_bytes!("../../../src/mobile_release/_desktop_engine.py") },
+        Source { id:"catalogue", relative:"src/mobile_release/api/_catalog.py", compiled:include_bytes!("../../../src/mobile_release/api/_catalog.py") },
+        Source { id:"apiContracts", relative:"src/mobile_release/api/contracts.py", compiled:include_bytes!("../../../src/mobile_release/api/contracts.py") },
+        Source { id:"snapshot", relative:"src/mobile_release/api/_snapshot.py", compiled:include_bytes!("../../../src/mobile_release/api/_snapshot.py") },
+        Source { id:"metadataResource", relative:"src/mobile_release/api/data/metadata-text-help-v1.json", compiled:RESOURCE },
+        Source { id:"schemaResource", relative:"src/mobile_release/api/data/project.schema.json", compiled:SCHEMA },
+    ];
+    static PROBES: Mutex<Vec<SourceBook>> = Mutex::new(Vec::new());
+    fn probes_settled() -> bool { PROBES.lock().is_ok_and(|books| books.iter().all(SourceBook::settled)) }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mode { Source, Zip }
+    impl Mode { fn name(self) -> &'static str { if self == Self::Source { "source" } else { "zip" } } }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Case { AndroidCreate, IosCreate, AndroidNoop, IosNoop, AndroidReplace, IosMixed, NoIgnore,
+        Sensitive, Nonutf8, Stale, Isolation, Registration, HeldTerminal, DocumentLost }
+    impl Case {
+        fn name(self) -> &'static str {
+            match self {
+                Self::AndroidCreate => "android-observe-create", Self::IosCreate => "ios-observe-create",
+                Self::AndroidNoop => "android-observe-noop", Self::IosNoop => "ios-observe-noop",
+                Self::AndroidReplace => "android-observe-replace-preserve", Self::IosMixed => "ios-observe-mixed-create-replace-preserve",
+                Self::NoIgnore => "observe-without-ignore-save-refused", Self::Sensitive => "observe-last-sensitive-refused",
+                Self::Nonutf8 => "observe-last-nonutf8-refused", Self::Stale => "stale-passive-baseline-refused",
+                Self::Isolation => "three-domain-owner-isolation", Self::Registration => "registration-changed-before-apply",
+                Self::HeldTerminal => "metadata-terminal-held-after-stop", Self::DocumentLost => "metadata-document-loss-before-apply",
+            }
+        }
+        fn selection(self) -> Selection {
+            Selection { platform:if matches!(self,Self::IosCreate|Self::IosNoop|Self::IosMixed|Self::Nonutf8) { Platform::Ios } else { Platform::Android },
+                locale:if self == Self::AndroidReplace { "fr-FR" } else { "en-US" },
+                metadata_root:if self == Self::IosCreate { "release/store" } else { "public/store" } }
+        }
+        fn fresh(self) -> bool { matches!(self,Self::AndroidCreate|Self::IosCreate|Self::NoIgnore|Self::Isolation|Self::Registration|Self::HeldTerminal|Self::DocumentLost) }
+    }
+    const SOURCE_CASES: [Case;14] = [Case::AndroidCreate,Case::IosCreate,Case::AndroidNoop,Case::IosNoop,Case::AndroidReplace,
+        Case::IosMixed,Case::NoIgnore,Case::Sensitive,Case::Nonutf8,Case::Stale,Case::Isolation,Case::Registration,Case::HeldTerminal,Case::DocumentLost];
+    const EOF_CASES: [EofCase;3] = [EofCase::MetadataPrecommit,EofCase::MetadataPostcommit,EofCase::MetadataConflict];
+    #[derive(Clone, Copy)]
+    struct Selection { platform:Platform, locale:&'static str, metadata_root:&'static str }
+    impl Selection {
+        fn platform_name(self) -> &'static str { if self.platform == Platform::Android { "android" } else { "ios" } }
+        fn names(self) -> &'static [&'static str] { if self.platform == Platform::Android { &ANDROID_NAMES } else { &IOS_NAMES } }
+        fn texts(self) -> &'static [&'static str] { if self.platform == Platform::Android { &ANDROID_TEXT } else { &IOS_TEXT } }
+        fn config(self) -> &'static [u8] { if self.metadata_root == "release/store" { CONFIG_RELEASE } else { CONFIG_PUBLIC } }
+        fn parent(self) -> String { format!("{}/{}/{}",self.metadata_root,self.platform_name(),self.locale) }
+        fn path(self,index:usize) -> String { format!("{}/{}",self.parent(),self.names()[index]) }
+        fn fields(self) -> Vec<metadata_wire::TextField> {
+            self.platform.ids().iter().zip(self.texts()).map(|(id,text)| metadata_wire::TextField { id:*id,text:(*text).into() }).collect()
+        }
+        fn open(self,project:&Project) -> metadata_text_commands::Open {
+            metadata_text_commands::Open { project_id:project.id.clone(),platform:self.platform,locale:self.locale.into() }
+        }
+    }
+    fn eof_selection(case:EofCase) -> Selection {
+        if case == EofCase::MetadataPostcommit { Selection { platform:Platform::Ios,locale:"en-US",metadata_root:"release/store" } }
+        else { Selection { platform:Platform::Android,locale:"en-US",metadata_root:"public/store" } }
+    }
+    fn hash_fields(platform:Platform,previous:bool) -> Value {
+        if previous {
+            if platform == Platform::Android { json!({"title.txt":hash(OLD_ANDROID_TITLE.as_bytes()),"short_description.txt":hash(OLD_ANDROID_SHORT.as_bytes())}) }
+            else { json!({"description.txt":hash(OLD_IOS_DESCRIPTION.as_bytes()),"keywords.txt":hash(OLD_IOS_KEYWORDS.as_bytes())}) }
+        } else {
+            let selection = Selection { platform,locale:"en-US",metadata_root:"public/store" };
+            let fields: serde_json::Map<String,Value> = selection.names().iter().zip(selection.texts()).map(|(id,text)| ((*id).into(),json!(hash(text.as_bytes())))).collect();
+            Value::Object(fields)
+        }
+    }
+    fn payload_bindings() -> Value {
+        json!({"configHashes":{"publicStore":hash(CONFIG_PUBLIC),"releaseStore":hash(CONFIG_RELEASE)},"ignoreSha256":hash(IGNORE),
+            "fieldHashes":{"android":hash_fields(Platform::Android,false),"ios":hash_fields(Platform::Ios,false)},
+            "previousFieldHashes":{"android":hash_fields(Platform::Android,true),"ios":hash_fields(Platform::Ios,true)},
+            "unrelatedSha256":hash(UNRELATED),"umaskProbeSha256":hash(UMASK_PROBE),"sensitiveSha256":hash(SENSITIVE),"nonutf8Sha256":hash(NONUTF8)})
+    }
+    struct Admitted { inputs:Inputs,mode:Mode,eof:bool,python:PathBuf,core:PathBuf,repository:PathBuf,
+        selections:Vec<(PathBuf,Platform,String)> }
+    fn source_entry(path:&str) -> bool {
+        path.starts_with("mobile_release/") && path.len() <= 256 && path.is_ascii()
+            && path.split('/').all(|part| !part.is_empty() && part != "." && part != ".."
+                && part.bytes().all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c)))
+            && [".py",".json",".pem"].iter().any(|suffix| path.ends_with(suffix))
+    }
+    fn core_binding(repository:&Path,task:&Path,sha:&str) -> Check<Value> {
+        require(canonical_input("MRK_DESKTOP_METADATA_TEXT_CORE_ZIP",true)? == task.join("core.zip")
+            && canonical_input("MRK_DESKTOP_METADATA_TEXT_CORE_METADATA",true)? == task.join("metadata.json"), Failure::SourceBindingMismatch)?;
+        let raw = read_regular(&task.join("metadata.json"),2*1024*1024)?;
+        let value:Value = serde_json::from_slice(&raw.bytes).map_err(|_| Failure::SourceBindingMismatch)?;
+        let run = environment("GITHUB_RUN_ID")?;
+        let attempt = environment("GITHUB_RUN_ATTEMPT")?;
+        let github_repository = environment("GITHUB_REPOSITORY")?;
+        require(value.as_object().is_some_and(|fields| fields.len() == 8) && value["sourceSha"].as_str() == Some(sha)
+            && value["sourceTree"].as_str().is_some_and(|tree| tree.len() == 40 && tree != "0".repeat(40)
+                && tree.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)))
+            && !run.is_empty() && run.len() <= 20 && !run.starts_with('0') && run.bytes().all(|c| c.is_ascii_digit())
+            && attempt == "1" && environment("GITHUB_EVENT_NAME")? == "push" && environment("MRK_PUSH_EVENT_AFTER")? == sha
+            && environment("GITHUB_REF")? == REFERENCE
+            && environment("GITHUB_WORKFLOW_SHA")? == sha
+            && environment("GITHUB_WORKFLOW_REF")? == format!("{github_repository}/{WORKFLOW_PATH}@{REFERENCE}")
+            && value["runId"].as_str() == Some(run.as_str()) && value["attempt"].as_str() == Some(attempt.as_str())
+            && value["ref"] == REFERENCE, Failure::SourceBindingMismatch)?;
+        let workflow_hash = hash(WORKFLOW_SOURCE);
+        require(hash(&read_regular(&repository.join(WORKFLOW_PATH),2*1024*1024)?.bytes) == workflow_hash
+            && value["workflowSha256"].as_str() == Some(workflow_hash.as_str()), Failure::SourceBindingMismatch)?;
+        let rows = value["coreFiles"].as_array().ok_or(Failure::SourceBindingMismatch)?;
+        require(!rows.is_empty() && rows.len() <= 2048,Failure::SourceBindingMismatch)?;
+        let mut previous = ""; let mut total = 0usize;
+        for row in rows {
+            let path = row["path"].as_str().ok_or(Failure::SourceBindingMismatch)?;
+            require(row.as_object().is_some_and(|fields| fields.len() == 3) && source_entry(path) && path > previous,Failure::SourceBindingMismatch)?;
+            let file = read_regular(&repository.join("src").join(path),8*1024*1024)?;
+            total = total.checked_add(file.bytes.len()).ok_or(Failure::SourceBindingMismatch)?;
+            require(total <= 32*1024*1024 && row["size"].as_u64() == Some(file.bytes.len() as u64)
+                && row["sha256"].as_str() == Some(hash(&file.bytes).as_str()),Failure::SourceBindingMismatch)?;
+            previous = path;
+        }
+        let zip_hash = hash(&read_regular(&task.join("core.zip"),32*1024*1024)?.bytes);
+        require(value["coreZipSha256"].as_str() == Some(zip_hash.as_str()),Failure::SourceBindingMismatch)?;
+        // The helper owns original Git/inventory/ZIP construction. This binds
+        // its exact metadata and bytes; it does not parse/extract another ZIP.
+        Ok(json!({"sourceTree":value["sourceTree"],"workflowSha256":workflow_hash,"runId":run,"attempt":attempt,"ref":REFERENCE,
+            "coreZipSha256":zip_hash,"coreInventorySha256":hash(&serde_json::to_vec(rows).map_err(|_| Failure::SourceBindingMismatch)?)}))
+    }
+    impl Admitted {
+        fn admit(eof:bool) -> Check<Self> {
+            FIXTURE_FILES.admit()?;
+            require(environment("MRK_DESKTOP_METADATA_TEXT_HOSTED_CHECKS")? == "metadata-text-v1"
+                && environment("GITHUB_ACTIONS")? == "true" && environment("RUNNER_ENVIRONMENT")? == "github-hosted"
+                && environment("RUNNER_OS")? == "Linux" && environment("RUNNER_ARCH")? == "X64"
+                && crate::runtime::COMPILED_TARGET == "x86_64-unknown-linux-gnu"
+                && rustix::process::getuid().as_raw() != 0 && rustix::process::getuid() == rustix::process::geteuid(),Failure::HostedGuardRefused)?;
+            let mode = match environment("MRK_DESKTOP_METADATA_TEXT_INPUT")?.as_str() {
+                "source" => Mode::Source,"zip" if !eof => Mode::Zip,_ => return Err(Failure::HostedGuardRefused),
+            };
+            let temporary = canonical_input("RUNNER_TEMP",false)?;
+            let root = canonical_input("MRK_DESKTOP_EDIT_TEST_ROOT",true)?;
+            let task = root.parent().ok_or(Failure::HostedGuardRefused)?;
+            let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).canonicalize().map_err(|_| Failure::HostedGuardRefused)?;
+            let repository = manifest.parent().and_then(Path::parent).ok_or(Failure::HostedGuardRefused)?.to_path_buf();
+            let name = if eof { "metadata-transaction-eof" } else if mode == Mode::Source { "metadata-owner-source" } else { "metadata-owner-zip" };
+            require(root.file_name().and_then(|name| name.to_str()) == Some(name) && task != temporary && task.starts_with(&temporary)
+                && std::env::current_dir().map_err(|_| Failure::HostedGuardRefused)? == manifest
+                && !root.starts_with(&repository) && !repository.starts_with(&root),Failure::HostedGuardRefused)?;
+            let stat = fs::symlink_metadata(&root).map_err(|_| Failure::HostedGuardRefused)?;
+            require(stat.is_dir() && stat.mode() & 0o7777 == 0o700 && stat.uid() == rustix::process::geteuid().as_raw()
+                && stat.gid() == rustix::process::getegid().as_raw()
+                && fs::read_dir(&root).map_err(|_| Failure::HostedGuardRefused)?.next().is_none(),Failure::HostedGuardRefused)?;
+            let python = canonical_input("MRK_DESKTOP_DEV_PYTHON",true)?;
+            let core = canonical_input("MRK_DESKTOP_DEV_CORE",true)?;
+            require(core == if mode == Mode::Source { repository.join("src") } else { task.join("core.zip") }
+                && !python.starts_with(task) && !python.starts_with(&repository),Failure::HostedGuardRefused)?;
+            let sha = environment("GITHUB_SHA")?;
+            require(sha.len() == 40 && sha != "0".repeat(40) && sha.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                && environment("MRK_DESKTOP_EDIT_SOURCE_SHA")? == sha && option_env!("GITHUB_SHA") == Some(sha.as_str()),Failure::SourceBindingMismatch)?;
+            let mut sources = serde_json::Map::new();
+            for item in SOURCES.iter().chain(EXTRA_SOURCES).chain(if eof { std::slice::from_ref(&EOF_SOURCE) } else { &[] }) {
+                let expected = hash(item.compiled);
+                require(hash(&read_regular(&repository.join(item.relative),2*1024*1024)?.bytes) == expected
+                    && sources.insert(item.id.into(),json!(expected)).is_none(),Failure::SourceBindingMismatch)?;
+            }
+            let mut bindings = core_binding(&repository,task,&sha)?;
+            bindings["sourceSha"] = json!(sha); bindings["domain"] = json!(DOMAIN); bindings["host"] = json!("linux");
+            bindings["target"] = json!(crate::runtime::COMPILED_TARGET); bindings["runtimeMode"] = json!("trusted-development-only");
+            bindings["runtimeInput"] = json!(mode.name()); bindings["pythonSha256"] = json!(hash(&read_regular(&python,64*1024*1024)?.bytes));
+            bindings["sourceHashes"] = json!(sources); bindings["payloadHashes"] = payload_bindings();
+            bindings["metadataResourceSha256"] = json!(hash(RESOURCE)); bindings["schemaResourceSha256"] = json!(hash(SCHEMA));
+            bindings["inheritedFileMaskObserved"] = json!(true); bindings["requestedCreateMode"] = json!(420);
+            bindings["observedCreateMode"] = json!(384); bindings["newDirectoryMode"] = json!(493);
+            bindings["documentEvidence"] = json!("controlled-original-lifetime-not-gui-callbacks");
+            let selections = if eof { EOF_CASES.iter().map(|case| { let s=eof_selection(*case); (root.join(case.name()),s.platform,s.locale.into()) }).collect() }
+                else if mode == Mode::Zip { let s=Case::IosMixed.selection(); vec![(root.join(Case::IosMixed.name()),s.platform,s.locale.into())] }
+                else { SOURCE_CASES.iter().map(|case| { let s=case.selection(); (root.join(case.name()),s.platform,s.locale.into()) })
+                    .chain([(root.join("registration-apply-extra"),Platform::Android,"en-US".into())]).collect() };
+            let mut probe = fs::OpenOptions::new().create_new(true).write(true).mode(0o644).open(root.join("umask-check")).map_err(|_| Failure::FixtureIo)?;
+            FIXTURE_FILES.acquired(); let wrote=probe.write_all(UMASK_PROBE); FIXTURE_FILES.close_original(probe)?;
+            require(wrote.is_ok(),Failure::FixtureIo)?;
+            let observed=read_regular(&root.join("umask-check"),128)?;
+            require(observed.bytes == UMASK_PROBE && observed.identity.mode & 0o7777 == 0o600,Failure::HostedGuardRefused)?;
+            Ok(Self { inputs:Inputs { root,identity:Identity::of(&stat),bindings },mode,eof,python,core,repository,selections })
+        }
+        fn permit(&self,owner:&EditOwner) -> Check<()> {
+            self.inputs.same_root()?;
+            require(owner.can_exit() && !owner.disabled() && !owner.inner.hosted_qualified(EditDomain::MetadataText),Failure::HostedGuardRefused)?;
+            let mut slot=owner.inner.fixture_metadata.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            require(slot.is_none(),Failure::HostedGuardRefused)?;
+            *slot=Some(Arc::new(MetadataFixturePermit { owner:Arc::downgrade(&owner.inner),selections:self.selections.clone(),
+                python:self.python.clone(),core:self.core.clone(),bootstrap:self.repository.join("desktop/config_edit_bootstrap.py"),
+                cwd:self.repository.join("desktop"),binding_sha256:hash(&serde_json::to_vec(&self.inputs.bindings).map_err(|_| Failure::SourceBindingMismatch)?),
+                zip:self.mode==Mode::Zip,eof:self.eof }));
+            Ok(())
+        }
+    }
+
+    struct Original { batch:Batch,bridge:Arc<DesktopBridge>,document:DocumentBinding,passive:Arc<Probe>,queries:Vec<Value> }
+    impl Original {
+        fn new(input:&Admitted) -> Check<Self> {
+            let bridge=Arc::new(DesktopBridge::new(input.inputs.root.clone()));
+            let owner=bridge.edits.clone();
+            let passive=Arc::new(Probe::attach(&bridge.supervisor).map_err(|_| Failure::OriginalCustodyUnknown)?);
+            {
+                let mut retained=RETAINED.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+                require(retained.is_none(),Failure::OriginalCustodyUnknown)?;
+                let mut retention=Retention::new(&owner);
+                retention.metadata_passive=Some((bridge.clone(),passive.clone()));
+                *retained=Some(retention); // Before any real passive/edit query.
+            }
+            input.permit(&owner)?;
+            let document=DocumentBinding::new(bridge.clone());
+            require(document.navigation(true),Failure::NativeCommandRejected)?;
+            document.observe(|life| life.started(true)); document.hook_installed(); document.observe(|life| life.finished(true));
+            require(owner.metadata_text_status().is_ok_and(|status| status.capability.available)
+                && !owner.inner.hosted_qualified(EditDomain::Configuration) && !owner.inner.hosted_qualified(EditDomain::GitHubWorkflows),Failure::NativeCommandRejected)?;
+            Ok(Self { batch:Batch { owner,originals:Vec::new(),missing_original:false,cases:Vec::new() },bridge,document,passive,queries:Vec::new() })
+        }
+        fn settled(&self) -> bool {
+            FIXTURE_FILES.all_settled() && probes_settled() && self.passive.settled() && !self.batch.missing_original
+                && self.batch.owner.can_exit() && self.batch.originals.iter().all(|original| match original.fixture_schedule.eof_case() {
+                    Some(case) => original_eof_facts(original,case).is_ok(),None => original_facts(original).is_ok(),
+                })
+        }
+        fn register(&self,root:&Path) -> Check<Project> {
+            require(FIXTURE_FILES.all_settled() && probes_settled() && self.passive.settled(),Failure::OriginalCustodyUnknown)?;
+            let generation=self.bridge.native_generation().map_err(|_| Failure::NativeCommandRejected)?;
+            let (proof,settled)={
+                let mut books=PROBES.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+                require(books.len() < 16,Failure::OriginalCustodyUnknown)?;
+                books.push(SourceBook::new()); // Retain the original before acquisition.
+                let book=books.last_mut().ok_or(Failure::OriginalCustodyUnknown)?;
+                let proof=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                    asset_source::probe_project(book,root.to_path_buf(),&[],&mut || false))).map_err(|_| Failure::OriginalCustodyUnknown)?;
+                (proof,book.settled())
+            };
+            require(settled,Failure::OriginalCustodyUnknown)?;
+            let project=self.document.metadata_fixture_publish(proof.map_err(|_| Failure::NativeCommandRejected)?,generation)
+                .map_err(|_| Failure::NativeCommandRejected)?;
+            let (_,registered)=self.bridge.native_project(&project.id).map_err(|_| Failure::UnexpectedStatus)?;
+            let stat=fs::symlink_metadata(root).map_err(|_| Failure::FixtureIo)?;
+            let identity=registered.identity.workflow_identity();
+            require(registered.path == root && identity.device == stat.dev().to_string() && identity.inode == stat.ino().to_string()
+                && identity.mode == stat.mode() && identity.uid == stat.uid() && identity.gid == stat.gid(),Failure::PayloadMismatch)?;
+            Ok(project)
+        }
+        fn retain_open(&mut self) -> Check<Arc<Session>> {
+            let original={
+                let registry=self.batch.owner.inner.lock();
+                if registry.last.as_ref().is_some_and(|last| !self.batch.originals.iter().any(|original| original.id == last.session_id)) {
+                    self.batch.missing_original=true;
+                }
+                registry.active.as_ref().map(|active| active.session.clone())
+            };
+            let original=original.ok_or_else(|| { self.batch.missing_original=true; Failure::OriginalCustodyUnknown })?;
+            self.batch.originals.push(original.clone());
+            RETAINED.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.as_mut().ok_or(Failure::OriginalCustodyUnknown)?.originals.push(original.clone());
+            Ok(original)
+        }
+        fn open(&mut self,project:&Project,selection:Selection) -> Check<Arc<Session>> {
+            require(self.settled() && !self.batch.owner.disabled(),Failure::OriginalCustodyUnknown)?;
+            let reply=self.bridge.open_metadata_text_edit(&self.document,"main",selection.open(project));
+            let original=self.retain_open()?;
+            let status=reply.map_err(|_| Failure::NativeCommandRejected)?;
+            require(select(&status,&original.id)?.phase == Phase::Opening && original.domain == EditDomain::MetadataText,Failure::UnexpectedStatus)?;
+            Ok(original)
+        }
+        async fn observe(&mut self,project:&Project,selection:Selection,error:Option<&'static str>) -> Check<Result<metadata_wire::Observation,BridgeError>> {
+            require(self.settled() && !self.batch.owner.disabled(),Failure::OriginalCustodyUnknown)?;
+            let reply=self.bridge.observe_metadata_text(selection.open(project)).await;
+            self.queries.push(self.passive.next(Method::MetadataTextObserve,error).await.map_err(|_| Failure::OriginalCustodyUnknown)?);
+            Ok(reply)
+        }
+        async fn validate(&mut self,selection:Selection) -> Check<()> {
+            require(self.settled() && !self.batch.owner.disabled(),Failure::OriginalCustodyUnknown)?;
+            let fields=selection.fields();
+            let reply=self.bridge.validate_metadata_text(metadata_text_commands::Validate { platform:selection.platform,fields:fields.clone() }).await;
+            self.queries.push(self.passive.next(Method::MetadataTextValidate,None).await.map_err(|_| Failure::OriginalCustodyUnknown)?);
+            let value=reply.map_err(|_| Failure::UnexpectedOutcome)?;
+            require(value.schema_version == 1 && value.platform == selection.platform && value.valid
+                && value.state == metadata_wire::ValidationState::FormatValid && value.fields.len() == fields.len()
+                && value.fields.iter().zip(&fields).enumerate().all(|(index,(row,field))| row.id == field.id && row.valid && row.issues.is_empty()
+                    && row.limit == field_limit(selection,index) && row.character_count == scalar_count(&field.text))
+                && assurance(&value.assurance,"schema-policy"),Failure::UnexpectedOutcome)
+        }
+        async fn catalogue(&mut self) -> Check<()> {
+            require(self.settled() && !self.batch.owner.disabled(),Failure::OriginalCustodyUnknown)?;
+            let reply=self.bridge.catalog().await;
+            self.queries.push(self.passive.next(Method::Catalog,None).await.map_err(|_| Failure::OriginalCustodyUnknown)?);
+            let value=reply.map_err(|_| Failure::UnexpectedOutcome)?;
+            let guide:Value=serde_json::from_slice(RESOURCE).map_err(|_| Failure::PayloadMismatch)?;
+            let schema:Value=serde_json::from_slice(SCHEMA).map_err(|_| Failure::PayloadMismatch)?;
+            require(value["schemaVersion"] == 1 && value["metadataText"] == guide && value["schema"] == schema
+                && value["metadata"]["requiredLocaleText"] == json!({"android":ANDROID_NAMES,"ios":IOS_NAMES})
+                && value["metadata"]["textLimits"] == json!({"title.txt":30,"name.txt":30,"short_description.txt":80,"subtitle.txt":30,
+                    "promotional_text.txt":170,"keywords.txt":100,"description.txt":4000,"full_description.txt":4000,
+                    "whats_new.txt":4000,"release_notes.txt":4000,"what-to-test.txt":4000})
+                && value["metadata"]["assurance"] == "format-rules-only",Failure::UnexpectedOutcome)
+        }
+        async fn stop(&self) {
+            let current=self.batch.owner.inner.lock().active.as_ref().map(|active| (active.session.id.clone(),active.session.domain));
+            if let Some((id,domain))=current {
+                match domain {
+                    EditDomain::MetadataText => { let _=self.batch.owner.close_metadata_text("main",&id); let _=observed_metadata(&self.batch.owner,&id,Phase::Final,false).await; },
+                    EditDomain::Configuration => self.batch.stop_original().await,
+                    EditDomain::GitHubWorkflows => { let _=self.batch.owner.close_workflow("main",&id); let _=workflow_observed(&self.batch.owner,&id,Phase::Final).await; },
+                }
+            }
+            if !self.passive.settled() { let _=self.bridge.supervisor.shutdown().await; }
+        }
+    }
+    fn scalar_count(text:&str) -> u32 { text.replace("\r\n","\n").replace('\r',"\n").trim_end_matches('\n').chars().count() as u32 }
+    fn field_limit(selection:Selection,index:usize) -> u32 {
+        if selection.platform == Platform::Android { [30,80,4000][index] } else { [4000,100,2048,2048,4000][index] }
+    }
+    fn assurance(value:&metadata_wire::Assurance,basis:&str) -> bool {
+        value.basis == basis && !value.project_code_executed && !value.tools_probed && !value.credentials_read && !value.git_observed
+            && !value.store_contacted && !value.writes_performed && value.release_readiness == "unknown"
+    }
+    fn select(status:&MetadataTextEditStatus,id:&str) -> Check<metadata_wire::Projection> {
+        require(status.domain == DOMAIN,Failure::UnexpectedStatus)?;
+        status.active.as_ref().filter(|p| p.session_id == id).or_else(|| status.last_terminal.as_ref().filter(|p| p.session_id == id))
+            .cloned().ok_or(Failure::UnexpectedStatus)
+    }
+    async fn observed_metadata(owner:&EditOwner,id:&str,desired:Phase,expected_unknown:bool) -> Check<metadata_wire::Projection> {
+        let end=Instant::now()+OBSERVATION; let mut revisions=owner.subscribe();
+        loop {
+            let status=owner.metadata_text_status().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            let current=select(&status,id)?;
+            if !expected_unknown {
+                require(!owner.disabled() && current.phase != Phase::Unknown && current.native_finality != NativeFinality::Unknown
+                    && !current.late_settled,Failure::OriginalCustodyUnknown)?;
+            }
+            if current.phase == desired && (!expected_unknown || status.active.is_none()) { return Ok(current); }
+            require(current.phase != Phase::Final,Failure::UnexpectedStatus)?;
+            tokio::select! {
+                result=revisions.changed() => { result.map_err(|_| Failure::UnexpectedStatus)?; },
+                _=tokio::time::sleep_until(tokio::time::Instant::from_std(end)) => return Err(Failure::ObservationTimeout),
+            }
+        }
+    }
+    async fn workflow_observed(owner:&EditOwner,id:&str,desired:Phase) -> Check<workflow_wire::Projection> {
+        let end=Instant::now()+OBSERVATION; let mut revisions=owner.subscribe();
+        loop {
+            let status=owner.workflow_status().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            let current=status.active.as_ref().filter(|p| p.session_id == id).or_else(|| status.last_terminal.as_ref().filter(|p| p.session_id == id))
+                .cloned().ok_or(Failure::UnexpectedStatus)?;
+            require(!owner.disabled() && current.native_finality != NativeFinality::Unknown && !current.late_settled,Failure::OriginalCustodyUnknown)?;
+            if current.phase == desired { return Ok(current); }
+            require(current.phase != Phase::Final,Failure::UnexpectedStatus)?;
+            tokio::select! { result=revisions.changed() => { result.map_err(|_| Failure::UnexpectedStatus)?; },
+                _=tokio::time::sleep_until(tokio::time::Instant::from_std(end)) => return Err(Failure::ObservationTimeout), }
+        }
+    }
+
+    #[derive(Clone,Copy,PartialEq,Eq)]
+    struct Stamp { modified:i64,modified_ns:i64,changed:i64,changed_ns:i64 }
+    impl Stamp { fn of(value:&fs::Metadata) -> Self { Self { modified:value.mtime(),modified_ns:value.mtime_nsec(),changed:value.ctime(),changed_ns:value.ctime_nsec() } } }
+    #[derive(PartialEq,Eq)]
+    struct RawFile { original:OriginalFile,stamp:Stamp }
+    #[derive(PartialEq,Eq)]
+    struct Snapshot { files:std::collections::BTreeMap<String,RawFile>,directories:std::collections::BTreeMap<String,Identity> }
+    fn raw_file(path:&Path,limit:u64) -> Check<RawFile> {
+        FIXTURE_FILES.admit()?;
+        let before=fs::symlink_metadata(path).map_err(|_| Failure::FixtureIo)?;
+        let original=read_regular(path,limit)?;
+        let after=fs::symlink_metadata(path).map_err(|_| Failure::FixtureIo)?;
+        require(Identity::of(&before) == original.identity && Identity::of(&after) == original.identity
+            && Stamp::of(&before) == Stamp::of(&after),Failure::PayloadMismatch)?;
+        Ok(RawFile { original,stamp:Stamp::of(&before) })
+    }
+    fn mkdir(path:&Path) -> Check<()> {
+        FIXTURE_FILES.admit()?; fs::DirBuilder::new().mode(0o700).create(path).map_err(|_| Failure::FixtureIo)
+    }
+    fn ancestors(relative:&str) -> Vec<String> {
+        let mut result=Vec::new(); let mut path=String::new();
+        for part in relative.split('/') { if !path.is_empty() { path.push('/'); } path.push_str(part); result.push(path.clone()); }
+        result
+    }
+    fn seed_parent(root:&Path,parent:&str) -> Check<()> {
+        for name in ancestors(parent) {
+            FIXTURE_FILES.admit()?;
+            match fs::symlink_metadata(root.join(&name)) {
+                Ok(stat) => require(stat.is_dir(),Failure::FixtureIo)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => mkdir(&root.join(name))?,
+                Err(_) => return Err(Failure::FixtureIo),
+            }
+        }
+        Ok(())
+    }
+    fn fixture_roster() -> (BTreeSet<String>,BTreeSet<String>) {
+        let mut directories:BTreeSet<String>=["","release",".github",".github/workflows"].into_iter().map(str::to_owned).collect();
+        let mut leaves:BTreeSet<String>=[".gitignore","unrelated.txt","release/mobile-release.json","release/other.txt",".github/workflows/unrelated.txt"]
+            .into_iter().map(str::to_owned).collect();
+        for metadata_root in ["public/store","release/store"] {
+            for (platform,locale) in [(Platform::Android,"en-US"),(Platform::Android,"fr-FR"),(Platform::Ios,"en-US")] {
+                let selection=Selection { platform,locale,metadata_root };
+                directories.extend(ancestors(&selection.parent()));
+                leaves.extend(selection.names().iter().enumerate().map(|(index,_)| selection.path(index)));
+                leaves.insert(format!("{}/unrelated.txt",selection.parent()));
+            }
+        }
+        (directories,leaves)
+    }
+    fn snapshot(root:&Path) -> Check<Snapshot> {
+        let (allowed_directories,allowed_files)=fixture_roster();
+        let mut directories=std::collections::BTreeMap::new(); let mut files=std::collections::BTreeMap::new();
+        let mut pending=vec![String::new()];
+        while let Some(relative)=pending.pop() {
+            FIXTURE_FILES.admit()?;
+            require(allowed_directories.contains(&relative) && directories.len() < 24,Failure::PayloadMismatch)?;
+            let path=root.join(&relative); let stat=fs::symlink_metadata(&path).map_err(|_| Failure::FixtureIo)?;
+            require(stat.is_dir(),Failure::PayloadMismatch)?; directories.insert(relative.clone(),Identity::of(&stat));
+            let mut count=0;
+            for entry in fs::read_dir(path).map_err(|_| Failure::FixtureIo)? {
+                count+=1; require(count <= 12,Failure::PayloadMismatch)?;
+                let name=entry.map_err(|_| Failure::FixtureIo)?.file_name().into_string().map_err(|_| Failure::PayloadMismatch)?;
+                let child=if relative.is_empty() { name } else { format!("{relative}/{name}") };
+                let stat=fs::symlink_metadata(root.join(&child)).map_err(|_| Failure::FixtureIo)?;
+                if stat.is_dir() { require(allowed_directories.contains(&child),Failure::PayloadMismatch)?; pending.push(child); }
+                else {
+                    require(allowed_files.contains(&child) && files.len() < 32,Failure::PayloadMismatch)?;
+                    let file=raw_file(&root.join(&child),1024*1024)?;
+                    require(files.insert(child,file).is_none(),Failure::PayloadMismatch)?;
+                }
+            }
+        }
+        Ok(Snapshot { files,directories })
+    }
+    fn seed_common(root:&Path,selection:Selection,ignore:bool) -> Check<()> {
+        mkdir(root)?; mkdir(&root.join("release"))?;
+        write_new(&root.join("release/mobile-release.json"),selection.config(),0o440)?;
+        if ignore { write_new(&root.join(".gitignore"),IGNORE,0o400)?; }
+        write_new(&root.join("unrelated.txt"),UNRELATED,0o400)?; write_new(&root.join("release/other.txt"),UNRELATED,0o400)?;
+        mkdir(&root.join(".github"))?; mkdir(&root.join(".github/workflows"))?;
+        write_new(&root.join(".github/workflows/unrelated.txt"),UNRELATED,0o400)
+    }
+    fn seed_siblings(root:&Path,selection:Selection) -> Check<()> {
+        for (platform,locale) in [(Platform::Android,"en-US"),(Platform::Android,"fr-FR"),(Platform::Ios,"en-US")] {
+            if selection.platform == platform && selection.locale == locale { continue; }
+            let other=Selection { platform,locale,metadata_root:selection.metadata_root };
+            seed_parent(root,&other.parent())?;
+            for (index,text) in other.texts().iter().enumerate() { write_new(&root.join(other.path(index)),text.as_bytes(),0o400)?; }
+        }
+        Ok(())
+    }
+    fn seed(input:&Admitted,case:Case) -> Check<PathBuf> {
+        input.inputs.same_root()?; let selection=case.selection(); let root=input.inputs.root.join(case.name());
+        seed_common(&root,selection,case != Case::NoIgnore)?;
+        if !case.fresh() {
+            seed_parent(&root,&selection.parent())?;
+            for (index,text) in selection.texts().iter().enumerate() {
+                if case == Case::IosMixed && index == 2 { continue; }
+                let bytes=if case == Case::AndroidReplace && index == 1 { OLD_ANDROID_SHORT.as_bytes() }
+                    else if case == Case::IosMixed && index == 0 { OLD_IOS_DESCRIPTION.as_bytes() }
+                    else if case == Case::IosMixed && index == 1 { OLD_IOS_KEYWORDS.as_bytes() }
+                    else if case == Case::Sensitive && index == 2 { SENSITIVE }
+                    else if case == Case::Nonutf8 && index == 4 { NONUTF8 }
+                    else { text.as_bytes() };
+                let first_replacement=if case == Case::AndroidReplace { index == 1 } else { index == 0 };
+                write_new(&root.join(selection.path(index)),bytes,if first_replacement { 0o640 } else { 0o600 })?;
+            }
+            seed_siblings(&root,selection)?;
+        }
+        Ok(root)
+    }
+    fn rewrite_original(path:&Path,old:&RawFile,bytes:&[u8]) -> Check<()> {
+        FIXTURE_FILES.admit()?;
+        let mut file=fs::OpenOptions::new().write(true).custom_flags(nix::libc::O_NOFOLLOW).open(path).map_err(|_| Failure::FixtureIo)?;
+        FIXTURE_FILES.acquired();
+        let result=(|| {
+            let opened=file.metadata().map_err(|_| Failure::FixtureIo)?;
+            require(Identity::of(&opened) == old.original.identity && Stamp::of(&opened) == old.stamp,Failure::PayloadMismatch)?;
+            file.set_len(0).map_err(|_| Failure::FixtureIo)?; file.write_all(bytes).map_err(|_| Failure::FixtureIo)
+        })();
+        FIXTURE_FILES.close_original(file)?; result
+    }
+    fn baseline(before:&Snapshot,selection:Selection) -> Check<metadata_wire::Baseline> {
+        let config=&before.files.get("release/mobile-release.json").ok_or(Failure::PayloadMismatch)?.original;
+        let fields=selection.platform.ids().iter().enumerate().map(|(index,id)| match before.files.get(&selection.path(index)) {
+            Some(file) => metadata_wire::BaselineField::Present { id:*id,byte_length:file.original.bytes.len() as u32,sha256:hash(&file.original.bytes) },
+            None => metadata_wire::BaselineField::Absent { id:*id },
+        }).collect();
+        Ok(metadata_wire::Baseline { config:metadata_wire::ContentDigest { byte_length:config.bytes.len() as u32,sha256:hash(&config.bytes) },fields })
+    }
+    fn observed_roster(before:&Snapshot,selection:Selection,value:&metadata_wire::Observation) -> Check<()> {
+        require(value.schema_version == 1 && value.platform == selection.platform && value.locale == selection.locale
+            && value.metadata_root == selection.metadata_root && value.observation_scope == "single-request-non-atomic"
+            && value.baseline == baseline(before,selection)? && value.fields.len() == selection.names().len()
+            && assurance(&value.assurance,"static-text"),Failure::UnexpectedOutcome)?;
+        for (index,field) in value.fields.iter().enumerate() {
+            let name=selection.path(index); let id=selection.platform.ids()[index];
+            let valid=match (field,before.files.get(&name)) {
+                (metadata_wire::ObservedField::Absent { id:actual,path },None) => *actual == id && *path == name,
+                (metadata_wire::ObservedField::Present { id:actual,path,text,byte_length,sha256 },Some(old)) => *actual == id && *path == name
+                    && text.as_bytes() == old.original.bytes && *byte_length as usize == old.original.bytes.len() && *sha256 == hash(&old.original.bytes),
+                _ => false,
+            };
+            require(valid,Failure::UnexpectedOutcome)?;
+        }
+        Ok(())
+    }
+    fn prepare_args(id:&str,revision:&str,expected:&metadata_wire::Baseline,selection:Selection) -> PrepareMetadataTextEdit {
+        PrepareMetadataTextEdit { session_id:id.into(),revision:revision.into(),expected_baseline:expected.clone(),fields:selection.fields(),
+            draft_revision:1,baseline_generation:0 }
+    }
+    async fn prepare(original:&Original,id:&str,checkout:&metadata_wire::Checkout,expected:&metadata_wire::Baseline,selection:Selection) -> Check<metadata_wire::Prepared> {
+        let reply=original.bridge.prepare_metadata_text_edit(&original.document,"main",prepare_args(id,&checkout.revision,expected,selection))
+            .map_err(|_| Failure::NativeCommandRejected)?;
+        require(select(&reply,id)?.phase == Phase::Preparing,Failure::UnexpectedStatus)?;
+        observed_metadata(&original.batch.owner,id,Phase::Reviewing,false).await?.prepared.ok_or(Failure::UnexpectedOutcome)
+    }
+    fn line_styles(text:&[u8]) -> u8 {
+        let mut at=0; let mut styles=0;
+        while at < text.len() {
+            match text[at] { b'\r' if text.get(at+1) == Some(&b'\n') => { styles|=1; at+=1; },b'\r' => styles|=2,b'\n' => styles|=4,_ => {} }
+            at+=1;
+        }
+        styles
+    }
+    fn verify_plan(before:&Snapshot,selection:Selection,checkout:&metadata_wire::Checkout,plan:&metadata_wire::Prepared) -> Check<Vec<String>> {
+        require(checkout.baseline == baseline(before,selection)? && checkout.metadata_root == selection.metadata_root
+            && plan.revision == checkout.revision && plan.draft_revision == 1 && plan.baseline_generation == 0
+            && plan.view.platform == selection.platform && plan.view.locale == selection.locale && plan.view.metadata_root == selection.metadata_root
+            && plan.view.files.len() == selection.names().len() && plan.view.validation.valid
+            && plan.view.validation.platform == selection.platform && plan.view.validation.fields.len() == selection.names().len(),Failure::UnexpectedOutcome)?;
+        for (index,file) in plan.view.files.iter().enumerate() {
+            let path=selection.path(index); let old=before.files.get(&path); let desired=selection.texts()[index].as_bytes();
+            let action=match old { None => metadata_wire::Action::Create,Some(old) if old.original.bytes == desired => metadata_wire::Action::Preserve,
+                Some(_) => metadata_wire::Action::Replace };
+            let before_matches=match (&file.before,old) {
+                (metadata_wire::Before::Absent {},None) => true,
+                (metadata_wire::Before::Present { text,byte_length,sha256 },Some(old)) => text.as_bytes() == old.original.bytes
+                    && *byte_length as usize == old.original.bytes.len() && *sha256 == hash(&old.original.bytes),_ => false,
+            };
+            let old_styles=old.map_or(0,|old| line_styles(&old.original.bytes));
+            let row=&plan.view.validation.fields[index];
+            require(file.id == selection.platform.ids()[index] && file.path == path && file.action == action && before_matches
+                && file.after.text.as_bytes() == desired && file.after.byte_length as usize == desired.len() && file.after.sha256 == hash(desired)
+                && file.line_endings_changed == (old_styles != line_styles(desired)) && row.id == file.id && row.valid && row.issues.is_empty()
+                && row.character_count == scalar_count(selection.texts()[index]) && row.limit == field_limit(selection,index),Failure::PayloadMismatch)?;
+        }
+        let created:Vec<String>=ancestors(&selection.parent()).into_iter().filter(|name| !before.directories.contains_key(name)).collect();
+        require(plan.view.create_directories == created && assurance(&plan.view.validation.assurance,"schema-policy"),Failure::UnexpectedOutcome)?;
+        Ok(created)
+    }
+    fn installed(root:&Path,before:&Snapshot,selection:Selection,created:&[String]) -> Check<()> {
+        let after=snapshot(root)?;
+        require(before.directories.iter().all(|(name,old)| after.directories.get(name) == Some(old)),Failure::PayloadMismatch)?;
+        let selected:Vec<String>=(0..selection.names().len()).map(|index| selection.path(index)).collect();
+        for (name,old) in &before.files {
+            if !selected.contains(name) { require(after.files.get(name) == Some(old),Failure::PayloadMismatch)?; }
+        }
+        let mut added=0;
+        for (index,name) in selected.iter().enumerate() {
+            let file=after.files.get(name).ok_or(Failure::PayloadMismatch)?; let bytes=selection.texts()[index].as_bytes();
+            require(file.original.bytes == bytes,Failure::PayloadMismatch)?;
+            match before.files.get(name) {
+                Some(old) if old.original.bytes == bytes => require(file == old,Failure::PayloadMismatch)?,
+                Some(old) => require(file.original.identity.device == old.original.identity.device && file.original.identity.inode != old.original.identity.inode
+                    && file.original.identity.mode == old.original.identity.mode && file.original.identity.owner == old.original.identity.owner
+                    && file.original.identity.group == old.original.identity.group,Failure::PayloadMismatch)?,
+                None => { added+=1; require(file.original.identity.mode & 0o7777 == 0o600
+                    && file.original.identity.owner == rustix::process::geteuid().as_raw() && file.original.identity.group == rustix::process::getegid().as_raw(),Failure::PayloadMismatch)?; },
+            }
+        }
+        for name in created { require(after.directories.get(name).is_some_and(|id| id.mode & 0o7777 == 0o755
+            && id.owner == rustix::process::geteuid().as_raw() && id.group == rustix::process::getegid().as_raw()),Failure::PayloadMismatch)?; }
+        require(after.files.len() == before.files.len()+added && after.directories.len() == before.directories.len()+created.len(),Failure::PayloadMismatch)
+    }
+    fn restored(root:&Path,before:&Snapshot) -> Check<()> {
+        let after=snapshot(root)?;
+        // Own rename/restore may change ctime. Compare original identity, mode,
+        // owner, group, bytes and mtime, not a false old-ctime requirement.
+        require(after.directories == before.directories && after.files.len() == before.files.len()
+            && before.files.iter().all(|(name,old)| after.files.get(name).is_some_and(|new| new.original == old.original
+                && new.stamp.modified == old.stamp.modified && new.stamp.modified_ns == old.stamp.modified_ns)),Failure::PayloadMismatch)
+    }
+
+    fn settled_terminal(owner:&EditOwner,terminal:&metadata_wire::Projection) -> Check<()> {
+        require(terminal.phase == Phase::Final && terminal.native_finality == NativeFinality::Settled && !terminal.late_settled
+            && owner.can_exit() && !owner.disabled(),Failure::OriginalCustodyUnknown)
+    }
+    fn correlated(terminal:&metadata_wire::Projection,editing:&metadata_wire::Projection,plan:&metadata_wire::Prepared) -> Check<()> {
+        require(terminal.domain == DOMAIN && terminal.owner_generation == editing.owner_generation && terminal.session_id == editing.session_id
+            && terminal.project_id == editing.project_id && terminal.platform == editing.platform && terminal.locale == editing.locale
+            && terminal.checkout.as_ref().is_some_and(|checkout| editing.checkout.as_ref().is_some_and(|old|
+                checkout.revision == old.revision && checkout.metadata_root == old.metadata_root && checkout.baseline == old.baseline))
+            && terminal.prepared.as_ref().is_some_and(|retained| retained.plan_token == plan.plan_token && retained.revision == plan.revision
+                && retained.draft_revision == plan.draft_revision && retained.baseline_generation == plan.baseline_generation
+                && matches!((serde_json::to_value(&retained.view),serde_json::to_value(&plan.view)),(Ok(actual),Ok(expected)) if actual==expected)),Failure::UnexpectedOutcome)
+    }
+    fn native_data(session:&Session,terminal:&metadata_wire::Projection,eof:Option<EofCase>) -> Check<Value> {
+        let facts=if let Some(case)=eof { original_eof_facts(session,case)? } else { original_facts(session)? };
+        require(terminal.session_id == session.id && session.domain == EditDomain::MetadataText,Failure::UnexpectedStatus)?;
+        let mut value=serde_json::to_value(facts).map_err(|_| Failure::ReceiptIo)?;
+        value["domain"]=json!(DOMAIN); value["nativePhase"]=json!(terminal.phase); value["nativeFinality"]=json!(terminal.native_finality);
+        value["nativeReason"]=json!(terminal.native_reason); value["applySubmitted"]=json!(terminal.apply_submitted);
+        value["lateSettled"]=json!(terminal.late_settled); value["outcome"]=json!(terminal.core_outcome);
+        value["terminalSeq"]=json!(session.fixture_schedule.sequence());
+        value["checkoutRetained"]=json!(terminal.checkout.is_some()); value["preparedRetained"]=json!(terminal.prepared.is_some());
+        Ok(value)
+    }
+    fn row(original:&mut Original,name:&str,selection:Selection,native:Option<Value>,observations:Value) -> Check<()> {
+        require(original.settled(),Failure::OriginalCustodyUnknown)?;
+        original.batch.cases.push(json!({"name":name,"domain":DOMAIN,"platform":selection.platform,"locale":selection.locale,
+            "native":native,"passive":std::mem::take(&mut original.queries),"observations":observations}));
+        Ok(())
+    }
+    fn statuses(original:&Original,id:&str,domain:EditDomain) -> Check<()> {
+        let config=original.batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+        let workflow=original.batch.owner.workflow_status().map_err(|_| Failure::UnexpectedStatus)?;
+        let metadata=original.batch.owner.metadata_text_status().map_err(|_| Failure::UnexpectedStatus)?;
+        require(config.status_revision == workflow.status_revision && workflow.status_revision == metadata.status_revision
+            && config.window_generation == workflow.window_generation && workflow.window_generation == metadata.window_generation
+            && config.active.as_ref().map(|p| p.session_id.as_str()) == (domain==EditDomain::Configuration).then_some(id)
+            && workflow.active.as_ref().map(|p| p.session_id.as_str()) == (domain==EditDomain::GitHubWorkflows).then_some(id)
+            && metadata.active.as_ref().map(|p| p.session_id.as_str()) == (domain==EditDomain::MetadataText).then_some(id),Failure::UnexpectedStatus)?;
+        for (candidate,capability) in [(EditDomain::Configuration,config.capability),(EditDomain::GitHubWorkflows,workflow.capability),(EditDomain::MetadataText,metadata.capability)] {
+            require(capability.reason == if candidate == domain { EditAvailability::Available } else { EditAvailability::OtherEditActive },Failure::UnexpectedStatus)?;
+        }
+        let last=original.batch.owner.inner.lock().last.as_ref().map(|p| (p.domain,p.session_id.clone()));
+        require(config.last_terminal.as_ref().map(|p| p.session_id.as_str()) == last.as_ref().filter(|(d,_)| *d==EditDomain::Configuration).map(|(_,id)| id.as_str())
+            && workflow.last_terminal.as_ref().map(|p| p.session_id.as_str()) == last.as_ref().filter(|(d,_)| *d==EditDomain::GitHubWorkflows).map(|(_,id)| id.as_str())
+            && metadata.last_terminal.as_ref().map(|p| p.session_id.as_str()) == last.as_ref().filter(|(d,_)| *d==EditDomain::MetadataText).map(|(_,id)| id.as_str()),Failure::UnexpectedStatus)
+    }
+    fn opposite_commands(original:&Original,project:&Project,selection:Selection,session:&Arc<Session>,revision:&str,
+        passive:&metadata_wire::Baseline,domain:EditDomain) -> Check<()> {
+        const TOKEN:&str="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        statuses(original,&session.id,domain)?;
+        if domain != EditDomain::Configuration {
+            require(original.bridge.open_config_edit("main",project.id.clone()).is_err()
+                && original.batch.owner.prepare("main",PrepareConfigEdit { session_id:session.id.clone(),revision:revision.into(),expected_base:Value::Null,
+                    draft:document(),draft_revision:1,baseline_generation:0 }).is_err()
+                && original.batch.owner.apply("main",&session.id,TOKEN).is_err(),Failure::UnexpectedStatus)?;
+        }
+        if domain != EditDomain::GitHubWorkflows {
+            require(original.bridge.open_workflow_edit(&original.document,"main",project.id.clone()).is_err()
+                && original.bridge.prepare_workflow_edit(&original.document,"main",PrepareWorkflowEdit { session_id:session.id.clone(),revision:revision.into(),
+                    draft:document(),tooling_repository:"Example/mobile-release-kit".into(),tooling_sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    draft_revision:1,baseline_generation:0 }).is_err()
+                && original.bridge.apply_workflow_edit(&original.document,"main",&session.id,TOKEN).is_err(),Failure::UnexpectedStatus)?;
+        }
+        if domain != EditDomain::MetadataText {
+            require(original.bridge.open_metadata_text_edit(&original.document,"main",selection.open(project)).is_err()
+                && original.bridge.prepare_metadata_text_edit(&original.document,"main",prepare_args(&session.id,revision,passive,selection)).is_err()
+                && original.bridge.apply_metadata_text_edit(&original.document,"main",&session.id,TOKEN).is_err(),Failure::UnexpectedStatus)?;
+        }
+        let registry=original.batch.owner.inner.lock(); let active=registry.active.as_ref().ok_or(Failure::OriginalCustodyUnknown)?;
+        require(Arc::ptr_eq(&active.session,session) && active.session.domain == domain && active.claimed_seq == 0
+            && active.prepare_counters.is_none() && !active.prepared && !active.projection.apply_submitted && active.cleanup_start.is_none(),Failure::UnexpectedStatus)
+    }
+    fn legacy_data(session:&Session,phase:Phase,finality:NativeFinality,native:Reason,applied:bool,late:bool,core:&wire::CoreEditOutcome) -> Check<Value> {
+        let facts=original_facts(session)?;
+        require((facts.request_frames,facts.response_frames)==(1,2) && session.fixture_schedule.sequence()==Some(0)
+            && phase == Phase::Final && finality == NativeFinality::Settled && native == Reason::Discarded && !applied && !late
+            && core.effect == Effect::NotStarted && core.journal == Journal::NotCreated && core.resources == ResourceState::Settled
+            && matches!(core.reason,CoreReason::Cancelled|CoreReason::None),Failure::UnexpectedOutcome)?;
+        let mut value=serde_json::to_value(facts).map_err(|_| Failure::ReceiptIo)?;
+        value["domain"]=json!(if session.domain==EditDomain::Configuration { "configuration" } else { "github_workflows" });
+        value["nativePhase"]=json!(phase); value["nativeFinality"]=json!(finality); value["nativeReason"]=json!(native);
+        value["applySubmitted"]=json!(applied); value["lateSettled"]=json!(late); value["outcome"]=json!(core); value["terminalSeq"]=json!(0);
+        Ok(value)
+    }
+    async fn legacy_isolation(original:&mut Original,input:&Admitted,root:&Path,project:&Project,selection:Selection,passive:&metadata_wire::Baseline) -> Check<Vec<Value>> {
+        require(original.settled(),Failure::OriginalCustodyUnknown)?;
+        let metadata_permit=original.batch.owner.inner.fixture_metadata.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.take()
+            .ok_or(Failure::HostedGuardRefused)?;
+        require(metadata_permit.root(&original.batch.owner.inner,root) && !original.batch.owner.inner.hosted_qualified(EditDomain::MetadataText)
+            && !original.batch.owner.inner.hosted_qualified(EditDomain::GitHubWorkflows),Failure::HostedGuardRefused)?;
+        original.batch.owner.inner.fixture_authorized.store(true,Ordering::SeqCst);
+        require(original.batch.owner.inner.hosted_qualified(EditDomain::Configuration)
+            && !original.batch.owner.inner.hosted_qualified(EditDomain::MetadataText),Failure::HostedGuardRefused)?;
+        let reply=original.bridge.open_config_edit("main",project.id.clone());
+        let session=original.retain_open()?;
+        require(projection(&reply.map_err(|_| Failure::NativeCommandRejected)?,&session.id)?.phase==Phase::Opening,Failure::UnexpectedStatus)?;
+        let editing=observed(&original.batch.owner,&session.id,Phase::Editing).await?;
+        let checkout=editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        opposite_commands(original,project,selection,&session,&checkout.revision,passive,EditDomain::Configuration)?;
+        original.batch.owner.close("main",&session.id).map_err(|_| Failure::NativeCommandRejected)?;
+        let terminal=observed(&original.batch.owner,&session.id,Phase::Final).await?;
+        let config=legacy_data(&session,terminal.phase,terminal.native_finality,terminal.native_reason,terminal.apply_submitted,terminal.late_settled,
+            terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?)?;
+        require(original.settled(),Failure::OriginalCustodyUnknown)?;
+        original.batch.owner.inner.fixture_authorized.store(false,Ordering::SeqCst);
+        {
+            let mut slot=original.batch.owner.inner.fixture_workflow.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            require(slot.is_none(),Failure::HostedGuardRefused)?;
+            *slot=Some(Arc::new(WorkflowFixturePermit { owner:Arc::downgrade(&original.batch.owner.inner),roots:vec![root.to_path_buf()],
+                python:input.python.clone(),core:input.core.clone(),bootstrap:input.repository.join("desktop/config_edit_bootstrap.py"),
+                cwd:input.repository.join("desktop"),binding_sha256:hash(&serde_json::to_vec(&input.inputs.bindings).map_err(|_| Failure::SourceBindingMismatch)?),eof:false }));
+        }
+        require(!original.batch.owner.inner.hosted_qualified(EditDomain::Configuration)
+            && original.batch.owner.inner.hosted_qualified(EditDomain::GitHubWorkflows)
+            && !original.batch.owner.inner.hosted_qualified(EditDomain::MetadataText),Failure::HostedGuardRefused)?;
+        let reply=original.bridge.open_workflow_edit(&original.document,"main",project.id.clone());
+        let session=original.retain_open()?;
+        require(reply.map_err(|_| Failure::NativeCommandRejected)?.active.is_some_and(|p| p.session_id==session.id && p.phase==Phase::Opening),Failure::UnexpectedStatus)?;
+        let editing=workflow_observed(&original.batch.owner,&session.id,Phase::Editing).await?;
+        let checkout=editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        opposite_commands(original,project,selection,&session,&checkout.revision,passive,EditDomain::GitHubWorkflows)?;
+        original.batch.owner.close_workflow("main",&session.id).map_err(|_| Failure::NativeCommandRejected)?;
+        let terminal=workflow_observed(&original.batch.owner,&session.id,Phase::Final).await?;
+        let workflow=legacy_data(&session,terminal.phase,terminal.native_finality,terminal.native_reason,terminal.apply_submitted,terminal.late_settled,
+            terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?)?;
+        require(original.settled(),Failure::OriginalCustodyUnknown)?;
+        original.batch.owner.inner.fixture_workflow.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.take();
+        {
+            let mut slot=original.batch.owner.inner.fixture_metadata.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            require(slot.is_none() && metadata_permit.owns(&original.batch.owner.inner),Failure::HostedGuardRefused)?;
+            *slot=Some(metadata_permit); // The same original metadata permit, never a workflow-derived value.
+        }
+        require(!original.batch.owner.inner.hosted_qualified(EditDomain::Configuration)
+            && !original.batch.owner.inner.hosted_qualified(EditDomain::GitHubWorkflows)
+            && original.batch.owner.inner.hosted_qualified(EditDomain::MetadataText),Failure::HostedGuardRefused)?;
+        Ok(vec![config,workflow])
+    }
+    async fn exercise_owner(original:&mut Original,input:&Admitted,case:Case) -> Check<()> {
+        require(original.settled() && !original.batch.owner.disabled() && original.queries.is_empty(),Failure::OriginalCustodyUnknown)?;
+        let selection=case.selection(); let root=seed(input,case)?; let project=original.register(&root)?;
+        let mut before=snapshot(&root)?;
+        if case==Case::AndroidCreate || input.mode==Mode::Zip { original.catalogue().await?; }
+        let passive_count=original.passive.count(); let edit_count=original.batch.originals.len();
+        let expected_error=match case { Case::Sensitive=>Some("metadata_text_sensitive"),Case::Nonutf8=>Some("metadata_text_encoding"),_=>None };
+        let observed=original.observe(&project,selection,expected_error).await?;
+        if let Some(code)=expected_error {
+            let expected=BridgeError::new(code,if case==Case::Sensitive { "A selected public text file may contain secret material; no contents were returned." }
+                else { "A selected public text file is not valid UTF-8." });
+            let error=observed.err().ok_or(Failure::UnexpectedOutcome)?;
+            require(error==expected && original.passive.count()==passive_count+1 && original.batch.originals.len()==edit_count
+                && original.batch.owner.metadata_text_status().is_ok_and(|s| s.active.is_none()) && snapshot(&root)?==before,Failure::UnexpectedOutcome)?;
+            return row(original,case.name(),selection,None,json!({"closedError":code,"lastFieldRefused":true,"noPartialTextOrDigest":true,
+                "noEditorAdmitted":true,"treeUnchanged":true,"sourceProbesSettled":probes_settled(),"passiveOriginalsSettled":original.passive.settled()}));
+        }
+        let passive=observed.map_err(|_| Failure::UnexpectedOutcome)?;
+        observed_roster(&before,selection,&passive)?;
+        original.validate(selection).await?;
+        require(snapshot(&root)?==before,Failure::PayloadMismatch)?;
+        let mut legacy=Vec::new();
+        if case==Case::Stale {
+            let path=selection.path(0);
+            rewrite_original(&root.join(&path),before.files.get(&path).ok_or(Failure::PayloadMismatch)?,OLD_ANDROID_TITLE.as_bytes())?;
+            before=snapshot(&root)?;
+            require(baseline(&before,selection)? != passive.baseline,Failure::PayloadMismatch)?;
+        } else if case==Case::Isolation {
+            legacy=legacy_isolation(original,input,&root,&project,selection,&passive.baseline).await?;
+            require(snapshot(&root)?==before,Failure::PayloadMismatch)?;
+        }
+        let registration=original.bridge.native_project(&project.id).map_err(|_| Failure::UnexpectedStatus)?;
+        let session=original.open(&project,selection)?;
+        require(session.registration.as_ref().is_some_and(|r| r.generation==registration.0 && r.root==registration.1)
+            && session.fixture_metadata.as_ref().is_some_and(|permit| original.batch.owner.inner.fixture_metadata.lock()
+                .is_ok_and(|current| current.as_ref().is_some_and(|current| Arc::ptr_eq(permit,current)))),Failure::UnexpectedStatus)?;
+        if case==Case::NoIgnore {
+            let terminal=observed_metadata(&original.batch.owner,&session.id,Phase::Final,false).await?;
+            settled_terminal(&original.batch.owner,&terminal)?;
+            let facts=original_facts(&session)?; let core=terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+            require((facts.request_frames,facts.response_frames)==(1,1) && session.fixture_schedule.sequence()==Some(0)
+                && terminal.checkout.is_none() && terminal.prepared.is_none() && !terminal.apply_submitted && terminal.native_reason==Reason::None
+                && core.effect==Effect::NotStarted && core.journal==Journal::NotCreated && core.resources==ResourceState::Settled
+                && core.reason==CoreReason::IgnoreConflict && snapshot(&root)?==before && !before.files.contains_key(".gitignore"),Failure::UnexpectedOutcome)?;
+            return row(original,case.name(),selection,Some(native_data(&session,&terminal,None)?),json!({"passiveObserveWithoutIgnore":true,
+                "ignoreStillAbsent":true,"noCheckoutOrPlan":true,"treeUnchanged":true,"sourceProbesSettled":probes_settled(),"passiveOriginalsSettled":original.passive.settled()}));
+        }
+        let editing=observed_metadata(&original.batch.owner,&session.id,Phase::Editing,false).await?;
+        let checkout=editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        require(checkout.baseline==baseline(&before,selection)? && checkout.metadata_root==selection.metadata_root
+            && editing.platform==selection.platform && editing.locale==selection.locale && editing.project_id==project.id,Failure::UnexpectedOutcome)?;
+        if case==Case::Isolation { opposite_commands(original,&project,selection,&session,&checkout.revision,&passive.baseline,EditDomain::MetadataText)?; }
+        if case==Case::Stale {
+            let reply=original.bridge.prepare_metadata_text_edit(&original.document,"main",prepare_args(&session.id,&checkout.revision,&passive.baseline,selection))
+                .map_err(|_| Failure::NativeCommandRejected)?;
+            require(select(&reply,&session.id)?.phase==Phase::Preparing,Failure::UnexpectedStatus)?;
+            let terminal=observed_metadata(&original.batch.owner,&session.id,Phase::Final,false).await?;
+            settled_terminal(&original.batch.owner,&terminal)?;
+            let facts=original_facts(&session)?; let core=terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+            require((facts.request_frames,facts.response_frames)==(2,2) && session.fixture_schedule.sequence()==Some(1)
+                && terminal.prepared.is_none() && !terminal.apply_submitted && terminal.native_reason==Reason::None
+                && terminal.checkout.as_ref().is_some_and(|saved| saved.revision==checkout.revision && saved.baseline==checkout.baseline)
+                && core.effect==Effect::NotStarted && core.journal==Journal::NotCreated && core.resources==ResourceState::Settled
+                && core.reason==CoreReason::StaleRevision && snapshot(&root)?==before,Failure::UnexpectedOutcome)?;
+            return row(original,case.name(),selection,Some(native_data(&session,&terminal,None)?),json!({"olderPassiveBaselineRejected":true,
+                "newerNativeCheckoutRetained":true,"noPlanOrRebase":true,"externalChangeRetained":true,"treeUnchanged":true,
+                "sourceProbesSettled":probes_settled(),"passiveOriginalsSettled":original.passive.settled()}));
+        }
+        require(checkout.baseline==passive.baseline,Failure::UnexpectedOutcome)?;
+        let plan=prepare(original,&session.id,checkout,&passive.baseline,selection).await?;
+        let directories=verify_plan(&before,selection,checkout,&plan)?;
+        require(snapshot(&root)?==before,Failure::PayloadMismatch)?;
+        if matches!(case,Case::Registration|Case::DocumentLost) {
+            if case==Case::Registration {
+                let extra=input.inputs.root.join("registration-apply-extra"); mkdir(&extra)?; original.register(&extra)?;
+                require(original.bridge.apply_metadata_text_edit(&original.document,"main",&session.id,&plan.plan_token).is_err(),Failure::UnexpectedStatus)?;
+            } else {
+                original.document.lost();
+                let replacement=DocumentBinding::new(original.bridge.clone());
+                require(!original.document.navigation(true) && !replacement.navigation(true)
+                    && original.bridge.apply_metadata_text_edit(&original.document,"main",&session.id,&plan.plan_token).is_err()
+                    && original.bridge.open_metadata_text_edit(&original.document,"main",selection.open(&project)).is_err(),Failure::UnexpectedStatus)?;
+            }
+            let terminal=observed_metadata(&original.batch.owner,&session.id,Phase::Final,false).await?;
+            settled_terminal(&original.batch.owner,&terminal)?; correlated(&terminal,&editing,&plan)?;
+            let facts=original_facts(&session)?; let core=terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+            require((facts.request_frames,facts.response_frames)==(2,3) && session.fixture_schedule.sequence()==Some(1)
+                && !terminal.apply_submitted && terminal.native_reason==if case==Case::Registration { Reason::CallerLost } else { Reason::WindowLost }
+                && core.effect==Effect::NotStarted && core.journal==Journal::NotCreated && core.resources==ResourceState::Settled
+                && matches!(core.reason,CoreReason::Cancelled|CoreReason::None) && snapshot(&root)?==before,Failure::UnexpectedOutcome)?;
+            return row(original,case.name(),selection,Some(native_data(&session,&terminal,None)?),json!({"preparedCorrelationRetained":true,
+                "treeUnchanged":true,"staleCommandNotSent":true,"newRegistrationPublishedUnderDocumentLock":case==Case::Registration,
+                "controlledOriginalDocumentLoss":case==Case::DocumentLost,"replacementDocumentRefused":case==Case::DocumentLost,
+                "guiCallbacksNotClaimed":true,"sourceProbesSettled":probes_settled(),"passiveOriginalsSettled":original.passive.settled()}));
+        }
+        let mut gate=if case==Case::HeldTerminal {
+            let guard=GateGuard::new(&original.batch.owner,session.fixture_schedule.clone()); session.fixture_schedule.terminal.hold()?; Some(guard)
+        } else { None };
+        let reply=original.bridge.apply_metadata_text_edit(&original.document,"main",&session.id,&plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+        require(select(&reply,&session.id)?.apply_submitted,Failure::UnexpectedStatus)?;
+        if case==Case::AndroidCreate {
+            let duplicate=original.bridge.apply_metadata_text_edit(&original.document,"main",&session.id,&plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+            require(select(&duplicate,&session.id)?.apply_submitted && original.batch.originals.len()==edit_count+1,Failure::UnexpectedStatus)?;
+        }
+        if let Some(guard)=gate.as_mut() {
+            let (active,cleanup)=original_clock(&original.batch,&session)?; let endpoint=active.ok_or(Failure::UnexpectedStatus)?;
+            require(cleanup.is_none(),Failure::UnexpectedStatus)?;
+            until(OBSERVATION,|| {
+                require(!session.fixture_schedule.failed.load(Ordering::SeqCst),Failure::OriginalCustodyUnknown)?;
+                Ok(session.fixture_schedule.terminal.entered.load(Ordering::SeqCst))
+            }).await?;
+            let held=session.fixture_schedule.held_terminal.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.clone().ok_or(Failure::UnexpectedStatus)?;
+            require(held.0==2 && held.1.effect==Effect::Committed && held.1.journal==Journal::Clean && held.1.resources==ResourceState::Settled
+                && held.1.reason==CoreReason::None && session.fixture_schedule.sequence().is_none()
+                && Instant::now()<endpoint && !*session.stop.borrow(),Failure::UnexpectedOutcome)?;
+            let closing=original.batch.owner.close_metadata_text("main",&session.id).map_err(|_| Failure::NativeCommandRejected)?;
+            require(select(&closing,&session.id)?.native_reason==Reason::Cancelled && *session.stop.borrow(),Failure::UnexpectedStatus)?;
+            guard.release(); // Real Close precedes release of that same reader.
+        }
+        let terminal=observed_metadata(&original.batch.owner,&session.id,Phase::Final,false).await?;
+        settled_terminal(&original.batch.owner,&terminal)?; correlated(&terminal,&editing,&plan)?;
+        let facts=original_facts(&session)?; let core=terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        let preserved=plan.view.files.iter().filter(|f| f.action==metadata_wire::Action::Preserve).count();
+        let created=plan.view.files.iter().filter(|f| f.action==metadata_wire::Action::Create).count();
+        let replaced=plan.view.files.len()-created-preserved;
+        let noop=matches!(case,Case::AndroidNoop|Case::IosNoop);
+        require((facts.request_frames,facts.response_frames)==(3,3) && session.fixture_schedule.sequence()==Some(2)
+            && terminal.apply_submitted && terminal.native_reason==if case==Case::HeldTerminal { Reason::Cancelled } else { Reason::None }
+            && core.effect==if noop { Effect::Unchanged } else { Effect::Committed }
+            && core.journal==if noop { Journal::NotCreated } else { Journal::Clean }
+            && core.resources==ResourceState::Settled && core.reason==CoreReason::None
+            && session.fixture_schedule.released(),Failure::UnexpectedOutcome)?;
+        installed(&root,&before,selection,&directories)?;
+        if noop { require(snapshot(&root)?==before && preserved==selection.names().len(),Failure::PayloadMismatch)?; }
+        if case==Case::AndroidReplace { require((created,replaced,preserved)==(0,1,2),Failure::UnexpectedOutcome)?; }
+        if case==Case::IosMixed { require((created,replaced,preserved)==(1,2,2),Failure::UnexpectedOutcome)?; }
+        let config=original.batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+        let workflow=original.batch.owner.workflow_status().map_err(|_| Failure::UnexpectedStatus)?;
+        let metadata=original.batch.owner.metadata_text_status().map_err(|_| Failure::UnexpectedStatus)?;
+        require(config.last_terminal.is_none() && workflow.last_terminal.is_none()
+            && metadata.last_terminal.as_ref().is_some_and(|p| p.session_id==session.id)
+            && config.status_revision==workflow.status_revision && workflow.status_revision==metadata.status_revision,Failure::UnexpectedStatus)?;
+        let observations=json!({"created":created,"replaced":replaced,"preserved":preserved,"directoriesCreated":directories,
+            "completePreparedBytes":true,"passiveBaselineMatchedCheckout":true,"preparedCorrelationRetained":true,
+            "capturePrepareRawFactsUnchanged":true,"unselectedAndDependenciesPreserved":true,"existingModesPreserved":true,
+            "createModesMasked":true,"directoryModesExact":true,"rawNoopUnchanged":noop,"duplicateApplyObservation":case==Case::AndroidCreate,
+            "catalogueResourceMatched":case==Case::AndroidCreate||input.mode==Mode::Zip,"sharedStatusRevision":true,"sharedLastTerminalDomainCorrect":true,
+            "threeDomainIsolation":case==Case::Isolation,"domains":legacy,"heldBeforeAcceptance":case==Case::HeldTerminal,
+            "realStopBeforeRelease":case==Case::HeldTerminal,"cancelledNotSaved":case==Case::HeldTerminal,
+            "sourceProbesSettled":probes_settled(),"passiveOriginalsSettled":original.passive.settled()});
+        row(original,case.name(),selection,Some(native_data(&session,&terminal,None)?),observations)
+    }
+
+    fn eof_seed(input:&Admitted,case:EofCase) -> Check<PathBuf> {
+        let selection=eof_selection(case); let root=input.inputs.root.join(case.name());
+        seed_common(&root,selection,true)?;
+        if case!=EofCase::MetadataConflict {
+            seed_parent(&root,&selection.parent())?;
+            for (index,text) in selection.texts().iter().enumerate() {
+                let bytes=if index==0 { if selection.platform==Platform::Android { OLD_ANDROID_TITLE.as_bytes() } else { OLD_IOS_DESCRIPTION.as_bytes() } }
+                    else { text.as_bytes() };
+                write_new(&root.join(selection.path(index)),bytes,if index==0 { 0o640 } else { 0o600 })?;
+            }
+            seed_siblings(&root,selection)?;
+        }
+        Ok(root)
+    }
+    fn introduce_sibling(root:&Path,selection:Selection) -> Check<RawFile> {
+        FIXTURE_FILES.admit()?;
+        let path=root.join(format!("{}/unrelated.txt",selection.parent()));
+        let mut file=fs::OpenOptions::new().create_new(true).write(true).mode(0o600).custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&path).map_err(|_| Failure::FixtureIo)?;
+        FIXTURE_FILES.acquired(); let wrote=file.write_all(UNRELATED); let stat=file.metadata();
+        FIXTURE_FILES.close_original(file)?;
+        require(wrote.is_ok(),Failure::FixtureIo)?; let stat=stat.map_err(|_| Failure::FixtureIo)?;
+        require(stat.is_file() && stat.len()==UNRELATED.len() as u64 && stat.mode()&0o7777==0o600,Failure::FixtureIo)?;
+        // No extra reader while the original transaction is held. These are
+        // the creating descriptor's own bytes and actual metadata return.
+        Ok(RawFile { original:OriginalFile { identity:Identity::of(&stat),bytes:UNRELATED.to_vec() },stamp:Stamp::of(&stat) })
+    }
+    async fn exercise_eof(original:&mut Original,input:&Admitted,case:EofCase) -> Check<()> {
+        require(input.eof && input.mode==Mode::Source && EOF_CASES.contains(&case) && original.queries.is_empty()
+            && original.settled() && !original.batch.owner.disabled(),Failure::OriginalCustodyUnknown)?;
+        input.inputs.same_root()?;
+        let selection=eof_selection(case); let root=eof_seed(input,case)?; let before=snapshot(&root)?;
+        let project=original.register(&root)?;
+        let passive=original.observe(&project,selection,None).await?.map_err(|_| Failure::UnexpectedOutcome)?;
+        observed_roster(&before,selection,&passive)?; original.validate(selection).await?;
+        let schedule=Arc::new(Schedule { eof:Some(case),..Schedule::default() });
+        {
+            let mut next=original.batch.owner.inner.fixture_next_schedule.lock().map_err(|_| Failure::OriginalCustodyUnknown)?;
+            require(next.is_none(),Failure::UnexpectedStatus)?; *next=Some(schedule.clone());
+        }
+        let mut guard=GateGuard::new(&original.batch.owner,schedule.clone());
+        let session=original.open(&project,selection)?;
+        require(Arc::ptr_eq(&session.fixture_schedule,&schedule),Failure::OriginalCustodyUnknown)?;
+        let editing=observed_metadata(&original.batch.owner,&session.id,Phase::Editing,false).await?;
+        let checkout=editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        let plan=prepare(original,&session.id,checkout,&passive.baseline,selection).await?;
+        let directories=verify_plan(&before,selection,checkout,&plan)?;
+        let unknown=case==EofCase::MetadataConflict; let committed=case==EofCase::MetadataPostcommit;
+        require(snapshot(&root)?==before && if unknown { directories==ancestors(&selection.parent()) }
+            else { directories.is_empty() && plan.view.files.iter().filter(|f| f.action==metadata_wire::Action::Replace).count()==1 },Failure::PayloadMismatch)?;
+        let reply=original.bridge.apply_metadata_text_edit(&original.document,"main",&session.id,&plan.plan_token).map_err(|_| Failure::NativeCommandRejected)?;
+        require(select(&reply,&session.id)?.apply_submitted,Failure::UnexpectedStatus)?;
+        let (active,cleanup)=original_clock(&original.batch,&session)?; let endpoint=active.ok_or(Failure::UnexpectedStatus)?;
+        require(cleanup.is_none(),Failure::UnexpectedStatus)?;
+        until(OBSERVATION,|| {
+            require(!original.batch.owner.disabled() && !schedule.failed.load(Ordering::SeqCst),Failure::OriginalCustodyUnknown)?;
+            Ok(schedule.eof_control.lock().map_err(|_| Failure::OriginalCustodyUnknown)?.boundary_only(case))
+        }).await?;
+        let introduced=if unknown { Some(introduce_sibling(&root,selection)?) } else { None };
+        require(Instant::now()<endpoint && !*session.stop.borrow(),Failure::UnexpectedStatus)?;
+        let closing=original.batch.owner.close_metadata_text("main",&session.id).map_err(|_| Failure::NativeCommandRejected)?;
+        let closing=select(&closing,&session.id)?;
+        require(closing.phase==Phase::Finalizing && closing.native_reason==Reason::Cancelled && closing.apply_submitted,Failure::UnexpectedStatus)?;
+        guard.release(); // Only the original owner closes the original stdin.
+        let terminal=observed_metadata(&original.batch.owner,&session.id,if unknown { Phase::Unknown } else { Phase::Final },unknown).await?;
+        let facts=original_eof_facts(&session,case)?;
+        correlated(&terminal,&editing,&plan)?;
+        let core=terminal.core_outcome.as_ref().ok_or(Failure::UnexpectedOutcome)?;
+        require(original.settled() && (facts.request_frames,facts.response_frames)==(3,3) && schedule.sequence()==Some(2)
+            && terminal.apply_submitted && terminal.native_reason==Reason::Cancelled
+            && core.effect==if unknown { Effect::Unknown } else if committed { Effect::Committed } else { Effect::RolledBack }
+            && core.journal==if unknown { Journal::RecoveryRequired } else { Journal::Clean }
+            && core.resources==ResourceState::Settled && core.reason==CoreReason::Cancelled
+            && schedule.eof_control.lock().is_ok_and(|control| control.complete(case) && control.records(case)==2)
+            && schedule.released(),Failure::UnexpectedOutcome)?;
+        if unknown {
+            // Effect Unknown remains disabled and is NOT ordinary Final. The
+            // original resource proof above admits only these fixed DATA reads
+            // and the existing receipt return, never another native operation.
+            require(terminal.phase==Phase::Unknown && terminal.native_finality==NativeFinality::Unknown && terminal.late_settled
+                && original.batch.owner.disabled() && original.batch.owner.inner.lock().blocked_projects.contains(&project.id),Failure::UnexpectedOutcome)?;
+            let config=original.batch.owner.status().map_err(|_| Failure::UnexpectedStatus)?;
+            let workflow=original.batch.owner.workflow_status().map_err(|_| Failure::UnexpectedStatus)?;
+            let metadata=original.batch.owner.metadata_text_status().map_err(|_| Failure::UnexpectedStatus)?;
+            require(config.active.is_none() && workflow.active.is_none() && metadata.active.is_none()
+                && config.capability.reason==EditAvailability::CleanupUnknown && workflow.capability.reason==EditAvailability::CleanupUnknown
+                && metadata.capability.reason==EditAvailability::CleanupUnknown && config.status_revision==workflow.status_revision
+                && workflow.status_revision==metadata.status_revision,Failure::UnexpectedStatus)?;
+            let sibling=raw_file(&root.join(format!("{}/unrelated.txt",selection.parent())),1024)?;
+            require(introduced.as_ref()==Some(&sibling),Failure::PayloadMismatch)?;
+            for (index,text) in selection.texts().iter().enumerate() {
+                let installed=read_regular(&root.join(selection.path(index)),32*1024)?;
+                require(installed.bytes==text.as_bytes() && installed.identity.mode&0o7777==0o600,Failure::PayloadMismatch)?;
+            }
+            require(fs::symlink_metadata(root.join(".mobile-release-metadata-text")).is_ok_and(|stat| stat.is_dir()),Failure::PayloadMismatch)?;
+            for (path,file) in &before.files { require(raw_file(&root.join(path),1024*1024)?==*file,Failure::PayloadMismatch)?; }
+            for (path,identity) in &before.directories {
+                require(Identity::of(&fs::symlink_metadata(root.join(path)).map_err(|_| Failure::FixtureIo)?)==*identity,Failure::PayloadMismatch)?;
+            }
+        } else {
+            settled_terminal(&original.batch.owner,&terminal)?;
+            if committed { installed(&root,&before,selection,&directories)?; } else { restored(&root,&before)?; }
+        }
+        let observations=json!({"evidenceKind":"real-stdin-eof-at-controlled-transaction-boundary","bootstrapMode":"instrumented-genuine-engine",
+            "boundary":case.boundary(),"originalCheckpoint":case.checkpoint(),"closeBeforeActiveDeadline":true,"controlRecords":2,
+            "actualStdinEof":true,"eofReadCount":1,"nonemptyReadCount":0,"readErrorCount":0,"preparedCorrelationRetained":true,
+            "metadataProfileAndControlProof":true,"committedPublication":committed,"rolledBackPublication":!committed&&!unknown,
+            "terminalDurable":!unknown,"fixedRecovery":true,"journalClean":!unknown,"journalAbsent":!unknown,
+            "originalTreeRestored":!committed&&!unknown,"selectedPayloadsRemain":committed||unknown,"unselectedAndDependenciesPreserved":true,
+            "unrelatedIntroducedBeforeEof":unknown,"introducedOriginalPreserved":unknown,"recoveryEvidenceRetained":unknown,
+            "sharedBlockedProject":unknown,"allThreeDomainsDisabled":unknown,"noFurtherAdmission":unknown,
+            "sourceProbesSettled":probes_settled(),"passiveOriginalsSettled":original.passive.settled(),"fixtureFilesSettled":FIXTURE_FILES.all_settled()});
+        row(original,case.name(),selection,Some(native_data(&session,&terminal,Some(case))?),observations)
+    }
+    fn receipt(input:&Admitted,cases:&[Value],passed:bool,resources:bool,disabled:bool,failure:Option<Failure>) -> Check<()> {
+        let expected=if input.eof { EOF_CASES.len() } else if input.mode==Mode::Source { SOURCE_CASES.len() } else { 1 };
+        require(!passed || resources && cases.len()==expected && failure.is_none() && disabled==input.eof,Failure::ReceiptIo)?;
+        receipt_document(&input.inputs,json!({"schemaVersion":1,"scope":if input.eof { TRANSACTION_SCOPE } else { OWNER_SCOPE },"domain":DOMAIN,
+            "status":if passed { "passed" } else { "failed" },"allOwnersSettled":resources&&!disabled,
+            "originalResourcesSettled":resources,"ownerDisabled":disabled,"retainedEffectUnknown":passed&&input.eof,
+            "failureCode":failure,"bindings":input.inputs.bindings,"cases":cases,"notVerified":NOT_VERIFIED}))
+    }
+    pub(super) async fn run(eof:bool) {
+        if BATCH_CLAIMED.swap(true,Ordering::SeqCst) {
+            if !FIXTURE_FILES.all_settled() || !probes_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted metadata batch already claimed");
+        }
+        let input=match Admitted::admit(eof) {
+            Ok(input)=>input,Err(code)=> {
+                if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+                panic!("hosted metadata admission refused: {code:?}");
+            },
+        };
+        if receipt(&input,&[],false,false,false,Some(Failure::NotCompleted)).is_err() {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted metadata partial receipt unavailable before native work");
+        }
+        let mut original=match Original::new(&input) {
+            Ok(original)=>original,Err(code)=> {
+                if !FIXTURE_FILES.all_settled() || !probes_settled() { retain_unknown_runtime().await; return; }
+                panic!("hosted metadata original document refused before native work: {code:?}");
+            },
+        };
+        let count=if eof { EOF_CASES.len() } else if input.mode==Mode::Source { SOURCE_CASES.len() } else { 1 };
+        for ordinal in 0..count {
+            let case_name=if eof { EOF_CASES[ordinal].name() } else if input.mode==Mode::Zip { Case::IosMixed.name() } else { SOURCE_CASES[ordinal].name() };
+            let result=if eof { exercise_eof(&mut original,&input,EOF_CASES[ordinal]).await }
+                else { exercise_owner(&mut original,&input,if input.mode==Mode::Zip { Case::IosMixed } else { SOURCE_CASES[ordinal] }).await };
+            let expected_unknown=eof && ordinal==EOF_CASES.len()-1 && result.is_ok();
+            if result.is_err() || !original.settled() || original.batch.owner.disabled()&&!expected_unknown { original.stop().await; }
+            if !original.settled() || original.batch.owner.disabled()&&!expected_unknown
+                || matches!(result,Err(Failure::OriginalCustodyUnknown|Failure::FixtureCustodyUnknown)) {
+                if FIXTURE_FILES.all_settled() && probes_settled() && original.passive.settled() {
+                    let _=receipt(&input,&original.batch.cases,false,false,original.batch.owner.disabled(),Some(Failure::OriginalCustodyUnknown));
+                }
+                retain_unknown_runtime().await; return;
+            }
+            if let Err(code)=result {
+                let _=receipt(&input,&original.batch.cases,false,true,original.batch.owner.disabled(),Some(code));
+                if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+                panic!("hosted metadata {case_name} failed after original resource settlement: {code:?}");
+            }
+            if !expected_unknown && receipt(&input,&original.batch.cases,false,false,false,Some(Failure::NotCompleted)).is_err() {
+                if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+                panic!("hosted metadata progress receipt failed after original settlement");
+            }
+        }
+        // No shutdown, fixture change, recovery or next native operation after
+        // EOF's expected effect Unknown. Retain those exact original books.
+        if !eof && (original.batch.owner.shutdown().await.is_err() || original.bridge.supervisor.shutdown().await.is_err())
+            || !original.settled() { retain_unknown_runtime().await; return; }
+        if receipt(&input,&original.batch.cases,true,true,original.batch.owner.disabled(),None).is_err() {
+            if !FIXTURE_FILES.all_settled() { retain_unknown_runtime().await; return; }
+            panic!("hosted metadata final receipt failed after original settlement");
+        }
+    }
+
+    #[test]
+    fn metadata_fixture_literal_and_scope_contract_is_closed() {
+        // Literal DATA/grammar only. These assertions start no owner or IO.
+        assert!(!qualified(EditDomain::MetadataText,false)); assert!(!qualified(EditDomain::MetadataText,true));
+        assert_eq!(SOURCE_CASES.len(),14); assert_eq!(SOURCE_CASES.last().map(|case| case.name()),Some("metadata-document-loss-before-apply"));
+        assert_eq!(Case::IosMixed.name(),"ios-observe-mixed-create-replace-preserve");
+        assert_eq!(hash(CONFIG_PUBLIC),"1b0b02e48d03cca36aaf36e5d8a8daf15f59924803bd4a5c0ec2e655828d3f94");
+        assert_eq!(hash(CONFIG_RELEASE),"caabad94b27c616e9deaf8570ded7edca9a41de86ca3e1982ab6e4a3f57073f1");
+        assert_eq!(hash(IGNORE),"e60087ecefac81e23666444e6aea9490b3fc42b2510f566cfd4aa5a36a35b7d4");
+        assert_eq!(hash_fields(Platform::Android,false),json!({
+            "title.txt":"17c61ad21566db1d3e8bc33087e2ea25eced56a923addd81a3a80305dea3ee94",
+            "short_description.txt":"233524e36ed836f2fc5b2754e73ff6f125f443d1bb57770942368c2fb90a0c63",
+            "full_description.txt":"52002e38814d0b0a78bc21cad572d5fa265ad3f9f72a672829982e889a4422fa"}));
+        assert_eq!(hash_fields(Platform::Ios,false),json!({
+            "description.txt":"417b4365404b44f1c83e478dbebb43864924c858fcca7346aac4db1b9f2c6ee5",
+            "keywords.txt":"d563110a53a8d4b4e320f549a957fcbc6d0f8ca14a02f77dfce9bdfaa2e0f866",
+            "privacy_url.txt":"5cb73fc576bb124e3930e583584ad86d8052264a12c273cf207874b3c82aa5ee",
+            "support_url.txt":"0cf21b6bc2716d68e9e9b41edda65445ab46e022fa94eeaa150c3c4045da1104",
+            "release_notes.txt":"4ec8e8f6389b0ece64c0f2ada003d134934dccba9c942ebbdfbadeb18c2ae5c9"}));
+        assert!(MetadataFixturePermit::bootstrap_case(false,Path::new("/inert/owner"),None));
+        assert!(!MetadataFixturePermit::bootstrap_case(true,Path::new("/inert/owner"),None));
+        for case in EOF_CASES {
+            let path=Path::new("/inert").join(case.name());
+            assert!(MetadataFixturePermit::bootstrap_case(true,&path,Some(case)));
+            assert!(!MetadataFixturePermit::bootstrap_case(false,&path,Some(case)));
+            assert!(!MetadataFixturePermit::bootstrap_case(true,Path::new("/inert/wrong"),Some(case)));
+            assert!(!WorkflowFixturePermit::bootstrap_case(true,&path,Some(case)));
+        }
+        for case in [EofCase::Precommit,EofCase::Postcommit,EofCase::WorkflowPrecommit,EofCase::WorkflowPostcommit,EofCase::WorkflowConflict] {
+            assert!(!MetadataFixturePermit::bootstrap_case(true,&Path::new("/inert").join(case.name()),Some(case)));
+        }
+        assert_eq!(EXTRA_SOURCES.len(),23);
+        let mut keys=BTreeSet::new();
+        for source in SOURCES.iter().chain(EXTRA_SOURCES) { assert!(keys.insert(source.id)); }
+        assert_eq!(keys.len(),49);
+    }
+}
+
+#[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable source-or-ZIP Linux metadata-owner process"]
+async fn hosted_metadata_text_edit_owner_original_resources() { metadata::run(false).await; }
+
+#[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "only the reviewed disposable Linux metadata transaction EOF process"]
+async fn hosted_metadata_text_transaction_eof_original_resources() { metadata::run(true).await; }
+
+#[test]
+fn metadata_eof_records_are_domain_distinct_and_exact() {
+    // Same original streaming observer, inert fixed bytes only.
+    let all=[EofCase::Precommit,EofCase::Postcommit,EofCase::WorkflowPrecommit,EofCase::WorkflowPostcommit,EofCase::WorkflowConflict,
+        EofCase::MetadataPrecommit,EofCase::MetadataPostcommit,EofCase::MetadataConflict];
+    for case in [EofCase::MetadataPrecommit,EofCase::MetadataPostcommit,EofCase::MetadataConflict] {
+        assert!(case.domain()==EditDomain::MetadataText);
+        let bytes=[case.marker(),case.summary()].concat();
+        for width in [1,2,7,case.marker().len(),bytes.len()] {
+            let mut control=EofControl::default();
+            for chunk in bytes.chunks(width) { assert!(control.observe(case,chunk)); }
+            assert!(control.complete(case)); assert_eq!(control.records(case),2); assert!(!control.observe(case,b"\n"));
+        }
+        for other in all {
+            if other==case { continue; }
+            let mut control=EofControl::default(); assert!(!control.observe(case,other.marker()));
+        }
+        for end in 0..bytes.len() {
+            let mut control=EofControl::default(); assert!(control.observe(case,&bytes[..end])); assert!(!control.complete(case));
+        }
+        for index in 0..bytes.len() {
+            let mut wrong=bytes.clone(); wrong[index]=b'!';
+            let mut control=EofControl::default(); assert!(!control.observe(case,&wrong));
         }
     }
 }

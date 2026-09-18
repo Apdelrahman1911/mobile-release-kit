@@ -3,8 +3,9 @@
 ## Status and scope
 
 The desktop application is **under development**. This branch introduces the
-passive foundation and gated configuration-save implementation, not a production release or a complete alternative to the
-CLI yet. A visible screen is not proof that its future operations are available.
+passive foundation and gated typed-edit implementations, not a production
+release or a complete alternative to the CLI yet. A visible screen is not proof
+that its future operations are available.
 Unimplemented operations are explicitly disabled.
 
 The intended application uses **Tauri 2 / Rust → application services → the
@@ -33,9 +34,11 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 | Configuration | Guided in-memory drafts with core-owned schema/policy validation and contextual help | Saving a file, checking path existence, approving an app identity or release readiness |
 | Configuration save implementation (disabled) | Separate native owner, exact two-file preview/apply contract, guided confirmation and original-outcome handling | Enabled saving, native window/process qualification, general project initialization or Windows file transactions |
 | GitHub setup proposal | Guided toolkit pin inputs, core-generated read-only workflow previews, contextual help and environment/credential-name checklist | GitHub login/contact, repository observation, compatibility verification, file writes, secret provisioning or workflow dispatch |
+| Public locale text | Saved-config-derived named observations, in-memory drafts, shared core validation and contextual help | Private review/TestFlight access, whole-metadata validation, translation, Store acceptance or writes |
+| Public locale text save implementation (disabled) | Separate metadata domain, complete one-locale file review and original one-use typed Save | Enabled saving, native transaction/process qualification, screenshot editing, locale deletion or packaged-runtime readiness |
 | Pure credential assessment (internal only) | Core policy over explicitly supplied scalars and finite file observations, with a private result-sanitizing adapter | Renderer secret entry, file acquisition/parser qualification, password verification, native custody, storage or assignment |
 | Environment | Static capability and missing-feature explanations | Running the full doctor, SDK version probes or native admission |
-| Credentials, metadata, releases, artifacts, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
+| Credentials, releases, artifacts, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
 
 Windows can use the portable passive services. Its original-parent static reader
 is staged in source but **disabled pending independent ABI/native W1–W6
@@ -84,6 +87,13 @@ methods are:
   — four core-generated workflow proposals and desired setup guidance, with no
   repository observation or Apply authority. `suppliedSnapshot` is explicitly
   null or caller-supplied digest/size assertions, never an observed file tree.
+- `metadata.text.observe`, `{root, platform, locale}` — all-or-error observation
+  of the complete public-text roster for one saved, enabled platform/locale;
+  native project selection supplies the root, never renderer paths. Available
+  only with the supported POSIX named reader, not the staged Windows reader.
+- `metadata.text.validate`, `{platform, fields}` — pure shared generic text
+  policy, Unicode character counts and fixed non-reflective issues; no IO,
+  observation, native revision or Save permission.
 - `credentials.assess`, `{schemaVersion, policyVersion, context, input}` — pure
   assessment of supplied scalars and closed mechanical observations, not a
   credential reader. This does not add a renderer command or enable the vault.
@@ -92,8 +102,11 @@ Exact additive preparation contracts, limits and the static-hint projection are
 documented in [desktop configuration preview](desktop-configuration-preview.md).
 The GitHub wire contract and its deliberately non-mutating scope are documented
 in [GitHub setup proposals](desktop-github-setup.md).
+The public-text scope, separate configuration prerequisite, raw-byte semantics
+and gated typed Save are documented in
+[guided metadata text](desktop-metadata-text.md).
 
-Configuration saving does **not** expand this passive method list. Its separate
+Typed saving does **not** expand this passive method list. Configuration's separate
 finite owner and core transaction contract are documented in
 [configuration editing](desktop-configuration-edit.md) and the
 [Rust bridge contract](../desktop/src-tauri/runtime-contract.md#separately-gated-finite-configuration-edit).
@@ -126,11 +139,13 @@ transport cleanup; the caller must check `ok`, not just the exit code. Startup,
 framing, unexpected service, write and close failures exit nonzero. Raw inputs
 and tracebacks are not diagnostics.
 
-Limits are 1 MiB request, 4 MiB response, 64 KiB diagnostics, 32 nesting levels and
+General limits are 1 MiB request, 4 MiB response, 64 KiB diagnostics, 32 nesting levels and
 20,000 JSON values. Duplicate keys, non-finite numbers, invalid Unicode, extra
 fields/frames, unknown methods, mismatched IDs and truncated input reject. Input
 and output protocol descriptors are private/non-inheritable; ordinary stdin is
 detached and OS stdout redirected before service imports.
+Metadata text narrows its passive result/native status to 2 MiB and a complete
+prepared view to 768 KiB; oversize data is refused rather than truncated.
 
 Rust owns each original child while concurrently writing input and draining both
 outputs. Queries have a startup-inclusive 10-second endpoint and at most one

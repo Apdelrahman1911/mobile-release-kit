@@ -13,7 +13,8 @@ pub const STDERR_LIMIT: usize = 64 * 1024;
 pub const STATUS_LIMIT: usize = 2 * 1024 * 1024;
 const CONFIG_LIMIT: usize = 512 * 1024;
 const IGNORE_LIMIT: u32 = 1024 * 1024;
-const IGNORE_LINES: [&str; 4] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/", ".mobile-release-init-cleanup/"];
+const IGNORE_LINES: [&str; 7] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/", ".mobile-release-init-cleanup/",
+    ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/", ".mobile-release-metadata-text-cleanup/"];
 
 pub fn token(value: &str) -> bool {
     value.len() == 32 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
@@ -74,7 +75,7 @@ pub enum NativeFinality { Pending, Settled, Unknown }
 pub enum EditAvailability { Available, UnsupportedPlatform, RuntimeUnqualified, CleanupUnknown, Shutdown, OtherEditActive }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EditDomain { Configuration, GitHubWorkflows }
+pub(crate) enum EditDomain { Configuration, GitHubWorkflows, MetadataText }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,12 +89,14 @@ pub struct Prepared { pub revision: String, pub plan_token: String, pub draft_re
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditProjection {
-    // Internal domain/custody are not configuration DTO fields. Workflow data
-    // is projected only through its separately typed, domain-tagged surface.
+    // Internal domain/custody are not configuration DTO fields. Other domains
+    // are projected only through their separately typed, domain-tagged surfaces.
     #[serde(skip)]
     pub(crate) domain: EditDomain,
     #[serde(skip)]
     pub(crate) workflow: Option<crate::github_workflow_edit_protocol::Details>,
+    #[serde(skip)]
+    pub(crate) metadata_text: Option<crate::metadata_text_edit_protocol::Details>,
     pub project_id: String, pub session_id: String, pub owner_generation: String,
     pub phase: Phase, pub review_remaining_ms: u32, pub checkout: Option<Checkout>,
     pub prepared: Option<Prepared>, pub apply_submitted: bool, pub core_outcome: Option<CoreEditOutcome>,
@@ -104,23 +107,37 @@ impl EditProjection {
         match self.domain {
             EditDomain::Configuration => self.checkout.as_ref().map(|c| c.revision.as_str()),
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
+            EditDomain::MetadataText => self.metadata_text.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
         }
     }
     pub(crate) fn plan_token(&self) -> Option<&str> {
         match self.domain {
             EditDomain::Configuration => self.prepared.as_ref().map(|p| p.plan_token.as_str()),
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
+            EditDomain::MetadataText => self.metadata_text.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
         }
     }
     pub(crate) fn workflow_projection(&self) -> Result<crate::github_workflow_edit_protocol::Projection, BridgeError> {
         use crate::github_workflow_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::GitHubWorkflows { return Err(BridgeError::protocol()); }
+        if self.domain != EditDomain::GitHubWorkflows || self.metadata_text.is_some() || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
         let detail = self.workflow.as_ref().ok_or_else(BridgeError::protocol)?;
         Ok(Projection { domain: DOMAIN, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
             owner_generation: self.owner_generation.clone(), phase: self.phase, review_remaining_ms: self.review_remaining_ms,
             checkout: detail.checkout.clone(), prepared: detail.prepared.clone(), conflict: detail.conflict.clone(),
             apply_submitted: self.apply_submitted, core_outcome: self.core_outcome.clone(), native_reason: self.native_reason,
             native_finality: self.native_finality, late_settled: self.late_settled })
+    }
+    pub(crate) fn metadata_text_projection(&self) -> Result<crate::metadata_text_edit_protocol::Projection, BridgeError> {
+        use crate::metadata_text_edit_protocol::{DOMAIN, Projection};
+        if self.domain != EditDomain::MetadataText || self.workflow.is_some() || self.checkout.is_some() || self.prepared.is_some() {
+            return Err(BridgeError::protocol());
+        }
+        let detail = self.metadata_text.as_ref().ok_or_else(BridgeError::protocol)?;
+        Ok(Projection { domain: DOMAIN, platform: detail.platform, locale: detail.locale.clone(),
+            project_id: self.project_id.clone(), session_id: self.session_id.clone(), owner_generation: self.owner_generation.clone(),
+            phase: self.phase, review_remaining_ms: self.review_remaining_ms, checkout: detail.checkout.clone(),
+            prepared: detail.prepared.clone(), apply_submitted: self.apply_submitted, core_outcome: self.core_outcome.clone(),
+            native_reason: self.native_reason, native_finality: self.native_finality, late_settled: self.late_settled })
     }
 }
 #[derive(Clone, Serialize)]
@@ -200,7 +217,7 @@ fn preview(value: &Value) -> bool {
 
 impl PreparedConfigView {
     fn valid(&self) -> bool {
-        if self.schema_version != 1 || self.files.len() != 2 || self.ignore_additions.len() > 4
+        if self.schema_version != 1 || self.files.len() != 2 || self.ignore_additions.len() > IGNORE_LINES.len()
             || bounded(self, 128 * 1024).is_err() || !preview(&self.preview) { return false; }
         for (file, path, limit, replacement) in [(&self.files[0], "release/mobile-release.json", CONFIG_LIMIT as u32, "replace"), (&self.files[1], ".gitignore", IGNORE_LIMIT, "append")] {
             if file.path != path || file.after_bytes > limit || file.before_bytes.is_some_and(|n| n > limit) { return false; }
@@ -217,7 +234,7 @@ impl PreparedConfigView {
         let ordered: Vec<&str> = IGNORE_LINES.into_iter().filter(|line| self.ignore_additions.iter().any(|s| s == line)).collect();
         self.ignore_additions.iter().map(String::as_str).eq(ordered)
             && (ignore.action == "preserve") == self.ignore_additions.is_empty()
-            && (ignore.action != "create" || self.ignore_additions.len() == 4)
+            && (ignore.action != "create" || self.ignore_additions.len() == IGNORE_LINES.len())
             && self.rewrites_config_formatting == (config.action == "replace")
             && (!self.create_release_directory || config.action == "create")
             && self.preview["comparison"]["baseProvided"] == (config.action != "create")
@@ -242,12 +259,16 @@ pub enum ChildFrame {
     WorkflowOpened(crate::github_workflow_edit_protocol::Opened),
     WorkflowPrepared(crate::github_workflow_edit_protocol::PreparedReply),
     WorkflowTerminal(u32, crate::github_workflow_edit_protocol::TerminalReply),
+    MetadataTextOpened(crate::metadata_text_edit_protocol::Opened),
+    MetadataTextPrepared(crate::metadata_text_edit_protocol::PreparedReply),
+    MetadataTextTerminal(u32, crate::metadata_text_edit_protocol::TerminalReply),
 }
 impl ChildFrame {
     pub(crate) fn domain(&self) -> EditDomain {
         match self {
             Self::Opened(_) | Self::Prepared(_) | Self::Terminal(..) => EditDomain::Configuration,
             Self::WorkflowOpened(_) | Self::WorkflowPrepared(_) | Self::WorkflowTerminal(..) => EditDomain::GitHubWorkflows,
+            Self::MetadataTextOpened(_) | Self::MetadataTextPrepared(_) | Self::MetadataTextTerminal(..) => EditDomain::MetadataText,
         }
     }
 }
@@ -306,5 +327,35 @@ pub fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
             Ok(ChildFrame::Terminal(seq, result))
         }
         _ => Err(BridgeError::protocol()),
+    }
+}
+
+#[cfg(test)]
+mod ignore_vocabulary_tests {
+    use super::*;
+    fn proposed() -> PreparedConfigView {
+        let assurance = json!({"basis":"schema-policy","projectCodeExecuted":false,"toolsProbed":false,"credentialsRead":false,
+            "gitObserved":false,"storeContacted":false,"writesPerformed":false,"releaseReadiness":"unknown"});
+        PreparedConfigView { schema_version:1,
+            files:vec![FileView { path:"release/mobile-release.json".into(),action:"create".into(),before_bytes:None,after_bytes:2 },
+                FileView { path:".gitignore".into(),action:"create".into(),before_bytes:None,after_bytes:256 }],
+            create_release_directory:true,rewrites_config_formatting:false,
+            ignore_additions:IGNORE_LINES.iter().map(|line| (*line).to_owned()).collect(),
+            preview:json!({"schemaVersion":1,"validation":{"valid":true,"state":"format-valid","issues":[],"requirements":[],"assurance":assurance.clone()},
+                "comparison":{"baseProvided":false,"kind":"proposed-create","state":"complete","semanticallyChanged":true,"counts":{"added":0,"changed":0,"removed":0},"changes":[],"unreviewedCount":0},
+                "fields":[],"assurance":assurance}) }
+    }
+    #[test]
+    fn metadata_ignore_prerequisites_extend_only_the_fixed_seven_rule_vocabulary() {
+        let original = proposed(); assert!(original.valid());
+        assert_eq!(&IGNORE_LINES[4..],&[".mobile-release-metadata-text-prepare/",".mobile-release-metadata-text/",".mobile-release-metadata-text-cleanup/"]);
+        for rule in ["metadata/", "!release/private/", ".mobile-release-other/"] {
+            let mut bad = original.clone(); bad.ignore_additions[4] = rule.into(); assert!(!bad.valid());
+        }
+        let mut bad = original.clone(); bad.ignore_additions.truncate(4); assert!(!bad.valid());
+        let mut bad = original.clone(); bad.ignore_additions.swap(4,5); assert!(!bad.valid());
+        let mut bad = original.clone(); bad.files.push(FileView { path:"release/metadata/android/en-US/title.txt".into(),action:"create".into(),before_bytes:None,after_bytes:1 });
+        assert!(!bad.valid()); // Configuration still has exactly two destinations.
+        let mut bad = original; bad.files[1].path = "release/metadata/android/en-US/title.txt".into(); assert!(!bad.valid());
     }
 }

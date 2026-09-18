@@ -591,6 +591,25 @@ impl DocumentBinding {
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::WorkflowRegistration) -> Result<T, BridgeError>,
     ) -> Result<T, BridgeError> {
+        self.registered_edit_admit(crate::edit_protocol::EditDomain::GitHubWorkflows, project_id, enqueue)
+    }
+    pub(crate) fn metadata_text_edit_admit<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit(crate::edit_protocol::EditDomain::MetadataText, project_id, enqueue)
+    }
+    // Only the two explicitly registered-root domains use this same mutex and
+    // proof. A proof never qualifies a writer or changes configuration custody.
+    fn registered_edit_admit<T>(
+        &self, domain: crate::edit_protocol::EditDomain,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        if !matches!(domain, crate::edit_protocol::EditDomain::GitHubWorkflows | crate::edit_protocol::EditDomain::MetadataText) {
+            return Err(BridgeError::invalid());
+        }
         let mut state = self.lock();
         self.expire(&mut state, Instant::now());
         if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
@@ -619,21 +638,35 @@ impl DocumentBinding {
             Reason::Unqualified => BridgeError::unavailable("The selected project has no qualified native root identity."),
             _ => BridgeError::invalid(),
         })?;
-        enqueue(&self.inner.bridge, crate::edit_owner::WorkflowRegistration { generation, root })
+        enqueue(&self.inner.bridge, crate::edit_owner::RegisteredEditRoot { generation, root })
     }
     /// Headless controlled-integration entry only: consume a real, already
     /// settled SourceBook probe under this SAME document admission mutex. It
     /// does not enable asset services or manufacture project/root identities.
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn workflow_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32) -> Result<Project, AssetError> {
+        self.registered_fixture_publish(proof, generation, crate::edit_protocol::EditDomain::GitHubWorkflows)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn metadata_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32) -> Result<Project, AssetError> {
+        self.registered_fixture_publish(proof, generation, crate::edit_protocol::EditDomain::MetadataText)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn registered_fixture_publish(&self, proof: crate::asset_source::ProjectProbe, generation: u32,
+        domain: crate::edit_protocol::EditDomain) -> Result<Project, AssetError> {
         let mut state = self.lock();
         self.expire(&mut state, Instant::now());
         if !state.lifetime.original_bound() || state.lost_observed { return Err(AssetError::new(Reason::DocumentLost)); }
         if state.unknown || state.exhausted { return Err(AssetError::new(Reason::CleanupUnknown)); }
+        let permitted = match domain {
+            crate::edit_protocol::EditDomain::GitHubWorkflows => self.inner.bridge.edits.workflow_fixture_registration_permitted(proof.path()),
+            crate::edit_protocol::EditDomain::MetadataText => self.inner.bridge.edits.metadata_fixture_registration_permitted(proof.path()),
+            crate::edit_protocol::EditDomain::Configuration => false,
+        };
         if state.stopping || state.quit_pending || state.retiring || state.lock_pending || state.slot.is_some()
             || state.session || state.context.is_some() || !state.records.is_empty() || !state.assignments.is_empty()
             || self.inner.bridge.supervisor.stopping() || self.inner.bridge.supervisor.disabled()
-            || !self.inner.bridge.edits.workflow_fixture_registration_permitted(proof.path()) {
+            || !permitted {
             return Err(AssetError::new(Reason::Unqualified));
         }
         let published = self.registry_result(&mut state, self.inner.bridge.publish_checked_project(proof, generation))?;

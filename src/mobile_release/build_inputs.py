@@ -28,7 +28,7 @@ from .checked_files import (
 )
 from ._profile_callers import fatal_cancellation_error
 from .errors import CredentialError, ValidationError
-from .init_transaction import STATE_NAMES as INIT_STATES, _rename_function
+from .init_transaction import ALL_STATE_NAMES as INIT_STATES, _rename_function
 from .owned_process import ProcessCleanupError, ProcessError, preserve_lifetime_error
 
 if TYPE_CHECKING:

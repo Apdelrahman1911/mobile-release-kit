@@ -14,6 +14,8 @@ import type { GitHubConnectionObservationPort, GitHubConnectionTokenHandoff } fr
 import { workflowOwnerReason, workflowRetainsDraft } from './githubWorkflowEdit.ts';
 import { GitHubWorkflowEditController } from './githubWorkflowEditController.ts';
 import { AssetSessionController } from './assetSessionController.ts';
+import { metadataProjectDirty } from './metadataText.ts';
+import { MetadataTextEditController, metadataOwnerReason, metadataRetainsDraft } from './metadataTextEditController.ts';
 import { githubSetupError } from './githubSetupProtocol.ts';
 import { suggestionHints } from './preparation.ts';
 import type { ApiError, AppInfo, Catalog, DesktopApi, HelpContent, JsonValue, Page } from './types.ts';
@@ -22,6 +24,7 @@ import { DraftEditor } from './components/DraftEditor.tsx';
 import { ConfigSave } from './components/ConfigSave.tsx';
 import { GitHubWorkflowApply } from './components/GitHubWorkflowApply.tsx';
 import { GitHubConnection } from './components/GitHubConnection.tsx';
+import { MetadataTextEditor, MetadataTextSave } from './components/MetadataTextEditor.tsx';
 import { Icon } from './components/Icon.tsx';
 import type { IconName } from './components/Icon.tsx';
 import { Dashboard } from './pages/Dashboard.tsx';
@@ -73,6 +76,7 @@ export function App() {
   const connectionHelpGeneration = useRef<object>({});
   const workflowControllerRef = useRef<GitHubWorkflowEditController | null>(null);
   const assetControllerRef = useRef<AssetSessionController | null>(null);
+  const metadataControllerRef = useRef<MetadataTextEditController | null>(null);
   const syncConnectionContext = useCallback(() => {
     const selected = workspaceRef.current.selectedId;
     const project = selected && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] : null;
@@ -105,6 +109,7 @@ export function App() {
       applicationRepositoryRef.current = ''; setApplicationRepository('');
     }
     workspaceRef.current = next;
+    metadataControllerRef.current?.syncProject();
     assetControllerRef.current?.syncProject();
     setWorkspace(next);
     githubControllerRef.current?.syncProject();
@@ -114,7 +119,8 @@ export function App() {
   }, [syncConnectionContext]);
   const [configEdit] = useState(() => new ConfigEditController({
     project: (projectId) => Object.hasOwn(workspaceRef.current.projects, projectId) ? workspaceRef.current.projects[projectId] ?? null : null,
-    otherEditReason: (projectId) => workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null,
+    otherEditReason: (projectId) => (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
+      (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null),
     onConfirmedSave: (receipt) => dispatch({ type: 'config-save-final', projectId: receipt.binding.projectId, receipt }),
     onRecoveryRequired: (attention) => dispatch({ type: 'config-save-recovery', projectId: attention.projectId, attention }),
   }));
@@ -136,10 +142,20 @@ export function App() {
       return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
     },
     setup: githubSetup.getSnapshot,
-    otherEditReason: (projectId) => configurationOwnerReason(configEdit.getSnapshot(), projectId),
+    otherEditReason: (projectId) => configurationOwnerReason(configEdit.getSnapshot(), projectId) ??
+      (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null),
   }));
   workflowControllerRef.current = workflowEdit;
   const workflowState = useSyncExternalStore(workflowEdit.subscribe, workflowEdit.getSnapshot, workflowEdit.getSnapshot);
+  const [metadataText] = useState(() => new MetadataTextEditController({
+    selectedProject: () => {
+      const current = workspaceRef.current;
+      return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
+    },
+    otherEditReason: (projectId) => configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId),
+  }));
+  metadataControllerRef.current = metadataText;
+  const metadataState = useSyncExternalStore(metadataText.subscribe, metadataText.getSnapshot, metadataText.getSnapshot);
   const [assetSession] = useState(() => new AssetSessionController(() => {
     const current = workspaceRef.current;
     return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
@@ -157,7 +173,9 @@ export function App() {
     !saveState.observationIssue && !saveState.integrityFailed && !saveState.generationLost && !saveState.nativeBlocked;
   const nativeWorkflowAvailable = mode === 'native' && workflowState.status?.capability.available === true &&
     !workflowState.observationIssue && !workflowState.integrityFailed && !workflowState.generationLost && !workflowState.nativeBlocked;
-  const localEditingLabel = nativeWorkflowAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
+  const nativeMetadataAvailable = mode === 'native' && metadataState.edit.status?.capability.available === true &&
+    !metadataState.edit.observationIssue && !metadataState.edit.integrityFailed && !metadataState.edit.generationLost && !metadataState.edit.nativeBlocked;
+  const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
 
   const bootstrap = useCallback(async () => {
     const generation = ++bootGeneration.current;
@@ -168,6 +186,7 @@ export function App() {
     connectionHandoffRef.current = null; connectionPortRef.current = null;
     void githubConnection.attach(null);
     githubSetup.beginConnection();
+    metadataText.beginConnection();
     setLoading(true);
     setBootError(null);
     setCatalogError(null);
@@ -188,22 +207,25 @@ export function App() {
       if (generation !== bootGeneration.current) return;
       setInfo(appInfo);
       githubSetup.setConnection(connection, appInfo);
+      metadataText.setConnection(connection, appInfo);
       if (connection.mode === 'preview' || methodReason(appInfo, 'catalog', connection.mode) === null) {
         try {
           const result = await connection.catalog();
           if (generation === bootGeneration.current) {
             if (!githubSetup.admitHelp(result.githubSetup)) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
             setCatalog(result);
+            metadataText.setHelp(result.metadataText);
             if (helpGeneration === connectionHelpGeneration.current) {
               githubConnection.setHelp(result.githubConnection); syncConnectionContext();
             }
           }
         } catch (error) {
-          if (generation === bootGeneration.current) { setCatalog(null); githubSetup.helpUnavailable(); setCatalogError(apiError(error)); }
+          if (generation === bootGeneration.current) { setCatalog(null); githubSetup.helpUnavailable(); metadataText.setHelp(null); setCatalogError(apiError(error)); }
         }
       } else {
         setCatalog(null);
         githubSetup.helpUnavailable();
+        metadataText.setHelp(null);
       }
     } catch (error) {
       if (generation === bootGeneration.current) {
@@ -214,7 +236,7 @@ export function App() {
     } finally {
       if (generation === bootGeneration.current) setLoading(false);
     }
-  }, [githubSetup, githubConnection, syncConnectionContext]);
+  }, [githubSetup, githubConnection, metadataText, syncConnectionContext]);
 
   useEffect(() => {
     void bootstrap();
@@ -227,6 +249,8 @@ export function App() {
   useEffect(() => () => githubConnection.dispose(), [githubConnection]);
   useEffect(() => { if (api) void workflowEdit.connect(api); }, [api, workflowEdit]);
   useEffect(() => () => workflowEdit.dispose(), [workflowEdit]);
+  useEffect(() => { if (api) void metadataText.connect(api); }, [api, metadataText]);
+  useEffect(() => () => metadataText.dispose(), [metadataText]);
   useEffect(() => { if (api) void assetSession.connect(api); }, [api, assetSession]);
   useEffect(() => () => assetSession.dispose(), [assetSession]);
 
@@ -236,7 +260,7 @@ export function App() {
 
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (Object.values(workspaceRef.current.projects).some(isDirty)) {
+      if (Object.values(workspaceRef.current.projects).some(isDirty) || metadataControllerRef.current && metadataProjectDirty(metadataControllerRef.current.getSnapshot().entries)) {
         event.preventDefault();
         event.returnValue = '';
       }
@@ -250,7 +274,7 @@ export function App() {
   const validateReason = methodReason(info, 'config.validate', mode);
   const reviewReason = methodReason(info, 'config.preview', mode);
   const suggestReason = methodReason(info, 'config.suggest', mode);
-  const chooseDisabled = loading || choosing || mode === 'unavailable' || saveState.status?.capability.reason === 'shutdown' || workflowState.status?.capability.reason === 'shutdown';
+  const chooseDisabled = loading || choosing || mode === 'unavailable' || saveState.status?.capability.reason === 'shutdown' || workflowState.status?.capability.reason === 'shutdown' || metadataState.edit.status?.capability.reason === 'shutdown';
 
   const loadSnapshot = async (projectId: string) => {
     if (!api || (refreshReason !== null && !preview)) return;
@@ -269,6 +293,7 @@ export function App() {
     // Admission of the native picker retires the original GitHub context even
     // if selection later cancels/fails. Do not wait for a successful folder.
     connectionPicking.current = true; advanceConnectionContext(); githubConnection.setContext(null);
+    metadataText.setSelectionPending(true);
     setChoosing(true);
     setChooseError(null);
     try {
@@ -278,7 +303,7 @@ export function App() {
       dispatch({ type: 'select', project });
       if (!alreadyLoaded) await loadSnapshot(project.id);
     } catch (error) { setChooseError(apiError(error)); }
-    finally { connectionPicking.current = false; setChoosing(false); syncConnectionContext(); }
+    finally { connectionPicking.current = false; setChoosing(false); syncConnectionContext(); metadataText.setSelectionPending(false); }
   };
 
   const changeApplicationRepository = (value: string) => {
@@ -335,7 +360,7 @@ export function App() {
     if (session) dispatch({ type: 'edit', projectId: session.project.id, path, value });
   };
 
-  const draftRetained = (projectId: string) => editRetainsDraft(configEdit.getSnapshot(), projectId) || workflowRetainsDraft(workflowEdit.getSnapshot(), projectId);
+  const draftRetained = (projectId: string) => editRetainsDraft(configEdit.getSnapshot(), projectId) || workflowRetainsDraft(workflowEdit.getSnapshot(), projectId) || metadataRetainsDraft(metadataText.getSnapshot(), projectId);
 
   const editor = (metadataOnly = false) => <DraftEditor
     key={`${session?.project.id ?? 'none'}-${metadataOnly ? 'metadata' : 'settings'}`}
@@ -343,7 +368,7 @@ export function App() {
     validateReason={loading ? 'Engine capabilities are being loaded.' : validateReason}
     reviewReason={loading ? 'Engine capabilities are being loaded.' : reviewReason}
     suggestReason={loading ? 'Engine capabilities are being loaded.' : suggestReason}
-    saveReason={loading ? 'Application capabilities are being loaded.' : (session ? workflowOwnerReason(workflowState, session.project.id) : null) ?? editStartReason(saveState, session)}
+    saveReason={loading ? 'Application capabilities are being loaded.' : (session ? workflowOwnerReason(workflowState, session.project.id) ?? metadataOwnerReason(metadataState, session.project.id) : null) ?? editStartReason(saveState, session)}
     discardReason={session && draftRetained(session.project.id) ? 'Keep this draft until the original native file-edit session has settled. Closing a review is separate from discarding draft data.' : null}
     onChoose={() => void chooseProject()} onEdit={edit} onValidate={() => void validate()}
     onReview={() => void review()} onSuggest={() => void suggest()}
@@ -358,17 +383,22 @@ export function App() {
 
   const workflowPanel = (detailed: boolean) => <GitHubWorkflowApply state={workflowState} controller={workflowEdit} setup={githubState} projects={workspace.projects} selectedId={workspace.selectedId} detailed={detailed}
     onShowProject={(projectId) => { dispatch({ type: 'switch', projectId }); navigate('github'); }} onHelp={setHelp} />;
+  const showMetadataProject = (projectId: string, key?: string) => {
+    dispatch({ type: 'switch', projectId });
+    if (key) metadataText.selectContext(key);
+    navigate('metadata');
+  };
 
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to workspace</a>
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark"><Icon name="box" size={25} /></span><div>Mobile Release Kit<span>THE KIT FOR A CAREFUL LAUNCH</span></div></div>
-      <div className="project-switcher"><label htmlFor="project-switch">CURRENT PROJECT</label><div className="project-switcher-control"><span className="project-switch-icon"><Icon name="folder" size={18} /></span><select id="project-switch" aria-label="Switch project; unsaved drafts are retained" value={workspace.selectedId ?? ''} onChange={(event) => dispatch({ type: 'switch', projectId: event.target.value })}><option value="" disabled>{choosing ? 'Opening project…' : 'Choose a project'}</option>{Object.values(workspace.projects).map((entry) => <option key={entry.project.id} value={entry.project.id}>{entry.project.name}{isDirty(entry) ? ' • unsaved' : ''}</option>)}</select><button type="button" className="icon-button" disabled={chooseDisabled} aria-label={preview ? 'Load example project' : 'Open another project folder'} onClick={() => void chooseProject()}><Icon name="plus" size={16} /></button></div></div>
+      <div className="project-switcher"><label htmlFor="project-switch">CURRENT PROJECT</label><div className="project-switcher-control"><span className="project-switch-icon"><Icon name="folder" size={18} /></span><select id="project-switch" aria-label="Switch project; unsaved configuration and text drafts are retained" value={workspace.selectedId ?? ''} onChange={(event) => dispatch({ type: 'switch', projectId: event.target.value })}><option value="" disabled>{choosing ? 'Opening project…' : 'Choose a project'}</option>{Object.values(workspace.projects).map((entry) => <option key={entry.project.id} value={entry.project.id}>{entry.project.name}{isDirty(entry) ? ' • unsaved config' : ''}{metadataProjectDirty(metadataState.entries, entry.project.id) ? ' • unsaved text' : ''}</option>)}</select><button type="button" className="icon-button" disabled={chooseDisabled} aria-label={preview ? 'Load example project' : 'Open another project folder'} onClick={() => void chooseProject()}><Icon name="plus" size={16} /></button></div></div>
       <nav aria-label="Workspace navigation">{(['workspace', 'release'] as const).map((group) => <div className="nav-group" key={group}><span className="nav-group-label">{group === 'workspace' ? 'WORKSPACE' : 'DELIVERY'}</span>{navigation.filter((entry) => entry.group === group).map((entry) => <button type="button" key={entry.id} className={`nav-item${entry.id === page ? ' active' : ''}`} aria-label={entry.label} aria-current={entry.id === page ? 'page' : undefined} onClick={() => navigate(entry.id)}><Icon name={entry.icon} size={19} /><span>{entry.label}</span>{entry.id === 'releases' && <span className="nav-soon">SOON</span>}</button>)}</div>)}</nav>
       <div className="sidebar-footer"><div className="foundation-label"><span className="local-dot" />{localEditingLabel}</div><p>Thoughtful preparation.<br />No accidental releases.</p><div className="sidebar-version"><span>DESKTOP {info?.appVersion ?? 'Not loaded'}</span><Icon name="shield" size={14} /></div></div>
     </aside>
     <div className="workspace">
-      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />No builds or release operations</span><Badge tone={preview || saveState.nativeBlocked || workflowState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : saveState.status?.active ? 'Native save session active' : workflowState.status?.active ? 'Local workflow session active' : localEditingLabel}</Badge></div></header>
+      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />No builds or release operations</span><Badge tone={preview || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : saveState.status?.active ? 'Native save session active' : workflowState.status?.active ? 'Local workflow session active' : metadataState.edit.status?.active ? 'Public-text session active' : localEditingLabel}</Badge></div></header>
       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
       <main id="main-content" tabIndex={-1} ref={main}>
         {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Loading desktop capabilities and the core field catalogue…</span></div>}
@@ -380,11 +410,12 @@ export function App() {
           onCheck={() => void configEdit.checkStatus()} onClose={() => configEdit.requestClose()} onApply={(binding) => configEdit.apply(binding)}
           onShowProject={(projectId) => { dispatch({ type: 'switch', projectId }); navigate('settings'); }} onHelp={setHelp} />
         {page !== 'github' && workflowPanel(false)}
+        {page !== 'metadata' && <MetadataTextSave state={metadataState} controller={metadataText} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
         {page === 'dashboard' && <Dashboard session={session} info={info} preview={preview} chooseDisabled={chooseDisabled} refreshReason={loading ? 'Capabilities are loading.' : refreshReason} onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="A little clarity before the next release." description="Edit a practical, schema-driven draft. The bundled core provides every field, requirement, and validation rule." />{editor()}</>}
         {page === 'environment' && <Environment info={info} preview={preview} onRetry={() => void bootstrap()} loading={loading} />}
         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} onHelp={setHelp} />}
-        {page === 'metadata' && <Metadata catalog={catalog}>{editor(true)}</Metadata>}
+        {page === 'metadata' && <Metadata catalog={catalog} textEditor={<MetadataTextEditor state={metadataState} controller={metadataText} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}>{editor(true)}</Metadata>}
         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} nativeReview={workflowPanel(true)}
           connectionView={<><GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp}
             repositoryInput={applicationRepository} onRepository={changeApplicationRepository} projectSelected={session !== null && !choosing}

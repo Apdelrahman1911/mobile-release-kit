@@ -6429,7 +6429,9 @@ class CIProductEvidenceContractTests(unittest.TestCase):
         }
         files = {
             "app/build.gradle.kts": b'plugins { id("com.android.application") }\nandroid { namespace = "com.example.wheelsmoke"; defaultConfig { applicationId = "com.example.wheelsmoke" } }\n',
-            ".gitignore": b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n",
+            ".gitignore": (b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n"
+                           b".mobile-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n"
+                           b".mobile-release-metadata-text-cleanup/\n"),
             "release/mobile-release.json": json.dumps(configuration).encode(),
         }
         for filename in ("title.txt", "short_description.txt", "full_description.txt", "changelogs/default.txt"):

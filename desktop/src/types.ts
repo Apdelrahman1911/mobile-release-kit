@@ -1,6 +1,7 @@
 import type { AssetSessionApi } from './assetSessionTypes.ts';
 import type { GitHubWorkflowEditApi } from './githubWorkflowEditTypes.ts';
 import type { GitHubConnectionApi, GitHubConnectionHelp } from './githubConnectionTypes.ts';
+import type { MetadataTextApi, MetadataTextGuide } from './metadataText.ts';
 
 // Closed passive service contracts. Python owns field policy and assurance.
 export type JsonPrimitive = string | number | boolean | null;
@@ -108,6 +109,7 @@ export interface Catalog {
   credentials: CredentialHelp[];
   credentialGuide: CredentialGuide | null;
   metadata: MetadataRules | null;
+  metadataText: MetadataTextGuide | null;
   githubSetup: GitHubSetupHelp;
   githubConnection: GitHubConnectionHelp | null;
   assurance: Assurance;
@@ -315,7 +317,8 @@ export interface CoreEditOutcome {
   resources: 'settled' | 'unknown';
   reason: CoreEditReason;
 }
-export type FixedIgnoreLine = '.mobile-release/' | '.mobile-release-init-prepare/' | '.mobile-release-init/' | '.mobile-release-init-cleanup/';
+export type FixedIgnoreLine = '.mobile-release/' | '.mobile-release-init-prepare/' | '.mobile-release-init/' | '.mobile-release-init-cleanup/' |
+  '.mobile-release-metadata-text-prepare/' | '.mobile-release-metadata-text/' | '.mobile-release-metadata-text-cleanup/';
 export interface PreparedConfigView {
   schemaVersion: 1;
   files: [
@@ -358,7 +361,7 @@ export interface PrepareConfigEditRequest {
   baselineGeneration: number;
 }
 
-export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi {
+export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, MetadataTextApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   chooseProject(): Promise<ProjectReference | null>;

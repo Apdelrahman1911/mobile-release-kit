@@ -13,14 +13,17 @@ import threading
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
 from .build_inputs import (BuildInputError, _Directory, _FD, _attempt_all,
                            _build_pending_names_locked, _directory,
                            _init_pending_names_locked)
 from .cancellation import CleanupScope, DefaultCancellation
-from .init_transaction import (InitApplyOutcome, InitOperationFailure,
+from .init_transaction import (InitApplyOutcome, InitConflict, InitOperationFailure,
                                InitWorkspace, ObservedFile, TypedEditProfile)
+
+if TYPE_CHECKING:
+    from .metadata_text import PublicTextSelection
 
 
 def _failure(reason: str, primary: BaseException | None = None, *,
@@ -31,9 +34,79 @@ def _failure(reason: str, primary: BaseException | None = None, *,
         (current.reason if current.reason != "none" else reason)), primary)
 
 
+class MetadataTargets:
+    """Original config-derived targets and immutable read-only dependencies.
+
+    The detached selection DATA is not this capability. Only the original
+    metadata lease creates one descriptor in its first locked capture; neither
+    a subsequent config observation nor a renderer baseline can retarget it.
+    """
+
+    __slots__ = ("_identity", "_lease", "_capture_workspace", "_selection", "_dependencies",
+                 "_raw", "_parents", "_parent_facts")
+
+    def __new__(cls, *args: Any, **kwargs: Any):
+        raise TypeError("metadata targets are bound only by the original lease")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("metadata targets are immutable")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("metadata targets are immutable")
+
+    def __copy__(self):
+        raise TypeError("metadata targets cannot be copied")
+
+    def __deepcopy__(self, memo: Any):
+        raise TypeError("metadata targets cannot be copied")
+
+    def __reduce_ex__(self, protocol: int):
+        raise TypeError("metadata targets cannot be serialized")
+
+    @property
+    def selection(self) -> PublicTextSelection:
+        return self._selection
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        return self._selection.paths
+
+    @property
+    def directories(self) -> tuple[str, ...]:
+        return self._selection.directories
+
+    @property
+    def observation_paths(self) -> tuple[str, ...]:
+        from .metadata_text import DEPENDENCY_PATHS
+        return (*DEPENDENCY_PATHS, *self.paths)
+
+    @property
+    def observation_limits(self) -> tuple[int, ...]:
+        from .metadata_text import DEPENDENCY_LIMITS, MAX_TEXT_BYTES
+        return (*DEPENDENCY_LIMITS, *((MAX_TEXT_BYTES,) * len(self.paths)))
+
+    @property
+    def dependency_only_parents(self) -> dict[str, dict[str, int] | None]:
+        return {path: dict(value) if value is not None else None for path, value in self._parents
+                if path not in self.directories}
+
+    def _check_workspace(self, workspace: InitWorkspace) -> None:
+        if (type(self) is not MetadataTargets or self._identity is not self
+                or type(workspace) is not InitWorkspace
+                or workspace._typed_profile is not TypedEditProfile.METADATA_TEXT
+                or workspace._metadata_targets is not self or workspace._scope is None
+                or type(workspace._scope) is not LockedInitScope
+                or workspace._scope is not self._lease._active
+                or workspace._scope.lease is not self._lease
+                or workspace._scope.workspace is not workspace
+                or self._lease._metadata_targets is not self):
+            raise _failure("invalid_params")
+
+
 class RootedRevision:
     """Exact private immutable capture; a token string cannot reconstruct it."""
-    __slots__ = ("_lease", "_profile", "_token", "_parents", "_parent_facts", "_files", "_raw", "_absent")
+    __slots__ = ("_lease", "_profile", "_token", "_parents", "_parent_facts", "_files", "_raw", "_absent",
+                 "_metadata_targets")
 
     def __new__(cls, *args: Any, **kwargs: Any):
         raise TypeError("rooted revisions are bound only by the original lease")
@@ -73,6 +146,17 @@ class RootedRevision:
             raise _failure("invalid_params")
         parents = dict(self._parents)
         return tuple(path for path in self._profile.directories if parents[path] is None)
+
+    @property
+    def metadata_selection(self) -> PublicTextSelection:
+        if self._profile is not TypedEditProfile.METADATA_TEXT or type(self._metadata_targets) is not MetadataTargets:
+            raise _failure("invalid_params")
+        return self._metadata_targets.selection
+
+    @property
+    def missing_metadata_directories(self) -> tuple[str, ...]:
+        parents = dict(self._parents)
+        return tuple(path for path in self.metadata_selection.directories if parents[path] is None)
 
 
 class LockedInitScope:
@@ -171,7 +255,7 @@ class InitRootLease:
         cancellation._check_owner()
         if threading.current_thread() is not threading.main_thread():
             raise _failure("invalid_params")
-        if profile is TypedEditProfile.GITHUB_WORKFLOWS:
+        if profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT):
             if (type(registered_identity) is not dict
                     or set(registered_identity) != {"device", "inode", "mode", "uid", "gid"}
                     or any(type(value) is not int for value in registered_identity.values())
@@ -191,6 +275,7 @@ class InitRootLease:
         self._scopes: list[LockedInitScope] = []
         self._active: LockedInitScope | None = None
         self._revision: RootedRevision | None = None
+        self._metadata_targets: MetadataTargets | None = None
         self._acquire_claimed = False
         self._acquired = False
         self._capture_claimed = False
@@ -216,7 +301,8 @@ class InitRootLease:
             raise _failure("custody_unknown", error, unknown=True) from None
         if not (sys.platform == "darwin" or sys.platform.startswith("linux")):
             raise _failure("unsupported_platform")
-        if self._profile is TypedEditProfile.GITHUB_WORKFLOWS and not sys.platform.startswith("linux"):
+        if (self._profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT)
+                and not sys.platform.startswith("linux")):
             raise _failure("unsupported_platform")
         try:
             value = str(self.root)
@@ -251,7 +337,7 @@ class InitRootLease:
             raise _failure("custody_unknown", unknown=True)
         try:
             self.directory.check()
-            if self._profile is TypedEditProfile.GITHUB_WORKFLOWS:
+            if self._profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT):
                 # Rust registration carries full st_mode, not S_IMODE. Read the
                 # original retained root descriptor before any target capture;
                 # a new pathname observation is not registration authority.
@@ -274,18 +360,82 @@ class InitRootLease:
             return InitApplyOutcome("not_started", "not_created", "settled", "none")
         return self._scopes[-1].outcome("none")
 
+    def bind_metadata_targets(self, workspace: InitWorkspace,
+                              dependencies: tuple[ObservedFile, ...],
+                              platform: object, locale: object) -> MetadataTargets:
+        """Derive once from the original fixed config/ignore observations."""
+        from .config_payloads import sufficient_ignore_rules
+        from .metadata import check_metadata_text
+        from .metadata_text import (DEPENDENCY_LIMITS, DEPENDENCY_PATHS,
+                                    MetadataTextInputError, public_text_selection)
+        self.check()
+        scope = self._active
+        if (self._profile is not TypedEditProfile.METADATA_TEXT or scope is None
+                or scope.workspace is not workspace or type(workspace) is not InitWorkspace
+                or workspace._typed_profile is not self._profile or self._revision is not None
+                or self._metadata_targets is not None or workspace._metadata_targets is not None
+                or type(dependencies) is not tuple or len(dependencies) != len(DEPENDENCY_PATHS)
+                or any(type(item) is not ObservedFile or item.path != path
+                       or workspace._captured.get(path) is not item
+                       for item, path in zip(dependencies, DEPENDENCY_PATHS))
+                or set(workspace._captured) != set(DEPENDENCY_PATHS)
+                or set(workspace._raw_observations) != set(DEPENDENCY_PATHS)
+                or set(workspace.parents) != {"release"}
+                or set(workspace._parent_facts) != {"release"}):
+            raise _failure("invalid_params")
+        config, ignore = dependencies
+        if config.before is None or type(config.data) is not bytes or not 0 < len(config.data) <= DEPENDENCY_LIMITS[0]:
+            raise _failure("invalid_config")
+        try:
+            config_text = config.data.decode("utf-8")
+            if any(code == "metadata.secret-pattern" for code, _ in check_metadata_text("mobile-release.json", config_text).issues):
+                raise _failure("invalid_config")
+            selection = public_text_selection(config_text, platform, locale)
+        except UnicodeError:
+            raise _failure("invalid_config") from None
+        except MetadataTextInputError as error:
+            raise _failure("invalid_params" if error.reason == "invalid_params" else "invalid_config") from None
+        if (ignore.before is None or type(ignore.data) is not bytes
+                or len(ignore.data) > DEPENDENCY_LIMITS[1] or not sufficient_ignore_rules(ignore.data)):
+            raise _failure("ignore_conflict")
+        targets = object.__new__(MetadataTargets)
+        for name, value in (
+            ("_identity", targets), ("_lease", self), ("_capture_workspace", workspace), ("_selection", selection),
+            ("_dependencies", tuple((item.path, tuple(sorted(item.before.items())), item.data) for item in dependencies)),
+            ("_raw", tuple(sorted(workspace._raw_observations.items()))),
+            ("_parents", tuple((path, tuple(sorted(value.items())) if value is not None else None)
+                              for path, value in sorted(workspace.parents.items()))),
+            ("_parent_facts", tuple(sorted(workspace._parent_facts.items()))),
+        ):
+            object.__setattr__(targets, name, value)
+        self._metadata_targets = targets
+        workspace._metadata_targets = targets
+        return targets
+
+    def _observation_roster(self, workspace: InitWorkspace) -> tuple[tuple[str, ...], tuple[int, ...], set[str]]:
+        if self._profile is TypedEditProfile.METADATA_TEXT:
+            targets = self._metadata_targets
+            if type(targets) is not MetadataTargets:
+                raise _failure("invalid_params")
+            targets._check_workspace(workspace)
+            return targets.observation_paths, targets.observation_limits, {"release", *targets.directories}
+        if self._profile in (TypedEditProfile.CONFIGURATION, TypedEditProfile.GITHUB_WORKFLOWS):
+            return self._profile.paths, self._profile.observation_limits, set(self._profile.directories)
+        raise _failure("invalid_params")
+
     def bind_revision(self, workspace: InitWorkspace,
                       observed: tuple[ObservedFile, ...]) -> RootedRevision:
         self.check()
         scope = self._active
+        paths, _, directories = self._observation_roster(workspace)
         if (scope is None or scope.workspace is not workspace or self._revision is not None
                 or workspace._typed_profile is not self._profile
-                or type(observed) is not tuple or len(observed) != len(self._profile.paths)
+                or type(observed) is not tuple or len(observed) != len(paths)
                 or any(type(item) is not ObservedFile or item.path != path
                        or workspace._captured.get(path) is not item
-                       for path, item in zip(self._profile.paths, observed))
-                or set(workspace._captured) != set(self._profile.paths)
-                or set(workspace.parents) != set(self._profile.directories)):
+                       for path, item in zip(paths, observed))
+                or set(workspace._captured) != set(paths)
+                or set(workspace.parents) != directories):
             raise _failure("invalid_params")
         revision = object.__new__(RootedRevision)
         parents = tuple((path, tuple(sorted(value.items())) if value is not None else None)
@@ -297,6 +447,7 @@ class InitRootLease:
             ("_parent_facts", tuple(sorted(workspace._parent_facts.items()))),
             ("_files", files), ("_raw", tuple(sorted(workspace._raw_observations.items()))),
             ("_absent", self._profile is TypedEditProfile.CONFIGURATION and workspace.parents["release"] is None),
+            ("_metadata_targets", self._metadata_targets),
         ):
             object.__setattr__(revision, name, value)
         self._revision = revision
@@ -305,20 +456,26 @@ class InitRootLease:
     def _recheck(self, workspace: InitWorkspace, revision: RootedRevision) -> None:
         if revision._profile is not self._profile or workspace._typed_profile is not self._profile:
             raise _failure("invalid_params")
+        if self._profile is TypedEditProfile.METADATA_TEXT and revision._metadata_targets is not self._metadata_targets:
+            raise _failure("invalid_params")
+        paths, limits, _ = self._observation_roster(workspace)
         workspace.parents = {path: dict(value) if value is not None else None
                              for path, value in revision._parents}
         try:
             current = tuple(workspace.observe(path, limit=limit)
-                            for path, limit in zip(self._profile.paths, self._profile.observation_limits))
+                            for path, limit in zip(paths, limits))
         except (KeyboardInterrupt, InitOperationFailure):
             raise
         except BaseException as error:
-            raise _failure("stale_revision", error, unknown=self.guard.lifetime_ledger.fatal) from None
+            reason = ("filesystem_error" if self._profile is TypedEditProfile.METADATA_TEXT
+                      and not isinstance(error, InitConflict) else "stale_revision")
+            raise _failure(reason, error, unknown=self.guard.lifetime_ledger.fatal) from None
         files = tuple((item.path, tuple(sorted(item.before.items())) if item.before is not None else None,
                        item.data) for item in current)
         if (files != revision._files or tuple(sorted(workspace._raw_observations.items())) != revision._raw
                 or tuple(sorted(workspace._parent_facts.items())) != revision._parent_facts):
             raise _failure("stale_revision")
+        workspace._rooted_revision = revision
 
     @contextmanager
     def workspace_scope(self, revision: RootedRevision | None = None) -> Iterator[InitWorkspace]:
@@ -355,7 +512,9 @@ class InitRootLease:
             if type(error) is InitOperationFailure:
                 outcome = error.outcome
             else:
-                reason = "cancelled" if isinstance(error, KeyboardInterrupt) else "filesystem_error"
+                reason = ("cancelled" if isinstance(error, KeyboardInterrupt) else
+                          "stale_revision" if self._profile is TypedEditProfile.METADATA_TEXT
+                          and isinstance(error, InitConflict) else "filesystem_error")
                 outcome = owner.outcome(reason)
             unknown = self.guard.lifetime_ledger.fatal or not owner.closed
             if unknown:

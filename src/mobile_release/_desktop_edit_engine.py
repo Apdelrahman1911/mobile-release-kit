@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ._desktop_edit_control import EditInput
-from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL,
+from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL,
                                      registered_identity, response)
 from .build_inputs import _attempt_all
 from .cancellation import CleanupScope, DefaultCancellation
@@ -26,6 +26,8 @@ from .github_workflow_edit import (WorkflowConflict, apply_github_workflow_edit,
                                    prepare_github_workflow_edit)
 from .init_transaction import InitOperationFailure, TypedEditProfile
 from .init_workspace_custody import InitRootLease
+from .metadata_text_edit import (apply_metadata_text_edit, capture_metadata_text_edit,
+                                 discard_metadata_text_edit, prepare_metadata_text_edit)
 
 
 def _root(value: str) -> Path:
@@ -47,12 +49,18 @@ def _root(value: str) -> Path:
 
 
 class _Engine:
-    def __init__(self, started: float, *, workflows: bool = False) -> None:
-        if type(workflows) is not bool:
+    def __init__(self, started: float, *, workflows: bool = False, domain: str | None = None) -> None:
+        if type(workflows) is not bool or domain is not None and workflows:
             raise ProtocolError("Invalid fixed edit domain")
-        self.workflows = workflows
+        selected = ("github_workflows" if workflows else "configuration") if domain is None else domain
+        if type(selected) is not str or selected not in {"configuration", "github_workflows", "metadata_text"}:
+            raise ProtocolError("Invalid fixed edit domain")
+        self.domain = selected
+        self.workflows = selected == "github_workflows"  # Existing private constructor compatibility.
         self.guard = DefaultCancellation(ValidationError, "configuration edit custody did not settle")
-        self.input = EditInput(started, protocol=WORKFLOW_PROTOCOL if workflows else PROTOCOL)
+        protocol = {"configuration": PROTOCOL, "github_workflows": WORKFLOW_PROTOCOL,
+                    "metadata_text": METADATA_PROTOCOL}[selected]
+        self.input = EditInput(started, protocol=protocol)
         self.lease: InitRootLease | None = None
         self.authority: Any = None
         self.last_request: EditRequest | None = None
@@ -99,10 +107,14 @@ class _Engine:
     def cleanup(self) -> None:
         def retire() -> None:
             if self.authority is not None:
-                if self.workflows:
+                if self.domain == "github_workflows":
                     discard_github_workflow_edit(self.authority)
-                else:
+                elif self.domain == "metadata_text":
+                    discard_metadata_text_edit(self.authority)
+                elif self.domain == "configuration":
                     discard_config_edit(self.authority)
+                else:
+                    raise ProtocolError("Invalid fixed edit domain")
         actions = [retire]
         if self.lease is not None:
             actions.append(self.lease.close)
@@ -144,23 +156,41 @@ class _Engine:
         self.last_request = request
         self.guard.check()
         root = _root(request.params["root"])
-        if self.workflows:
+        if self.domain == "github_workflows":
             # The closed lease compares all five facts to raw original fstat on
             # acquire and subsequent checks BEFORE any workflow observation.
             self.lease = InitRootLease(root, cancellation=self.guard,
                 profile=TypedEditProfile.GITHUB_WORKFLOWS,
                 registered_identity=registered_identity(request.params["registeredIdentity"]))
-        else:
+        elif self.domain == "metadata_text":
+            self.lease = InitRootLease(root, cancellation=self.guard,
+                profile=TypedEditProfile.METADATA_TEXT,
+                registered_identity=registered_identity(request.params["registeredIdentity"]))
+        elif self.domain == "configuration":
             self.lease = InitRootLease(root, cancellation=self.guard)
+        else:
+            raise ProtocolError("Invalid fixed edit domain")
         self.lease.acquire()
-        checkout = capture_github_workflow_edit(self.lease) if self.workflows else capture_config_edit(self.lease)
+        if self.domain == "github_workflows":
+            checkout = capture_github_workflow_edit(self.lease)
+        elif self.domain == "metadata_text":
+            checkout = capture_metadata_text_edit(self.lease, request.params["platform"], request.params["locale"])
+        elif self.domain == "configuration":
+            checkout = capture_config_edit(self.lease)
+        else:
+            raise ProtocolError("Invalid fixed edit domain")
         self.authority = checkout
-        if self.workflows:
+        if self.domain == "github_workflows":
             opened = response(request, "opened", {"revision": checkout.revision, "observed": checkout.observed,
                                                   "scopeResources": "settled"})
-        else:
+        elif self.domain == "metadata_text":
+            opened = response(request, "opened", {"revision": checkout.revision, "metadataRoot": checkout.metadata_root,
+                                                  "baseline": checkout.baseline, "scopeResources": "settled"})
+        elif self.domain == "configuration":
             opened = response(request, "opened", {"revision": checkout.revision, "base": checkout.base,
                                                   "scopeResources": "settled"})
+        else:
+            raise ProtocolError("Invalid fixed edit domain")
         self.input.idle()
         self.write(opened)
         request = self.input.request(1, request.session)
@@ -169,7 +199,7 @@ class _Engine:
         if request.op == "discard":
             self.outcome = CoreEditOutcome("not_started", "not_created", "settled", "none")
             return
-        if self.workflows:
+        if self.domain == "github_workflows":
             plan = prepare_github_workflow_edit(self.lease, checkout, request.params["revision"],
                 request.params["draft"], request.params["toolingRepository"], request.params["toolingSha"])
             if type(plan) is WorkflowConflict:
@@ -179,9 +209,14 @@ class _Engine:
                 # Keep the original retired checkout for idempotent discard;
                 # detached conflict DATA is never an authority to clean up.
                 return
-        else:
+        elif self.domain == "metadata_text":
+            plan = prepare_metadata_text_edit(self.lease, checkout, request.params["revision"],
+                                             request.params["expectedBaseline"], request.params["fields"])
+        elif self.domain == "configuration":
             plan = prepare_config_edit(self.lease, checkout, request.params["revision"],
                                        request.params["expectedBase"], request.params["draft"])
+        else:
+            raise ProtocolError("Invalid fixed edit domain")
         self.authority = plan
         prepared = response(request, "prepared", {"revision": plan.revision, "planToken": plan.token,
                                                    "view": plan.view, "scopeResources": "settled"})
@@ -199,7 +234,14 @@ class _Engine:
             return
         if request.params["planToken"] != plan.token:
             raise ProtocolError("The original plan token is required")
-        self.outcome = apply_github_workflow_edit(self.lease, plan) if self.workflows else apply_config_edit(self.lease, plan)
+        if self.domain == "github_workflows":
+            self.outcome = apply_github_workflow_edit(self.lease, plan)
+        elif self.domain == "metadata_text":
+            self.outcome = apply_metadata_text_edit(self.lease, plan)
+        elif self.domain == "configuration":
+            self.outcome = apply_config_edit(self.lease, plan)
+        else:
+            raise ProtocolError("Invalid fixed edit domain")
 
     def terminal(self) -> None:
         if self.last_request is None:
@@ -214,9 +256,9 @@ class _Engine:
             "planToken": self.published_token, "effect": outcome.effect, "journal": outcome.journal,
             "resources": outcome.resources, "reason": outcome.reason,
         }
-        if self.workflows:
+        if self.domain in {"github_workflows", "metadata_text"}:
             result["kind"] = "outcome"
-            if self.conflict is not None:
+            if self.domain == "github_workflows" and self.conflict is not None:
                 del result["planToken"]
                 result.update(kind="conflict", revision=self.conflict.revision, conflict=self.conflict.view)
         self.write(response(self.last_request, "terminal", result), terminal=True)
@@ -236,8 +278,8 @@ class _Engine:
             raise first
 
 
-def main(*, started: float | None = None, workflows: bool = False) -> int:
-    engine = _Engine(time.monotonic() if started is None else started, workflows=workflows)
+def main(*, started: float | None = None, workflows: bool = False, domain: str | None = None) -> int:
+    engine = _Engine(time.monotonic() if started is None else started, workflows=workflows, domain=domain)
     scope = CleanupScope(engine.guard, engine.cleanup, owns_cancellation=True, first_primary=True)
     try:
         try:

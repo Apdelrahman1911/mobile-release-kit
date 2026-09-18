@@ -73,6 +73,17 @@ impl DesktopBridge {
         let root = self.project_root(&project_id)?;
         self.supervisor.query(Method::ProjectSnapshot, json!({"root": root})).await
     }
+    pub(crate) async fn observe_metadata_text(&self, input: crate::metadata_text_commands::Open) -> Result<crate::metadata_text_edit_protocol::Observation, BridgeError> {
+        // Only the native-selected root reaches this bounded named-file query.
+        // No checkout/write authority is created by a passive observation.
+        let root = self.project_root(&input.project_id)?;
+        let value = self.supervisor.query(Method::MetadataTextObserve, json!({"root":root,"platform":input.platform,"locale":&input.locale})).await?;
+        crate::metadata_text_edit_protocol::observation_result(value, input.platform, &input.locale)
+    }
+    pub(crate) async fn validate_metadata_text(&self, input: crate::metadata_text_commands::Validate) -> Result<crate::metadata_text_edit_protocol::ValidationResult, BridgeError> {
+        let value = self.supervisor.query(Method::MetadataTextValidate, json!({"platform":input.platform,"fields":&input.fields})).await?;
+        crate::metadata_text_edit_protocol::validation_result(value, input.platform, &input.fields)
+    }
     fn project_root(&self, project_id: &str) -> Result<PathBuf, BridgeError> {
         if !crate::protocol::valid_id(project_id) { return Err(BridgeError::invalid()); }
         let projects = self.projects.lock().map_err(|_| BridgeError::new("unavailable", "The project registry is unavailable."))?;
@@ -108,6 +119,25 @@ impl DesktopBridge {
         session_id: &str, plan_token: &str) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
         document.workflow_edit_admit(|bridge| bridge.edits.workflow_project(window, session_id), |bridge, registration|
             bridge.edits.apply_workflow(window, session_id, plan_token, registration))
+    }
+    pub(crate) fn open_metadata_text_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::metadata_text_commands::Open) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
+        let ticket = self.edits.metadata_text_open_ticket(window)?;
+        let context = args.context();
+        let selected = args.project_id.clone();
+        document.metadata_text_edit_admit(|_| Ok(selected), |bridge, registration|
+            bridge.edits.open_metadata_text(window, args.project_id, context, registration, ticket))
+    }
+    pub(crate) fn prepare_metadata_text_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::metadata_text_edit_protocol::PrepareMetadataTextEdit) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.metadata_text_edit_admit(|bridge| bridge.edits.metadata_text_project(window, &session_id), |bridge, registration|
+            bridge.edits.prepare_metadata_text(window, args, registration))
+    }
+    pub(crate) fn apply_metadata_text_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        session_id: &str, plan_token: &str) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
+        document.metadata_text_edit_admit(|bridge| bridge.edits.metadata_text_project(window, session_id), |bridge, registration|
+            bridge.edits.apply_metadata_text(window, session_id, plan_token, registration))
     }
     /// Only called while the real DocumentBinding admission lock is held. No
     /// project method calls back into that lock. These are private native hints.

@@ -7,7 +7,8 @@ export const U32_MAX = 0xffff_ffff;
 const CONFIG_BYTES = 512 * 1024;
 const IGNORE_BYTES = 1024 * 1024;
 const encoder = new TextEncoder();
-const IGNORE_LINES = ['.mobile-release/', '.mobile-release-init-prepare/', '.mobile-release-init/', '.mobile-release-init-cleanup/'] as const;
+const IGNORE_LINES = ['.mobile-release/', '.mobile-release-init-prepare/', '.mobile-release-init/', '.mobile-release-init-cleanup/',
+  '.mobile-release-metadata-text-prepare/', '.mobile-release-metadata-text/', '.mobile-release-metadata-text-cleanup/'] as const;
 const phases = ['opening', 'editing', 'preparing', 'reviewing', 'applying', 'finalizing', 'final', 'unknown'] as const;
 const nativeReasons = ['none', 'discarded', 'cancelled', 'active_timeout', 'review_expired', 'caller_lost', 'window_lost', 'shutdown', 'runtime_unavailable', 'spawn_failed', 'protocol_error', 'io_error', 'output_limit', 'cleanup_unknown'] as const;
 const coreReasons = ['none', 'invalid_params', 'invalid_config', 'ignore_conflict', 'stale_revision', 'pending_state', 'busy', 'cancelled', 'filesystem_error', 'custody_unknown', 'unsupported_platform'] as const;
@@ -144,7 +145,7 @@ function preparedView(value: unknown): value is PreparedConfigView {
       !Array.isArray(value.files) || value.files.length !== 2 ||
       !file(value.files[0], 'release/mobile-release.json', ['create', 'replace', 'preserve'], CONFIG_BYTES) ||
       !file(value.files[1], '.gitignore', ['create', 'append', 'preserve'], IGNORE_BYTES) ||
-      !list(value.ignoreAdditions, (item) => oneOf(item, IGNORE_LINES), 4) || !preview(value.preview)) return false;
+      !list(value.ignoreAdditions, (item) => oneOf(item, IGNORE_LINES), IGNORE_LINES.length) || !preview(value.preview)) return false;
   const config = value.files[0];
   const ignore = value.files[1];
   if (value.rewritesConfigFormatting !== (config.action === 'replace') || (value.createReleaseDirectory && config.action !== 'create')) return false;

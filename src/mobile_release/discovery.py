@@ -8,10 +8,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
 from .config import ReleaseConfig
-from .init_transaction import STATE_NAMES, is_state_name
+from .init_transaction import ALL_STATE_NAMES, STATE_NAMES, is_state_name
+
+# Keep the legacy passive STATE_NAMES import seam intact; the broader set is
+# only for exclusions/admission and never substitutes for recovery dispatch.
 
 IGNORED_PARTS = {
-    *STATE_NAMES,
+    *ALL_STATE_NAMES,
     ".git",
     ".gradle",
     ".idea",
