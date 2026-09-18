@@ -56,6 +56,9 @@ enum Failure {
     OriginalCustodyUnknown, UnexpectedOutcome, PayloadMismatch, ReceiptIo,
     EofSeedModeMismatch, EofPreparedOriginalsMismatch, EofOriginalsMismatch, EofPayloadMismatch,
     EofMetadataMismatch, EofUnrelatedMismatch, EofReplacementInodeMismatch,
+    DocumentOriginalNavigationAccepted, DocumentOriginalApplyNotRefused, DocumentOriginalOpenNotRefused,
+    DocumentReplacementNavigationRefused, DocumentReplacementPrematurelyBound, DocumentReplacementRebound,
+    DocumentReplacementApplyNotRefused, DocumentReplacementOpenNotRefused,
 }
 type Check<T> = Result<T, Failure>;
 fn require(condition: bool, failure: Failure) -> Check<()> { if condition { Ok(()) } else { Err(failure) } }
@@ -3410,10 +3413,26 @@ mod metadata {
                 require(original.bridge.apply_metadata_text_edit(&original.document,"main",&session.id,&plan.plan_token).is_err(),Failure::UnexpectedStatus)?;
             } else {
                 original.document.lost();
+                require(!original.document.navigation(true),Failure::DocumentOriginalNavigationAccepted)?;
+                require(original.bridge.apply_metadata_text_edit(&original.document,"main",&session.id,&plan.plan_token)
+                    .is_err_and(|error| error.code=="invalid_edit_owner"),Failure::DocumentOriginalApplyNotRefused)?;
+                require(original.bridge.open_metadata_text_edit(&original.document,"main",selection.open(&project))
+                    .is_err_and(|error| error.code=="invalid_edit_owner"),Failure::DocumentOriginalOpenNotRefused)?;
                 let replacement=DocumentBinding::new(original.bridge.clone());
-                require(!original.document.navigation(true) && !replacement.navigation(true)
-                    && original.bridge.apply_metadata_text_edit(&original.document,"main",&session.id,&plan.plan_token).is_err()
-                    && original.bridge.open_metadata_text_edit(&original.document,"main",selection.open(&project)).is_err(),Failure::UnexpectedStatus)?;
+                // Initial navigation is allowed, not an edit capability. Only
+                // Finished asks the SAME registry to bind; its loss is final.
+                require(replacement.navigation(true),Failure::DocumentReplacementNavigationRefused)?;
+                replacement.observe(|life| life.started(true)); replacement.hook_installed();
+                let mut bound=true;
+                replacement.observe(|life| { bound=life.original_bound(); crate::document_lifetime::DocumentAction::None });
+                require(!bound,Failure::DocumentReplacementPrematurelyBound)?;
+                replacement.observe(|life| life.finished(true));
+                replacement.observe(|life| { bound=life.original_bound(); crate::document_lifetime::DocumentAction::None });
+                require(!bound,Failure::DocumentReplacementRebound)?;
+                require(original.bridge.apply_metadata_text_edit(&replacement,"main",&session.id,&plan.plan_token)
+                    .is_err_and(|error| error.code=="invalid_edit_owner"),Failure::DocumentReplacementApplyNotRefused)?;
+                require(original.bridge.open_metadata_text_edit(&replacement,"main",selection.open(&project))
+                    .is_err_and(|error| error.code=="invalid_edit_owner"),Failure::DocumentReplacementOpenNotRefused)?;
             }
             let terminal=observed_metadata(&original.batch.owner,&session.id,Phase::Final,false).await?;
             settled_terminal(&original.batch.owner,&terminal)?; correlated(&terminal,&editing,&plan)?;

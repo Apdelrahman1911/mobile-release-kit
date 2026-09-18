@@ -5,6 +5,7 @@
 compile_error!("SG1 requires debug test + desktop-shell + development-runtime, Linux x86_64 GNU");
 #[path = "../src/error.rs"] mod error;
 #[path = "../src/protocol.rs"] mod protocol;
+#[path = "../src/environment.rs"] mod environment;
 #[path = "../src/runtime.rs"] mod runtime;
 #[path = "../src/installed_runtime.rs"] mod installed_runtime;
 #[path = "../src/supervisor.rs"] mod supervisor;

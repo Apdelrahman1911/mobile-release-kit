@@ -50,6 +50,13 @@ impl DesktopBridge {
         AppInfo { app_name: "Mobile Release Kit", app_version: env!("CARGO_PKG_VERSION"), runtime, capabilities }
     }
     pub async fn catalog(&self) -> Result<Value, BridgeError> { self.supervisor.query(Method::Catalog, json!({})).await }
+    pub(crate) async fn environment_requirements(&self, input: crate::environment::Request) -> Result<crate::environment::Requirements, BridgeError> {
+        // Current draft DATA only; no selected path, tool or execution owner.
+        let context = input.context();
+        let value = self.supervisor.query(Method::EnvironmentRequirements, input.into_params()?).await
+            .map_err(crate::environment::public_error)?;
+        crate::environment::result(value, context)
+    }
     pub async fn validate_config(&self, draft: Value) -> Result<Value, BridgeError> {
         if !draft.is_object() { return Err(BridgeError::invalid()); }
         self.supervisor.query(Method::ValidateConfig, json!({"draft": draft})).await

@@ -10,6 +10,8 @@ import { assetError } from './assetSessionProtocol.ts';
 import { workflowEditError } from './githubWorkflowEditProtocol.ts';
 import { githubConnectionError, parseGitHubConnectionHelp } from './githubConnectionProtocol.ts';
 import { metadataTextError, parseMetadataTextGuide } from './metadataTextProtocol.ts';
+import { environmentError, environmentRequestFits } from './environment.ts';
+import type { EnvironmentRequest, EnvironmentResult, EnvironmentRole, EnvironmentRequirement } from './environment.ts';
 import type { ApiError, Assurance, Catalog, DesktopApi, FieldHelp, JsonObject, ProjectSnapshot } from './types.ts';
 
 // Inert, explicit browser-design fixture. Nothing here is a project observation.
@@ -66,6 +68,44 @@ const workflowUnavailable = async (): Promise<never> => { throw workflowEditErro
 const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
 const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
 
+// Deliberate design fixture, not a core assessment or a source of version policy.
+// The page labels every returned row as illustrative and hides the fixture host.
+function exampleEnvironment(request: EnvironmentRequest): EnvironmentResult {
+  const ids: EnvironmentRole[] = request.platform === 'android' ? request.operation === 'build'
+    ? ['android-jdk', 'android-gradle-wrapper', 'android-sdk'] : ['android-jdk', 'android-bundletool']
+    : request.operation === 'build' ? ['apple-macos', 'apple-xcode', 'apple-signing-tools']
+      : ['apple-macos', 'apple-codesign', 'apple-openssl', 'apple-security-framework'];
+  const labels: Record<EnvironmentRole, string> = {
+    'android-jdk': 'Java Development Kit', 'android-gradle-wrapper': 'Project Gradle wrapper', 'android-sdk': 'Android SDK',
+    'android-bundletool': 'Bundletool helper', 'apple-macos': 'macOS host', 'apple-xcode': 'Xcode',
+    'apple-signing-tools': 'Signing tools', 'apple-codesign': 'Code signature tools', 'apple-openssl': 'OpenSSL',
+    'apple-security-framework': 'Apple Security and CoreFoundation',
+  };
+  const exampleHelp = (label: string) => ({ label, requiredness: 'required' as const, requiredWhen: 'Illustration only.',
+    what: 'Example of contextual guidance, not a core environment assessment.',
+    why: 'The native app will explain the purpose of this exact prerequisite.',
+    where: 'The connected core provides practical instructions for finding this item.',
+    format: 'Illustrative placeholder only; no actual tool or expected version is supplied by this preview.',
+    failure: 'No installation, project, account or release readiness has been checked.' });
+  const requirements: EnvironmentRequirement[] = ids.map((id) => {
+    const kind: EnvironmentRequirement['kind'] = id === 'android-gradle-wrapper' ? 'project-file' :
+      id === 'android-bundletool' ? 'bundled-helper' : id === 'android-jdk' || id === 'android-sdk' || id === 'apple-xcode' ? 'external-toolchain' : 'native-os';
+    const baseline: EnvironmentRequirement['baseline'] = { kind: 'platform-defined', version: null, build: null, sha256: null, maxBytes: null };
+    if (id === 'android-jdk') { baseline.kind = 'workflow-reference'; baseline.version = 'Example only'; }
+    else if (id === 'android-sdk' || id === 'android-gradle-wrapper') baseline.kind = 'project-defined';
+    else if (id === 'apple-xcode') { baseline.kind = 'exact-pin'; baseline.version = 'Example only'; baseline.build = 'Example only'; }
+    else if (id === 'android-bundletool') { baseline.kind = 'exact-pin'; baseline.version = 'Example only'; baseline.sha256 = '0'.repeat(64); baseline.maxBytes = 1; }
+    return { id, kind, presence: 'unknown', versionState: 'unknown', inspection: 'not-run', baseline, help: exampleHelp(labels[id]) };
+  });
+  return { schemaVersion: 1, policyVersion: 'environment-requirements-v1', hostPlatform: 'other',
+    context: { platform: request.platform, operation: request.operation }, platformEnabled: true, state: 'requirements-only',
+    coverage: 'toolchain-prerequisites-only', nativeInspection: 'unavailable', dependencyCompleteness: 'unknown', requirements,
+    help: { platform: exampleHelp('Release platform'), operation: exampleHelp('Activity') },
+    limitations: ['Browser design fixture only. Baseline text is illustrative and is not loaded from the core.',
+      'No configuration was validated and no host or tool was inspected. This fixture cannot enable native operations.'],
+    assurance: { ...assurance, basis: 'schema-policy' } };
+}
+
 export const previewApi: DesktopApi = {
   mode: 'preview',
   appInfo: async () => ({
@@ -86,6 +126,10 @@ export const previewApi: DesktopApi = {
     throw { code: 'PreviewOnly', message: 'Core draft review is unavailable in browser preview. No configuration was reviewed.', retryable: false } satisfies ApiError;
   },
   proposeGitHubSetup: async () => { throw githubSetupError({ code: 'PreviewOnly' }); },
+  environmentRequirements: async (request) => {
+    if (!environmentRequestFits(request)) throw environmentError({ code: 'environment_request_invalid' });
+    return exampleEnvironment(request);
+  },
   openConfigEdit: editUnavailable,
   prepareConfigEdit: editUnavailable,
   applyConfigEdit: editUnavailable,

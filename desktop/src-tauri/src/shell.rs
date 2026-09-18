@@ -71,6 +71,14 @@ async fn catalog(state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_result!(observed, value, &result);
     result
 }
+#[tauri::command]
+async fn environment_requirements(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment::Requirements, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    let args = crate::environment::request(request_body(&request)?)?;
+    not_closing(&state)?;
+    state.bridge.environment_requirements(args).await
+}
 #[tauri::command(rename_all = "camelCase")]
 async fn project_snapshot(project_id: String, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
@@ -1111,7 +1119,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            app_info, choose_project, project_snapshot, catalog, validate_config, suggest_config, preview_config,
+            app_info, choose_project, project_snapshot, catalog, environment_requirements, validate_config, suggest_config, preview_config,
             propose_github_setup,
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,
             github_workflow_edit_open, github_workflow_edit_prepare, github_workflow_edit_apply,

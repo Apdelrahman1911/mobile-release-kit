@@ -45,14 +45,13 @@ from .local_signing import SigningLease, local_signing_lease
 from .owned_process import OUTPUT_LIMIT, ProcessError, run_owned
 from .reporting import FAILING_STATUSES, Finding, Report, Status
 from .stores import online_preflight_findings
+from .toolchain_policy import XCODE_BUILD, XCODE_VERSION
 
 ANDROID_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+$")
 IOS_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*(?:\.[A-Za-z0-9][A-Za-z0-9-]*)+$")
 FINGERPRINT_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 TEAM_ID_RE = re.compile(r"^[A-Z0-9]{10}$")
 APP_STORE_ID_RE = re.compile(r"^[0-9]+$")
-XCODE_VERSION = "26.3"
-XCODE_BUILD = "17C529"
 
 
 def _normalized_fingerprint(value: str | None) -> str | None:

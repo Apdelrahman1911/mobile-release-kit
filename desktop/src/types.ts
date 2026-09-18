@@ -2,6 +2,7 @@ import type { AssetSessionApi } from './assetSessionTypes.ts';
 import type { GitHubWorkflowEditApi } from './githubWorkflowEditTypes.ts';
 import type { GitHubConnectionApi, GitHubConnectionHelp } from './githubConnectionTypes.ts';
 import type { MetadataTextApi, MetadataTextGuide } from './metadataText.ts';
+import type { EnvironmentRequest, EnvironmentResult } from './environment.ts';
 
 // Closed passive service contracts. Python owns field policy and assurance.
 export type JsonPrimitive = string | number | boolean | null;
@@ -371,6 +372,7 @@ export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitH
   suggestConfig(hints: SuggestionHints): Promise<ConfigSuggestion>;
   configPreview(base: JsonObject | null, draft: JsonObject): Promise<ConfigPreview>;
   proposeGitHubSetup(request: GitHubSetupRequest): Promise<GitHubSetupResult>;
+  environmentRequirements(request: EnvironmentRequest): Promise<EnvironmentResult>;
   openConfigEdit(projectId: string): Promise<ConfigEditStatus>;
   prepareConfigEdit(request: PrepareConfigEditRequest): Promise<ConfigEditStatus>;
   applyConfigEdit(sessionId: string, planToken: string): Promise<ConfigEditStatus>;

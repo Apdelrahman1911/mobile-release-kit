@@ -30,6 +30,8 @@ from ._profile_callers import fatal_cancellation_error
 from .errors import CredentialError, ValidationError
 from .init_transaction import ALL_STATE_NAMES as INIT_STATES, _rename_function
 from .owned_process import ProcessCleanupError, ProcessError, preserve_lifetime_error
+from .toolchain_policy import (BUNDLETOOL_MAX_BYTES as _BUNDLETOOL_BYTES,
+                               BUNDLETOOL_SHA256 as _BUNDLETOOL_SHA256)
 
 if TYPE_CHECKING:
     from .local_signing import SigningLease
@@ -43,8 +45,6 @@ _PENDING = "build-inputs"
 _TERMINAL = "build-inputs-complete.json"
 _TERMINAL_STAGE = "build-inputs-complete.stage"
 _CONFIRM = "project-build-inputs-are-idle-and-restore-owned-state"
-_BUNDLETOOL_BYTES = 32_520_401
-_BUNDLETOOL_SHA256 = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
 _TOKEN = re.compile(r"[0-9a-f]{32}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _ENV_LOCK = threading.Lock()

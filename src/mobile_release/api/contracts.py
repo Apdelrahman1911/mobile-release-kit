@@ -37,6 +37,68 @@ class Assurance(TypedDict):
     releaseReadiness: Literal["unknown"]
 
 
+EnvironmentPlatform = Literal["android", "ios"]
+EnvironmentOperation = Literal["build", "artifact-validation"]
+EnvironmentRole = Literal["android-jdk", "android-gradle-wrapper", "android-sdk", "android-bundletool",
+                          "apple-macos", "apple-xcode", "apple-signing-tools", "apple-codesign",
+                          "apple-openssl", "apple-security-framework"]
+
+
+class EnvironmentHelp(TypedDict):
+    label: str
+    requiredness: Literal["required", "optional", "conditional"]
+    requiredWhen: str
+    what: str
+    why: str
+    where: str
+    format: str
+    failure: str
+
+
+class EnvironmentContext(TypedDict):
+    platform: EnvironmentPlatform
+    operation: EnvironmentOperation
+
+
+class EnvironmentBaseline(TypedDict):
+    kind: Literal["exact-pin", "workflow-reference", "project-defined", "platform-defined", "none"]
+    version: str | None
+    build: str | None
+    sha256: str | None
+    maxBytes: int | None
+
+
+class EnvironmentRequirement(TypedDict):
+    id: EnvironmentRole
+    kind: Literal["external-toolchain", "project-file", "bundled-helper", "native-os"]
+    presence: Literal["unknown"]
+    versionState: Literal["unknown"]
+    inspection: Literal["not-run"]
+    baseline: EnvironmentBaseline
+    help: EnvironmentHelp
+
+
+class EnvironmentSelectorHelp(TypedDict):
+    platform: EnvironmentHelp
+    operation: EnvironmentHelp
+
+
+class EnvironmentRequirementsResult(TypedDict):
+    schemaVersion: Literal[1]
+    policyVersion: Literal["environment-requirements-v1"]
+    hostPlatform: Literal["linux", "macos", "windows", "other"]
+    context: EnvironmentContext
+    platformEnabled: bool
+    state: Literal["requirements-only", "platform-disabled"]
+    coverage: Literal["toolchain-prerequisites-only"]
+    nativeInspection: Literal["unavailable"]
+    dependencyCompleteness: Literal["unknown"]
+    requirements: list[EnvironmentRequirement]
+    help: EnvironmentSelectorHelp
+    limitations: list[str]
+    assurance: Assurance
+
+
 class FieldHelp(TypedDict):
     path: str
     label: str

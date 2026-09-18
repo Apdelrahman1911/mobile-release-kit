@@ -19,6 +19,8 @@ class EngineContractTests(unittest.TestCase):
     def test_closed_envelope_and_identity(self):
         request = engine.parse_request(frame())
         self.assertEqual((request.id, request.method, request.params), ("test-1", "capabilities", {}))
+        environment = engine.parse_request(frame(method="environment.requirements", params={"draft": {}, "platform": "ios", "operation": "build"}))
+        self.assertEqual(environment.method, "environment.requirements")
         for changes in (
             {"protocol": True}, {"protocol": 2}, {"id": "../other"}, {"id": ""},
             {"id": "x" * 65}, {"method": "run"}, {"method": []}, {"params": []},

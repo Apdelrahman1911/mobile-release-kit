@@ -66,12 +66,18 @@ mod tests {
     fn original_load_and_actual_hook_install_are_both_required() {
         for hook_before_start in [false, true] {
             let mut state = DocumentLifetime::default();
+            assert!(!state.original_bound());
             if hook_before_start { assert_eq!(state.crash_hook_installed(), DocumentAction::None); }
             assert_eq!(state.navigation(true), (true, DocumentAction::None));
+            assert!(!state.original_bound());
             assert_eq!(state.started(true), DocumentAction::None);
+            assert!(!state.original_bound());
             if !hook_before_start { assert_eq!(state.crash_hook_installed(), DocumentAction::None); }
+            assert!(!state.original_bound());
             assert_eq!(state.finished(true), DocumentAction::Bind);
+            assert!(state.original_bound());
             assert_eq!(state.navigation(true), (false, DocumentAction::Lost));
+            assert!(!state.original_bound());
             assert_eq!(state.finished(true), DocumentAction::None);
             assert_eq!(state.crash_hook_installed(), DocumentAction::None);
         }

@@ -15,6 +15,7 @@ from ..config import parse_config_text
 from ..errors import ConfigurationError
 from ._catalog import catalog, requirement_descriptors
 from ._credential_assessment import assess_credentials
+from ._environment import environment_requirements
 from ._json import bounded_json_text
 from ._preview import preview_config, suggest_config
 from ._github_setup import propose_github_setup
@@ -25,7 +26,8 @@ from .contracts import ApiError, CapabilitiesResult, ValidateResult, assurance, 
 
 __all__ = ["ApiError", "execute"]
 METHODS = ("capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
-           "github.setup.propose", "credentials.assess", "metadata.text.observe", "metadata.text.validate")
+           "github.setup.propose", "credentials.assess", "metadata.text.observe", "metadata.text.validate",
+           "environment.requirements")
 _FUTURE_ACTIONS = (
     "project.initialize", "config.save", "doctor", "preflight.offline",
     "preflight.signing", "preflight.online", "android.build", "ios.build",
@@ -87,6 +89,8 @@ def execute(method: str, params: dict[str, Any]) -> dict[str, Any]:
         # let the older generic parameter errors or validate_draft's reflective
         # configuration issues escape through its secret-bearing boundary.
         return assess_credentials(params)
+    if method == "environment.requirements":
+        return environment_requirements(params)
     if method == "metadata.text.observe":
         return observe_metadata_text(params)
     if method == "metadata.text.validate":

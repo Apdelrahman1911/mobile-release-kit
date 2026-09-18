@@ -5,6 +5,7 @@ compile_error!("development-runtime is forbidden when debug assertions are disab
 
 pub mod error;
 pub mod protocol;
+mod environment;
 pub mod runtime;
 // First protected-runtime inspection backend only. It is not connected to a
 // launch path and cannot construct an executable qualified-runtime capability.

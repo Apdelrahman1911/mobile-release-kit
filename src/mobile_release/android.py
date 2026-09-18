@@ -20,13 +20,12 @@ from .owned_process import ProcessError, run_owned
 from .errors import ValidationError
 from .reporting import Finding, Status
 from .tooling import private_build_directory
+from .toolchain_policy import BUNDLETOOL_SHA256, BUNDLETOOL_VERSION
 
 MAX_ENTRY_SIZE = 512 * 1024 * 1024
 MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024
 MAX_ENTRY_COUNT = 100_000
 ALLOWED_ARTIFACT_NAMES = {"android-aab", "android-mapping", "android-native-symbols"}
-BUNDLETOOL_VERSION = "1.18.3"
-BUNDLETOOL_SHA256 = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
 
 
 def _validation_environment() -> dict[str, str]:

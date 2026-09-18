@@ -8,6 +8,7 @@ import type { WorkspaceAction } from './drafts.ts';
 import { configurationOwnerReason, editRetainsDraft, editStartReason } from './configEdit.ts';
 import { ConfigEditController } from './configEditController.ts';
 import { GitHubSetupController } from './githubSetupController.ts';
+import { EnvironmentController } from './environment.ts';
 import { GitHubConnectionController } from './githubConnectionController.ts';
 import { connectionRepository } from './githubConnectionProtocol.ts';
 import type { GitHubConnectionObservationPort, GitHubConnectionTokenHandoff } from './githubConnectionTypes.ts';
@@ -72,6 +73,7 @@ export function App() {
   const workspaceRef = useRef(workspace);
   const editControllerRef = useRef<ConfigEditController | null>(null);
   const githubControllerRef = useRef<GitHubSetupController | null>(null);
+  const environmentControllerRef = useRef<EnvironmentController | null>(null);
   const connectionControllerRef = useRef<GitHubConnectionController | null>(null);
   const connectionHelpGeneration = useRef<object>({});
   const workflowControllerRef = useRef<GitHubWorkflowEditController | null>(null);
@@ -109,6 +111,7 @@ export function App() {
       applicationRepositoryRef.current = ''; setApplicationRepository('');
     }
     workspaceRef.current = next;
+    environmentControllerRef.current?.syncProject();
     metadataControllerRef.current?.syncProject();
     assetControllerRef.current?.syncProject();
     setWorkspace(next);
@@ -132,6 +135,12 @@ export function App() {
   }, () => workflowControllerRef.current?.syncContext()));
   githubControllerRef.current = githubSetup;
   const githubState = useSyncExternalStore(githubSetup.subscribe, githubSetup.getSnapshot, githubSetup.getSnapshot);
+  const [environment] = useState(() => new EnvironmentController(() => {
+    const current = workspaceRef.current;
+    return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
+  }));
+  environmentControllerRef.current = environment;
+  const environmentState = useSyncExternalStore(environment.subscribe, environment.getSnapshot, environment.getSnapshot);
   // Safe observation is separate from the compiled-disabled token entry path.
   const [githubConnection] = useState(() => new GitHubConnectionController());
   connectionControllerRef.current = githubConnection;
@@ -186,6 +195,7 @@ export function App() {
     connectionHandoffRef.current = null; connectionPortRef.current = null;
     void githubConnection.attach(null);
     githubSetup.beginConnection();
+    environment.beginConnection();
     metadataText.beginConnection();
     setLoading(true);
     setBootError(null);
@@ -207,6 +217,7 @@ export function App() {
       if (generation !== bootGeneration.current) return;
       setInfo(appInfo);
       githubSetup.setConnection(connection, appInfo);
+      environment.setConnection(connection, appInfo);
       metadataText.setConnection(connection, appInfo);
       if (connection.mode === 'preview' || methodReason(appInfo, 'catalog', connection.mode) === null) {
         try {
@@ -231,12 +242,12 @@ export function App() {
       if (generation === bootGeneration.current) {
         connectionHandoffRef.current = null; connectionPortRef.current = null;
         githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null);
-        setInfo(null); setCatalog(null); githubSetup.connectionUnavailable(); setBootError(apiError(error));
+        setInfo(null); setCatalog(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); setBootError(apiError(error));
       }
     } finally {
       if (generation === bootGeneration.current) setLoading(false);
     }
-  }, [githubSetup, githubConnection, metadataText, syncConnectionContext]);
+  }, [githubSetup, githubConnection, environment, metadataText, syncConnectionContext]);
 
   useEffect(() => {
     void bootstrap();
@@ -246,6 +257,7 @@ export function App() {
   useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
   useEffect(() => () => configEdit.dispose(), [configEdit]);
   useEffect(() => () => githubSetup.dispose(), [githubSetup]);
+  useEffect(() => () => environment.dispose(), [environment]);
   useEffect(() => () => githubConnection.dispose(), [githubConnection]);
   useEffect(() => { if (api) void workflowEdit.connect(api); }, [api, workflowEdit]);
   useEffect(() => () => workflowEdit.dispose(), [workflowEdit]);
@@ -413,7 +425,8 @@ export function App() {
         {page !== 'metadata' && <MetadataTextSave state={metadataState} controller={metadataText} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
         {page === 'dashboard' && <Dashboard session={session} info={info} preview={preview} chooseDisabled={chooseDisabled} refreshReason={loading ? 'Capabilities are loading.' : refreshReason} onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="A little clarity before the next release." description="Edit a practical, schema-driven draft. The bundled core provides every field, requirement, and validation rule." />{editor()}</>}
-        {page === 'environment' && <Environment info={info} preview={preview} onRetry={() => void bootstrap()} loading={loading} />}
+        {page === 'environment' && <Environment info={info} preview={preview} session={session} state={environmentState} controller={environment}
+          onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} onHelp={setHelp} />}
         {page === 'metadata' && <Metadata catalog={catalog} textEditor={<MetadataTextEditor state={metadataState} controller={metadataText} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}>{editor(true)}</Metadata>}
         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} nativeReview={workflowPanel(true)}

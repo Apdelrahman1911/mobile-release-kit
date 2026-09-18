@@ -1,4 +1,5 @@
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
+import { environmentError, environmentRequestFits, parseEnvironmentResult } from './environment.ts';
 import { githubSetupError, githubSetupRequestFits, githubSetupResultMatches, parseCatalogGitHubSetup, parseGitHubSetupResult } from './githubSetupProtocol.ts';
 import { parseCatalogCredentialGuide } from './credentialGuide.ts';
 import { assetError, assetRequestFits, parseAssetStatus } from './assetSessionProtocol.ts';
@@ -103,6 +104,17 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     validate: (draft: JsonObject) => call<ValidationResult>('validate_config', { draft }),
     suggestConfig: (hints: SuggestionHints) => call<ConfigSuggestion>('suggest_config', { hints }),
     configPreview: (base: JsonObject | null, draft: JsonObject) => call<ConfigPreview>('preview_config', { base, draft }),
+    environmentRequirements: async (input) => {
+      try {
+        if (mode !== 'native') throw { code: 'environment_unavailable' };
+        if (!environmentRequestFits(input)) throw { code: 'environment_request_invalid' };
+        const request = structuredClone(input);
+        const value = await invoke<unknown>('environment_requirements', structuredClone({ draft: request.draft, platform: request.platform, operation: request.operation }));
+        const result = parseEnvironmentResult(value, request);
+        if (!result) throw { code: 'protocol_error' };
+        return result;
+      } catch (error) { throw environmentError(error); }
+    },
     proposeGitHubSetup: async (input) => {
       try {
         if (!githubSetupRequestFits(input)) throw { code: 'invalid_request' };

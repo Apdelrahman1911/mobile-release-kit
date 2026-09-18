@@ -83,6 +83,12 @@ methods are:
   draft, with default/example provenance and no invented detected platform.
 - `config.preview`, `{base, draft}` — bounded, redacted known-field changes and
   shared-policy field context; no filesystem revision, save token or writes.
+- `environment.requirements`, `{draft, platform, operation}` — current supplied
+  draft guidance for `android|ios` and `build|artifact-validation`. Expected pins
+  and practical help are core-owned; tool presence/version/readiness stay unknown.
+  The actual core host is distinct from the selected release platform. Disabled
+  draft platforms return no applicable rows. There is no filesystem/tool probe,
+  credential lookup, native execution or network access in this method.
 - `github.setup.propose`, `{draft, toolingRepository, toolingSha, suppliedSnapshot}`
   — four core-generated workflow proposals and desired setup guidance, with no
   repository observation or Apply authority. `suppliedSnapshot` is explicitly
@@ -138,6 +144,15 @@ rejection has exactly `protocol`, `id`, `ok: false`, and
 transport cleanup; the caller must check `ok`, not just the exit code. Startup,
 framing, unexpected service, write and close failures exit nonzero. Raw inputs
 and tracebacks are not diagnostics.
+
+Environment requirements narrow the whole response envelope, including its
+newline, to 65,536 bytes; draft input is at most 512 KiB. Fixed errors never echo
+malformed field names, draft values or exception messages. Project, draft,
+baseline, activity and connection generations bind UI responses; changes
+invalidate synchronously, including switching away and back. Earlier requirements
+are explicitly stale, not evidence for the current selection. A deliberate
+browser fixture remains labelled as example data across connection changes.
+No native doctor or release gate is enabled.
 
 General limits are 1 MiB request, 4 MiB response, 64 KiB diagnostics, 32 nesting levels and
 20,000 JSON values. Duplicate keys, non-finite numbers, invalid Unicode, extra

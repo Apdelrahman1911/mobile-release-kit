@@ -22,6 +22,7 @@ from .credential_policy import (CREDENTIALS_FILE_MAX_BYTES, PRIVATE_SMALL_MAX_BY
                                 PRIVATE_GENERAL_MAX_BYTES)
 from .owned_process import ProcessCleanupError
 from ._profile_callers import fatal_cancellation_error
+from .toolchain_policy import BUNDLETOOL_MAX_BYTES, BUNDLETOOL_SHA256, BUNDLETOOL_VERSION
 
 if TYPE_CHECKING:
     from .build_inputs import FiniteScratch, InputSnapshot
@@ -29,12 +30,6 @@ if TYPE_CHECKING:
 
 ExternalKind = Literal["credentials-file", "private-small", "private-general", "public-tool"]
 PrivateKind = Literal["credentials-file", "private-small", "private-general"]
-
-BUNDLETOOL_VERSION = "1.18.3"
-BUNDLETOOL_SHA256 = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
-# Upstream release1.18.3 asset329035725 metadata, independently recorded before
-# this constant was selected. The size is a bound, never a substitute for SHA256.
-BUNDLETOOL_MAX_BYTES = 32_520_401
 
 _READ_CHUNK = 1024 * 1024
 _MAX_COMPONENTS = 128

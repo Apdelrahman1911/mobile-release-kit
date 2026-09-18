@@ -214,6 +214,12 @@ class ApiPureTests(unittest.TestCase):
                 fresh.execute("catalog", {})
                 fresh.execute("capabilities", {})
                 fresh.execute("config.validate", {"draft": draft()})
+                # Environment requirements stay in the passive import graph.
+                # Unlike a snapshot, this method must perform no file probing.
+                with patch.object(os, "open", side_effect=AssertionError("filesystem open")), \
+                     patch.object(os, "stat", side_effect=AssertionError("filesystem stat")), \
+                     patch.object(Path, "open", side_effect=AssertionError("path open")):
+                    fresh.execute("environment.requirements", {"draft": draft(), "platform": "android", "operation": "build"})
                 self.assertFalse(forbidden & set(sys.modules))
                 # Negative control: the guard actually rejects a forbidden route.
                 with self.assertRaisesRegex(AssertionError, "forbidden runtime import"):
@@ -229,7 +235,8 @@ class ApiPureTests(unittest.TestCase):
             self.assertEqual(methods, {"capabilities": True, "catalog": True, "project.snapshot": False,
                                        "config.validate": True, "config.suggest": True, "config.preview": True,
                                        "github.setup.propose": True, "credentials.assess": True,
-                                       "metadata.text.observe": False, "metadata.text.validate": True})
+                                       "metadata.text.observe": False, "metadata.text.validate": True,
+                                       "environment.requirements": True})
             self.assertTrue(execute("config.validate", {"draft": draft()})["valid"])
             with self.assertRaises(ApiError) as caught:
                 execute("project.snapshot", {"root": "C:\\selected"})

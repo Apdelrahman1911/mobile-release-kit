@@ -46,7 +46,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
     def test_core_inventory_rejects_substitutions_and_malformed_rows(self):
         original = [{"path": path, "size": 1, "sha256": "4" * 64} for path in helper.GTK_CORE_PATHS]
         helper.validate_gtk_core_inventory(original)
-        self.assertEqual(len(original), 76)
+        self.assertEqual(len(original), 78)
         variants = (None, {}, tuple(original), original[:-1], original + [original[0]],
                     [original[0]] + original[:-1], list(reversed(original)))
         for value in variants:
@@ -79,10 +79,11 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         rust_paths = re.findall(r'^    source!\("([^\"]+)"\),$', rust_block, re.MULTILINE)
         self.assertEqual(python_paths, rust_paths)
         self.assertEqual(python_paths, sorted(set(python_paths)))
-        self.assertEqual(len(python_paths), 197)
+        self.assertEqual(len(python_paths), 201)
         self.assertNotIn("len(SOURCES) == 154", driver)
         self.assertNotIn("len(SOURCES) == 182", driver)
-        self.assertEqual(driver.count("len(SOURCES) == 197"), 2)
+        self.assertNotIn("len(SOURCES) == 197", driver)
+        self.assertEqual(driver.count("len(SOURCES) == 201"), 2)
         self.assertEqual(tuple(path.removeprefix("src/") for path in python_paths if path.startswith("src/")),
                          helper.GTK_CORE_PATHS)
         package = root / "src/mobile_release"
@@ -100,10 +101,10 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         for filename, name in registrations:
             self.assertEqual(filename, name)
             self.assertIn(f"desktop/src-tauri/src/{name}.rs", python_paths)
-        for name in ("github_workflow_edit_protocol", "github_connection_protocol", "github_connection_session",
+        for name in ("environment", "github_workflow_edit_protocol", "github_connection_protocol", "github_connection_session",
                      "metadata_text_commands", "metadata_text_edit_protocol"):
             self.assertIn(f"desktop/src-tauri/src/{name}.rs", helper.GTK_COMPILE_SOURCES)
-        for relative in ("desktop/src/components/MetadataTextEditor.tsx", "desktop/src/metadataText.ts",
+        for relative in ("desktop/src/environment.ts", "desktop/src/components/MetadataTextEditor.tsx", "desktop/src/metadataText.ts",
                          "desktop/src/metadataTextEditController.ts", "desktop/src/metadataTextProtocol.ts"):
             self.assertIn(relative, python_paths)
         # These test-cfg owners and includes also compile in the SG1 target;
