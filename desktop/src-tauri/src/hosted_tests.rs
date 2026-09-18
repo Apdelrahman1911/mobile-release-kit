@@ -3057,7 +3057,10 @@ pub(crate) mod github_tls {
         "python_not_regular", "source_layout", "source_sha_shape", "test_root_not_fresh", "test_root_unavailable",
         "tls_admission_unclassified", "tls_artifact_size", "tls_compile_anchor_missing", "tls_compiled_fixture_binding",
         "tls_compiled_pem_binding", "tls_current_artifact", "tls_deadline_fixed_resolver_bytes", "tls_deadline_original_identity",
-        "tls_deadline_privilege_drop", "tls_deadline_privilege_status", "tls_deadline_profile_layout", "tls_dynamic_nss_unsupported",
+        "tls_deadline_privilege_ambient", "tls_deadline_privilege_bounding", "tls_deadline_privilege_drop",
+        "tls_deadline_privilege_effective", "tls_deadline_privilege_groups", "tls_deadline_privilege_inheritable",
+        "tls_deadline_privilege_nonewprivs", "tls_deadline_privilege_permitted", "tls_deadline_privilege_status",
+        "tls_deadline_profile_layout", "tls_dynamic_nss_unsupported",
         "tls_file_bound", "tls_file_changed", "tls_file_metadata", "tls_file_open", "tls_file_read", "tls_file_size",
         "tls_fixed_pem", "tls_fixed_role", "tls_genuine_ssl_binding", "tls_host_or_route", "tls_input_bytes", "tls_input_limit",
         "tls_input_order", "tls_input_path", "tls_input_roster", "tls_inputs_binding", "tls_inputs_compile_binding",
@@ -4620,6 +4623,33 @@ pub(crate) mod github_tls {
                 value.into_string().map_err(|_| "tls_parent_environment")?))).collect::<Check<BTreeMap<_, _>>>()?;
             require(actual == expected, "tls_parent_environment")
         }
+        fn privilege_status(status: &str) -> Check<()> {
+            require(!status.is_empty() && status.len() <= 64 * 1024 && status.ends_with('\n')
+                && !status.bytes().any(|byte| matches!(byte, 0 | b'\r')), "tls_deadline_privilege_status")?;
+            for (name, expected, code) in [
+                ("CapInh:", "0000000000000000", "tls_deadline_privilege_inheritable"),
+                ("CapPrm:", "0000000000000000", "tls_deadline_privilege_permitted"),
+                ("CapEff:", "0000000000000000", "tls_deadline_privilege_effective"),
+                ("CapBnd:", "0000000000000000", "tls_deadline_privilege_bounding"),
+                ("CapAmb:", "0000000000000000", "tls_deadline_privilege_ambient"),
+                ("NoNewPrivs:", "1", "tls_deadline_privilege_nonewprivs"),
+                ("Groups:", "", "tls_deadline_privilege_groups"),
+            ] {
+                let mut rows = status.split_terminator('\n').filter_map(|line| line.strip_prefix(name));
+                let value = rows.next().ok_or(code)?;
+                require(rows.next().is_none(), code)?;
+                let admitted = if name == "Groups:" {
+                    // Empty membership can include kernel horizontal padding.
+                    // Never trim Unicode whitespace or accept any numeric group.
+                    value.strip_prefix('\t').is_some_and(|suffix| suffix.bytes().all(|byte| matches!(byte, b' ' | b'\t')))
+                } else {
+                    // Capabilities and no-new-privs retain their exact values.
+                    value.strip_prefix('\t') == Some(expected)
+                };
+                require(admitted, code)?;
+            }
+            Ok(())
+        }
         pub(super) fn admit_resolver(manifest: &Manifest, profile: &'static str) -> Check<()> {
             require(matches!(profile, "hosts" | "dns-withhold") && environment("MRK_GITHUB_TLS_PROFILE")? == profile
                 && PathBuf::from(environment("MRK_DESKTOP_TEST_ROOT")?) == manifest.job_root.join("github-tls-deadline"),
@@ -4636,11 +4666,7 @@ pub(crate) mod github_tls {
                 "tls_deadline_original_identity")?;
             let status = proc_bytes("/proc/self/status", 64 * 1024)?;
             let status = std::str::from_utf8(&status).map_err(|_| "tls_deadline_privilege_status")?;
-            for (name, value) in [("CapInh:", "0000000000000000"), ("CapPrm:", "0000000000000000"), ("CapEff:", "0000000000000000"),
-                ("CapBnd:", "0000000000000000"), ("CapAmb:", "0000000000000000"), ("NoNewPrivs:", "1"), ("Groups:", "")] {
-                require(status.lines().filter_map(|line| line.strip_prefix(name)).collect::<Vec<_>>() == vec![format!("\t{value}")],
-                    "tls_deadline_privilege_drop")?;
-            }
+            privilege_status(status)?;
             resolver_runtime(manifest)
         }
 
@@ -5312,6 +5338,60 @@ pub(crate) mod github_tls {
             // DATA-only predicates. These tests create no Child, descriptor,
             // socket, namespace, file or certificate and certify no native run.
             use super::*;
+
+            fn privilege_status_fixture(group_padding: &str) -> String {
+                format!(concat!("Name:\tinert-status-model\n", "CapInh:\t0000000000000000\n",
+                    "CapPrm:\t0000000000000000\n", "CapEff:\t0000000000000000\n",
+                    "CapBnd:\t0000000000000000\n", "CapAmb:\t0000000000000000\n",
+                    "NoNewPrivs:\t1\n", "Groups:\t{}\n"), group_padding)
+            }
+            #[test]
+            fn privilege_status_accepts_only_empty_group_padding() {
+                for padding in ["", " ", "\t \t"] {
+                    assert_eq!(privilege_status(&privilege_status_fixture(padding)), Ok(()));
+                }
+                for membership in ["0", "0 ", "1001 1002 ", "\u{a0}", "\u{2003}", "\u{b}"] {
+                    assert_eq!(privilege_status(&privilege_status_fixture(membership)), Err("tls_deadline_privilege_groups"));
+                }
+                let missing_separator = privilege_status_fixture("").replace("Groups:\t\n", "Groups:\n");
+                assert_eq!(privilege_status(&missing_separator), Err("tls_deadline_privilege_groups"));
+                // Additional ordinary kernel fields carry no privilege authority.
+                assert_eq!(privilege_status(&(privilege_status_fixture(" ") + "FutureKernelField:\t1\n")), Ok(()));
+            }
+            #[test]
+            fn privilege_status_refuses_incomplete_unsafe_or_ambiguous_rows() {
+                let valid = privilege_status_fixture(" ");
+                for (name, replacement, code) in [
+                    ("CapInh:", "\t0000000000000001", "tls_deadline_privilege_inheritable"),
+                    ("CapPrm:", "\t0000000000000001", "tls_deadline_privilege_permitted"),
+                    ("CapEff:", "\t0000000000000001", "tls_deadline_privilege_effective"),
+                    ("CapBnd:", "\t0000000000000001", "tls_deadline_privilege_bounding"),
+                    ("CapAmb:", "\t0000000000000001", "tls_deadline_privilege_ambient"),
+                    ("NoNewPrivs:", "\t0", "tls_deadline_privilege_nonewprivs"),
+                    ("Groups:", "\t0 ", "tls_deadline_privilege_groups"),
+                ] {
+                    let mut rows = valid.lines().map(str::to_owned).collect::<Vec<_>>();
+                    let index = rows.iter().position(|row| row.starts_with(name)).unwrap();
+                    let original = rows[index].clone();
+                    rows[index] = format!("{name}{replacement}");
+                    assert_eq!(privilege_status(&(rows.join("\n") + "\n")), Err(code));
+                    rows.remove(index);
+                    assert_eq!(privilege_status(&(rows.join("\n") + "\n")), Err(code));
+                    assert_eq!(privilege_status(&format!("{valid}{original}\n")), Err(code));
+                }
+                for payload in [" 0000000000000000", "\t0", "\t0000000000000000 ", "\t\t0000000000000000"] {
+                    let changed = valid.replace("CapEff:\t0000000000000000", &format!("CapEff:{payload}"));
+                    assert_eq!(privilege_status(&changed), Err("tls_deadline_privilege_effective"));
+                }
+                for payload in [" 1", "\t01", "\t1 ", "\t\t1"] {
+                    let changed = valid.replace("NoNewPrivs:\t1", &format!("NoNewPrivs:{payload}"));
+                    assert_eq!(privilege_status(&changed), Err("tls_deadline_privilege_nonewprivs"));
+                }
+                for malformed in [String::new(), valid.trim_end_matches('\n').to_owned(), valid.replace('\n', "\r\n"),
+                    valid.replace("Groups:\t ", "Groups:\t\0"), "x".repeat(64 * 1024) + "\n"] {
+                    assert_eq!(privilege_status(&malformed), Err("tls_deadline_privilege_status"));
+                }
+            }
 
             #[test]
             fn maps_rows_preserve_opaque_names_and_original_backing_columns() {

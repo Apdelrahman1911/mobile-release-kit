@@ -4779,6 +4779,10 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         self.assertEqual(len(codes), len(set(codes)))
         self.assertEqual(set(codes), helper.GITHUB_TLS_ADMISSION_CODES)
         self.assertIn("tls_admission_unclassified", codes)
+        self.assertTrue({"tls_deadline_privilege_inheritable", "tls_deadline_privilege_permitted",
+                         "tls_deadline_privilege_effective", "tls_deadline_privilege_bounding",
+                         "tls_deadline_privilege_ambient", "tls_deadline_privilege_nonewprivs",
+                         "tls_deadline_privilege_groups", "tls_deadline_privilege_drop"}.issubset(codes))
         self.assertEqual(rust.count("refuse_before_cases("), 3)  # Definition + exactly two pre-case calls.
         self.assertIn("Err(code) => refuse_before_cases(None, code)", rust)
         self.assertIn("Err(code) => refuse_before_cases(Some(profile), code)", rust)
