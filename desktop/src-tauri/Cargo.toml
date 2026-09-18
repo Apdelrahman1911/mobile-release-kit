@@ -54,6 +54,13 @@ mrk-linux-mount-observation = { path = "../native/linux-mount-observation" }
 [build-dependencies]
 tauri-build = { version = "=2.6.3", optional = true, features = [] }
 
+# Keep complete runtime byte hashing inside the original test admission clocks:
+# optimize the existing hash implementation, never omit checks or widen deadlines.
+[profile.test.package.sha2]
+opt-level = 3
+debug-assertions = true
+overflow-checks = true
+
 [lints.rust]
 unsafe_code = "forbid"
 

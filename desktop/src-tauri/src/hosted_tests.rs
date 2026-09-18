@@ -4711,6 +4711,10 @@ pub(crate) mod github_tls {
             let limit = rustix::process::getrlimit(rustix::process::Resource::Fsize);
             limit.current.zip(limit.maximum).is_some_and(|(soft, hard)| soft > 0 && soft <= hard && hard <= 1024 * 1024)
         }
+        fn probe_spawn_admission(now: Instant, endpoint: Instant, file_limit: bool) -> Check<()> {
+            require(now + CLIENT_RESERVE <= endpoint, "tls_probe_spawn_deadline")?;
+            require(file_limit, "tls_probe_spawn_file_limit")
+        }
         fn ambient_values(ca: &Path, root: &Path, keylog: &Path) -> Check<BTreeMap<String, String>> {
             let mut environment = BTreeMap::new();
             for key in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
@@ -4880,7 +4884,7 @@ pub(crate) mod github_tls {
                     command.args(["-I", "-S", "-B"]).arg(&runtime.bootstrap).arg(&runtime.core)
                         .current_dir(&runtime.cwd).env_clear().envs(environment)
                         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
-                    require(Instant::now() + CLIENT_RESERVE <= endpoint && nonzero_file_limit(), "tls_probe_spawn_deadline")?;
+                    probe_spawn_admission(Instant::now(), endpoint, nonzero_file_limit())?;
                     let launch = Instant::now(); // L, immediately before THIS actual original spawn call.
                     command.spawn().map(|child| (child, launch)).map_err(|_| "tls_probe_spawn_refused")
                 }));
@@ -5366,6 +5370,42 @@ pub(crate) mod github_tls {
             // DATA-only predicates. These tests create no Child, descriptor,
             // socket, namespace, file or certificate and certify no native run.
             use super::*;
+
+            #[test]
+            fn probe_spawn_preserves_reserve_and_attributes_file_limit() {
+                let now = Instant::now();
+                let endpoint = now + CLIENT_RESERVE;
+                let tick = Duration::from_nanos(1);
+                assert_eq!(probe_spawn_admission(now, endpoint, true), Ok(()));
+                assert_eq!(probe_spawn_admission(now, endpoint + tick, true), Ok(()));
+                assert_eq!(probe_spawn_admission(now, endpoint, false), Err("tls_probe_spawn_file_limit"));
+                assert_eq!(probe_spawn_admission(now + tick, endpoint, true), Err("tls_probe_spawn_deadline"));
+                assert_eq!(probe_spawn_admission(now + tick, endpoint, false), Err("tls_probe_spawn_deadline"));
+            }
+
+            #[test]
+            fn sha256_known_answers_and_bounded_streaming_diagnostic() {
+                assert_eq!(hash(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+                assert_eq!(hash(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+                let chunk = [b'a'; 64 * 1024];
+                let mut million = Sha256::new();
+                for _ in 0..(1_000_000 / chunk.len()) { million.update(&chunk); }
+                million.update(&chunk[..1_000_000 % chunk.len()]);
+                assert_eq!(format!("{:x}", million.finalize()),
+                    "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+
+                // One bounded hot-path observation, not a benchmark or a timing
+                // pass threshold. This is not full filesystem/runtime admission
+                // or native TLS evidence; every real byte check stays mandatory.
+                let started = Instant::now();
+                let mut digest = Sha256::new();
+                for _ in 0..(100_000_000 / chunk.len()) { digest.update(&chunk); }
+                digest.update(&chunk[..100_000_000 % chunk.len()]);
+                let digest = format!("{:x}", digest.finalize());
+                let elapsed_ns = started.elapsed().as_nanos();
+                assert_eq!(digest, "83d30385a4a11980275dc23de3fb49ff37b906cc841efa048a96c62d90ff3b5f");
+                println!("TLS_SHA256_100MB bytes=100000000 chunk_bytes=65536 elapsed_ns={elapsed_ns} sha256={digest}");
+            }
 
             // Literal producer wire keys, not Serialize-derived Rust DTOs. These
             // inert frames exercise decoding, not native peer/finality evidence.
