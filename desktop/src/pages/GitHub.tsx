@@ -6,8 +6,8 @@ import type { ProjectSession } from '../drafts.ts';
 import { githubSetupStartReason } from '../githubSetupController.ts';
 import type { GitHubAssertionInput, GitHubSetupController, GitHubSetupState } from '../githubSetupController.ts';
 import { GITHUB_WORKFLOWS } from '../githubSetupProtocol.ts';
-import type { AppInfo, GitHubComparison, GitHubHelpText, GitHubSetupProposed, Page } from '../types.ts';
-import { Badge, DisabledAction, ErrorNotice, Issues, PageHeading, SectionHeading } from '../components/Common.tsx';
+import type { AppInfo, CredentialHelp, GitHubComparison, GitHubHelpText, GitHubSetupProposed, HelpContent, Page } from '../types.ts';
+import { Badge, DisabledAction, ErrorNotice, HelpButton, Issues, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
 
 const comparisonLabels: Record<GitHubComparison, string> = {
@@ -43,7 +43,7 @@ function draftBranch(session: ProjectSession | null, path: string): string {
   return typeof value === 'string' ? value || 'Not set in this draft' : value === undefined ? 'Not set in this draft' : 'Not a text value — review Project settings';
 }
 
-function Proposal({ result }: { result: GitHubSetupProposed }) {
+function Proposal({ result, credentialHelp, onHelp }: { result: GitHubSetupProposed; credentialHelp: CredentialHelp[] | null; onHelp: (help: HelpContent) => void }) {
   return <section className="github-proposal" aria-label="Read-only GitHub setup proposal">
     <div className="card">
       <SectionHeading title="Passive proposal — nothing applied by this preview" description="Complete caller text from the shared core. This preview saves no files and observes no GitHub, Git or Store state. Any separate native operation is reported in Local workflow files."><Badge tone="info">GitHub not contacted</Badge></SectionHeading>
@@ -83,18 +83,22 @@ function Proposal({ result }: { result: GitHubSetupProposed }) {
           <div className="inline-heading"><h3><code>{environment.name}</code></h3><Badge>Unobserved</Badge></div>
           <p>Stage: {environment.stage} · approvals and protection unknown</p>
           {requirements.length === 0 ? <p>The core returned no requirement descriptors for this environment. Its configuration and readiness are still unknown.</p> :
-            <ul className="github-requirements">{requirements.map((requirement) => <li key={`${requirement.name}-${requirement.stage}-${requirement.platform}`}>
-              <div><strong><code>{requirement.name}</code></strong><Badge>Presence unknown</Badge></div>
-              <p>{requirement.kind} · {requirement.platform}</p><p>{requirement.reason}</p>
-              {requirement.alternatives.length > 0 && <p>Local guidance only — not additional GitHub secret names: {requirement.alternatives.map((name, index) => <span key={`${name}-${index}`}>{index > 0 && ', '}<code>{name}</code></span>)}</p>}
-            </li>)}</ul>}
+            <ul className="github-requirements">{requirements.map((requirement) => {
+              const help = credentialHelp?.find((entry) => entry.name === requirement.name);
+              return <li key={`${requirement.name}-${requirement.stage}-${requirement.platform}`}>
+                <div><strong><code>{requirement.name}</code></strong>{help && <HelpButton content={{ ...help, label: help.name }} onHelp={onHelp} />}<Badge>Presence unknown</Badge></div>
+                <p>{requirement.kind} · {requirement.platform}</p><p>{requirement.reason}</p>
+                {!help && <p className="save-note">Core field guidance is unavailable. No substitute credential policy is supplied here.</p>}
+                {requirement.alternatives.length > 0 && <p>Local guidance only — not additional GitHub secret names: {requirement.alternatives.map((name, index) => <span key={`${name}-${index}`}>{index > 0 && ', '}<code>{name}</code></span>)}</p>}
+              </li>;
+            })}</ul>}
         </article>;
       })}
     </section>
   </section>;
 }
 
-export function GitHub({ info, session, state, controller, loading, onReload, onNavigate, nativeReview, connectionView }: {
+export function GitHub({ info, session, state, controller, loading, onReload, onNavigate, credentialHelp, onHelp, nativeReview, connectionView }: {
   info: AppInfo | null;
   session: ProjectSession | null;
   state: GitHubSetupState;
@@ -102,6 +106,8 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
   loading: boolean;
   onReload: () => void;
   onNavigate: (page: Page) => void;
+  credentialHelp: CredentialHelp[] | null;
+  onHelp: (help: HelpContent) => void;
   nativeReview: ReactNode;
   connectionView: ReactNode;
 }) {
@@ -159,7 +165,7 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
     {state.invalidated && <div className="notice notice-warning" role="status"><Icon name="info" /><div><strong>Previous preview discarded</strong><p>The project, draft, toolkit inputs, comparison or service generation changed. Preview again; an older reply cannot restore stale output.</p></div></div>}
     {state.error && <ErrorNotice error={state.error} title="Setup preview unavailable" />}
     {state.result?.state === 'invalid' && <section className="card"><SectionHeading title="Draft needs correction" description="The passive core returned no workflow or settings proposal. This preview saved or applied nothing and did not contact GitHub."><Badge tone="danger">Format invalid</Badge></SectionHeading><Issues issues={state.result.validation.issues} /><button type="button" className="button secondary" onClick={() => onNavigate('settings')}>Review the draft and field guidance</button></section>}
-    {state.result?.state === 'proposed' && <Proposal result={state.result} />}
+    {state.result?.state === 'proposed' && <Proposal result={state.result} credentialHelp={credentialHelp} onHelp={onHelp} />}
     {nativeReview}
     <section className="card"><SectionHeading title="Remote authority stays disabled" description="Neither a preview nor local caller installation enables Connect, remote setup, credential provisioning, checks or dispatch. Those operations need separate reviewed ownership and authorization." /><div className="github-disabled-actions">
       <DisabledAction label="Apply remote GitHub setup" icon="lock" reason={futureReason(info?.capabilities, 'github.setup', 'Authenticated repository setup and remote apply are not implemented. A local file plan has no remote authority.')} />

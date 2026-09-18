@@ -24,6 +24,7 @@ pub(crate) struct ProjectRoster { pub(crate) generation: u32, pub(crate) roots: 
 pub struct DesktopBridge {
     pub supervisor: Supervisor,
     pub edits: EditOwner,
+    pub(crate) diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner,
     projects: Mutex<BTreeMap<String, RegisteredProject>>,
     project_generation: AtomicU32,
     #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
@@ -33,7 +34,9 @@ impl DesktopBridge {
     pub fn new(resource_dir: PathBuf) -> Self {
         let runtime = RuntimeConfig::packaged(resource_dir);
         Self {
-            supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime), projects: Mutex::new(BTreeMap::new()), project_generation: AtomicU32::new(1),
+            supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime.clone()),
+            diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime),
+            projects: Mutex::new(BTreeMap::new()), project_generation: AtomicU32::new(1),
             #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
             sequence: AtomicU64::new(1),
         }
@@ -97,7 +100,37 @@ impl DesktopBridge {
         projects.get(project_id).map(|project| project.root.clone())
             .ok_or_else(|| BridgeError::new("unknown_project", "Select this project through the native folder picker first."))
     }
+    /// Native registry DATA only, under DocumentBinding's admission mutex.
+    /// No selected directory is opened or discovery executed. This retained
+    /// path is solely overlap context, not a claim of qualified root custody.
+    pub(crate) fn environment_registration(&self, project_id: &str) -> Result<(u32, PathBuf), BridgeError> {
+        if !crate::protocol::valid_id(project_id) { return Err(crate::environment_diagnostics_protocol::invalid()); }
+        let projects = self.projects.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        let root = projects.get(project_id).ok_or_else(|| BridgeError::new("unknown_project", "Select this project through the native folder picker first."))?;
+        Ok((self.project_generation.load(Ordering::SeqCst), root.root.clone()))
+    }
+    /// Fixture DATA only, called under the original DocumentBinding lock. It
+    /// grants no ProjectProbe, picker, filesystem identity, asset or GitHub gate.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    pub(crate) fn environment_fixture_registration(&self,
+        permit: &crate::environment_diagnostics_owner::EnvironmentRegistrationPermit, change: bool) -> Result<(), BridgeError> {
+        let (id, root, generation) = permit.validate(&self.diagnostics)?;
+        let mut projects = self.projects.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        let current = self.project_generation.load(Ordering::SeqCst);
+        if change {
+            if current != generation || !projects.get(id).is_some_and(|p| p.root == root) { return Err(BridgeError::invalid()); }
+            self.project_generation.store(current.checked_add(1).ok_or_else(BridgeError::cleanup_unknown)?, Ordering::SeqCst);
+        } else {
+            if !projects.is_empty() || current != 1 || generation != 2 { return Err(BridgeError::invalid()); }
+            let view = Project { id: id.into(), name: "Synthetic diagnostics project".into(), path: root.to_string_lossy().into_owned() };
+            projects.insert(id.into(), RegisteredProject { view, root: root.to_path_buf(), identity: None });
+            self.project_generation.store(generation, Ordering::SeqCst);
+        }
+        Ok(())
+    }
     pub fn open_config_edit(&self, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
+        self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
         // The same exact native-selected root is retained separately from its
@@ -207,6 +240,7 @@ impl DesktopBridge {
     }
     #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
     pub(crate) fn register_picked_project(&self, path: PathBuf) -> Result<Project, BridgeError> {
+        self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() || self.edits.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() || self.edits.disabled() { return Err(BridgeError::cleanup_unknown()); }
         let text = path.to_str().ok_or_else(|| BridgeError::new("unsupported_path", "The selected project path is not valid UTF-8."))?;

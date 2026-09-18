@@ -317,6 +317,7 @@ impl Slot {
 struct DocumentState {
     lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
+    compatibility_picker_pending: bool,
     context: Option<Arc<NativeContext>>, slot: Option<Slot>, records: Vec<Record>, assignments: Vec<Assignment>,
     quit: Option<Arc<OriginalWork>>, quit_accepted: bool, quit_cleanup_end: Option<Instant>,
     github: ConnectionState,
@@ -380,6 +381,7 @@ impl DocumentBinding {
             github_fixture: None,
             state: Mutex::new(DocumentState { lifetime: DocumentLifetime::default(), revision: 0,
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+            compatibility_picker_pending: false,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new() }) }) }
     }
@@ -444,6 +446,7 @@ impl DocumentBinding {
         if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::CleanupUnknown, Instant::now()); slot.phase = Phase::Unknown; }
         stop_quit(state, Instant::now());
         self.inner.bridge.edits.document_lost(MAIN);
+        self.inner.bridge.diagnostics.document_lost();
         state.revision = u32::MAX; self.inner.changes.send_replace(u32::MAX);
     }
     fn next_operation(&self, state: &mut DocumentState) -> Result<u32, AssetError> {
@@ -459,7 +462,8 @@ impl DocumentBinding {
         stop_quit(state, Instant::now());
         // This actual loss path is synchronous under the same admission lock.
         // EditOwner's first-loss tombstone was preallocated, with no loss RNG.
-        self.inner.bridge.edits.document_lost(MAIN); self.bump(state);
+        self.inner.bridge.edits.document_lost(MAIN);
+        self.inner.bridge.diagnostics.document_lost(); self.bump(state);
     }
     fn apply(&self, state: &mut DocumentState, action: DocumentAction) {
         match action {
@@ -478,10 +482,106 @@ impl DocumentBinding {
     }
     pub(crate) fn lost(&self) { self.observe(DocumentLifetime::invalidate); }
     pub(crate) fn hook_installed(&self) { self.observe(DocumentLifetime::crash_hook_installed); }
+    fn environment_gate(&self, state: &DocumentState) -> crate::environment_diagnostics_protocol::Availability {
+        use crate::environment_diagnostics_protocol::Availability;
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() { return Availability::Shutdown; }
+        if !state.lifetime.original_bound() || state.lost_observed { return Availability::DocumentLost; }
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
+            || state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
+            || state.github.native_work_pending() || !self.inner.bridge.edits.can_exit()
+            || !self.inner.bridge.supervisor.can_exit() { return Availability::Busy; }
+        Availability::Available
+    }
+    pub(crate) fn environment_diagnostics_status(&self) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
+        // DATA only: inspect existing state/registry generation and already-ended
+        // original task joins. Never poll a tool or start a replacement owner.
+        let state = self.lock();
+        if !self.inner.bridge.diagnostics.registration_matches(self.inner.bridge.registry_generation()) { self.inner.bridge.diagnostics.context_changed(); }
+        self.inner.bridge.diagnostics.status(self.environment_gate(&state))
+    }
+    pub(crate) fn environment_diagnostics_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.diagnostics.subscribe() }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    pub(crate) fn environment_fixture_registration(&self,
+        permit: &crate::environment_diagnostics_owner::EnvironmentRegistrationPermit, change: bool) -> Result<(), BridgeError> {
+        let state = self.lock();
+        if state.unknown || state.exhausted || !state.lifetime.original_bound() || state.lost_observed || state.stopping { return Err(BridgeError::cleanup_unknown()); }
+        self.inner.bridge.environment_fixture_registration(permit, change)
+    }
+    pub(crate) fn start_environment_diagnostics(&self, args: crate::environment_diagnostics_protocol::Start) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
+        let ticket = self.inner.bridge.diagnostics.ticket()?; // Original T, entropy/executor before lock/effects.
+        let state = self.lock();
+        use crate::environment_diagnostics_protocol::Availability;
+        match self.environment_gate(&state) {
+            Availability::Available => {}, Availability::Busy => return Err(BridgeError::new("environment_diagnostics_busy", "Finish or cancel the original native operation before checking build tools.")),
+            Availability::CleanupUnknown => return Err(BridgeError::cleanup_unknown()), Availability::Shutdown => return Err(BridgeError::shutdown()),
+            _ => return Err(BridgeError::new("environment_diagnostics_owner", "This request does not identify the original build-tool diagnostics run.")),
+        }
+        let (generation, root) = self.inner.bridge.environment_registration(&args.project_id)?;
+        let admitted = self.inner.bridge.diagnostics.admit(ticket, args, generation, root)?;
+        // Real document loss, selection, assets, edits, GitHub and quit cannot
+        // interleave lookup/claim/enqueue. All original handles exist before GO.
+        drop(state); Ok(admitted.release())
+    }
+    pub(crate) fn cancel_environment_diagnostics(&self, args: crate::environment_diagnostics_protocol::Cancel) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
+        let state = self.lock();
+        // Exact original STOP stays usable during shutdown, document loss,
+        // deadline or retained Unknown; it never grants start authority.
+        self.inner.bridge.diagnostics.cancel(&args.run_id, &args.owner_generation, self.environment_gate(&state))
+    }
+    /// Configuration operations use the same document mutex for reciprocal
+    /// diagnostics exclusion. Their existing root/owner semantics are unchanged.
+    pub(crate) fn configuration_edit_admit<T>(&self, action: impl FnOnce(&DesktopBridge) -> Result<T, BridgeError>) -> Result<T, BridgeError> {
+        let state = self.lock();
+        if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
+        if !state.lifetime.original_bound() || state.lost_observed { return Err(BridgeError::new("invalid_edit_owner", "This document does not own that live edit domain.")); }
+        if state.stopping { return Err(BridgeError::shutdown()); }
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending { return Err(BridgeError::new("busy", "Finish the original native operation first.")); }
+        self.inner.bridge.diagnostics.ensure_idle()?;
+        action(&self.inner.bridge)
+    }
+    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    pub(crate) fn compatibility_picker_begin(&self) -> Result<(), BridgeError> {
+        let mut state = self.lock();
+        self.inner.bridge.diagnostics.context_changed();
+        self.inner.bridge.diagnostics.ensure_idle()?;
+        if state.stopping { return Err(BridgeError::shutdown()); }
+        if state.compatibility_picker_pending { return Err(BridgeError::new("busy", "A native project picker is already open.")); }
+        state.compatibility_picker_pending = true; self.bump(&mut state); Ok(())
+    }
+    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    pub(crate) fn compatibility_picker_end(&self) {
+        // This preserves the existing compatibility picker reservation; it is
+        // NOT evidence for a qualified macOS/Windows document/GUI owner.
+        let mut state = self.lock(); state.compatibility_picker_pending = false; self.bump(&mut state);
+    }
+    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    pub(crate) fn compatibility_picker_publish(&self, path: std::path::PathBuf) -> Result<Project, BridgeError> {
+        let state = self.lock();
+        if !state.compatibility_picker_pending { return Err(BridgeError::invalid()); }
+        self.inner.bridge.diagnostics.ensure_idle()?;
+        self.inner.bridge.register_picked_project(path)
+    }
+    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    pub(crate) fn compatibility_quit_begin(&self) -> bool {
+        let mut state = self.lock();
+        if state.compatibility_picker_pending || state.quit_pending { return false; }
+        state.quit_pending = true; self.bump(&mut state); true
+    }
+    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    pub(crate) fn compatibility_quit_result(&self, accepted: bool) {
+        let mut state = self.lock(); state.quit_pending = false;
+        if accepted { state.stopping = true; self.inner.bridge.diagnostics.request_shutdown(); }
+        self.bump(&mut state);
+    }
     fn gate(&self, state: &DocumentState, session: bool) -> Result<(), AssetError> {
         if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
         if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
         if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
+        if self.inner.bridge.diagnostics.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
+        if self.inner.bridge.diagnostics.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
+        if self.inner.bridge.diagnostics.busy() || state.compatibility_picker_pending { return Err(AssetError::new(Reason::Busy)); }
         if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
         if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
         if !self.native_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
@@ -492,10 +592,11 @@ impl DocumentBinding {
         result
     }
     fn github_gate(&self, state: &DocumentState) -> GitHubReason {
-        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() { return GitHubReason::CleanupUnknown; }
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() { return GitHubReason::CleanupUnknown; }
         if !self.github_qualified() { return GitHubReason::Unqualified; }
         if !state.lifetime.original_bound() || state.lost_observed || state.stopping
-            || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() { return GitHubReason::Cancelled; }
+            || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() || self.inner.bridge.diagnostics.stopping() { return GitHubReason::Cancelled; }
+        if self.inner.bridge.diagnostics.busy() || state.compatibility_picker_pending { return GitHubReason::Busy; }
         if state.quit_pending || state.retiring || state.lock_pending || state.slot.as_ref().is_some_and(|slot|
             slot.operation == Operation::ChooseProject && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return GitHubReason::Busy; }
         GitHubReason::None
@@ -618,6 +719,7 @@ impl DocumentBinding {
         }
         if state.stopping || self.inner.bridge.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.inner.bridge.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
+        self.inner.bridge.diagnostics.ensure_idle()?;
         if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
         if state.retiring || state.lock_pending || state.slot.as_ref().is_some_and(|slot|
             slot.operation == Operation::ChooseProject && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) {
@@ -774,7 +876,8 @@ impl DocumentBinding {
                 context.refuse(); return Err(AssetError::new(Reason::Unqualified));
             }
         }
-        let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, true)?;
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        self.inner.bridge.diagnostics.context_changed(); self.gate(&state, true)?;
         let (registry_generation, project) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id))?;
         let Some(revision) = state.next_context.checked_add(1) else { self.exhaust(&mut state); return Err(AssetError::new(Reason::CleanupUnknown)); };
         // Bounded, already-admitted Value serialization, not source parsing or
@@ -962,6 +1065,7 @@ impl DocumentBinding {
                 // the settled assignments and never renews review time.
                 state.quit_accepted = true; state.stopping = true; invalidate_all(&mut state);
                 state.github.retire(GitHubReason::Cancelled);
+                self.inner.bridge.diagnostics.request_shutdown();
                 if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::Shutdown, now); }
                 stop_quit(&mut state, now);
                 fixture_event!(owner, QuitStop, 1);
@@ -1637,7 +1741,8 @@ impl DocumentBinding {
     }
 
     pub(crate) fn choose_project(&self, app: tauri::AppHandle) -> Result<u32, AssetError> {
-        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.gate(&state, false)?; idle(&state)?;
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        self.inner.bridge.diagnostics.context_changed(); self.gate(&state, false)?; idle(&state)?;
         // Acquire the registry's checked generation before any native work;
         // poison is sticky document Unknown, never merely a later picker error.
         let generation = self.registry_result(&mut state, self.inner.bridge.native_generation())?;
@@ -1674,6 +1779,7 @@ impl DocumentBinding {
         if state.unknown { return Err(BridgeError::cleanup_unknown()); }
         if state.stopping { return Err(BridgeError::shutdown()); }
         if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
+        self.inner.bridge.diagnostics.ensure_idle()?;
         Ok(())
     }
     pub(crate) fn assets_can_exit(&self) -> bool {
@@ -1703,7 +1809,7 @@ impl DocumentBinding {
         // The app's data-only observer does not run general session publication.
         // Only this already-ended quit original is joined here.
         ready && quit.is_some_and(|quit| quit.join_if_ended() == Some(true) && quit.resources_settled())
-            && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit()
+            && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
     }
     pub(crate) fn request_quit(&self, app: tauri::AppHandle) {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
@@ -1752,12 +1858,12 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
             _ = tokio::time::sleep(Duration::from_millis(25)) => document.tick(),
         }
     }
-    // Actual OK already latched STOP on the asset slot. Start all three shutdown
+    // Actual OK already latched STOP on the asset slot. Start all shutdown
     // futures once, even if the original quit dialog is still being disposed.
     // join! does not short-circuit an error or abandon any original future.
     let settlement = async {
         let gui = async { if !dialog_ended { let _ = dialog.as_mut().await; } };
-        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown());
+        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown(), document.inner.bridge.diagnostics.shutdown());
     };
     tokio::pin!(settlement);
     loop {
@@ -1769,7 +1875,7 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     }
     // Late all-positive settlement may permit exit, never a successful import,
     // new owner, reassignment or reuse of this unknown session.
-    while !(document.retained_material_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit()) {
+    while !(document.retained_material_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit() && document.inner.bridge.diagnostics.can_exit()) {
         tokio::select! {
             _ = owner.wake.notified() => document.tick(),
             _ = tokio::time::sleep(Duration::from_millis(50)) => document.tick(),
@@ -1862,6 +1968,7 @@ mod tests {
     fn empty_state() -> DocumentState {
         DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+            compatibility_picker_pending: false,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new() }
     }

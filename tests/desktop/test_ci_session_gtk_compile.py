@@ -1,6 +1,7 @@
 """Inert SG1 compiler admission/receipt/argv checks. No native/tool execution."""
 from __future__ import annotations
 
+import ast
 from copy import deepcopy
 import importlib.util
 import json
@@ -46,7 +47,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
     def test_core_inventory_rejects_substitutions_and_malformed_rows(self):
         original = [{"path": path, "size": 1, "sha256": "4" * 64} for path in helper.GTK_CORE_PATHS]
         helper.validate_gtk_core_inventory(original)
-        self.assertEqual(len(original), 78)
+        self.assertEqual(len(original), 83)
         variants = (None, {}, tuple(original), original[:-1], original + [original[0]],
                     [original[0]] + original[:-1], list(reversed(original)))
         for value in variants:
@@ -79,11 +80,13 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         rust_paths = re.findall(r'^    source!\("([^\"]+)"\),$', rust_block, re.MULTILINE)
         self.assertEqual(python_paths, rust_paths)
         self.assertEqual(python_paths, sorted(set(python_paths)))
-        self.assertEqual(len(python_paths), 201)
+        self.assertEqual(len(python_paths), 217)
         self.assertNotIn("len(SOURCES) == 154", driver)
         self.assertNotIn("len(SOURCES) == 182", driver)
         self.assertNotIn("len(SOURCES) == 197", driver)
-        self.assertEqual(driver.count("len(SOURCES) == 201"), 2)
+        self.assertNotIn("len(SOURCES) == 201", driver)
+        self.assertNotIn("len(SOURCES) == 213", driver)
+        self.assertEqual(driver.count("len(SOURCES) == 217"), 2)
         self.assertEqual(tuple(path.removeprefix("src/") for path in python_paths if path.startswith("src/")),
                          helper.GTK_CORE_PATHS)
         package = root / "src/mobile_release"
@@ -101,10 +104,19 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         for filename, name in registrations:
             self.assertEqual(filename, name)
             self.assertIn(f"desktop/src-tauri/src/{name}.rs", python_paths)
-        for name in ("environment", "github_workflow_edit_protocol", "github_connection_protocol", "github_connection_session",
+        for name in ("environment", "environment_diagnostics_protocol", "environment_diagnostics_owner",
+                     "github_workflow_edit_protocol", "github_connection_protocol", "github_connection_session",
                      "metadata_text_commands", "metadata_text_edit_protocol"):
             self.assertIn(f"desktop/src-tauri/src/{name}.rs", helper.GTK_COMPILE_SOURCES)
-        for relative in ("desktop/src/environment.ts", "desktop/src/components/MetadataTextEditor.tsx", "desktop/src/metadataText.ts",
+        for relative in ("desktop/environment_bootstrap.py",
+                         ".github/workflows/desktop-environment-diagnostics-native.yml",
+                         "desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs",
+                         "tests/native_desktop_environment.py",
+                         "tests/workflow/command_bootstrap_fixture.py",
+                         "desktop/src/components/EnvironmentDiagnostics.tsx",
+                         "desktop/src/environmentDiagnosticsTypes.ts",
+                         "desktop/src/environmentDiagnosticsProtocol.ts",
+                         "desktop/src/environmentDiagnosticsController.ts", "desktop/src/environment.ts", "desktop/src/components/MetadataTextEditor.tsx", "desktop/src/metadataText.ts",
                          "desktop/src/metadataTextEditController.ts", "desktop/src/metadataTextProtocol.ts"):
             self.assertIn(relative, python_paths)
         # These test-cfg owners and includes also compile in the SG1 target;
@@ -130,6 +142,55 @@ class SessionGtkCompileContractTests(unittest.TestCase):
                          "desktop/src-tauri/src/hosted_tests.rs", "desktop/src-tauri/src/asset_session.rs"):
             self.assertIn(relative, python_paths)
             self.assertIn(relative, helper.GTK_COMPILE_SOURCES)
+
+    def test_sg1_observes_only_unavailable_diagnostics_status_without_starting_work(self):
+        root = HELPER.parents[2]
+        driver = (root / "desktop/tools/qualify_session_gtk.py").read_text(encoding="utf-8")
+        native = (root / "desktop/src-tauri/src/session_gtk_qualification.rs").read_text(encoding="utf-8")
+        shell = (root / "desktop/src-tauri/src/shell.rs").read_text(encoding="utf-8")
+        parsed = ast.parse(driver)
+        commands = next(node.value for node in parsed.body if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == "COMMANDS" for target in node.targets))
+        names = re.search(r"pub\(super\) enum Command \{([^}]+)\}", native).group(1).split(",")
+        self.assertEqual(names[-2:], ["EnvironmentStatus", "Forbidden"])
+        self.assertEqual(ast.literal_eval(commands), tuple(re.sub(r"(?<!^)(?=[A-Z])", "-", name).lower()
+                                                          for name in names[:-1]))
+        self.assertIn("count(EventKind::CommandEnter)==10 && count(EventKind::CommandReturn)==10", native)
+        self.assertIn('len(actual) == 10, "ten exact real SG1 commands"', driver)
+        self.assertIn('u(event["detail"], 8)', driver)
+        for command in ("start_environment_diagnostics", "cancel_environment_diagnostics"):
+            body = shell.split(f"async fn {command}(", 1)[1].split("\n}", 1)[0]
+            self.assertIn("fixture_command!(state, Forbidden, observed,", body)
+        status = shell.split("async fn environment_diagnostics_status(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("fixture_command!(state, EnvironmentStatus, observed,", status)
+        self.assertIn("state.document.environment_diagnostics_status()", status)
+        self.assertIn("fixture_result!(observed, environment_status_returned, &result)", status)
+        self.assertIn("diagnostics_owner.can_exit() && !diagnostics_owner.disabled() && diagnostics_owner.stopping()", native)
+        self.assertIn("API_INVENTORY: str | None = None", driver)
+        # Execute only these five bounded DATA validators and their exception;
+        # never import the native driver or its IO/process/fixture definitions.
+        selected = {"Refused", "require", "u", "closed", "fixed", "diagnostics_observation"}
+        nodes = [node for node in parsed.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in selected]
+        self.assertEqual({node.name for node in nodes}, selected)
+        self.assertEqual(len(nodes), len(selected))
+        namespace = {"Any": object}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "<sg1-diagnostics-data-only>", "exec"), namespace)
+        observe, refused = namespace["diagnostics_observation"], namespace["Refused"]
+        value = {"schemaVersion": 1, "statusRevision": 0, "capability": {"available": False, "reason": "busy"},
+                 "active": None, "lastTerminal": None}
+        for reason in ("busy", "document-lost", "runtime-unqualified"):
+            observe({**value, "capability": {"available": False, "reason": reason}}, final=False)
+        observe({**value, "capability": {"available": False, "reason": "shutdown"}}, final=True)
+        for key, bad in (("schemaVersion", True), ("statusRevision", True), ("statusRevision", 2**32-1),
+                         ("active", {}), ("lastTerminal", {}), ("extra", None)):
+            with self.subTest(key=key, bad=bad), self.assertRaises(refused):
+                observe({**value, key: bad}, final=False)
+        for capability in ({"available": True, "reason": "available"}, {"available": 0, "reason": "busy"},
+                           {"available": False, "reason": "cleanup-unknown"}, {"available": False, "reason": "shutdown"}):
+            with self.subTest(capability=capability), self.assertRaises(refused):
+                observe({**value, "capability": capability}, final=False)
+        with self.assertRaises(refused):
+            observe(value, final=True)
 
     def test_native_phases_and_non_linux_profiles_refuse_before_context_or_tools(self):
         with patch.object(helper, "load_context", side_effect=AssertionError("no context IO")), \

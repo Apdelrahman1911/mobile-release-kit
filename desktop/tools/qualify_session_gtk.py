@@ -45,10 +45,12 @@ ROSTER = ("picker-cancel", "picker-select", "source-select", "quit-cancel", "qui
 # Literal source DATA matched to Q's complete first-party roster. No runtime
 # glob, Git discovery, source execution, generated include or module import.
 SOURCES = (
+    '.github/workflows/desktop-environment-diagnostics-native.yml',
     '.github/workflows/desktop-github-connection-tls.yml',
     '.github/workflows/desktop-github-workflow-apply-native.yml',
     'desktop/config_edit_bootstrap.py',
     'desktop/engine_bootstrap.py',
+    'desktop/environment_bootstrap.py',
     'desktop/github_connection_bootstrap.py',
     'desktop/index.html',
     'desktop/native/linux-mount-observation/Cargo.toml',
@@ -76,6 +78,9 @@ SOURCES = (
     'desktop/src-tauri/src/edit_owner.rs',
     'desktop/src-tauri/src/edit_protocol.rs',
     'desktop/src-tauri/src/environment.rs',
+    'desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs',
+    'desktop/src-tauri/src/environment_diagnostics_owner.rs',
+    'desktop/src-tauri/src/environment_diagnostics_protocol.rs',
     'desktop/src-tauri/src/error.rs',
     'desktop/src-tauri/src/github_commands.rs',
     'desktop/src-tauri/src/github_connection_protocol.rs',
@@ -123,6 +128,7 @@ SOURCES = (
     'desktop/src/components/DraftEditor.tsx',
     'desktop/src/components/DraftReview.tsx',
     'desktop/src/components/DraftSuggestions.tsx',
+    'desktop/src/components/EnvironmentDiagnostics.tsx',
     'desktop/src/components/Fields.tsx',
     'desktop/src/components/GitHubConnection.tsx',
     'desktop/src/components/GitHubWorkflowApply.tsx',
@@ -135,6 +141,9 @@ SOURCES = (
     'desktop/src/credentialGuide.ts',
     'desktop/src/drafts.ts',
     'desktop/src/environment.ts',
+    'desktop/src/environmentDiagnosticsController.ts',
+    'desktop/src/environmentDiagnosticsProtocol.ts',
+    'desktop/src/environmentDiagnosticsTypes.ts',
     'desktop/src/githubConnectionController.ts',
     'desktop/src/githubConnectionProtocol.ts',
     'desktop/src/githubConnectionTypes.ts',
@@ -169,6 +178,9 @@ SOURCES = (
     'src/mobile_release/_desktop_edit_engine.py',
     'src/mobile_release/_desktop_edit_protocol.py',
     'src/mobile_release/_desktop_engine.py',
+    'src/mobile_release/_desktop_environment_control.py',
+    'src/mobile_release/_desktop_environment_engine.py',
+    'src/mobile_release/_desktop_environment_protocol.py',
     'src/mobile_release/_desktop_github_engine.py',
     'src/mobile_release/_github_connection_transport.py',
     'src/mobile_release/_lifetime_evidence.py',
@@ -212,6 +224,8 @@ SOURCES = (
     'src/mobile_release/credentials.py',
     'src/mobile_release/data/apple-profile-roots.pem',
     'src/mobile_release/discovery.py',
+    'src/mobile_release/environment_diagnostics.py',
+    'src/mobile_release/environment_diagnostics_tools.py',
     'src/mobile_release/errors.py',
     'src/mobile_release/github_workflow_edit.py',
     'src/mobile_release/init_transaction.py',
@@ -246,6 +260,8 @@ SOURCES = (
     'templates/workflows/mobile-production-submit.yml',
     'tests/native_desktop_config.py',
     'tests/native_desktop_config_eof.py',
+    'tests/native_desktop_environment.py',
+    'tests/workflow/command_bootstrap_fixture.py',
 )
 BUILD_KEYS = "baselineManifest sourceRoster contractSource helperSource launcherSource appBinary helperBinary launcherRuntime pythonRuntime frontend featuresSha256 apiInventory"
 COMMON_KEYS = "v type case profile binding roots file writer writtenNs"
@@ -1569,7 +1585,7 @@ class Freeze:
         require(Path(__file__).resolve(strict=True) == launcher and os.getcwd() == str(repository / "desktop/src-tauri"), "fixed actual launcher source/cwd")
         require(type(v["display"]) is str and re.fullmatch(r":[1-9][0-9]{0,3}", v["display"]) is not None
                 and os.environ.get("DISPLAY") == v["display"], "fixed inherited display number")
-        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 201, "complete frozen201 source roster")
+        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 217, "complete frozen217 source roster")
         for path in SOURCES:
             h(v["sourceHashes"][path])
             actual, st = book.hash_file(exact_path(repository / path), 2 * 1024 * 1024)
@@ -2219,7 +2235,7 @@ EVENT_KINDS = frozenset((
     "project-published", "header-observed", "candidate-published", "quit-stop", "close-stimulus", "close-prevented",
     "relay-joined", "checkpoint", "command-enter", "command-return", "recipe-returned",
 ))
-COMMANDS = ("app-info", "catalog", "edit-status", "asset-status", "project", "open", "context", "choose")
+COMMANDS = ("app-info", "catalog", "edit-status", "asset-status", "project", "open", "context", "choose", "environment-status")
 
 
 class Events:
@@ -2233,7 +2249,7 @@ class Events:
             fixed(event["ordinal"], ordinal)
             require(type(event["kind"]) is str and event["kind"] in EVENT_KINDS, "closed original event kind")
             u(event["operation"], 5)
-            u(event["detail"], 7)
+            u(event["detail"], 8)
             boolean(event["mainThread"])
 
     def matching(self, kind: str, operation: int | None = None) -> list[dict[str, Any]]:
@@ -2261,8 +2277,9 @@ class Events:
 
 
 def command_facts(actual: Any, events: Events, stages: dict[int, int]) -> dict[tuple[str, int], dict[str, Any]]:
-    require(type(actual) is list and len(actual) == 9, "nine exact real SG1 commands")
+    require(type(actual) is list and len(actual) == 10, "ten exact real SG1 commands")
     expected = {("app-info", 0): 1, ("catalog", 0): 1, ("edit-status", 0): 1, ("asset-status", 0): 1,
+                ("environment-status", 0): 1,
                 ("project", 1): 2, ("project", 2): 3, ("open", 3): 1, ("context", 3): 1, ("choose", 3): 1}
     result: dict[tuple[str, int], dict[str, Any]] = {}
     previous_enter = 0
@@ -2283,7 +2300,7 @@ def command_facts(actual: Any, events: Events, stages: dict[int, int]) -> dict[t
         else:
             require(stages[stage] < entered and returned < stages[stage + 1], "original command contained in its SG1 stage")
         result[key] = command
-    require(set(result) == set(expected) and len(events.matching("command-enter")) == len(events.matching("command-return")) == 9, "all actual command links accounted")
+    require(set(result) == set(expected) and len(events.matching("command-enter")) == len(events.matching("command-return")) == 10, "all actual command links accounted")
     require(result[("open", 3)]["returned"] < result[("context", 3)]["entered"]
             and result[("context", 3)]["returned"] < result[("choose", 3)]["entered"], "real Open/Context/Choose sequential replies")
     return result
@@ -2312,17 +2329,34 @@ def disposal_response_order(f: dict[str, int], enter: int, leave: int) -> None:
     require(f["close-leave"] < enter < leave < f["destroy-enter"], "only later idle DeleteEvent response before actual destroy")
 
 
+def diagnostics_observation(actual: Any, *, final: bool) -> None:
+    closed(actual, "schemaVersion statusRevision capability active lastTerminal", ordered=False)
+    fixed(actual["schemaVersion"], 1)
+    u(actual["statusRevision"], (1 << 32) - 2)
+    closed(actual["capability"], "available reason", ordered=False)
+    fixed(actual["capability"]["available"], False)
+    allowed = ("shutdown",) if final else ("busy", "document-lost", "runtime-unqualified")
+    require(type(actual["capability"]["reason"]) is str and actual["capability"]["reason"] in allowed,
+            "actual unavailable diagnostics observation")
+    fixed(actual["active"], None)
+    fixed(actual["lastTerminal"], None)
+
+
 def prefix_facts(data: bytes, bridge: Bridge) -> None:
     prefix = receipt_data(data)
-    closed(prefix, "scope case fixtureOnly events commands sources passive edit relayJoin recipeJoin documentBound selectedCancelPreserved frontendSubscriptions nativeOwnership", ordered=False)
+    closed(prefix, "scope case fixtureOnly events commands sources passive edit relayJoin recipeJoin documentBound selectedCancelPreserved frontendSubscriptions nativeOwnership diagnosticsBootstrap diagnosticsFinal", ordered=False)
     fixed(prefix["scope"], SCOPE)
     fixed(prefix["case"], CASE)
     for flag in ("fixtureOnly", "documentBound", "selectedCancelPreserved"):
         fixed(prefix[flag], True)
     fixed(prefix["relayJoin"], "ok")
     fixed(prefix["recipeJoin"], "ok")
-    fixed(prefix["frontendSubscriptions"], {"sourcePinned": True, "names": ["config-edit-state", "asset-session-state"],
+    fixed(prefix["frontendSubscriptions"], {"sourcePinned": True, "names": ["config-edit-state", "asset-session-state", "environment-diagnostics-state-changed"],
           "evidence": "real-status-command-after-awaited-listen-in-pinned-controller"})
+    diagnostics_observation(prefix["diagnosticsBootstrap"], final=False)
+    diagnostics_observation(prefix["diagnosticsFinal"], final=True)
+    require(prefix["diagnosticsFinal"]["statusRevision"] >= prefix["diagnosticsBootstrap"]["statusRevision"],
+            "original diagnostics observation revisions do not reverse")
     source_books(prefix["sources"], bridge)
     passive_and_edit(prefix)
     ownerships = prefix["nativeOwnership"]
@@ -2616,7 +2650,7 @@ def inert_source_tests() -> None:
     raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
     fixed(FiniteJson(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
     longest = max(SOURCES, key=len)
-    assert len(SOURCES) == 201 and 64 < len(longest) <= 128 and len(WITNESS) == 18
+    assert len(SOURCES) == 217 and 64 < len(longest) <= 128 and len(WITNESS) == 18
     raw = (json.dumps({longest: "a" * 64}, separators=(",", ":")) + "\n").encode("ascii")
     rejects(lambda data: FiniteJson(data, native=True).parse(lf=True), raw)
     base = {"response-decision": 1, "response-leave": 3, "close-dispatch": 2, "close-enter": 4, "close-ack": 5, "close-leave": 6,

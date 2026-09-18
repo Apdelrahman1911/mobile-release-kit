@@ -31,7 +31,11 @@ const PYTHON_RESOURCE: &str = "python/bin/python3";
 pub struct RuntimeStatus { pub state: &'static str, pub reason: Option<String>, pub mode: &'static str }
 
 #[derive(Clone)]
-pub struct RuntimeConfig { bundle_root: PathBuf }
+pub struct RuntimeConfig { bundle_root: PathBuf,
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    environment_fixture_core: Option<PathBuf>,
+}
 
 #[derive(Debug)]
 pub struct VerifiedRuntime { pub python: PathBuf, pub bootstrap: PathBuf, pub core: PathBuf, pub cwd: PathBuf }
@@ -207,7 +211,16 @@ fn exact_inventory(root: &Path, expected: &BTreeSet<String>, end: Instant) -> Re
 }
 
 impl RuntimeConfig {
-    pub fn packaged(resource_dir: PathBuf) -> Self { Self { bundle_root: resource_dir.join("runtime") } }
+    pub fn packaged(resource_dir: PathBuf) -> Self { Self { bundle_root: resource_dir.join("runtime"),
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        environment_fixture_core: None,
+    } }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    pub(crate) fn select_environment_fixture_zip(&mut self, selection: &crate::environment_diagnostics_owner::EnvironmentRuntimeSelection) {
+        self.environment_fixture_core = Some(selection.core().to_path_buf());
+    }
     pub fn mode(&self) -> &'static str {
         #[cfg(all(feature = "development-runtime", debug_assertions))]
         { "development" }
@@ -240,6 +253,35 @@ impl RuntimeConfig {
         {
             let _ = end;
             Err(BridgeError::unavailable("Packaged configuration editing is disabled until its runtime custody and native owner are qualified."))
+        }
+    }
+    /// Fixed diagnostics bootstrap, never the passive engine or edit protocol.
+    /// These source/metadata checks do not qualify the neutral cwd, installed
+    /// runtime custody, external tool policy or actual native document owner.
+    pub(crate) fn resolve_environment_diagnostics(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(feature = "development-runtime", debug_assertions))]
+        {
+            let mut runtime = self.development(end)?;
+            #[cfg(all(test, debug_assertions, not(feature = "desktop-shell"),
+                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            if let Some(core) = &self.environment_fixture_core {
+                // Closed R3 selection only; no change to passive/edit/Store
+                // resolution and no mutable process-wide environment override.
+                anchored_path(core)?;
+                if !fs::metadata(core).map_err(|_| unavailable())?.is_file() || core.extension().is_none_or(|s| s != "zip") { return Err(unavailable()); }
+                runtime.core = core.clone();
+            }
+            let bootstrap = runtime.cwd.join("environment_bootstrap.py");
+            const BOOTSTRAP: &[u8] = include_bytes!("../../environment_bootstrap.py");
+            if read_checked(&bootstrap, BOOTSTRAP.len() as u64, end)?.as_slice() != BOOTSTRAP { return Err(unavailable()); }
+            deadline(end)?;
+            runtime.bootstrap = bootstrap;
+            Ok(runtime)
+        }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        {
+            let _ = end;
+            Err(BridgeError::unavailable("Packaged build-tool diagnostics remain disabled until their fixed runtime, native owner and neutral cwd are qualified."))
         }
     }
     /// Private profile, not another ambient development entry. The closed gate

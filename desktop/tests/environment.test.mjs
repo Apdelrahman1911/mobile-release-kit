@@ -219,7 +219,7 @@ test('guided UI and synchronous workspace/bootstrap wiring preserve field help a
   assert.ok(page.includes("const resultPreview = state.resultBinding?.mode === 'preview'"));
   assert.ok(page.includes('Host not observed in browser preview'));
   assert.ok(page.includes('Earlier requirements are stale'));
-  assert.ok(page.includes('Run native doctor') && page.includes('DisabledAction'));
+  assert.ok(page.includes('EnvironmentDiagnostics state={diagnosticsState}') && !page.includes('Run native doctor'));
   assert.ok(app.includes('workspaceRef.current = next;\n    environmentControllerRef.current?.syncProject();'));
   assert.ok(app.indexOf('environment.beginConnection()') < app.indexOf('const connection = await desktopApi()'));
 });

@@ -111,6 +111,11 @@ class DefaultCancellation:
         self._edit_source: Any = None
         self._edit_source_installed = False
         self._edit_source_removed = False
+        # A separate one-request diagnostics source; never an edit protocol
+        # extension or a generic cancellation callback. Only one domain binds.
+        self._environment_source: Any = None
+        self._environment_source_installed = False
+        self._environment_source_removed = False
         self._ledger = LifetimeLedger(self)
         self._diagnostic_error: BaseException | None = None
         # Compatibility/diagnostics only: modifying this mapping grants nothing.
@@ -247,17 +252,20 @@ class DefaultCancellation:
         from ._desktop_edit_control import EditInput
         self._check_owner()
         if (type(source) is not EditInput or self.owner_thread is not threading.main_thread()
-                or self._edit_source_installed or self._edit_source_removed):
+                or self._edit_source_installed or self._edit_source_removed
+                or self._environment_source_installed):
             raise self.restore_error("invalid edit cancellation source ownership")
         source.bind(self)
         self._edit_source_installed = True
         self._edit_source = source
 
     def _poll_edit_stop(self) -> None:
-        """Fixed cleanup may poll/latch, but must not call cancelled check()."""
+        """Fixed desktop sources only; cleanup may poll but not cancelled check()."""
         self._check_owner()
         if self._edit_source is not None:
             self._edit_source.poll(self)
+        if self._environment_source is not None:
+            self._environment_source.poll(self)
 
     def _remove_edit_source(self, source: Any) -> None:
         self._check_owner()
@@ -265,6 +273,24 @@ class DefaultCancellation:
             raise self.restore_error("edit cancellation source did not settle")
         self._edit_source_removed = True
         self._edit_source = None
+
+    def _install_environment_source(self, source: Any) -> None:
+        from ._desktop_environment_control import EnvironmentInput
+        self._check_owner()
+        if (type(source) is not EnvironmentInput or self.owner_thread is not threading.main_thread()
+                or self._environment_source_installed or self._environment_source_removed
+                or self._edit_source_installed):
+            raise self.restore_error("invalid environment cancellation source ownership")
+        source.bind(self)
+        self._environment_source_installed = True
+        self._environment_source = source
+
+    def _remove_environment_source(self, source: Any) -> None:
+        self._check_owner()
+        if (self._environment_source is not source or self._environment_source_removed or not source.closed):
+            raise self.restore_error("environment cancellation source did not settle")
+        self._environment_source_removed = True
+        self._environment_source = None
 
     @contextmanager
     def deferred(self, *, check_on_exit: bool = True):

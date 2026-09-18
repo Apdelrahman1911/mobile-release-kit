@@ -400,6 +400,7 @@ impl ConnectionState {
     pub(crate) fn material_settled(&self) -> bool {
         self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none())
     }
+    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some()) }
     fn fact_retirement(&mut self, reason: Reason) {
         stale(&mut self.status.account, reason); stale(&mut self.status.repository, reason); stale(&mut self.status.automation, reason);
     }

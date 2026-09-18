@@ -11,6 +11,7 @@ import { workflowEditError } from './githubWorkflowEditProtocol.ts';
 import { githubConnectionError, parseGitHubConnectionHelp } from './githubConnectionProtocol.ts';
 import { metadataTextError, parseMetadataTextGuide } from './metadataTextProtocol.ts';
 import { environmentError, environmentRequestFits } from './environment.ts';
+import { environmentDiagnosticsError } from './environmentDiagnosticsProtocol.ts';
 import type { EnvironmentRequest, EnvironmentResult, EnvironmentRole, EnvironmentRequirement } from './environment.ts';
 import type { ApiError, Assurance, Catalog, DesktopApi, FieldHelp, JsonObject, ProjectSnapshot } from './types.ts';
 
@@ -67,6 +68,7 @@ const assetUnavailable = async (): Promise<never> => { throw assetError({ code: 
 const workflowUnavailable = async (): Promise<never> => { throw workflowEditError({ code: 'PreviewOnly' }); };
 const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
 const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
+const diagnosticsUnavailable = (): Promise<never> => Promise.reject(environmentDiagnosticsError({ code: 'environment_diagnostics_unavailable' }));
 
 // Deliberate design fixture, not a core assessment or a source of version policy.
 // The page labels every returned row as illustrative and hides the fixture host.
@@ -130,6 +132,12 @@ export const previewApi: DesktopApi = {
     if (!environmentRequestFits(request)) throw environmentError({ code: 'environment_request_invalid' });
     return exampleEnvironment(request);
   },
+  // Browser requirements are explicit design examples. There is no successful
+  // diagnostics fixture, native status, owner or fallback after a bridge error.
+  startEnvironmentDiagnostics: diagnosticsUnavailable,
+  cancelEnvironmentDiagnostics: diagnosticsUnavailable,
+  environmentDiagnosticsStatus: diagnosticsUnavailable,
+  subscribeEnvironmentDiagnostics: diagnosticsUnavailable,
   openConfigEdit: editUnavailable,
   prepareConfigEdit: editUnavailable,
   applyConfigEdit: editUnavailable,

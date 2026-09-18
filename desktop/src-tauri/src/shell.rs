@@ -79,6 +79,28 @@ async fn environment_requirements(webview: Webview, request: tauri::ipc::Request
     not_closing(&state)?;
     state.bridge.environment_requirements(args).await
 }
+#[tauri::command]
+async fn start_environment_diagnostics(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    let args = crate::environment_diagnostics_protocol::start(request_body(&request)?)?;
+    state.document.start_environment_diagnostics(args)
+}
+#[tauri::command]
+async fn environment_diagnostics_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
+    fixture_command!(state, EnvironmentStatus, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?; crate::environment_diagnostics_protocol::status_request(request_body(&request)?)?;
+    let result = state.document.environment_diagnostics_status();
+    fixture_result!(observed, environment_status_returned, &result);
+    result
+}
+#[tauri::command]
+async fn cancel_environment_diagnostics(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    let args = crate::environment_diagnostics_protocol::cancel(request_body(&request)?)?;
+    state.document.cancel_environment_diagnostics(args)
+}
 #[tauri::command(rename_all = "camelCase")]
 async fn project_snapshot(project_id: String, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
@@ -132,7 +154,7 @@ async fn open_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, st
     let window = edit_window(&webview)?;
     let args = edit_commands::open(request_body(&request)?)?;
     not_closing(&state)?;
-    state.bridge.open_config_edit(window, args.project_id)
+    state.document.configuration_edit_admit(|bridge| bridge.open_config_edit(window, args.project_id))
 }
 #[tauri::command]
 async fn prepare_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
@@ -140,7 +162,7 @@ async fn prepare_config_edit(webview: Webview, request: tauri::ipc::Request<'_>,
     let window = edit_window(&webview)?;
     let args = edit_commands::prepare(request_body(&request)?)?;
     not_closing(&state)?;
-    state.bridge.edits.prepare(window, args)
+    state.document.configuration_edit_admit(|bridge| bridge.edits.prepare(window, args))
 }
 #[tauri::command]
 async fn apply_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
@@ -148,7 +170,7 @@ async fn apply_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, s
     let window = edit_window(&webview)?;
     let args = edit_commands::apply(request_body(&request)?)?;
     not_closing(&state)?;
-    state.bridge.edits.apply(window, &args.session_id, &args.plan_token)
+    state.document.configuration_edit_admit(|bridge| bridge.edits.apply(window, &args.session_id, &args.plan_token))
 }
 #[tauri::command]
 async fn close_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
@@ -372,9 +394,9 @@ async fn vault_lock(webview: Webview, request: tauri::ipc::Request<'_>, state: S
 }
 
 #[cfg(not(target_os = "linux"))]
-struct PickerGuard(Arc<AtomicBool>);
+struct PickerGuard { flag: Arc<AtomicBool>, document: Option<DocumentBinding> }
 #[cfg(not(target_os = "linux"))]
-impl Drop for PickerGuard { fn drop(&mut self) { self.0.store(false, Ordering::SeqCst); } }
+impl Drop for PickerGuard { fn drop(&mut self) { if let Some(document) = &self.document { document.compatibility_picker_end(); } self.flag.store(false, Ordering::SeqCst); } }
 #[cfg(not(target_os = "linux"))]
 #[tauri::command]
 async fn choose_project(state: State<'_, ShellState>) -> Result<Option<Project>, BridgeError> {
@@ -383,15 +405,17 @@ async fn choose_project(state: State<'_, ShellState>) -> Result<Option<Project>,
     if state.picker.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         return Err(BridgeError::new("busy", "A native project picker is already open."));
     }
-    let guard = PickerGuard(state.picker.clone());
+    let mut guard = PickerGuard { flag: state.picker.clone(), document: None };
+    state.document.compatibility_picker_begin()?;
+    guard.document = Some(state.document.clone());
     not_closing(&state)?;
-    let bridge = state.bridge.clone();
+    let document = state.document.clone();
     // A renderer going away cannot abandon the Rust picker/selection owner.
     tauri::async_runtime::spawn(async move {
         let _guard = guard;
         match rfd::AsyncFileDialog::new().set_title("Choose a mobile project folder").pick_folder().await {
             None => Ok(None),
-            Some(folder) => bridge.register_picked_project(folder.path().to_path_buf()).map(Some),
+            Some(folder) => document.compatibility_picker_publish(folder.path().to_path_buf()).map(Some),
         }
     }).await.map_err(|_| BridgeError::new("picker_failed", "The native project picker did not settle normally."))?
 }
@@ -426,10 +450,12 @@ fn trusted_document(url: &tauri::Url) -> bool {
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
     let mut revisions = edits.subscribe();
     let mut assets = document.subscribe();
+    let mut diagnostics = document.environment_diagnostics_subscribe();
     let (start, enter) = oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
         if enter.await.is_err() { return; }
         let mut metadata_revision = None;
+        let mut diagnostics_revision = None;
         loop {
             if *stop.borrow() { return; }
             // status() releases its native locks before any renderer callback.
@@ -452,11 +478,18 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             let _ = app.emit_to(MAIN_WINDOW, ASSET_EVENT, &status);
             let status = document.github_connection_status();
             let _ = app.emit_to(MAIN_WINDOW, github_connection_wire::EVENT, &status);
+            if let Ok(status) = document.environment_diagnostics_status() {
+                if diagnostics_revision != Some(status.status_revision) {
+                    diagnostics_revision = Some(status.status_revision);
+                    let _ = app.emit_to(MAIN_WINDOW, crate::environment_diagnostics_protocol::EVENT, &status);
+                }
+            }
             tokio::select! {
                 biased;
                 result = stop.changed() => { if result.is_err() || *stop.borrow() { return; } },
                 result = revisions.changed() => { if result.is_err() { return; } },
                 result = assets.changed() => { if result.is_err() { return; } },
+                result = diagnostics.changed() => { if result.is_err() { return; } },
                 // Observation only: status checks fixed original endpoints and
                 // already-ended joins. It launches no operation or new clock.
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {},
@@ -520,6 +553,9 @@ fn request_shutdown(app: &tauri::AppHandle) {
         state.closing.store(false, Ordering::SeqCst);
         return;
     }
+    if !state.document.compatibility_quit_begin() {
+        state.closing.store(false, Ordering::SeqCst); return;
+    }
     let bridge = state.bridge.clone();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -532,13 +568,14 @@ fn request_shutdown(app: &tauri::AppHandle) {
             .set_level(rfd::MessageLevel::Warning)
             .show().await;
         if !matches!(choice, rfd::MessageDialogResult::Ok) {
+            app.state::<ShellState>().document.compatibility_quit_result(false);
             app.state::<ShellState>().closing.store(false, Ordering::SeqCst);
             return;
         }
-        // Request both owners' shutdown and await both results. A failure in
-        // one must not skip stopping/settling the other's original resources.
-        let (passive, edit) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown());
-        if passive.is_ok() && edit.is_ok() && bridge.supervisor.can_exit() && bridge.edits.can_exit() {
+        app.state::<ShellState>().document.compatibility_quit_result(true);
+        // No short circuit can skip another original owner's shutdown.
+        let (passive, edit, diagnostics) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown(), bridge.diagnostics.shutdown());
+        if passive.is_ok() && edit.is_ok() && diagnostics.is_ok() && bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() {
             if !settle_relay(&app).await { return; }
             app.state::<ShellState>().exit_ready.store(true, Ordering::SeqCst);
             app.exit(0);
@@ -1119,7 +1156,9 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            app_info, choose_project, project_snapshot, catalog, environment_requirements, validate_config, suggest_config, preview_config,
+            app_info, choose_project, project_snapshot, catalog, environment_requirements,
+            start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,
+            validate_config, suggest_config, preview_config,
             propose_github_setup,
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,
             github_workflow_edit_open, github_workflow_edit_prepare, github_workflow_edit_apply,

@@ -1,0 +1,164 @@
+name: Desktop environment diagnostics native verification
+
+on:
+  push:
+    branches: [verify/desktop-environment-diagnostics-native]
+    paths:
+      - desktop/**
+      - src/mobile_release/**
+      - tests/native_desktop_environment.py
+      - tests/workflow/command_bootstrap_fixture.py
+      - tests/desktop/test_ci_environment_diagnostics.py
+      - tests/desktop/test_ci_foundation_contract.py
+      - pyproject.toml
+      - .github/workflows/desktop-environment-diagnostics-native.yml
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed environment-diagnostics source (synthetic verification only)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-environment-diagnostics-native-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  environment-native:
+    name: Fixed headless environment diagnostics / ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+          - platform: macos
+            runner: macos-26
+    env:
+      MRK_DESKTOP_PLATFORM: ${{ matrix.platform }}
+      MRK_DESKTOP_HOSTED_CHECKS: environment-diagnostics-native-v1
+      MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+    steps:
+      - name: Require exact disposable non-root native verification source
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$EUID" -ne 0 ]]
+          case "$MRK_DESKTOP_PLATFORM:$RUNNER_OS:$RUNNER_ARCH:$ImageOS" in
+            linux:Linux:X64:ubuntu24|macos:macOS:ARM64:macos26|macos:macOS:ARM64:macos26-arm64) ;;
+            *) exit 1 ;;
+          esac
+          [[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-environment-diagnostics-native ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" != 0000000000000000000000000000000000000000 ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-environment-diagnostics-native.yml@$GITHUB_REF" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == push && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
+          fi
+      - name: Check out exact candidate without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select fixed native helper Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Prepare exact bounded source and ZIP bindings
+        id: prepare
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py prepare'
+      - name: Acquire only locked active-platform headless compiler inputs
+        timeout-minutes: 15
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
+      - name: Compile one headless library-test artifact without execution
+        timeout-minutes: 12
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
+      - name: Verify original environment owners once with original shell custody
+        id: native
+        # Infrastructure ceiling only. T/W/H and native/ordinary output caps
+        # belong to the original implementation, not this outer job timer.
+        timeout-minutes: 4
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set +o posix
+          unset POSIXLY_CORRECT
+          set -C
+          umask 077
+          # Bash non-POSIX -f units are 1024 bytes. The Python pre-exec gate
+          # checks actual RLIMIT_FSIZE == 1048576 on BOTH supported hosts.
+          # Hitting this limit is failure, never finality or a truncated pass.
+          ulimit -S -f 1024
+          exec 3>"$MRK_DESKTOP_CI_ROOT/environment-native-outer.json"
+          exec 4>"$MRK_DESKTOP_CI_ROOT/environment-native.stdout"
+          exec 5>"$MRK_DESKTOP_CI_ROOT/environment-native.stderr"
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py environment-native </dev/null 1>&4 2>&5 3>&- 4>&- 5>&-
+          result=$?
+          set -e
+          # Only this original shell retains these writer descriptors. A close
+          # or write failure must fail the step, not overwrite result with zero.
+          exec 4>&- 5>&- || exit 125
+          printf '{"schemaVersion":1,"scope":"environment-diagnostics-native-v1","sourceSha":"%s","platform":"%s","runId":"%s","attempt":"%s","originalWait":true,"exitCode":%s,"outputWritersClosed":true,"statusWriterCloseGate":"original-step-success-required","fileLimitBytes":1048576}\n' "$GITHUB_SHA" "$MRK_DESKTOP_PLATFORM" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$result" >&3 || exit 125
+          exec 3>&- || exit 125
+          exit "$result"
+      - name: Validate DATA receipts only and retain required originals for VM disposal
+        id: retain
+        # A failed/timed-out native step licenses ONLY this bounded DATA
+        # snapshot, never another native case, runtime probe or cleanup.
+        if: always() && steps.prepare.outcome == 'success' && steps.native.outcome != 'skipped'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_ENVIRONMENT_NATIVE_STEP_OUTCOME: ${{ steps.native.outcome }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py retain'
+      - name: Retain only the validated sanitized aggregate
+        # No raw logs, private inputs, runtime/compiler roots or case traces.
+        # A conservative/unexecuted receipt may be retained, never called a pass.
+        if: always() && steps.prepare.outcome == 'success' && steps.retain.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-environment-diagnostics-native-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.prepare.outputs.root }}/environment-native-public.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1

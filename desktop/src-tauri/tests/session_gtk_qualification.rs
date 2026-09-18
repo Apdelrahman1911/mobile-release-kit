@@ -6,6 +6,8 @@ compile_error!("SG1 requires debug test + desktop-shell + development-runtime, L
 #[path = "../src/error.rs"] mod error;
 #[path = "../src/protocol.rs"] mod protocol;
 #[path = "../src/environment.rs"] mod environment;
+#[path = "../src/environment_diagnostics_protocol.rs"] mod environment_diagnostics_protocol;
+#[path = "../src/environment_diagnostics_owner.rs"] mod environment_diagnostics_owner;
 #[path = "../src/runtime.rs"] mod runtime;
 #[path = "../src/installed_runtime.rs"] mod installed_runtime;
 #[path = "../src/supervisor.rs"] mod supervisor;

@@ -65,7 +65,7 @@ function WriteOnlyFields({ kind, disabled, prepareHelp, onPrepare, onHelp }: { k
   </form>;
 }
 
-export function CredentialSession({ state, controller, project, guide, onHelp }: { state: AssetDisplayState; controller: AssetSessionController; project: ProjectSession | null; guide: CredentialGuide | null; onHelp: (help: HelpContent) => void }) {
+export function CredentialSession({ state, controller, project, guide, onHelp, nativeBusyReason = null }: { state: AssetDisplayState; controller: AssetSessionController; project: ProjectSession | null; guide: CredentialGuide | null; onHelp: (help: HelpContent) => void; nativeBusyReason?: string | null }) {
   const id = useId();
   const [kindId, setKind] = useState<AssetKind>('android-keystore');
   const [replacementId, setReplacement] = useState<string | null>(null);
@@ -79,8 +79,8 @@ export function CredentialSession({ state, controller, project, guide, onHelp }:
   useEffect(() => { setReplacement(null); setConfirmLock(false); }, [project?.project.id, state.scope.platform, state.scope.stage, state.scope.purpose]);
   const status = state.status;
   const operation = status?.operation;
-  const baseReason = assetSessionReason(state);
-  const contextReason = assetContextReason(state);
+  const baseReason = nativeBusyReason ?? assetSessionReason(state);
+  const contextReason = nativeBusyReason ?? assetContextReason(state);
   const cancellationReason = assetCancellationReason(state);
   const inSession = status?.mode === 'session';
   const nativeAvailable = state.mode === 'native' && status?.capability.available === true && !state.blocked && !state.observationFailed;
@@ -127,9 +127,9 @@ export function CredentialSession({ state, controller, project, guide, onHelp }:
       <p><strong>Project:</strong> {project?.project.name ?? 'Choose a project first'} · {project?.draft ? 'Current in-memory draft' : 'Prepare a draft in Project settings'}</p>
       <div className="session-context-fields">{([
         ['platform', 'Platform', ASSET_PLATFORMS], ['stage', 'Release stage', ASSET_STAGES], ['purpose', 'Input purpose', ASSET_PURPOSES],
-      ] as const).map(([name, label, options]) => <div className="field" key={name}><div className="field-label"><label htmlFor={`${id}-${name}`}>{label}</label>{controlHelp(name)}</div><select id={`${id}-${name}`} value={state.scope[name]} onChange={(event) => scopeChange(name, event.target.value)} disabled={state.blocked}>{options.map((option) => <option key={option} value={option}>{option === 'project' ? 'Project dependency access' : option === 'candidate' ? 'Candidate / internal testing' : option === 'production' ? 'Production preparation' : option === 'full' ? 'All selected input roles' : option === 'store' ? 'Store access only' : option === 'signing' ? 'Build / signing only' : option === 'external-testing' ? 'External testing' : option === 'ios' ? 'iOS' : 'Android'}</option>)}</select></div>)}</div>
+      ] as const).map(([name, label, options]) => <div className="field" key={name}><div className="field-label"><label htmlFor={`${id}-${name}`}>{label}</label>{controlHelp(name)}</div><select id={`${id}-${name}`} value={state.scope[name]} onChange={(event) => scopeChange(name, event.target.value)} disabled={state.blocked || nativeBusyReason !== null}>{options.map((option) => <option key={option} value={option}>{option === 'project' ? 'Project dependency access' : option === 'candidate' ? 'Candidate / internal testing' : option === 'production' ? 'Production preparation' : option === 'full' ? 'All selected input roles' : option === 'store' ? 'Store access only' : option === 'signing' ? 'Build / signing only' : option === 'external-testing' ? 'External testing' : option === 'ios' ? 'iOS' : 'Android'}</option>)}</select></div>)}</div>
       <p>Changing the project, draft, platform, stage or purpose makes prior assignment displays stale immediately. The core—not these selectors—decides which inputs are required.</p>
-      <button className="button secondary small" disabled={!nativeAvailable || !inSession || !project || state.updatingContext} onClick={() => controller.submitContext()}>{state.updatingContext ? 'Submitting current context…' : 'Submit current context'}</button>
+      <button className="button secondary small" disabled={!nativeAvailable || !inSession || !project || state.updatingContext || nativeBusyReason !== null} onClick={() => controller.submitContext()}>{state.updatingContext ? 'Submitting current context…' : 'Submit current context'}</button>
     </div>
     {nativeAvailable && inSession && guide && <>
       <div className="session-selection">

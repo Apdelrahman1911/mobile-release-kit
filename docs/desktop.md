@@ -37,7 +37,8 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 | Public locale text | Saved-config-derived named observations, in-memory drafts, shared core validation and contextual help | Private review/TestFlight access, whole-metadata validation, translation, Store acceptance or writes |
 | Public locale text save implementation (disabled) | Separate metadata domain, complete one-locale file review and original one-use typed Save | Enabled saving, native transaction/process qualification, screenshot editing, locale deletion or packaged-runtime readiness |
 | Pure credential assessment (internal only) | Core policy over explicitly supplied scalars and finite file observations, with a private result-sanitizing adapter | Renderer secret entry, file acquisition/parser qualification, password verification, native custody, storage or assignment |
-| Environment | Static capability and missing-feature explanations | Running the full doctor, SDK version probes or native admission |
+| Environment requirements | Current-draft prerequisites, fixed baseline guidance and missing-feature explanations | Observing installed tools, running doctor or native admission |
+| Build-tool diagnostics implementation (disabled) | Explicit, cancellable version observations through a separate native owner and the ordinary core command owner | Enabled diagnostics, complete SDK checks, native document/runtime qualification or release readiness |
 | Credentials, releases, artifacts, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
 
 Windows can use the portable passive services. Its original-parent static reader
@@ -171,6 +172,63 @@ abandonment does not abandon a process owner. Unknown finality prevents reuse.
 This direct-child design **must not** be reused for builds, native validation,
 signing or other descendant-producing/stateful work without the separately
 reviewed ownership/cancellation backend.
+
+### Build-tool diagnostics (separate, qualification-gated operation)
+
+The Environment page separates **requirements** from **observed checks**.
+Requirements use the current configuration draft; they do not inspect the host.
+The explicit **Check build tools** action has a separate native capability gate.
+It never runs automatically when a project opens, reconnects, or changes. At this
+source milestone that gate remains closed: source implementation and pure tests
+do not qualify a host, runtime, or native document lifecycle.
+
+Once that exact profile is qualified, the first diagnostic scope is deliberately
+small:
+
+| Target and host | Allowed observations | Still not checked |
+| --- | --- | --- |
+| Android on qualified GNU/Linux or macOS | Git, Java runtime and Java compiler versions | Gradle/AGP compatibility, SDK packages, signing tools, project commands |
+| iOS on qualified macOS | Selected developer installation, Git, and complete Xcode version/build against core policy | Signing, profiles, schemes, archives, Store access |
+| iOS on Linux; Windows; artifact-validation diagnostics | Explicit host/scope unavailable result | No fallback execution or cross-platform claim |
+
+Linux uses only the admitted system Git and the matching Java alternatives pair
+under `/usr/lib/jvm`. macOS uses the existing selected developer installation and
+at most one admissible system-installed JDK pair. No PATH search, custom-location
+fallback, installation launcher, license acceptance, or tool-selection change is
+performed. Missing **in the supported lookup** does not mean missing everywhere
+on the computer. The UI explains these distinctions and the next manual setup
+step rather than displaying raw tool output or internal paths.
+
+The command environment starts empty with only fixed locale/system search
+settings (and the admitted developer directory for Xcode). It excludes project
+hooks, home configuration, JVM options, credentials, proxies and loader settings;
+the current working directory is the qualified neutral runtime directory, not the
+project. Installed tools are administratively trusted software. This is not a
+malware sandbox, immutable executable-handle proof, or promise that system tools
+cannot update their own caches.
+
+One native operation reserves a **six-second work deadline** and a **ten-second
+finality deadline**, both from original admission, including startup. Each command
+has at most three seconds within that shared reservation and a combined 16-KiB
+stdout/stderr bound. A slow installation can therefore time out even when it
+would work with a longer interactive command. There is no automatic retry or
+renewed cleanup allowance. An ambiguous ordinary command failure is reported as
+incomplete, not guessed to be a timeout, missing tool or invalid version.
+
+The native operation—not the page promise—owns startup, the original child,
+request pipe, output readers and their final joins. Cancel, document/context loss
+and confirmed Quit request the original operation to stop. Losing a Start reply
+requires checking its existing status, never starting a replacement. A terminal
+core frame is provisional until original resources settle; unknown cleanup keeps
+the active operation reserved and blocks conflicting work/normal exit. Earlier
+results remain visibly stale after their project/draft/baseline context changes.
+
+**Complete** means the finite check list completed, not that every tool matched
+policy. Version mismatch, unavailable selection, failed command, cancellation,
+timeout and unknown finality remain distinct. No project, repository, credential,
+signing, network or Store operation is requested. Builds, full doctor, Windows
+ownership, native UI qualification and standalone distribution remain separate
+milestones; no production constructor is enabled by this implementation.
 
 ### Supplied-input credential assessment (no renderer routing)
 
@@ -417,6 +475,28 @@ Use credential-free synthetic inputs and verification-only workflows. Never run
 a release workflow or contact a live Store merely to test the desktop. Keep
 protected PR delivery and actual-main verification separate from feature-branch
 checks.
+
+### Build-tool diagnostics verification profile
+
+The dedicated `desktop-environment-diagnostics-native.yml` profile is headless:
+one compilation and one fixed test entry on each of GNU/Linux x64 and macOS
+arm64. It does not launch the desktop, install an application, invoke project
+build scripts, contact a Store or change the selected tools. Linux compilation
+and inert checks run locally first; hosted Linux is used for the original
+process-lifecycle exercises that must not run on a shared development machine.
+
+Receipts distinguish actual installed-tool observations, source/core-ZIP
+bootstrap coverage, and explicitly injected cancellation, output-limit and
+delayed-finality cases. The latter exercise the real owners but are not evidence
+of installed tool versions or actual OS faults. A missing prerequisite leaves
+dependent checks unexecuted; it is not replaced with a fake successful tool.
+Terminal output alone never proves that the original processes, readers and
+closes settled. Unknown resource custody prevents another case from starting.
+
+This profile cannot enable diagnostics in a production constructor. Native
+window/document behavior, installed runtime custody, Windows support and
+standalone packages remain separate qualification requirements. Passing its
+workflow is not a claim that the Desktop application is complete.
 
 Keep build outputs/cache roots task-owned, serialize memory-intensive compiles,
 and record concise source-bound results. Close only owned finished workers and

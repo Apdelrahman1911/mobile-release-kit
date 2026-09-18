@@ -1,5 +1,8 @@
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
 import { environmentError, environmentRequestFits, parseEnvironmentResult } from './environment.ts';
+import { ENVIRONMENT_DIAGNOSTICS_EVENT, environmentDiagnosticsError, environmentDiagnosticsRequestFits, parseEnvironmentDiagnosticsStatus } from './environmentDiagnosticsProtocol.ts';
+import type { EnvironmentDiagnosticsCommand } from './environmentDiagnosticsProtocol.ts';
+import type { EnvironmentDiagnosticsStatus } from './environmentDiagnosticsTypes.ts';
 import { githubSetupError, githubSetupRequestFits, githubSetupResultMatches, parseCatalogGitHubSetup, parseGitHubSetupResult } from './githubSetupProtocol.ts';
 import { parseCatalogCredentialGuide } from './credentialGuide.ts';
 import { assetError, assetRequestFits, parseAssetStatus } from './assetSessionProtocol.ts';
@@ -15,7 +18,7 @@ import { metadataTextError, metadataTextRequestFits, parseMetadataTextEditStatus
 import type { MetadataTextCommand } from './metadataTextProtocol.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'environment-diagnostics-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -39,6 +42,15 @@ export function apiError(error: unknown): ApiError {
 }
 
 export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: NativeInvoke, listen?: NativeEditListen): DesktopApi {
+  const diagnosticsCall = async (command: EnvironmentDiagnosticsCommand, args: unknown): Promise<EnvironmentDiagnosticsStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'environment_diagnostics_unavailable' };
+      if (!environmentDiagnosticsRequestFits(command, args)) throw { code: 'environment_diagnostics_invalid' };
+      const status = parseEnvironmentDiagnosticsStatus(await invoke<unknown>(command, structuredClone(args) as Record<string, unknown>));
+      if (!status) throw { code: 'environment_diagnostics_status_invalid' };
+      return status;
+    } catch (error) { throw environmentDiagnosticsError(error); }
+  };
   const call = async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
     if (mode !== 'native') {
       throw { code: 'NativeBridgeRequired', message: 'Open the installed desktop application. Browser preview requires an explicit developer build flag.', retryable: false } satisfies ApiError;
@@ -114,6 +126,15 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (!result) throw { code: 'protocol_error' };
         return result;
       } catch (error) { throw environmentError(error); }
+    },
+    startEnvironmentDiagnostics: (request) => diagnosticsCall('start_environment_diagnostics', request),
+    cancelEnvironmentDiagnostics: (runId, ownerGeneration) => diagnosticsCall('cancel_environment_diagnostics', { runId, ownerGeneration }),
+    environmentDiagnosticsStatus: () => diagnosticsCall('environment_diagnostics_status', {}),
+    subscribeEnvironmentDiagnostics: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'environment_diagnostics_unavailable' };
+        return await listen(ENVIRONMENT_DIAGNOSTICS_EVENT, (value) => onStatus(parseEnvironmentDiagnosticsStatus(value)));
+      } catch (error) { throw environmentDiagnosticsError(error); }
     },
     proposeGitHubSetup: async (input) => {
       try {

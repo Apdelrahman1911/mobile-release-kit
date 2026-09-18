@@ -157,10 +157,12 @@ macro_rules! source { ($path:literal) => { Source { path:$path, bytes:include_by
 const SOURCES: &[Source] = &[
     // Fixed first-party superset: real frontend/assets/build inputs, native
     // modules (including cfg(test) transitive files), and core import/data tree.
+    source!(".github/workflows/desktop-environment-diagnostics-native.yml"),
     source!(".github/workflows/desktop-github-connection-tls.yml"),
     source!(".github/workflows/desktop-github-workflow-apply-native.yml"),
     source!("desktop/config_edit_bootstrap.py"),
     source!("desktop/engine_bootstrap.py"),
+    source!("desktop/environment_bootstrap.py"),
     source!("desktop/github_connection_bootstrap.py"),
     source!("desktop/index.html"),
     source!("desktop/native/linux-mount-observation/Cargo.toml"),
@@ -188,6 +190,9 @@ const SOURCES: &[Source] = &[
     source!("desktop/src-tauri/src/edit_owner.rs"),
     source!("desktop/src-tauri/src/edit_protocol.rs"),
     source!("desktop/src-tauri/src/environment.rs"),
+    source!("desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs"),
+    source!("desktop/src-tauri/src/environment_diagnostics_owner.rs"),
+    source!("desktop/src-tauri/src/environment_diagnostics_protocol.rs"),
     source!("desktop/src-tauri/src/error.rs"),
     source!("desktop/src-tauri/src/github_commands.rs"),
     source!("desktop/src-tauri/src/github_connection_protocol.rs"),
@@ -235,6 +240,7 @@ const SOURCES: &[Source] = &[
     source!("desktop/src/components/DraftEditor.tsx"),
     source!("desktop/src/components/DraftReview.tsx"),
     source!("desktop/src/components/DraftSuggestions.tsx"),
+    source!("desktop/src/components/EnvironmentDiagnostics.tsx"),
     source!("desktop/src/components/Fields.tsx"),
     source!("desktop/src/components/GitHubConnection.tsx"),
     source!("desktop/src/components/GitHubWorkflowApply.tsx"),
@@ -247,6 +253,9 @@ const SOURCES: &[Source] = &[
     source!("desktop/src/credentialGuide.ts"),
     source!("desktop/src/drafts.ts"),
     source!("desktop/src/environment.ts"),
+    source!("desktop/src/environmentDiagnosticsController.ts"),
+    source!("desktop/src/environmentDiagnosticsProtocol.ts"),
+    source!("desktop/src/environmentDiagnosticsTypes.ts"),
     source!("desktop/src/githubConnectionController.ts"),
     source!("desktop/src/githubConnectionProtocol.ts"),
     source!("desktop/src/githubConnectionTypes.ts"),
@@ -281,6 +290,9 @@ const SOURCES: &[Source] = &[
     source!("src/mobile_release/_desktop_edit_engine.py"),
     source!("src/mobile_release/_desktop_edit_protocol.py"),
     source!("src/mobile_release/_desktop_engine.py"),
+    source!("src/mobile_release/_desktop_environment_control.py"),
+    source!("src/mobile_release/_desktop_environment_engine.py"),
+    source!("src/mobile_release/_desktop_environment_protocol.py"),
     source!("src/mobile_release/_desktop_github_engine.py"),
     source!("src/mobile_release/_github_connection_transport.py"),
     source!("src/mobile_release/_lifetime_evidence.py"),
@@ -324,6 +336,8 @@ const SOURCES: &[Source] = &[
     source!("src/mobile_release/credentials.py"),
     source!("src/mobile_release/data/apple-profile-roots.pem"),
     source!("src/mobile_release/discovery.py"),
+    source!("src/mobile_release/environment_diagnostics.py"),
+    source!("src/mobile_release/environment_diagnostics_tools.py"),
     source!("src/mobile_release/errors.py"),
     source!("src/mobile_release/github_workflow_edit.py"),
     source!("src/mobile_release/init_transaction.py"),
@@ -358,6 +372,8 @@ const SOURCES: &[Source] = &[
     source!("templates/workflows/mobile-production-submit.yml"),
     source!("tests/native_desktop_config.py"),
     source!("tests/native_desktop_config_eof.py"),
+    source!("tests/native_desktop_environment.py"),
+    source!("tests/workflow/command_bootstrap_fixture.py"),
 ];
 fn inherited_stdout() -> Check<Stdout> {
     use nix::{fcntl::{fcntl, FcntlArg, FdFlag, OFlag}, sys::stat::{fstat, SFlag}};
@@ -534,7 +550,7 @@ pub(crate) enum EventKind {
 struct Event {ordinal:u32,kind:EventKind,operation:u32,detail:u32,main_thread:bool}
 #[derive(Clone,Copy,PartialEq,Eq,Serialize)]
 #[serde(rename_all="kebab-case")]
-pub(super) enum Command {AppInfo,Catalog,EditStatus,AssetStatus,Project,Open,Context,Choose,Forbidden}
+pub(super) enum Command {AppInfo,Catalog,EditStatus,AssetStatus,Project,Open,Context,Choose,EnvironmentStatus,Forbidden}
 #[derive(Clone,Serialize)]
 struct CommandFact {kind:Command,stage:u32,entered:u32,returned:Option<u32>,reply:u32}
 #[derive(Clone,PartialEq,Eq)]
@@ -557,6 +573,7 @@ struct TopologySlot {
 struct Record {
     events:Vec<Event>,commands:Vec<CommandFact>,stage:u32,project_id:Option<String>,sources:[Option<Value>;5],
     topology:[Option<TopologySlot>;5],topology_main_retired:bool,
+    diagnostics_bootstrap:Option<crate::environment_diagnostics_protocol::Status>,
 }
 impl Record {
     fn event(&mut self,kind:EventKind,operation:u32,detail:u32,main_thread:bool)->Check<u32> {
@@ -694,10 +711,10 @@ impl Qualification {
     }
     pub(super) fn command(self:&Arc<Self>,kind:Command)->Check<CommandGuard> {
         let mut b=self.record()?; let stage=b.stage;
-        let expected=match stage {0=>matches!(kind,Command::AppInfo|Command::Catalog|Command::EditStatus|Command::AssetStatus),
+        let expected=match stage {0=>matches!(kind,Command::AppInfo|Command::Catalog|Command::EditStatus|Command::AssetStatus|Command::EnvironmentStatus),
             1|2=>kind==Command::Project,3=>match kind {Command::Open=>true,Command::Context=>b.complete(Command::Open,3,1),
                 Command::Choose=>b.complete(Command::Context,3,1),_=>false},_=>false};
-        if !expected || kind==Command::Forbidden || b.commands.iter().any(|c|c.kind==kind && c.stage==stage) || b.commands.len()==9 {
+        if !expected || kind==Command::Forbidden || b.commands.iter().any(|c|c.kind==kind && c.stage==stage) || b.commands.len()==10 {
             drop(b); self.refuse(); return Err("sg1_command_not_in_recipe");
         }
         let entered=b.event(EventKind::CommandEnter,stage,kind as u32,std::thread::current().id()==self.main)?;
@@ -781,7 +798,7 @@ impl Qualification {
     }
     async fn run_recipe(self:&Arc<Self>,app:tauri::AppHandle)->Check<()> {
         self.until(||self.doc().is_ok_and(|d|d.fixture_bootstrap()) && self.record().is_ok_and(|b|
-            [Command::AppInfo,Command::Catalog,Command::EditStatus,Command::AssetStatus].iter().all(|c|b.complete(*c,0,1)))
+            [Command::AppInfo,Command::Catalog,Command::EditStatus,Command::AssetStatus,Command::EnvironmentStatus].iter().all(|c|b.complete(*c,0,1)))
             && self.probes().is_ok_and(|p|p.bridge.supervisor.can_exit())).await?;
         self.probes()?.passive.bootstrap().await?; self.probes()?.bridge.edits.session_gtk_idle(false)?;
         self.mark(1)?; self.eval(&app,"project")?; self.native_dialog(1,&app).await?;
@@ -879,9 +896,9 @@ impl Qualification {
             check(count(kind)==1 && one(kind,0,1,Some(true))?<finished,"sg1_original_lifecycle_order")?;
         }
         check(count(EventKind::LoadFinished)==1 && count(EventKind::DocumentLost)==0 && finished<first,"sg1_original_lifecycle_complete")?;
-        let expected=[(Command::AppInfo,0,1),(Command::Catalog,0,1),(Command::EditStatus,0,1),(Command::AssetStatus,0,1),
+        let expected=[(Command::AppInfo,0,1),(Command::Catalog,0,1),(Command::EditStatus,0,1),(Command::AssetStatus,0,1),(Command::EnvironmentStatus,0,1),
             (Command::Project,1,2),(Command::Project,2,3),(Command::Open,3,1),(Command::Context,3,1),(Command::Choose,3,1)];
-        check(b.commands.len()==expected.len() && count(EventKind::CommandEnter)==9 && count(EventKind::CommandReturn)==9
+        check(b.commands.len()==expected.len() && count(EventKind::CommandEnter)==10 && count(EventKind::CommandReturn)==10
             && expected.iter().all(|(kind,stage,reply)|b.complete(*kind,*stage,*reply)),"sg1_exact_command_roster")?;
         for c in &b.commands {
             let returned=c.returned.ok_or("sg1_command_unreturned")?;
@@ -946,15 +963,25 @@ impl Qualification {
         self.recipe.join(self,Some(Duration::from_secs(8))).await??;
         check(self.recipe.joined() && self.relay_ok.load(Ordering::SeqCst) && self.doc()?.can_exit() && self.doc()?.fixture_final(),"sg1_final_original_conjunction")?;
         let passive=self.probes()?.passive.final_facts().await?; let edit=self.probes()?.bridge.edits.session_gtk_idle(true)?;
+        let diagnostics_owner=&self.probes()?.bridge.diagnostics;
+        let diagnostics_final=diagnostics_owner.status(crate::environment_diagnostics_protocol::Availability::Available)
+            .map_err(|_|"sg1_diagnostics_final_status")?;
+        check(diagnostics_owner.can_exit() && !diagnostics_owner.disabled() && diagnostics_owner.stopping()
+            && diagnostics_final.schema_version==1 && diagnostics_final.status_revision<u32::MAX
+            && !diagnostics_final.capability.available
+            && diagnostics_final.capability.reason==crate::environment_diagnostics_protocol::Availability::Shutdown
+            && diagnostics_final.active.is_none() && diagnostics_final.last_terminal.is_none(),"sg1_diagnostics_never_started")?;
         self.native.closed()?; self.input.unchanged()?;
         for n in 1..=5 {self.dialog_facts(n)?;}
         let prefix={let b=self.record()?;
             check(b.stage==5,"sg1_final_stage")?; self.final_events(&b)?;
             let native_ownership=self.topology_prefix(&b)?;
+            let diagnostics_bootstrap=b.diagnostics_bootstrap.as_ref().ok_or("sg1_diagnostics_bootstrap_missing")?;
             json!({"scope":"session-gtk-five-dialog-v1","case":"SG1","fixtureOnly":true,"events":b.events,
                 "commands":b.commands,"sources":b.sources,"nativeOwnership":native_ownership,"passive":passive,"edit":edit,"relayJoin":"ok","recipeJoin":"ok",
+                "diagnosticsBootstrap":diagnostics_bootstrap,"diagnosticsFinal":diagnostics_final,
                 "documentBound":true,"selectedCancelPreserved":true,
-                "frontendSubscriptions":{"sourcePinned":true,"names":["config-edit-state","asset-session-state"],
+                "frontendSubscriptions":{"sourcePinned":true,"names":["config-edit-state","asset-session-state","environment-diagnostics-state-changed"],
                     "evidence":"real-status-command-after-awaited-listen-in-pinned-controller"}})
         };
         let bytes=crate::edit_protocol::bounded(&prefix,64*1024).map_err(|_|"sg1_prefix_bound")?;
@@ -1002,6 +1029,24 @@ impl CommandGuard {
     pub(super) fn value(self,r:&Result<Value,BridgeError>) {self.finish(u32::from(r.is_ok()),None);}
     pub(super) fn edit(self,r:&Result<ConfigEditStatus,BridgeError>) {self.finish(u32::from(r.is_ok()),None);}
     pub(super) fn asset(self,r:&Result<AssetStatus,AssetError>) {self.finish(u32::from(r.is_ok()),None);}
+    pub(super) fn environment_status_returned(self,r:&Result<crate::environment_diagnostics_protocol::Status,BridgeError>) {
+        use crate::environment_diagnostics_protocol::Availability;
+        // The actual awaited-listen Status can precede LoadFinished or overlap
+        // passive bootstrap. Record that observation, never invent an idle
+        // capability or start diagnostics to make the recipe pass.
+        let accepted:Check<()>=(|| {
+            let status=r.as_ref().map_err(|_|"sg1_diagnostics_bootstrap_reply")?;
+            check(status.schema_version==1 && status.status_revision<u32::MAX && !status.capability.available
+                && matches!(status.capability.reason,Availability::Busy|Availability::DocumentLost|Availability::RuntimeUnqualified)
+                && status.active.is_none() && status.last_terminal.is_none(),"sg1_diagnostics_bootstrap_unavailable")?;
+            let mut b=self.context.record()?;
+            let original=b.commands.get(self.index).ok_or("sg1_command_original")?;
+            check(original.kind==Command::EnvironmentStatus && original.stage==0 && original.returned.is_none()
+                && b.diagnostics_bootstrap.is_none(),"sg1_diagnostics_bootstrap_once")?;
+            b.diagnostics_bootstrap=Some(status.clone()); Ok(())
+        })();
+        self.finish(u32::from(accepted.is_ok()),None);
+    }
     pub(super) fn project(self,r:&Result<Option<Project>,AssetError>) {
         match r {Ok(None)=>self.finish(2,None),Ok(Some(p))=>self.finish(3,Some(p)),Err(_)=>self.finish(0,None)}
     }
@@ -1019,8 +1064,8 @@ pub(crate) fn main()->std::process::ExitCode {
         let input=Inputs::admit(&native,files)?;
         Ok(Arc::new(Qualification {main,phase:AtomicU8::new(DISARMED),failed:AtomicBool::new(false),wrote:AtomicBool::new(false),
             stdout,input,native,document:OnceLock::new(),probes:OnceLock::new(),
-            record:Mutex::new(Record {events:Vec::with_capacity(512),commands:Vec::with_capacity(9),stage:0,project_id:None,sources:std::array::from_fn(|_|None),
-                topology:std::array::from_fn(|_|None),topology_main_retired:false}),
+            record:Mutex::new(Record {events:Vec::with_capacity(512),commands:Vec::with_capacity(10),stage:0,project_id:None,sources:std::array::from_fn(|_|None),
+                topology:std::array::from_fn(|_|None),topology_main_retired:false,diagnostics_bootstrap:None}),
             recipe:OriginalTask::new(),relay_ok:AtomicBool::new(false)}))
     })();
     let context:Arc<Qualification>=match admitted {Ok(q)=>q,Err(_)=>{eprintln!("SG1 admission refused; no native qualification was run.");return std::process::ExitCode::FAILURE;}};

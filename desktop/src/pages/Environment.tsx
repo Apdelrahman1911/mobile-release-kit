@@ -2,7 +2,9 @@ import type { AppInfo, HelpContent } from '../types.ts';
 import type { ProjectSession } from '../drafts.ts';
 import { environmentStartReason } from '../environment.ts';
 import type { EnvironmentController, EnvironmentPlatform, EnvironmentOperation, EnvironmentState } from '../environment.ts';
-import { Badge, DisabledAction, ErrorNotice, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
+import type { EnvironmentDiagnosticsController, EnvironmentDiagnosticsState } from '../environmentDiagnosticsController.ts';
+import { EnvironmentDiagnostics } from '../components/EnvironmentDiagnostics.tsx';
+import { Badge, ErrorNotice, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
 
 const methodLabels: Record<string, string> = {
@@ -28,8 +30,9 @@ const initialHelp: Record<'platform' | 'operation', HelpContent> = {
 };
 const activity = (operation: EnvironmentOperation) => operation === 'build' ? 'Build / archive prerequisites' : 'Artifact-validation prerequisites';
 
-export function Environment({ info, preview, session, state, controller, onRetry, onSettings, onHelp, loading }: {
+export function Environment({ info, preview, session, state, controller, diagnosticsState, diagnosticsController, onRetry, onSettings, onHelp, loading }: {
   info: AppInfo | null; preview: boolean; session: ProjectSession | null; state: EnvironmentState; controller: EnvironmentController;
+  diagnosticsState: EnvironmentDiagnosticsState; diagnosticsController: EnvironmentDiagnosticsController;
   onRetry: () => void; onSettings: () => void; onHelp: (help: HelpContent) => void; loading: boolean;
 }) {
   const runtime = info?.runtime;
@@ -38,17 +41,21 @@ export function Environment({ info, preview, session, state, controller, onRetry
   const result = state.resultBinding?.projectId === session?.project.id ? state.result : null;
   const resultPreview = state.resultBinding?.mode === 'preview';
   const guide = result?.help ?? initialHelp;
+  const setContext = (platform: EnvironmentPlatform, operation: EnvironmentOperation) => {
+    diagnosticsController.setContext(platform, operation);
+    controller.setContext(platform, operation);
+  };
   return <>
-    <PageHeading eyebrow="ENVIRONMENT" title="Know what your project needs." description="Understand prerequisites for your current configuration draft. Tools are not searched for or run."><button type="button" className="button secondary" disabled={loading} onClick={onRetry}><Icon name="refresh" size={17} className={loading ? 'spin' : ''} />{loading ? 'Loading…' : 'Reload connection'}</button></PageHeading>
-    <div className="notice notice-info"><Icon name="info" /><div><strong>{preview ? 'Browser design preview — example data only' : 'Requirements are not verification'}</strong><p>{preview ? 'The example rows and baselines below are illustrative, not a core assessment. No host, draft or tool has been checked.' : 'Expected versions describe toolkit policy. Installed versions, signing identities, accounts and release readiness remain unknown.'}</p></div></div>
+    <PageHeading eyebrow="ENVIRONMENT" title="Know what your project needs." description="Keep expected prerequisites separate from explicitly requested, bounded local tool observations."><button type="button" className="button secondary" disabled={loading} onClick={onRetry}><Icon name="refresh" size={17} className={loading ? 'spin' : ''} />{loading ? 'Loading…' : 'Reload connection'}</button></PageHeading>
+    <div className="notice notice-info"><Icon name="info" /><div><strong>{preview ? 'Browser design preview — example data only' : 'Requirements are not verification'}</strong><p>{preview ? 'The example rows and baselines below are illustrative, not a core assessment. No host, draft or tool has been checked.' : 'Expected versions describe toolkit policy, not installed versions. Native observations have a separate section and capability; neither proves signing, accounts or release readiness.'}</p></div></div>
     <section className="card">
       <SectionHeading title="Prepare for your next activity" description={session ? `${session.project.name} · current in-memory configuration draft ${session.revision}` : 'Select a project before loading its prerequisites.'} />
       <div className="environment-controls">
         <div><label htmlFor="environment-platform">Release platform <HelpButton content={guide.platform} onHelp={onHelp} /></label>
-          <select id="environment-platform" value={state.platform} disabled={loading || !session?.draft} onChange={(event) => controller.setContext(event.target.value as EnvironmentPlatform, state.operation)}><option value="android">Android</option><option value="ios">iOS</option></select>
+          <select id="environment-platform" value={state.platform} disabled={loading || !session?.draft} onChange={(event) => setContext(event.target.value as EnvironmentPlatform, state.operation)}><option value="android">Android</option><option value="ios">iOS</option></select>
           <p>The target you want to prepare for, not the host operating system.</p></div>
         <div><label htmlFor="environment-operation">Activity <HelpButton content={guide.operation} onHelp={onHelp} /></label>
-          <select id="environment-operation" value={state.operation} disabled={loading || !session?.draft} onChange={(event) => controller.setContext(state.platform, event.target.value as EnvironmentOperation)}><option value="build">Build / archive</option><option value="artifact-validation">Validate an existing artifact</option></select>
+          <select id="environment-operation" value={state.operation} disabled={loading || !session?.draft} onChange={(event) => setContext(state.platform, event.target.value as EnvironmentOperation)}><option value="build">Build / archive</option><option value="artifact-validation">Validate an existing artifact</option></select>
           <p>Build guidance is not a complete signed-release checklist.</p></div>
       </div>
       <div className="button-row"><button type="button" className="button primary" disabled={loading || reason !== null} onClick={() => void controller.refresh()}><Icon name="list" size={17} />{state.pending ? 'Loading requirements…' : preview ? 'Show example requirements' : 'Load draft requirements'}</button><button type="button" className="button secondary" onClick={onSettings}>Project settings</button></div>
@@ -77,6 +84,7 @@ export function Environment({ info, preview, session, state, controller, onRetry
       </>}
       <ul className="plain-list">{result.limitations.map((item, index) => <li key={index}><Icon name="shield" size={16} /><span>{item}</span></li>)}</ul>
     </section>}
+    <EnvironmentDiagnostics state={diagnosticsState} controller={diagnosticsController} loading={loading} />
     <div className="environment-summary">
       <section className="card runtime-card"><span className="eyebrow">CORE RUNTIME</span><h2>{preview ? 'Browser preview' : runtime?.state === 'available' ? runtime.mode === 'development' ? 'Development runtime' : 'Bundled runtime' : 'Runtime unavailable'}</h2><Badge tone={runtime?.state === 'available' && !preview ? 'info' : 'warning'}>{preview ? 'No native connection' : runtime?.state ?? 'Not loaded'}</Badge><p>{preview ? 'This page is a design preview. No platform or engine capability has been verified.' : runtime?.reason ?? (runtime?.state === 'available' ? 'A runtime is available for the listed static functions. This does not establish native process finality or packaged release readiness.' : 'No runtime availability has been established. Capabilities and environment state remain unassessed.')}</p>{runtime?.mode === 'development' && <p className="warning-text">An explicit developer runtime is not a standalone end-user distribution.</p>}<div className="runtime-versions"><span>Desktop <strong>{info?.appVersion ?? 'Not loaded'}</strong></span><span>Core <strong>{capabilities?.coreVersion ?? 'Not loaded'}</strong></span><span>Platform <strong>{capabilities?.hostPlatform ?? 'Not observed'}</strong></span></div></section>
       <section className="card platform-note"><div className="soft-icon"><Icon name="environment" size={24} /></div><h2>The right platform for the job</h2><p>The Desktop goal is Linux, macOS and Windows. Native iOS requires macOS; native Android Windows execution has separate unfinished qualification.</p><p>The finished app must bundle its runtime and non-SDK helpers, without manual Python, Rust or CLI setup. This milestone does not deliver installers or run builds.</p></section>
@@ -85,7 +93,6 @@ export function Environment({ info, preview, session, state, controller, onRetry
       const available = capability.available && runtime?.state === 'available' && !preview;
       return <div key={capability.method}><span className="capability-icon"><Icon name="list" size={19} /></span><div><strong>{methodLabels[capability.method] ?? capability.method}</strong><p>{preview ? 'Illustration only; no core service is connected.' : capability.reason}</p></div><Badge tone={available ? 'info' : 'neutral'}>{available ? 'Available · passive' : 'Unavailable'}</Badge></div>;
     })}</div>{!capabilities && <p>No core capability inventory has been loaded.</p>}<p className="save-note">Native editing has separate owned-session capabilities. Passive functions never enable signing, builds or release operations.</p></section>
-    <section className="card"><SectionHeading title="Native diagnostics are not yet available" description="This page neither searches for nor selects executables." /><div className="card-action"><DisabledAction label="Run native doctor" icon="environment" reason="Tool discovery and execution require a separately reviewed native owner. This page only explains prerequisites." /></div></section>
     {capabilities && capabilities.limitations.length > 0 && <section className="card"><SectionHeading title="Engine-reported boundaries" /><ul className="plain-list">{capabilities.limitations.map((limitation, index) => <li key={index}><Icon name="shield" size={16} /><span>{limitation}</span></li>)}</ul></section>}
   </>;
 }

@@ -95,9 +95,33 @@ METADATA_NATIVE_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target",
 METADATA_OWNER_TEST = "edit_owner::hosted_tests::hosted_metadata_text_edit_owner_original_resources"
 METADATA_TRANSACTION_EOF_TEST = "edit_owner::hosted_tests::hosted_metadata_text_transaction_eof_original_resources"
 METADATA_PARTITIONS = ("ordinary", "committed-fsync", "committed-close")
+ENVIRONMENT_NATIVE_SCOPE = "environment-diagnostics-native-v1"
+ENVIRONMENT_NATIVE_EVIDENCE_SCOPE = "desktop-environment-diagnostics-native-only-v1"
+ENVIRONMENT_NATIVE_WORKFLOW = ".github/workflows/desktop-environment-diagnostics-native.yml"
+ENVIRONMENT_NATIVE_REF = "refs/heads/verify/desktop-environment-diagnostics-native"
+ENVIRONMENT_NATIVE_PHASES = ("prepare", "acquire", "compile", "environment-native", "retain")
+ENVIRONMENT_NATIVE_CHECKS = {
+    "acquire": ("rust-toolchain-install", "rust-version-target", "environment-locked-headless-metadata"),
+    "compile": ("rust-version-target", "environment-headless-test-compile-only"),
+}
+ENVIRONMENT_NATIVE_DIRECTORIES = ("home", "cargo", "rustup", "tmp", "target", "environment-native")
+ENVIRONMENT_NATIVE_TEST = "environment_diagnostics_owner::hosted_tests::hosted_environment_diagnostics_original_resources"
+ENVIRONMENT_NATIVE_SECONDS = 240
+ENVIRONMENT_NATIVE_INPUT_LIMIT = 256 * 1024
+ENVIRONMENT_NATIVE_PUBLIC_LIMIT = 1024 * 1024
+ENVIRONMENT_NATIVE_CASES = (
+    "reader-shared-cap", "reader-late-stderr", "reader-no-eof", "reader-close-error", "wait-nonzero",
+    "R1", "R2", "R3", "L1", "L2", "L3a", "L3b", "L3c", "L3d", "L4", "L5", "L6a", "L6b", "L6c", "L7",
+)
+ENVIRONMENT_NATIVE_NOT_VERIFIED = (
+    "production-enablement", "installed-runtime-custody", "native-gui-picker-quit",
+    "windows-diagnostics", "actual-os-close-or-wait-faults", "physical-device", "packaging", "store-or-release-operations",
+)
 BOUNDARY_PHASES = ("prepare", "acquire", "compile", "native", "config-owner", "config-task-loss",
                    "config-owner-delta", "config-transaction-eof", "config-core", "clean")
 GTK_COMPILE_SOURCES = (
+    ".github/workflows/desktop-environment-diagnostics-native.yml",
+    "desktop/environment_bootstrap.py",
     "desktop/github_connection_bootstrap.py",
     "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock",
     "desktop/src-tauri/src/asset_session.rs", "desktop/src-tauri/src/asset_source.rs",
@@ -109,6 +133,9 @@ GTK_COMPILE_SOURCES = (
     "desktop/src-tauri/src/metadata_text_commands.rs",
     "desktop/src-tauri/src/metadata_text_edit_protocol.rs",
     "desktop/src-tauri/src/environment.rs",
+    "desktop/src-tauri/src/environment_diagnostics_owner.rs",
+    "desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs",
+    "desktop/src-tauri/src/environment_diagnostics_protocol.rs",
     "desktop/src-tauri/src/runtime.rs",
     "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/src/supervisor.rs",
     "desktop/src-tauri/src/session_gtk_qualification.rs",
@@ -132,6 +159,8 @@ GTK_COMPILE_SOURCES = (
     "desktop/src-tauri/tests/fixtures/github_tls/server-key.pem",
     "desktop/src-tauri/tests/session_gtk_qualification.rs",
     "desktop/src-tauri/tests/session_gtk_recipe.js",
+    "tests/native_desktop_environment.py",
+    "tests/workflow/command_bootstrap_fixture.py",
     "desktop/native/session_gtk_input_linux.c", "desktop/tools/qualify_session_gtk.py",
     "desktop/tools/ci_foundation.py", GTK_COMPILE_WORKFLOW,
 )
@@ -145,6 +174,9 @@ GTK_CORE_PATHS = (
     "mobile_release/_desktop_edit_engine.py",
     "mobile_release/_desktop_edit_protocol.py",
     "mobile_release/_desktop_engine.py",
+    "mobile_release/_desktop_environment_control.py",
+    "mobile_release/_desktop_environment_engine.py",
+    "mobile_release/_desktop_environment_protocol.py",
     "mobile_release/_desktop_github_engine.py",
     "mobile_release/_github_connection_transport.py",
     "mobile_release/_lifetime_evidence.py",
@@ -188,6 +220,8 @@ GTK_CORE_PATHS = (
     "mobile_release/credentials.py",
     "mobile_release/data/apple-profile-roots.pem",
     "mobile_release/discovery.py",
+    "mobile_release/environment_diagnostics.py",
+    "mobile_release/environment_diagnostics_tools.py",
     "mobile_release/errors.py",
     "mobile_release/github_workflow_edit.py",
     "mobile_release/init_transaction.py",
@@ -819,6 +853,8 @@ TOOL_CHECKS = frozenset({
     "windows-snapshot-native-contract",
     "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
     "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
+    "environment-source-status", "environment-source-inventory",
+    "environment-locked-headless-metadata", "environment-headless-test-compile-only",
 })
 
 
@@ -833,13 +869,15 @@ def require(condition: bool, message: str) -> None:
 
 def admit_phase(scope: str, phase: str) -> None:
     """Closed scope selection, before context, tools, or native dispatch."""
-    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
+    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, ENVIRONMENT_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
     if scope in COMPILE_PROFILES:
         require(phase in COMPILE_PHASES, "Compiler-only scope cannot execute a native phase")
     elif scope == WORKFLOW_NATIVE_SCOPE:
         require(phase in WORKFLOW_NATIVE_PHASES, "Workflow-only scope cannot execute an unrelated native phase")
     elif scope == METADATA_NATIVE_SCOPE:
         require(phase in METADATA_NATIVE_PHASES, "Metadata-only scope cannot execute an unrelated native phase")
+    elif scope == ENVIRONMENT_NATIVE_SCOPE:
+        require(phase in ENVIRONMENT_NATIVE_PHASES, "Environment-only scope cannot execute an unrelated phase")
     elif scope == WINDOWS_SNAPSHOT_SCOPE:
         require(phase in WINDOWS_SNAPSHOT_PHASES, "Windows snapshot scope cannot execute an unrelated phase")
     elif scope == GITHUB_READONLY_SCOPE:
@@ -855,6 +893,7 @@ def admit_platform(scope: str, platform: str) -> None:
     require(scope != GTK_COMPILE_SCOPE or platform == "linux", "SG1 compilation requires Linux")
     require(scope != WORKFLOW_NATIVE_SCOPE or platform == "linux", "Workflow native verification requires Linux")
     require(scope != METADATA_NATIVE_SCOPE or platform == "linux", "Metadata native verification requires Linux")
+    require(scope != ENVIRONMENT_NATIVE_SCOPE or platform in {"linux", "macos"}, "Environment native verification requires its exact Linux or macOS host")
     require(scope != WINDOWS_SNAPSHOT_SCOPE or platform == "windows", "Windows snapshot verification requires Windows")
     require(scope != GITHUB_READONLY_SCOPE or platform == "linux", "G1 native verification requires Linux")
     require(scope != GITHUB_TLS_SCOPE or platform == "linux", "TLS verification requires Linux")
@@ -1052,7 +1091,8 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
     require(not (capture and output is not None), "Conflicting compiler output destinations")
     require(diagnostics is None or (output is not None and check in {
         "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
-        "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only"}),
+        "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
+        "environment-locked-headless-metadata", "environment-headless-test-compile-only"}),
         "Unexpected private diagnostic destination")
     print(f"Fixed check: {check}", flush=True)
     try:
@@ -1075,10 +1115,10 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
 def admitted_host(*, retention_only: bool = False) -> str:
     require(os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
+            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, ENVIRONMENT_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
             "This fixed check requires an explicitly admitted disposable hosted job")
-    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == METADATA_NATIVE_SCOPE,
-            "DATA-only admission is restricted to metadata retention")
+    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, ENVIRONMENT_NATIVE_SCOPE},
+            "DATA-only admission is restricted to fixed retention")
     platform = os.environ.get("MRK_DESKTOP_PLATFORM", "")
     require(platform in TARGETS and platform == {
         "linux": "linux", "darwin": "macos", "win32": "windows",
@@ -1090,6 +1130,10 @@ def admitted_host(*, retention_only: bool = False) -> str:
         require(os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"
                 and os.environ.get("ImageOS") == "ubuntu24" and (retention_only or os.uname().machine == "x86_64")
                 and os.geteuid() != 0, "Workflow native checks require the non-root Ubuntu 24 x86_64 runner")
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == ENVIRONMENT_NATIVE_SCOPE:
+        environment_native_binding(os.environ)
+        if not retention_only:
+            environment_observed_host(platform)
     require(sys.version.split()[0] == PYTHON, "Unexpected selected Python version")
     if not retention_only:
         selected = Path(os.environ["MRK_PYTHON"]).resolve(strict=True)
@@ -4842,6 +4886,9 @@ def metadata_public_bindings(context: dict) -> dict:
 def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, "prepare")
     admit_platform(scope, platform)
+    if scope == ENVIRONMENT_NATIVE_SCOPE:
+        prepare_environment_native(platform)
+        return
     windows = scope == WINDOWS_SNAPSHOT_SCOPE
     if windows:
         require(admitted_scope(platform) == scope, "Windows preparation scope differs")
@@ -4995,6 +5042,8 @@ def metadata_invocation() -> dict:
 
 def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: bool = False) -> dict:
     admit_platform(scope, platform)
+    if scope == ENVIRONMENT_NATIVE_SCOPE:
+        return load_environment_native_context(platform, retention_only=retention_only)
     require(not retention_only or scope == METADATA_NATIVE_SCOPE, "Unexpected DATA-only context route")
     metadata_binding = metadata_native_binding(os.environ) if scope == METADATA_NATIVE_SCOPE else None
     if scope == WINDOWS_SNAPSHOT_SCOPE:
@@ -5523,8 +5572,12 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
 def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, name)
     admit_platform(scope, platform)
-    context = (load_context(platform, scope, retention_only=True) if scope == METADATA_NATIVE_SCOPE and name == "clean"
+    context = (load_context(platform, scope, retention_only=True) if (scope == METADATA_NATIVE_SCOPE and name == "clean"
+               or scope == ENVIRONMENT_NATIVE_SCOPE and name == "retain")
                else load_context(platform, scope))
+    if scope == ENVIRONMENT_NATIVE_SCOPE:
+        phase_environment_native(name, context)
+        return
     if scope == METADATA_NATIVE_SCOPE:
         phase_metadata_native(name, context)
         return
@@ -5795,17 +5848,1089 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
             print("Removed settled task-owned compiler, dependency and fixture outputs.")
 
 
+def environment_native_binding(environment: dict[str, str]) -> dict[str, str]:
+    """Closed two-host verification route; never a diagnostic capability."""
+    sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
+    run_id, attempt = environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
+    require(type(sha) is str and re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
+            and type(repository) is str and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None,
+            "Environment source identity differs")
+    require(all(type(value) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None for value in (run_id, attempt)),
+            "Environment original run identity differs")
+    require(environment.get("MRK_DESKTOP_HOSTED_CHECKS") == ENVIRONMENT_NATIVE_SCOPE
+            and environment.get("GITHUB_REF") == ENVIRONMENT_NATIVE_REF
+            and environment.get("GITHUB_WORKFLOW_SHA") == sha
+            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{ENVIRONMENT_NATIVE_WORKFLOW}@{ENVIRONMENT_NATIVE_REF}",
+            "Environment workflow/ref/scope binding differs")
+    event = environment.get("GITHUB_EVENT_NAME")
+    require(event == "push" and environment.get("MRK_PUSH_EVENT_AFTER") == sha
+            or event == "workflow_dispatch" and environment.get("MRK_EXPECTED_SHA") == sha,
+            "Environment event or exact reviewed source differs")
+    return {"workflowPath": ENVIRONMENT_NATIVE_WORKFLOW, "workflowSha": sha,
+            "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
+            "runId": run_id, "attempt": attempt, "repository": repository, "event": event, "ref": ENVIRONMENT_NATIVE_REF}
+
+
+def validate_environment_host(value: object, platform: str) -> dict:
+    require(type(platform) is str and platform in {"linux", "macos"}, "Environment host is not supported by this lane")
+    host = closed_object(value, {"system", "kernelRelease", "machine", "nonRoot", "imageOS", "imageVersion"},
+                         "Environment host fields differ")
+    require(host["nonRoot"] is True and all(type(host[key]) is str and 0 < len(host[key]) <= 256
+            and all(0x21 <= ord(char) <= 0x7e for char in host[key])
+            for key in ("system", "kernelRelease", "machine", "imageOS", "imageVersion")),
+            "Environment host observations are missing or malformed")
+    if platform == "linux":
+        require(host["system"] == "Linux" and host["machine"] == "x86_64" and host["imageOS"] == "ubuntu24",
+                "Environment requires the original Ubuntu 24 x86_64 host")
+    else:
+        require(host["system"] == "Darwin" and host["machine"] == "arm64"
+                and host["kernelRelease"].split(".")[0] == "25"
+                and re.fullmatch(r"macos26(?:-arm64)?", host["imageOS"]) is not None,
+                "Environment requires the original macOS 26 arm64 host")
+    return host
+
+
+def environment_observed_host(platform: str) -> dict:
+    expected = {"linux": ("Linux", "X64"), "macos": ("macOS", "ARM64")}
+    require(platform in expected and (os.environ.get("RUNNER_OS"), os.environ.get("RUNNER_ARCH")) == expected[platform]
+            and os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted",
+            "Environment native execution requires its exact disposable hosted platform")
+    kernel = os.uname()
+    return validate_environment_host({"system": kernel.sysname, "kernelRelease": kernel.release,
+        "machine": kernel.machine, "nonRoot": os.geteuid() != 0,
+        "imageOS": os.environ.get("ImageOS", ""), "imageVersion": os.environ.get("ImageVersion", "")}, platform)
+
+
+def environment_directory_bindings(root: Path, source: Path) -> dict:
+    return {"root": workflow_directory_identity(root), "source": workflow_directory_identity(source),
+            "cwd": workflow_directory_identity(source / "desktop"),
+            **{name: workflow_directory_identity(root / name) for name in ENVIRONMENT_NATIVE_DIRECTORIES}}
+
+
+def validate_environment_inventory(value: object, *, maximum: int) -> list[dict]:
+    require(type(value) is list and 0 < len(value) <= 2048, "Environment input inventory count differs")
+    names, total = [], 0
+    for entry in value:
+        row = closed_object(entry, {"path", "size", "sha256"}, "Environment input inventory fields differ")
+        name = row["path"]
+        require(type(name) is str and re.fullmatch(r"[A-Za-z0-9_./-]+", name) is not None
+                and not name.startswith("/") and not any(part in {"", ".", ".."} for part in name.split("/"))
+                and integer_between(row["size"], 0, 8 * 1024 * 1024) and sha256_value(row["sha256"]),
+                "Environment input name/hash/size differs")
+        names.append(name)
+        total += row["size"]
+    require(names == sorted(set(names)) and total <= maximum, "Environment input inventory order or aggregate differs")
+    return value
+
+
+def validate_environment_inputs(value: object) -> dict:
+    """Private precompile DATA, authenticated by a separate compiled digest."""
+    fields = {"schemaVersion", "scope", "root", "source", "python", "sourceSha", "sourceTree", "platform", "target",
+        "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt", "repository", "event", "ref",
+        "sourceFiles", "coreFiles", "coreZipSha256", "coreZipBytes", "pythonSha256", "pythonBytes", "bootstrapSha256",
+        "cwd", "originalDirectories", "observedHost"}
+    value = closed_object(value, fields, "Environment native input fields differ")
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == ENVIRONMENT_NATIVE_SCOPE
+            and type(value["platform"]) is str and value["platform"] in {"linux", "macos"}
+            and value["target"] == TARGETS[value["platform"]],
+            "Environment native input profile differs")
+    for name in ("sourceSha", "sourceTree", "workflowSha"):
+        require(type(value[name]) is str and re.fullmatch(r"[0-9a-f]{40}", value[name]) is not None and value[name] != "0" * 40,
+                "Environment native source/tree identity differs")
+    require(value["workflowSha"] == value["sourceSha"] and value["workflowPath"] == ENVIRONMENT_NATIVE_WORKFLOW
+            and value["ref"] == ENVIRONMENT_NATIVE_REF and type(value["event"]) is str
+            and value["event"] in {"push", "workflow_dispatch"}
+            and type(value["repository"]) is str and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value["repository"]) is not None
+            and value["workflowRef"] == f"{value['repository']}/{ENVIRONMENT_NATIVE_WORKFLOW}@{ENVIRONMENT_NATIVE_REF}"
+            and all(type(value[name]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value[name]) is not None for name in ("runId", "attempt")),
+            "Environment native input workflow binding differs")
+    require(all(sha256_value(value[name]) for name in ("workflowSha256", "coreZipSha256", "pythonSha256", "bootstrapSha256"))
+            and integer_between(value["coreZipBytes"], 1, 40 * 1024 * 1024)
+            and integer_between(value["pythonBytes"], 1, 512 * 1024 * 1024), "Environment native runtime bindings differ")
+    require(all(type(value[name]) is str and 0 < len(value[name]) <= 16384 and "\0" not in value[name]
+                and value[name].startswith("/") and not any(part in {"", ".", ".."} for part in value[name].split("/")[1:])
+                for name in ("root", "source", "python", "cwd"))
+            and value["cwd"] == str(Path(value["source"]) / "desktop")
+            and Path(value["root"]).name == f"mrk-desktop-foundation-environment-{value['runId']}-{value['attempt']}"
+            and not Path(value["root"]).is_relative_to(value["source"])
+            and not Path(value["source"]).is_relative_to(value["root"]),
+            "Environment native private paths differ")
+    sources = validate_environment_inventory(value["sourceFiles"], maximum=64 * 1024 * 1024)
+    core = validate_environment_inventory(value["coreFiles"], maximum=32 * 1024 * 1024)
+    validate_gtk_core_inventory(core)  # The same complete core package DATA, not a GTK invocation.
+    by_path = {row["path"]: row for row in sources}
+    required = {ENVIRONMENT_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py", "desktop/environment_bootstrap.py",
+        "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
+        "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/environment_diagnostics_owner.rs",
+        "desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs", "tests/native_desktop_environment.py",
+        "tests/workflow/command_bootstrap_fixture.py"}
+    require(required <= by_path.keys() and by_path[ENVIRONMENT_NATIVE_WORKFLOW]["sha256"] == value["workflowSha256"]
+            and by_path["desktop/environment_bootstrap.py"]["sha256"] == value["bootstrapSha256"],
+            "Environment complete source inventory is missing its actual fixture/runtime")
+    for row in core:
+        require(same_compile_json(by_path.get("src/" + row["path"]), {**row, "path": "src/" + row["path"]}),
+                "Environment source and ZIP package inventories disagree")
+    directories = closed_object(value["originalDirectories"], {"root", "source", "cwd", *ENVIRONMENT_NATIVE_DIRECTORIES},
+                                "Environment original directory roster differs")
+    for row in directories.values():
+        closed_object(row, {"device", "inode", "mode", "uid", "gid"}, "Environment original directory fields differ")
+        require(all(type(row[name]) is str and re.fullmatch(r"0|[1-9][0-9]{0,19}", row[name]) is not None
+                    and int(row[name]) < 2**64 for name in ("device", "inode"))
+                and integer_between(row["mode"], 0, 65535) and stat.S_ISDIR(row["mode"])
+                and integer_between(row["uid"], 1, 2**32 - 1) and integer_between(row["gid"], 0, 2**32 - 1),
+                "Environment original directory identity is malformed")
+    validate_environment_host(value["observedHost"], value["platform"])
+    require(len(canonical_json(value)) + 1 <= ENVIRONMENT_NATIVE_INPUT_LIMIT, "Environment native inputs exceed their bound")
+    return value
+
+
+def environment_public_bindings(inputs: dict, digest: str) -> dict:
+    validate_environment_inputs(inputs)
+    require(sha256_value(digest), "Environment public input digest differs")
+    return {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_EVIDENCE_SCOPE,
+        **{key: inputs[key] for key in ("sourceSha", "sourceTree", "platform", "target", "workflowPath", "workflowSha",
+                                      "workflowRef", "workflowSha256", "runId", "attempt")},
+        "inputsSha256": digest, "host": inputs["observedHost"],
+        "python": {"release": PYTHON, "sha256": inputs["pythonSha256"], "size": inputs["pythonBytes"]},
+        "rust": {"release": RUST, "target": inputs["target"]},
+        "sourceFiles": len(inputs["sourceFiles"]), "coreFiles": len(inputs["coreFiles"]),
+        "coreZipSha256": inputs["coreZipSha256"], "bootstrapSha256": inputs["bootstrapSha256"],
+        "features": ["development-runtime"], "entry": ENVIRONMENT_NATIVE_TEST,
+        "notVerified": list(ENVIRONMENT_NATIVE_NOT_VERIFIED)}
+
+
+def environment_inputs_unchanged(context: dict, inputs: dict) -> None:
+    """Pre-native source inspection only. Never called by DATA-only retain."""
+    root, source = Path(context["root"]), Path(context["source"])
+    require(same_compile_json(environment_directory_bindings(root, source), inputs["originalDirectories"]),
+            "Environment original directories changed")
+    require(same_compile_json(fixed_file_inventory(source, tuple(row["path"] for row in inputs["sourceFiles"])), inputs["sourceFiles"])
+            and same_compile_json(workflow_core_inventory(source), inputs["coreFiles"]),
+            "Environment original source/package inventory changed")
+    require(hash_file(root / "core.zip") == inputs["coreZipSha256"] and (root / "core.zip").stat().st_size == inputs["coreZipBytes"]
+            and hash_file(Path(inputs["python"])) == inputs["pythonSha256"]
+            and Path(inputs["python"]).stat().st_size == inputs["pythonBytes"], "Environment original runtime bytes changed")
+    require(same_compile_json(environment_observed_host(context["platform"]), inputs["observedHost"]),
+            "Environment original host observations changed")
+
+
+def prepare_environment_native(platform: str) -> None:
+    binding = environment_native_binding(os.environ)
+    source, temp = Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True), Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+    for name in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/target", "desktop/src-tauri/gen"):
+        require(not os.path.lexists(source / name), "Environment checkout contains an existing generated output")
+    no_cargo_configuration((source / "desktop/src-tauri", source / "desktop", source, *source.parents, temp, *temp.parents))
+    root = temp / f"mrk-desktop-foundation-environment-{binding['runId']}-{binding['attempt']}"
+    root.mkdir(mode=0o700)  # Exactly one root per original job attempt; never a replacement after failure.
+    for name in ENVIRONMENT_NATIVE_DIRECTORIES:
+        (root / name).mkdir(mode=0o700)
+    (root / "gitconfig-empty").touch(mode=0o600, exist_ok=False)
+    git, rustup = shutil.which("git"), shutil.which("rustup")
+    require(git is not None and rustup is not None, "Environment hosted compiler tools unavailable")
+    context = {"root": str(root), "source": str(source), "platform": platform, "executionScope": ENVIRONMENT_NATIVE_SCOPE,
+        "git": git, "rustup": rustup, "python": str(Path(sys.executable).resolve(strict=True)), **binding,
+        "originalInvocation": metadata_invocation()}
+    environment = clean_environment(root)
+    source_unchanged(context)
+    require(run([git, "status", "--porcelain=v1", "--untracked-files=all"], check="environment-source-status", cwd=source,
+                env=environment, timeout=15, capture=True) == "", "Environment source contains unreviewed inputs")
+    tree = run([git, "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=source, env=environment, timeout=15, capture=True)
+    raw_names = run([git, "ls-files", "-z"], check="environment-source-inventory", cwd=source, env=environment, timeout=15, capture=True)
+    require(raw_names.endswith("\0"), "Environment source inventory has no terminal separator")
+    names = tuple(sorted(raw_names[:-1].split("\0")))
+    sources = fixed_file_inventory(source, names)
+    core = workflow_core_inventory(source)
+    validate_gtk_core_inventory(core)
+    with zipfile.ZipFile(root / "core.zip", "x", compression=zipfile.ZIP_DEFLATED) as archive:
+        for row in core:
+            data = (source / "src" / row["path"]).read_bytes()
+            require(len(data) == row["size"] and hashlib.sha256(data).hexdigest() == row["sha256"], "Environment core changed during ZIP creation")
+            member = zipfile.ZipInfo(row["path"], date_time=(1980, 1, 1, 0, 0, 0))
+            member.create_system, member.external_attr = 3, (stat.S_IFREG | 0o644) << 16
+            archive.writestr(member, data, compress_type=zipfile.ZIP_DEFLATED)
+    inputs = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_SCOPE, "root": str(root), "source": str(source),
+        "python": context["python"], "sourceTree": tree, "platform": platform, "target": TARGETS[platform], **binding,
+        "workflowSha256": hash_file(source / ENVIRONMENT_NATIVE_WORKFLOW), "sourceFiles": sources, "coreFiles": core,
+        "coreZipSha256": hash_file(root / "core.zip"), "coreZipBytes": (root / "core.zip").stat().st_size,
+        "pythonSha256": hash_file(Path(context["python"])), "pythonBytes": Path(context["python"]).stat().st_size,
+        "bootstrapSha256": hash_file(source / "desktop/environment_bootstrap.py"), "cwd": str(source / "desktop"),
+        "originalDirectories": environment_directory_bindings(root, source), "observedHost": environment_observed_host(platform)}
+    validate_environment_inputs(inputs)
+    write_json(root / "environment-native-inputs.json", inputs)
+    context.update(sourceTree=tree, workflowSha256=inputs["workflowSha256"], environmentInputsSha256=hash_file(root / "environment-native-inputs.json"))
+    source_unchanged(context)
+    environment_inputs_unchanged(context, inputs)
+    write_json(root / "context.json", context)
+    write_json(root / "public-bindings.json", environment_public_bindings(inputs, context["environmentInputsSha256"]))
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
+        output.write(f"root={root}\n")
+    print("Prepared the fixed environment source/ZIP/runtime inputs; no native execution or qualification.")
+
+
+def load_environment_native_context(platform: str, *, retention_only: bool = False) -> dict:
+    binding = environment_native_binding(os.environ)
+    root = Path(os.environ["MRK_DESKTOP_CI_ROOT"])
+    require(root.is_absolute() and root.parent == Path(os.environ["RUNNER_TEMP"])
+            and root.name == f"mrk-desktop-foundation-environment-{binding['runId']}-{binding['attempt']}"
+            and not root.is_symlink(), "Environment original root differs")
+    keys = {"root", "source", "platform", "executionScope", "git", "rustup", "python", *binding,
+            "originalInvocation", "sourceTree", "workflowSha256", "environmentInputsSha256"}
+    context = closed_object(read_bounded_json(root / "context.json", ENVIRONMENT_NATIVE_INPUT_LIMIT), keys,
+                            "Environment original context fields differ")
+    require(context["root"] == str(root) and context["platform"] == platform and context["executionScope"] == ENVIRONMENT_NATIVE_SCOPE
+            and all(context[key] == value for key, value in binding.items())
+            and same_compile_json(context["originalInvocation"], metadata_invocation()), "Environment original invocation changed")
+    inputs_path = root / "environment-native-inputs.json"
+    require(hash_file(inputs_path) == context["environmentInputsSha256"], "Environment original input digest changed")
+    inputs = validate_environment_inputs(read_bounded_json(inputs_path, ENVIRONMENT_NATIVE_INPUT_LIMIT))
+    require(all(same_compile_json(inputs[key], context[key]) for key in ("root", "source", "python", "platform", "sourceTree", "workflowSha256", *binding)),
+            "Environment original input/context correspondence differs")
+    require(same_compile_json(read_bounded_json(root / "public-bindings.json", 16384),
+                              environment_public_bindings(inputs, context["environmentInputsSha256"])),
+            "Environment public source binding changed")
+    if not retention_only:
+        require(context["source"] == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
+                and context["python"] == str(Path(sys.executable).resolve(strict=True)), "Environment source/runtime selection changed")
+        environment_inputs_unchanged(context, inputs)
+    # Retention deliberately does not resolve/reopen source, runtime, executable,
+    # compiler or case paths after the lane-last negative owner result.
+    context["environmentInputs"] = inputs
+    return context
+
+
+def environment_source_unchanged(context: dict) -> None:
+    """Compiler/pre-exec check only; no post-L7 source or tool invocation."""
+    source_unchanged(context)
+    require(run([context["git"], "status", "--porcelain=v1", "--untracked-files=all"],
+                check="environment-source-status", cwd=Path(context["source"]),
+                env=clean_environment(Path(context["root"])), timeout=15, capture=True) == "",
+            "Environment source contains unreviewed or generated inputs")
+    environment_inputs_unchanged(context, context["environmentInputs"])
+
+
+def environment_executable_path(value: object, *, root: Path, platform: str) -> Path:
+    """Two fixed native profiles; do not broaden the older Linux G1 parser."""
+    require(type(platform) is str and platform in {"linux", "macos"}
+            and type(value) is str and 0 < len(value) <= 16384 and "\0" not in value
+            and value.startswith("/") and not any(part in {"", ".", ".."} for part in value.split("/")[1:]),
+            "Environment compiler executable path is malformed")
+    path = Path(value)
+    require(root.is_absolute() and path.parent == root / "target" / TARGETS[platform] / "debug/deps"
+            and re.fullmatch(r"mobile_release_desktop-[0-9a-f]{16}", path.name) is not None,
+            "Environment compiler executable left its original native target")
+    return path
+
+
+def environment_compiled_test(messages: bytes, *, source: Path, root: Path, platform: str) -> Path:
+    """Consume the sole original Cargo artifact, never a glob or second build."""
+    require(type(messages) is bytes and 0 < len(messages) <= 16 * 1024 * 1024,
+            "Environment compiler messages exceed their bound")
+    executable, finished = None, False
+    for line in messages.splitlines():
+        require(not finished, "Environment compiler data followed the final result")
+        row = bounded_json(line, 1024 * 1024)
+        require(type(row) is dict and type(row.get("reason")) is str, "Malformed environment compiler message")
+        if row["reason"] == "compiler-artifact" and row.get("executable") is not None:
+            target, profile = row.get("target"), row.get("profile")
+            require(executable is None and type(target) is dict and target.get("kind") == ["lib"]
+                    and target.get("name") == "mobile_release_desktop"
+                    and target.get("src_path") == str(source / "desktop/src-tauri/src/lib.rs")
+                    and row.get("manifest_path") == str(source / "desktop/src-tauri/Cargo.toml")
+                    and type(profile) is dict and profile.get("test") is True and profile.get("debug_assertions") is True
+                    and row.get("features") == ["development-runtime"] and row.get("fresh") is False,
+                    "Environment original executable is not the requested fresh headless libtest")
+            executable = environment_executable_path(row["executable"], root=root, platform=platform)
+        elif row["reason"] == "build-finished":
+            require(row.get("success") is True, "Environment original compilation failed")
+            finished = True
+    require(finished and executable is not None, "Environment compilation did not yield exactly one original libtest")
+    return executable
+
+
+def environment_artifact_identity(path: Path, context: dict) -> dict:
+    root, platform = Path(context["root"]), context["platform"]
+    require(environment_executable_path(str(path), root=root, platform=platform) == path,
+            "Environment artifact selection differs")
+    for directory in (root, root / "target", root / "target" / TARGETS[platform],
+                      root / "target" / TARGETS[platform] / "debug", path.parent):
+        workflow_directory_identity(directory)
+    before = github_file_identity(path)
+    require(integer_between(before["size"], 1, 512 * 1024 * 1024)
+            and before["mode"] & 0o111 and not before["mode"] & 0o6022
+            and before["uid"] == os.geteuid(), "Environment artifact kind, owner, permissions or size differs")
+    digest = hash_file(path)
+    require(same_compile_json(before, github_file_identity(path)), "Environment artifact changed while binding")
+    return {"identity": before, "size": before["size"], "sha256": digest}
+
+
+def validate_environment_compiled_summary(value: object) -> dict:
+    value = closed_object(value, {"size", "sha256", "invocationSha256", "messagesSha256"},
+                          "Environment public compiler summary fields differ")
+    require(integer_between(value["size"], 1, 512 * 1024 * 1024)
+            and all(sha256_value(value[key]) for key in ("sha256", "invocationSha256", "messagesSha256")),
+            "Environment public compiler summary is malformed")
+    return value
+
+
+def environment_phase_value(context: dict, name: str, *, compiled: dict | None = None) -> dict:
+    require(name in ENVIRONMENT_NATIVE_CHECKS and context["executionScope"] == ENVIRONMENT_NATIVE_SCOPE,
+            "Unknown environment compiler phase")
+    value = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_EVIDENCE_SCOPE, "phase": name, "status": "passed",
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha",
+                                       "workflowRef", "workflowSha256", "runId", "attempt")},
+        "inputsSha256": context["environmentInputsSha256"], "python": PYTHON,
+        "rust": {"release": RUST, "target": TARGETS[context["platform"]]},
+        "features": ["development-runtime"], "testTarget": "lib", "execution": "no-run",
+        "checks": [{"check": check, "exitCode": 0} for check in ENVIRONMENT_NATIVE_CHECKS[name]],
+        "notVerified": list(ENVIRONMENT_NATIVE_NOT_VERIFIED)}
+    if name == "compile":
+        value["compiledTest"] = validate_environment_compiled_summary(compiled)
+    else:
+        require(compiled is None, "Environment acquisition cannot claim a compiled artifact")
+    return value
+
+
+def validate_environment_phase_receipt(value: object, context: dict, name: str) -> dict:
+    require(type(value) is dict and name in ENVIRONMENT_NATIVE_CHECKS, "Unknown environment phase receipt")
+    compiled = value.get("compiledTest") if name == "compile" else None
+    require(same_compile_json(value, environment_phase_value(context, name, compiled=compiled)),
+            "Environment original source or phase check receipt differs")
+    return value
+
+
+def environment_phase_claim(context: dict, name: str) -> dict:
+    require(name in ENVIRONMENT_NATIVE_PHASES[1:], "Unknown environment original phase claim")
+    return {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_SCOPE, "phase": name,
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "runId", "attempt")},
+        "inputsSha256": context["environmentInputsSha256"]}
+
+
+def environment_predecessors(context: dict, name: str) -> None:
+    phases = ENVIRONMENT_NATIVE_PHASES[1:]
+    require(name in phases, "Unknown environment phase successor")
+    root = Path(context["root"])
+    previous = phases[:phases.index(name)]
+    for prior in previous:
+        require(same_compile_json(read_bounded_json(root / f"{prior}-started.json", 4096),
+                                  environment_phase_claim(context, prior)), "Environment original phase claim changed")
+        if prior in ENVIRONMENT_NATIVE_CHECKS:
+            validate_environment_phase_receipt(read_bounded_json(root / f"{prior}-checks.json", 16384), context, prior)
+    for later in phases[len(previous):]:
+        require(not os.path.lexists(root / f"{later}-started.json")
+                and not os.path.lexists(root / f"{later}-checks.json"),
+                "Environment phase was already claimed; retain original outputs")
+    if name in {"acquire", "compile"}:
+        require(not os.path.lexists(root / "environment-native-invocation.json"),
+                "Environment compiled invocation already exists")
+    if name != "retain":
+        require(all(not os.path.lexists(root / filename) for filename in (
+            "environment-native-progress.json", "environment-native-result.json", "environment-native-public.json")),
+            "Environment native output already exists; do not replay the owner")
+
+
+def validate_environment_invocation(value: object, *, context: dict, compile_receipt: dict,
+                                    compile_digest: str) -> dict:
+    """DATA-only correspondence; artifact reopening is a separate pre-exec step."""
+    fields = {"schemaVersion", "scope", "inputsSha256", "sourceSha", "sourceTree", "platform", "target", "path",
+              "identity", "size", "sha256", "invocationSha256", "messagesSha256", "compileReceiptSha256"}
+    value = closed_object(value, fields, "Environment invocation fields differ")
+    expected = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_SCOPE,
+                **{key: context[key] for key in ("sourceSha", "sourceTree", "platform")},
+                "target": TARGETS[context["platform"]], "inputsSha256": context["environmentInputsSha256"],
+                "compileReceiptSha256": compile_digest}
+    require(sha256_value(compile_digest) and same_compile_json({key: value[key] for key in expected}, expected),
+            "Environment invocation input/compiler source binding differs")
+    environment_executable_path(value["path"], root=Path(context["root"]), platform=context["platform"])
+    identity = closed_object(value["identity"], {"device", "inode", "mode", "uid", "gid", "size", "mtimeNs"},
+                             "Environment original artifact identity fields differ")
+    require(all(type(identity[key]) is str and re.fullmatch(r"0|[1-9][0-9]{0,19}", identity[key]) is not None
+                and int(identity[key]) < 2**64 for key in ("device", "inode"))
+            and integer_between(identity["mode"], 0, 65535) and stat.S_ISREG(identity["mode"])
+            and identity["mode"] & 0o111 and not identity["mode"] & 0o6022
+            and integer_between(identity["uid"], 1, 2**32 - 1) and integer_between(identity["gid"], 0, 2**32 - 1)
+            and identity["uid"] == context["environmentInputs"]["originalDirectories"]["root"]["uid"]
+            and integer_between(identity["size"], 1, 512 * 1024 * 1024)
+            and identity["size"] == value["size"] and integer_between(identity["mtimeNs"], 0, 2**64 - 1),
+            "Environment original artifact identity is malformed")
+    validate_environment_phase_receipt(compile_receipt, context, "compile")
+    summary = validate_environment_compiled_summary({key: value[key] for key in (
+        "size", "sha256", "invocationSha256", "messagesSha256")})
+    require(same_compile_json(summary, compile_receipt["compiledTest"]),
+            "Environment invocation and original compile receipt disagree")
+    return value
+
+
+def environment_original_invocation(context: dict, *, inspect_artifact: bool) -> tuple[dict, str]:
+    root = Path(context["root"])
+    receipt_path, invocation_path = root / "compile-checks.json", root / "environment-native-invocation.json"
+    value = validate_environment_invocation(read_bounded_json(invocation_path, 16384), context=context,
+        compile_receipt=read_bounded_json(receipt_path, 16384), compile_digest=hash_file(receipt_path))
+    if inspect_artifact:
+        path = environment_executable_path(value["path"], root=root, platform=context["platform"])
+        require(same_compile_json({key: value[key] for key in ("identity", "size", "sha256")},
+                                  environment_artifact_identity(path, context)), "Environment original libtest changed")
+        require(hash_file(root / "environment-compile-messages.jsonl") == value["messagesSha256"],
+                "Environment original compiler message binding changed")
+    return value, hash_file(invocation_path)
+
+
+def environment_compile_record(context: dict, argv: list[str], messages: Path) -> None:
+    ordinary(messages)
+    require(0 < messages.stat().st_size <= 16 * 1024 * 1024, "Environment compiler messages exceed their bound")
+    with messages.open("rb") as stream:
+        raw = stream.read(16 * 1024 * 1024 + 1)
+    root = Path(context["root"])
+    path = environment_compiled_test(raw, source=Path(context["source"]), root=root, platform=context["platform"])
+    artifact = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_SCOPE,
+        "inputsSha256": context["environmentInputsSha256"],
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "platform")},
+        "target": TARGETS[context["platform"]], "path": str(path), **environment_artifact_identity(path, context),
+        # This is the compiler argv digest. The native result separately binds
+        # the digest of this complete invocation file, including its final LF.
+        "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(),
+        "messagesSha256": hashlib.sha256(raw).hexdigest()}
+    compiled = {key: artifact[key] for key in ("size", "sha256", "invocationSha256", "messagesSha256")}
+    receipt = environment_phase_value(context, "compile", compiled=compiled)
+    receipt_path = root / "compile-checks.json"
+    write_json(receipt_path, receipt)  # No invocation digest in this receipt: no hash cycle.
+    artifact["compileReceiptSha256"] = hash_file(receipt_path)
+    validate_environment_invocation(artifact, context=context, compile_receipt=receipt,
+                                    compile_digest=artifact["compileReceiptSha256"])
+    write_json(root / "environment-native-invocation.json", artifact)
+
+
+def environment_native_environment(context: dict) -> dict[str, str]:
+    """Fixed host/runtime tuple only: no inherited credentials, proxy or config."""
+    root, source = Path(context["root"]), Path(context["source"])
+    environment = clean_environment(root)
+    host = context["environmentInputs"]["observedHost"]
+    environment.update(MRK_DESKTOP_HOSTED_CHECKS=ENVIRONMENT_NATIVE_SCOPE,
+        MRK_DESKTOP_PLATFORM=context["platform"], MRK_ENVIRONMENT_NATIVE_INPUTS=str(root / "environment-native-inputs.json"),
+        MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
+        GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+        RUNNER_OS="Linux" if context["platform"] == "linux" else "macOS",
+        RUNNER_ARCH="X64" if context["platform"] == "linux" else "ARM64",
+        ImageOS=host["imageOS"], ImageVersion=host["imageVersion"],
+        GITHUB_SHA=context["sourceSha"], GITHUB_WORKFLOW_SHA=context["workflowSha"],
+        GITHUB_WORKFLOW_REF=context["workflowRef"], GITHUB_REPOSITORY=context["repository"],
+        GITHUB_RUN_ID=context["runId"], GITHUB_RUN_ATTEMPT=context["attempt"],
+        GITHUB_EVENT_NAME=context["event"], GITHUB_REF=context["ref"],
+        GITHUB_WORKSPACE=context["source"], RUNNER_TEMP=str(root.parent), MRK_PYTHON=context["python"])
+    environment["MRK_PUSH_EVENT_AFTER" if context["event"] == "push" else "MRK_EXPECTED_SHA"] = context["sourceSha"]
+    return environment
+
+
+def environment_original_outer_outputs(context: dict) -> None:
+    """Pre-exec only: the shell owns these bounded originals, not a launcher."""
+    import resource  # POSIX scope admitted above; never imported on Windows.
+    require(resource.getrlimit(resource.RLIMIT_FSIZE)[0] == ENVIRONMENT_NATIVE_PUBLIC_LIMIT,
+            "Environment original shell file-size limit differs")
+    root = Path(context["root"])
+    seen = set()
+    for fd, name in ((1, "environment-native.stdout"), (2, "environment-native.stderr")):
+        path = root / name
+        ordinary(path)
+        actual, expected = os.fstat(fd), path.lstat()
+        identity = (actual.st_dev, actual.st_ino)
+        require(identity == (expected.st_dev, expected.st_ino) and identity not in seen
+                and stat.S_ISREG(actual.st_mode) and actual.st_nlink == 1
+                and stat.S_IMODE(actual.st_mode) == 0o600 and actual.st_uid == os.geteuid()
+                and actual.st_size <= ENVIRONMENT_NATIVE_PUBLIC_LIMIT,
+                "Environment original shell output descriptor differs")
+        seen.add(identity)
+    outer = root / "environment-native-outer.json"
+    ordinary(outer)
+    require(outer.stat().st_size == 0 and stat.S_IMODE(outer.stat().st_mode) == 0o600,
+            "Environment original shell wait writer was already used")
+    for fd in (3, 4, 5):
+        try:
+            os.fstat(fd)
+        except OSError as error:
+            require(error.errno == 9, "Environment shell custody check failed")
+        else:
+            raise CheckFailure("Environment shell custody descriptor leaked into native launch")
+
+
+def validate_environment_projection(value: object, platform: str) -> dict:
+    """Closed native DATA shape; no core import/runtime lookup during retain."""
+    projection = closed_object(value, {"runId", "ownerGeneration", "context", "phase", "outcome", "finality", "reason", "result"},
+                               "Environment projection fields differ")
+    require(all(type(projection[key]) is str and re.fullmatch(r"[0-9a-f]{32}", projection[key]) is not None
+                for key in ("runId", "ownerGeneration")), "Environment projection owner identity differs")
+    context = closed_object(projection["context"], {"projectId", "draftRevision", "baselineGeneration", "platform", "operation"},
+                            "Environment projection context fields differ")
+    require(type(context["projectId"]) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", context["projectId"]) is not None
+            and integer_between(context["draftRevision"], 0, 2**32 - 2)
+            and integer_between(context["baselineGeneration"], 0, 2**32 - 2)
+            and type(context["platform"]) is str and context["platform"] in {"android", "ios"}
+            and context["operation"] == "build", "Environment projection context is malformed")
+    outcomes = {"complete", "partial", "failed", "cancelled", "timed-out", "unavailable"}
+    require(type(projection["phase"]) is str and projection["phase"] in {"starting", "checking", "stopping", "settled", "retained-unknown"}
+            and type(projection["finality"]) is str and projection["finality"] in {"pending", "settled", "unknown"}
+            and type(projection["reason"]) is str and projection["reason"] in {"none", "cancelled", "context-changed", "document-lost",
+                "shutdown", "timed-out", "protocol-error", "runtime-unavailable", "command-failed", "cleanup-unknown"}
+            and (projection["outcome"] is None or type(projection["outcome"]) is str and projection["outcome"] in outcomes),
+            "Environment projection state is malformed")
+    if projection["result"] is None:
+        return projection
+    result = closed_object(projection["result"], {"schemaVersion", "policyVersion", "context", "hostPlatform", "outcome",
+        "checks", "commandsAttempted", "lifetime", "assurance"}, "Environment terminal fields differ")
+    require(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1
+            and result["policyVersion"] == "environment-diagnostics-v1" and result["hostPlatform"] == platform
+            and same_compile_json(result["context"], context)
+            and type(result["outcome"]) is str and result["outcome"] in outcomes,
+            "Environment terminal source/context/outcome differs")
+    roles = ("git", "java", "javac") if context["platform"] == "android" else ("git", "xcode")
+    if platform == "macos":
+        roles = ("developer-selection", *roles)
+    require(type(result["checks"]) is list and len(result["checks"]) == len(roles), "Environment terminal check roster differs")
+    reasons = {"not-run": {"invalid-draft", "platform-disabled", "host-mismatch", "unsupported-host", "missing-in-supported-lookup",
+            "unsupported-installation", "unselected-installation", "full-xcode-not-selected", "stopped"},
+        "attempted": {"command-incomplete", "binding-changed", "cancelled", "timed-out"},
+        "completed": {"observed", "nonzero-exit", "version-unrecognized", "selection-unrecognized"}}
+    version = lambda value: type(value) is str and re.fullmatch(r"[0-9][0-9A-Za-z._+\-]{0,63}", value) is not None
+    build = lambda value: type(value) is str and re.fullmatch(r"[0-9]{1,3}[A-Z][0-9]{1,6}[a-z]?", value) is not None
+    for role, supplied in zip(roles, result["checks"], strict=True):
+        row = closed_object(supplied, {"id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help"},
+                            "Environment terminal row fields differ")
+        require(row["id"] == role and type(row["state"]) is str and row["state"] in reasons
+                and type(row["reason"]) is str and row["reason"] in reasons[row["state"]]
+                and type(row["help"]) is str and 0 < len(row["help"]) <= 1024
+                and all(ord(char) >= 32 and ord(char) != 127 for char in row["help"])
+                and (row["version"] is None or version(row["version"])) and (row["build"] is None or build(row["build"]))
+                and type(row["assessment"]) is str and row["assessment"] in {"match", "mismatch", "no-local-policy", "not-assessed"},
+                "Environment terminal row state or bounded observation differs")
+        baseline = closed_object(row["baseline"], {"kind", "version", "build"}, "Environment terminal baseline fields differ")
+        if role in {"java", "javac"}:
+            require(baseline["kind"] == "workflow-reference" and version(baseline["version"]) and baseline["build"] is None,
+                    "Environment Java baseline shape differs")
+        elif role == "xcode":
+            require(baseline["kind"] == "exact-pin" and version(baseline["version"]) and build(baseline["build"]),
+                    "Environment Xcode baseline shape differs")
+        else:
+            require(same_compile_json(baseline, {"kind": "no-local-policy", "version": None, "build": None}),
+                    "Environment no-policy baseline differs")
+        if row["state"] != "completed":
+            require(row["version"] is None and row["build"] is None and row["returnCode"] is None
+                    and row["assessment"] == "not-assessed", "Environment uncompleted row claims a version result")
+        else:
+            require(integer_between(row["returnCode"], -(2**31), 2**31 - 1)
+                    and (row["reason"] == "nonzero-exit") == (row["returnCode"] != 0),
+                    "Environment completed row has no original return code")
+            if row["reason"] != "observed" or role == "developer-selection":
+                require(row["version"] is None and row["build"] is None and row["assessment"] == "not-assessed",
+                        "Environment non-version result contains an invented observation")
+            else:
+                require(version(row["version"]), "Environment observed row has no bounded version")
+                expected = ("match" if (row["version"], row["build"]) == (baseline["version"], baseline["build"]) else "mismatch") if role == "xcode" else "no-local-policy"
+                require(row["assessment"] == expected and (build(row["build"]) if role == "xcode" else row["build"] is None),
+                        "Environment observed version/policy assessment differs")
+    attempted = sum(row["state"] != "not-run" for row in result["checks"])
+    completed = sum(row["state"] == "completed" for row in result["checks"])
+    lifetime = closed_object(result["lifetime"], {"complete", "fatal", "contained", "commandDispatched", "commands", "inputClosed",
+        "handlersRestored", "toolDescriptorsClosed", "stopObserved"}, "Environment core lifetime fields differ")
+    require(integer_between(result["commandsAttempted"], 0, 4) and result["commandsAttempted"] == attempted
+            and integer_between(lifetime["commands"], completed, attempted)
+            and all(type(lifetime[key]) is bool for key in ("complete", "fatal", "contained", "inputClosed", "handlersRestored", "toolDescriptorsClosed"))
+            and (lifetime["commandDispatched"] is None or type(lifetime["commandDispatched"]) is bool)
+            and (completed == 0 or lifetime["commandDispatched"] is True)
+            and type(lifetime["stopObserved"]) is str and lifetime["stopObserved"] in {"none", "cancelled", "timed-out"},
+            "Environment original core lifetime/command count differs")
+    assurance = {"basis": "local-tool-observation", "toolsAttempted": attempted > 0, "projectCodeExecuted": False,
+        "projectFilesRead": False, "repositoryObserved": False, "sdkInspected": False, "credentialsRead": False,
+        "storeContacted": False, "dependencyCompleteness": "unknown", "releaseReadiness": "unknown", "toolCacheEffects": "possible"}
+    require(same_compile_json(result["assurance"], assurance), "Environment terminal claims an unrelated inspection or readiness")
+    require(not (platform == "linux" and context["platform"] == "ios") or attempted == 0,
+            "Environment Linux iOS refusal launched an Apple command")
+    return projection
+
+
+def environment_core_settled(projection: dict) -> None:
+    result = projection["result"]
+    require(result is not None, "Environment spawned original has no admitted terminal")
+    lifetime = result["lifetime"]
+    require(all(lifetime[key] is True for key in ("complete", "contained", "inputClosed", "handlersRestored", "toolDescriptorsClosed"))
+            and lifetime["fatal"] is False and type(lifetime["commandDispatched"]) is bool,
+            "Environment original core cleanup has not positively settled")
+
+
+def validate_environment_native_resources(value: object, case: str, projection: dict, *, exercised: bool = True) -> dict:
+    """Every actual acquired resource, and the deliberate last failed task."""
+    native = closed_object(value, {"startup", "inspection", "acquisition", "child", "input", "output", "error",
+        "writer", "stdout", "stderr", "driver", "manager", "observer", "watchdog", "outputBytes",
+        "resourceUnknown", "activeRetained", "disabled", "canExit"}, "Environment original native resource fields differ")
+    absent, negative = case in {"L1", "L2"}, case == "L7"
+    startup = {"attempted": not absent, "returned": not absent, "failed": False}
+    require(same_compile_json(native["startup"], startup), "Environment original acquisition did not return as expected")
+    for role in ("inspection", "acquisition"):
+        expected = {"joined": (case != "L1" if role == "inspection" else not absent), "failed": False, "retained": False}
+        require(same_compile_json(native[role], expected), "Environment original startup join is missing, failed or retained")
+    require(same_compile_json(native["child"], {"present": not absent, "waited": not absent,
+            "code": None if absent else 0, "waitFailed": False}), "Environment original child wait is missing or unsuccessful")
+    for role in ("input", "output", "error"):
+        require(same_compile_json(native[role], {"close": "new" if absent else "settled", "retained": False}),
+                "Environment original pipe close did not settle")
+    require(same_compile_json(native["writer"], {"joined": True, "failed": False,
+            "end": {"sent": not absent, "closed": not absent, "failed": False}}), "Environment original writer receipt differs")
+    for role in ("stdout", "stderr"):
+        end = {"frames": 2 if role == "stdout" and not absent else 0, "eof": not absent, "closed": not absent, "failed": False}
+        require(same_compile_json(native[role], {"joined": True, "failed": False, "end": end}),
+                "Environment original reader EOF/close/join receipt differs")
+    for role in ("driver", "manager", "observer", "watchdog"):
+        receipt = "panic" if negative and role == "driver" else (
+            "ok-false" if negative and role in {"observer", "watchdog"} else "ok-true" if role in {"observer", "watchdog"} else "ok-unit")
+        retained = negative and role != "manager"
+        require(same_compile_json(native[role], {"receipt": receipt, "retained": retained}),
+                "Environment original task result, retention or final observer receipt differs")
+    # An admitted L5 still holds its original decoded terminal across H when
+    # the current Git prerequisite is refused. Its ordinary failure stimulus
+    # remains unexecuted; do not erase the actual late native custody either.
+    late = case in {"L5", "L6a", "L6b", "L6c"}
+    require(integer_between(native["outputBytes"], 0 if absent else 1, 64 * 1024)
+            and (not absent or native["outputBytes"] == 0)
+            and native["resourceUnknown"] is negative and native["activeRetained"] is negative
+            and native["disabled"] is (late or negative) and native["canExit"] is (not negative),
+            "Environment original physical finality or retained Unknown facts differ")
+    if not absent:
+        environment_core_settled(projection)
+    else:
+        require(projection["result"] is None, "Environment no-child case contains a child terminal")
+    require(projection["finality"] == ("unknown" if late or negative else "settled")
+            and projection["phase"] == ("retained-unknown" if late or negative else "settled"),
+            "Environment application finality differs from the original task receipts")
+    if late or negative:
+        require(projection["outcome"] != "complete" and projection["reason"] != "none",
+                "Environment late or lost owner was incorrectly promoted to success")
+    return native
+
+
+def validate_environment_ordinary(value: object, *, case: dict) -> list[dict]:
+    rows = value
+    shim = case["id"] in {"L3a", "L3b", "L3c", "L3d", "L4", "L5"}
+    require(type(rows) is list and len(rows) <= 2, "Environment ordinary relay row bound differs")
+    if not shim:
+        require(rows == [], "Environment case contains an unrelated ordinary observer")
+        return rows
+    common = {"schemaVersion": 1, "case": case["id"], "runId": case["projection"]["runId"],
+              "ownerGeneration": case["projection"]["ownerGeneration"]}
+    base_fields = {*common, "event"}
+    if case["assertion"] == "unexecuted":
+        require(len(rows) == 1 and same_compile_json(rows[0], {**common, "event": "unexecuted", "intercepts": 0,
+            "readyObserved": False, "observerClosed": True, "noNextCall": True, "reason": case["reason"], "coreCode": 0}),
+            "Environment unexecuted prerequisite was replaced by a synthetic success")
+        return rows
+    require(len(rows) in {1, 2}, "Environment ordinary observed case has no original settlement row")
+    settled = closed_object(rows[-1], {*base_fields, "commandNonce", "recipeSha256", "intercepts", "readyObserved",
+        "resultIntegrity", "dispatched", "contained", "cleanupComplete", "cWait", "aWait", "cFinish", "aFinish",
+        "targetWait", "targetMarker", "readersJoined", "traceCloses", "noNextCall", "reason", "coreCode", "capture", "stopBeforeWorkNs"},
+        "Environment ordinary settlement fields differ")
+    require(same_compile_json({key: settled[key] for key in common}, common)
+            and settled["event"] == "settled" and type(settled["commandNonce"]) is str
+            and re.fullmatch(r"[0-9a-f]{32}", settled["commandNonce"]) is not None and sha256_value(settled["recipeSha256"])
+            and type(settled["intercepts"]) is int and settled["intercepts"] == 1
+            and settled["resultIntegrity"] == "incomplete" and type(settled["coreCode"]) is int and settled["coreCode"] == 0
+            and all(settled[key] is True for key in ("dispatched", "contained", "cleanupComplete", "targetMarker", "readersJoined", "noNextCall"))
+            and type(settled["readyObserved"]) is bool
+            and type(settled["reason"]) is str and settled["reason"] in {"cancelled", "timed-out", "command-incomplete"},
+            "Environment original ordinary command was not dispatched and settled")
+    for wait, finish in (("cWait", "cFinish"), ("aWait", "aFinish")):
+        require(type(settled[wait]) is int and settled[wait] in {0, 2}
+                and type(settled[finish]) is int and settled[finish] == settled[wait],
+                "Environment original helper wait and positive trace-close gate disagree")
+    require(same_compile_json(settled["traceCloses"], {"o": True, "c": True, "a": True, "w": True}),
+            "Environment original trace custody did not positively close")
+    target = closed_object(settled["targetWait"], {"kind", "code"}, "Environment ordinary target wait fields differ")
+    require(type(target["kind"]) is str and target["kind"] in {"exit", "signal"}
+            and integer_between(target["code"], 0, 2**31 - 1), "Environment original target wait is unavailable")
+    capture = closed_object(settled["capture"], {"stdout", "stderr", "limit", "overflow"},
+                            "Environment ordinary capture fields differ")
+    require(all(integer_between(capture[key], 0, 16385) for key in ("stdout", "stderr"))
+            and type(capture["limit"]) is int and capture["limit"] == 16384 and type(capture["overflow"]) is bool,
+            "Environment ordinary aggregate output accounting differs")
+    if case["id"] in {"L4", "L5"}:
+        require(same_compile_json(capture, {"stdout": 8192, "stderr": 8193, "limit": 16384, "overflow": True})
+                and settled["reason"] == "command-incomplete" and settled["stopBeforeWorkNs"] is None,
+                "Environment shared ordinary output cap was not exercised")
+    else:
+        require(capture["stdout"] > 0 and capture["stdout"] + capture["stderr"] < 16384 and capture["overflow"] is False
+                and settled["reason"] == "cancelled" and integer_between(settled["stopBeforeWorkNs"], 1, 3 * 10**9),
+                "Environment active STOP was not accepted before the original ordinary deadline")
+    require(settled["readyObserved"] is (len(rows) == 2), "Environment readiness and original relay count disagree")
+    if len(rows) == 2:
+        ready = closed_object(rows[0], {*base_fields, "commandNonce", "recipeSha256", "remainingNs", "sourceDelayNs"},
+                              "Environment original target readiness fields differ")
+        require(same_compile_json({key: ready[key] for key in common}, common) and ready["event"] == "target-ready"
+                and ready["commandNonce"] == settled["commandNonce"] and ready["recipeSha256"] == settled["recipeSha256"]
+                and integer_between(ready["remainingNs"], 10**9, 3 * 10**9)
+                and integer_between(ready["sourceDelayNs"], 0, 3 * 10**9),
+                "Environment readiness did not originate in the admitted current command")
+    if case["id"].startswith("L3"):
+        require(len(rows) == 2, "Environment active intervention has no actual target readiness")
+    require(len(canonical_json(rows)) <= 4096, "Environment original relay exceeds its bound")
+    return rows
+
+
+def validate_environment_timing(value: object, *, case: str, exercised: bool) -> dict:
+    timing = closed_object(value, {"workMs", "finalityMs", "heldMs", "releasedMs", "interventionMs", "unknownMs", "returnedMs"},
+                           "Environment original monotonic timing fields differ")
+    require(type(timing["workMs"]) is int and timing["workMs"] == 6000
+            and type(timing["finalityMs"]) is int and timing["finalityMs"] == 10000
+            and integer_between(timing["returnedMs"], 0, ENVIRONMENT_NATIVE_SECONDS * 1000),
+            "Environment original work/finality endpoints were changed")
+    for key in ("heldMs", "releasedMs", "interventionMs", "unknownMs"):
+        require(timing[key] is None or integer_between(timing[key], 0, timing["returnedMs"]),
+                "Environment monotonic observation left its original case lifetime")
+    if not exercised and case != "L5":
+        require(all(timing[key] is None for key in ("heldMs", "releasedMs", "interventionMs", "unknownMs")),
+                "Environment unexecuted prerequisite claims an intervention")
+    elif case in {"L1", "L2", "L5", "L6a", "L6b", "L6c"}:
+        require(integer_between(timing["heldMs"], 0, 5999)
+                and integer_between(timing["releasedMs"], timing["heldMs"], timing["returnedMs"]),
+                "Environment original hold/release was not exercised")
+        if case == "L1":
+            require(timing["releasedMs"] < 6000 and timing["unknownMs"] is None,
+                    "Environment no-child cancellation did not settle within its original work endpoint")
+        elif case == "L2":
+            require(6000 <= timing["releasedMs"] < 10000 and timing["unknownMs"] is None,
+                    "Environment held startup did not cross W strictly before H")
+        else:
+            require(timing["releasedMs"] >= 10000
+                    and integer_between(timing["unknownMs"], 10000, timing["releasedMs"]),
+                    "Environment late original was not retained Unknown across H")
+    elif case in {"L3a", "L3b", "L3c", "L3d"}:
+        require(integer_between(timing["interventionMs"], 0, 5999) and timing["unknownMs"] is None,
+                "Environment active original route did not intervene before W")
+    return timing
+
+
+def validate_environment_progress(value: object, context: dict) -> dict:
+    progress = closed_object(value, {"schemaVersion", "scope", "inputsSha256", "sourceSha", "platform", "classification",
+        "completedCases", "nextCase", "stage", "failureCode"}, "Environment conservative progress fields differ")
+    expected = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_SCOPE,
+        "inputsSha256": context["environmentInputsSha256"], "sourceSha": context["sourceSha"], "platform": context["platform"],
+        "classification": "native-not-settled"}
+    require(same_compile_json({key: progress[key] for key in expected}, expected),
+            "Environment conservative progress source or classification differs")
+    completed = progress["completedCases"]
+    require(type(completed) is list and len(completed) <= len(ENVIRONMENT_NATIVE_CASES)
+            and same_compile_json(completed, list(ENVIRONMENT_NATIVE_CASES[:len(completed)]))
+            and progress["nextCase"] == (ENVIRONMENT_NATIVE_CASES[len(completed)] if len(completed) < len(ENVIRONMENT_NATIVE_CASES) else None),
+            "Environment conservative progress is not an exact original case prefix")
+    require(type(progress["stage"]) is str and progress["stage"] in {
+                "inputs", "reader", "native-admission", "native-originals", "negative-tail", "result"}
+            and (progress["failureCode"] is None or type(progress["failureCode"]) is str and progress["failureCode"] in {
+                "input-binding", "case-assertion", "ordinary-observation", "original-physical-finality", "output-write"})
+            and (len(completed) != len(ENVIRONMENT_NATIVE_CASES) or progress["stage"] == "result"),
+            "Environment conservative progress contains an arbitrary stage or diagnostic")
+    return progress
+
+
+def validate_environment_outer(value: object, context: dict, *, step_outcome: str, success: bool) -> dict:
+    outer = closed_object(value, {"schemaVersion", "scope", "sourceSha", "platform", "runId", "attempt",
+        "originalWait", "exitCode", "outputWritersClosed", "statusWriterCloseGate", "fileLimitBytes"},
+        "Environment original shell wait fields differ")
+    fixed = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_SCOPE,
+        **{key: context[key] for key in ("sourceSha", "platform", "runId", "attempt")},
+        "originalWait": True, "outputWritersClosed": True,
+        "statusWriterCloseGate": "original-step-success-required", "fileLimitBytes": ENVIRONMENT_NATIVE_PUBLIC_LIMIT}
+    require(same_compile_json({key: outer[key] for key in fixed}, fixed)
+            and integer_between(outer["exitCode"], 0, 255), "Environment original shell wait/source/custody differs")
+    if success:
+        # The row was written before FD3 close. Only actual original step0 also
+        # establishes that the final shell close returned positively.
+        require(step_outcome == "success" and outer["exitCode"] == 0,
+                "Environment shell row alone cannot prove the original final close")
+    else:
+        require(step_outcome in {"failure", "cancelled"}, "Environment failure snapshot has no failed original step")
+    return outer
+
+
+def validate_environment_reader(value: object, case: str) -> dict:
+    reader = closed_object(value, {"outputBytes", "frames", "eof", "closed", "failed", "closeCalls",
+        "secondaryFrames", "secondaryFailed", "pendingObserved"}, "Environment reader exercise fields differ")
+    require(integer_between(reader["outputBytes"], 0, 128 * 1024)
+            and integer_between(reader["frames"], 0, 3) and type(reader["closeCalls"]) is int and reader["closeCalls"] == 1
+            and all(type(reader[key]) is bool for key in ("eof", "closed", "failed", "pendingObserved"))
+            and integer_between(reader["secondaryFrames"], 0, 3) and type(reader["secondaryFailed"]) is bool,
+            "Environment reader original output/close observation is malformed")
+    if case == "reader-shared-cap":
+        require(reader["outputBytes"] == 66000 and reader["eof"] is True and reader["closed"] is True
+                and reader["frames"] < 2 and reader["failed"] is True and reader["secondaryFrames"] == 0
+                and reader["secondaryFailed"] is True and reader["pendingObserved"] is False,
+                "Environment reader shared stream allowance was not exercised")
+    elif case == "reader-late-stderr":
+        # Primary is the later stderr return; secondary is the earlier exact
+        # terminal-bearing stdout return, not another interpreted terminal.
+        require(0 < reader["outputBytes"] <= 64 * 1024 and reader["frames"] == 0 and reader["eof"] is True
+                and reader["closed"] is True and reader["failed"] is True and reader["secondaryFrames"] == 2
+                and reader["secondaryFailed"] is False and reader["pendingObserved"] is False,
+                "Environment terminal was not followed by an independently failed stderr stream")
+    elif case == "reader-no-eof":
+        require(0 < reader["outputBytes"] <= 64 * 1024 and reader["frames"] == 2 and reader["eof"] is True
+                and reader["closed"] is True and reader["failed"] is False and reader["secondaryFrames"] == 0
+                and reader["secondaryFailed"] is False and reader["pendingObserved"] is True,
+                "Environment admitted terminal incorrectly substituted for original EOF/close")
+    else:
+        require(case == "reader-close-error" and reader["eof"] is True and reader["closed"] is False
+                and reader["frames"] == 0 and reader["outputBytes"] == 0 and reader["failed"] is False
+                and reader["secondaryFrames"] == 0 and reader["secondaryFailed"] is False and reader["pendingObserved"] is False,
+                "Environment original close error was retried or turned into success")
+    return reader
+
+
+def validate_environment_result(value: object, context: dict, invocation_digest: str) -> dict:
+    result = closed_object(value, {"schemaVersion", "scope", "inputsSha256", "invocationSha256", "sourceSha", "sourceTree",
+        "platform", "target", "workflowSha", "runId", "attempt", "caseOrder", "cases", "unexecuted", "classification"},
+        "Environment native result fields differ")
+    fixed = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_SCOPE, "inputsSha256": context["environmentInputsSha256"],
+        "invocationSha256": invocation_digest,
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowSha", "runId", "attempt")},
+        "target": TARGETS[context["platform"]], "caseOrder": list(ENVIRONMENT_NATIVE_CASES)}
+    require(sha256_value(invocation_digest) and same_compile_json({key: result[key] for key in fixed}, fixed),
+            "Environment native result source/artifact or ordered case roster differs")
+    require(type(result["cases"]) is list and len(result["cases"]) == len(ENVIRONMENT_NATIVE_CASES),
+            "Environment native result omits an original case")
+    unexecuted, mandatory_missing, r1_git_completed = [], False, False
+    for name, supplied in zip(ENVIRONMENT_NATIVE_CASES, result["cases"], strict=True):
+        case = closed_object(supplied, {"id", "classification", "assertion", "reason", "timing", "projection", "native", "ordinary", "reader", "files"},
+                             "Environment native case fields differ")
+        reader_case, wait_case = name.startswith("reader-"), name == "wait-nonzero"
+        shim = name in {"L3a", "L3b", "L3c", "L3d", "L4", "L5"}
+        classification = ("synthetic-reader" if reader_case else "synthetic-wait" if wait_case else
+            "real-source" if name in {"R1", "R2"} else "real-zip" if name == "R3" else
+            "expected-driver-loss" if name == "L7" else "synthetic-lifecycle")
+        require(case["id"] == name and case["classification"] == classification
+                and type(case["assertion"]) is str and case["assertion"] in {"passed", "unexecuted"},
+                "Environment native case classification or order differs")
+        exercised = case["assertion"] == "passed"
+        if not exercised:
+            require(shim and type(case["reason"]) is str and case["reason"] in {"git-not-admitted", "insufficient-work-margin"},
+                    "Environment confirmed case was silently waived")
+            mandatory_missing = True
+            unexecuted.append({"case": name, "check": "git", "reason": case["reason"]})
+        else:
+            require(case["reason"] is None, "Environment passing fixture has an unrelated omission reason")
+        if shim and not r1_git_completed:
+            # No dependent synthetic owner may be created when the actual R1
+            # Git command was never completed. This is an explicit omission,
+            # not an invented ordinary relay or a replacement tool admission.
+            require(same_compile_json(case, {"id": name, "classification": "synthetic-lifecycle",
+                "assertion": "unexecuted", "reason": "git-not-admitted", "timing": None, "projection": None,
+                "native": None, "ordinary": [], "reader": None, "files": {"controlClosed": None, "relayClosed": None}}),
+                "Environment synthetic owner ran without its actual R1 Git prerequisite")
+            continue
+        require(same_compile_json(case["files"], {"controlClosed": True if shim else None, "relayClosed": True if shim else None}),
+                "Environment original shim control/relay close did not return")
+        if name in {"reader-shared-cap", "reader-close-error"}:
+            require(case["projection"] is None, "Environment unadmitted reader claims a terminal projection")
+        else:
+            # Fixed in-memory parser vectors use a Linux DATA profile on both
+            # hosts. They are not actual macOS/Linux installed-tool evidence.
+            validate_environment_projection(case["projection"], "linux" if reader_case or wait_case else context["platform"])
+        if reader_case or wait_case:
+            require(case["native"] is None and case["timing"] is None and case["ordinary"] == [],
+                    "Environment synthetic reader/wait exercise claims a native process")
+            if reader_case:
+                validate_environment_reader(case["reader"], name)
+            else:
+                require(case["reader"] is None and case["projection"]["finality"] == "unknown"
+                        and case["projection"]["reason"] == "protocol-error"
+                        and case["projection"]["outcome"] != "complete", "Environment nonzero original wait was accepted as success")
+            continue
+        require(case["reader"] is None, "Environment native process case contains an unrelated reader exercise")
+        validate_environment_native_resources(case["native"], name, case["projection"], exercised=exercised)
+        validate_environment_timing(case["timing"], case=name, exercised=exercised)
+        validate_environment_ordinary(case["ordinary"], case=case)
+        projection = case["projection"]
+        mobile = "ios" if name == "R2" or name == "R3" and context["platform"] == "macos" else "android"
+        require(projection["context"]["platform"] == mobile, "Environment case exercised the wrong mobile platform")
+        if exercised:
+            reason = {"L1": "cancelled", "L2": "timed-out", "L3a": "cancelled", "L3b": "context-changed",
+                "L3c": "document-lost", "L3d": "shutdown", "L4": "command-failed", "L5": "timed-out",
+                "L6a": "timed-out", "L6b": "timed-out", "L6c": "timed-out", "L7": "cleanup-unknown"}.get(name)
+            if reason is not None:
+                require(projection["reason"] == reason, "Environment case did not exercise its actual original lifecycle route")
+        if name in {"R1", "R2", "R3"}:
+            for check in projection["result"]["checks"]:
+                if check["reason"] != "observed":
+                    unexecuted.append({"case": name, "check": check["id"], "reason": check["reason"]})
+                if name == "R1" and check["id"] == "git":
+                    r1_git_completed = check["state"] == "completed"
+        if name in {"L6a", "L6b", "L6c", "L7"}:
+            require(projection["result"]["commandsAttempted"] == 0
+                    and all(row["reason"] == "platform-disabled" for row in projection["result"]["checks"]),
+                    "Environment no-tool management case invoked an unrelated tool")
+        if name in {"L4", "L5"} and exercised:
+            git = next(row for row in projection["result"]["checks"] if row["id"] == "git")
+            require(git["state"] == "attempted" and git["reason"] == "command-incomplete",
+                    "Environment historical ordinary failure was overwritten by a later native clock")
+        if name.startswith("L3") and exercised:
+            git = next(row for row in projection["result"]["checks"] if row["id"] == "git")
+            require(git["state"] == "attempted" and git["reason"] == "cancelled"
+                    and projection["result"]["lifetime"]["stopObserved"] == "cancelled",
+                    "Environment original core STOP does not agree with the active ordinary command")
+    expected_classification = ("finite-incomplete-with-expected-driver-loss" if mandatory_missing
+                               else "finite-complete-with-expected-driver-loss")
+    require(result["classification"] == expected_classification and same_compile_json(result["unexecuted"], unexecuted),
+            "Environment native omissions or deliberately negative final classification differ")
+    require(len(canonical_json(result)) + 1 <= ENVIRONMENT_NATIVE_PUBLIC_LIMIT, "Environment native result exceeds its bound")
+    return result
+
+
+def environment_sanitized_result(value: dict) -> dict:
+    # All other strings have closed enums/token/version syntax. Free-text help
+    # is useful in the app but unnecessary in public synthetic CI evidence.
+    result = json.loads(canonical_json(value))
+    for case in result["cases"]:
+        projection = case["projection"]
+        if projection is not None and projection["result"] is not None:
+            for check in projection["result"]["checks"]:
+                del check["help"]
+    return result
+
+
+def environment_optional_data(path: Path, limit: int, validator) -> tuple[dict | None, str]:
+    """One bounded DATA snapshot; a partial/failed writer is not retried."""
+    try:
+        return validator(read_bounded_json(path, limit)), "available"
+    except FileNotFoundError:
+        return None, "missing"
+    except (OSError, CheckFailure):
+        return None, "invalid"
+
+
+def retain_environment_native(context: dict) -> None:
+    """DATA only, including failure diagnostics. Never a cleanup capability."""
+    root = Path(context["root"])
+    step = os.environ.get("MRK_ENVIRONMENT_NATIVE_STEP_OUTCOME")
+    require(step in {"success", "failure", "cancelled"}, "Environment retention has no original native step outcome")
+    require(not os.path.lexists(root / "retain-started.json") and not os.path.lexists(root / "environment-native-public.json"),
+            "Environment DATA retention was already claimed")
+    write_json(root / "retain-started.json", environment_phase_claim(context, "retain"))
+    # These are prior DATA receipts only: do not call source_unchanged(),
+    # tools(), environment_inputs_unchanged(), runtime resolution, or cleanup.
+    compiler = []
+    for phase in ("acquire", "compile"):
+        require(same_compile_json(read_bounded_json(root / f"{phase}-started.json", 4096), environment_phase_claim(context, phase)),
+                "Environment prior compiler claim differs during DATA retention")
+        compiler.append(validate_environment_phase_receipt(read_bounded_json(root / f"{phase}-checks.json", 16384), context, phase))
+    _, invocation_digest = environment_original_invocation(context, inspect_artifact=False)
+    progress, progress_state = environment_optional_data(root / "environment-native-progress.json", 16384,
+        lambda value: validate_environment_progress(value, context))
+    outer, outer_state = environment_optional_data(root / "environment-native-outer.json", 4096,
+        lambda value: validate_environment_outer(value, context, step_outcome=step, success=step == "success"))
+    result, diagnostic = None, None
+    if step == "success":
+        try:
+            require(same_compile_json(read_bounded_json(root / "environment-native-started.json", 4096),
+                                      environment_phase_claim(context, "environment-native")),
+                    "Environment original native phase claim differs")
+            require(outer is not None, "Environment original shell wait/close receipt is missing or invalid")
+            require(progress is not None, "Environment conservative progress is missing or invalid")
+            require(progress["completedCases"] == list(ENVIRONMENT_NATIVE_CASES) and progress["nextCase"] is None
+                    and progress["stage"] == "result" and progress["failureCode"] is None,
+                    "Environment successful result lacks its original final progress record")
+            result = validate_environment_result(read_bounded_json(root / "environment-native-result.json", ENVIRONMENT_NATIVE_PUBLIC_LIMIT),
+                                                 context, invocation_digest)
+        except CheckFailure as error:
+            # These pure validators use only fixed diagnostics, never receipt
+            # values, raw logs or filesystem exception text in their messages.
+            diagnostic = str(error)
+        except OSError:
+            diagnostic = "Environment native result DATA is unavailable"
+    else:
+        diagnostic = "Environment original native step did not complete successfully"
+    classification = result["classification"] if result is not None else "native-not-verified"
+    public = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_EVIDENCE_SCOPE, "classification": classification,
+        "bindings": environment_public_bindings(context["environmentInputs"], context["environmentInputsSha256"]),
+        "compiler": compiler, "externalStepOutcome": step, "outer": outer, "outerData": outer_state,
+        "progress": progress, "progressData": progress_state, "diagnostic": diagnostic,
+        "native": environment_sanitized_result(result) if result is not None else None,
+        "retention": {"deleted": False, "laterNativeWork": False, "projectProbes": False, "vmDisposalRequired": True,
+            "reason": "expected-driver-loss" if result is not None else "native-finality-unverified"},
+        "applicationFinality": "unknown", "normalApplicationExitProved": False,
+        "physicalOriginals": "verified-negative-fixture-only" if result is not None else "unverified",
+        "notVerified": list(ENVIRONMENT_NATIVE_NOT_VERIFIED)}
+    require(len(canonical_json(public)) + 1 <= ENVIRONMENT_NATIVE_PUBLIC_LIMIT, "Environment sanitized evidence exceeds its bound")
+    write_json(root / "environment-native-public.json", public)
+    require(result is not None, diagnostic or "Environment native result is not verified")
+    require(classification == "finite-complete-with-expected-driver-loss",
+            "Environment mandatory native cases remain unexecuted; retained as incomplete evidence")
+    print("Retained finite negative-fixture evidence for VM disposal; production/runtime/GUI qualification remains false.")
+
+
+def phase_environment_native(name: str, context: dict) -> None:
+    require(context.get("executionScope") == ENVIRONMENT_NATIVE_SCOPE
+            and context.get("platform") in {"linux", "macos"}, "Wrong environment native scope")
+    admit_phase(ENVIRONMENT_NATIVE_SCOPE, name)
+    require(name != "prepare", "Environment preparation has a separate fixed entry")
+    if name == "retain":
+        retain_environment_native(context)
+        return
+    environment_predecessors(context, name)
+    root, source = Path(context["root"]), Path(context["source"])
+    write_json(root / f"{name}-started.json", environment_phase_claim(context, name))
+    environment_source_unchanged(context)
+    no_cargo_configuration((root, *root.parents, source / "desktop/src-tauri", source / "desktop", source, *source.parents))
+    if name == "environment-native":
+        # No subprocess timeout/second launcher. The already-prepared original
+        # Actions shell owns this PID, descriptors and actual returned wait.
+        # Once exec succeeds this interpreter cannot probe or clean after L7.
+        artifact, _ = environment_original_invocation(context, inspect_artifact=True)
+        environment_original_outer_outputs(context)
+        environment = environment_native_environment(context)
+        os.chdir(context["environmentInputs"]["cwd"])
+        os.execve(artifact["path"], [artifact["path"], ENVIRONMENT_NATIVE_TEST,
+                                  "--exact", "--ignored", "--test-threads=1"], environment)
+        raise CheckFailure("Environment original executable unexpectedly returned from exec")
+    environment = clean_environment(root)
+    environment.update(GITHUB_SHA=context["sourceSha"],
+                       MRK_ENVIRONMENT_NATIVE_INPUTS_SHA256=context["environmentInputsSha256"])
+    manifest = source / "desktop/src-tauri/Cargo.toml"
+    if name == "acquire":
+        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+            check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
+        cargo, _ = tools(context, environment)
+        with (root / "cargo-metadata.json").open("x", encoding="utf-8") as output, \
+                (root / "acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                 "--features", "development-runtime", "--filter-platform", TARGETS[context["platform"]],
+                 "--manifest-path", str(manifest)], check="environment-locked-headless-metadata", cwd=root,
+                env=environment, timeout=600, output=output, diagnostics=diagnostics)
+        ordinary(root / "cargo-metadata.json")
+        require(0 < (root / "cargo-metadata.json").stat().st_size <= 32 * 1024 * 1024,
+                "Environment locked compiler metadata exceeds its bound")
+        environment_source_unchanged(context)
+        write_json(root / "acquire-checks.json", environment_phase_value(context, "acquire"))
+    else:
+        require(name == "compile", "Unknown environment compiler phase")
+        cargo, _ = tools(context, environment)
+        argv = [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features",
+                "--features", "development-runtime", "--target", TARGETS[context["platform"]],
+                "--manifest-path", str(manifest), "--target-dir", str(root / "target"),
+                "--lib", "--no-run", "--message-format=json"]
+        messages = root / "environment-compile-messages.jsonl"
+        with messages.open("x", encoding="utf-8", newline="\n") as output, \
+                (root / "compile.stderr").open("x", encoding="utf-8") as diagnostics:
+            run(argv, check="environment-headless-test-compile-only", cwd=root, env=environment, timeout=600,
+                output=output, diagnostics=diagnostics)
+        environment_source_unchanged(context)
+        environment_compile_record(context, argv, messages)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core",
-                        "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline"))
+                        "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
+                        "environment-native", "retain"))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)
     try:
         scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")
         admit_phase(scope, args.phase)
-        platform = (admitted_host(retention_only=True) if scope == METADATA_NATIVE_SCOPE and args.phase == "clean" else admitted_host())
+        platform = (admitted_host(retention_only=True) if (scope == METADATA_NATIVE_SCOPE and args.phase == "clean"
+                    or scope == ENVIRONMENT_NATIVE_SCOPE and args.phase == "retain") else admitted_host())
         prepare(platform, scope) if args.phase == "prepare" else phase(args.phase, platform, scope)
     except Exception as error:
         reason = str(error) if isinstance(error, CheckFailure) else type(error).__name__

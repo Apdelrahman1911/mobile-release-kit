@@ -210,7 +210,7 @@ export class EnvironmentController {
   }
   beginConnection(): void {
     this.api = null;
-    this.invalidate({ mode: 'unavailable', reason: 'Core capabilities are loading. No environment check is running.', connectionGeneration: this.state.connectionGeneration + 1 });
+    this.invalidate({ mode: 'unavailable', reason: 'Core capabilities are loading. This requirements request does not start native tool checks.', connectionGeneration: this.state.connectionGeneration + 1 });
   }
   setConnection(api: DesktopApi, info: AppInfo): void {
     if (this.disposed) return;

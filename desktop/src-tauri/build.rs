@@ -25,6 +25,8 @@ fn main() {
     // artifact. Neither is discovered or promoted to authority by this build.
     anchor("MRK_GITHUB_TLS_INPUTS_SHA256");
     anchor("MRK_GITHUB_TLS_DEADLINE_INPUTS_SHA256");
+    // A closed hosted diagnostics fixture input, never runtime qualification.
+    anchor("MRK_ENVIRONMENT_NATIVE_INPUTS_SHA256");
     let target = env::var("TARGET").unwrap_or_default();
     println!("cargo:rustc-env=MRK_COMPILED_TARGET={target}");
     #[cfg(feature = "desktop-shell")]
@@ -32,6 +34,7 @@ fn main() {
         const COMMANDS: &[&str] = &[
             "app_info", "choose_project", "project_snapshot", "catalog",
             "environment_requirements",
+            "start_environment_diagnostics", "environment_diagnostics_status", "cancel_environment_diagnostics",
             "validate_config", "suggest_config", "preview_config", "propose_github_setup",
             "open_config_edit", "prepare_config_edit", "apply_config_edit",
             "close_config_edit", "config_edit_status",

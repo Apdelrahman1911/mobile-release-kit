@@ -5088,14 +5088,17 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         metadata = {"mobile_release/api/_metadata_text.py",
                     "mobile_release/api/data/metadata-text-help-v1.json",
                     "mobile_release/metadata_text.py", "mobile_release/metadata_text_edit.py",
-                    "mobile_release/api/_environment.py", "mobile_release/toolchain_policy.py"}
+                    "mobile_release/api/_environment.py", "mobile_release/toolchain_policy.py",
+                    "mobile_release/_desktop_environment_protocol.py", "mobile_release/_desktop_environment_control.py",
+                    "mobile_release/_desktop_environment_engine.py", "mobile_release/environment_diagnostics.py",
+                    "mobile_release/environment_diagnostics_tools.py"}
         context, forbidden = self.context(), self.forbidden
         with patch.multiple(helper, github_tls_runtime=forbidden, github_tls_file=forbidden,
                 read_bounded_json=forbidden, write_json=forbidden, run=forbidden, tools=forbidden), \
                 patch.object(helper.subprocess, "run", side_effect=forbidden), \
                 patch.object(helper.subprocess, "Popen", side_effect=forbidden):
             inventory = helper.workflow_core_inventory(SOURCE)
-            self.assertEqual(len(inventory), 78)
+            self.assertEqual(len(inventory), 83)
             self.assertTrue(metadata <= {row["path"] for row in inventory})
             helper.validate_gtk_core_inventory(inventory)
             with patch.multiple(helper, Path=PurePosixPath, ordinary=forbidden, hash_file=forbidden,
@@ -5122,11 +5125,16 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     "mobile_release/api/data/metadata-text-help-v1.json",
                     "mobile_release/metadata_text.py", "mobile_release/metadata_text_edit.py"}
         environment = {"mobile_release/api/_environment.py", "mobile_release/toolchain_policy.py"}
+        diagnostics = {"mobile_release/_desktop_environment_protocol.py", "mobile_release/_desktop_environment_control.py",
+                       "mobile_release/_desktop_environment_engine.py", "mobile_release/environment_diagnostics.py",
+                       "mobile_release/environment_diagnostics_tools.py"}
         inventory = [{"path": name, "size": 1, "sha256": "4" * 64} for name in helper.GTK_CORE_PATHS]
-        stale = [row for row in inventory if row["path"] not in metadata | environment]
-        pre_environment = [row for row in inventory if row["path"] not in environment]
+        stale = [row for row in inventory if row["path"] not in metadata | environment | diagnostics]
+        pre_environment = [row for row in inventory if row["path"] not in environment | diagnostics]
+        pre_diagnostics = [row for row in inventory if row["path"] not in diagnostics]
         self.assertEqual(len(stale), 72)
         self.assertEqual(len(pre_environment), 76)
+        self.assertEqual(len(pre_diagnostics), 78)
         extra = [*inventory, {"path": "mobile_release/unreviewed.py", "size": 1, "sha256": "4" * 64}]
         context, forbidden = self.context(), self.forbidden
         before = deepcopy(context)
@@ -5136,11 +5144,11 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 run=forbidden, tools=forbidden), \
                 patch.object(helper.subprocess, "run", side_effect=forbidden), \
                 patch.object(helper.subprocess, "Popen", side_effect=forbidden):
-            for value, count in ((stale, 72), (pre_environment, 76), (extra, 79)):
+            for value, count in ((stale, 72), (pre_environment, 76), (pre_diagnostics, 78), (extra, 84)):
                 with self.subTest(count=count), self.assertRaises(helper.CheckFailure) as refused:
                     helper.prepare_github_tls_context(context, value)
                 self.assertEqual(str(refused.exception),
-                    f"Reviewed core inventory count differs: expected 78 files, observed {count}")
+                    f"Reviewed core inventory count differs: expected 83 files, observed {count}")
                 self.assertEqual(context, before)
 
     def test_tls_manifest_roles_source_ca_ssl_and_file_bounds_are_closed_data(self):
