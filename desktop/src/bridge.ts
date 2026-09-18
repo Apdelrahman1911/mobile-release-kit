@@ -10,9 +10,11 @@ import type { GitHubWorkflowEditStatus } from './githubWorkflowEditTypes.ts';
 import { GITHUB_CONNECTION_ENTRY_AVAILABLE, GITHUB_CONNECTION_EVENT, githubConnectionError, githubConnectionRequestFits,
   parseGitHubConnectionHelp, parseGitHubConnectionStatus } from './githubConnectionProtocol.ts';
 import type { GitHubConnectionStatus } from './githubConnectionTypes.ts';
+import { metadataTextError, metadataTextRequestFits, parseMetadataTextEditStatus, parseMetadataTextGuide, parseMetadataTextObservation, parseMetadataTextValidation } from './metadataTextProtocol.ts';
+import type { MetadataTextCommand } from './metadataTextProtocol.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -62,6 +64,19 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       return structuredClone(status);
     } catch (error) { throw workflowEditError(error); }
   };
+  const metadataCall = async <T>(command: MetadataTextCommand, args: unknown, parse: (value: unknown) => T | null): Promise<T> => {
+    try {
+      if (!metadataTextRequestFits(command, args)) throw { code: 'MetadataTextRequestInvalid' };
+      const request = structuredClone(args) as Record<string, unknown>;
+      const result = parse(await call<unknown>(command, request));
+      if (!result) throw { code: command.startsWith('metadata_text_edit_') ? 'MetadataTextStatusInvalid' : 'MetadataTextResponseInvalid' };
+      if (command === 'metadata_text_observe' || command === 'metadata_text_validate') {
+        const passive = result as { platform?: unknown; locale?: unknown };
+        if (passive.platform !== request.platform || command === 'metadata_text_observe' && passive.locale !== request.locale) throw { code: 'MetadataTextResponseInvalid' };
+      }
+      return structuredClone(result);
+    } catch (error) { throw metadataTextError(error); }
+  };
   const connectionCall = (command: 'github_connection_status' | 'github_connection_connect_token' | 'github_connection_refresh' | 'github_connection_disconnect', args: Record<string, unknown>): Promise<GitHubConnectionStatus> => {
     // Deliberately not async and not the generic call/apiError route. Start one
     // invoke synchronously; its callbacks do not close over the token arguments.
@@ -83,7 +98,7 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       const githubSetup = parseCatalogGitHubSetup(result);
       if (!githubSetup) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
       return { ...result, githubSetup: structuredClone(githubSetup), credentialGuide: parseCatalogCredentialGuide(result),
-        githubConnection: parseGitHubConnectionHelp(result.githubConnection) };
+        githubConnection: parseGitHubConnectionHelp(result.githubConnection), metadataText: parseMetadataTextGuide(result.metadataText) };
     },
     validate: (draft: JsonObject) => call<ValidationResult>('validate_config', { draft }),
     suggestConfig: (hints: SuggestionHints) => call<ConfigSuggestion>('suggest_config', { hints }),
@@ -124,6 +139,19 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (mode !== 'native' || !listen) throw { code: 'NativeBridgeRequired' };
         return await listen('github-workflow-edit-status', onStatus);
       } catch (error) { throw workflowEditError(error); }
+    },
+    observeMetadataText: (request) => metadataCall('metadata_text_observe', request, parseMetadataTextObservation),
+    validateMetadataText: (request) => metadataCall('metadata_text_validate', request, parseMetadataTextValidation),
+    openMetadataTextEdit: (request) => metadataCall('metadata_text_edit_open', request, parseMetadataTextEditStatus),
+    prepareMetadataTextEdit: (request) => metadataCall('metadata_text_edit_prepare', request, parseMetadataTextEditStatus),
+    applyMetadataTextEdit: (sessionId, planToken) => metadataCall('metadata_text_edit_apply', { sessionId, planToken }, parseMetadataTextEditStatus),
+    closeMetadataTextEdit: (sessionId) => metadataCall('metadata_text_edit_close', { sessionId }, parseMetadataTextEditStatus),
+    metadataTextEditStatus: () => metadataCall('metadata_text_edit_status', {}, parseMetadataTextEditStatus),
+    subscribeMetadataTextEdit: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'MetadataTextUnavailable' };
+        return await listen('metadata-text-edit-status', onStatus);
+      } catch (error) { throw metadataTextError(error); }
     },
     githubConnectionStatus: () => connectionCall('github_connection_status', {}),
     connectGitHubToken: (args) => connectionCall('github_connection_connect_token', args),

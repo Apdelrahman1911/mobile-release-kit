@@ -3,11 +3,13 @@ import projectSchema from '../../src/mobile_release/api/data/project.schema.json
 import githubSetupResource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
 import credentialGuideResource from '../../src/mobile_release/api/data/credential-guide-v1.json' with { type: 'json' };
 import githubConnectionResource from '../../src/mobile_release/api/data/github-connection-v1.json' with { type: 'json' };
+import metadataTextResource from '../../src/mobile_release/api/data/metadata-text-help-v1.json' with { type: 'json' };
 import { githubSetupError, parseGitHubSetupHelp } from './githubSetupProtocol.ts';
 import { parseCredentialGuide } from './credentialGuide.ts';
 import { assetError } from './assetSessionProtocol.ts';
 import { workflowEditError } from './githubWorkflowEditProtocol.ts';
 import { githubConnectionError, parseGitHubConnectionHelp } from './githubConnectionProtocol.ts';
+import { metadataTextError, parseMetadataTextGuide } from './metadataTextProtocol.ts';
 import type { ApiError, Assurance, Catalog, DesktopApi, FieldHelp, JsonObject, ProjectSnapshot } from './types.ts';
 
 // Inert, explicit browser-design fixture. Nothing here is a project observation.
@@ -25,6 +27,7 @@ if (!githubSetup) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' })
 const catalog: Catalog = {
   credentialGuide: parseCredentialGuide(credentialGuideResource),
   githubConnection: parseGitHubConnectionHelp(githubConnectionResource),
+  metadataText: parseMetadataTextGuide(metadataTextResource),
   // TypeScript adds optional `undefined` properties when inferring heterogeneous
   // JSON arrays. The exact core-owned JSON resource cannot contain undefined.
   schemaVersion: 1, schema: projectSchema as unknown as JsonObject, fields: fieldHelp as FieldHelp[],
@@ -61,6 +64,7 @@ const editUnavailable = async (): Promise<never> => {
 const assetUnavailable = async (): Promise<never> => { throw assetError({ code: 'AssetSessionUnavailable' }); };
 const workflowUnavailable = async (): Promise<never> => { throw workflowEditError({ code: 'PreviewOnly' }); };
 const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
+const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
 
 export const previewApi: DesktopApi = {
   mode: 'preview',
@@ -94,6 +98,14 @@ export const previewApi: DesktopApi = {
   closeGitHubWorkflowEdit: workflowUnavailable,
   githubWorkflowEditStatus: workflowUnavailable,
   subscribeGitHubWorkflowEdit: workflowUnavailable,
+  observeMetadataText: metadataUnavailable,
+  validateMetadataText: metadataUnavailable,
+  openMetadataTextEdit: metadataUnavailable,
+  prepareMetadataTextEdit: metadataUnavailable,
+  applyMetadataTextEdit: metadataUnavailable,
+  closeMetadataTextEdit: metadataUnavailable,
+  metadataTextEditStatus: metadataUnavailable,
+  subscribeMetadataTextEdit: metadataUnavailable,
   githubConnectionStatus: connectionUnavailable,
   connectGitHubToken: connectionUnavailable,
   refreshGitHubConnection: connectionUnavailable,

@@ -140,8 +140,10 @@ restriction or a configuration file, so historical initialization journals remai
 content intentionally fails metadata preflight until the product owner completes it. Existing
 regular metadata files are preserved even with `--force`; a symlink or non-file at a required
 destination aborts installation. The root `.gitignore` is created when missing or receives missing
-exact lines for `.mobile-release/`, `.mobile-release-init-prepare/`, `.mobile-release-init/` and
-`.mobile-release-init-cleanup/`. Existing bytes (including CRLF) are preserved; a symlink, non-file,
+exact lines for `.mobile-release/`, `.mobile-release-init-prepare/`, `.mobile-release-init/`,
+`.mobile-release-init-cleanup/` and the desktop's three
+`.mobile-release-metadata-text-prepare/`, `.mobile-release-metadata-text/`,
+`.mobile-release-metadata-text-cleanup/` directories. Existing bytes (including CRLF) are preserved; a symlink, non-file,
 non-UTF-8 file, or ignore file exceeding 1 MiB before or after the append fails before any
 destination write. Special permission bits on the project root or destination ancestors are
 unsupported and rejected before staging.

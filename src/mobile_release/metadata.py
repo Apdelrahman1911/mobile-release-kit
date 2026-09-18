@@ -7,6 +7,7 @@ import re
 import stat
 import struct
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlsplit
@@ -73,6 +74,54 @@ ANDROID_NOTE_SECRET_RE = re.compile(
     r"[\"'](?:client_secret|private_key|private_key_id)[\"']\s*:\s*[\"'][^\"']{8,}|"
     r"(?:password|api[_ -]?key|secret)\s*[:=]\s*[^\s]{8,}"
 )
+
+
+@dataclass(frozen=True)
+class MetadataTextCheck:
+    """Pure generic Store-text policy; never the Android changelog policy."""
+
+    character_count: int
+    limit: int | None
+    issues: tuple[tuple[str, Status], ...]
+
+
+def check_metadata_text(name: str, text: str) -> MetadataTextCheck:
+    """Check the CLI's universal-newline view without altering saved bytes.
+
+    The generic metadata reader historically uses read_text(newline=None).
+    Supplied desktop text must use that same policy view, while the uploader's
+    distinct Android release-note helper above continues to count raw text.
+    File admission, UTF-8 byte bounds and JSON parsing belong to their callers.
+    """
+    view = text.replace("\r\n", "\n").replace("\r", "\n")
+    issues: list[tuple[str, Status]] = []
+    if not view.strip():
+        issues.append(("metadata.empty-text", Status.INVALID))
+    if "\x00" in view:
+        issues.append(("metadata.nul", Status.INVALID))
+    if PLACEHOLDER_RE.search(view):
+        issues.append(("metadata.placeholder", Status.FAIL))
+    if SECRET_RE.search(view):
+        issues.append(("metadata.secret-pattern", Status.FAIL))
+    candidate = view.rstrip("\n")
+    url = name.endswith("_url.txt")
+    if url:
+        try:
+            parsed = urlsplit(candidate)
+            _ = parsed.port
+        except ValueError:
+            parsed = None
+        if not (parsed and candidate == candidate.strip()
+                and len(candidate) <= MAX_STORE_URL_LENGTH
+                and not any(ord(character) < 32 for character in candidate)
+                and parsed.scheme == "https" and parsed.hostname
+                and parsed.username is None and parsed.password is None
+                and not parsed.query and not parsed.fragment):
+            issues.append(("metadata.url", Status.INVALID))
+    limit = TEXT_LIMITS.get(name)
+    if limit is not None and len(candidate) > limit:
+        issues.append(("metadata.length", Status.FAIL))
+    return MetadataTextCheck(len(candidate), MAX_STORE_URL_LENGTH if url else limit, tuple(issues))
 
 
 def validate_android_release_note(text: object) -> str:
@@ -444,7 +493,9 @@ def metadata_findings(
                     )
                 )
                 continue
-            if not text.strip():
+            checked = check_metadata_text(path.name, text)
+            codes = {code for code, _ in checked.issues}
+            if "metadata.empty-text" in codes:
                 findings.append(
                     Finding(
                         "metadata.empty-text",
@@ -453,7 +504,7 @@ def metadata_findings(
                         category="metadata",
                     )
                 )
-            if "\x00" in text:
+            if "metadata.nul" in codes:
                 findings.append(
                     Finding(
                         "metadata.nul",
@@ -462,7 +513,7 @@ def metadata_findings(
                         category="metadata",
                     )
                 )
-            if PLACEHOLDER_RE.search(text):
+            if "metadata.placeholder" in codes:
                 findings.append(
                     Finding(
                         "metadata.placeholder",
@@ -471,7 +522,7 @@ def metadata_findings(
                         category="metadata",
                     )
                 )
-            if SECRET_RE.search(text):
+            if "metadata.secret-pattern" in codes:
                 findings.append(
                     Finding(
                         "metadata.secret-pattern",
@@ -493,41 +544,21 @@ def metadata_findings(
                             category="metadata",
                         )
                     )
-            if path.name.endswith("_url.txt"):
-                candidate = text.rstrip("\n")
-                try:
-                    parsed = urlsplit(candidate)
-                    _ = parsed.port
-                except ValueError:
-                    parsed = None
-                valid_url = bool(
-                    parsed
-                    and candidate == candidate.strip()
-                    and len(candidate) <= MAX_STORE_URL_LENGTH
-                    and not any(ord(character) < 32 for character in candidate)
-                    and parsed.scheme == "https"
-                    and parsed.hostname
-                    and parsed.username is None
-                    and parsed.password is None
-                    and not parsed.query
-                    and not parsed.fragment
-                )
-                if not valid_url:
-                    findings.append(
-                        Finding(
-                            "metadata.url",
-                            Status.INVALID,
-                            f"Store URL must be an absolute credential-free HTTPS URL: {relative}",
-                            category="metadata",
-                        )
+            if "metadata.url" in codes:
+                findings.append(
+                    Finding(
+                        "metadata.url",
+                        Status.INVALID,
+                        f"Store URL must be an absolute credential-free HTTPS URL: {relative}",
+                        category="metadata",
                     )
-            limit = TEXT_LIMITS.get(path.name)
-            if limit is not None and len(text.rstrip("\n")) > limit:
+                )
+            if "metadata.length" in codes:
                 findings.append(
                     Finding(
                         "metadata.length",
                         Status.FAIL,
-                        f"{relative} exceeds its {limit}-character Store limit.",
+                        f"{relative} exceeds its {checked.limit}-character Store limit.",
                         category="metadata",
                     )
                 )

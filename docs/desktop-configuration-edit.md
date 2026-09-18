@@ -90,7 +90,9 @@ validated final draft. It is not another file revision or mutation authority.
 
 ## Conservative ignore behavior
 
-The four existing `init_transaction.IGNORE_LINES` are the only permitted rules.
+The seven fixed `init_transaction.IGNORE_LINES` are the only permitted rules,
+including the three metadata-text transaction prerequisites. Configuration
+still has exactly its two writable destinations; metadata Save cannot add rules.
 Unprefixed or root-prefixed exact positive directory lines count as sufficient
 coverage. LF/optional preceding CR split patterns; leading spaces are meaningful.
 Any later syntactic negation (`!` in column zero) invalidates earlier proofs.

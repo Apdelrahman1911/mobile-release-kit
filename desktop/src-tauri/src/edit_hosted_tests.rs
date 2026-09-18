@@ -21,8 +21,8 @@ const EOF_SCOPE: &str = "configuration-transaction-eof-hosted-v1";
 const OBSERVATION: Duration = Duration::from_secs(45);
 const NOT_VERIFIED: &[&str] = &["production-runtime-custody", "production-save-enablement", "native-gui", "window-reload-crash",
     "parent-death", "native-stuck-wait-close", "windows-filesystem", "stores", "mobile-builds", "installers"];
-const IGNORE: &[u8] = b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n";
-const NOOP_IGNORE: &[u8] = b"# fixed synthetic comment\r\n/.mobile-release/\r\n/.mobile-release-init-prepare/\r\n/.mobile-release-init/\r\n/.mobile-release-init-cleanup/\r\n";
+const IGNORE: &[u8] = b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n";
+const NOOP_IGNORE: &[u8] = b"# fixed synthetic comment\r\n/.mobile-release/\r\n/.mobile-release-init-prepare/\r\n/.mobile-release-init/\r\n/.mobile-release-init-cleanup/\r\n/.mobile-release-metadata-text-prepare/\r\n/.mobile-release-metadata-text/\r\n/.mobile-release-metadata-text-cleanup/\r\n";
 const UNRELATED: &[u8] = b"fixed synthetic unrelated content\n";
 const EOF_IGNORE_BASE: &[u8] = b"# fixed synthetic EOF ignore\n";
 static BATCH_CLAIMED: AtomicBool = AtomicBool::new(false);
@@ -265,6 +265,12 @@ impl GateGuard {
             match domain {
                 EditDomain::Configuration => { let _ = self.owner.close("main", &id); },
                 EditDomain::GitHubWorkflows => { let _ = self.owner.close_workflow("main", &id); },
+                EditDomain::MetadataText => {
+                    // This historical fixture has no metadata admission grant.
+                    // If reached, retain/stop the original rather than routing
+                    // its cleanup through a configuration/workflow command.
+                    self.owner.inner.trigger(&id, Reason::RuntimeUnavailable, Instant::now());
+                },
             }
         }
         self.schedule.release();

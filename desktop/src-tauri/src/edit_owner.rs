@@ -12,10 +12,12 @@ use {std::process::Stdio, tokio::process::Command};
 use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, ConfigEditStatus, CoreReason,
     EditAvailability, EditDomain, EditProjection, Effect, Journal, NativeEditReason as Reason, NativeFinality, Phase,
     PrepareConfigEdit, Prepared, ResourceState}, github_workflow_edit_protocol::{self as workflow_wire, PrepareWorkflowEdit, WorkflowEditStatus},
+    metadata_text_edit_protocol::{self as metadata_wire, MetadataTextEditStatus, PrepareMetadataTextEdit},
     error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}};
 
 const NATIVE_EDIT_QUALIFIED: bool = false;
 const NATIVE_WORKFLOW_EDIT_QUALIFIED: bool = false;
+const NATIVE_METADATA_TEXT_EDIT_QUALIFIED: bool = false;
 const ACTIVE: Duration = Duration::from_secs(30);
 const REVIEW: Duration = Duration::from_secs(15 * 60);
 const SOFT_STOP: Duration = Duration::from_secs(8);
@@ -25,6 +27,7 @@ fn qualified(domain: EditDomain, configuration_fixture: bool) -> bool {
     match domain {
         EditDomain::Configuration => NATIVE_EDIT_QUALIFIED || configuration_fixture,
         EditDomain::GitHubWorkflows => NATIVE_WORKFLOW_EDIT_QUALIFIED,
+        EditDomain::MetadataText => NATIVE_METADATA_TEXT_EDIT_QUALIFIED,
     }
 }
 fn capability_reason(domain: EditDomain, active: Option<EditDomain>, stopping: bool, disabled: bool,
@@ -37,6 +40,7 @@ fn capability_reason(domain: EditDomain, active: Option<EditDomain>, stopping: b
     else if match domain {
         EditDomain::Configuration => !(cfg!(target_os = "linux") || cfg!(target_os = "macos")),
         EditDomain::GitHubWorkflows => !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
+        EditDomain::MetadataText => !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
     } { EditAvailability::UnsupportedPlatform }
     else if !domain_qualified || !document_live { EditAvailability::RuntimeUnqualified }
     else { EditAvailability::Available }
@@ -49,9 +53,10 @@ fn request_bytes(domain: EditDomain, session: &str, seq: u32, op: &str, params: 
     match domain {
         EditDomain::Configuration => wire::request(session, seq, op, params),
         EditDomain::GitHubWorkflows => workflow_wire::request(session, seq, op, params),
+        EditDomain::MetadataText => metadata_wire::request(session, seq, op, params),
     }
 }
-enum DomainStatus { Configuration(ConfigEditStatus), GitHubWorkflows(WorkflowEditStatus) }
+enum DomainStatus { Configuration(ConfigEditStatus), GitHubWorkflows(WorkflowEditStatus), MetadataText(MetadataTextEditStatus) }
 impl DomainStatus {
     fn configuration(self) -> Result<ConfigEditStatus, BridgeError> {
         match self { Self::Configuration(status) => Ok(status), _ => Err(BridgeError::protocol()) }
@@ -59,12 +64,19 @@ impl DomainStatus {
     fn workflows(self) -> Result<WorkflowEditStatus, BridgeError> {
         match self { Self::GitHubWorkflows(status) => Ok(status), _ => Err(BridgeError::protocol()) }
     }
+    fn metadata_text(self) -> Result<MetadataTextEditStatus, BridgeError> {
+        match self { Self::MetadataText(status) => Ok(status), _ => Err(BridgeError::protocol()) }
+    }
 }
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct WorkflowRegistration {
+pub(crate) struct RegisteredEditRoot {
     pub(crate) generation: u32, pub(crate) root: crate::asset_source::RegisteredRoot,
 }
-pub(crate) struct WorkflowOpenTicket { owner: Arc<Inner>, id: String, executor: tokio::runtime::Handle }
+// Keep existing workflow callers/fixtures bound to their original API. The
+// shared root proof is not a domain permit; admission and tickets remain tagged.
+pub(crate) type WorkflowRegistration = RegisteredEditRoot;
+pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle }
+pub(crate) type WorkflowOpenTicket = RegisteredOpenTicket;
 
 // Only the ignored headless workflow fixture can construct this private value,
 // after its fixed hosted/root/source/runtime/payload admission. No environment
@@ -250,10 +262,25 @@ impl Inner {
         wire::bounded(&status, workflow_wire::STATUS_LIMIT)?;
         Ok(status)
     }
+    fn metadata_text_snapshot(&self, r: &Registry) -> Result<MetadataTextEditStatus, BridgeError> {
+        if r.exhausted || self.poisoned.load(Ordering::SeqCst) { return Err(edit_unknown()); }
+        let active = r.active.as_ref().filter(|a| a.session.domain == EditDomain::MetadataText).map(|a| {
+            let mut projection = a.projection.metadata_text_projection()?;
+            projection.review_remaining_ms = a.review_end.saturating_duration_since(Instant::now()).as_millis().min(REVIEW.as_millis()) as u32;
+            Ok::<metadata_wire::Projection, BridgeError>(projection)
+        }).transpose()?;
+        let last_terminal = r.last.as_ref().filter(|p| p.domain == EditDomain::MetadataText)
+            .map(EditProjection::metadata_text_projection).transpose()?;
+        let status = MetadataTextEditStatus { schema_version: 1, domain: metadata_wire::DOMAIN, window_generation: r.generation.clone(),
+            status_revision: r.revision, capability: self.capability(r, EditDomain::MetadataText), active, last_terminal };
+        wire::bounded(&status, metadata_wire::STATUS_LIMIT)?;
+        Ok(status)
+    }
     fn snapshot_for(&self, r: &Registry, domain: EditDomain) -> Result<DomainStatus, BridgeError> {
         match domain {
             EditDomain::Configuration => self.snapshot(r).map(DomainStatus::Configuration),
             EditDomain::GitHubWorkflows => self.workflow_snapshot(r).map(DomainStatus::GitHubWorkflows),
+            EditDomain::MetadataText => self.metadata_text_snapshot(r).map(DomainStatus::MetadataText),
         }
     }
     fn trigger_locked(&self, r: &mut Registry, id: &str, reason: Reason, at: Instant) {
@@ -345,6 +372,7 @@ impl EditOwner {
     pub fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
     pub fn status(&self) -> Result<ConfigEditStatus, BridgeError> { self.inner.snapshot(&self.inner.lock()) }
     pub(crate) fn workflow_status(&self) -> Result<WorkflowEditStatus, BridgeError> { self.inner.workflow_snapshot(&self.inner.lock()) }
+    pub(crate) fn metadata_text_status(&self) -> Result<MetadataTextEditStatus, BridgeError> { self.inner.metadata_text_snapshot(&self.inner.lock()) }
     pub fn stopping(&self) -> bool { self.inner.lock().stopping }
     pub fn disabled(&self) -> bool { let r = self.inner.lock(); r.disabled || self.inner.poisoned.load(Ordering::SeqCst) || r.exhausted }
     pub fn can_exit(&self) -> bool { self.inner.lock().active.is_none() }
@@ -388,22 +416,35 @@ impl EditOwner {
     }
 
     pub fn open(&self, window: &str, project_id: String, root: PathBuf) -> Result<ConfigEditStatus, BridgeError> {
-        self.open_domain(window, project_id, root, EditDomain::Configuration, None, None)?.configuration()
+        self.open_domain(window, project_id, root, EditDomain::Configuration, None, None, None)?.configuration()
     }
     pub(crate) fn workflow_open_ticket(&self, window: &str) -> Result<WorkflowOpenTicket, BridgeError> {
-        { let r = self.inner.lock(); self.inner.admission(&r, window, EditDomain::GitHubWorkflows)?; }
+        self.registered_open_ticket(window, EditDomain::GitHubWorkflows)
+    }
+    pub(crate) fn metadata_text_open_ticket(&self, window: &str) -> Result<RegisteredOpenTicket, BridgeError> {
+        self.registered_open_ticket(window, EditDomain::MetadataText)
+    }
+    fn registered_open_ticket(&self, window: &str, domain: EditDomain) -> Result<RegisteredOpenTicket, BridgeError> {
+        if !matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText) { return Err(invalid_owner()); }
+        { let r = self.inner.lock(); self.inner.admission(&r, window, domain)?; }
         // Entropy is obtained before the real document/selection mutex. This
         // private ticket performs no observation, registration, claim or spawn.
         let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
-        Ok(WorkflowOpenTicket { owner: self.inner.clone(), id: nonce()?, executor })
+        Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor })
     }
     pub(crate) fn open_workflow(&self, window: &str, project_id: String, registration: WorkflowRegistration,
         ticket: WorkflowOpenTicket) -> Result<WorkflowEditStatus, BridgeError> {
         let root = registration.root.path.clone();
-        self.open_domain(window, project_id, root, EditDomain::GitHubWorkflows, Some(registration), Some(ticket))?.workflows()
+        self.open_domain(window, project_id, root, EditDomain::GitHubWorkflows, Some(registration), Some(ticket), None)?.workflows()
+    }
+    pub(crate) fn open_metadata_text(&self, window: &str, project_id: String, context: metadata_wire::Context,
+        registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<MetadataTextEditStatus, BridgeError> {
+        if !context.valid() { return Err(BridgeError::invalid()); }
+        let root = registration.root.path.clone();
+        self.open_domain(window, project_id, root, EditDomain::MetadataText, Some(registration), Some(ticket), Some(context))?.metadata_text()
     }
     fn open_domain(&self, window: &str, project_id: String, root: PathBuf, domain: EditDomain,
-        registration: Option<WorkflowRegistration>, ticket: Option<WorkflowOpenTicket>) -> Result<DomainStatus, BridgeError> {
+        registration: Option<RegisteredEditRoot>, ticket: Option<RegisteredOpenTicket>, metadata: Option<metadata_wire::Context>) -> Result<DomainStatus, BridgeError> {
         { let r = self.inner.lock(); self.inner.admission(&r, window, domain)?; }
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         let fixture_workflow = if domain == EditDomain::GitHubWorkflows && !NATIVE_WORKFLOW_EDIT_QUALIFIED {
@@ -418,12 +459,15 @@ impl EditOwner {
                 let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
                 (nonce()?, executor)
             },
-            (EditDomain::GitHubWorkflows, Some(ticket)) if Arc::ptr_eq(&self.inner, &ticket.owner) => (ticket.id, ticket.executor),
+            (EditDomain::GitHubWorkflows | EditDomain::MetadataText, Some(ticket))
+                if ticket.domain == domain && Arc::ptr_eq(&self.inner, &ticket.owner) => (ticket.id, ticket.executor),
             _ => return Err(invalid_owner()),
         };
-        let params = match (domain, registration.as_ref()) {
-            (EditDomain::Configuration, None) => json!({"root": root}),
-            (EditDomain::GitHubWorkflows, Some(binding)) => json!({"root":root,"registeredIdentity":binding.root.identity.workflow_identity()}),
+        let params = match (domain, registration.as_ref(), metadata.as_ref()) {
+            (EditDomain::Configuration, None, None) => json!({"root": root}),
+            (EditDomain::GitHubWorkflows, Some(binding), None) => json!({"root":root,"registeredIdentity":binding.root.identity.workflow_identity()}),
+            (EditDomain::MetadataText, Some(binding), Some(context)) if context.valid() => json!({"root":root,
+                "registeredIdentity":binding.root.identity.workflow_identity(),"platform":context.platform,"locale":context.locale}),
             _ => return Err(invalid_owner()),
         };
         let bytes = request_bytes(domain, &id, 0, "open", params)?;
@@ -458,6 +502,7 @@ impl EditOwner {
             r.active = Some(ActiveOwner { session: session.clone(), review_end: now + REVIEW, phase_end: Some(now + ACTIVE), cleanup_start: None,
                 prepare_counters: None, claimed_seq: 0, opened: false, prepared: false, terminal: false, unknown: false,
                 projection: EditProjection { domain, workflow: (domain == EditDomain::GitHubWorkflows).then(workflow_wire::Details::default),
+                    metadata_text: metadata.map(metadata_wire::Details::new),
                     project_id, session_id: id.clone(), owner_generation: generation, phase: Phase::Opening,
                     review_remaining_ms: REVIEW.as_millis() as u32, checkout: None, prepared: None, apply_submitted: false,
                     core_outcome: None, native_reason: Reason::None, native_finality: NativeFinality::Pending, late_settled: false } });
@@ -476,16 +521,24 @@ impl EditOwner {
     pub fn prepare(&self, window: &str, args: PrepareConfigEdit) -> Result<ConfigEditStatus, BridgeError> {
         self.prepare_domain(window, EditDomain::Configuration, &args.session_id, &args.revision,
             (args.draft_revision, args.baseline_generation),
-            json!({"revision": &args.revision, "expectedBase": &args.expected_base, "draft": &args.draft}), None)?.configuration()
+            json!({"revision": &args.revision, "expectedBase": &args.expected_base, "draft": &args.draft}), None, None)?.configuration()
     }
     pub(crate) fn prepare_workflow(&self, window: &str, args: PrepareWorkflowEdit, registration: WorkflowRegistration) -> Result<WorkflowEditStatus, BridgeError> {
         self.prepare_domain(window, EditDomain::GitHubWorkflows, &args.session_id, &args.revision,
             (args.draft_revision, args.baseline_generation), json!({"revision":&args.revision,"draft":&args.draft,
-                "toolingRepository":&args.tooling_repository,"toolingSha":&args.tooling_sha}), Some(registration))?.workflows()
+                "toolingRepository":&args.tooling_repository,"toolingSha":&args.tooling_sha}), Some(registration), None)?.workflows()
+    }
+    pub(crate) fn prepare_metadata_text(&self, window: &str, args: PrepareMetadataTextEdit,
+        registration: RegisteredEditRoot) -> Result<MetadataTextEditStatus, BridgeError> {
+        let params = json!({"revision":&args.revision,"expectedBaseline":&args.expected_baseline,"fields":&args.fields});
+        let submission = metadata_wire::Submission { expected_baseline: args.expected_baseline, fields: args.fields };
+        self.prepare_domain(window, EditDomain::MetadataText, &args.session_id, &args.revision,
+            (args.draft_revision, args.baseline_generation), params, Some(registration), Some(submission))?.metadata_text()
     }
     fn prepare_domain(&self, window: &str, domain: EditDomain, session_id: &str, revision: &str,
-        counters: (u32, u32), params: Value, registration: Option<WorkflowRegistration>) -> Result<DomainStatus, BridgeError> {
-        if !wire::token(session_id) || !wire::token(revision) { return Err(BridgeError::invalid()); }
+        counters: (u32, u32), params: Value, registration: Option<RegisteredEditRoot>, submission: Option<metadata_wire::Submission>) -> Result<DomainStatus, BridgeError> {
+        if !wire::token(session_id) || !wire::token(revision)
+            || domain != EditDomain::Configuration && (counters.0 == u32::MAX || counters.1 == u32::MAX) { return Err(BridgeError::invalid()); }
         let bytes = request_bytes(domain, session_id, 1, "prepare", params)?;
         let (session, reply) = {
             let mut r = self.inner.lock();
@@ -502,8 +555,17 @@ impl EditOwner {
             };
             // Wrong revisions do not revise an original checkout or renew time.
             if a.projection.revision() != Some(revision) {
-                if domain == EditDomain::GitHubWorkflows { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); }
+                if matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText) { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); }
                 return Err(invalid_owner());
+            }
+            match (domain, submission) {
+                (EditDomain::MetadataText, Some(submission)) => {
+                    let valid = a.projection.metadata_text.as_ref().is_some_and(|detail| detail.submission.is_none() && submission.valid_for(detail.platform));
+                    if !valid { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
+                    if let Some(detail) = a.projection.metadata_text.as_mut() { detail.submission = Some(submission); }
+                },
+                (EditDomain::Configuration | EditDomain::GitHubWorkflows, None) => {},
+                _ => return Err(invalid_owner()),
             }
             a.prepare_counters = Some(counters);
             a.claimed_seq = 1;
@@ -524,6 +586,10 @@ impl EditOwner {
     pub(crate) fn apply_workflow(&self, window: &str, session_id: &str, plan_token: &str, registration: WorkflowRegistration) -> Result<WorkflowEditStatus, BridgeError> {
         self.apply_domain(window, EditDomain::GitHubWorkflows, session_id, plan_token, Some(registration))?.workflows()
     }
+    pub(crate) fn apply_metadata_text(&self, window: &str, session_id: &str, plan_token: &str,
+        registration: RegisteredEditRoot) -> Result<MetadataTextEditStatus, BridgeError> {
+        self.apply_domain(window, EditDomain::MetadataText, session_id, plan_token, Some(registration))?.metadata_text()
+    }
     fn apply_domain(&self, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
         registration: Option<WorkflowRegistration>) -> Result<DomainStatus, BridgeError> {
         if !wire::token(session_id) || !wire::token(plan_token) { return Err(BridgeError::invalid()); }
@@ -543,7 +609,7 @@ impl EditOwner {
             let a = r.active.as_mut().filter(|a| a.session.domain == domain && a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
             if a.projection.phase != Phase::Reviewing || !a.prepared { return Err(invalid_owner()); }
             if a.session.registration != registration || a.projection.plan_token() != Some(plan_token) {
-                if domain == EditDomain::GitHubWorkflows { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); }
+                if matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText) { self.inner.trigger_locked(&mut r, session_id, Reason::CallerLost, now); }
                 return Err(invalid_owner());
             }
             let Some(phase_end) = claim_phase(a.review_end, now) else {
@@ -568,6 +634,9 @@ impl EditOwner {
     pub(crate) fn close_workflow(&self, window: &str, session_id: &str) -> Result<WorkflowEditStatus, BridgeError> {
         self.close_domain(window, EditDomain::GitHubWorkflows, session_id)?.workflows()
     }
+    pub(crate) fn close_metadata_text(&self, window: &str, session_id: &str) -> Result<MetadataTextEditStatus, BridgeError> {
+        self.close_domain(window, EditDomain::MetadataText, session_id)?.metadata_text()
+    }
     fn close_domain(&self, window: &str, domain: EditDomain, session_id: &str) -> Result<DomainStatus, BridgeError> {
         if !wire::token(session_id) { return Err(BridgeError::invalid()); }
         let mut r = self.inner.lock();
@@ -583,11 +652,18 @@ impl EditOwner {
         self.inner.snapshot_for(&r, domain)
     }
     pub(crate) fn workflow_project(&self, window: &str, session_id: &str) -> Result<String, BridgeError> {
+        self.registered_edit_project(window, session_id, EditDomain::GitHubWorkflows)
+    }
+    pub(crate) fn metadata_text_project(&self, window: &str, session_id: &str) -> Result<String, BridgeError> {
+        self.registered_edit_project(window, session_id, EditDomain::MetadataText)
+    }
+    fn registered_edit_project(&self, window: &str, session_id: &str, domain: EditDomain) -> Result<String, BridgeError> {
         let r = self.inner.lock();
         if r.window.as_deref() != Some(window) || !r.document_bound || r.document_lost || !wire::token(session_id) { return Err(invalid_owner()); }
         let projection = r.active.as_ref().map(|a| &a.projection).filter(|p| p.session_id == session_id)
             .or_else(|| r.last.as_ref().filter(|p| p.session_id == session_id)).ok_or_else(invalid_owner)?;
-        if projection.domain != EditDomain::GitHubWorkflows || projection.owner_generation != r.generation { return Err(invalid_owner()); }
+        if projection.domain != domain || projection.owner_generation != r.generation
+            || !matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText) { return Err(invalid_owner()); }
         Ok(projection.project_id.clone())
     }
 
@@ -787,7 +863,11 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                 for byte in &buffer[..length] {
                     if discard { break; }
                     frame.push(*byte);
-                    let response_limit = if owner.domain == EditDomain::GitHubWorkflows { workflow_wire::RESPONSE_LIMIT } else { wire::RESPONSE_LIMIT };
+                    let response_limit = match owner.domain {
+                        EditDomain::Configuration => wire::RESPONSE_LIMIT,
+                        EditDomain::GitHubWorkflows => workflow_wire::RESPONSE_LIMIT,
+                        EditDomain::MetadataText => metadata_wire::RESPONSE_LIMIT,
+                    };
                     if frame.len() > response_limit {
                         discard = true; failed = true; frame.clear();
                         inner.trigger(&owner.id, Reason::OutputLimit, Instant::now()); inner.unknown(&owner.id);
@@ -797,6 +877,7 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                             match owner.domain {
                                 EditDomain::Configuration => wire::decode(&frame, &owner.id),
                                 EditDomain::GitHubWorkflows => workflow_wire::decode(&frame, &owner.id),
+                                EditDomain::MetadataText => metadata_wire::decode(&frame, &owner.id),
                             }
                         } else { Err(BridgeError::protocol()) };
                         match parsed {
@@ -841,10 +922,19 @@ fn terminal_projection_admissible(projection: &EditProjection, plan_token: Optio
             || !matches!(core.journal, Journal::NotCreated | Journal::Unknown))
         || core.reason == CoreReason::None && projection.apply_submitted
             && !matches!((&core.effect, &core.journal), (Effect::Committed, Journal::Clean) | (Effect::Unchanged, Journal::NotCreated)) { return false; }
-    if projection.domain == EditDomain::GitHubWorkflows && matches!(core.effect, Effect::Unchanged | Effect::Committed | Effect::RolledBack) {
-        let Some(prepared) = projection.workflow.as_ref().and_then(|w| w.prepared.as_ref()) else { return false; };
-        let creates = prepared.view.files.iter().any(|f| f.action == workflow_wire::Action::Create);
-        if (core.effect == Effect::Unchanged) == creates { return false; }
+    if matches!(core.effect, Effect::Unchanged | Effect::Committed | Effect::RolledBack) {
+        let changes = match projection.domain {
+            EditDomain::Configuration => None, // Preserve the existing configuration outcome contract.
+            EditDomain::GitHubWorkflows => {
+                let Some(prepared) = projection.workflow.as_ref().and_then(|w| w.prepared.as_ref()) else { return false; };
+                Some(prepared.view.files.iter().any(|f| f.action == workflow_wire::Action::Create))
+            },
+            EditDomain::MetadataText => {
+                let Some(prepared) = projection.metadata_text.as_ref().and_then(|m| m.prepared.as_ref()) else { return false; };
+                Some(prepared.view.files.iter().any(|f| f.action != metadata_wire::Action::Preserve))
+            },
+        };
+        if changes.is_some_and(|changes| (core.effect == Effect::Unchanged) == changes) { return false; }
     }
     true
 }
@@ -940,6 +1030,48 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
                     }
                 }
             }
+            ChildFrame::MetadataTextOpened(opened) => {
+                if a.opened || a.prepared || a.claimed_seq != 0 { invalid = true; }
+                else if let Some(detail) = a.projection.metadata_text.as_mut() {
+                    if !opened.baseline.valid_for(detail.platform)
+                        || !metadata_wire::target_context(&opened.metadata_root, detail.platform, &detail.locale) { invalid = true; }
+                    else {
+                        detail.checkout = Some(metadata_wire::Checkout { revision: opened.revision,
+                            metadata_root: opened.metadata_root, baseline: opened.baseline });
+                        a.opened = true;
+                        if a.cleanup_start.is_none() { a.projection.phase = Phase::Editing; a.phase_end = None; }
+                    }
+                } else { invalid = true; }
+            }
+            ChildFrame::MetadataTextPrepared(prepared) => {
+                if !a.opened || a.prepared || a.claimed_seq != 1 || a.projection.revision() != Some(prepared.revision.as_str()) {
+                    invalid = true;
+                } else if let (Some((draft_revision, baseline_generation)), Some(detail)) = (a.prepare_counters, a.projection.metadata_text.as_mut()) {
+                    if !detail.checkout.as_ref().is_some_and(|old| prepared.view.matches_checkout(old, detail.platform, &detail.locale)
+                        && detail.submission.as_ref().is_some_and(|submitted| submitted.matches(old, &prepared.view))) {
+                        invalid = true;
+                    } else {
+                        detail.submission = None; // The accepted exact view retains these same bytes once.
+                        detail.prepared = Some(metadata_wire::Prepared { revision: prepared.revision, plan_token: prepared.plan_token,
+                            draft_revision, baseline_generation, view: prepared.view });
+                        a.prepared = true;
+                        if a.cleanup_start.is_none() { a.projection.phase = Phase::Reviewing; a.phase_end = None; }
+                    }
+                } else { invalid = true; }
+            }
+            ChildFrame::MetadataTextTerminal(seq, result) => {
+                let core = result.outcome();
+                if !terminal_admissible(a, seq, result.plan_token.as_deref(), &core) { invalid = true; }
+                else {
+                    uncertain = core.resources == ResourceState::Unknown || core.effect == Effect::Unknown || core.journal == Journal::Unknown;
+                    if let Some(detail) = a.projection.metadata_text.as_mut() { detail.submission = None; }
+                    a.projection.core_outcome = Some(core);
+                    a.terminal = true;
+                    terminal = true;
+                    // Existing configuration/workflow fixture scheduling does
+                    // not acquire any metadata-writer qualification here.
+                }
+            }
         }
     }
     inner.bump(&mut r);
@@ -1005,10 +1137,15 @@ fn spawn_original(runtime: VerifiedRuntime, inner: &Inner, owner: &Session) {
         inner.fixture_workflow.lock().is_ok_and(|current| current.as_ref().is_some_and(|current| Arc::ptr_eq(current, original)))
             && original.spawn(inner, owner, &runtime)
     });
-    if owner.domain == EditDomain::GitHubWorkflows && (!workflow_allowed
-        || !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))) {
+    let domain_allowed = match owner.domain {
+        EditDomain::Configuration => true, // Existing separate configuration admission/spawn policy follows.
+        EditDomain::GitHubWorkflows => workflow_allowed && cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
+        EditDomain::MetadataText => NATIVE_METADATA_TEXT_EDIT_QUALIFIED
+            && cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")),
+    };
+    if !domain_allowed {
         inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
-        return; // A configuration permit cannot bypass either workflow gate.
+        return; // Neither a configuration nor workflow permit qualifies metadata.
     }
     #[cfg(not(all(unix, feature = "development-runtime", debug_assertions)))]
     {
@@ -1032,7 +1169,11 @@ fn spawn_original(runtime: VerifiedRuntime, inner: &Inner, owner: &Session) {
         #[cfg(not(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos"))))]
         command.arg(&runtime.bootstrap);
         command.arg(&runtime.core);
-        if owner.domain == EditDomain::GitHubWorkflows { command.arg("github_workflows"); }
+        match owner.domain {
+            EditDomain::Configuration => {},
+            EditDomain::GitHubWorkflows => { command.arg("github_workflows"); },
+            EditDomain::MetadataText => { command.arg("metadata_text"); },
+        }
         #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
         if let Some(case) = owner.fixture_schedule.eof_case() { command.arg(case.name()); }
         command.current_dir(&runtime.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
@@ -1569,7 +1710,7 @@ mod workflow_domain_tests {
             template_set:workflow_wire::TemplateSet { core_version:"0.3.0".into(),resource_version:1,resource_sha256:"a".repeat(64) },
             tooling:workflow_wire::Tooling { repository:"example/toolkit".into(),sha:"0".repeat(40),
                 schema_reference:format!("https://raw.githubusercontent.com/example/toolkit/{}/schemas/project.schema.json","0".repeat(40)),state:"format-only".into() } };
-        EditProjection { domain:EditDomain::GitHubWorkflows,workflow:Some(workflow_wire::Details {
+        EditProjection { domain:EditDomain::GitHubWorkflows,metadata_text:None,workflow:Some(workflow_wire::Details {
             checkout:Some(workflow_wire::Checkout { revision:REVISION.into(),observed }),
             prepared:Some(workflow_wire::Prepared { revision:REVISION.into(),plan_token:PLAN.into(),draft_revision:1,baseline_generation:0,view }),conflict:None }),
             project_id:"project-1".into(),session_id:SESSION.into(),owner_generation:GENERATION.into(),phase:Phase::Reviewing,
@@ -1582,15 +1723,19 @@ mod workflow_domain_tests {
     #[test]
     fn configuration_fixture_never_qualifies_workflow_or_hides_an_opposite_unknown_owner() {
         assert!(!NATIVE_WORKFLOW_EDIT_QUALIFIED);
+        assert!(!NATIVE_METADATA_TEXT_EDIT_QUALIFIED);
         assert!(!qualified(EditDomain::GitHubWorkflows,false));
         assert!(!qualified(EditDomain::GitHubWorkflows,true));
+        assert!(!qualified(EditDomain::MetadataText,false));
+        assert!(!qualified(EditDomain::MetadataText,true));
         assert!(!qualified(EditDomain::Configuration,false));
         assert!(qualified(EditDomain::Configuration,true));
-        for (domain,other) in [(EditDomain::Configuration,EditDomain::GitHubWorkflows),
-            (EditDomain::GitHubWorkflows,EditDomain::Configuration)] {
+        for domain in [EditDomain::Configuration,EditDomain::GitHubWorkflows,EditDomain::MetadataText] {
+            for other in [EditDomain::Configuration,EditDomain::GitHubWorkflows,EditDomain::MetadataText].into_iter().filter(|other| *other != domain) {
             for stopping in [false,true] { for disabled in [false,true] {
                 assert_eq!(capability_reason(domain,Some(other),stopping,disabled,false,false),EditAvailability::OtherEditActive);
             } }
+            }
             assert_eq!(capability_reason(domain,Some(domain),false,true,false,true),EditAvailability::CleanupUnknown);
             assert_eq!(capability_reason(domain,None,true,false,false,true),EditAvailability::Shutdown);
         }
@@ -1645,7 +1790,8 @@ mod workflow_domain_tests {
         let params = json!({"root":"/inert/project"});
         assert_eq!(request_bytes(EditDomain::Configuration,SESSION,0,"open",params.clone()).unwrap(),
             wire::request(SESSION,0,"open",params.clone()).unwrap());
-        assert!(request_bytes(EditDomain::GitHubWorkflows,SESSION,0,"open",params).is_err());
+        assert!(request_bytes(EditDomain::GitHubWorkflows,SESSION,0,"open",params.clone()).is_err());
+        assert!(request_bytes(EditDomain::MetadataText,SESSION,0,"open",params).is_err());
         let p = projection(false);
         let workflow = serde_json::to_value(p.workflow_projection().unwrap()).unwrap();
         assert_eq!(workflow["domain"],"github_workflows");
@@ -1654,6 +1800,57 @@ mod workflow_domain_tests {
         assert!(configuration.workflow_projection().is_err());
         let encoded = serde_json::to_value(configuration).unwrap();
         assert!(encoded.get("domain").is_none()); assert!(encoded.get("workflow").is_none());
+        assert!(encoded.get("metadata_text").is_none());
         assert!(encoded.get("conflict").is_none()); assert_eq!(encoded["checkout"],Value::Null);
+    }
+    #[test]
+    fn metadata_actions_and_receipts_cannot_become_configuration_or_workflow_authority() {
+        use metadata_wire::{Action, Before, ContentDigest, FieldId, Platform, TextContent};
+        let make = |action: Action| {
+            let mut projection = projection(false);
+            projection.domain = EditDomain::MetadataText; projection.workflow = None;
+            let after = "Public"; let old = if action == Action::Preserve { after } else { "Prior" };
+            let hash = |text: &str| format!("{:x}",Sha256::digest(text.as_bytes()));
+            let ids = [(FieldId::Title,"title.txt"),(FieldId::ShortDescription,"short_description.txt"),(FieldId::FullDescription,"full_description.txt")];
+            let fields = ids.iter().map(|(id,_)| if action == Action::Create { metadata_wire::BaselineField::Absent { id:*id } }
+                else { metadata_wire::BaselineField::Present { id:*id,byte_length:old.len() as u32,sha256:hash(old) } }).collect();
+            let checkout = metadata_wire::Checkout { revision:REVISION.into(),metadata_root:"release/metadata".into(),
+                baseline:metadata_wire::Baseline { config:ContentDigest { byte_length:2,sha256:hash("{}") },fields } };
+            let files = ids.iter().map(|(id,name)| metadata_wire::FileView { id:*id,path:format!("release/metadata/android/en-US/{name}"),action,
+                before:if action == Action::Create { Before::Absent {} } else { Before::Present { text:old.into(),byte_length:old.len() as u32,sha256:hash(old) } },
+                after:TextContent { text:after.into(),byte_length:after.len() as u32,sha256:hash(after) },line_endings_changed:false }).collect();
+            let validation = metadata_wire::ValidationResult { schema_version:1,platform:Platform::Android,valid:true,state:metadata_wire::ValidationState::FormatValid,
+                fields:ids.iter().map(|(id,_)| metadata_wire::ValidatedField { id:*id,valid:true,character_count:6,limit:32768,issues:Vec::new() }).collect(),
+                assurance:metadata_wire::Assurance { basis:"schema-policy".into(),project_code_executed:false,tools_probed:false,credentials_read:false,
+                    git_observed:false,store_contacted:false,writes_performed:false,release_readiness:"unknown".into() } };
+            let view = metadata_wire::PreparedView { schema_version:1,platform:Platform::Android,locale:"en-US".into(),metadata_root:"release/metadata".into(),files,create_directories:Vec::new(),validation };
+            projection.metadata_text = Some(metadata_wire::Details { platform:Platform::Android,locale:"en-US".into(),checkout:Some(checkout),
+                prepared:Some(metadata_wire::Prepared { revision:REVISION.into(),plan_token:PLAN.into(),draft_revision:1,baseline_generation:0,view }),submission:None });
+            projection
+        };
+        for action in [Action::Create,Action::Replace,Action::Preserve] {
+            let mut original = make(action);
+            assert!(original.workflow_projection().is_err());
+            let view = serde_json::to_value(original.metadata_text_projection().unwrap()).unwrap();
+            for key in ["root","registeredIdentity","conflict","workflow","submission"] { assert!(view.get(key).is_none()); }
+            assert_eq!(view["domain"],"metadata_text"); assert_eq!(view["platform"],"android"); assert_eq!(view["locale"],"en-US");
+            assert!(!exact_apply_receipt(&original,EditDomain::MetadataText,GENERATION,SESSION,PLAN));
+            original.apply_submitted = true;
+            for phase in [Phase::Applying,Phase::Finalizing,Phase::Unknown,Phase::Final] {
+                original.phase = phase;
+                assert!(exact_apply_receipt(&original,EditDomain::MetadataText,GENERATION,SESSION,PLAN));
+                for domain in [EditDomain::Configuration,EditDomain::GitHubWorkflows] { assert!(!exact_apply_receipt(&original,domain,GENERATION,SESSION,PLAN)); }
+                assert!(!exact_apply_receipt(&original,EditDomain::MetadataText,REVISION,SESSION,PLAN));
+                assert!(!exact_apply_receipt(&original,EditDomain::MetadataText,GENERATION,REVISION,PLAN));
+                assert!(!exact_apply_receipt(&original,EditDomain::MetadataText,GENERATION,SESSION,REVISION));
+            }
+            let no_op = action == Action::Preserve;
+            assert_eq!(terminal_projection_admissible(&original,Some(PLAN),&outcome(Effect::Unchanged,Journal::NotCreated,CoreReason::None)),no_op);
+            assert_eq!(terminal_projection_admissible(&original,Some(PLAN),&outcome(Effect::Committed,Journal::Clean,CoreReason::None)),!no_op);
+            assert_eq!(terminal_projection_admissible(&original,Some(PLAN),&outcome(Effect::RolledBack,Journal::Clean,CoreReason::FilesystemError)),!no_op);
+            assert!(!terminal_projection_admissible(&original,Some(REVISION),&outcome(Effect::Committed,Journal::Clean,CoreReason::None)));
+            original.apply_submitted = false;
+            assert!(!terminal_projection_admissible(&original,Some(PLAN),&outcome(Effect::Committed,Journal::Clean,CoreReason::None)));
+        }
     }
 }

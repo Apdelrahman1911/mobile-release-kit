@@ -279,6 +279,8 @@ APPLE_ROOTS_SHA256 = "c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca44
 IGNORE_LINES = (
     ".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/",
     ".mobile-release-init-cleanup/",
+    ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/",
+    ".mobile-release-metadata-text-cleanup/",
 )
 SKELETON_FILES = (
     "title.txt", "short_description.txt", "full_description.txt", "changelogs/default.txt",

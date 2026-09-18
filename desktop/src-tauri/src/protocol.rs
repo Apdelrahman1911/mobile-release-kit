@@ -12,7 +12,7 @@ pub const DEPTH_LIMIT: usize = 32;
 pub const NODE_LIMIT: usize = 20_000;
 
 #[derive(Clone, Copy, Debug)]
-pub enum Method { Capabilities, Catalog, ProjectSnapshot, ValidateConfig, SuggestConfig, PreviewConfig, ProposeGithubSetup, AssessCredentials }
+pub enum Method { Capabilities, Catalog, ProjectSnapshot, ValidateConfig, SuggestConfig, PreviewConfig, ProposeGithubSetup, AssessCredentials, MetadataTextObserve, MetadataTextValidate }
 impl Method {
     pub fn name(self) -> &'static str {
         match self {
@@ -21,6 +21,8 @@ impl Method {
             Self::SuggestConfig => "config.suggest", Self::PreviewConfig => "config.preview",
             Self::ProposeGithubSetup => "github.setup.propose",
             Self::AssessCredentials => "credentials.assess",
+            Self::MetadataTextObserve => "metadata.text.observe",
+            Self::MetadataTextValidate => "metadata.text.validate",
         }
     }
 }
@@ -179,7 +181,8 @@ mod tests {
         let parsed = strict_json(&bytes);
         assert_eq!(parsed.ok(), Some(json!({"protocol":1,"id":"query-1","method":"capabilities","params":{}})));
         for (method, name) in [(Method::SuggestConfig, "config.suggest"), (Method::PreviewConfig, "config.preview"),
-                               (Method::ProposeGithubSetup, "github.setup.propose")] {
+                               (Method::ProposeGithubSetup, "github.setup.propose"),
+                               (Method::MetadataTextObserve, "metadata.text.observe"), (Method::MetadataTextValidate, "metadata.text.validate")] {
             let bytes = encode_request("query-2", method, &json!({})).unwrap_or_default();
             assert_eq!(strict_json(&bytes).ok().and_then(|value| value.get("method").cloned()), Some(json!(name)));
         }

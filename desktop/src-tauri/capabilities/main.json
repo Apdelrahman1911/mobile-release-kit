@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Fixed passive queries, finite configuration or local workflow editing and closed session-only credential commands with native owner qualification. Listen/unlisten for owner status only; no event emission, general filesystem, shell, opener, or remote authority.",
+  "description": "Fixed passive queries, finite configuration, local workflow or selected public metadata-text editing and closed session-only credential commands with native owner qualification. Listen/unlisten for owner status only; no event emission, general filesystem, shell, opener, or remote authority.",
   "windows": ["main"],
   "local": true,
   "permissions": [
@@ -11,6 +11,8 @@
     "allow-close-config-edit", "allow-config-edit-status",
     "allow-github-workflow-edit-open", "allow-github-workflow-edit-prepare", "allow-github-workflow-edit-apply",
     "allow-github-workflow-edit-close", "allow-github-workflow-edit-status",
+    "allow-metadata-text-observe", "allow-metadata-text-validate", "allow-metadata-text-edit-open", "allow-metadata-text-edit-prepare",
+    "allow-metadata-text-edit-apply", "allow-metadata-text-edit-close", "allow-metadata-text-edit-status",
     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
     "allow-vault-status", "allow-vault-open", "allow-asset-context", "allow-asset-choose", "allow-credential-prepare",
     "allow-vault-prepare-delete", "allow-vault-commit", "allow-vault-bind", "allow-vault-discard", "allow-vault-lock",

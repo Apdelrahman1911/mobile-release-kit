@@ -11,6 +11,7 @@ import os
 import stat
 import sys
 import time
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -225,7 +226,15 @@ class _ReadProblem(Exception):
         self.code, self.message = code, message
 
 
-def _read_file(parent: int, name: str, relative: str, inventory: _Inventory) -> str:
+def _named_identity(value: os.stat_result) -> tuple[int, ...]:
+    # The narrower named editor additionally retains ownership facts without
+    # widening or changing the existing generic snapshot reader contract.
+    return (*_identity(value), value.st_uid, value.st_gid)
+
+
+def _read_file(parent: int, name: str, relative: str, inventory: _Inventory, *,
+               limit: int = MAX_SOURCE_BYTES,
+               receipts: list[tuple[int, str, tuple[int, ...] | None]] | None = None) -> str:
     if not inventory.tick():
         raise _ReadProblem("snapshot.deadline", "Static read was not attempted after its scan deadline.")
     if inventory.counts["sourceFiles"] >= MAX_SOURCE_FILES:
@@ -235,7 +244,7 @@ def _read_file(parent: int, name: str, relative: str, inventory: _Inventory) -> 
     before = os.stat(name, dir_fd=parent, follow_symlinks=False)
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
         raise _ReadProblem("snapshot.unsafe-file", f"Skipped nonordinary, linked or symbolic source path: {relative}")
-    if before.st_size > MAX_SOURCE_BYTES:
+    if before.st_size > limit:
         raise _ReadProblem("snapshot.file-size", f"Static source file exceeds its byte limit: {relative}")
     if before.st_size > MAX_TOTAL_BYTES - inventory.counts["sourceBytes"]:
         inventory.stopped = True
@@ -258,10 +267,10 @@ def _read_file(parent: int, name: str, relative: str, inventory: _Inventory) -> 
             if remaining <= 0:
                 inventory.stopped = True
                 raise _ReadProblem("snapshot.byte-limit", "Static aggregate source-byte limit reached before EOF was observed.")
-            chunk = os.read(descriptor, min(64 * 1024, MAX_SOURCE_BYTES + 1 - consumed, remaining))
+            chunk = os.read(descriptor, min(64 * 1024, limit + 1 - consumed, remaining))
             inventory.counts["sourceBytes"] += len(chunk)
             consumed += len(chunk)
-            if consumed > MAX_SOURCE_BYTES:
+            if consumed > limit:
                 raise _ReadProblem("snapshot.file-size", f"Static source grew beyond its byte limit: {relative}")
             if not chunk:
                 break
@@ -275,11 +284,121 @@ def _read_file(parent: int, name: str, relative: str, inventory: _Inventory) -> 
                 or consumed != ending.st_size):
             raise _ReadProblem("snapshot.changed", f"Source path or bytes changed during reading: {relative}")
         try:
-            return b"".join(chunks).decode("utf-8")
+            text = b"".join(chunks).decode("utf-8")
         except UnicodeError as error:
             raise _ReadProblem("snapshot.encoding", f"Static source is not UTF-8 text: {relative}") from error
+        if receipts is not None:
+            receipts.append((parent, name, _named_identity(ending)))
+        return text
     finally:
         _close_handles([descriptor])
+
+
+class _NamedTextReads:
+    """Small named-reader seam retaining original parents until final recheck.
+
+    It does not enumerate a metadata tree, supply new native write authority or
+    reopen a replacement root. Only the fixed caller-derived names are read.
+    Immediate names are inspected under the shared entry/deadline budget solely
+    to reject portable aliases; no sibling contents are opened.
+    """
+
+    def __init__(self, root: int, inventory: _Inventory):
+        self.root, self.inventory = root, inventory
+        self.handles: list[int] = []
+        self.links: list[tuple[int, str, int, tuple[int, ...]]] = []
+        self.leaves: list[tuple[int, str, tuple[int, ...] | None]] = []
+        original = os.fstat(root)
+        self.root_identity = _named_identity(original)
+        self.device, self.owner = original.st_dev, original.st_uid
+        self._admit(original, directory=True)
+
+    def _admit(self, value: os.stat_result, *, directory: bool) -> None:
+        ordinary = stat.S_ISDIR(value.st_mode) if directory else stat.S_ISREG(value.st_mode) and value.st_nlink == 1
+        if (not ordinary or value.st_dev != self.device or value.st_uid != self.owner
+                or stat.S_IMODE(value.st_mode) & 0o7000):
+            raise _ReadProblem("snapshot.unsafe-file", "Named observation requires ordinary same-device, same-owner objects.")
+
+    def _alias(self, parent: int, name: str) -> None:
+        key = unicodedata.normalize("NFC", name).casefold()
+        entries = os.scandir(parent)
+        try:
+            for entry in entries:
+                if not self.inventory.tick() or self.inventory.counts["entries"] >= MAX_ENTRIES:
+                    raise _ReadProblem("snapshot.entry-limit", "Named observation exhausted its entry budget.")
+                self.inventory.counts["entries"] += 1
+                if entry.name != name and unicodedata.normalize("NFC", entry.name).casefold() == key:
+                    raise _ReadProblem("snapshot.unsafe-file", "Named observation found a portable alias.")
+        finally:
+            try:
+                entries.close()  # The original iterator, once only; no retry.
+            except BaseException as error:
+                raise _DescriptorCleanupError("Named observation directory iterator cleanup did not settle") from error
+
+    def read(self, relative: str, *, limit: int) -> str | None:
+        parent = self.root
+        parts = relative.split("/")
+        for index, name in enumerate(parts):
+            if not self.inventory.tick():
+                raise _ReadProblem("snapshot.deadline", "Named observation exhausted its deadline.")
+            self._alias(parent, name)
+            try:
+                before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                self.leaves.append((parent, name, None))
+                return None
+            self._admit(before, directory=index != len(parts) - 1)
+            if index == len(parts) - 1:
+                try:
+                    text = _read_file(parent, name, relative, self.inventory,
+                                      limit=limit, receipts=self.leaves)
+                except FileNotFoundError as error:
+                    raise _ReadProblem("snapshot.changed", "Named file disappeared during admission.") from error
+                if self.leaves[-1][2] != _named_identity(before):
+                    raise _ReadProblem("snapshot.changed", "Named file changed before reading.")
+                return text
+            try:
+                child = os.open(name, _directory_flags(), dir_fd=parent)
+            except FileNotFoundError as error:
+                raise _ReadProblem("snapshot.changed", "Named parent disappeared during admission.") from error
+            self.handles.append(child)
+            if _named_identity(before) != _named_identity(os.fstat(child)):
+                raise _ReadProblem("snapshot.changed", "Named parent changed during admission.")
+            self.links.append((parent, name, child, _named_identity(before)))
+            parent = child
+        raise _ReadProblem("snapshot.unsafe-file", "Named path is empty.")
+
+    def check(self) -> None:
+        if not self.inventory.tick():
+            raise _ReadProblem("snapshot.deadline", "Named observation exhausted its deadline.")
+        if _named_identity(os.fstat(self.root)) != self.root_identity:
+            raise _ReadProblem("snapshot.changed", "Named root changed during observation.")
+        for parent, name, child, expected in self.links:
+            self._alias(parent, name)
+            try:
+                current, opened = os.stat(name, dir_fd=parent, follow_symlinks=False), os.fstat(child)
+            except OSError as error:
+                raise _ReadProblem("snapshot.changed", "Original named parent cannot be rechecked.") from error
+            if (_named_identity(current) != expected or _named_identity(opened) != expected):
+                raise _ReadProblem("snapshot.changed", "Original named parent changed.")
+        for parent, name, expected in self.leaves:
+            self._alias(parent, name)
+            try:
+                current = _named_identity(os.stat(name, dir_fd=parent, follow_symlinks=False))
+            except FileNotFoundError:
+                current = None
+            if current != expected:
+                raise _ReadProblem("snapshot.changed", "Original named file or absence changed.")
+
+
+@contextmanager
+def _named_text_reads(root: int, inventory: _Inventory) -> Iterator[_NamedTextReads]:
+    reader = _NamedTextReads(root, inventory)
+    try:
+        yield reader
+        reader.check()
+    finally:
+        _close_handles(reader.handles)
 
 
 def _config(root: int, relative: str, inventory: _Inventory) -> ConfigObservation:

@@ -82,7 +82,7 @@ pub(crate) struct RegisteredIdentity {
     pub(crate) mode: u32, pub(crate) uid: u32, pub(crate) gid: u32,
 }
 impl RegisteredIdentity {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         [&self.device, &self.inode].into_iter().all(|s| !s.is_empty() && s.len() <= 20
             && s.bytes().all(|b| b.is_ascii_digit()) && (s.len() == 1 || !s.starts_with('0'))
             && s.parse::<u64>().is_ok())
