@@ -102,9 +102,12 @@ GTK_COMPILE_SOURCES = (
     "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock",
     "desktop/src-tauri/src/asset_session.rs", "desktop/src-tauri/src/asset_source.rs",
     "desktop/src-tauri/src/edit_owner.rs", "desktop/src-tauri/src/hosted_tests.rs",
+    "desktop/src-tauri/src/edit_hosted_tests.rs",
     "desktop/src-tauri/src/github_workflow_edit_protocol.rs",
     "desktop/src-tauri/src/github_connection_protocol.rs",
     "desktop/src-tauri/src/github_connection_session.rs",
+    "desktop/src-tauri/src/metadata_text_commands.rs",
+    "desktop/src-tauri/src/metadata_text_edit_protocol.rs",
     "desktop/src-tauri/src/runtime.rs",
     "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/src/supervisor.rs",
     "desktop/src-tauri/src/session_gtk_qualification.rs",
@@ -113,6 +116,11 @@ GTK_COMPILE_SOURCES = (
     # cfg(test) hosted_tests embeds these bytes in the same Linux libtest. This
     # is compiler-input accounting, never permission to execute the TLS entry.
     ".github/workflows/desktop-github-connection-tls.yml",
+    ".github/workflows/desktop-github-workflow-apply-native.yml",
+    "templates/workflows/mobile-candidate.yml",
+    "templates/workflows/mobile-external-testing.yml",
+    "templates/workflows/mobile-preflight.yml",
+    "templates/workflows/mobile-production-submit.yml",
     "desktop/src-tauri/tests/fixtures/github_tls_peer.py",
     "desktop/src-tauri/tests/fixtures/github_tls_namespace.sh",
     "desktop/src-tauri/tests/fixtures/github_tls/root-ca.pem",
@@ -154,6 +162,7 @@ GTK_CORE_PATHS = (
     "mobile_release/api/_github_connection.py",
     "mobile_release/api/_github_setup.py",
     "mobile_release/api/_json.py",
+    "mobile_release/api/_metadata_text.py",
     "mobile_release/api/_preview.py",
     "mobile_release/api/_snapshot.py",
     "mobile_release/api/_snapshot_windows.py",
@@ -163,6 +172,7 @@ GTK_CORE_PATHS = (
     "mobile_release/api/data/field-help.json",
     "mobile_release/api/data/github-connection-v1.json",
     "mobile_release/api/data/github-setup-v1.json",
+    "mobile_release/api/data/metadata-text-help-v1.json",
     "mobile_release/api/data/project.schema.json",
     "mobile_release/build_inputs.py",
     "mobile_release/cancellation.py",
@@ -193,6 +203,8 @@ GTK_CORE_PATHS = (
     "mobile_release/local_signing.py",
     "mobile_release/macho.py",
     "mobile_release/metadata.py",
+    "mobile_release/metadata_text.py",
+    "mobile_release/metadata_text_edit.py",
     "mobile_release/owned_process.py",
     "mobile_release/preflight.py",
     "mobile_release/provenance.py",
@@ -1004,22 +1016,23 @@ def gtk_compile_binding(source: Path) -> dict:
 
 def validate_gtk_core_inventory(value: object) -> None:
     """Pure exact-name/shape check; byte identities still come from prepare()."""
-    require(type(value) is list and len(value) == len(GTK_CORE_PATHS),
-            "SG1 requires its complete reviewed core inventory")
+    require(type(value) is list, "Reviewed core inventory must be a list")
+    require(len(value) == len(GTK_CORE_PATHS),
+            f"Reviewed core inventory count differs: expected {len(GTK_CORE_PATHS)} files, observed {len(value)}")
     names = []
     total = 0
     for row in value:
         require(type(row) is dict and set(row) == {"path", "sha256", "size"},
-                "SG1 core inventory entry differs")
+                "Reviewed core inventory entry differs")
         require(type(row["path"]) is str and type(row["sha256"]) is str
                 and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None
                 and type(row["size"]) is int and 0 <= row["size"] <= 8 * 1024 * 1024,
-                "SG1 core inventory entry is malformed")
+                "Reviewed core inventory entry is malformed")
         names.append(row["path"])
         total += row["size"]
     require(len(set(names)) == len(names) and tuple(names) == GTK_CORE_PATHS,
-            "SG1 core inventory has missing, duplicate, extra, or reordered paths")
-    require(total <= 32 * 1024 * 1024, "SG1 core aggregate bound exceeded")
+            "Reviewed core inventory has missing, duplicate, extra, or reordered paths")
+    require(total <= 32 * 1024 * 1024, "Reviewed core aggregate bound exceeded")
 
 
 def write_json(path: Path, value: object) -> None:
@@ -2989,7 +3002,7 @@ def github_original_directories(context: dict) -> dict:
 def github_input_bindings(context: dict) -> dict:
     source, root, python = Path(context["source"]), Path(context["root"]), Path(context["python"])
     core = workflow_core_inventory(source)
-    validate_gtk_core_inventory(core)  # The same literal 72-file core inventory; no GTK execution.
+    validate_gtk_core_inventory(core)  # Shared reviewed package-member DATA; no GTK execution.
     ordinary(python)
     size = python.stat().st_size
     require(0 < size <= 512 * 1024 * 1024, "G1 Python executable size differs")
@@ -3676,6 +3689,9 @@ def github_tls_input_summary(context: dict, manifest: dict) -> dict:
 
 
 def prepare_github_tls_context(context: dict, inventory: list[dict]) -> None:
+    # Reject stale package membership before resolver files or a runtime probe.
+    # The final comparison below still binds actual source/ZIP bytes and sizes.
+    validate_gtk_core_inventory(inventory)
     root = Path(context["root"])
     for name, data in GITHUB_TLS_CONFIG.items():
         with (root / "github-tls-namespace" / name).open("xb") as stream:

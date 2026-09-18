@@ -46,7 +46,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
     def test_core_inventory_rejects_substitutions_and_malformed_rows(self):
         original = [{"path": path, "size": 1, "sha256": "4" * 64} for path in helper.GTK_CORE_PATHS]
         helper.validate_gtk_core_inventory(original)
-        self.assertEqual(len(original), 72)
+        self.assertEqual(len(original), 76)
         variants = (None, {}, tuple(original), original[:-1], original + [original[0]],
                     [original[0]] + original[:-1], list(reversed(original)))
         for value in variants:
@@ -79,9 +79,10 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         rust_paths = re.findall(r'^    source!\("([^\"]+)"\),$', rust_block, re.MULTILINE)
         self.assertEqual(python_paths, rust_paths)
         self.assertEqual(python_paths, sorted(set(python_paths)))
-        self.assertEqual(len(python_paths), 182)
+        self.assertEqual(len(python_paths), 197)
         self.assertNotIn("len(SOURCES) == 154", driver)
-        self.assertEqual(driver.count("len(SOURCES) == 182"), 2)
+        self.assertNotIn("len(SOURCES) == 182", driver)
+        self.assertEqual(driver.count("len(SOURCES) == 197"), 2)
         self.assertEqual(tuple(path.removeprefix("src/") for path in python_paths if path.startswith("src/")),
                          helper.GTK_CORE_PATHS)
         package = root / "src/mobile_release"
@@ -99,13 +100,22 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         for filename, name in registrations:
             self.assertEqual(filename, name)
             self.assertIn(f"desktop/src-tauri/src/{name}.rs", python_paths)
-        for name in ("github_workflow_edit_protocol", "github_connection_protocol", "github_connection_session"):
+        for name in ("github_workflow_edit_protocol", "github_connection_protocol", "github_connection_session",
+                     "metadata_text_commands", "metadata_text_edit_protocol"):
             self.assertIn(f"desktop/src-tauri/src/{name}.rs", helper.GTK_COMPILE_SOURCES)
+        for relative in ("desktop/src/components/MetadataTextEditor.tsx", "desktop/src/metadataText.ts",
+                         "desktop/src/metadataTextEditController.ts", "desktop/src/metadataTextProtocol.ts"):
+            self.assertIn(relative, python_paths)
         # These test-cfg owners and includes also compile in the SG1 target;
         # do not infer completeness from the consumer's own roster constant.
         for relative in ("desktop/github_connection_bootstrap.py",
                          "desktop/src-tauri/tests/fixtures/github_core/_desktop_github_engine.py",
                          ".github/workflows/desktop-github-connection-tls.yml",
+                         ".github/workflows/desktop-github-workflow-apply-native.yml",
+                         "templates/workflows/mobile-candidate.yml",
+                         "templates/workflows/mobile-external-testing.yml",
+                         "templates/workflows/mobile-preflight.yml",
+                         "templates/workflows/mobile-production-submit.yml",
                          "desktop/src-tauri/tests/fixtures/github_tls_peer.py",
                          "desktop/src-tauri/tests/fixtures/github_tls_namespace.sh",
                          "desktop/src-tauri/tests/fixtures/github_tls/api-expired.pem",
@@ -115,6 +125,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
                          "desktop/src-tauri/tests/fixtures/github_tls/server-key.pem",
                          "desktop/src-tauri/tests/fixtures/github_tls/wrong-san.pem",
                          "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/supervisor.rs",
+                         "desktop/src-tauri/src/edit_hosted_tests.rs",
                          "desktop/src-tauri/src/hosted_tests.rs", "desktop/src-tauri/src/asset_session.rs"):
             self.assertIn(relative, python_paths)
             self.assertIn(relative, helper.GTK_COMPILE_SOURCES)

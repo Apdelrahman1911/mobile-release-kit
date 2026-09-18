@@ -11,6 +11,7 @@ compile_error!("SG1 requires debug test + desktop-shell + development-runtime, L
 #[path = "../src/bridge.rs"] mod bridge;
 #[path = "../src/document_lifetime.rs"] mod document_lifetime;
 #[path = "../src/edit_commands.rs"] mod edit_commands;
+#[path = "../src/metadata_text_commands.rs"] mod metadata_text_commands;
 #[path = "../src/github_commands.rs"] mod github_commands;
 #[path = "../src/credential_assessment.rs"] mod credential_assessment;
 #[path = "../src/credential_format.rs"] mod credential_format;
@@ -19,6 +20,7 @@ compile_error!("SG1 requires debug test + desktop-shell + development-runtime, L
 #[path = "../src/asset_session.rs"] mod asset_session;
 #[path = "../src/edit_protocol.rs"] mod edit_protocol;
 #[path = "../src/github_workflow_edit_protocol.rs"] mod github_workflow_edit_protocol;
+#[path = "../src/metadata_text_edit_protocol.rs"] mod metadata_text_edit_protocol;
 #[path = "../src/github_connection_protocol.rs"] mod github_connection_protocol;
 #[path = "../src/github_connection_session.rs"] mod github_connection_session;
 #[path = "../src/edit_owner.rs"] mod edit_owner;

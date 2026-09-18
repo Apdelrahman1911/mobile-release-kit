@@ -46,6 +46,7 @@ ROSTER = ("picker-cancel", "picker-select", "source-select", "quit-cancel", "qui
 # glob, Git discovery, source execution, generated include or module import.
 SOURCES = (
     '.github/workflows/desktop-github-connection-tls.yml',
+    '.github/workflows/desktop-github-workflow-apply-native.yml',
     'desktop/config_edit_bootstrap.py',
     'desktop/engine_bootstrap.py',
     'desktop/github_connection_bootstrap.py',
@@ -83,6 +84,8 @@ SOURCES = (
     'desktop/src-tauri/src/installed_runtime.rs',
     'desktop/src-tauri/src/lib.rs',
     'desktop/src-tauri/src/main.rs',
+    'desktop/src-tauri/src/metadata_text_commands.rs',
+    'desktop/src-tauri/src/metadata_text_edit_protocol.rs',
     'desktop/src-tauri/src/passive_management_tests.rs',
     'desktop/src-tauri/src/protocol.rs',
     'desktop/src-tauri/src/runtime.rs',
@@ -123,6 +126,7 @@ SOURCES = (
     'desktop/src/components/GitHubConnection.tsx',
     'desktop/src/components/GitHubWorkflowApply.tsx',
     'desktop/src/components/Icon.tsx',
+    'desktop/src/components/MetadataTextEditor.tsx',
     'desktop/src/components/RemovedFields.tsx',
     'desktop/src/configEdit.ts',
     'desktop/src/configEditController.ts',
@@ -139,6 +143,9 @@ SOURCES = (
     'desktop/src/githubWorkflowEditProtocol.ts',
     'desktop/src/githubWorkflowEditTypes.ts',
     'desktop/src/main.tsx',
+    'desktop/src/metadataText.ts',
+    'desktop/src/metadataTextEditController.ts',
+    'desktop/src/metadataTextProtocol.ts',
     'desktop/src/pages/Credentials.tsx',
     'desktop/src/pages/Dashboard.tsx',
     'desktop/src/pages/Environment.tsx',
@@ -178,6 +185,7 @@ SOURCES = (
     'src/mobile_release/api/_github_connection.py',
     'src/mobile_release/api/_github_setup.py',
     'src/mobile_release/api/_json.py',
+    'src/mobile_release/api/_metadata_text.py',
     'src/mobile_release/api/_preview.py',
     'src/mobile_release/api/_snapshot.py',
     'src/mobile_release/api/_snapshot_windows.py',
@@ -187,6 +195,7 @@ SOURCES = (
     'src/mobile_release/api/data/field-help.json',
     'src/mobile_release/api/data/github-connection-v1.json',
     'src/mobile_release/api/data/github-setup-v1.json',
+    'src/mobile_release/api/data/metadata-text-help-v1.json',
     'src/mobile_release/api/data/project.schema.json',
     'src/mobile_release/build_inputs.py',
     'src/mobile_release/cancellation.py',
@@ -217,6 +226,8 @@ SOURCES = (
     'src/mobile_release/local_signing.py',
     'src/mobile_release/macho.py',
     'src/mobile_release/metadata.py',
+    'src/mobile_release/metadata_text.py',
+    'src/mobile_release/metadata_text_edit.py',
     'src/mobile_release/owned_process.py',
     'src/mobile_release/preflight.py',
     'src/mobile_release/provenance.py',
@@ -225,6 +236,10 @@ SOURCES = (
     'src/mobile_release/tooling.py',
     'src/mobile_release/workflow.py',
     'src/mobile_release/workflow_payloads.py',
+    'templates/workflows/mobile-candidate.yml',
+    'templates/workflows/mobile-external-testing.yml',
+    'templates/workflows/mobile-preflight.yml',
+    'templates/workflows/mobile-production-submit.yml',
     'tests/native_desktop_config.py',
     'tests/native_desktop_config_eof.py',
 )
@@ -1550,7 +1565,7 @@ class Freeze:
         require(Path(__file__).resolve(strict=True) == launcher and os.getcwd() == str(repository / "desktop/src-tauri"), "fixed actual launcher source/cwd")
         require(type(v["display"]) is str and re.fullmatch(r":[1-9][0-9]{0,3}", v["display"]) is not None
                 and os.environ.get("DISPLAY") == v["display"], "fixed inherited display number")
-        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 182, "complete frozen182 source roster")
+        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 197, "complete frozen197 source roster")
         for path in SOURCES:
             h(v["sourceHashes"][path])
             actual, st = book.hash_file(exact_path(repository / path), 2 * 1024 * 1024)
@@ -2597,7 +2612,7 @@ def inert_source_tests() -> None:
     raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
     fixed(FiniteJson(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
     longest = max(SOURCES, key=len)
-    assert len(SOURCES) == 182 and 64 < len(longest) <= 128 and len(WITNESS) == 18
+    assert len(SOURCES) == 197 and 64 < len(longest) <= 128 and len(WITNESS) == 18
     raw = (json.dumps({longest: "a" * 64}, separators=(",", ":")) + "\n").encode("ascii")
     rejects(lambda data: FiniteJson(data, native=True).parse(lf=True), raw)
     base = {"response-decision": 1, "response-leave": 3, "close-dispatch": 2, "close-enter": 4, "close-ack": 5, "close-leave": 6,

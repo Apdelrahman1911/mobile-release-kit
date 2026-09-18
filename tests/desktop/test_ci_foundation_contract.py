@@ -5082,6 +5082,63 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 with self.subTest(native_platform=platform), self.assertRaises(helper.CheckFailure):
                     helper.phase("github-tls", platform, self.SCOPE)
 
+    def test_tls_core_producer_and_both_summaries_include_current_metadata(self):
+        # The real bounded SOURCE producer is the independent oracle, not a
+        # second fixture regenerated solely from the consumer's literal tuple.
+        metadata = {"mobile_release/api/_metadata_text.py",
+                    "mobile_release/api/data/metadata-text-help-v1.json",
+                    "mobile_release/metadata_text.py", "mobile_release/metadata_text_edit.py"}
+        context, forbidden = self.context(), self.forbidden
+        with patch.multiple(helper, github_tls_runtime=forbidden, github_tls_file=forbidden,
+                read_bounded_json=forbidden, write_json=forbidden, run=forbidden, tools=forbidden), \
+                patch.object(helper.subprocess, "run", side_effect=forbidden), \
+                patch.object(helper.subprocess, "Popen", side_effect=forbidden):
+            inventory = helper.workflow_core_inventory(SOURCE)
+            self.assertEqual(len(inventory), 76)
+            self.assertTrue(metadata <= {row["path"] for row in inventory})
+            helper.validate_gtk_core_inventory(inventory)
+            with patch.multiple(helper, Path=PurePosixPath, ordinary=forbidden, hash_file=forbidden,
+                    workflow_core_inventory=forbidden):
+                source = PurePosixPath(context["source"]) / "src"
+                for deadline in (False, True):
+                    manifest = self.deadline_manifest(context) if deadline else self.manifest(context)
+                    records = {row["path"]: row for row in manifest["files"]}
+                    for row in inventory:
+                        name = str(source / row["path"])
+                        records[name] = {**row, "path": name}
+                    manifest["files"] = [records[name] for name in sorted(records)]
+                    with self.subTest(deadline=deadline):
+                        helper.validate_github_tls_manifest(manifest, context=context, deadline=deadline)
+                        self.assertEqual(helper.github_tls_input_summary(context, manifest)["coreFiles"], inventory)
+                    for name in sorted(metadata):
+                        missing = deepcopy(manifest)
+                        missing["files"] = [row for row in missing["files"] if row["path"] != str(source / name)]
+                        with self.subTest(deadline=deadline, missing=name), self.assertRaises(helper.CheckFailure):
+                            helper.validate_github_tls_manifest(missing, context=context, deadline=deadline)
+
+    def test_tls_prepare_refuses_stale_or_unreviewed_core_before_capability_access(self):
+        metadata = {"mobile_release/api/_metadata_text.py",
+                    "mobile_release/api/data/metadata-text-help-v1.json",
+                    "mobile_release/metadata_text.py", "mobile_release/metadata_text_edit.py"}
+        inventory = [{"path": name, "size": 1, "sha256": "4" * 64} for name in helper.GTK_CORE_PATHS]
+        stale = [row for row in inventory if row["path"] not in metadata]
+        self.assertEqual(len(stale), 72)
+        extra = [*inventory, {"path": "mobile_release/unreviewed.py", "size": 1, "sha256": "4" * 64}]
+        context, forbidden = self.context(), self.forbidden
+        before = deepcopy(context)
+        with patch.multiple(helper, Path=forbidden, github_tls_runtime=forbidden, github_tls_manifest=forbidden,
+                github_tls_deadline_manifest=forbidden, github_tls_directories=forbidden, workflow_host=forbidden,
+                ordinary=forbidden, hash_file=forbidden, read_bounded_json=forbidden, write_json=forbidden,
+                run=forbidden, tools=forbidden), \
+                patch.object(helper.subprocess, "run", side_effect=forbidden), \
+                patch.object(helper.subprocess, "Popen", side_effect=forbidden):
+            for value, count in ((stale, 72), (extra, 77)):
+                with self.subTest(count=count), self.assertRaises(helper.CheckFailure) as refused:
+                    helper.prepare_github_tls_context(context, value)
+                self.assertEqual(str(refused.exception),
+                    f"Reviewed core inventory count differs: expected 76 files, observed {count}")
+                self.assertEqual(context, before)
+
     def test_tls_manifest_roles_source_ca_ssl_and_file_bounds_are_closed_data(self):
         context, forbidden = self.context(), self.forbidden
         manifest = self.manifest(context)
