@@ -434,6 +434,17 @@ main:focus { outline: none; }
   .asset-guide-definitions > div, .asset-guide-statuses > div, .asset-guide-control-grid { grid-template-columns: minmax(0, 1fr); gap: 4px; }
   .asset-guide-control-grid { gap: 18px; }
 }
+.release-input-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+.release-input-controls label { display: grid; gap: 6px; font-size: 12px; min-width: 210px; }
+.release-input-controls select { min-height: 38px; }
+.release-input-scope, .release-input-file, .release-input-alternatives { font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; margin-top: 14px; }
+.release-input-group { margin-top: 24px; }
+.release-input-group > h3 { font-size: 15px; margin: 0 0 10px; }
+.release-input-row { border-top: 1px solid var(--line); padding: 18px 0; min-width: 0; }
+.release-input-row .credential-row-heading { flex-wrap: wrap; align-items: flex-start; }
+.release-input-row .inline-heading { min-width: 0; max-width: 100%; }
+.release-input-row h4 { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.release-input-row > .button { margin-top: 12px; }
 .credential-when { margin-top: 10px; color: #9b927e; }
 .metadata-requirements { padding: 0; margin: 0; list-style: none; }
 .metadata-platform + .metadata-platform { margin-top: 22px; }

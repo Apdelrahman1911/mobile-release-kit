@@ -10,6 +10,7 @@ import { ConfigEditController } from './configEditController.ts';
 import { GitHubSetupController } from './githubSetupController.ts';
 import { EnvironmentController } from './environment.ts';
 import { ReleaseVersionController } from './releaseVersion.ts';
+import { ReleaseInputGuidanceController } from './releaseInputGuidance.ts';
 import { EnvironmentDiagnosticsController, diagnosticsOwnerReason } from './environmentDiagnosticsController.ts';
 import { GitHubConnectionController } from './githubConnectionController.ts';
 import { connectionRepository } from './githubConnectionProtocol.ts';
@@ -78,6 +79,7 @@ export function App() {
   const githubControllerRef = useRef<GitHubSetupController | null>(null);
   const environmentControllerRef = useRef<EnvironmentController | null>(null);
   const releaseVersionControllerRef = useRef<ReleaseVersionController | null>(null);
+  const releaseInputControllerRef = useRef<ReleaseInputGuidanceController | null>(null);
   const diagnosticsControllerRef = useRef<EnvironmentDiagnosticsController | null>(null);
   const connectionControllerRef = useRef<GitHubConnectionController | null>(null);
   const connectionHelpGeneration = useRef<object>({});
@@ -105,6 +107,7 @@ export function App() {
     // Intent/event retirement must precede even an unchanged reducer result:
     // failed refresh and unchanged/older saves need not advance generations.
     releaseVersionControllerRef.current?.beforeWorkspaceAction(action);
+    releaseInputControllerRef.current?.beforeWorkspaceAction(action);
     const previous = workspaceRef.current;
     const next = workspaceReducer(previous, action);
     if (next === previous) return;
@@ -121,6 +124,7 @@ export function App() {
     workspaceRef.current = next;
     environmentControllerRef.current?.syncProject();
     releaseVersionControllerRef.current?.syncProject();
+    releaseInputControllerRef.current?.syncProject();
     diagnosticsControllerRef.current?.syncProject();
     metadataControllerRef.current?.syncProject();
     assetControllerRef.current?.syncProject();
@@ -158,6 +162,12 @@ export function App() {
   }, (projectId) => configurationOwnerReason(configEdit.getSnapshot(), projectId) !== null));
   releaseVersionControllerRef.current = releaseVersion;
   const releaseVersionState = useSyncExternalStore(releaseVersion.subscribe, releaseVersion.getSnapshot, releaseVersion.getSnapshot);
+  const [releaseInputs] = useState(() => new ReleaseInputGuidanceController(() => {
+    const current = workspaceRef.current;
+    return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
+  }, (projectId) => configurationOwnerReason(configEdit.getSnapshot(), projectId) !== null, () => setHelp(null)));
+  releaseInputControllerRef.current = releaseInputs;
+  const releaseInputState = useSyncExternalStore(releaseInputs.subscribe, releaseInputs.getSnapshot, releaseInputs.getSnapshot);
   const [diagnostics] = useState(() => new EnvironmentDiagnosticsController({
     selectedProject: () => {
       const current = workspaceRef.current;
@@ -233,6 +243,7 @@ export function App() {
     githubSetup.beginConnection();
     environment.beginConnection();
     releaseVersion.beginConnection();
+    releaseInputs.beginConnection();
     diagnostics.beginConnection();
     metadataText.beginConnection();
     setLoading(true);
@@ -260,12 +271,14 @@ export function App() {
       githubSetup.setConnection(connection, appInfo);
       environment.setConnection(connection, appInfo);
       releaseVersion.setConnection(connection, appInfo);
+      releaseInputs.setConnection(connection, appInfo);
       metadataText.setConnection(connection, appInfo);
       if (connection.mode === 'preview' || methodReason(appInfo, 'catalog', connection.mode) === null) {
         try {
           const result = await connection.catalog();
           if (generation === bootGeneration.current) {
             if (!githubSetup.admitHelp(result.githubSetup)) throw githubSetupError({ code: 'GitHubSetupHelpUnavailable' });
+            releaseInputs.setCatalog(result);
             setCatalog(result);
             metadataText.setHelp(result.metadataText);
             if (helpGeneration === connectionHelpGeneration.current) {
@@ -273,9 +286,10 @@ export function App() {
             }
           }
         } catch (error) {
-          if (generation === bootGeneration.current) { setCatalog(null); githubSetup.helpUnavailable(); metadataText.setHelp(null); setCatalogError(apiError(error)); }
+          if (generation === bootGeneration.current) { releaseInputs.setCatalog(null); setCatalog(null); githubSetup.helpUnavailable(); metadataText.setHelp(null); setCatalogError(apiError(error)); }
         }
       } else {
+        releaseInputs.setCatalog(null);
         setCatalog(null);
         githubSetup.helpUnavailable();
         metadataText.setHelp(null);
@@ -284,16 +298,16 @@ export function App() {
       if (generation === bootGeneration.current) {
         connectionHandoffRef.current = null; connectionPortRef.current = null;
         githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null);
-        setInfo(null); setCatalog(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); releaseVersion.connectionUnavailable(); setBootError(apiError(error));
+        setInfo(null); setCatalog(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); releaseVersion.connectionUnavailable(); releaseInputs.connectionUnavailable(); setBootError(apiError(error));
       }
     } finally {
       if (generation === bootGeneration.current) setLoading(false);
     }
-  }, [githubSetup, githubConnection, environment, releaseVersion, diagnostics, metadataText, syncConnectionContext]);
+  }, [githubSetup, githubConnection, environment, releaseVersion, releaseInputs, diagnostics, metadataText, syncConnectionContext]);
 
   useEffect(() => {
     void bootstrap();
-    return () => { bootGeneration.current += 1; connectionHelpGeneration.current = {}; githubConnection.setHelp(null); };
+    return () => { bootGeneration.current += 1; connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
   }, [bootstrap]);
 
   useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
@@ -301,6 +315,7 @@ export function App() {
   useEffect(() => () => githubSetup.dispose(), [githubSetup]);
   useEffect(() => () => environment.dispose(), [environment]);
   useEffect(() => () => releaseVersion.dispose(), [releaseVersion]);
+  useEffect(() => () => releaseInputs.dispose(), [releaseInputs]);
   useEffect(() => () => diagnostics.dispose(), [diagnostics]);
   useEffect(() => () => githubConnection.dispose(), [githubConnection]);
   useEffect(() => { if (api) void workflowEdit.connect(api); }, [api, workflowEdit]);
@@ -351,6 +366,7 @@ export function App() {
     // if selection later cancels/fails. Do not wait for a successful folder.
     connectionPicking.current = true; advanceConnectionContext(); githubConnection.setContext(null);
     releaseVersion.setSelectionPending(true);
+    releaseInputs.setSelectionPending(true);
     diagnostics.setSelectionPending(true);
     metadataText.setSelectionPending(true);
     setChoosing(true);
@@ -362,7 +378,7 @@ export function App() {
       dispatch({ type: 'select', project });
       if (!alreadyLoaded) await loadSnapshot(project.id);
     } catch (error) { setChooseError(apiError(error)); }
-    finally { connectionPicking.current = false; setChoosing(false); syncConnectionContext(); releaseVersion.setSelectionPending(false); metadataText.setSelectionPending(false); diagnostics.setSelectionPending(false); }
+    finally { connectionPicking.current = false; setChoosing(false); syncConnectionContext(); releaseVersion.setSelectionPending(false); releaseInputs.setSelectionPending(false); metadataText.setSelectionPending(false); diagnostics.setSelectionPending(false); }
   };
 
   const changeApplicationRepository = (value: string) => {
@@ -431,7 +447,7 @@ export function App() {
     discardReason={session && draftRetained(session.project.id) ? 'Keep this draft until the original native file-edit session has settled. Closing a review is separate from discarding draft data.' : null}
     onChoose={() => void chooseProject()} onEdit={edit} onValidate={() => void validate()}
     onReview={() => void review()} onSuggest={() => void suggest()}
-    onPrepareSave={() => { if (session && workspaceRef.current.selectedId === session.project.id) { releaseVersion.saveIntent(); configEdit.start(session.project.id); } }}
+    onPrepareSave={() => { if (session && workspaceRef.current.selectedId === session.project.id) { releaseInputs.saveIntent(); releaseVersion.saveIntent(); configEdit.start(session.project.id); } }}
     onAdoptSuggestion={(requestId) => { if (session) dispatch({ type: 'adopt-suggestion', projectId: session.project.id, requestId }); }}
     onRemoveForbidden={(reviewId, paths) => { if (session) dispatch({ type: 'remove-forbidden', projectId: session.project.id, reviewId, paths }); }}
     onUndoRemoval={(removalId) => { if (session) dispatch({ type: 'undo-removal', projectId: session.project.id, removalId }); }}
@@ -467,7 +483,7 @@ export function App() {
         {info?.runtime.state !== 'available' && info && !preview && <div className="notice notice-warning"><Icon name="info" /><div><strong>{info.runtime.state === 'disabled' ? 'The engine is disabled' : 'Bundled engine unavailable'}</strong><p>{info.runtime.reason ?? 'A trusted packaged runtime has not been supplied. The app will not select an ambient Python or a mock engine.'} Folder selection does not establish a project observation.</p></div></div>}
         {page !== 'environment' && <EnvironmentDiagnostics state={diagnosticsState} controller={diagnostics} compact onShow={() => navigate('environment')} />}
         <ConfigSave state={saveState} projects={workspace.projects} catalog={catalog} selectedId={workspace.selectedId} detailed={page === 'settings' || page === 'metadata'}
-          onCheck={() => void configEdit.checkStatus()} onClose={() => configEdit.requestClose()} onApply={(binding) => { releaseVersion.saveIntent(); return configEdit.apply(binding); }}
+          onCheck={() => void configEdit.checkStatus()} onClose={() => configEdit.requestClose()} onApply={(binding) => { releaseInputs.saveIntent(); releaseVersion.saveIntent(); return configEdit.apply(binding); }}
           onShowProject={(projectId) => { dispatch({ type: 'switch', projectId }); navigate('settings'); }} onHelp={setHelp} />
         {page !== 'github' && workflowPanel(false)}
         {page !== 'metadata' && <MetadataTextSave state={metadataState} controller={metadataText} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
@@ -477,7 +493,7 @@ export function App() {
         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="A little clarity before the next release." description="Edit a practical, schema-driven draft. The bundled core provides every field, requirement, and validation rule." />{editor()}</>}
         {page === 'environment' && <Environment info={info} preview={preview} session={session} state={environmentState} controller={environment}
           diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
-        {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} onHelp={setHelp} nativeBusyReason={diagnosticsOwnerReason(diagnosticsState)} />}
+        {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} inputState={releaseInputState} inputController={releaseInputs} onSettings={() => navigate('settings')} onHelp={setHelp} nativeBusyReason={diagnosticsOwnerReason(diagnosticsState)} />}
         {page === 'metadata' && <Metadata catalog={catalog} textEditor={<MetadataTextEditor state={metadataState} controller={metadataText} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}>{editor(true)}</Metadata>}
         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} credentialHelp={catalog?.credentials ?? null} onHelp={setHelp} nativeReview={workflowPanel(true)}
           connectionView={<><GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp}
