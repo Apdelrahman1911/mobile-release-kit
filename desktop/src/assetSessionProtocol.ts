@@ -122,11 +122,13 @@ export function parseAssetStatus(value: unknown): AssetStatus | null {
     const operation = value.operation;
     if (operation !== null) {
       if (!keys(operation, ['operationId', 'operation', 'phase', 'reason', 'source', 'settlement', 'selectionToken', 'assessment', 'preview']) ||
-          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-project', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock']) ||
+          !assetCounter(operation.operationId) || !one(operation.operation, ['choose-file', 'choose-project', 'choose-evidence-folder', 'inspect-evidence', 'prepare', 'prepare-delete', 'commit', 'bind', 'discard', 'lock']) ||
           !one(operation.phase, ['idle', 'admitting', 'picking', 'capturing', 'selected', 'assessing', 'preview', 'mutating', 'stopping', 'unknown']) ||
           !one(operation.reason, ASSET_REASONS) || !one(operation.source, ['not-run', 'pending', 'captured', 'refused', 'unknown']) ||
           !one(operation.settlement, ['pending', 'known', 'unknown', 'late-known']) || (operation.selectionToken !== null && !token(operation.selectionToken)) ||
           (operation.assessment !== null && !assessment(operation.assessment))) return null;
+      if (['choose-evidence-folder', 'inspect-evidence'].includes(operation.operation as string) &&
+          (operation.selectionToken !== null || operation.assessment !== null || operation.preview !== null)) return null;
       if (operation.preview !== null && (!keys(operation.preview, ['token', 'action', 'expiresInMs', 'subject']) || !token(operation.preview.token) ||
           !one(operation.preview.action, ['save', 'bind', 'delete']) || !assetCounter(operation.preview.expiresInMs) || operation.preview.expiresInMs > 300000 ||
           operation.phase !== 'preview' || operation.settlement !== 'known' || operation.selectionToken !== null ||

@@ -361,6 +361,7 @@ export class AssetSessionController {
   discard(): boolean {
     const operation = this.state.status?.operation;
     if (!this.api || this.state.mode !== 'native' || !operation || (operation.phase === 'idle' && operation.settlement === 'known') || this.cancelling === operation.operationId || this.disposed) return false;
+    if (operation.operation === 'choose-evidence-folder' || operation.operation === 'inspect-evidence') return false;
     // Each explicit phase has a fresh native ID. A prior selected/preview
     // status cannot identify a new in-flight operation, even if an event has
     // overtaken its originating acknowledgement. Never fake accepting Cancel.

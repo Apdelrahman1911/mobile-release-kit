@@ -40,7 +40,8 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 | Pure credential assessment (internal only) | Core policy over explicitly supplied scalars and finite file observations, with a private result-sanitizing adapter | Renderer secret entry, file acquisition/parser qualification, password verification, native custody, storage or assignment |
 | Environment requirements | Current-draft prerequisites, fixed baseline guidance and missing-feature explanations | Observing installed tools, running doctor or native admission |
 | Build-tool diagnostics implementation (disabled) | Explicit, cancellable version observations through a separate native owner and the ordinary core command owner | Enabled diagnostics, complete SDK checks, native document/runtime qualification or release readiness |
-| Credentials, releases, artifacts, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
+| Candidate evidence inspector (disabled) | Separate evidence-folder picker, three fixed candidate documents, core-owned format/self-digest/binding checks and a guided documents-only summary | Artifact-byte inspection, authenticated provenance, source-project comparison, Store state, release readiness or safe recovery |
+| Credentials, releases, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
 
 Windows can use the portable passive services. Its original-parent static reader
 is staged in source but **disabled pending independent ABI/native W1–W6
@@ -107,6 +108,13 @@ methods are:
 - `metadata.text.validate`, `{platform, fields}` — pure shared generic text
   policy, Unicode character counts and fixed non-reflective issues; no IO,
   observation, native revision or Save permission.
+- `artifacts.candidate.observe`, `{root, expectedRoot}` — private, bounded
+  observation of `candidate-manifest.json`, `candidate-receipt.json` and
+  `operation/candidate-operation-intent.json`. Native supplies the separately
+  selected evidence root and its original device/inode/mode/UID/GID; renderer
+  requests contain only the opaque selection ID. Reuses the existing provenance
+  validators for document consistency, without opening artifact payloads,
+  following document-directed paths, contacting services or changing files.
 - `credentials.assess`, `{schemaVersion, policyVersion, context, input}` — pure
   assessment of supplied scalars and closed mechanical observations, not a
   credential reader. This does not add a renderer command or enable the vault.
@@ -118,6 +126,16 @@ in [GitHub setup proposals](desktop-github-setup.md).
 The public-text scope, separate configuration prerequisite, raw-byte semantics
 and gated typed Save are documented in
 [guided metadata text](desktop-metadata-text.md).
+
+The Artifacts screen always labels its result **“Local document consistency;
+provenance and artifact bytes unverified.”** Choosing evidence never replaces the
+source project, discards a draft or changes GitHub context. The separate original
+operation ID permits exact cancellation and status recovery after a lost reply;
+“Stopping” is not proof of settlement, and cleanup-unknown remains blocking.
+Earlier observations are shown only as stale. Inspection is currently
+qualification-gated and Linux-only; preview builds and older native fixtures
+cannot run it. macOS/Windows evidence adapters and production runtime admission
+remain outstanding.
 
 Typed saving does **not** expand this passive method list. Configuration's separate
 finite owner and core transaction contract are documented in

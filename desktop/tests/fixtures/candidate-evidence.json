@@ -1,0 +1,251 @@
+{
+  "androidConsistent": {
+    "schemaVersion": 1,
+    "outcome": "consistent",
+    "documents": [
+      {
+        "kind": "manifest",
+        "state": "valid"
+      },
+      {
+        "kind": "receipt",
+        "state": "valid"
+      },
+      {
+        "kind": "intent",
+        "state": "valid"
+      }
+    ],
+    "summary": {
+      "platform": "android",
+      "applicationId": "com.example.reader",
+      "version": {
+        "marketing": "1.2.3",
+        "build": 42
+      },
+      "source": {
+        "commit": "2222222222222222222222222222222222222222",
+        "tree": "3333333333333333333333333333333333333333"
+      },
+      "artifacts": [
+        {
+          "logicalName": "android-aab",
+          "declaredBytes": "12345678",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "logicalName": "store-metadata",
+          "declaredBytes": "34567",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "logicalName": "validation-report",
+          "declaredBytes": "2345",
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "recordedRuns": {
+        "authorizedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "executedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "producedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        }
+      },
+      "documentPayloadSha256": {
+        "manifest": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16",
+        "receipt": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018",
+        "intent": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29"
+      }
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "iosConsistent": {
+    "schemaVersion": 1,
+    "outcome": "consistent",
+    "documents": [
+      {
+        "kind": "manifest",
+        "state": "valid"
+      },
+      {
+        "kind": "receipt",
+        "state": "valid"
+      },
+      {
+        "kind": "intent",
+        "state": "valid"
+      }
+    ],
+    "summary": {
+      "platform": "ios",
+      "applicationId": "com.example.reader",
+      "version": {
+        "marketing": "1.2.3",
+        "build": 42
+      },
+      "source": {
+        "commit": "2222222222222222222222222222222222222222",
+        "tree": "3333333333333333333333333333333333333333"
+      },
+      "artifacts": [
+        {
+          "logicalName": "ios-ipa",
+          "declaredBytes": "12345678",
+          "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+        },
+        {
+          "logicalName": "ios-archive",
+          "declaredBytes": "23456789",
+          "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+        },
+        {
+          "logicalName": "ios-dsyms",
+          "declaredBytes": "345678",
+          "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+        },
+        {
+          "logicalName": "store-metadata",
+          "declaredBytes": "34567",
+          "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        },
+        {
+          "logicalName": "validation-report",
+          "declaredBytes": "2345",
+          "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      ],
+      "recordedRuns": {
+        "authorizedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "executedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        },
+        "producedBy": {
+          "runId": "1000000000",
+          "attempt": "1"
+        }
+      },
+      "documentPayloadSha256": {
+        "manifest": "9d646dbd3dd5f0496db431f726efecf337025af76ac8d6eb52b625efdc7cf55a",
+        "receipt": "190e84d982059bd897dde9496a5121de6a08b238969221452153763147036035",
+        "intent": "131601523b5b3e52192288eee1f060b36581894825b35499d81dfcaceb313395"
+      }
+    },
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "missingAll": {
+    "schemaVersion": 1,
+    "outcome": "incomplete",
+    "documents": [
+      {
+        "kind": "manifest",
+        "state": "missing"
+      },
+      {
+        "kind": "receipt",
+        "state": "missing"
+      },
+      {
+        "kind": "intent",
+        "state": "missing"
+      }
+    ],
+    "summary": null,
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "invalidManifestMissingOthers": {
+    "schemaVersion": 1,
+    "outcome": "invalid",
+    "documents": [
+      {
+        "kind": "manifest",
+        "state": "invalid"
+      },
+      {
+        "kind": "receipt",
+        "state": "missing"
+      },
+      {
+        "kind": "intent",
+        "state": "missing"
+      }
+    ],
+    "summary": null,
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  },
+  "crossBindingMismatch": {
+    "schemaVersion": 1,
+    "outcome": "inconsistent",
+    "documents": [
+      {
+        "kind": "manifest",
+        "state": "valid"
+      },
+      {
+        "kind": "receipt",
+        "state": "valid"
+      },
+      {
+        "kind": "intent",
+        "state": "valid"
+      }
+    ],
+    "summary": null,
+    "assurance": {
+      "level": "local-document-consistency",
+      "documentsOnly": true,
+      "artifactBytesVerified": false,
+      "workflowAuthenticated": false,
+      "storeStateObserved": false,
+      "comparedWithSourceProject": false,
+      "releaseReady": false,
+      "recoveryAuthorized": false
+    }
+  }
+}

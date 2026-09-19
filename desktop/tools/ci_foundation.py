@@ -137,6 +137,7 @@ GTK_COMPILE_SOURCES = (
     "desktop/src-tauri/src/metadata_text_edit_protocol.rs",
     "desktop/src-tauri/src/environment.rs",
     "desktop/src-tauri/src/release_version_protocol.rs",
+    "desktop/src-tauri/src/candidate_evidence_protocol.rs",
     "desktop/src-tauri/src/environment_diagnostics_owner.rs",
     "desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs",
     "desktop/src-tauri/src/environment_diagnostics_protocol.rs",
@@ -163,6 +164,7 @@ GTK_COMPILE_SOURCES = (
     "desktop/src-tauri/tests/fixtures/github_tls/server-key.pem",
     "desktop/src-tauri/tests/session_gtk_qualification.rs",
     "desktop/src-tauri/tests/session_gtk_recipe.js",
+    "desktop/tests/fixtures/candidate-evidence.json",
     "tests/native_desktop_environment.py",
     "tests/workflow/command_bootstrap_fixture.py",
     "desktop/native/session_gtk_input_linux.c", "desktop/tools/qualify_session_gtk.py",
@@ -193,6 +195,7 @@ GTK_CORE_PATHS = (
     "mobile_release/android.py",
     "mobile_release/android_upload_validation.py",
     "mobile_release/api/__init__.py",
+    "mobile_release/api/_candidate_evidence.py",
     "mobile_release/api/_catalog.py",
     "mobile_release/api/_credential_assessment.py",
     "mobile_release/api/_credential_guide.py",
@@ -561,6 +564,7 @@ WORKFLOW_EOF_CASES = ("precommit-eof", "postcommit-eof", "precommit-conflict-eof
 # may execute. No shell/GTK or Node/Vite outputs are prerequisites for this lane.
 WORKFLOW_NATIVE_SOURCES = tuple(sorted({
     *WORKFLOW_TRANSACTION_EOF_SOURCES.values(), *WORKFLOW_CORE_SOURCES.values(),
+    "desktop/src-tauri/src/candidate_evidence_protocol.rs", "desktop/tests/fixtures/candidate-evidence.json",
     "desktop/src-tauri/src/credential_assessment.rs", "desktop/src-tauri/src/credential_format.rs",
     "desktop/src-tauri/src/installed_runtime.rs", "desktop/src-tauri/src/hosted_tests.rs",
     "desktop/src-tauri/src/passive_management_tests.rs",

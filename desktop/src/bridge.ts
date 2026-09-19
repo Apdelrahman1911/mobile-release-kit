@@ -1,6 +1,8 @@
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
 import { environmentError, environmentRequestFits, parseEnvironmentResult } from './environment.ts';
 import { parseReleaseVersionObservation, releaseVersionError, releaseVersionRequestFits } from './releaseVersion.ts';
+import { evidenceError, evidenceRequestFits, parseEvidenceStatus } from './candidateEvidence.ts';
+import type { EvidenceCommand, EvidenceStatus } from './candidateEvidence.ts';
 import { ENVIRONMENT_DIAGNOSTICS_EVENT, environmentDiagnosticsError, environmentDiagnosticsRequestFits, parseEnvironmentDiagnosticsStatus } from './environmentDiagnosticsProtocol.ts';
 import type { EnvironmentDiagnosticsCommand } from './environmentDiagnosticsProtocol.ts';
 import type { EnvironmentDiagnosticsStatus } from './environmentDiagnosticsTypes.ts';
@@ -43,6 +45,15 @@ export function apiError(error: unknown): ApiError {
 }
 
 export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: NativeInvoke, listen?: NativeEditListen): DesktopApi {
+  const evidenceCall = async (command: EvidenceCommand, args: Record<string, unknown>): Promise<EvidenceStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'artifact_evidence_unavailable' };
+      if (!evidenceRequestFits(command, args)) throw { code: 'artifact_evidence_invalid' };
+      const result = parseEvidenceStatus(await invoke<unknown>(command, structuredClone(args)));
+      if (!result) throw { code: 'artifact_evidence_protocol' };
+      return result;
+    } catch (error) { throw evidenceError(error); }
+  };
   const diagnosticsCall = async (command: EnvironmentDiagnosticsCommand, args: unknown): Promise<EnvironmentDiagnosticsStatus> => {
     try {
       if (mode !== 'native') throw { code: 'environment_diagnostics_unavailable' };
@@ -106,6 +117,10 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     mode,
     appInfo: () => call<AppInfo>('app_info'),
     chooseProject: () => call<ProjectReference | null>('choose_project'),
+    chooseEvidenceFolder: () => evidenceCall('artifact_evidence_choose', {}),
+    evidenceStatus: () => evidenceCall('artifact_evidence_status', {}),
+    observeEvidence: (selectionId) => evidenceCall('artifact_evidence_observe', { selectionId }),
+    cancelEvidence: (operationId, selectionId) => evidenceCall('artifact_evidence_cancel', { operationId, selectionId }),
     snapshot: (projectId) => call<ProjectSnapshot>('project_snapshot', { projectId }),
     observeReleaseVersion: async (projectId) => {
       try {

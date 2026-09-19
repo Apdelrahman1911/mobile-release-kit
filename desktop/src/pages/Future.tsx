@@ -11,14 +11,6 @@ export function Releases({ info }: { info: AppInfo | null }) {
   </>;
 }
 
-export function Artifacts({ info }: { info: AppInfo | null }) {
-  return <>
-    <PageHeading eyebrow="ARTIFACTS" title="The files. The provenance. The proof." description="Future artifact records will identify exactly what was built, how it was validated, and which candidate it belongs to." />
-    <div className="three-card-grid">{[{ icon: 'android' as const, title: 'Android packages', detail: 'AABs, mappings, and native symbols' }, { icon: 'apple' as const, title: 'iOS packages', detail: 'IPAs, archives, and retained dSYMs' }, { icon: 'shield' as const, title: 'Release evidence', detail: 'Validation reports and authenticated receipts' }].map((item) => <div className="card artifact-type" key={item.title}><div className="soft-icon"><Icon name={item.icon} size={25} /></div><h3>{item.title}</h3><p>{item.detail}</p><Badge>Not loaded</Badge></div>)}</div>
-    <section className="card"><EmptyState icon="box" title="No authenticated artifacts loaded" description="The desktop foundation does not build, discover, import, authenticate, or download release artifacts. No placeholder artifacts stand in for real evidence."><DisabledAction label="Load candidate artifacts" icon="folder" reason={futureReason(info?.capabilities, 'artifacts.list', 'Artifact custody, authenticated candidate records, and safe native file actions are not implemented.')} /></EmptyState></section>
-  </>;
-}
-
 export function Recovery({ info }: { info: AppInfo | null }) {
   return <>
     <PageHeading eyebrow="RECOVERY" title="An interruption shouldn’t leave you guessing." description="Recovery must know what really happened, preserve original ownership, and never mistake partial success for a clean restart." />

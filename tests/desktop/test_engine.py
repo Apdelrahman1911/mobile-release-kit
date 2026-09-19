@@ -23,6 +23,11 @@ class EngineContractTests(unittest.TestCase):
         self.assertEqual(environment.method, "environment.requirements")
         version = engine.parse_request(frame(method="release.version.observe", params={"root": "/selected/project"}))
         self.assertEqual((version.method, version.params), ("release.version.observe", {"root": "/selected/project"}))
+        evidence_params = {"root": "/selected/evidence", "expectedRoot": {
+            "device": "1", "inode": "2", "mode": 0o40700, "uid": 0, "gid": 0,
+        }}
+        evidence = engine.parse_request(frame(method="artifacts.candidate.observe", params=evidence_params))
+        self.assertEqual((evidence.method, evidence.params), ("artifacts.candidate.observe", evidence_params))
         for changes in (
             {"protocol": True}, {"protocol": 2}, {"id": "../other"}, {"id": ""},
             {"id": "x" * 65}, {"method": "run"}, {"method": []}, {"params": []},

@@ -101,6 +101,30 @@ async fn cancel_environment_diagnostics(webview: Webview, request: tauri::ipc::R
     let args = crate::environment_diagnostics_protocol::cancel(request_body(&request)?)?;
     state.document.cancel_environment_diagnostics(args)
 }
+#[tauri::command]
+async fn artifact_evidence_choose(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::candidate_evidence_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?; crate::candidate_evidence_protocol::empty_request(request_body(&request)?)?;
+    state.document.artifact_evidence_choose(app)
+}
+#[tauri::command]
+async fn artifact_evidence_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::candidate_evidence_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?; crate::candidate_evidence_protocol::empty_request(request_body(&request)?)?;
+    state.document.artifact_evidence_status()
+}
+#[tauri::command]
+async fn artifact_evidence_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::candidate_evidence_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?; let args = crate::candidate_evidence_protocol::observe_request(request_body(&request)?)?;
+    state.document.artifact_evidence_observe(args)
+}
+#[tauri::command]
+async fn artifact_evidence_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::candidate_evidence_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?; let args = crate::candidate_evidence_protocol::cancel_request(request_body(&request)?)?;
+    state.document.artifact_evidence_cancel(args)
+}
 #[tauri::command(rename_all = "camelCase")]
 async fn project_snapshot(project_id: String, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
@@ -598,7 +622,7 @@ fn request_shutdown(app: &tauri::AppHandle) {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), Project, Quit }
+pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), Project, EvidenceFolder, Quit }
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) async fn run_owned_dialog(_: &tauri::AppHandle, owner: &Arc<OriginalWork>, _: DialogChoice) -> Result<Option<std::path::PathBuf>, Reason> {
@@ -678,6 +702,8 @@ mod owned_gtk {
             }
             DialogChoice::Project => Object::File(gtk::FileChooserDialog::with_buttons(Some("Choose a mobile project folder"), Some(&parent), gtk::FileChooserAction::SelectFolder,
                 &[("Cancel", gtk::ResponseType::Cancel), ("Select", gtk::ResponseType::Accept)])),
+            DialogChoice::EvidenceFolder => Object::File(gtk::FileChooserDialog::with_buttons(Some("Choose a candidate evidence folder"), Some(&parent), gtk::FileChooserAction::SelectFolder,
+                &[("Cancel", gtk::ResponseType::Cancel), ("Select evidence folder", gtk::ResponseType::Accept)])),
             DialogChoice::Quit => Object::Message(gtk::MessageDialog::new(Some(&parent), gtk::DialogFlags::MODAL, gtk::MessageType::Question, gtk::ButtonsType::OkCancel,
                 "Unsaved in-memory changes will be lost. Choose Cancel to keep working, or OK to stop owned operations and wait for cleanup before quitting. A save already accepted may still complete; quitting does not undo committed files.")),
         };
@@ -1166,6 +1192,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
         })
         .invoke_handler(tauri::generate_handler![
             app_info, choose_project, project_snapshot, catalog, environment_requirements, release_version_observe,
+            artifact_evidence_choose, artifact_evidence_status, artifact_evidence_observe, artifact_evidence_cancel,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,
             validate_config, suggest_config, preview_config,
             propose_github_setup,

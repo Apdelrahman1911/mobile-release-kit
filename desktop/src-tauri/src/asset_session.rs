@@ -8,6 +8,7 @@ use tokio::{sync::{Mutex as AsyncMutex, Notify, oneshot, watch}, task::JoinHandl
 use crate::{asset_commands::{self as commands, AssetError, CommandError, Fields, Kind, Platform, Purpose, Reason, Stage}, asset_source::{self, OriginWitness, SourceBook},
     bridge::{DesktopBridge, Project, ProjectRoster}, credential_assessment::{AssessmentRequest, AssessmentResult, assess_supplied}, credential_format::{self, FileObservation},
     document_lifetime::{DocumentAction, DocumentLifetime}, error::BridgeError,
+    candidate_evidence_protocol::{self as evidence_wire, Problem as EvidenceProblem},
     github_connection_protocol::{self as github_wire, Reason as GitHubReason},
     github_connection_session::{self as github_session, ConnectionState}};
 
@@ -63,7 +64,11 @@ impl SafeAssessment { fn permits(&self) -> bool { self.0.permits_session_preview
 pub(crate) enum Phase { Idle, Admitting, Picking, Capturing, Selected, Assessing, Preview, Mutating, Stopping, Unknown }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Operation { ChooseFile, ChooseProject, Prepare, PrepareDelete, Commit, Bind, Discard, Lock }
+enum Operation { ChooseFile, ChooseProject, ChooseEvidenceFolder, InspectEvidence, Prepare, PrepareDelete, Commit, Bind, Discard, Lock }
+impl Operation {
+    fn evidence(self) -> bool { matches!(self, Self::ChooseEvidenceFolder | Self::InspectEvidence) }
+    fn blocks_context(self) -> bool { self == Self::ChooseProject || self.evidence() }
+}
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum SourceState { NotRun, Pending, Captured, Refused, Unknown }
@@ -304,6 +309,7 @@ struct Slot {
     assessment_context_revision: Option<u32>,
     staged: Option<Staged>, error: Option<CommandError>, project: Option<Project>, discard: bool,
     kind: Option<Kind>, result_record: Option<RecordKey>, retired_payload: Option<Arc<Payload>>,
+    evidence: Option<EvidenceBinding>,
 }
 impl Slot {
     fn stop(&mut self, reason: Reason, at: Instant) {
@@ -321,6 +327,127 @@ struct DocumentState {
     context: Option<Arc<NativeContext>>, slot: Option<Slot>, records: Vec<Record>, assignments: Vec<Assignment>,
     quit: Option<Arc<OriginalWork>>, quit_accepted: bool, quit_cleanup_end: Option<Instant>,
     github: ConnectionState,
+    evidence: EvidenceRegistry,
+}
+
+// One purpose-bound selection for this original document. It is never inserted
+// into DesktopBridge.projects and cannot change source drafts or GitHub context.
+#[derive(Clone, PartialEq, Eq)]
+struct EvidenceBinding { operation_id: u32, kind: evidence_wire::OperationKind, selection_id: Option<String>, epoch: u64 }
+impl EvidenceBinding {
+    fn public(&self) -> evidence_wire::Operation {
+        evidence_wire::Operation { operation_id: self.operation_id.to_string(), kind: self.kind, selection_id: self.selection_id.clone() }
+    }
+}
+struct EvidenceSelection { view: evidence_wire::Selection, root: asset_source::RegisteredRoot, epoch: u64 }
+struct EvidenceRegistry {
+    revision: u64, epoch: u64, revoked: bool, selection: Option<EvidenceSelection>, operation: Option<EvidenceBinding>,
+    phase: evidence_wire::Phase, result: Option<evidence_wire::Observation>, problem: Option<EvidenceProblem>,
+}
+impl EvidenceRegistry {
+    fn new() -> Self { Self { revision: 0, epoch: 0, revoked: false, selection: None, operation: None,
+        phase: evidence_wire::Phase::Idle, result: None, problem: None } }
+    fn revoke(&mut self, unknown: bool) {
+        self.revoked = true; self.selection = None; self.result = None;
+        self.phase = if unknown { evidence_wire::Phase::Unknown } else { evidence_wire::Phase::Refused };
+        self.problem = Some(if unknown { EvidenceProblem::CleanupUnknown } else { EvidenceProblem::StaleSelection });
+    }
+    fn matches(&self, slot: &Slot) -> bool {
+        let Some(binding) = &slot.evidence else { return false; };
+        slot.operation.evidence() && self.operation.as_ref() == Some(binding) && binding.operation_id == slot.owner.id
+            && binding.epoch == self.epoch
+            && matches!((slot.operation, binding.kind), (Operation::ChooseEvidenceFolder, evidence_wire::OperationKind::Choose)
+                | (Operation::InspectEvidence, evidence_wire::OperationKind::Observe))
+    }
+    fn selection_matches(&self, binding: &EvidenceBinding) -> bool {
+        !self.revoked && self.selection.as_ref().is_some_and(|selection| selection.epoch == binding.epoch
+            && binding.selection_id.as_deref() == Some(selection.view.selection_id.as_str()))
+    }
+}
+fn evidence_reason(reason: Reason) -> EvidenceProblem {
+    match reason {
+        Reason::CleanupUnknown => EvidenceProblem::CleanupUnknown,
+        Reason::Deadline | Reason::ReviewExpired => EvidenceProblem::Deadline,
+        Reason::UserCancelled => EvidenceProblem::Cancelled,
+        Reason::Capacity | Reason::MaterialLimit | Reason::ParserLimit => EvidenceProblem::Limit,
+        Reason::Busy => EvidenceProblem::Busy,
+        Reason::ContextStale | Reason::SourceChanged | Reason::DocumentLost | Reason::Shutdown => EvidenceProblem::StaleSelection,
+        Reason::SourceRefused | Reason::ProjectOverlap | Reason::ExclusionUnconfirmed => EvidenceProblem::UnsafeSelection,
+        Reason::UnsupportedPlatform | Reason::UnsupportedFilesystem | Reason::Unqualified | Reason::Closed => EvidenceProblem::Unavailable,
+        _ => EvidenceProblem::ObservationFailed,
+    }
+}
+fn cancel_evidence_locked(state: &mut DocumentState, args: &evidence_wire::Cancel, at: Instant) -> Result<bool, BridgeError> {
+    // A STOP identifies the exact original job, not merely its folder. Match
+    // before clock reconciliation or any change to unrelated shared state.
+    let id = evidence_wire::operation_id(&args.operation_id).ok_or_else(evidence_wire::invalid)?;
+    let binding = state.evidence.operation.as_ref().filter(|binding| binding.operation_id == id
+        && binding.selection_id == args.selection_id && binding.epoch == state.evidence.epoch)
+        .ok_or_else(|| evidence_wire::refused(EvidenceProblem::StaleSelection))?.clone();
+    let matching = state.slot.as_ref().is_some_and(|slot| state.evidence.matches(slot) && slot.evidence.as_ref() == Some(&binding));
+    if !matching {
+        // A retained terminal operation no longer has an owner to stop. Never
+        // route it into the different shared job now occupying the slot.
+        return if matches!(state.evidence.phase, evidence_wire::Phase::Selected | evidence_wire::Phase::Observed | evidence_wire::Phase::Cancelled | evidence_wire::Phase::Refused) {
+            Ok(false)
+        } else { Err(evidence_wire::refused(EvidenceProblem::StaleSelection)) };
+    }
+    let slot = state.slot.as_mut().ok_or_else(evidence_wire::invalid)?;
+    if slot.phase == Phase::Idle && slot.owner.resources_settled() { return Ok(false); }
+    let reason = if slot.owner.endpoint().is_some_and(|end| at >= end) { Reason::Deadline } else { Reason::UserCancelled };
+    slot.stop(reason, at); Ok(true)
+}
+fn record_evidence_failure(state: &mut DocumentState, owner: &Arc<OriginalWork>, problem: EvidenceProblem, at: Instant) -> bool {
+    let Some(slot) = state.slot.as_ref().filter(|slot| Arc::ptr_eq(&slot.owner, owner) && state.evidence.matches(slot)) else { return false; };
+    // The first STOP owns both timing and public explanation. A late ordinary
+    // core error cannot relabel a user's cancellation or the original deadline.
+    // Unconfirmed cleanup remains a conservative, sticky authority reduction.
+    if (slot.reason != Reason::None || slot.cleanup_end.is_some()) && problem != EvidenceProblem::CleanupUnknown { return false; }
+    let problem = if problem != EvidenceProblem::CleanupUnknown && slot.owner.endpoint().is_some_and(|end| at >= end) {
+        EvidenceProblem::Deadline
+    } else { problem };
+    state.evidence.problem = Some(problem); state.evidence.result = None;
+    let reason = match problem { EvidenceProblem::Deadline => Reason::Deadline, EvidenceProblem::CleanupUnknown => Reason::CleanupUnknown,
+        EvidenceProblem::Limit => Reason::Capacity, EvidenceProblem::Cancelled => Reason::UserCancelled, _ => Reason::SourceRefused };
+    if let Some(slot) = state.slot.as_mut() { slot.stop(reason, at); }
+    if problem == EvidenceProblem::CleanupUnknown { state.unknown = true; }
+    true
+}
+fn evidence_display_name(path: &std::path::Path) -> String {
+    path.file_name().and_then(|name| name.to_str()).filter(|name|
+        evidence_wire::display_text(name, 128, 512) && !name.contains(['/', '\\']))
+        .unwrap_or("Selected evidence folder").to_owned()
+}
+fn evidence_snapshot(state: &DocumentState, available: bool) -> evidence_wire::Status {
+    let registry = &state.evidence;
+    if !available { return evidence_wire::Status::unavailable(registry.revision); }
+    let mut phase = registry.phase;
+    let mut problem = registry.problem;
+    if state.unknown || state.exhausted {
+        phase = evidence_wire::Phase::Unknown; problem = Some(EvidenceProblem::CleanupUnknown);
+    } else if let Some(slot) = state.slot.as_ref().filter(|slot| registry.matches(slot)) {
+        if slot.phase == Phase::Unknown || matches!(slot.settlement, Settlement::Unknown | Settlement::LateKnown) {
+            phase = evidence_wire::Phase::Unknown; problem = Some(EvidenceProblem::CleanupUnknown);
+        } else if slot.cleanup_end.is_some() {
+            // STOP is not terminal until all ORIGINAL resources and their data
+            // retirement have settled. A late positive result cannot revive it.
+            phase = if slot.phase == Phase::Idle && slot.owner.resources_settled() {
+                if !registry.revoked && slot.reason == Reason::UserCancelled { evidence_wire::Phase::Cancelled } else { evidence_wire::Phase::Refused }
+            } else { evidence_wire::Phase::Stopping };
+            problem = Some(problem.unwrap_or_else(|| evidence_reason(slot.reason)));
+        }
+    }
+    evidence_wire::Status { schema_version: 1, revision: registry.revision.to_string(), availability: "available", phase,
+        selection: if registry.revoked { None } else { registry.selection.as_ref().map(|selection| selection.view.clone()) },
+        operation: registry.operation.as_ref().map(EvidenceBinding::public),
+        result: if phase == evidence_wire::Phase::Observed { registry.result.clone() } else { None }, problem }
+}
+fn settle_evidence_status(state: &mut DocumentState) {
+    if state.slot.as_ref().is_some_and(|slot| state.evidence.matches(slot) && slot.phase == Phase::Idle && slot.owner.resources_settled()) {
+        let status = evidence_snapshot(state, true);
+        state.evidence.phase = status.phase; state.evidence.problem = status.problem;
+        if status.phase != evidence_wire::Phase::Observed { state.evidence.result = None; }
+    }
 }
 // A late observer/lifecycle callback cannot move an already-due work or review
 // endpoint forward. The first STOP owns the only cleanup clock.
@@ -383,7 +510,7 @@ impl DocumentBinding {
             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
-            github: ConnectionState::new() }) }) }
+            github: ConnectionState::new(), evidence: EvidenceRegistry::new() }) }) }
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn for_fixture(bridge: Arc<DesktopBridge>, permit: FixtureAdmission) -> Result<Self, &'static str> {
@@ -418,6 +545,10 @@ impl DocumentBinding {
         if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) { return context.permits(self); }
         false
     }
+    fn evidence_qualified(&self) -> bool {
+        // Existing fixture permits do NOT authorize the new picker/query route.
+        NATIVE_QUALIFIED && cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))
+    }
     fn lock(&self) -> MutexGuard<'_, DocumentState> {
         match self.inner.state.lock() {
             Ok(state) => state,
@@ -433,7 +564,9 @@ impl DocumentBinding {
     }
     fn bump(&self, state: &mut DocumentState) {
         if state.exhausted { return; }
-        if state.unknown { state.github.unknown(); }
+        if state.unknown { state.github.unknown(); state.evidence.revoke(true); }
+        let Some(revision) = state.evidence.revision.checked_add(1) else { self.exhaust(state); return; };
+        state.evidence.revision = revision;
         match status_successor(state.revision) {
             Some(next) => { state.revision = next; self.inner.changes.send_replace(next); }
             None => self.exhaust(state),
@@ -442,6 +575,7 @@ impl DocumentBinding {
     fn exhaust(&self, state: &mut DocumentState) {
         state.exhausted = true; state.unknown = true; state.stopping = true; state.lost_observed = true;
         state.github.exhaust();
+        state.evidence.revision = u64::MAX; state.evidence.revoke(true);
         state.lifetime.invalidate(); invalidate_all(state);
         if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::CleanupUnknown, Instant::now()); slot.phase = Phase::Unknown; }
         stop_quit(state, Instant::now());
@@ -456,6 +590,7 @@ impl DocumentBinding {
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
     fn loss_locked(&self, state: &mut DocumentState) {
         state.lost_observed = true;
+        state.evidence.revoke(false);
         state.github.retire(GitHubReason::Cancelled);
         invalidate_all(state);
         if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::DocumentLost, Instant::now()); }
@@ -538,6 +673,8 @@ impl DocumentBinding {
         if !state.lifetime.original_bound() || state.lost_observed { return Err(BridgeError::new("invalid_edit_owner", "This document does not own that live edit domain.")); }
         if state.stopping { return Err(BridgeError::shutdown()); }
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending { return Err(BridgeError::new("busy", "Finish the original native operation first.")); }
+        if state.slot.as_ref().is_some_and(|slot| slot.operation.evidence()
+            && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(evidence_wire::refused(EvidenceProblem::Busy)); }
         self.inner.bridge.diagnostics.ensure_idle()?;
         action(&self.inner.bridge)
     }
@@ -582,10 +719,43 @@ impl DocumentBinding {
         if self.inner.bridge.diagnostics.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
         if self.inner.bridge.diagnostics.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
         if self.inner.bridge.diagnostics.busy() || state.compatibility_picker_pending { return Err(AssetError::new(Reason::Busy)); }
+        if session && state.slot.as_ref().is_some_and(|slot| slot.operation.evidence()
+            && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
         if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
         if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
         if !self.native_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
         if session && !state.session { return Err(AssetError::new(Reason::Closed)); } Ok(())
+    }
+    fn evidence_gate(&self, state: &DocumentState) -> Result<(), BridgeError> {
+        if !self.evidence_qualified() { return Err(evidence_wire::refused(EvidenceProblem::Unavailable)); }
+        self.gate(state, false).map_err(|error| evidence_wire::refused(evidence_reason(error.reason)))?;
+        idle(state).map_err(|_| evidence_wire::refused(EvidenceProblem::Busy))?;
+        if state.evidence.revoked { return Err(evidence_wire::refused(EvidenceProblem::StaleSelection)); }
+        if self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() { return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
+        if self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() { return Err(evidence_wire::refused(EvidenceProblem::Unavailable)); }
+        if !self.inner.bridge.supervisor.can_exit() || !self.inner.bridge.edits.can_exit() || state.github.native_work_pending() {
+            return Err(evidence_wire::refused(EvidenceProblem::Busy));
+        }
+        Ok(())
+    }
+    pub(crate) fn artifact_evidence_status(&self) -> Result<evidence_wire::Status, BridgeError> {
+        self.reconcile();
+        let mut state = self.lock(); self.expire(&mut state, Instant::now());
+        evidence_snapshot(&state, self.evidence_qualified()).checked()
+    }
+    pub(crate) fn artifact_evidence_cancel(&self, args: evidence_wire::Cancel) -> Result<evidence_wire::Status, BridgeError> {
+        // Match before expire/reconcile: a wrong cancellation is not authority
+        // even to change another slot's status or its clock.
+        let mut state = self.lock();
+        // Do not alter credentials/source/G state or invoke Supervisor STOP.
+        // The existing coordinator retains the exact in-progress query future.
+        if cancel_evidence_locked(&mut state, &args, Instant::now())? { self.bump(&mut state); }
+        evidence_snapshot(&state, self.evidence_qualified()).checked()
+    }
+    #[cfg(feature = "desktop-shell")]
+    fn evidence_failed(&self, owner: &Arc<OriginalWork>, problem: EvidenceProblem) {
+        let mut state = self.lock();
+        if record_evidence_failure(&mut state, owner, problem, Instant::now()) { self.bump(&mut state); }
     }
     fn registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Result<T, AssetError> {
         if result.as_ref().is_err_and(|error| error.reason == Reason::CleanupUnknown) { self.coordinator_failed(state); }
@@ -598,7 +768,7 @@ impl DocumentBinding {
             || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() || self.inner.bridge.diagnostics.stopping() { return GitHubReason::Cancelled; }
         if self.inner.bridge.diagnostics.busy() || state.compatibility_picker_pending { return GitHubReason::Busy; }
         if state.quit_pending || state.retiring || state.lock_pending || state.slot.as_ref().is_some_and(|slot|
-            slot.operation == Operation::ChooseProject && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return GitHubReason::Busy; }
+            slot.operation.blocks_context() && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return GitHubReason::Busy; }
         GitHubReason::None
     }
     fn github_observe_locked(&self, state: &mut DocumentState, now: Instant) {
@@ -722,7 +892,7 @@ impl DocumentBinding {
         self.inner.bridge.diagnostics.ensure_idle()?;
         if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
         if state.retiring || state.lock_pending || state.slot.as_ref().is_some_and(|slot|
-            slot.operation == Operation::ChooseProject && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) {
+            slot.operation.blocks_context() && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) {
             return Err(BridgeError::new("busy", "The original native project selection has not settled."));
         }
         let id = project_id(&self.inner.bridge)?;
@@ -903,7 +1073,7 @@ impl DocumentBinding {
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
         if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
         if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
-        let slot = state.slot.as_mut().filter(|slot| slot.owner.id == id).ok_or_else(AssetError::invalid)?;
+        let slot = state.slot.as_mut().filter(|slot| slot.owner.id == id && !slot.operation.evidence()).ok_or_else(AssetError::invalid)?;
         slot.operation = Operation::Discard; slot.stop(Reason::UserCancelled, Instant::now()); self.bump(&mut state);
         drop(state); Ok(self.status())
     }
@@ -911,7 +1081,10 @@ impl DocumentBinding {
         let mut state = self.lock();
         if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
         invalidate_all(&mut state); state.lock_pending = true;
-        if let Some(slot) = state.slot.as_mut() { slot.operation = Operation::Lock; slot.stop(Reason::UserCancelled, Instant::now()); }
+        if let Some(slot) = state.slot.as_mut() {
+            if !slot.operation.evidence() { slot.operation = Operation::Lock; }
+            slot.stop(Reason::UserCancelled, Instant::now());
+        }
         self.bump(&mut state); drop(state); Ok(self.status())
     }
 }
@@ -940,12 +1113,14 @@ enum ChildEnd { Tokens(TokenBatch), Captured(Material), Probed(asset_source::Pro
 enum Staged {
     Selected { payload: Arc<Payload>, tokens: TokenBatch }, Prepared { result: Result<SafeAssessment, CommandError>, tokens: TokenBatch },
     Delete(TokenBatch), Project { proof: asset_source::ProjectProbe, generation: u32 },
+    EvidenceFolder { proof: asset_source::ProjectProbe, tokens: TokenBatch }, EvidenceObserved(evidence_wire::Observation),
     Committed { bind: Option<Token> }, Bound(Assignment), Refused(Reason),
 }
 #[cfg(feature = "desktop-shell")]
 enum Job {
     Choose { app: tauri::AppHandle, kind: Kind, roster: ProjectRoster },
     Project { app: tauri::AppHandle, generation: u32, origins: Vec<Arc<OriginWitness>> },
+    ChooseEvidenceFolder { app: tauri::AppHandle }, InspectEvidence { root: asset_source::RegisteredRoot },
     Prepare { payload: Arc<Payload>, context: Arc<NativeContext> }, Delete, Retire { bind: Option<Token> }, Bind(Assignment),
 }
 
@@ -1031,7 +1206,7 @@ impl Slot {
         let assessment_context_revision = context.as_ref().map(|context| context.revision);
         Self { owner, operation, phase: Phase::Admitting, reason: Reason::None, source: SourceState::NotRun, settlement: Settlement::Pending,
             context, target, review_end, cleanup_end: None, candidate: None, selection: None, assessment: None, preview: None,
-            assessment_context_revision, staged: None, error: None, project: None, discard: false, kind: None, result_record: None, retired_payload: None }
+            assessment_context_revision, staged: None, error: None, project: None, discard: false, kind: None, result_record: None, retired_payload: None, evidence: None }
     }
 }
 
@@ -1064,6 +1239,7 @@ impl DocumentBinding {
                 // dialog-return or renderer callback. Cancel changes none of
                 // the settled assignments and never renews review time.
                 state.quit_accepted = true; state.stopping = true; invalidate_all(&mut state);
+                state.evidence.revoke(false);
                 state.github.retire(GitHubReason::Cancelled);
                 self.inner.bridge.diagnostics.request_shutdown();
                 if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::Shutdown, now); }
@@ -1232,6 +1408,7 @@ impl DocumentBinding {
             }
         }
         state.slot = Some(slot);
+        settle_evidence_status(&mut state);
         if complete_empty_session_lock(&mut state) { self.bump(&mut state); }
         if state.unknown { invalidate_all(&mut state); }
         drop(state);
@@ -1255,6 +1432,7 @@ impl DocumentBinding {
             if (state.lock_pending || state.stopping || !state.lifetime.original_bound()) && session_data_empty(&state) {
                 state.session = false; state.lock_pending = false;
             }
+            settle_evidence_status(&mut state);
             self.bump(&mut state);
         }
     }
@@ -1263,6 +1441,25 @@ impl DocumentBinding {
         // This function performs bounded memory-only publication. Every source,
         // GTK, parser and original coordinator/child join has already settled.
         match staged {
+            Staged::EvidenceFolder { proof, tokens } => {
+                if state.evidence.revoked || !state.evidence.matches(slot) || slot.operation != Operation::ChooseEvidenceFolder || !tokens_distinct(&tokens) {
+                    slot.stop(Reason::ContextStale, Instant::now()); return;
+                }
+                let selection_id = format!("evidence-{}", tokens.selection.0);
+                let display_name = evidence_display_name(proof.path());
+                state.evidence.selection = Some(EvidenceSelection { view: evidence_wire::Selection { selection_id, display_name },
+                    root: asset_source::RegisteredRoot { path: proof.path().to_path_buf(), identity: proof.identity() }, epoch: state.evidence.epoch });
+                state.evidence.phase = evidence_wire::Phase::Selected; state.evidence.problem = None; state.evidence.result = None;
+                slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+            }
+            Staged::EvidenceObserved(result) => {
+                if !state.evidence.matches(slot) || slot.operation != Operation::InspectEvidence
+                    || !slot.evidence.as_ref().is_some_and(|binding| state.evidence.selection_matches(binding)) {
+                    slot.stop(Reason::ContextStale, Instant::now()); return;
+                }
+                state.evidence.result = Some(result); state.evidence.phase = evidence_wire::Phase::Observed; state.evidence.problem = None;
+                slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+            }
             Staged::Selected { payload, tokens } => {
                 if !tokens_distinct(&tokens) || state.records.iter().any(|record| record.key.id == tokens.record) {
                     slot.staged = Some(Staged::Selected { payload, tokens }); slot.stop(Reason::SourceRefused, Instant::now()); return;
@@ -1412,6 +1609,7 @@ fn offer_preview(state: &DocumentState, slot: &mut Slot, preview: Preview) {
 #[cfg(feature = "desktop-shell")]
 impl DocumentBinding {
     fn install(&self, state: &mut DocumentState, slot: Slot, job: Job) -> Result<oneshot::Sender<()>, AssetError> {
+        settle_evidence_status(state);
         let owner = slot.owner.clone();
         let old_slot = state.slot.take().map(Box::new);
         if let Err(retirement) = owner.retain_retirement(Retirement { old_slot, ..Retirement::default() }) {
@@ -1562,6 +1760,37 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
     match job {
         Job::Retire { bind } => Staged::Committed { bind },
         Job::Bind(assignment) => Staged::Bound(assignment),
+        Job::ChooseEvidenceFolder { app } => {
+            let tokens = match child(owner, ChildJob::Tokens).await {
+                Ok(ChildEnd::Tokens(tokens)) => tokens,
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => { owner.gui.not_created(reason); return Staged::Refused(reason); },
+                _ => { owner.gui.not_created(Reason::CleanupUnknown); return Staged::Refused(Reason::CleanupUnknown); },
+            };
+            let path = match crate::shell::run_owned_dialog(&app, owner, crate::shell::DialogChoice::EvidenceFolder).await {
+                Ok(Some(path)) => path, Ok(None) => return Staged::Refused(Reason::UserCancelled), Err(reason) => return Staged::Refused(reason),
+            };
+            if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
+            // Ordinary directory metadata only, no project publication and no
+            // credential-source capture or user-selected document paths.
+            match child(owner, ChildJob::Probe { path, origins: Vec::new() }).await {
+                Ok(ChildEnd::Probed(proof)) => Staged::EvidenceFolder { proof, tokens },
+                Ok(ChildEnd::Refused(reason)) | Err(reason) => Staged::Refused(reason), _ => Staged::Refused(Reason::CleanupUnknown),
+            }
+        }
+        Job::InspectEvidence { root } => {
+            if let Err(reason) = document.phase(owner, Phase::Assessing) { return Staged::Refused(reason); }
+            if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
+            let result = document.inner.bridge.observe_candidate_evidence(&root).await;
+            if let Err(error) = &result { document.evidence_failed(owner, evidence_wire::core_problem(error)); }
+            // Keep the same query/coordinator if its Supervisor reported
+            // unknown cleanup. No new wait lease, global cancel or clock.
+            if document.inner.bridge.supervisor.disabled() {
+                { let mut state = document.lock(); document.coordinator_failed(&mut state); }
+                while !document.inner.bridge.supervisor.can_exit() { tokio::time::sleep(Duration::from_millis(50)).await; }
+            }
+            if owner.interrupted() { return Staged::Refused(Reason::UserCancelled); }
+            match result { Ok(result) => Staged::EvidenceObserved(result), Err(_) => Staged::Refused(Reason::SourceRefused) }
+        }
         Job::Choose { app, kind, roster } => {
             let tokens = match child(owner, ChildJob::Tokens).await {
                 Ok(ChildEnd::Tokens(tokens)) => tokens,
@@ -1622,6 +1851,35 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
 
 #[cfg(feature = "desktop-shell")]
 impl DocumentBinding {
+    pub(crate) fn artifact_evidence_choose(&self, app: tauri::AppHandle) -> Result<evidence_wire::Status, BridgeError> {
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.evidence_gate(&state)?;
+        let Some(epoch) = state.evidence.epoch.checked_add(1) else { self.exhaust(&mut state); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); };
+        let id = self.next_operation(&mut state).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
+        if id == u32::MAX { self.exhaust(&mut state); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
+        let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
+        let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Choose, selection_id: None, epoch };
+        let mut slot = Slot::new(owner, Operation::ChooseEvidenceFolder, None, None, None); slot.evidence = Some(binding.clone());
+        // Only an accepted evidence choose revokes the previous evidence ID.
+        // Source-project selection, drafts, assignments and G are untouched.
+        state.evidence.epoch = epoch; state.evidence.selection = None; state.evidence.result = None; state.evidence.problem = None;
+        state.evidence.phase = evidence_wire::Phase::Choosing; state.evidence.operation = Some(binding);
+        let start = self.install(&mut state, slot, Job::ChooseEvidenceFolder { app }).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
+        let status = evidence_snapshot(&state, true).checked()?; drop(state); let _ = start.send(()); Ok(status)
+    }
+    pub(crate) fn artifact_evidence_observe(&self, args: evidence_wire::Observe) -> Result<evidence_wire::Status, BridgeError> {
+        self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now()); self.evidence_gate(&state)?;
+        let selected = state.evidence.selection.as_ref().filter(|selection| selection.view.selection_id == args.selection_id
+            && selection.epoch == state.evidence.epoch).ok_or_else(|| evidence_wire::refused(EvidenceProblem::StaleSelection))?;
+        let root = selected.root.clone(); let epoch = selected.epoch;
+        let id = self.next_operation(&mut state).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
+        if id == u32::MAX { self.exhaust(&mut state); return Err(evidence_wire::refused(EvidenceProblem::CleanupUnknown)); }
+        let owner = OriginalWork::new(id, false, Arc::downgrade(&self.inner));
+        let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Observe, selection_id: Some(args.selection_id), epoch };
+        let mut slot = Slot::new(owner, Operation::InspectEvidence, None, None, None); slot.evidence = Some(binding.clone());
+        state.evidence.result = None; state.evidence.problem = None; state.evidence.phase = evidence_wire::Phase::Observing; state.evidence.operation = Some(binding);
+        let start = self.install(&mut state, slot, Job::InspectEvidence { root }).map_err(|e| evidence_wire::refused(evidence_reason(e.reason)))?;
+        let status = evidence_snapshot(&state, true).checked()?; drop(state); let _ = start.send(()); Ok(status)
+    }
     fn consume_preview(&self, state: &mut DocumentState, token: &str, bind: bool) -> Result<Preview, AssetError> {
         if state.slot.as_ref().is_some_and(|slot| slot.preview.as_ref().is_some_and(|preview| !preview_subject_valid(state, slot, preview))) {
             return Err(self.refuse_consumed(state, AssetError::invalid()));
@@ -1970,12 +2228,123 @@ mod tests {
             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
             compatibility_picker_pending: false,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
-            github: ConnectionState::new() }
+            github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
     }
     fn scalar() -> Arc<Payload> { Arc::new(Payload { kind: Kind::GoogleWif, material: None, fields: None }) }
     fn slot(target: Option<RecordKey>, review: Option<Instant>) -> Slot {
         let mut slot = Slot::new(OriginalWork::new(1, false, Weak::new()), Operation::Prepare, None, target, review);
         slot.kind = Some(Kind::GoogleWif); slot
+    }
+
+    fn evidence_model(id: u32) -> (DocumentState, Arc<OriginalWork>) {
+        let mut state = empty_state();
+        let owner = OriginalWork::new(id, false, Weak::new());
+        let binding = EvidenceBinding { operation_id: id, kind: evidence_wire::OperationKind::Observe,
+            selection_id: Some("evidence-model".to_owned()), epoch: 4 };
+        let mut work = Slot::new(owner.clone(), Operation::InspectEvidence, None, None, None); work.evidence = Some(binding.clone());
+        state.evidence.epoch = 4; state.evidence.operation = Some(binding); state.evidence.phase = evidence_wire::Phase::Observing;
+        state.evidence.selection = Some(EvidenceSelection { view: evidence_wire::Selection { selection_id: "evidence-model".to_owned(), display_name: "Model".to_owned() },
+            root: asset_source::RegisteredRoot { path: "/synthetic/never-opened/evidence".into(), identity: asset_source::DirectoryIdentity::synthetic_evidence_identity() }, epoch: 4 });
+        state.slot = Some(work); (state, owner)
+    }
+    fn evidence_cancel(id: u32) -> evidence_wire::Cancel {
+        evidence_wire::Cancel { operation_id: id.to_string(), selection_id: Some("evidence-model".to_owned()) }
+    }
+
+    #[test]
+    fn evidence_stop_matches_original_job_not_just_selection_or_shared_slot() {
+        let (mut state, owner) = evidence_model(2); let at = Instant::now();
+        let before = serde_json::to_value(evidence_snapshot(&state, true)).unwrap();
+        // Observe1's delayed STOP cannot affect Observe2 under the same folder.
+        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(1), at).is_err());
+        let mut wrong = evidence_cancel(2); wrong.selection_id = Some("evidence-other".to_owned());
+        assert!(cancel_evidence_locked(&mut state, &wrong, at).is_err());
+        assert_eq!(serde_json::to_value(evidence_snapshot(&state, true)).unwrap(), before); assert!(!owner.stopped());
+        state.slot.as_mut().unwrap().operation = Operation::Prepare;
+        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(2), at).is_err()); assert!(!owner.stopped());
+        state.slot.as_mut().unwrap().operation = Operation::InspectEvidence;
+        state.evidence.epoch += 1;
+        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(2), at).is_err()); assert!(!owner.stopped());
+    }
+
+    #[test]
+    fn evidence_cancel_preserves_source_context_records_github_and_first_cleanup() {
+        let (mut state, owner) = evidence_model(3); let at = Instant::now();
+        let root = asset_source::RegisteredRoot { path: "/synthetic/never-opened/project".into(), identity: asset_source::DirectoryIdentity::synthetic_evidence_identity() };
+        let context = Arc::new(NativeContext { revision: 9, project_id: "source-project".to_owned(), project: root, registry_generation: 7,
+            draft: b"{\"unchanged\":true}".to_vec(), platform: Platform::Android, stage: Stage::Candidate, purpose: Purpose::Full });
+        state.context = Some(context.clone());
+        state.records.push(Record { key: RecordKey { id: token('a'), revision: 1 }, payload: scalar(), mutation_pending: false });
+        state.assignments.push(Assignment { kind: Kind::GoogleWif, record_id: token('a'), record_revision: 1, context_revision: 9, availability: AssignmentAvailability::Available });
+        let github = serde_json::to_value(state.github.snapshot()).unwrap(); let original_endpoint = owner.endpoint();
+        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(3), at).unwrap());
+        let cleanup = state.slot.as_ref().unwrap().cleanup_end;
+        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(3), at + WORK).unwrap());
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, cleanup); assert_eq!(owner.endpoint(), original_endpoint);
+        assert!(Arc::ptr_eq(state.context.as_ref().unwrap(), &context)); assert_eq!(state.records.len(), 1); assert!(!state.records[0].mutation_pending);
+        assert_eq!(state.assignments.len(), 1); assert!(state.assignments[0].availability == AssignmentAvailability::Available);
+        assert_eq!(serde_json::to_value(state.github.snapshot()).unwrap(), github);
+        assert!(state.evidence.selection.is_some()); assert!(owner.stopped());
+        assert_eq!(evidence_snapshot(&state, true).phase, evidence_wire::Phase::Stopping);
+        // Synthetic coordinator fact tests the publication predicate only.
+        // No task ran, and this is not native join/cleanup evidence.
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        state.slot.as_mut().unwrap().phase = Phase::Idle;
+        settle_evidence_status(&mut state);
+        assert_eq!(evidence_snapshot(&state, true).phase, evidence_wire::Phase::Cancelled);
+        assert_eq!(evidence_snapshot(&state, true).problem, Some(EvidenceProblem::Cancelled));
+        let unrelated = OriginalWork::new(4, false, Weak::new());
+        state.slot = Some(Slot::new(unrelated.clone(), Operation::Prepare, None, None, None));
+        assert!(!cancel_evidence_locked(&mut state, &evidence_cancel(3), at).unwrap()); assert!(!unrelated.stopped());
+    }
+
+    #[test]
+    fn evidence_late_error_preserves_first_stop_and_original_deadline() {
+        for first in [Reason::UserCancelled, Reason::Deadline] {
+            let (mut state, owner) = evidence_model(5); let at = Instant::now();
+            state.slot.as_mut().unwrap().stop(first, at); let cleanup = state.slot.as_ref().unwrap().cleanup_end;
+            for later in [EvidenceProblem::ObservationFailed, EvidenceProblem::Deadline, EvidenceProblem::Limit] {
+                assert!(!record_evidence_failure(&mut state, &owner, later, at + WORK));
+                assert_eq!(evidence_snapshot(&state, true).problem, Some(evidence_reason(first)));
+                assert_eq!(state.slot.as_ref().unwrap().cleanup_end, cleanup);
+            }
+        }
+        let (mut state, owner) = evidence_model(6); let end = owner.endpoint().unwrap();
+        assert!(record_evidence_failure(&mut state, &owner, EvidenceProblem::ObservationFailed, end + WORK));
+        assert_eq!(evidence_snapshot(&state, true).problem, Some(EvidenceProblem::Deadline));
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(end + CLEANUP));
+        let (mut state, owner) = evidence_model(7); let end = owner.endpoint().unwrap();
+        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(7), end + WORK).unwrap());
+        assert_eq!(evidence_snapshot(&state, true).problem, Some(EvidenceProblem::Deadline));
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, Some(end + CLEANUP));
+    }
+
+    #[test]
+    fn evidence_unknown_retains_original_binding_and_cannot_become_late_success() {
+        let (mut state, owner) = evidence_model(8); let at = Instant::now();
+        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(8), at).unwrap());
+        let cleanup = state.slot.as_ref().unwrap().cleanup_end;
+        assert!(record_evidence_failure(&mut state, &owner, EvidenceProblem::CleanupUnknown, at + WORK));
+        state.evidence.revoke(true);
+        assert!(cancel_evidence_locked(&mut state, &evidence_cancel(8), at + WORK).unwrap());
+        assert_eq!(state.slot.as_ref().unwrap().cleanup_end, cleanup);
+        owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+        let slot = state.slot.as_mut().unwrap(); slot.phase = Phase::Idle; slot.settlement = Settlement::LateKnown;
+        settle_evidence_status(&mut state);
+        let status = evidence_snapshot(&state, true);
+        assert_eq!(status.phase, evidence_wire::Phase::Unknown); assert_eq!(status.problem, Some(EvidenceProblem::CleanupUnknown));
+        assert_eq!(status.operation.unwrap().operation_id, "8"); assert!(status.selection.is_none() && status.result.is_none());
+    }
+
+    #[test]
+    fn evidence_folder_label_is_bounded_and_never_a_full_or_controlled_path() {
+        use std::path::Path;
+        assert_eq!(evidence_display_name(Path::new("/private/source/Évidence")), "Évidence");
+        for leaf in ["hidden\u{200b}name", "soft\u{00ad}name", "bidi\u{202e}name", "slash\\name", "line\nname"] {
+            assert_eq!(evidence_display_name(&Path::new("/private/source").join(leaf)), "Selected evidence folder");
+        }
+        assert_eq!(evidence_display_name(&Path::new("/private/source").join("a".repeat(129))), "Selected evidence folder");
+        assert_eq!(evidence_display_name(Path::new("/")), "Selected evidence folder");
     }
 
     #[test]

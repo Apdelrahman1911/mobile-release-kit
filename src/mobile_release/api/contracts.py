@@ -50,6 +50,78 @@ class ReleaseVersionObservationResult(TypedDict):
     assurance: Assurance
 
 
+CandidateEvidenceKind = Literal["manifest", "receipt", "intent"]
+CandidateEvidenceRole = Literal["android-aab", "android-mapping", "android-native-symbols", "ios-ipa",
+                                "ios-archive", "ios-dsyms", "store-metadata", "validation-report"]
+
+
+class CandidateEvidenceDocument(TypedDict):
+    kind: CandidateEvidenceKind
+    state: Literal["missing", "invalid", "valid"]
+
+
+class CandidateEvidenceVersion(TypedDict):
+    marketing: str
+    build: int
+
+
+class CandidateEvidenceSource(TypedDict):
+    commit: str
+    tree: str
+
+
+class CandidateEvidenceArtifact(TypedDict):
+    logicalName: CandidateEvidenceRole
+    declaredBytes: str  # Positive decimal text; not a measured size or JS number.
+    sha256: str
+
+
+class CandidateEvidenceRun(TypedDict):
+    runId: str
+    attempt: str  # Preserve up to 64 decimal digits without renderer rounding.
+
+
+class CandidateEvidenceRuns(TypedDict):
+    authorizedBy: CandidateEvidenceRun
+    executedBy: CandidateEvidenceRun
+    producedBy: CandidateEvidenceRun
+
+
+class CandidateEvidenceDigests(TypedDict):
+    manifest: str
+    receipt: str
+    intent: str
+
+
+class CandidateEvidenceSummary(TypedDict):
+    platform: Literal["android", "ios"]
+    applicationId: str
+    version: CandidateEvidenceVersion
+    source: CandidateEvidenceSource
+    artifacts: list[CandidateEvidenceArtifact]
+    recordedRuns: CandidateEvidenceRuns
+    documentPayloadSha256: CandidateEvidenceDigests
+
+
+class CandidateEvidenceAssurance(TypedDict):
+    level: Literal["local-document-consistency"]
+    documentsOnly: Literal[True]
+    artifactBytesVerified: Literal[False]
+    workflowAuthenticated: Literal[False]
+    storeStateObserved: Literal[False]
+    comparedWithSourceProject: Literal[False]
+    releaseReady: Literal[False]
+    recoveryAuthorized: Literal[False]
+
+
+class CandidateEvidenceResult(TypedDict):
+    schemaVersion: Literal[1]
+    outcome: Literal["consistent", "incomplete", "invalid", "inconsistent"]
+    documents: list[CandidateEvidenceDocument]  # Exactly manifest/receipt/intent, in that order.
+    summary: CandidateEvidenceSummary | None  # Only present for consistent, after original cleanup.
+    assurance: CandidateEvidenceAssurance
+
+
 EnvironmentPlatform = Literal["android", "ios"]
 EnvironmentOperation = Literal["build", "artifact-validation"]
 EnvironmentRole = Literal["android-jdk", "android-gradle-wrapper", "android-sdk", "android-bundletool",

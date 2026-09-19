@@ -92,6 +92,13 @@ impl DesktopBridge {
             .map_err(crate::release_version_protocol::public_error)?;
         crate::release_version_protocol::result(value)
     }
+    pub(crate) async fn observe_candidate_evidence(&self, root: &crate::asset_source::RegisteredRoot) -> Result<crate::candidate_evidence_protocol::Observation, BridgeError> {
+        // Only the separate native evidence registry can supply this identity.
+        // The caller retains its original coordinator through query settlement.
+        let params = crate::candidate_evidence_protocol::params(root)?;
+        let value = self.supervisor.query(Method::CandidateEvidenceObserve, params).await?;
+        crate::candidate_evidence_protocol::result(value)
+    }
     pub(crate) async fn observe_metadata_text(&self, input: crate::metadata_text_commands::Open) -> Result<crate::metadata_text_edit_protocol::Observation, BridgeError> {
         // Only the native-selected root reaches this bounded named-file query.
         // No checkout/write authority is created by a passive observation.

@@ -13,6 +13,7 @@ import { metadataTextError, parseMetadataTextGuide } from './metadataTextProtoco
 import { environmentError, environmentRequestFits } from './environment.ts';
 import { environmentDiagnosticsError } from './environmentDiagnosticsProtocol.ts';
 import { releaseVersionError } from './releaseVersion.ts';
+import { evidenceError } from './candidateEvidence.ts';
 import type { EnvironmentRequest, EnvironmentResult, EnvironmentRole, EnvironmentRequirement } from './environment.ts';
 import type { ApiError, Assurance, Catalog, DesktopApi, FieldHelp, JsonObject, ProjectSnapshot } from './types.ts';
 
@@ -117,6 +118,11 @@ export const previewApi: DesktopApi = {
     capabilities: null,
   }),
   chooseProject: async () => ({ id: 'preview-example', name: 'Northstar Notes', path: example.root }),
+  // No fabricated folder, documents, lifecycle or successful result in preview.
+  chooseEvidenceFolder: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
+  evidenceStatus: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
+  observeEvidence: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
+  cancelEvidence: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
   snapshot: async () => structuredClone(example),
   observeReleaseVersion: async () => {
     // No successful saved-file fixture, including after native bridge failure.

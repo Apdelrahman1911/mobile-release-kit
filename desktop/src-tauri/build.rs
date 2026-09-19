@@ -34,6 +34,7 @@ fn main() {
         const COMMANDS: &[&str] = &[
             "app_info", "choose_project", "project_snapshot", "catalog",
             "environment_requirements", "release_version_observe",
+            "artifact_evidence_choose", "artifact_evidence_status", "artifact_evidence_observe", "artifact_evidence_cancel",
             "start_environment_diagnostics", "environment_diagnostics_status", "cancel_environment_diagnostics",
             "validate_config", "suggest_config", "preview_config", "propose_github_setup",
             "open_config_edit", "prepare_config_edit", "apply_config_edit",

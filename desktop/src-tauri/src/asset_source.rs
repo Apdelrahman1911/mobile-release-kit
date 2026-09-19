@@ -11,7 +11,17 @@ pub(crate) const DESCRIPTOR_LIMIT: usize = 512;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DirectoryIdentity { dev: u64, ino: u64, mode: u32, uid: u32, gid: u32 }
 impl DirectoryIdentity {
+    #[cfg(test)]
+    pub(crate) fn synthetic_evidence_identity() -> Self {
+        // Predicate DATA only: no path is opened and no native proof is issued.
+        Self { dev: 1, ino: 2, mode: 0o40700, uid: 123, gid: 123 }
+    }
     pub(crate) fn same_object(self, other: Self) -> bool { self.dev == other.dev && self.ino == other.ino }
+    pub(crate) fn evidence_identity(self) -> crate::candidate_evidence_protocol::RootIdentity {
+        crate::candidate_evidence_protocol::RootIdentity {
+            device: self.dev.to_string(), inode: self.ino.to_string(), mode: self.mode, uid: self.uid, gid: self.gid,
+        }
+    }
     pub(crate) fn workflow_identity(self) -> crate::github_workflow_edit_protocol::RegisteredIdentity {
         // This closed private authority DTO is not the test-only projection.
         // Preserve full st_mode and both ownership fields, with lossless u64s.

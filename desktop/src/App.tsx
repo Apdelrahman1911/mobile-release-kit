@@ -11,6 +11,7 @@ import { GitHubSetupController } from './githubSetupController.ts';
 import { EnvironmentController } from './environment.ts';
 import { ReleaseVersionController } from './releaseVersion.ts';
 import { ReleaseInputGuidanceController } from './releaseInputGuidance.ts';
+import { CandidateEvidenceController } from './candidateEvidence.ts';
 import { EnvironmentDiagnosticsController, diagnosticsOwnerReason } from './environmentDiagnosticsController.ts';
 import { GitHubConnectionController } from './githubConnectionController.ts';
 import { connectionRepository } from './githubConnectionProtocol.ts';
@@ -36,7 +37,8 @@ import { Dashboard } from './pages/Dashboard.tsx';
 import { Environment } from './pages/Environment.tsx';
 import { Credentials } from './pages/Credentials.tsx';
 import { Metadata } from './pages/Metadata.tsx';
-import { Artifacts, Recovery, Releases } from './pages/Future.tsx';
+import { Recovery, Releases } from './pages/Future.tsx';
+import { Artifacts } from './pages/Artifacts.tsx';
 import { GitHub } from './pages/GitHub.tsx';
 
 const navigation: { id: Page; label: string; icon: IconName; group: 'workspace' | 'release' }[] = [
@@ -217,6 +219,9 @@ export function App() {
   }));
   assetControllerRef.current = assetSession;
   const assetState = useSyncExternalStore(assetSession.subscribe, assetSession.getSnapshot, assetSession.getSnapshot);
+  // Evidence selection has deliberately no source-project or draft callback.
+  const [candidateEvidence] = useState(() => new CandidateEvidenceController());
+  const evidenceState = useSyncExternalStore(candidateEvidence.subscribe, candidateEvidence.getSnapshot, candidateEvidence.getSnapshot);
   const requests = useRef(0);
   const bootGeneration = useRef(0);
   const main = useRef<HTMLElement>(null);
@@ -245,6 +250,7 @@ export function App() {
     releaseVersion.beginConnection();
     releaseInputs.beginConnection();
     diagnostics.beginConnection();
+    candidateEvidence.beginConnection();
     metadataText.beginConnection();
     setLoading(true);
     setBootError(null);
@@ -256,6 +262,7 @@ export function App() {
       // This fixed native Status has its own qualification gate. Passive
       // appInfo/catalogue success never enables tool execution.
       void diagnostics.connect(connection);
+      void candidateEvidence.connect(connection);
       const port: GitHubConnectionObservationPort = {
         mode: connection.mode, subscribe: connection.subscribeGitHubConnection, status: connection.githubConnectionStatus,
         refresh: connection.refreshGitHubConnection, disconnect: connection.disconnectGitHubConnection,
@@ -303,7 +310,7 @@ export function App() {
     } finally {
       if (generation === bootGeneration.current) setLoading(false);
     }
-  }, [githubSetup, githubConnection, environment, releaseVersion, releaseInputs, diagnostics, metadataText, syncConnectionContext]);
+  }, [githubSetup, githubConnection, environment, releaseVersion, releaseInputs, diagnostics, candidateEvidence, metadataText, syncConnectionContext]);
 
   useEffect(() => {
     void bootstrap();
@@ -317,6 +324,7 @@ export function App() {
   useEffect(() => () => releaseVersion.dispose(), [releaseVersion]);
   useEffect(() => () => releaseInputs.dispose(), [releaseInputs]);
   useEffect(() => () => diagnostics.dispose(), [diagnostics]);
+  useEffect(() => () => candidateEvidence.dispose(), [candidateEvidence]);
   useEffect(() => () => githubConnection.dispose(), [githubConnection]);
   useEffect(() => { if (api) void workflowEdit.connect(api); }, [api, workflowEdit]);
   useEffect(() => () => workflowEdit.dispose(), [workflowEdit]);
@@ -501,7 +509,7 @@ export function App() {
             handoff={connectionHandoffRef.current} />
             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}</>} />}
         {page === 'releases' && <Releases info={info} />}
-        {page === 'artifacts' && <Artifacts info={info} />}
+        {page === 'artifacts' && <Artifacts state={evidenceState} controller={candidateEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />}
         {page === 'recovery' && <Recovery info={info} />}
         <footer className="workspace-footer"><span><Icon name="shield" size={14} />Configuration is not verification.</span><span>{preview ? 'Illustration only · no engine connected' : 'Configuration desktop slice · not a completed release product'}</span></footer>
       </main>

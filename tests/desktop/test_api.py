@@ -188,6 +188,13 @@ class ApiPureTests(unittest.TestCase):
         self.assertEqual(result["metadata"]["assurance"], "format-rules-only")
 
     def test_import_graph_refuses_runtime_execution_and_native_modules(self):
+        fixtures = Path(__file__).resolve().parents[1] / "fixtures"
+        candidate_documents = [
+            (name, (fixtures / fixture).read_text(encoding="utf-8"))
+            for name, fixture in (("candidate-manifest.json", "candidate-valid.json"),
+                                  ("candidate-receipt.json", "receipt-candidate-valid.json"),
+                                  ("operation/candidate-operation-intent.json", "intent-candidate-valid.json"))
+        ]
         forbidden = {
             "mobile_release.cli", "mobile_release.credentials", "mobile_release.cancellation",
             "mobile_release.owned_process", "mobile_release._native_process", "mobile_release._command_process",
@@ -223,6 +230,24 @@ class ApiPureTests(unittest.TestCase):
                     with self.assertRaises(fresh.ApiError) as refused:
                         fresh.execute("release.version.observe", {})
                     self.assertEqual(refused.exception.code, "release_version_invalid_params")
+                    with self.assertRaises(fresh.ApiError) as evidence_refused:
+                        fresh.execute("artifacts.candidate.observe", {})
+                    self.assertEqual(evidence_refused.exception.code, "invalid_params")
+                # Positive actual fixed-three/chain validation, not merely an
+                # early refusal which could hide a forbidden lazy import.
+                if sys.platform.startswith("linux"):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        root = Path(temporary)
+                        for name, content in candidate_documents:
+                            put(root, name, content)
+                        observed = root.stat()
+                        params = {"root": str(root), "expectedRoot": {
+                            "device": str(observed.st_dev), "inode": str(observed.st_ino),
+                            "mode": observed.st_mode, "uid": observed.st_uid, "gid": observed.st_gid,
+                        }}
+                        evidence_result = fresh.execute("artifacts.candidate.observe", params)
+                        self.assertEqual(evidence_result["outcome"], "consistent")
+                        self.assertFalse(evidence_result["assurance"]["workflowAuthenticated"])
                 self.assertFalse(forbidden & set(sys.modules))
                 # Negative control: the guard actually rejects a forbidden route.
                 with self.assertRaisesRegex(AssertionError, "forbidden runtime import"):
@@ -239,7 +264,8 @@ class ApiPureTests(unittest.TestCase):
                                        "config.validate": True, "config.suggest": True, "config.preview": True,
                                        "github.setup.propose": True, "credentials.assess": True,
                                        "metadata.text.observe": False, "metadata.text.validate": True,
-                                        "environment.requirements": True, "release.version.observe": False})
+                                        "environment.requirements": True, "release.version.observe": False,
+                                        "artifacts.candidate.observe": False})
             self.assertTrue(execute("config.validate", {"draft": draft()})["valid"])
             with self.assertRaises(ApiError) as caught:
                 execute("project.snapshot", {"root": "C:\\selected"})

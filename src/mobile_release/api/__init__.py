@@ -13,6 +13,8 @@ from typing import Any
 from .. import __version__
 from ..config import parse_config_text
 from ..errors import ConfigurationError
+from ._candidate_evidence import (candidate_evidence_observation_available,
+                                 observe_candidate_evidence)
 from ._catalog import catalog, requirement_descriptors
 from ._credential_assessment import assess_credentials
 from ._environment import environment_requirements
@@ -29,7 +31,7 @@ from .contracts import ApiError, CapabilitiesResult, ValidateResult, assurance, 
 __all__ = ["ApiError", "execute"]
 METHODS = ("capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
            "github.setup.propose", "credentials.assess", "metadata.text.observe", "metadata.text.validate",
-           "environment.requirements", "release.version.observe")
+           "environment.requirements", "release.version.observe", "artifacts.candidate.observe")
 _FUTURE_ACTIONS = (
     "project.initialize", "config.save", "doctor", "preflight.offline",
     "preflight.signing", "preflight.online", "android.build", "ios.build",
@@ -48,13 +50,18 @@ def capabilities() -> CapabilitiesResult:
         "methods": [
             {"method": name, "available": (snapshot_available() if name == "project.snapshot" else
                                            metadata_text_observation_available() if name == "metadata.text.observe" else
-                                           release_version_observation_available() if name == "release.version.observe" else True),
+                                           release_version_observation_available() if name == "release.version.observe" else
+                                           candidate_evidence_observation_available() if name == "artifacts.candidate.observe" else True),
              "reason": ("Static snapshots are unavailable on this profile; the staged Windows reader awaits independent ABI/native qualification."
                         if name == "project.snapshot" and not snapshot_available()
                          else "Selected public text observation is unavailable on this platform."
                          if name == "metadata.text.observe" and not metadata_text_observation_available()
                          else "Saved release-version observation is unavailable on this platform."
                          if name == "release.version.observe" and not release_version_observation_available()
+                         else "Local candidate evidence inspection is unavailable on this platform."
+                         if name == "artifacts.candidate.observe" and not candidate_evidence_observation_available()
+                         else "Local document consistency; provenance and artifact bytes unverified."
+                         if name == "artifacts.candidate.observe"
                         else "Pure supplied-input assessment only; no selected files, native or service verification."
                         if name == "credentials.assess"
                         else "Implemented passive API; no native, signing or Store verification.")}
@@ -71,6 +78,7 @@ def capabilities() -> CapabilitiesResult:
             "The staged Windows original-parent snapshot reader remains disabled pending independent ABI/native W1-W6 qualification.",
             "Windows build/process ownership, configuration writes and packaged-runtime custody have separate closed gates.",
             "A native desktop bridge and packaged standalone runtime require their own verification.",
+            "The candidate inspector reads three separately selected local documents only; artifact bytes, provenance and source-project association remain unverified.",
         ],
     }
 
@@ -102,6 +110,8 @@ def execute(method: str, params: dict[str, Any]) -> dict[str, Any]:
         return validate_metadata_text(params)
     if method == "release.version.observe":
         return observe_release_version(params)
+    if method == "artifacts.candidate.observe":
+        return observe_candidate_evidence(params)
     if type(params) is not dict or any(type(key) is not str for key in params):
         raise ApiError("invalid_params", "Method parameters must be a JSON object with string keys")
     allowed = {"project.snapshot": {"root", "configPath"}, "config.validate": {"draft"},

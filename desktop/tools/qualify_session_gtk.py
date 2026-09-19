@@ -70,6 +70,7 @@ SOURCES = (
     'desktop/src-tauri/src/asset_session.rs',
     'desktop/src-tauri/src/asset_source.rs',
     'desktop/src-tauri/src/bridge.rs',
+    'desktop/src-tauri/src/candidate_evidence_protocol.rs',
     'desktop/src-tauri/src/credential_assessment.rs',
     'desktop/src-tauri/src/credential_format.rs',
     'desktop/src-tauri/src/document_lifetime.rs',
@@ -121,6 +122,7 @@ SOURCES = (
     'desktop/src/assetSessionProtocol.ts',
     'desktop/src/assetSessionTypes.ts',
     'desktop/src/bridge.ts',
+    'desktop/src/candidateEvidence.ts',
     'desktop/src/catalog.ts',
     'desktop/src/certainty.ts',
     'desktop/src/components/Common.tsx',
@@ -159,6 +161,7 @@ SOURCES = (
     'desktop/src/metadataText.ts',
     'desktop/src/metadataTextEditController.ts',
     'desktop/src/metadataTextProtocol.ts',
+    'desktop/src/pages/Artifacts.tsx',
     'desktop/src/pages/Credentials.tsx',
     'desktop/src/pages/Dashboard.tsx',
     'desktop/src/pages/Environment.tsx',
@@ -172,6 +175,7 @@ SOURCES = (
     'desktop/src/requirementProtocol.ts',
     'desktop/src/styles.css',
     'desktop/src/types.ts',
+    'desktop/tests/fixtures/candidate-evidence.json',
     'desktop/tools/qualify_session_gtk.py',
     'desktop/tsconfig.json',
     'desktop/vite.config.mjs',
@@ -198,6 +202,7 @@ SOURCES = (
     'src/mobile_release/android.py',
     'src/mobile_release/android_upload_validation.py',
     'src/mobile_release/api/__init__.py',
+    'src/mobile_release/api/_candidate_evidence.py',
     'src/mobile_release/api/_catalog.py',
     'src/mobile_release/api/_credential_assessment.py',
     'src/mobile_release/api/_credential_guide.py',
@@ -1591,7 +1596,7 @@ class Freeze:
         require(Path(__file__).resolve(strict=True) == launcher and os.getcwd() == str(repository / "desktop/src-tauri"), "fixed actual launcher source/cwd")
         require(type(v["display"]) is str and re.fullmatch(r":[1-9][0-9]{0,3}", v["display"]) is not None
                 and os.environ.get("DISPLAY") == v["display"], "fixed inherited display number")
-        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 223, "complete frozen223 source roster")
+        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 228, "complete frozen228 source roster")
         for path in SOURCES:
             h(v["sourceHashes"][path])
             actual, st = book.hash_file(exact_path(repository / path), 2 * 1024 * 1024)
@@ -2656,7 +2661,7 @@ def inert_source_tests() -> None:
     raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
     fixed(FiniteJson(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
     longest = max(SOURCES, key=len)
-    assert len(SOURCES) == 223 and 64 < len(longest) <= 128 and len(WITNESS) == 18
+    assert len(SOURCES) == 228 and 64 < len(longest) <= 128 and len(WITNESS) == 18
     raw = (json.dumps({longest: "a" * 64}, separators=(",", ":")) + "\n").encode("ascii")
     rejects(lambda data: FiniteJson(data, native=True).parse(lf=True), raw)
     base = {"response-decision": 1, "response-leave": 3, "close-dispatch": 2, "close-enter": 4, "close-ack": 5, "close-leave": 6,
