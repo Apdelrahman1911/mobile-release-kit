@@ -131,7 +131,9 @@ impl BoundInputs {
         require(data.schema_version == 1 && data.scope == SCOPE && data.platform == std::env::consts::OS
             && data.target == crate::runtime::COMPILED_TARGET && hex(&data.source_sha, 40) && hex(&data.source_tree, 40)
             && data.workflow_sha == data.source_sha && data.workflow_path == WORKFLOW
-            && data.r#ref == "refs/heads/verify/desktop-environment-diagnostics-native"
+            && matches!((data.r#ref.as_str(), data.platform.as_str()),
+                ("refs/heads/verify/desktop-environment-diagnostics-native", "linux" | "macos")
+                | ("refs/heads/verify/desktop-environment-diagnostics-native-macos", "macos"))
             && ["push", "workflow_dispatch"].contains(&data.event.as_str()) && !data.repository.is_empty()
             && data.workflow_ref == format!("{}/{WORKFLOW}@{}", data.repository, data.r#ref)
             && !data.run_id.is_empty() && data.run_id.bytes().all(|b| b.is_ascii_digit())

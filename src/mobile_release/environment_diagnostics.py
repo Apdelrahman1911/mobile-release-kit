@@ -119,11 +119,12 @@ class DiagnosticsRun:
             return None
         try:
             if result.stderr:
-                raise ToolUnavailable()
+                raise ToolUnavailable(selection_diagnostic={"stage": "selector-output", "reason": "stderr-present"})
             developer = self.lookup.mac_developer(result.stdout)
             self.lookup.recheck(developer)
-        except ToolUnavailable:
-            self.checks[role] = row(role, "completed", "selection-unrecognized", returncode=0)
+        except ToolUnavailable as error:
+            self.checks[role] = row(role, "completed", "selection-unrecognized", returncode=0,
+                selection_diagnostic=error.selection_diagnostic)
             self.current = None
             return None
         self.checks[role] = row(role, "completed", "observed", returncode=0)

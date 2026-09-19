@@ -107,6 +107,48 @@ test('fixed Linux/macOS rosters preserve complete negative observations and Java
   assert.ok(parseEnvironmentDiagnosticsStatus(status(1, null, finished({ context: result.context, result }))));
 });
 
+test('optional selection detail is closed DATA on the original mac negative row, never extra observation authority', () => {
+  const result = core(CONTEXT, 'macos');
+  result.checks = result.checks.map((row, index) => ({ ...row, state: index === 0 ? 'completed' : 'not-run',
+    reason: index === 0 ? 'selection-unrecognized' : 'unselected-installation', version: null, build: null,
+    returnCode: index === 0 ? 0 : null, assessment: 'not-assessed' }));
+  result.commandsAttempted = 1; result.lifetime.commands = 1;
+  const parse = (value) => parseEnvironmentDiagnosticsStatus(status(1, null, finished({ context: value.context, result: value, outcome: value.outcome })));
+  assert.ok(parse(result));
+  // Missing and explicit null are absent on any otherwise-valid row. A
+  // present undefined is not DATA and must not be silently treated as absent.
+  for (const value of [clone(result), core(), core({ ...CONTEXT, platform: 'ios' })]) {
+    value.checks.forEach((row) => { row.selectionDiagnostic = null; });
+    assert.ok(parse(value));
+  }
+  const detail = { stage: 'contents', reason: 'directory-group-write' };
+  const detailed = clone(result); detailed.checks[0].selectionDiagnostic = detail;
+  const admitted = parse(detailed);
+  assert.deepEqual(admitted.lastTerminal.result.checks[0].selectionDiagnostic, detail);
+  assert.notEqual(admitted.lastTerminal.result.checks[0].selectionDiagnostic, detail);
+  for (const invalid of [undefined, false, [], { stage: 'selector-output', reason: 'directory-owner' },
+    { stage: 'alias', reason: 'app-name' }, { stage: 'contents', reason: 'unknown' }, { stage: '/PRIVATE', reason: 'directory-kind' },
+    { stage: 'contents', reason: 'directory-kind', path: 'PRIVATE' }, { stage: 'contents' }]) {
+    const bad = clone(detailed); bad.checks[0].selectionDiagnostic = invalid; assert.equal(parse(bad), null);
+  }
+  for (const key of ['id', 'state', 'reason', 'version', 'build', 'returnCode', 'baseline', 'assessment', 'help']) {
+    const bad = clone(detailed); delete bad.checks[0][key]; assert.equal(parse(bad), null, `required original row key ${key}`);
+  }
+  const extra = clone(detailed); extra.checks[0].extra = 'PRIVATE'; assert.equal(parse(extra), null);
+  const positive = clone(detailed); positive.checks[0].reason = 'observed'; assert.equal(parse(positive), null);
+  const nonzero = clone(detailed); nonzero.checks[0].reason = 'nonzero-exit'; nonzero.checks[0].returnCode = 1; assert.equal(parse(nonzero), null);
+  for (const value of [clone(result), core()]) {
+    value.checks.find((row) => row.id === 'git').selectionDiagnostic = detail; assert.equal(parse(value), null);
+  }
+  let reads = 0;
+  const accessor = clone(detailed);
+  Object.defineProperty(accessor.checks[0], 'selectionDiagnostic', { enumerable: true, get() { reads += 1; return detail; } });
+  assert.equal(parse(accessor), null);
+  const nestedAccessor = clone(detailed);
+  Object.defineProperty(nestedAccessor.checks[0].selectionDiagnostic, 'reason', { enumerable: true, get() { reads += 1; return 'directory-kind'; } });
+  assert.equal(parse(nestedAccessor), null); assert.equal(reads, 0);
+});
+
 test('strict row, assurance, lifetime and global scope joins reject invented observations or exit/finality facts', () => {
   const mutations = [
     (v) => { v.extra = 'private'; }, (v) => { v.runId += '\n'; }, (v) => { v.context.projectId += '\n'; },

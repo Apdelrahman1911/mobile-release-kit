@@ -12,11 +12,21 @@ export type EnvironmentCheckReason = 'invalid-draft' | 'platform-disabled' | 'ho
   'missing-in-supported-lookup' | 'unsupported-installation' | 'unselected-installation' | 'full-xcode-not-selected' | 'stopped' |
   'command-incomplete' | 'binding-changed' | 'cancelled' | 'timed-out' | 'observed' | 'nonzero-exit' | 'version-unrecognized' | 'selection-unrecognized';
 export type EnvironmentDiagnosticsOutcome = 'complete' | 'partial' | 'failed' | 'cancelled' | 'timed-out' | 'unavailable';
+type SelectionDirectoryReason = 'namespace-missing' | 'namespace-inaccessible' | 'directory-kind' | 'directory-owner' |
+  'directory-world-write' | 'directory-group-write';
+export type EnvironmentSelectionDiagnostic =
+  | { stage: 'selector-output'; reason: 'stderr-present' | 'byte-shape' | 'line-shape' | 'utf8-invalid' | 'path-shape' | 'app-name' }
+  | { stage: 'selection-path'; reason: 'path-depth' | 'project-overlap' }
+  | { stage: 'root' | 'applications' | 'contents' | 'developer' | 'library' | 'library-developer' | 'command-line-tools'; reason: SelectionDirectoryReason }
+  | { stage: 'application'; reason: SelectionDirectoryReason | 'alias-disallowed' }
+  | { stage: 'alias'; reason: 'namespace-missing' | 'namespace-inaccessible' | 'alias-kind' | 'alias-owner' | 'target-bytes' |
+      'target-encoding' | 'target-shape' | 'identity-changed' };
 export interface EnvironmentCheck {
   id: EnvironmentCheckId; state: 'not-run' | 'attempted' | 'completed'; reason: EnvironmentCheckReason;
   version: string | null; build: string | null; returnCode: number | null;
   baseline: { kind: 'exact-pin' | 'workflow-reference' | 'no-local-policy'; version: string | null; build: string | null };
   assessment: 'match' | 'mismatch' | 'no-local-policy' | 'not-assessed'; help: string;
+  selectionDiagnostic?: EnvironmentSelectionDiagnostic | null;
 }
 export interface EnvironmentDiagnosticsResult {
   schemaVersion: 1; policyVersion: 'environment-diagnostics-v1'; context: EnvironmentDiagnosticsContext;

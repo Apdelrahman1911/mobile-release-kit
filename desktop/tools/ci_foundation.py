@@ -99,6 +99,9 @@ ENVIRONMENT_NATIVE_SCOPE = "environment-diagnostics-native-v1"
 ENVIRONMENT_NATIVE_EVIDENCE_SCOPE = "desktop-environment-diagnostics-native-only-v1"
 ENVIRONMENT_NATIVE_WORKFLOW = ".github/workflows/desktop-environment-diagnostics-native.yml"
 ENVIRONMENT_NATIVE_REF = "refs/heads/verify/desktop-environment-diagnostics-native"
+ENVIRONMENT_NATIVE_MACOS_REF = "refs/heads/verify/desktop-environment-diagnostics-native-macos"
+ENVIRONMENT_NATIVE_ROUTES = frozenset({(ENVIRONMENT_NATIVE_REF, "linux"), (ENVIRONMENT_NATIVE_REF, "macos"),
+    (ENVIRONMENT_NATIVE_MACOS_REF, "macos")})
 ENVIRONMENT_NATIVE_PHASES = ("prepare", "acquire", "compile", "environment-native", "retain")
 ENVIRONMENT_NATIVE_CHECKS = {
     "acquire": ("rust-toolchain-install", "rust-version-target", "environment-locked-headless-metadata"),
@@ -5854,15 +5857,16 @@ def environment_native_binding(environment: dict[str, str]) -> dict[str, str]:
     """Closed two-host verification route; never a diagnostic capability."""
     sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
     run_id, attempt = environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
+    ref, platform = environment.get("GITHUB_REF", ""), environment.get("MRK_DESKTOP_PLATFORM", "")
     require(type(sha) is str and re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
             and type(repository) is str and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None,
             "Environment source identity differs")
     require(all(type(value) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None for value in (run_id, attempt)),
             "Environment original run identity differs")
     require(environment.get("MRK_DESKTOP_HOSTED_CHECKS") == ENVIRONMENT_NATIVE_SCOPE
-            and environment.get("GITHUB_REF") == ENVIRONMENT_NATIVE_REF
+            and type(ref) is str and type(platform) is str and (ref, platform) in ENVIRONMENT_NATIVE_ROUTES
             and environment.get("GITHUB_WORKFLOW_SHA") == sha
-            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{ENVIRONMENT_NATIVE_WORKFLOW}@{ENVIRONMENT_NATIVE_REF}",
+            and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{ENVIRONMENT_NATIVE_WORKFLOW}@{ref}",
             "Environment workflow/ref/scope binding differs")
     event = environment.get("GITHUB_EVENT_NAME")
     require(event == "push" and environment.get("MRK_PUSH_EVENT_AFTER") == sha
@@ -5870,7 +5874,7 @@ def environment_native_binding(environment: dict[str, str]) -> dict[str, str]:
             "Environment event or exact reviewed source differs")
     return {"workflowPath": ENVIRONMENT_NATIVE_WORKFLOW, "workflowSha": sha,
             "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
-            "runId": run_id, "attempt": attempt, "repository": repository, "event": event, "ref": ENVIRONMENT_NATIVE_REF}
+            "runId": run_id, "attempt": attempt, "repository": repository, "event": event, "ref": ref}
 
 
 def validate_environment_host(value: object, platform: str) -> dict:
@@ -5940,10 +5944,10 @@ def validate_environment_inputs(value: object) -> dict:
         require(type(value[name]) is str and re.fullmatch(r"[0-9a-f]{40}", value[name]) is not None and value[name] != "0" * 40,
                 "Environment native source/tree identity differs")
     require(value["workflowSha"] == value["sourceSha"] and value["workflowPath"] == ENVIRONMENT_NATIVE_WORKFLOW
-            and value["ref"] == ENVIRONMENT_NATIVE_REF and type(value["event"]) is str
+            and type(value["ref"]) is str and (value["ref"], value["platform"]) in ENVIRONMENT_NATIVE_ROUTES and type(value["event"]) is str
             and value["event"] in {"push", "workflow_dispatch"}
             and type(value["repository"]) is str and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value["repository"]) is not None
-            and value["workflowRef"] == f"{value['repository']}/{ENVIRONMENT_NATIVE_WORKFLOW}@{ENVIRONMENT_NATIVE_REF}"
+            and value["workflowRef"] == f"{value['repository']}/{ENVIRONMENT_NATIVE_WORKFLOW}@{value['ref']}"
             and all(type(value[name]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value[name]) is not None for name in ("runId", "attempt")),
             "Environment native input workflow binding differs")
     require(all(sha256_value(value[name]) for name in ("workflowSha256", "coreZipSha256", "pythonSha256", "bootstrapSha256"))
@@ -6353,6 +6357,27 @@ def environment_original_outer_outputs(context: dict) -> None:
             raise CheckFailure("Environment shell custody descriptor leaked into native launch")
 
 
+_ENVIRONMENT_SELECTION_DIRECTORY_REASONS = frozenset({"namespace-missing", "namespace-inaccessible", "directory-kind",
+    "directory-owner", "directory-world-write", "directory-group-write"})
+ENVIRONMENT_SELECTION_DIAGNOSTICS = {
+    **{stage: _ENVIRONMENT_SELECTION_DIRECTORY_REASONS for stage in ("root", "applications", "contents", "developer",
+        "library", "library-developer", "command-line-tools")},
+    "application": _ENVIRONMENT_SELECTION_DIRECTORY_REASONS | {"alias-disallowed"},
+    "selector-output": frozenset({"stderr-present", "byte-shape", "line-shape", "utf8-invalid", "path-shape", "app-name"}),
+    "selection-path": frozenset({"path-depth", "project-overlap"}),
+    "alias": frozenset({"namespace-missing", "namespace-inaccessible", "alias-kind", "alias-owner", "target-bytes",
+        "target-encoding", "target-shape", "identity-changed"}),
+}
+
+
+def validate_environment_selection_diagnostic(value: object) -> dict:
+    value = closed_object(value, {"stage", "reason"}, "Environment selection diagnostic fields differ")
+    require(type(value["stage"]) is str and value["stage"] in ENVIRONMENT_SELECTION_DIAGNOSTICS
+            and type(value["reason"]) is str and value["reason"] in ENVIRONMENT_SELECTION_DIAGNOSTICS[value["stage"]]
+            and len(canonical_json(value)) < 160, "Environment selection diagnostic vocabulary differs")
+    return value
+
+
 def validate_environment_projection(value: object, platform: str) -> dict:
     """Closed native DATA shape; no core import/runtime lookup during retain."""
     projection = closed_object(value, {"runId", "ownerGeneration", "context", "phase", "outcome", "finality", "reason", "result"},
@@ -6393,8 +6418,15 @@ def validate_environment_projection(value: object, platform: str) -> dict:
     version = lambda value: type(value) is str and re.fullmatch(r"[0-9][0-9A-Za-z._+\-]{0,63}", value) is not None
     build = lambda value: type(value) is str and re.fullmatch(r"[0-9]{1,3}[A-Z][0-9]{1,6}[a-z]?", value) is not None
     for role, supplied in zip(roles, result["checks"], strict=True):
-        row = closed_object(supplied, {"id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help"},
+        required = {"id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help"}
+        optional = {"selectionDiagnostic"} if type(supplied) is dict and "selectionDiagnostic" in supplied else set()
+        row = closed_object(supplied, required | optional,
                             "Environment terminal row fields differ")
+        if row.get("selectionDiagnostic") is not None:
+            validate_environment_selection_diagnostic(row["selectionDiagnostic"])
+            require(platform == "macos" and role == "developer-selection" and row["state"] == "completed"
+                    and row["reason"] == "selection-unrecognized" and type(row["returnCode"]) is int and row["returnCode"] == 0,
+                    "Environment selection diagnostic is attached to a different observation")
         require(row["id"] == role and type(row["state"]) is str and row["state"] in reasons
                 and type(row["reason"]) is str and row["reason"] in reasons[row["state"]]
                 and type(row["help"]) is str and 0 < len(row["help"]) <= 1024

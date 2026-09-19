@@ -103,12 +103,31 @@ export function environmentDiagnosticsRequestFits(command: EnvironmentDiagnostic
 export function startEnvironmentDiagnosticsFits(value: unknown): value is StartEnvironmentDiagnostics {
   return environmentDiagnosticsRequestFits('start_environment_diagnostics', value);
 }
+const selectionDirectoryReasons = ['namespace-missing', 'namespace-inaccessible', 'directory-kind', 'directory-owner',
+  'directory-world-write', 'directory-group-write'];
+const selectionDiagnosticReasons: Record<string, readonly string[]> = {
+  ...Object.fromEntries(['root', 'applications', 'contents', 'developer', 'library', 'library-developer', 'command-line-tools']
+    .map((stage) => [stage, selectionDirectoryReasons])),
+  application: [...selectionDirectoryReasons, 'alias-disallowed'],
+  'selector-output': ['stderr-present', 'byte-shape', 'line-shape', 'utf8-invalid', 'path-shape', 'app-name'],
+  'selection-path': ['path-depth', 'project-overlap'],
+  alias: ['namespace-missing', 'namespace-inaccessible', 'alias-kind', 'alias-owner', 'target-bytes',
+    'target-encoding', 'target-shape', 'identity-changed'],
+};
+function selectionDiagnostic(value: unknown): boolean {
+  return keys(value, ['stage', 'reason']) && typeof value.stage === 'string' && Object.hasOwn(selectionDiagnosticReasons, value.stage) &&
+    oneOf(value.reason, selectionDiagnosticReasons[value.stage]!) && encoder.encode(JSON.stringify(value)).byteLength < 160;
+}
 function check(value: unknown, id: EnvironmentCheckId): value is EnvironmentCheck {
-  if (!keys(value, ['id', 'state', 'reason', 'version', 'build', 'returnCode', 'baseline', 'assessment', 'help']) || value.id !== id ||
+  if ((!keys(value, ['id', 'state', 'reason', 'version', 'build', 'returnCode', 'baseline', 'assessment', 'help']) &&
+      !keys(value, ['id', 'state', 'reason', 'version', 'build', 'returnCode', 'baseline', 'assessment', 'help', 'selectionDiagnostic'])) || value.id !== id ||
       !oneOf(value.state, ['not-run', 'attempted', 'completed']) || !oneOf(value.reason, value.state === 'not-run' ? notRun : value.state === 'attempted' ? attempted : completed) ||
       !oneOf(value.assessment, ['match', 'mismatch', 'no-local-policy', 'not-assessed']) ||
       typeof value.help !== 'string' || value.help.trim().length === 0 || encoder.encode(value.help).byteLength > 1024 || /[\u0000-\u001f\u007f]/u.test(value.help) ||
       !keys(value.baseline, ['kind', 'version', 'build']) || value.version !== null && !version(value.version) || value.build !== null && !build(value.build)) return false;
+  if (Object.hasOwn(value, 'selectionDiagnostic') && value.selectionDiagnostic !== null &&
+      (!selectionDiagnostic(value.selectionDiagnostic) || id !== 'developer-selection' || value.state !== 'completed' ||
+        value.reason !== 'selection-unrecognized' || value.returnCode !== 0)) return false;
   const baseline = value.baseline;
   // Validate policy *shape* and joins, never maintain a second pin catalogue.
   if (id === 'java' || id === 'javac') {

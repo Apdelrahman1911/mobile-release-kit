@@ -14,7 +14,8 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from ._desktop_environment_protocol import PROFILES, ProtocolError, absolute_path, require
+from ._desktop_environment_protocol import (PROFILES, ProtocolError, absolute_path, require,
+    validate_selection_diagnostic)
 from .cancellation import DefaultCancellation
 from .owned_process import ProcessCleanupError
 
@@ -25,10 +26,14 @@ _CUSTODY = "Environment tool observation custody did not settle"
 
 
 class ToolUnavailable(Exception):
-    def __init__(self, reason: str = "unsupported-installation", *, inaccessible: bool = False) -> None:
+    def __init__(self, reason: str = "unsupported-installation", *, inaccessible: bool = False,
+                 selection_diagnostic: dict[str, str] | None = None) -> None:
         require(type(reason) is str and reason in {"missing-in-supported-lookup", "unsupported-installation", "unselected-installation"})
         self.reason = reason
         self.inaccessible = inaccessible
+        if selection_diagnostic is not None:
+            validate_selection_diagnostic(selection_diagnostic)
+        self.selection_diagnostic = None if selection_diagnostic is None else dict(selection_diagnostic)
         super().__init__("Tool is unavailable in the supported lookup")
 
 
@@ -41,15 +46,53 @@ def _admit(condition: bool, reason: str = "unsupported-installation") -> None:
         raise ToolUnavailable(reason)
 
 
+def _selection_tag(error: ToolUnavailable, stage: str, reason: str) -> ToolUnavailable:
+    # Only a caught/observed first refusal supplies these fixed names. Never
+    # infer detail from a legacy exception's generic reason or replace it.
+    if error.selection_diagnostic is None:
+        diagnostic = {"stage": stage, "reason": reason}
+        validate_selection_diagnostic(diagnostic)
+        error.selection_diagnostic = diagnostic
+    return error
+
+
+def _selection_admit(condition: bool, stage: str, reason: str) -> None:
+    if not condition:
+        raise _selection_tag(ToolUnavailable(), stage, reason)
+
+
 def overlaps(left: str, right: str) -> bool:
     return (left == right or left == "/" or right == "/" or left.startswith(right + "/")
             or right.startswith(left + "/"))
 
 
-def directory_allowed(value: os.stat_result, profile: str) -> bool:
+def _directory_refusal(value: os.stat_result, profile: str) -> str | None:
     groups = {0, 80} if PROFILES[profile][0] == "macos" else {0}
-    return (stat.S_ISDIR(value.st_mode) and value.st_uid == 0 and not value.st_mode & 0o002
-            and (not value.st_mode & 0o020 or value.st_gid in groups))
+    if not stat.S_ISDIR(value.st_mode):
+        return "directory-kind"
+    if value.st_uid != 0:
+        return "directory-owner"
+    if value.st_mode & 0o002:
+        return "directory-world-write"
+    if value.st_mode & 0o020 and value.st_gid not in groups:
+        return "directory-group-write"
+    return None
+
+
+def directory_allowed(value: os.stat_result, profile: str) -> bool:
+    return _directory_refusal(value, profile) is None
+
+
+def _selection_stage(path: str) -> str:
+    # Called only for components of the already shape-admitted selection.
+    # Return structural labels, never names from the observed namespace.
+    fixed = {"/": "root", "/Applications": "applications", "/Library": "library",
+        "/Library/Developer": "library-developer", "/Library/Developer/CommandLineTools": "command-line-tools"}
+    if path in fixed:
+        return fixed[path]
+    parts = path.split("/")
+    require(parts[:2] == ["", "Applications"] and 3 <= len(parts) <= 5)
+    return ("application", "contents", "developer")[len(parts) - 3]
 
 
 def executable_allowed(value: os.stat_result) -> bool:
@@ -159,53 +202,80 @@ class ToolLookup:
         require(self.pid == os.getpid() and self.thread is threading.current_thread())
         self.guard._check_owner()
 
-    def _path(self, value: str) -> str:
+    def _path(self, value: str, *, selection: bool = False) -> str:
         absolute_path(value)
-        _admit(len(value.split("/")) - 1 <= 32 and not overlaps(value, self.project_root))
+        if selection:
+            _selection_admit(len(value.split("/")) - 1 <= 32, "selection-path", "path-depth")
+            _selection_admit(not overlaps(value, self.project_root), "selection-path", "project-overlap")
+        else:
+            _admit(len(value.split("/")) - 1 <= 32 and not overlaps(value, self.project_root))
         return value
 
-    def _stat(self, path: str) -> os.stat_result:
+    def _stat(self, path: str, *, selection_stage: str | None = None) -> os.stat_result:
         self._origin()
         self.guard.check()
         try:
             result = os.lstat(path)
         except FileNotFoundError:
-            raise ToolUnavailable("missing-in-supported-lookup") from None
+            error = ToolUnavailable("missing-in-supported-lookup")
+            raise (_selection_tag(error, selection_stage, "namespace-missing") if selection_stage else error) from None
         except OSError:
-            raise ToolUnavailable(inaccessible=True) from None
+            error = ToolUnavailable(inaccessible=True)
+            raise (_selection_tag(error, selection_stage, "namespace-inaccessible") if selection_stage else error) from None
         self.guard.check()
         return result
 
-    def _readlink(self, path: str) -> bytes:
+    def _readlink(self, path: str, *, selection: bool = False) -> bytes:
         self.guard.check()
         try:
             result = os.readlink(os.fsencode(path))
-        except OSError:
-            raise ToolUnavailable(inaccessible=True) from None
+        except OSError as observed:
+            error = ToolUnavailable(inaccessible=True)
+            reason = "namespace-missing" if isinstance(observed, FileNotFoundError) else "namespace-inaccessible"
+            raise (_selection_tag(error, "alias", reason) if selection else error) from None
         self.guard.check()
-        _admit(type(result) is bytes and 0 < len(result) <= 4096 and b"\0" not in result)
+        accepted = type(result) is bytes and 0 < len(result) <= 4096 and b"\0" not in result
+        if selection:
+            _selection_admit(accepted, "alias", "target-bytes")
+        else:
+            _admit(accepted)
         return result
 
-    def _plain(self, path: str, *, directory: bool = False) -> tuple[_Node, ...]:
-        self._path(path)
+    def _plain(self, path: str, *, directory: bool = False, selection: bool = False) -> tuple[_Node, ...]:
+        self._path(path, selection=selection)
         components = path.split("/")[1:]
         nodes = []
         names = ["/"] + ["/" + "/".join(components[:index + 1]) for index in range(len(components))]
         for index, name in enumerate(names):
-            value = self._stat(name)
+            stage = _selection_stage(name) if selection else None
+            value = self._stat(name, selection_stage=stage) if selection else self._stat(name)
             is_directory = directory or index < len(names) - 1
-            _admit(directory_allowed(value, self.profile) if is_directory else executable_allowed(value))
+            if stage is not None and is_directory:
+                refusal = _directory_refusal(value, self.profile)
+                if refusal is not None:
+                    raise _selection_tag(ToolUnavailable(), stage, refusal)
+            else:
+                _admit(directory_allowed(value, self.profile) if is_directory else executable_allowed(value))
             nodes.append(_Node(name, "directory" if is_directory else "file",
                                _directory_facts(value) if is_directory else _file_facts(value)))
         return tuple(nodes)
 
-    def _link(self, path: str) -> tuple[tuple[_Node, ...], bytes]:
-        self._path(path)
-        nodes = self._plain(path.rsplit("/", 1)[0], directory=True)
-        value = self._stat(path)
-        _admit(stat.S_ISLNK(value.st_mode) and value.st_uid == 0)
-        target = self._readlink(path)
-        _admit(_file_facts(value) == _file_facts(self._stat(path)))
+    def _link(self, path: str, *, selection: bool = False) -> tuple[tuple[_Node, ...], bytes]:
+        self._path(path, selection=selection)
+        nodes = self._plain(path.rsplit("/", 1)[0], directory=True, selection=selection)
+        value = self._stat(path, selection_stage="alias") if selection else self._stat(path)
+        if selection:
+            _selection_admit(stat.S_ISLNK(value.st_mode), "alias", "alias-kind")
+            _selection_admit(value.st_uid == 0, "alias", "alias-owner")
+        else:
+            _admit(stat.S_ISLNK(value.st_mode) and value.st_uid == 0)
+        target = self._readlink(path, selection=True) if selection else self._readlink(path)
+        expected = _file_facts(value)
+        current = self._stat(path, selection_stage="alias") if selection else self._stat(path)
+        if selection:
+            _selection_admit(expected == _file_facts(current), "alias", "identity-changed")
+        else:
+            _admit(expected == _file_facts(current))
         return (*nodes, _Node(path, "link", _file_facts(value), target)), target
 
     def recheck(self, binding: ToolBinding) -> None:
@@ -304,36 +374,38 @@ class ToolLookup:
 
     def mac_developer(self, output: bytes) -> ToolBinding:
         require(PROFILES[self.profile][0] == "macos")
-        _admit(type(output) is bytes and 0 < len(output) <= 4096)
+        _selection_admit(type(output) is bytes and 0 < len(output) <= 4096, "selector-output", "byte-shape")
         raw = output[:-1] if output.endswith(b"\n") else output
-        _admit(bool(raw) and b"\n" not in raw and b"\r" not in raw)
+        _selection_admit(bool(raw) and b"\n" not in raw and b"\r" not in raw, "selector-output", "line-shape")
         try:
             path = raw.decode("utf-8", errors="strict")
         except UnicodeError:
-            raise ToolUnavailable() from None
+            raise _selection_tag(ToolUnavailable(), "selector-output", "utf8-invalid") from None
         prefix: tuple[_Node, ...] = ()
         if path != "/Library/Developer/CommandLineTools":
             parts = path.split("/")
-            _admit(len(parts) == 5 and parts[:2] == ["", "Applications"]
-                and parts[3:] == ["Contents", "Developer"]
-                and (parts[2] == "Xcode.app" or _XCODE_APP.fullmatch(parts[2]) is not None))
-            self._path("/Applications/" + parts[2])
-            parent = self._plain("/Applications", directory=True)
-            selected = self._stat("/Applications/" + parts[2])
+            _selection_admit(len(parts) == 5 and parts[:2] == ["", "Applications"]
+                and parts[3:] == ["Contents", "Developer"], "selector-output", "path-shape")
+            _selection_admit(parts[2] == "Xcode.app" or _XCODE_APP.fullmatch(parts[2]) is not None, "selector-output", "app-name")
+            self._path("/Applications/" + parts[2], selection=True)
+            parent = self._plain("/Applications", directory=True, selection=True)
+            selected = self._stat("/Applications/" + parts[2], selection_stage="application")
             if stat.S_ISLNK(selected.st_mode):
-                _admit(parts[2] == "Xcode.app")
-                prefix, target = self._link("/Applications/Xcode.app")
+                _selection_admit(parts[2] == "Xcode.app", "application", "alias-disallowed")
+                prefix, target = self._link("/Applications/Xcode.app", selection=True)
                 try:
                     name = target.decode("ascii", errors="strict")
                 except UnicodeError:
-                    raise ToolUnavailable() from None
+                    raise _selection_tag(ToolUnavailable(), "alias", "target-encoding") from None
                 name = name[len("/Applications/"):] if name.startswith("/Applications/") else name
-                _admit(_XCODE_APP.fullmatch(name) is not None)
+                _selection_admit(_XCODE_APP.fullmatch(name) is not None, "alias", "target-shape")
                 path = "/Applications/" + name + "/Contents/Developer"
             else:
-                _admit(directory_allowed(selected, self.profile))
+                refusal = _directory_refusal(selected, self.profile)
+                if refusal is not None:
+                    raise _selection_tag(ToolUnavailable(), "application", refusal)
                 prefix = parent
-        return ToolBinding(path, (*prefix, *self._plain(path, directory=True)))
+        return ToolBinding(path, (*prefix, *self._plain(path, directory=True, selection=True)))
 
     def mac_developer_tool(self, developer: ToolBinding, role: str) -> ToolBinding:
         require(PROFILES[self.profile][0] == "macos" and type(developer) is ToolBinding

@@ -25,17 +25,18 @@ helper = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(helper)
 
 
-def binding_environment(event: str = "push", attempt: str = "1") -> dict:
+def binding_environment(event: str = "push", attempt: str = "1", *, platform: str = "linux", ref: str | None = None) -> dict:
+    ref = helper.ENVIRONMENT_NATIVE_REF if ref is None else ref
     return {"MRK_DESKTOP_HOSTED_CHECKS": helper.ENVIRONMENT_NATIVE_SCOPE,
         "GITHUB_SHA": "1" * 40, "GITHUB_WORKFLOW_SHA": "1" * 40,
         "GITHUB_REPOSITORY": "synthetic/project", "GITHUB_RUN_ID": "23", "GITHUB_RUN_ATTEMPT": attempt,
-        "GITHUB_REF": helper.ENVIRONMENT_NATIVE_REF, "GITHUB_EVENT_NAME": event,
-        "GITHUB_WORKFLOW_REF": f"synthetic/project/{helper.ENVIRONMENT_NATIVE_WORKFLOW}@{helper.ENVIRONMENT_NATIVE_REF}",
+        "GITHUB_REF": ref, "GITHUB_EVENT_NAME": event, "MRK_DESKTOP_PLATFORM": platform,
+        "GITHUB_WORKFLOW_REF": f"synthetic/project/{helper.ENVIRONMENT_NATIVE_WORKFLOW}@{ref}",
         "MRK_EXPECTED_SHA": "1" * 40, "MRK_PUSH_EVENT_AFTER": "1" * 40}
 
 
-def native_inputs(platform: str = "linux") -> dict:
-    binding = helper.environment_native_binding(binding_environment())
+def native_inputs(platform: str = "linux", *, ref: str | None = None) -> dict:
+    binding = helper.environment_native_binding(binding_environment(platform=platform, ref=ref))
     core = [{"path": name, "sha256": "4" * 64, "size": 1} for name in helper.GTK_CORE_PATHS]
     names = {helper.ENVIRONMENT_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py", "desktop/environment_bootstrap.py",
         "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
@@ -266,6 +267,29 @@ class EnvironmentNativeCIContracts(unittest.TestCase):
         dispatch = binding_environment("workflow_dispatch")
         dispatch["MRK_EXPECTED_SHA"] = "3" * 40
         self.assert_refused(helper.environment_native_binding, dispatch)
+
+    def test_mac_only_ref_has_exact_platform_and_workflow_binding_not_prefix_authority(self) -> None:
+        old, mac = helper.ENVIRONMENT_NATIVE_REF, helper.ENVIRONMENT_NATIVE_MACOS_REF
+        for ref, platform in ((old, "linux"), (old, "macos"), (mac, "macos")):
+            for event in ("push", "workflow_dispatch"):
+                environment = binding_environment(event, platform=platform, ref=ref)
+                self.assertEqual(helper.environment_native_binding(environment)["ref"], ref)
+                inputs = native_inputs(platform, ref=ref)
+                self.assertEqual(helper.validate_environment_inputs(inputs), inputs)
+        for ref, platform in ((mac, "linux"), (old, "windows"), (mac + "-other", "macos"), ("refs/heads/main", "macos")):
+            self.assert_refused(helper.environment_native_binding, binding_environment(platform=platform, ref=ref))
+            inputs = native_inputs("macos")
+            inputs.update(ref=ref, platform=platform, target=helper.TARGETS.get(platform, helper.TARGETS["macos"]),
+                workflowRef=f"synthetic/project/{helper.ENVIRONMENT_NATIVE_WORKFLOW}@{ref}")
+            self.assert_refused(helper.validate_environment_inputs, inputs)
+        for key, wrong in (("GITHUB_REF", []), ("MRK_DESKTOP_PLATFORM", []),
+                           ("GITHUB_WORKFLOW_REF", f"synthetic/project/{helper.ENVIRONMENT_NATIVE_WORKFLOW}@{old}")):
+            environment = binding_environment(platform="macos", ref=mac)
+            environment[key] = wrong
+            self.assert_refused(helper.environment_native_binding, environment)
+        inputs = native_inputs("macos", ref=mac)
+        inputs["workflowRef"] = f"synthetic/project/{helper.ENVIRONMENT_NATIVE_WORKFLOW}@{old}"
+        self.assert_refused(helper.validate_environment_inputs, inputs)
 
     def test_inputs_accept_only_original_host_and_complete_source_zip_correspondence(self) -> None:
         for platform in ("linux", "macos"):
@@ -554,6 +578,41 @@ class EnvironmentNativeCIContracts(unittest.TestCase):
         self.assertEqual(check["help"], marker)
         self.assertEqual(public["cases"][5]["projection"]["result"]["checks"][0]["version"], check["version"])
 
+    def test_selection_diagnostic_is_closed_optional_original_negative_data(self) -> None:
+        projection = projection_value("macos", "R1")
+        result, selected = projection["result"], projection["result"]["checks"][0]
+        selected["reason"] = "selection-unrecognized"
+        for check in result["checks"][1:]:
+            check.update(state="not-run", reason="unselected-installation", version=None, build=None, returnCode=None, assessment="not-assessed")
+        result["commandsAttempted"] = result["lifetime"]["commands"] = 1
+        self.assertEqual(helper.validate_environment_projection(projection, "macos"), projection)
+        for detail in (None, {"stage": "application", "reason": "directory-owner"},
+                       {"stage": "alias", "reason": "target-encoding"}):
+            selected["selectionDiagnostic"] = detail
+            self.assertEqual(helper.validate_environment_projection(projection, "macos"), projection)
+            public = helper.environment_sanitized_result({"cases": [{"projection": projection}]})
+            self.assertEqual(public["cases"][0]["projection"]["result"]["checks"][0]["selectionDiagnostic"], detail)
+            self.assertNotIn("help", public["cases"][0]["projection"]["result"]["checks"][0])
+        detail = {"stage": "application", "reason": "directory-owner"}
+        for bad in ({}, {"stage": "alias", "reason": "directory-owner"},
+                    {"stage": "application", "reason": "target-encoding"},
+                    {"stage": "PRIVATE_PATH", "reason": "directory-owner"}, {**detail, "path": "PRIVATE_PATH"}):
+            selected["selectionDiagnostic"] = bad
+            self.assert_refused(lambda value: helper.validate_environment_projection(value, "macos"), projection)
+        selected["selectionDiagnostic"] = detail
+        for key in ("id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help"):
+            bad = deepcopy(projection)
+            del bad["result"]["checks"][0][key]
+            self.assert_refused(lambda value: helper.validate_environment_projection(value, "macos"), bad)
+        for key, value in (("reason", "observed"), ("returnCode", 1)):
+            bad = deepcopy(projection)
+            bad["result"]["checks"][0][key] = value
+            self.assert_refused(lambda value: helper.validate_environment_projection(value, "macos"), bad)
+        result["checks"][1]["selectionDiagnostic"] = None
+        self.assertEqual(helper.validate_environment_projection(projection, "macos"), projection)
+        result["checks"][1]["selectionDiagnostic"] = detail
+        self.assert_refused(lambda value: helper.validate_environment_projection(value, "macos"), projection)
+
     def test_source_routes_native_through_one_exec_with_no_cargo_or_cleanup_after_it(self) -> None:
         tree = ast.parse(HELPER.read_text(encoding="utf-8"))
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
@@ -572,8 +631,17 @@ class EnvironmentNativeCIContracts(unittest.TestCase):
 
     def test_workflow_is_two_fixed_profiles_one_compile_and_preowned_original_wait(self) -> None:
         workflow = (SOURCE / helper.ENVIRONMENT_NATIVE_WORKFLOW).read_text(encoding="utf-8")
-        self.assertIn("runner: ubuntu-24.04", workflow)
-        self.assertIn("runner: macos-26", workflow)
+        mac = '{"include":[{"platform":"macos","runner":"macos-26"}]}'
+        both = '{"include":[{"platform":"linux","runner":"ubuntu-24.04"},{"platform":"macos","runner":"macos-26"}]}'
+        self.assertIn("matrix: ${{ fromJSON(github.ref == '" + helper.ENVIRONMENT_NATIVE_MACOS_REF + "' && '" + mac + "' || '" + both + "') }}", workflow)
+        gate = 'case "$GITHUB_REF:$MRK_DESKTOP_PLATFORM" in'
+        pairs = helper.ENVIRONMENT_NATIVE_REF + ":linux|" + helper.ENVIRONMENT_NATIVE_REF + ":macos|" + helper.ENVIRONMENT_NATIVE_MACOS_REF + ":macos) ;;"
+        self.assertIn(pairs, workflow)
+        self.assertLess(workflow.index(gate), workflow.index("uses: actions/checkout@"))
+        self.assertIn("*) exit 1 ;;", workflow[workflow.index(gate):workflow.index("uses: actions/checkout@")])
+        fixture = (SOURCE / "desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs").read_text(encoding="utf-8")
+        self.assertIn('("' + helper.ENVIRONMENT_NATIVE_REF + '", "linux" | "macos")', fixture)
+        self.assertIn('("' + helper.ENVIRONMENT_NATIVE_MACOS_REF + '", "macos")', fixture)
         self.assertIn("contents: read", workflow)
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn("cancel-in-progress: false", workflow)

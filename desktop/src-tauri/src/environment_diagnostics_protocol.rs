@@ -201,15 +201,48 @@ impl Baseline {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum Assessment { Match, Mismatch, NoLocalPolicy, NotAssessed }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum SelectionStage { SelectorOutput, SelectionPath, Root, Applications, Application, Contents, Developer,
+    Library, LibraryDeveloper, CommandLineTools, Alias }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum SelectionReason { StderrPresent, ByteShape, LineShape, Utf8Invalid, PathShape, AppName, PathDepth, ProjectOverlap,
+    NamespaceMissing, NamespaceInaccessible, DirectoryKind, DirectoryOwner, DirectoryWorldWrite, DirectoryGroupWrite,
+    AliasDisallowed, AliasKind, AliasOwner, TargetBytes, TargetEncoding, TargetShape, IdentityChanged }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SelectionDiagnostic { stage: SelectionStage, reason: SelectionReason }
+impl SelectionDiagnostic {
+    fn valid(&self) -> bool {
+        use SelectionReason::*;
+        let directory = matches!(self.reason, NamespaceMissing | NamespaceInaccessible | DirectoryKind | DirectoryOwner
+            | DirectoryWorldWrite | DirectoryGroupWrite);
+        let compatible = match self.stage {
+            SelectionStage::SelectorOutput => matches!(self.reason, StderrPresent | ByteShape | LineShape | Utf8Invalid | PathShape | AppName),
+            SelectionStage::SelectionPath => matches!(self.reason, PathDepth | ProjectOverlap),
+            SelectionStage::Application => directory || self.reason == AliasDisallowed,
+            SelectionStage::Alias => matches!(self.reason, NamespaceMissing | NamespaceInaccessible | AliasKind | AliasOwner
+                | TargetBytes | TargetEncoding | TargetShape | IdentityChanged),
+            _ => directory,
+        };
+        compatible && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() < 160)
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Check {
     id: CheckId, state: CheckState, reason: CheckReason, version: Option<String>, build: Option<String>,
     return_code: Option<i32>, baseline: Baseline, assessment: Assessment, help: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selection_diagnostic: Option<SelectionDiagnostic>,
 }
 impl Check {
     fn valid(&self, expected: CheckId) -> bool {
         if self.id != expected || self.reason.state() != self.state || !self.baseline.valid(self.id)
+            || self.selection_diagnostic.as_ref().is_some_and(|detail| self.id != CheckId::DeveloperSelection
+                || self.state != CheckState::Completed || self.reason != CheckReason::SelectionUnrecognized
+                || self.return_code != Some(0) || !detail.valid())
             || self.reason == CheckReason::FullXcodeNotSelected && self.id != CheckId::Xcode
             || self.help.trim().is_empty() || self.help.len() > 1024 || self.help.chars().any(|c| c <= '\u{1f}' || c == '\u{7f}')
             || self.version.as_deref().is_some_and(|v| !role_version(self.id, v)) || self.build.as_deref().is_some_and(|v| !build(v)) { return false; }
@@ -338,7 +371,8 @@ pub(crate) fn decode(bytes: &[u8], run: &str, generation: &str, context: &Contex
         (1, "terminal") => {
             let rows = envelope.result.get("checks").and_then(Value::as_array).ok_or_else(BridgeError::protocol)?;
             // Nullable fields are REQUIRED, not serde's omitted Option default.
-            if rows.iter().any(|r| !keys(r, &["id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help"])
+            if rows.iter().any(|r| (!keys(r, &["id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help"])
+                && !keys(r, &["id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help", "selectionDiagnostic"]))
                 || !r.get("baseline").is_some_and(|b| keys(b, &["kind", "version", "build"])))
                 || !envelope.result.get("lifetime").is_some_and(|l| keys(l, &["complete", "fatal", "contained", "commandDispatched", "commands", "inputClosed", "handlersRestored", "toolDescriptorsClosed", "stopObserved"])) { return Err(BridgeError::protocol()); }
             let terminal = Terminal::deserialize(&envelope.result).map_err(|_| BridgeError::protocol())?;
@@ -471,6 +505,55 @@ pub(crate) mod tests {
         let mut bad = original.clone(); bad["checks"].as_array_mut().unwrap().swap(1,2); assert!(parsed(bad).is_err());
         let mut bad = original.clone(); bad["checks"][0].as_object_mut().unwrap().remove("returnCode"); assert!(parsed(bad).is_err());
         let mut bad = original; bad["checks"][1]["baseline"].as_object_mut().unwrap().remove("build"); assert!(parsed(bad).is_err());
+    }
+    #[test]
+    fn selection_detail_is_optional_closed_and_only_for_the_original_mac_negative_row() {
+        let context = Context { platform: Platform::Android, ..context() };
+        let parsed = |value: Value, host| decode(&frame("terminal",1,value), &"a".repeat(32), &"b".repeat(32), &context, host);
+        let mut original = terminal(&context);
+        original["hostPlatform"] = json!("macos");
+        original["commandsAttempted"] = json!(1); original["lifetime"]["commands"] = json!(1);
+        let rows = original["checks"].as_array_mut().unwrap();
+        for row in rows.iter_mut() {
+            row["state"] = json!("not-run"); row["reason"] = json!("unselected-installation");
+            for key in ["version", "build", "returnCode"] { row[key] = Value::Null; }
+            row["assessment"] = json!("not-assessed");
+        }
+        rows.insert(0, json!({"id":"developer-selection","state":"completed","reason":"selection-unrecognized",
+            "version":null,"build":null,"returnCode":0,"baseline":{"kind":"no-local-policy","version":null,"build":null},
+            "assessment":"not-assessed","help":"Fixed negative selection guidance"}));
+        assert!(parsed(original.clone(), Host::Macos).is_ok());
+        // Explicit null is absence on ANY otherwise-valid row, and serializes
+        // as absent; it does not require a negative macOS selector observation.
+        for (mut value, host) in [(original.clone(), Host::Macos), (terminal(&context), Host::Linux)] {
+            for row in value["checks"].as_array_mut().unwrap() { row["selectionDiagnostic"] = Value::Null; }
+            match parsed(value, host).unwrap() {
+                Frame::Terminal(t) => assert!(serde_json::to_value(t).unwrap()["checks"].as_array().unwrap()
+                    .iter().all(|row| row.get("selectionDiagnostic").is_none())),
+                _ => panic!("expected terminal"),
+            }
+        }
+        let detail = json!({"stage":"contents","reason":"directory-group-write"});
+        let mut detailed = original.clone(); detailed["checks"][0]["selectionDiagnostic"] = detail.clone();
+        match parsed(detailed.clone(), Host::Macos).unwrap() {
+            Frame::Terminal(t) => assert_eq!(serde_json::to_value(t).unwrap()["checks"][0]["selectionDiagnostic"], detail),
+            _ => panic!("expected terminal"),
+        }
+        for invalid in [json!({"stage":"selector-output","reason":"directory-owner"}), json!({"stage":"alias","reason":"app-name"}),
+            json!({"stage":"contents","reason":"unknown"}), json!({"stage":"/PRIVATE","reason":"directory-kind"}),
+            json!({"stage":"contents","reason":"directory-kind","path":"PRIVATE"}), json!({"stage":"contents"}), json!([]), json!(false)] {
+            let mut bad = detailed.clone(); bad["checks"][0]["selectionDiagnostic"] = invalid; assert!(parsed(bad, Host::Macos).is_err());
+        }
+        for key in ["id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help"] {
+            let mut bad = detailed.clone(); bad["checks"][0].as_object_mut().unwrap().remove(key);
+            assert!(parsed(bad, Host::Macos).is_err(), "required original row key {key}");
+        }
+        let mut bad = detailed.clone(); bad["checks"][0]["extra"] = json!("PRIVATE"); assert!(parsed(bad, Host::Macos).is_err());
+        let mut bad = detailed.clone(); bad["checks"][0]["reason"] = json!("observed"); assert!(parsed(bad, Host::Macos).is_err());
+        let mut bad = detailed.clone(); bad["checks"][0]["reason"] = json!("nonzero-exit"); bad["checks"][0]["returnCode"] = json!(1);
+        assert!(parsed(bad, Host::Macos).is_err());
+        let mut bad = original; bad["checks"][1]["selectionDiagnostic"] = detail.clone(); assert!(parsed(bad, Host::Macos).is_err());
+        let mut bad = terminal(&context); bad["checks"][0]["selectionDiagnostic"] = detail; assert!(parsed(bad, Host::Linux).is_err());
     }
     #[test]
     fn opaque_incomplete_owner_cannot_become_a_negative_completed_tool_check() {

@@ -42,6 +42,18 @@ NOT_RUN = frozenset({"invalid-draft", "platform-disabled", "host-mismatch", "uns
     "full-xcode-not-selected", "stopped"})
 ATTEMPTED = frozenset({"command-incomplete", "binding-changed", "cancelled", "timed-out"})
 COMPLETED = frozenset({"observed", "nonzero-exit", "version-unrecognized", "selection-unrecognized"})
+# Closed observation detail, not paths, tool policy or a new execution route.
+_DIRECTORY_SELECTION_REASONS = frozenset({"namespace-missing", "namespace-inaccessible", "directory-kind",
+    "directory-owner", "directory-world-write", "directory-group-write"})
+SELECTION_DIAGNOSTICS = {
+    **{stage: _DIRECTORY_SELECTION_REASONS for stage in ("root", "applications", "contents", "developer",
+        "library", "library-developer", "command-line-tools")},
+    "application": _DIRECTORY_SELECTION_REASONS | {"alias-disallowed"},
+    "selector-output": frozenset({"stderr-present", "byte-shape", "line-shape", "utf8-invalid", "path-shape", "app-name"}),
+    "selection-path": frozenset({"path-depth", "project-overlap"}),
+    "alias": frozenset({"namespace-missing", "namespace-inaccessible", "alias-kind", "alias-owner", "target-bytes",
+        "target-encoding", "target-shape", "identity-changed"}),
+}
 OUTCOMES = frozenset({"complete", "partial", "failed", "cancelled", "timed-out", "unavailable"})
 HELP = {
     "developer-selection": "Checks the existing macOS developer selection only. No tool selection, installation, license acceptance or path is exposed. A Command Line Tools selection does not establish the pinned full Xcode baseline.",
@@ -157,24 +169,41 @@ def baseline(role: str) -> dict[str, str | None]:
     return {"kind": "no-local-policy", "version": None, "build": None}
 
 
+def validate_selection_diagnostic(value: object) -> None:
+    require(type(value) is dict and set(value) == {"stage", "reason"})
+    assert isinstance(value, dict)
+    require(type(value["stage"]) is str and value["stage"] in SELECTION_DIAGNOSTICS
+        and type(value["reason"]) is str and value["reason"] in SELECTION_DIAGNOSTICS[value["stage"]]
+        and len(_json_bytes(value)) < 160)
+
+
 def row(role: str, state: str = "not-run", reason: str = "stopped", *, version: str | None = None,
-        build: str | None = None, returncode: int | None = None) -> dict[str, Any]:
+        build: str | None = None, returncode: int | None = None,
+        selection_diagnostic: dict[str, str] | None = None) -> dict[str, Any]:
     assessment = "not-assessed"
     if reason == "observed" and role != "developer-selection":
         assessment = ("match" if (version, build) == (XCODE_VERSION, XCODE_BUILD) else "mismatch") if role == "xcode" else "no-local-policy"
     value = {"id": role, "state": state, "reason": reason, "version": version, "build": build,
              "returnCode": returncode, "baseline": baseline(role), "assessment": assessment, "help": HELP[role]}
+    if selection_diagnostic is not None:
+        validate_selection_diagnostic(selection_diagnostic)
+        value["selectionDiagnostic"] = dict(selection_diagnostic)
     validate_row(value)
     return value
 
 
 def validate_row(value: object) -> None:
-    require(type(value) is dict and set(value) == {
-        "id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help"})
+    required = {"id", "state", "reason", "version", "build", "returnCode", "baseline", "assessment", "help"}
+    require(type(value) is dict and required <= set(value) <= required | {"selectionDiagnostic"})
     assert isinstance(value, dict)
     role = value["id"]
     require(type(role) is str and role in HELP)
     require(type(value["state"]) is str and value["state"] in {"not-run", "attempted", "completed"})
+    diagnostic = value.get("selectionDiagnostic")
+    if diagnostic is not None:
+        validate_selection_diagnostic(diagnostic)
+        require(role == "developer-selection" and value["state"] == "completed"
+            and value["reason"] == "selection-unrecognized" and type(value["returnCode"]) is int and value["returnCode"] == 0)
     reasons = {"not-run": NOT_RUN, "attempted": ATTEMPTED, "completed": COMPLETED}
     require(type(value["reason"]) is str and value["reason"] in reasons[value["state"]])
     require(type(value["baseline"]) is dict and value["baseline"] == baseline(role)

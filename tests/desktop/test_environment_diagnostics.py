@@ -98,6 +98,36 @@ def elf(architecture="x86_64") -> bytes:
 
 
 class EnvironmentDiagnosticsProtocolTests(unittest.TestCase):
+    def test_selection_detail_is_optional_closed_and_only_for_original_negative_selection(self):
+        original = wire.row("developer-selection", "completed", "selection-unrecognized", returncode=0)
+        for detail in (None, {"stage": "application", "reason": "directory-owner"},
+                       {"stage": "alias", "reason": "target-shape"}):
+            value = {**original, "selectionDiagnostic": detail}
+            wire.validate_row(value)
+            self.assertEqual(json.loads(encoded(value)), value)
+        wire.validate_row(original)
+        self.assertNotIn("selectionDiagnostic", original)
+        wire.validate_row({**wire.row("git"), "selectionDiagnostic": None})
+        for bad in ({}, {"stage": "application", "reason": "target-shape"},
+                    {"stage": "alias", "reason": "directory-owner"},
+                    {"stage": "PRIVATE_PATH", "reason": "directory-owner"},
+                    {"stage": "application", "reason": "directory-owner", "path": "PRIVATE_PATH"}):
+            with self.subTest(detail=bad), self.assertRaises(wire.ProtocolError):
+                wire.validate_row({**original, "selectionDiagnostic": bad})
+        detail = {"stage": "application", "reason": "directory-owner"}
+        for key in original:
+            bad = {**original, "selectionDiagnostic": detail}
+            del bad[key]
+            with self.subTest(missing=key), self.assertRaises(wire.ProtocolError): wire.validate_row(bad)
+        for value in (wire.row("git"), wire.row("developer-selection"),
+                      wire.row("developer-selection", "completed", "observed", returncode=0),
+                      wire.row("developer-selection", "completed", "nonzero-exit", returncode=1)):
+            with self.subTest(row=value["reason"]), self.assertRaises(wire.ProtocolError):
+                wire.validate_row({**value, "selectionDiagnostic": detail})
+        constructed = wire.row("developer-selection", "completed", "selection-unrecognized", returncode=0, selection_diagnostic=detail)
+        detail["reason"] = "PRIVATE_SENTINEL"
+        self.assertEqual(constructed["selectionDiagnostic"]["reason"], "directory-owner")
+
     def test_closed_request_context_native_data_and_finite_two_frame_contract(self):
         req = request()
         self.assertEqual(req.native, request_data()["native"])
@@ -297,7 +327,7 @@ class EnvironmentDiagnosticsLookupTests(unittest.TestCase):
         table = metadata_table((selected + "/usr/bin/git",), ("/Applications/Xcode.app",))
         owner = guard()
         lookup = tools.ToolLookup("macos-arm64", "/inert/project", owner)
-        with patch.object(owner, "check"), patch.object(lookup, "_stat", side_effect=table.__getitem__), \
+        with patch.object(owner, "check"), patch.object(lookup, "_stat", side_effect=lambda path, **_options: table[path]), \
              patch.object(lookup, "_readlink", return_value=b"Xcode_26.3.app") as link:
             result = lookup.mac_developer(b"/Applications/Xcode.app/Contents/Developer\n")
             self.assertEqual(result.path, selected)
@@ -306,6 +336,98 @@ class EnvironmentDiagnosticsLookupTests(unittest.TestCase):
             with self.assertRaises(tools.ToolUnavailable): lookup.mac_developer(b"/Applications/Xcode.app/Contents/Developer\n")
         for output in (b"/private/custom\n", b"/Applications/Xcode.app/Contents/Developer\n\n", b"/usr/bin/git", b"\xff"):
             with self.assertRaises(tools.ToolUnavailable): lookup.mac_developer(output)
+
+    def test_mac_selection_reports_first_original_predicate_without_extra_observation(self):
+        selected = "/Applications/Xcode_26.3.app/Contents/Developer"
+        app, contents = "/Applications/Xcode_26.3.app", "/Applications/Xcode_26.3.app/Contents"
+        prefix = ["/", "/Applications", app]
+        cases = [("/", metadata(uid=1000), "root", "directory-owner", ["/"]),
+                 ("/Applications", metadata(stat.S_IFDIR | 0o777), "applications", "directory-world-write", prefix[:2]),
+                 (app, metadata(uid=1000), "application", "directory-owner", prefix),
+                 (app, metadata(stat.S_IFDIR | 0o775, gid=1000), "application", "directory-group-write", prefix),
+                 (contents, metadata(stat.S_IFLNK | 0o777), "contents", "directory-kind", prefix + prefix + [contents])]
+        for path, facts, stage, reason, names in cases:
+            with self.subTest(stage=stage, reason=reason):
+                table = metadata_table((selected + "/usr/bin/git",))
+                table[path] = facts
+                lookup = tools.ToolLookup("macos-arm64", "/inert/project", guard())
+                with patch.object(lookup, "_stat", side_effect=lambda name, **_options: table[name]) as observed, \
+                     patch.object(lookup, "_readlink", side_effect=AssertionError("no alias probe")), \
+                     patch.object(lookup, "_header", side_effect=AssertionError("no executable header")):
+                    with self.assertRaises(tools.ToolUnavailable) as caught: lookup.mac_developer(selected.encode() + b"\n")
+                self.assertEqual(caught.exception.selection_diagnostic, {"stage": stage, "reason": reason})
+                self.assertEqual([call.args[0] for call in observed.call_args_list], names)
+        lookup = tools.ToolLookup("macos-arm64", "/inert/project", guard())
+        for raw, reason in ((b"", "byte-shape"), (b"\n", "line-shape"), (b"\xff", "utf8-invalid"),
+                (b"/PRIVATE_PATH\n", "path-shape"), (b"/Applications/PRIVATE.app/Contents/Developer\n", "app-name")):
+            with self.subTest(reason=reason), patch.object(lookup, "_stat", side_effect=AssertionError("no namespace probe")):
+                with self.assertRaises(tools.ToolUnavailable) as caught: lookup.mac_developer(raw)
+                self.assertEqual(caught.exception.selection_diagnostic, {"stage": "selector-output", "reason": reason})
+                self.assertNotIn("PRIVATE", json.dumps(caught.exception.selection_diagnostic))
+
+    def test_mac_selection_namespace_alias_and_legacy_errors_keep_original_custody(self):
+        owner = guard()
+        lookup = tools.ToolLookup("macos-arm64", "/inert/project", owner)
+        for failure, reason in ((FileNotFoundError("PRIVATE_PATH"), "namespace-missing"),
+                                (PermissionError("PRIVATE_PATH"), "namespace-inaccessible")):
+            with patch.object(lookup, "_origin"), patch.object(owner, "check"), patch.object(os, "lstat", side_effect=failure) as observed:
+                with self.assertRaises(tools.ToolUnavailable) as caught:
+                    lookup.mac_developer(b"/Library/Developer/CommandLineTools\n")
+            self.assertEqual(observed.call_count, 1)
+            self.assertEqual(caught.exception.selection_diagnostic, {"stage": "root", "reason": reason})
+            self.assertNotIn("PRIVATE", str(caught.exception))
+        legacy = tools.ToolUnavailable("missing-in-supported-lookup")
+        with patch.object(lookup, "_stat", side_effect=legacy):
+            with self.assertRaises(tools.ToolUnavailable) as caught: lookup.mac_developer(b"/Library/Developer/CommandLineTools\n")
+        self.assertIs(caught.exception, legacy)
+        self.assertIsNone(caught.exception.selection_diagnostic)
+        selected = "/Applications/Xcode_26.3.app/Contents/Developer"
+        table = metadata_table((selected + "/usr/bin/git", "/Library/Developer/CommandLineTools/usr/bin/git"), ("/Applications/Xcode.app",))
+        with patch.object(owner, "check"), patch.object(lookup, "_stat", side_effect=lambda name, **_options: table[name]), \
+             patch.object(os, "readlink", return_value=b"../PRIVATE_TARGET") as link:
+            with self.assertRaises(tools.ToolUnavailable) as caught: lookup.mac_developer(b"/Applications/Xcode.app/Contents/Developer\n")
+            self.assertEqual(caught.exception.selection_diagnostic, {"stage": "alias", "reason": "target-shape"})
+            self.assertEqual(link.call_count, 1)
+            link.return_value = b"\xff"
+            with self.assertRaises(tools.ToolUnavailable) as caught: lookup.mac_developer(b"/Applications/Xcode.app/Contents/Developer\n")
+            self.assertEqual(caught.exception.selection_diagnostic, {"stage": "alias", "reason": "target-encoding"})
+            link.return_value = b"Xcode_26.3.app"
+            self.assertEqual(lookup.mac_developer(b"/Applications/Xcode.app/Contents/Developer\n").path, selected)
+            self.assertEqual(lookup.mac_developer(b"/Library/Developer/CommandLineTools\n").path, "/Library/Developer/CommandLineTools")
+
+    def test_mac_alias_first_readlink_or_identity_failure_has_no_later_probe(self):
+        alias = "/Applications/Xcode.app"
+        table = metadata_table(links=(alias,))
+        original_facts = tools._file_facts
+        for kind, reason in (("missing", "namespace-missing"), ("bytes", "target-bytes"), ("changed", "identity-changed")):
+            with self.subTest(kind=kind):
+                owner = guard()
+                lookup = tools.ToolLookup("macos-arm64", "/inert/project", owner)
+                events = []
+                def observed(path, **_options):
+                    events.append(("stat", path))
+                    if kind == "changed" and events.count(("stat", alias)) == 3:
+                        return metadata(stat.S_IFLNK | 0o777, inode=999)
+                    return table[path]
+                def link(path):
+                    self.assertEqual(path, alias.encode())
+                    events.append(("readlink", alias))
+                    if kind == "missing": raise FileNotFoundError("PRIVATE_TARGET")
+                    return b"" if kind == "bytes" else b"Xcode_26.3.app"
+                def facts(value):
+                    events.append(("facts", "changed" if value.st_ino == 999 else "original"))
+                    return original_facts(value)
+                with patch.object(owner, "check"), patch.object(lookup, "_stat", side_effect=observed), \
+                     patch.object(os, "readlink", side_effect=link), patch.object(tools, "_file_facts", side_effect=facts):
+                    with self.assertRaises(tools.ToolUnavailable) as caught:
+                        lookup.mac_developer((alias + "/Contents/Developer\n").encode())
+                expected = [("stat", path) for path in ("/", "/Applications", alias, "/", "/Applications", alias)]
+                expected.append(("readlink", alias))
+                if kind == "changed": expected.extend((("facts", "original"), ("stat", alias), ("facts", "changed")))
+                self.assertEqual(events, expected)
+                self.assertEqual(caught.exception.selection_diagnostic, {"stage": "alias", "reason": reason})
+                self.assertEqual(caught.exception.inaccessible, kind == "missing")
+                self.assertEqual(lookup.headers, [])
 
     def test_mac_jdk_unique_census_rejects_multiple_or_inaccessible_candidate(self):
         root = "/Library/Java/JavaVirtualMachines"
@@ -487,6 +609,39 @@ class EnvironmentDiagnosticsServiceTests(unittest.TestCase):
         xcode = called.call_args_list[-1]
         self.assertEqual(xcode.kwargs["environ"]["DEVELOPER_DIR"], "/Applications/Xcode.app/Contents/Developer")
         self.assertIsNone(service.checks["developer-selection"]["version"])
+
+    def test_mac_selection_detail_uses_original_negative_call_not_raw_data_or_new_git(self):
+        service, lookup = self.service(platform="ios", profile="macos-arm64")
+        with patch.object(diagnostics, "run_owned", return_value=subprocess.CompletedProcess(
+                ("/usr/bin/xcode-select", "-p"), 0, b"PRIVATE_PATH", b"PRIVATE_DIAGNOSTIC")) as call, \
+             patch.object(lookup, "mac_developer", side_effect=AssertionError("stderr refused before path lookup")), \
+             patch.object(lookup, "mac_developer_tool", side_effect=AssertionError("no Git or Xcode")):
+            service.run()
+        self.assertEqual(call.call_count, 1)
+        check = service.checks["developer-selection"]
+        self.assertEqual((check["state"], check["reason"], check["returnCode"]), ("completed", "selection-unrecognized", 0))
+        self.assertEqual(check["selectionDiagnostic"], {"stage": "selector-output", "reason": "stderr-present"})
+        self.assertNotIn("PRIVATE", json.dumps(service.checks))
+        self.assertEqual(service.commands_attempted, 1)
+        legacy = tools.ToolUnavailable()
+        # A fresh in-memory service, not another call on the completed run.
+        fresh, other = self.service(platform="ios", profile="macos-arm64")
+        with patch.object(diagnostics, "run_owned", side_effect=self.result), patch.object(other, "mac_developer", side_effect=legacy):
+            fresh.run()
+        self.assertNotIn("selectionDiagnostic", fresh.checks["developer-selection"])
+
+    def test_mac_developer_recheck_binding_changed_is_not_a_completed_selection_detail(self):
+        service, lookup = self.service(platform="ios", profile="macos-arm64")
+        original = tools.BindingChanged("PRIVATE_PATH")
+        def recheck(binding):
+            if binding.path.endswith("/Developer"): raise original
+        with patch.object(diagnostics, "run_owned", side_effect=self.result) as call, patch.object(lookup, "recheck", side_effect=recheck):
+            with self.assertRaises(tools.BindingChanged) as caught: service.run()
+        self.assertIs(caught.exception, original)
+        service.remember(original)
+        self.assertEqual(call.call_count, 1)
+        self.assertEqual(service.checks["developer-selection"]["reason"], "binding-changed")
+        self.assertNotIn("selectionDiagnostic", service.checks["developer-selection"])
 
     def test_opaque_process_error_retains_original_facts_and_stops_without_new_probe(self):
         service, lookup = self.service()
