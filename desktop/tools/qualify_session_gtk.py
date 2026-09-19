@@ -94,6 +94,7 @@ SOURCES = (
     'desktop/src-tauri/src/metadata_text_edit_protocol.rs',
     'desktop/src-tauri/src/passive_management_tests.rs',
     'desktop/src-tauri/src/protocol.rs',
+    'desktop/src-tauri/src/release_version_protocol.rs',
     'desktop/src-tauri/src/runtime.rs',
     'desktop/src-tauri/src/session_gtk_qualification.rs',
     'desktop/src-tauri/src/session_gtk_qualification/native_contract.rs',
@@ -165,6 +166,7 @@ SOURCES = (
     'desktop/src/pages/Metadata.tsx',
     'desktop/src/preparation.ts',
     'desktop/src/preview.ts',
+    'desktop/src/releaseVersion.ts',
     'desktop/src/styles.css',
     'desktop/src/types.ts',
     'desktop/tools/qualify_session_gtk.py',
@@ -202,6 +204,7 @@ SOURCES = (
     'src/mobile_release/api/_json.py',
     'src/mobile_release/api/_metadata_text.py',
     'src/mobile_release/api/_preview.py',
+    'src/mobile_release/api/_release_version.py',
     'src/mobile_release/api/_snapshot.py',
     'src/mobile_release/api/_snapshot_windows.py',
     'src/mobile_release/api/_snapshot_windows_native.py',
@@ -1585,7 +1588,7 @@ class Freeze:
         require(Path(__file__).resolve(strict=True) == launcher and os.getcwd() == str(repository / "desktop/src-tauri"), "fixed actual launcher source/cwd")
         require(type(v["display"]) is str and re.fullmatch(r":[1-9][0-9]{0,3}", v["display"]) is not None
                 and os.environ.get("DISPLAY") == v["display"], "fixed inherited display number")
-        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 217, "complete frozen217 source roster")
+        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 220, "complete frozen220 source roster")
         for path in SOURCES:
             h(v["sourceHashes"][path])
             actual, st = book.hash_file(exact_path(repository / path), 2 * 1024 * 1024)
@@ -2650,7 +2653,7 @@ def inert_source_tests() -> None:
     raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
     fixed(FiniteJson(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
     longest = max(SOURCES, key=len)
-    assert len(SOURCES) == 217 and 64 < len(longest) <= 128 and len(WITNESS) == 18
+    assert len(SOURCES) == 220 and 64 < len(longest) <= 128 and len(WITNESS) == 18
     raw = (json.dumps({longest: "a" * 64}, separators=(",", ":")) + "\n").encode("ascii")
     rejects(lambda data: FiniteJson(data, native=True).parse(lf=True), raw)
     base = {"response-decision": 1, "response-leave": 3, "close-dispatch": 2, "close-enter": 4, "close-ack": 5, "close-leave": 6,

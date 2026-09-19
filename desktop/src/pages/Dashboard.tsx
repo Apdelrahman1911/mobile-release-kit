@@ -2,6 +2,8 @@ import { getValue, textValue } from '../catalog.ts';
 import { configurationStatus } from '../certainty.ts';
 import { isDirty } from '../drafts.ts';
 import type { ProjectSession } from '../drafts.ts';
+import { releaseVersionHelp, releaseVersionPhase } from '../releaseVersion.ts';
+import type { ReleaseVersionState } from '../releaseVersion.ts';
 import type { AppInfo, HelpContent, Page } from '../types.ts';
 import { Badge, DisabledAction, EmptyState, ErrorNotice, HelpButton, Issues, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
@@ -16,8 +18,37 @@ const projectHelp: HelpContent = {
   failure: 'An incomplete read is not “no project found.” File observations are not atomic, may become stale, and never verify native tools, credentials, Git, or Store state.',
 };
 
-export function Dashboard({ session, info, preview, chooseDisabled, refreshReason, onChoose, onRefresh, onNavigate, onHelp }: {
+function SavedVersionCard({ state, reason, onRead, onHelp }: {
+  state: ReleaseVersionState; reason: string | null; onRead: () => void; onHelp: (help: HelpContent) => void;
+}) {
+  const phase = releaseVersionPhase(state);
+  const result = state.result;
+  const labels = { 'not-read': 'Not read', reading: 'Reading…', observed: 'Observed', stale: 'Stale observation',
+    missing: 'Saved input missing', invalid: 'Invalid saved input', unavailable: 'Unavailable' };
+  const earlier = result !== null && phase !== 'observed';
+  return <section className="card summary-card" aria-label="Saved version and build">
+    <div className="summary-label"><span>Version & build</span><HelpButton content={releaseVersionHelp} onHelp={onHelp} /></div>
+    <div aria-live="polite" aria-busy={phase === 'reading'}>
+      <strong className="summary-value compact-value" style={{ overflowWrap: 'anywhere' }}>{phase === 'observed' && result ? result.version.name : labels[phase]}</strong>
+      {phase === 'observed' && result && <><p>Build number {result.version.build}</p><Badge tone="info">Observed from saved version file</Badge></>}
+      {earlier && result && <p style={{ overflowWrap: 'anywhere' }}>Earlier read: {result.version.name} · Build {result.version.build} — stale, not current.</p>}
+      {result && <p>{earlier ? 'Earlier returned source' : 'Returned saved source'}:<br /><code style={{ overflowWrap: 'anywhere', whiteSpace: 'normal' }}>{result.source}</code></p>}
+      {state.stale && <p>Known context changes retired the earlier read. Read again explicitly; returning to this view does not refresh it.</p>}
+      {state.error && <p>{state.error.message}</p>}
+      {reason && reason !== state.error?.message && <p>{reason}</p>}
+    </div>
+    {state.project?.dirtyDraft && <p><strong>Unsaved draft not applied.</strong> This reads saved configuration only and leaves your draft untouched.</p>}
+    <p>One non-atomic read. External changes are not continuously monitored. No artifact check or full preflight; release readiness is not assessed.</p>
+    <button type="button" className="button small secondary" disabled={reason !== null} title={reason ?? undefined} onClick={onRead}>
+      <Icon name="refresh" size={15} className={phase === 'reading' ? 'spin' : ''} />Read saved version
+    </button>
+    <div className="summary-foot"><Icon name="metadata" size={14} /><code style={{ overflowWrap: 'anywhere', whiteSpace: 'normal' }}>Saved config: release/mobile-release.json</code></div>
+  </section>;
+}
+
+export function Dashboard({ session, info, preview, chooseDisabled, refreshReason, releaseVersionState, releaseVersionReason, onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
   session: ProjectSession | null; info: AppInfo | null; preview: boolean; chooseDisabled: boolean; refreshReason: string | null;
+  releaseVersionState: ReleaseVersionState; releaseVersionReason: string | null; onReadVersion: () => void;
   onChoose: () => void; onRefresh: () => void; onNavigate: (page: Page) => void; onHelp: (help: HelpContent) => void;
 }) {
   const status = configurationStatus(session, preview);
@@ -40,7 +71,7 @@ export function Dashboard({ session, info, preview, chooseDisabled, refreshReaso
     {session && refreshReason && !session.snapshot && !preview && <div className="notice notice-warning"><Icon name="info" /><div><strong>The folder is selected, but it has not been read</strong><p>{refreshReason}</p></div></div>}
     {partial && <div className="notice notice-warning"><Icon name="info" /><div><strong>Only a partial static observation is available</strong><p>Some input was excluded, unreadable, changed, or limited. This is not a complete snapshot or a verification result.</p></div></div>}
     <div className="summary-grid">
-      <div className="card summary-card"><div className="summary-label"><span>Version & build</span><Icon name="box" size={18} /></div><strong className="summary-value">Not observed</strong><p>No authoritative version read</p><div className="summary-foot"><Icon name="metadata" size={14} /><span>{textValue(getValue(config, 'version.source'), 'Choose a project to see the source')}</span></div></div>
+      <SavedVersionCard state={releaseVersionState} reason={releaseVersionReason} onRead={onReadVersion} onHelp={onHelp} />
       <div className="card summary-card"><div className="summary-label"><span>Configuration</span><Icon name="settings" size={18} /></div><strong className="summary-value compact-value">{status.label}</strong><p>{preview && session ? 'Inert example · not core validated' : config ? 'Policy and syntax are not release evidence' : 'No configuration facts assumed'}</p><div className="summary-foot"><Icon name="metadata" size={14} /><span>{configName}</span></div></div>
       <div className="card summary-card"><div className="summary-label"><span>Release readiness</span><Icon name="shield" size={18} /></div><strong className="summary-value compact-value">Not assessed</strong><p>Native tools and services not verified</p><div className="summary-foot"><span className="neutral-dot" /><span>No release operations are enabled</span></div></div>
     </div>

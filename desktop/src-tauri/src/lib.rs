@@ -6,6 +6,7 @@ compile_error!("development-runtime is forbidden when debug assertions are disab
 pub mod error;
 pub mod protocol;
 mod environment;
+mod release_version_protocol;
 mod environment_diagnostics_protocol;
 mod environment_diagnostics_owner;
 pub mod runtime;

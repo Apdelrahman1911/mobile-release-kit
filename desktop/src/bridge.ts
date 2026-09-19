@@ -1,5 +1,6 @@
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
 import { environmentError, environmentRequestFits, parseEnvironmentResult } from './environment.ts';
+import { parseReleaseVersionObservation, releaseVersionError, releaseVersionRequestFits } from './releaseVersion.ts';
 import { ENVIRONMENT_DIAGNOSTICS_EVENT, environmentDiagnosticsError, environmentDiagnosticsRequestFits, parseEnvironmentDiagnosticsStatus } from './environmentDiagnosticsProtocol.ts';
 import type { EnvironmentDiagnosticsCommand } from './environmentDiagnosticsProtocol.ts';
 import type { EnvironmentDiagnosticsStatus } from './environmentDiagnosticsTypes.ts';
@@ -106,6 +107,19 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     appInfo: () => call<AppInfo>('app_info'),
     chooseProject: () => call<ProjectReference | null>('choose_project'),
     snapshot: (projectId) => call<ProjectSnapshot>('project_snapshot', { projectId }),
+    observeReleaseVersion: async (projectId) => {
+      try {
+        if (mode !== 'native') throw { code: 'runtime_unavailable' };
+        const input = { projectId };
+        if (!releaseVersionRequestFits(input)) throw { code: 'release_version_invalid_params' };
+        // One fixed registered-ID route, not the generic reflective apiError
+        // adapter. No supplied path, draft, key or platform crosses this seam.
+        const request = structuredClone(input);
+        const result = parseReleaseVersionObservation(await invoke<unknown>('release_version_observe', request));
+        if (!result) throw { code: 'protocol_error' };
+        return result;
+      } catch (error) { throw releaseVersionError(error); }
+    },
     catalog: async () => {
       const result = await call<Catalog>('catalog');
       const githubSetup = parseCatalogGitHubSetup(result);

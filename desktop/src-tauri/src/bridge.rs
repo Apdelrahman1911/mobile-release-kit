@@ -83,6 +83,15 @@ impl DesktopBridge {
         let root = self.project_root(&project_id)?;
         self.supervisor.query(Method::ProjectSnapshot, json!({"root": root})).await
     }
+    pub(crate) async fn observe_release_version(&self, input: crate::release_version_protocol::Request) -> Result<crate::release_version_protocol::Observation, BridgeError> {
+        // Native-selected root only. The existing passive owner/runtime gate is
+        // unchanged; this observation creates no write or preflight authority.
+        let root = self.project_root(&input.project_id).map_err(crate::release_version_protocol::public_error)?;
+        let params = crate::release_version_protocol::params(&root)?;
+        let value = self.supervisor.query(Method::ReleaseVersionObserve, params).await
+            .map_err(crate::release_version_protocol::public_error)?;
+        crate::release_version_protocol::result(value)
+    }
     pub(crate) async fn observe_metadata_text(&self, input: crate::metadata_text_commands::Open) -> Result<crate::metadata_text_edit_protocol::Observation, BridgeError> {
         // Only the native-selected root reaches this bounded named-file query.
         // No checkout/write authority is created by a passive observation.

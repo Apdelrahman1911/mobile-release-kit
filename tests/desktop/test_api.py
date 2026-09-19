@@ -220,6 +220,9 @@ class ApiPureTests(unittest.TestCase):
                      patch.object(os, "stat", side_effect=AssertionError("filesystem stat")), \
                      patch.object(Path, "open", side_effect=AssertionError("path open")):
                     fresh.execute("environment.requirements", {"draft": draft(), "platform": "android", "operation": "build"})
+                    with self.assertRaises(fresh.ApiError) as refused:
+                        fresh.execute("release.version.observe", {})
+                    self.assertEqual(refused.exception.code, "release_version_invalid_params")
                 self.assertFalse(forbidden & set(sys.modules))
                 # Negative control: the guard actually rejects a forbidden route.
                 with self.assertRaisesRegex(AssertionError, "forbidden runtime import"):
@@ -236,7 +239,7 @@ class ApiPureTests(unittest.TestCase):
                                        "config.validate": True, "config.suggest": True, "config.preview": True,
                                        "github.setup.propose": True, "credentials.assess": True,
                                        "metadata.text.observe": False, "metadata.text.validate": True,
-                                       "environment.requirements": True})
+                                        "environment.requirements": True, "release.version.observe": False})
             self.assertTrue(execute("config.validate", {"draft": draft()})["valid"])
             with self.assertRaises(ApiError) as caught:
                 execute("project.snapshot", {"root": "C:\\selected"})

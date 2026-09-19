@@ -31,6 +31,7 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 | --- | --- | --- |
 | Project selection | Native directory selection, bound to a Rust-owned project ID | Trust in project scripts or repository contents |
 | Static snapshot | Bounded recognized text-file hints and configuration observations on supported POSIX filesystems | An atomic snapshot, Git source authority, successful build, signing or Store state |
+| Saved release version | Explicit Dashboard read of the saved configuration's version file, using the same parser and version/build policy as core builds | A version from an unsaved draft, Git commit proof, artifact comparison, full preflight or release readiness |
 | Configuration | Guided in-memory drafts with core-owned schema/policy validation and contextual help | Saving a file, checking path existence, approving an app identity or release readiness |
 | Configuration save implementation (disabled) | Separate native owner, exact two-file preview/apply contract, guided confirmation and original-outcome handling | Enabled saving, native window/process qualification, general project initialization or Windows file transactions |
 | GitHub setup proposal | Guided toolkit pin inputs, core-generated read-only workflow previews, contextual help and environment/credential-name checklist | GitHub login/contact, repository observation, compatibility verification, file writes, secret provisioning or workflow dispatch |
@@ -79,6 +80,11 @@ methods are:
 - `catalog`, `{}` — packaged schema, field help and credential/metadata guidance.
 - `project.snapshot`, `{root, configPath?}` — static observations of one explicit
   selected root; the desktop supplies the root, not the renderer.
+- `release.version.observe`, `{root}` — bounded observation of fixed saved
+  `release/mobile-release.json` and only its admitted `version.source`. Rust
+  supplies the registered root via `release_version_observe({projectId})`;
+  renderer paths, alternate configs, key/platform overrides and drafts are not
+  accepted. This uses the existing POSIX named reader, not staged Windows support.
 - `config.validate`, `{draft}` — pure shape/policy checks of a JSON object.
 - `config.suggest`, `{hints}` — closed in-memory hints to an explicitly unverified
   draft, with default/example provenance and no invented detected platform.
@@ -131,6 +137,41 @@ walking them. It uses anchored no-follow descriptor reads with traversal/read
 budgets and explicit partial/error results. It does not infer an enclosing
 repository above the selected directory or read arbitrary file contents for the
 renderer.
+
+### Read the saved release version
+
+Dashboard's **Read saved version** action displays the normalized marketing name
+and build number from the saved configuration's source. The shared core parser
+handles KEY=VALUE lines, comments, quotes and duplicate/unsafe-value refusal;
+the shared release policy applies the stricter marketing form whenever saved
+configuration enables iOS and requires a canonical build number in
+1..2,100,000,000. No project script, Git command, native tool, credential lookup,
+report writer or network service is used. An unsaved draft is explicitly **not
+applied** and is never overwritten by the read.
+
+Configuration is capped at 512 KiB and the version file at 64 KiB. Saved source
+paths must be bounded nonprivate relative paths (512 UTF-8 bytes, 12 components),
+with no links or portable aliases. The existing named reader holds original
+parents, checks file identities and absences, and settles original cleanup.
+Ordinary missing/invalid outcomes are retained until those contexts finish;
+change/limit findings supersede them and uncertain cleanup cannot become success.
+Only the admitted relative source and selected normalized name/build are returned,
+not the file text, other keys or raw parser/filesystem errors. The 8-KiB params
+and 4-KiB result DTO caps are separate from unchanged finite RPC framing limits.
+
+Observations are single-request, non-atomic and may become stale. Refresh, picker,
+service and save intents retire old UI requests synchronously; failed refresh,
+cancelled selection, unchanged/stale saves and recovery attention cannot reattach
+a late result. Retry is explicit, and retiring a UI result does not cancel or
+claim settlement of its native owner. Browser preview never fabricates a read.
+Installed/production runtime execution remains disabled even with a valid
+manifest, and Windows observation remains unavailable. The card reports real
+runtime/platform unavailability rather than using ambient Python.
+
+This is build-input preparation, **not offline preflight**. Even core preflight
+with `--offline --skip-builds` may perform Git/discovery, project checks and native
+commands. No build, version bump, artifact inspection/authentication/comparison,
+signing or release operation is added; **Release readiness remains Not assessed**.
 
 The transport is private and one-shot. Each request is one strict UTF-8 JSON
 object followed immediately by a newline and EOF:

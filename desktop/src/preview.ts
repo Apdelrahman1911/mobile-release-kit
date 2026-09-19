@@ -12,6 +12,7 @@ import { githubConnectionError, parseGitHubConnectionHelp } from './githubConnec
 import { metadataTextError, parseMetadataTextGuide } from './metadataTextProtocol.ts';
 import { environmentError, environmentRequestFits } from './environment.ts';
 import { environmentDiagnosticsError } from './environmentDiagnosticsProtocol.ts';
+import { releaseVersionError } from './releaseVersion.ts';
 import type { EnvironmentRequest, EnvironmentResult, EnvironmentRole, EnvironmentRequirement } from './environment.ts';
 import type { ApiError, Assurance, Catalog, DesktopApi, FieldHelp, JsonObject, ProjectSnapshot } from './types.ts';
 
@@ -117,6 +118,11 @@ export const previewApi: DesktopApi = {
   }),
   chooseProject: async () => ({ id: 'preview-example', name: 'Northstar Notes', path: example.root }),
   snapshot: async () => structuredClone(example),
+  observeReleaseVersion: async () => {
+    // No successful saved-file fixture, including after native bridge failure.
+    throw { ...releaseVersionError({ code: 'release_version_unavailable' }),
+      message: 'Browser preview cannot read saved project files or fabricate a version observation.' };
+  },
   catalog: async () => structuredClone(catalog),
   validate: async () => {
     throw { code: 'PreviewOnly', message: 'Core validation is unavailable in browser preview. Open the native application to validate a draft.', retryable: false } satisfies ApiError;

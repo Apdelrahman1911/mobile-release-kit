@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from mobile_release.config import ConfigurationError, load_config, parse_key_value_file
+from mobile_release.config import (ConfigurationError, ReleaseConfig, load_config, parse_key_value_file,
+                                   parse_key_value_text, release_version_from_values)
 from mobile_release.discovery import (
     discover_android,
     discover_ios,
@@ -162,6 +163,52 @@ class ConfigDiscoveryTests(unittest.TestCase):
                 )
                 with self.assertRaises(ConfigurationError):
                     config.release_version()
+
+    def test_shared_version_text_parser_preserves_file_grammar_and_errors(self) -> None:
+        corpus = [
+            "# comment\r\n// comment\r; comment\nVERSION_NAME='1.2.3'\r\nBUILD_NUMBER=42\n",
+            'VERSION_NAME="1.2.3"\nBUILD_NUMBER="42"\nOTHER=value\n',
+            "A=1\nA=2", "bad key=value", "A=${HOME}", "A=`command`", "A=\x00",
+            'A="broken', "A=''", 'A=" spaced "', "missing equals",
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "version.properties"
+            for raw in corpus:
+                path.write_text(raw, encoding="utf-8")
+                try:
+                    expected = parse_key_value_text(raw)
+                except ConfigurationError as expected_error:
+                    with self.subTest(raw=raw), self.assertRaises(ConfigurationError) as actual:
+                        parse_key_value_file(path)
+                    self.assertEqual(str(actual.exception), str(expected_error))
+                else:
+                    self.assertEqual(parse_key_value_file(path), expected)
+
+    def test_shared_release_policy_retains_wrapper_semantics_without_path_reads(self) -> None:
+        source = Path("/synthetic/version.properties")
+        for ios in (False, True):
+            data = {"version": {"source": "version.properties", "nameKey": "NAME", "buildKey": "BUILD"},
+                    "ios": {"enabled": ios}}
+            selected = ReleaseConfig(Path("unused"), Path("/synthetic"), data)
+            for name, build in [("1.2", "1"), ("1.2.3", "2100000000"), ("1.2.3.4-beta.5", "42"),
+                                ("1.2.3.4-beta+5", "42"),
+                                ("1", "42"), ("1.2", "0"), ("1.2", "042"), ("1.2", "+42"),
+                                ("1.2", "2100000001"), (None, "42"), ("1.2", None)]:
+                values = {key: value for key, value in (("NAME", name), ("BUILD", build)) if value is not None}
+                with self.subTest(ios=ios, name=name, build=build), \
+                        patch.object(ReleaseConfig, "project_path", return_value=source) as path, \
+                        patch("mobile_release.config.parse_key_value_file", return_value=values) as read:
+                    try:
+                        expected = release_version_from_values(values, name_key="NAME", build_key="BUILD",
+                                                               ios_enabled=ios, source_label=str(source))
+                    except ConfigurationError as expected_error:
+                        with self.assertRaises(ConfigurationError) as actual:
+                            selected.release_version()
+                        self.assertEqual(str(actual.exception), str(expected_error))
+                    else:
+                        self.assertEqual(selected.release_version(), expected)
+                    path.assert_called_once_with("version.properties")
+                    read.assert_called_once_with(source)
 
     def test_runtime_rejects_bool_schema_version_colon_fingerprint_and_length_overflow(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -9,6 +9,7 @@ import { configurationOwnerReason, editRetainsDraft, editStartReason } from './c
 import { ConfigEditController } from './configEditController.ts';
 import { GitHubSetupController } from './githubSetupController.ts';
 import { EnvironmentController } from './environment.ts';
+import { ReleaseVersionController } from './releaseVersion.ts';
 import { EnvironmentDiagnosticsController, diagnosticsOwnerReason } from './environmentDiagnosticsController.ts';
 import { GitHubConnectionController } from './githubConnectionController.ts';
 import { connectionRepository } from './githubConnectionProtocol.ts';
@@ -76,6 +77,7 @@ export function App() {
   const editControllerRef = useRef<ConfigEditController | null>(null);
   const githubControllerRef = useRef<GitHubSetupController | null>(null);
   const environmentControllerRef = useRef<EnvironmentController | null>(null);
+  const releaseVersionControllerRef = useRef<ReleaseVersionController | null>(null);
   const diagnosticsControllerRef = useRef<EnvironmentDiagnosticsController | null>(null);
   const connectionControllerRef = useRef<GitHubConnectionController | null>(null);
   const connectionHelpGeneration = useRef<object>({});
@@ -100,6 +102,9 @@ export function App() {
   // Keep the reducer's latest state synchronously visible to save admission.
   // A React render/effect delay must not let an older review authorize Apply.
   const dispatch = useCallback((action: WorkspaceAction) => {
+    // Intent/event retirement must precede even an unchanged reducer result:
+    // failed refresh and unchanged/older saves need not advance generations.
+    releaseVersionControllerRef.current?.beforeWorkspaceAction(action);
     const previous = workspaceRef.current;
     const next = workspaceReducer(previous, action);
     if (next === previous) return;
@@ -115,6 +120,7 @@ export function App() {
     }
     workspaceRef.current = next;
     environmentControllerRef.current?.syncProject();
+    releaseVersionControllerRef.current?.syncProject();
     diagnosticsControllerRef.current?.syncProject();
     metadataControllerRef.current?.syncProject();
     assetControllerRef.current?.syncProject();
@@ -146,6 +152,12 @@ export function App() {
   }));
   environmentControllerRef.current = environment;
   const environmentState = useSyncExternalStore(environment.subscribe, environment.getSnapshot, environment.getSnapshot);
+  const [releaseVersion] = useState(() => new ReleaseVersionController(() => {
+    const current = workspaceRef.current;
+    return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
+  }, (projectId) => configurationOwnerReason(configEdit.getSnapshot(), projectId) !== null));
+  releaseVersionControllerRef.current = releaseVersion;
+  const releaseVersionState = useSyncExternalStore(releaseVersion.subscribe, releaseVersion.getSnapshot, releaseVersion.getSnapshot);
   const [diagnostics] = useState(() => new EnvironmentDiagnosticsController({
     selectedProject: () => {
       const current = workspaceRef.current;
@@ -220,6 +232,7 @@ export function App() {
     void githubConnection.attach(null);
     githubSetup.beginConnection();
     environment.beginConnection();
+    releaseVersion.beginConnection();
     diagnostics.beginConnection();
     metadataText.beginConnection();
     setLoading(true);
@@ -246,6 +259,7 @@ export function App() {
       setInfo(appInfo);
       githubSetup.setConnection(connection, appInfo);
       environment.setConnection(connection, appInfo);
+      releaseVersion.setConnection(connection, appInfo);
       metadataText.setConnection(connection, appInfo);
       if (connection.mode === 'preview' || methodReason(appInfo, 'catalog', connection.mode) === null) {
         try {
@@ -270,12 +284,12 @@ export function App() {
       if (generation === bootGeneration.current) {
         connectionHandoffRef.current = null; connectionPortRef.current = null;
         githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null);
-        setInfo(null); setCatalog(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); setBootError(apiError(error));
+        setInfo(null); setCatalog(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); releaseVersion.connectionUnavailable(); setBootError(apiError(error));
       }
     } finally {
       if (generation === bootGeneration.current) setLoading(false);
     }
-  }, [githubSetup, githubConnection, environment, diagnostics, metadataText, syncConnectionContext]);
+  }, [githubSetup, githubConnection, environment, releaseVersion, diagnostics, metadataText, syncConnectionContext]);
 
   useEffect(() => {
     void bootstrap();
@@ -286,6 +300,7 @@ export function App() {
   useEffect(() => () => configEdit.dispose(), [configEdit]);
   useEffect(() => () => githubSetup.dispose(), [githubSetup]);
   useEffect(() => () => environment.dispose(), [environment]);
+  useEffect(() => () => releaseVersion.dispose(), [releaseVersion]);
   useEffect(() => () => diagnostics.dispose(), [diagnostics]);
   useEffect(() => () => githubConnection.dispose(), [githubConnection]);
   useEffect(() => { if (api) void workflowEdit.connect(api); }, [api, workflowEdit]);
@@ -335,6 +350,7 @@ export function App() {
     // Admission of the native picker retires the original GitHub context even
     // if selection later cancels/fails. Do not wait for a successful folder.
     connectionPicking.current = true; advanceConnectionContext(); githubConnection.setContext(null);
+    releaseVersion.setSelectionPending(true);
     diagnostics.setSelectionPending(true);
     metadataText.setSelectionPending(true);
     setChoosing(true);
@@ -346,7 +362,7 @@ export function App() {
       dispatch({ type: 'select', project });
       if (!alreadyLoaded) await loadSnapshot(project.id);
     } catch (error) { setChooseError(apiError(error)); }
-    finally { connectionPicking.current = false; setChoosing(false); syncConnectionContext(); metadataText.setSelectionPending(false); diagnostics.setSelectionPending(false); }
+    finally { connectionPicking.current = false; setChoosing(false); syncConnectionContext(); releaseVersion.setSelectionPending(false); metadataText.setSelectionPending(false); diagnostics.setSelectionPending(false); }
   };
 
   const changeApplicationRepository = (value: string) => {
@@ -415,7 +431,7 @@ export function App() {
     discardReason={session && draftRetained(session.project.id) ? 'Keep this draft until the original native file-edit session has settled. Closing a review is separate from discarding draft data.' : null}
     onChoose={() => void chooseProject()} onEdit={edit} onValidate={() => void validate()}
     onReview={() => void review()} onSuggest={() => void suggest()}
-    onPrepareSave={() => { if (session && workspaceRef.current.selectedId === session.project.id) configEdit.start(session.project.id); }}
+    onPrepareSave={() => { if (session && workspaceRef.current.selectedId === session.project.id) { releaseVersion.saveIntent(); configEdit.start(session.project.id); } }}
     onAdoptSuggestion={(requestId) => { if (session) dispatch({ type: 'adopt-suggestion', projectId: session.project.id, requestId }); }}
     onRemoveForbidden={(reviewId, paths) => { if (session) dispatch({ type: 'remove-forbidden', projectId: session.project.id, reviewId, paths }); }}
     onUndoRemoval={(removalId) => { if (session) dispatch({ type: 'undo-removal', projectId: session.project.id, removalId }); }}
@@ -451,11 +467,13 @@ export function App() {
         {info?.runtime.state !== 'available' && info && !preview && <div className="notice notice-warning"><Icon name="info" /><div><strong>{info.runtime.state === 'disabled' ? 'The engine is disabled' : 'Bundled engine unavailable'}</strong><p>{info.runtime.reason ?? 'A trusted packaged runtime has not been supplied. The app will not select an ambient Python or a mock engine.'} Folder selection does not establish a project observation.</p></div></div>}
         {page !== 'environment' && <EnvironmentDiagnostics state={diagnosticsState} controller={diagnostics} compact onShow={() => navigate('environment')} />}
         <ConfigSave state={saveState} projects={workspace.projects} catalog={catalog} selectedId={workspace.selectedId} detailed={page === 'settings' || page === 'metadata'}
-          onCheck={() => void configEdit.checkStatus()} onClose={() => configEdit.requestClose()} onApply={(binding) => configEdit.apply(binding)}
+          onCheck={() => void configEdit.checkStatus()} onClose={() => configEdit.requestClose()} onApply={(binding) => { releaseVersion.saveIntent(); return configEdit.apply(binding); }}
           onShowProject={(projectId) => { dispatch({ type: 'switch', projectId }); navigate('settings'); }} onHelp={setHelp} />
         {page !== 'github' && workflowPanel(false)}
         {page !== 'metadata' && <MetadataTextSave state={metadataState} controller={metadataText} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
-        {page === 'dashboard' && <Dashboard session={session} info={info} preview={preview} chooseDisabled={chooseDisabled} refreshReason={loading ? 'Capabilities are loading.' : refreshReason} onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
+        {page === 'dashboard' && <Dashboard session={session} info={info} preview={preview} chooseDisabled={chooseDisabled} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
+          releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => void releaseVersion.read()}
+          onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="A little clarity before the next release." description="Edit a practical, schema-driven draft. The bundled core provides every field, requirement, and validation rule." />{editor()}</>}
         {page === 'environment' && <Environment info={info} preview={preview} session={session} state={environmentState} controller={environment}
           diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
