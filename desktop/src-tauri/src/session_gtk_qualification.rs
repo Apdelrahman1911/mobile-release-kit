@@ -155,8 +155,6 @@ impl FileBook {
 struct Source { path: &'static str, bytes: &'static [u8] }
 macro_rules! source { ($path:literal) => { Source { path:$path, bytes:include_bytes!(concat!("../../../", $path)) } }; }
 const SOURCES: &[Source] = &[
-    // Fixed first-party superset: real frontend/assets/build inputs, native
-    // modules (including cfg(test) transitive files), and core import/data tree.
     source!(".github/workflows/desktop-environment-diagnostics-native.yml"),
     source!(".github/workflows/desktop-github-connection-tls.yml"),
     source!(".github/workflows/desktop-github-workflow-apply-native.yml"),
@@ -247,6 +245,7 @@ const SOURCES: &[Source] = &[
     source!("desktop/src/components/GitHubWorkflowApply.tsx"),
     source!("desktop/src/components/Icon.tsx"),
     source!("desktop/src/components/MetadataTextEditor.tsx"),
+    source!("desktop/src/components/ReleaseInputGuidance.tsx"),
     source!("desktop/src/components/RemovedFields.tsx"),
     source!("desktop/src/configEdit.ts"),
     source!("desktop/src/configEditController.ts"),
@@ -278,7 +277,9 @@ const SOURCES: &[Source] = &[
     source!("desktop/src/pages/Metadata.tsx"),
     source!("desktop/src/preparation.ts"),
     source!("desktop/src/preview.ts"),
+    source!("desktop/src/releaseInputGuidance.ts"),
     source!("desktop/src/releaseVersion.ts"),
+    source!("desktop/src/requirementProtocol.ts"),
     source!("desktop/src/styles.css"),
     source!("desktop/src/types.ts"),
     source!("desktop/tools/qualify_session_gtk.py"),

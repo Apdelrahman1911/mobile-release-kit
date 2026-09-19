@@ -210,6 +210,9 @@ test('both result variants are admitted only with their exact discriminants and 
 });
 
 test('every nested proposal object rejects unknown and missing keys', () => {
+  // A fail-closed decoder must not make every malformed case pass vacuously.
+  const baseline = proposed();
+  assert.deepEqual(parseGitHubSetupResult(baseline), baseline);
   const locations = [
     (value) => value, (value) => value.assurance, (value) => value.facts, (value) => value.validation,
     (value) => value.validation.assurance, (value) => value.validation.requirements[0], (value) => value.templateSet,

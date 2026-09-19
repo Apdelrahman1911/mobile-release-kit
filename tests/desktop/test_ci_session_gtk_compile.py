@@ -80,14 +80,14 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         rust_paths = re.findall(r'^    source!\("([^\"]+)"\),$', rust_block, re.MULTILINE)
         self.assertEqual(python_paths, rust_paths)
         self.assertEqual(python_paths, sorted(set(python_paths)))
-        self.assertEqual(len(python_paths), 220)
+        self.assertEqual(len(python_paths), 223)
         self.assertNotIn("len(SOURCES) == 154", driver)
         self.assertNotIn("len(SOURCES) == 182", driver)
         self.assertNotIn("len(SOURCES) == 197", driver)
         self.assertNotIn("len(SOURCES) == 201", driver)
         self.assertNotIn("len(SOURCES) == 213", driver)
         self.assertNotIn("len(SOURCES) == 217", driver)
-        self.assertEqual(driver.count("len(SOURCES) == 220"), 2)
+        self.assertEqual(driver.count("len(SOURCES) == 223"), 2)
         self.assertEqual(tuple(path.removeprefix("src/") for path in python_paths if path.startswith("src/")),
                          helper.GTK_CORE_PATHS)
         package = root / "src/mobile_release"

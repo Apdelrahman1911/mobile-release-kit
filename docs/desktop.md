@@ -271,6 +271,41 @@ signing, network or Store operation is requested. Builds, full doctor, Windows
 ownership, native UI qualification and standalone distribution remain separate
 milestones; no production constructor is enabled by this implementation.
 
+### Prepare this release's inputs (draft guidance only)
+
+Credentials offers **Show current draft requirements** using the existing passive
+`config.validate` method. It sends a clone of the current in-memory configuration,
+including unsaved changes; it does not inspect credentials or saved files. The
+core already returns all-stage, full-purpose requirements. Candidate/internal,
+external testing and production preparation are presentation filters only, with
+Android, iOS and project-level rows grouped without a second policy table.
+
+Each row says **Required by this draft; presence not checked.** File/scalar
+companions and alternatives come from the returned descriptors. Existing core
+asset/catalogue help explains what an input is, how/where to obtain it, its format
+and failure guidance. **Open guide** selects existing reference content; it never
+starts an importer or changes private-session context. Unmatched families remain
+visible, with bounded catalogue help or an explicit unavailable-help message.
+No requirements for one stage does not mean inputs are present or a release is
+ready. Browser preview cannot fabricate a current-draft core result.
+
+Rows and requests retire synchronously on refresh attempts, project/picker and
+draft changes, reconnect at its start, help replacement/failure, and save or
+recovery events—even when draft revision does not change. Pending/failed refresh
+never restores old rows; stage changes cannot reveal them. Only the still-current
+original request may publish, and retired replies cannot clear a newer request.
+This is UI retirement, not cancellation or finality of the passive supervisor.
+A failed project refresh leaves any later explicit guidance limited to the
+retained draft; separate native recovery attention remains blocking.
+
+The renderer admits bounded requirement/help DTOs and schema-policy assurance,
+not credential-validation claims. Invalid-draft and transport errors use fixed
+safe messages instead of reflective core errors. No secrets, possession flags,
+file paths or private values are collected or retained by this pane. Existing
+session acquisition/assessment/storage/assignment gates are unchanged; native
+qualification, unsupported pickers, persistent vault storage, protected service
+checks and releases are not enabled by guidance or pure frontend tests.
+
 ### Supplied-input credential assessment (no renderer routing)
 
 The R1 pure contract uses exactly:
