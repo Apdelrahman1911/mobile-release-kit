@@ -384,14 +384,45 @@ impl CaseFiles {
     }
 }
 fn draft(enabled: bool) -> Value {
+    // A disabled platform must contain only `enabled:false`, and core policy
+    // still requires one enabled platform. Every disabled management case
+    // selects Android; enabled iOS does not authorize any tool invocation.
+    let android = if enabled {
+        json!({"enabled":true,"applicationId":"org.synthetic.diagnostics","identityStatus":"unverified"})
+    } else { json!({"enabled":false}) };
     json!({"schemaVersion":1,"version":{"source":"release/version.properties","nameKey":"VERSION_NAME","buildKey":"BUILD_NUMBER"},
         "source":{"candidateBranch":"main","productionBranch":"main"},
-        "android":{"enabled":enabled,"applicationId":"org.synthetic.diagnostics","identityStatus":"unverified"},
-        "ios":{"enabled":enabled,"bundleId":"org.synthetic.diagnostics","identityStatus":"unverified"},
+        "android":android,
+        "ios":{"enabled":true,"bundleId":"org.synthetic.diagnostics","identityStatus":"unverified"},
         "metadata":{"root":"release/store","androidLocales":["en-US"],"iosLocales":["en-US"]},
         "services":{"androidFirebase":"disabled","iosFirebase":"disabled"},
         "projectChecks":{"preflight":[],"androidArtifact":[],"iosArtifact":[]}})
 }
+
+#[test]
+fn management_draft_obeys_core_shape_and_android_routing() {
+    // Pure DATA only: use the actual factory without creating a Run, runtime,
+    // owner, file or tool. The focused policy check consumes these exact JSON
+    // records through the existing core parser, not a Python copy of the draft.
+    let disabled = draft(false);
+    assert_eq!(disabled["android"], json!({"enabled":false}));
+    assert_eq!(disabled["ios"], json!({"enabled":true,"bundleId":"org.synthetic.diagnostics","identityStatus":"unverified"}));
+    for case in [Case::L1, Case::L2, Case::L6a, Case::L6b, Case::L6c, Case::L7] {
+        assert!(!case.enabled());
+        assert!(matches!(case.platform(), wire::Platform::Android));
+    }
+    let enabled = draft(true);
+    let mut expected_enabled = disabled.clone();
+    expected_enabled["android"] = json!({"enabled":true,"applicationId":"org.synthetic.diagnostics","identityStatus":"unverified"});
+    assert_eq!(enabled, expected_enabled);
+    for (variant, value) in [("android-disabled", disabled), ("both-enabled", enabled)] {
+        let record = serde_json::to_string(&json!({"schemaVersion":1,"variant":variant,"selectedPlatform":"android","draft":value})).unwrap();
+        assert!(record.len() <= 4096);
+        // libtest's `test ...` prefix may share a line under --nocapture.
+        println!("\nMRK_ENVIRONMENT_DRAFT_POLICY_V1 {record}");
+    }
+}
+
 struct Run { bridge: Arc<DesktopBridge>, document: DocumentBinding, permit: Arc<Permit>, session: Option<Arc<Session>> }
 impl Run {
     fn prepare(inputs: Arc<BoundInputs>, case: Case) -> Check<Self> {

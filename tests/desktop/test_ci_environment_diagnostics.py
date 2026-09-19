@@ -416,6 +416,27 @@ class EnvironmentNativeCIContracts(unittest.TestCase):
                 at[path[-1]] = bad
                 self.assert_refused(lambda result: helper.validate_environment_result(result, context, digest), value)
 
+    def test_no_tool_management_refusals_distinguish_attempts_from_invalid_drafts(self) -> None:
+        for platform in ("linux", "macos"):
+            for name in ("L6a", "L6b", "L6c", "L7"):
+                for attempted in (False, True):
+                    with self.subTest(platform=platform, case=name, attempted=attempted):
+                        context, result, digest = native_result(platform)
+                        projection = result["cases"][helper.ENVIRONMENT_NATIVE_CASES.index(name)]["projection"]
+                        if attempted:
+                            projection["result"] = projection_value(platform, "R1")["result"]
+                            expected = f"Environment {name} no-tool management case attempted tools"
+                        else:
+                            # Change every reason together: mixed refusal reasons
+                            # would fail an earlier DTO consistency check instead.
+                            for check in projection["result"]["checks"]:
+                                check["reason"] = "invalid-draft"
+                            expected = f"Environment {name} no-tool management case did not report platform-disabled"
+                        self.assertEqual(helper.validate_environment_projection(projection, platform), projection)
+                        with self.assertRaises(helper.CheckFailure) as caught:
+                            helper.validate_environment_result(result, context, digest)
+                        self.assertEqual(str(caught.exception), expected)
+
     def test_real_r1_git_refusal_prevents_synthetic_admission_without_fake_relay(self) -> None:
         context, result, digest = native_result()
         r1 = result["cases"][helper.ENVIRONMENT_NATIVE_CASES.index("R1")]["projection"]["result"]

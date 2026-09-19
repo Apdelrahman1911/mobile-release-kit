@@ -6757,9 +6757,10 @@ def validate_environment_result(value: object, context: dict, invocation_digest:
                 if name == "R1" and check["id"] == "git":
                     r1_git_completed = check["state"] == "completed"
         if name in {"L6a", "L6b", "L6c", "L7"}:
-            require(projection["result"]["commandsAttempted"] == 0
-                    and all(row["reason"] == "platform-disabled" for row in projection["result"]["checks"]),
-                    "Environment no-tool management case invoked an unrelated tool")
+            require(projection["result"]["commandsAttempted"] == 0,
+                    f"Environment {name} no-tool management case attempted tools")
+            require(all(row["reason"] == "platform-disabled" for row in projection["result"]["checks"]),
+                    f"Environment {name} no-tool management case did not report platform-disabled")
         if name in {"L4", "L5"} and exercised:
             git = next(row for row in projection["result"]["checks"] if row["id"] == "git")
             require(git["state"] == "attempted" and git["reason"] == "command-incomplete",
