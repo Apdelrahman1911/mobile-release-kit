@@ -227,7 +227,14 @@ class OperationRecoveryTests(unittest.TestCase):
             self.assertEqual(argv, ["keytool", "-printcert", "-jarfile", str(self.fixture.binary)])
             return subprocess.CompletedProcess(argv, 0, "Signer #1:\n\nCertificate #1:\nSHA256: " + ":".join(["AA"] * 32) + "\n", "")
         self.stack.enter_context(patch("mobile_release.cli.validate_aab", new=validate_aab))
-        self.stack.enter_context(patch("mobile_release.android._bundletool_manifest", return_value='<manifest package="com.example.reader" android:versionCode="42" android:versionName="1.2.3" />'))
+        self.stack.enter_context(patch(
+            "mobile_release.android._bundletool_manifest",
+            return_value=(
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.example.reader" android:versionCode="42" '
+                'android:versionName="1.2.3"><application /></manifest>'
+            ),
+        ))
         self.stack.enter_context(patch(
             "mobile_release._command_process.run_command",
             side_effect=AssertionError("policy fixture must not acquire a native command owner"),

@@ -6,6 +6,7 @@ control flow is exercised with descriptor/stat sentinels under IO traps.
 from __future__ import annotations
 
 import builtins
+import hashlib
 import json
 import os
 import socket
@@ -43,6 +44,11 @@ def values(raw="VERSION_NAME='1.2.3'\r\nBUILD_NUMBER=42\nOTHER=unselected-fixtur
     return {api.CONFIG_PATH: json.dumps(data), data["version"]["source"]: raw}
 
 
+def comparison(raw):
+    raw = raw.encode("utf-8") if isinstance(raw, str) else raw
+    return {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+
+
 def forbidden(*_args, **_kwargs):
     raise AssertionError("No project/native/process/network IO is admitted")
 
@@ -67,10 +73,15 @@ def no_io():
 
 class Reads:
     def __init__(self, supplied):
-        self.values, self.calls, self.events = supplied, [], []
+        # Fixture text is encoded before the service receives its byte reader;
+        # this is not a v1 DTO conversion or an alternate production read path.
+        self.values = {path: value.encode("utf-8") if isinstance(value, str) else value for path, value in supplied.items()}
+        self.calls, self.events = [], []
 
-    def read(self, path, *, limit):
-        self.calls.append((path, limit))
+    def read(self, path, *, limit, binary=False):
+        self.calls.append((path, limit, binary))
+        if binary is not True:
+            raise AssertionError("Saved pair must capture original bytes, not decoded/normalized text")
         if path not in self.values:
             raise AssertionError("Read outside the saved-config-derived fixture")
         value = self.values[path]
@@ -154,11 +165,14 @@ class ReleaseVersionTests(unittest.TestCase):
             self.assertTrue(all(not row["available"] for row in caps["actions"]))
 
     def test_only_saved_source_and_selected_normalized_values_are_returned(self):
-        with inert_observation(values()) as reader:
+        supplied = values()
+        with inert_observation(supplied) as reader:
             result = execute("release.version.observe", {"root": "/inert-project"})
-        self.assertEqual(reader.calls, [(api.CONFIG_PATH, MAX_CONFIG_BYTES), ("release/version.properties", MAX_VERSION_BYTES)])
+        self.assertEqual(reader.calls, [(api.CONFIG_PATH, MAX_CONFIG_BYTES, True), ("release/version.properties", MAX_VERSION_BYTES, True)])
         self.assertEqual(reader.events, ["root-enter", "named-enter", "named-recheck", "named-close", "root-recheck", "root-close"])
-        self.assertEqual(result, {"schemaVersion": 1, "source": "release/version.properties", "version": {"name": "1.2.3", "build": 42},
+        self.assertEqual(result, {"schemaVersion": 2, "source": "release/version.properties", "version": {"name": "1.2.3", "build": 42},
+                                 "savedConfig": comparison(supplied[api.CONFIG_PATH]),
+                                 "savedVersion": comparison(supplied["release/version.properties"]),
                                  "observationScope": "single-request-non-atomic", "assurance": {
                                      "basis": "static-text", "projectCodeExecuted": False, "toolsProbed": False,
                                      "credentialsRead": False, "gitObserved": False, "storeContacted": False,
@@ -168,6 +182,54 @@ class ReleaseVersionTests(unittest.TestCase):
         data["version"].update(nameKey="MARKETING", buildKey="BUILD")
         with inert_observation(values("MARKETING=2.4\nBUILD=7\nVERSION_NAME=ignored", data=data)):
             self.assertEqual(execute("release.version.observe", {"root": "/inert-project"})["version"], {"name": "2.4", "build": 7})
+
+    def test_pair_hashes_exact_utf8_bytes_not_parsed_config_or_normalized_version(self):
+        data = config(source="public/é-version.properties")
+        config_raw = (json.dumps(data, ensure_ascii=False, indent=2) + "\r\n").encode("utf-8")
+        version_raw = 'VERSION_NAME = "1.2.3"\r\nBUILD_NUMBER = 42\r\n# café: inert unselected comment\r\n'.encode("utf-8")
+        source = data["version"]["source"]
+        supplied = {api.CONFIG_PATH: config_raw, source: version_raw}
+        with inert_observation(supplied) as reader:
+            result = execute("release.version.observe", {"root": "/inert-project"})
+        self.assertEqual(reader.calls, [(api.CONFIG_PATH, MAX_CONFIG_BYTES, True), (source, MAX_VERSION_BYTES, True)])
+        self.assertEqual(result["savedConfig"], comparison(config_raw))
+        self.assertEqual(result["savedVersion"], comparison(version_raw))
+        self.assertGreater(result["savedConfig"]["bytes"], len(config_raw.decode("utf-8")))
+        self.assertGreater(result["savedVersion"]["bytes"], len(version_raw.decode("utf-8")))
+        self.assertEqual(result["version"], {"name": "1.2.3", "build": 42})
+        self.assertNotIn("unselected comment", json.dumps(result))
+        alternatives = [({**supplied, api.CONFIG_PATH: json.dumps(data, ensure_ascii=False).encode("utf-8")}, "savedConfig"),
+                        ({**supplied, source: version_raw.replace(b"\r\n", b"\n")}, "savedVersion"),
+                        ({**supplied, source: version_raw.replace(b"inert", b"other")}, "savedVersion")]
+        for changed, field in alternatives:
+            with self.subTest(field=field), inert_observation(changed):
+                observed = execute("release.version.observe", {"root": "/inert-project"})
+            self.assertEqual(observed["source"], result["source"])
+            self.assertEqual(observed["version"], result["version"])
+            self.assertNotEqual(observed[field]["sha256"], result[field]["sha256"])
+            unchanged = "savedVersion" if field == "savedConfig" else "savedConfig"
+            self.assertEqual(observed[unchanged], result[unchanged])
+
+    def test_pair_retains_existing_file_limits_and_no_partial_encoding_result(self):
+        raw = json.dumps(config()).encode("utf-8")
+        source = b"VERSION_NAME=1.2\nBUILD_NUMBER=42\n#"
+        supplied = {api.CONFIG_PATH: raw + b" " * (MAX_CONFIG_BYTES - len(raw)),
+                    "release/version.properties": source + b"x" * (MAX_VERSION_BYTES - len(source))}
+        with inert_observation(supplied) as reader:
+            result = execute("release.version.observe", {"root": "/inert-project"})
+        self.assertEqual(result["savedConfig"], comparison(supplied[api.CONFIG_PATH]))
+        self.assertEqual(result["savedVersion"], comparison(supplied["release/version.properties"]))
+        self.assertEqual(result["savedConfig"]["bytes"], MAX_CONFIG_BYTES)
+        self.assertEqual(result["savedVersion"]["bytes"], MAX_VERSION_BYTES)
+        self.assertTrue(all(binary for _, _, binary in reader.calls))
+        for supplied in ({api.CONFIG_PATH: b"private-error-marker\xff"}, values(b"private-error-marker\xff")):
+            with self.subTest(config_only=len(supplied) == 1), inert_observation(supplied) as reader:
+                self.refused("encoding")
+            self.assertEqual(reader.events, ["root-enter", "named-enter", "named-recheck", "named-close", "root-recheck", "root-close"])
+            with inert_observation(supplied, root_note="snapshot.changed"):
+                self.refused("changed")
+            with inert_observation(supplied, named_close=True):
+                self.refused("cleanup_unknown")
 
     def test_shared_policy_handles_enabled_ios_suffixes_keys_and_build_limits(self):
         for ios, name, build, valid in [(False, "1.2.3.4-beta.5", "42", True), (False, "1.2.3.4+5", "42", True),
@@ -198,7 +260,7 @@ class ReleaseVersionTests(unittest.TestCase):
                 self.refused(reason)
             self.assertEqual(reader.events, ["root-enter", "named-enter", "named-recheck", "named-close", "root-recheck", "root-close"])
             if reason in {"config_missing", "config_invalid", "unsafe"}:
-                self.assertEqual(reader.calls, [(api.CONFIG_PATH, MAX_CONFIG_BYTES)])
+                self.assertEqual(reader.calls, [(api.CONFIG_PATH, MAX_CONFIG_BYTES, True)])
 
     def test_changed_and_limit_rechecks_supersede_ordinary_outcomes(self):
         for supplied in ({api.CONFIG_PATH: None}, {api.CONFIG_PATH: "invalid"}, values(None), values("invalid")):
@@ -237,7 +299,7 @@ class ReleaseVersionTests(unittest.TestCase):
                 with self.assertRaises(ApiError) as caught:
                     execute("release.version.observe", {"root": "/inert-project"})
                 self.assertIn(caught.exception.code, {"release_version_config_invalid", "release_version_unsafe"})
-            self.assertEqual(reader.calls, [(api.CONFIG_PATH, MAX_CONFIG_BYTES)])
+            self.assertEqual(reader.calls, [(api.CONFIG_PATH, MAX_CONFIG_BYTES, True)])
 
     def test_mechanical_failures_and_known_codes_never_reflect_messages(self):
         failures = [(snapshot._ReadProblem(code, "private-error-marker"), reason) for code, reason in api._READ_REASONS.items()]
@@ -255,6 +317,8 @@ class ReleaseVersionTests(unittest.TestCase):
         # supplied as inert sentinels. No root or descriptor is actually opened.
         for case, expected in [("config-appears", "changed"), ("source-appears", "changed"),
                                ("invalid-config-root-changes", "changed"), ("invalid-source-root-changes", "changed"),
+                               ("config-encoding-root-changes", "changed"), ("source-encoding-root-changes", "changed"),
+                               ("source-encoding-close-fails", "cleanup_unknown"),
                                ("config-appears-close-fails", "cleanup_unknown"), ("missing-source-close-fails", "cleanup_unknown")]:
             root_fact, selected_fact, release_fact, file_fact = facts(1, directory=True), facts(2, directory=True), facts(3, directory=True), facts(4)
             current, opened, closed = {"changed": False}, [], []
@@ -274,11 +338,16 @@ class ReleaseVersionTests(unittest.TestCase):
                     raise FileNotFoundError()
                 return file_fact
 
-            def read_fake(parent, name, relative, inventory, *, limit, receipts):
+            def read_fake(parent, name, relative, inventory, *, limit, receipts, binary=False):
+                self.assertIs(binary, True)
                 receipts.append((parent, name, snapshot._named_identity(file_fact)))
                 if name == "mobile-release.json":
-                    return "invalid" if case == "invalid-config-root-changes" else json.dumps(config())
-                return "invalid" if case == "invalid-source-root-changes" else "VERSION_NAME=1.2\nBUILD_NUMBER=42"
+                    if case.startswith("config-encoding"):
+                        return b"private-error-marker\xff"
+                    return b"invalid" if case == "invalid-config-root-changes" else json.dumps(config()).encode("utf-8")
+                if case.startswith("source-encoding"):
+                    return b"private-error-marker\xff"
+                return b"invalid" if case == "invalid-source-root-changes" else b"VERSION_NAME=1.2\nBUILD_NUMBER=42"
 
             original_check = snapshot._NamedTextReads.check
 

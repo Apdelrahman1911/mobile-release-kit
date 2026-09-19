@@ -69,7 +69,11 @@ class AndroidCurrentUploadTests(unittest.TestCase):
         self.addCleanup(self.stack.close)
         self.manifest = self.stack.enter_context(patch(
             "mobile_release.android._bundletool_manifest",
-            return_value='<manifest package="com.example.reader" android:versionCode="42" android:versionName="1.2.3" />',
+            return_value=(
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.example.reader" android:versionCode="42" '
+                'android:versionName="1.2.3"><application /></manifest>'
+            ),
         ))
         self.native_owner = self.stack.enter_context(patch(
             "mobile_release._command_process.run_command",

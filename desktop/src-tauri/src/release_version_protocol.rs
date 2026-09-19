@@ -1,5 +1,5 @@
-//! One fixed passive saved-version query. Paths arrive only from the native
-//! project registry; this DTO is neither file authority nor release readiness.
+//! One fixed passive saved-version/pair query. Paths arrive only from the native
+//! project registry; byte comparisons are neither file authority nor build consent.
 use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -71,6 +71,16 @@ pub(crate) fn params(root: &Path) -> Result<Value, BridgeError> {
 struct Version { name: String, build: u32 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ContentComparison { bytes: u32, sha256: String }
+impl ContentComparison {
+    fn valid(&self, maximum: u32) -> bool {
+        (1..=maximum).contains(&self.bytes) && self.sha256.len() == 64
+            && self.sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Assurance {
     basis: String, project_code_executed: bool, tools_probed: bool, credentials_read: bool,
@@ -87,6 +97,7 @@ impl Assurance {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Observation {
     schema_version: u32, source: String, version: Version, observation_scope: String, assurance: Assurance,
+    saved_config: ContentComparison, saved_version: ContentComparison,
 }
 
 fn relative_display_path(path: &str) -> bool {
@@ -111,10 +122,11 @@ pub(crate) fn result(value: Value) -> Result<Observation, BridgeError> {
     value_bounds(&value, 4, RESULT_LIMIT).map_err(|_| BridgeError::protocol())?;
     let result = Observation::deserialize(&value).map_err(|_| BridgeError::protocol())?;
     // Wire bounds, not a second marketing/iOS version policy.
-    if result.schema_version != 1 || !relative_display_path(&result.source)
+    if result.schema_version != 2 || !relative_display_path(&result.source)
         || result.version.name.is_empty() || result.version.name.len() > 64
         || !result.version.name.bytes().all(|b| b.is_ascii_alphanumeric() || b".+-".contains(&b))
         || !(1..=2_100_000_000).contains(&result.version.build)
+        || !result.saved_config.valid(512 * 1024) || !result.saved_version.valid(64 * 1024)
         || result.observation_scope != "single-request-non-atomic" || !result.assurance.valid() {
         return Err(BridgeError::protocol());
     }
@@ -125,7 +137,8 @@ pub(crate) fn result(value: Value) -> Result<Observation, BridgeError> {
 mod tests {
     use super::*;
     fn observation() -> Value {
-        json!({"schemaVersion":1,"source":"release/version.properties","version":{"name":"1.2.3","build":42},
+        json!({"schemaVersion":2,"source":"release/version.properties","version":{"name":"1.2.3","build":42},
+            "savedConfig":{"bytes":1024,"sha256":"a".repeat(64)},"savedVersion":{"bytes":35,"sha256":"b".repeat(64)},
             "observationScope":"single-request-non-atomic","assurance":{"basis":"static-text","projectCodeExecuted":false,
             "toolsProbed":false,"credentialsRead":false,"gitObserved":false,"storeContacted":false,"writesPerformed":false,"releaseReadiness":"unknown"}})
     }
@@ -147,7 +160,7 @@ mod tests {
     fn result_is_closed_bounded_and_never_release_authority() {
         let value = observation();
         assert_eq!(serde_json::to_value(result(value.clone()).unwrap()).unwrap(), value);
-        for (key, bad) in [("schemaVersion", json!(true)), ("schemaVersion", json!(2)),
+        for (key, bad) in [("schemaVersion", json!(true)), ("schemaVersion", json!(1)), ("schemaVersion", json!(3)), ("schemaVersion", json!("2")),
             ("observationScope", json!("atomic")), ("source", json!("../private")),
             ("source", json!("release/.env")), ("source", json!("release/version.properties.")),
             ("source", json!("release/COM1.properties")), ("source", json!("x".repeat(513)))] {
@@ -165,7 +178,7 @@ mod tests {
         for key in ["basis", "releaseReadiness"] {
             let mut changed = value.clone(); changed["assurance"][key] = json!("verified"); assert!(result(changed).is_err());
         }
-        for location in ["", "version", "assurance"] {
+        for location in ["", "version", "assurance", "savedConfig", "savedVersion"] {
             let mut changed = value.clone();
             if location.is_empty() { changed["unexpected"] = json!(null); } else { changed[location]["unexpected"] = json!(null); }
             assert!(result(changed).is_err());
@@ -175,6 +188,42 @@ mod tests {
         // A safe suffix is wire data; iOS/platform-specific acceptance is core-owned.
         let mut suffix = value; suffix["version"]["name"] = json!("1.2.3-beta+4");
         assert!(result(suffix).is_ok());
+    }
+    #[test]
+    fn pair_requires_both_exact_bounded_comparisons_without_v1_conversion() {
+        let value = observation();
+        let mut legacy = value.clone();
+        legacy["schemaVersion"] = json!(1);
+        legacy.as_object_mut().unwrap().remove("savedConfig");
+        legacy.as_object_mut().unwrap().remove("savedVersion");
+        assert!(result(legacy).is_err());
+        for (field, maximum) in [("savedConfig", 512 * 1024u32), ("savedVersion", 64 * 1024u32)] {
+            for bytes in [1, maximum] {
+                let mut changed = value.clone(); changed[field]["bytes"] = json!(bytes);
+                assert!(result(changed).is_ok());
+            }
+            for bytes in [json!(true), json!(0), json!(-1), json!(1.0), json!(maximum + 1), json!("35"), Value::Null] {
+                let mut changed = value.clone(); changed[field]["bytes"] = bytes;
+                assert!(result(changed).is_err());
+            }
+            for digest in [json!(""), json!("a".repeat(63)), json!("a".repeat(65)), json!("A".repeat(64)),
+                json!("g".repeat(64)), json!(format!("{}\n", "a".repeat(63))), json!("é".repeat(32)), json!(true), Value::Null] {
+                let mut changed = value.clone(); changed[field]["sha256"] = digest;
+                assert!(result(changed).is_err());
+            }
+            for malformed in [Value::Null, json!([]), json!({"bytes":35}), json!({"sha256":"a".repeat(64)})] {
+                let mut changed = value.clone(); changed[field] = malformed;
+                assert!(result(changed).is_err());
+            }
+            let mut missing = value.clone(); missing.as_object_mut().unwrap().remove(field);
+            assert!(result(missing).is_err());
+        }
+        // Shape-valid hashes are comparison DATA; this parser cannot authenticate
+        // files, bind two later observations, grant consent or assert finality.
+        let mut different = value.clone(); different["savedVersion"]["sha256"] = json!("c".repeat(64));
+        let admitted = result(different.clone()).unwrap();
+        assert_eq!(serde_json::to_value(admitted).unwrap(), different);
+        assert_eq!(different["assurance"], value["assurance"]);
     }
     #[test]
     fn fixed_errors_do_not_relay_messages_or_unknown_codes() {

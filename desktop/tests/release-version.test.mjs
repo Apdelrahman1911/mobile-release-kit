@@ -12,7 +12,15 @@ import { ReleaseVersionController, parseReleaseVersionObservation, releaseVersio
 const assurance = { basis: 'static-text', projectCodeExecuted: false, toolsProbed: false, credentialsRead: false,
   gitObserved: false, storeContacted: false, writesPerformed: false, releaseReadiness: 'unknown' };
 function observation(source = 'release/saved-version.properties', name = '1.2.3-rc+4', build = 24) {
-  return { schemaVersion: 1, source, version: { name, build }, observationScope: 'single-request-non-atomic', assurance: { ...assurance } };
+  // Inert comparison DATA, not hashes obtained from files or native evidence.
+  return { schemaVersion: 2, source, version: { name, build },
+    savedConfig: { bytes: 1024, sha256: 'a'.repeat(64) }, savedVersion: { bytes: 35, sha256: 'b'.repeat(64) },
+    observationScope: 'single-request-non-atomic', assurance: { ...assurance } };
+}
+function legacyObservation() {
+  // Deliberately invalid old DTO: every boundary must refuse it, not add hashes.
+  return { schemaVersion: 1, source: 'release/legacy-version.properties', version: { name: '9.9', build: 99 },
+    observationScope: 'single-request-non-atomic', assurance: { ...assurance } };
 }
 const info = { runtime: { state: 'available', mode: 'development', reason: null },
   capabilities: { methods: [{ method: 'release.version.observe', available: true, reason: '' }] } };
@@ -101,12 +109,17 @@ test('exact request admits only a bounded registered ID, never path/draft/key/pl
   assert.equal(reads, 0);
 });
 
-test('DTO copies bounded saved source and core values without imposing renderer iOS version policy', () => {
+test('DTO copies the complete bounded saved pair without imposing renderer iOS version policy', () => {
   const raw = observation(), parsed = parseReleaseVersionObservation(raw);
   assert.deepEqual(parsed, raw);
   assert.notEqual(parsed, raw); assert.notEqual(parsed.version, raw.version); assert.notEqual(parsed.assurance, raw.assurance);
+  assert.notEqual(parsed.savedConfig, raw.savedConfig); assert.notEqual(parsed.savedVersion, raw.savedVersion);
   raw.version.name = 'changed'; raw.assurance.toolsProbed = true;
+  raw.savedConfig.bytes = 2048; raw.savedConfig.sha256 = 'c'.repeat(64);
+  raw.savedVersion.bytes = 64; raw.savedVersion.sha256 = 'd'.repeat(64);
   assert.equal(parsed.version.name, '1.2.3-rc+4'); assert.equal(parsed.assurance.toolsProbed, false);
+  assert.deepEqual(parsed.savedConfig, { bytes: 1024, sha256: 'a'.repeat(64) });
+  assert.deepEqual(parsed.savedVersion, { bytes: 35, sha256: 'b'.repeat(64) });
   assert.ok(parseReleaseVersionObservation(observation('release/é-version.properties', 'a'.repeat(64), 2_100_000_000)));
   assert.ok(parseReleaseVersionObservation(observation('a/'.repeat(11) + 'v')));
   const maxBytes = 'é'.repeat(127) + '/' + 'é'.repeat(127) + '/aa';
@@ -117,9 +130,44 @@ test('DTO copies bounded saved source and core values without imposing renderer 
   assert.ok(new TextEncoder().encode(JSON.stringify(parsed)).byteLength <= 4096);
 });
 
+test('v2 requires both exact positive bounded byte comparisons and never upgrades v1', () => {
+  assert.equal(parseReleaseVersionObservation(legacyObservation()), null);
+  assert.equal(parseReleaseVersionObservation({ ...observation(), schemaVersion: 1 }), null);
+  for (const [field, maximum] of [['savedConfig', 512 * 1024], ['savedVersion', 64 * 1024]]) {
+    for (const bytes of [1, maximum]) for (const sha256 of ['0'.repeat(64), '0123456789abcdef'.repeat(4)]) {
+      const raw = observation(); raw[field] = { bytes, sha256 };
+      assert.deepEqual(parseReleaseVersionObservation(raw), raw);
+    }
+    for (const bytes of [0, -1, 1.5, maximum + 1, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, -Infinity, '35', true, null, undefined, 35n]) {
+      const raw = observation(); raw[field].bytes = bytes;
+      assert.equal(parseReleaseVersionObservation(raw), null);
+    }
+    for (const sha256 of ['', 'a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), 'g'.repeat(64),
+      'a'.repeat(63) + '\n', 'a'.repeat(63) + '\r', 'é'.repeat(64), '\ud800'.repeat(64), 123, true, null, undefined, new String('a'.repeat(64))]) {
+      const raw = observation(); raw[field].sha256 = sha256;
+      assert.equal(parseReleaseVersionObservation(raw), null);
+    }
+    for (const malformed of [null, [], 'PRIVATE', {}, { bytes: 35 }, { sha256: 'a'.repeat(64) },
+      { bytes: 35, sha256: 'a'.repeat(64), extra: 'PRIVATE' }]) {
+      const raw = observation(); raw[field] = malformed;
+      assert.equal(parseReleaseVersionObservation(raw), null);
+    }
+    const missing = observation(); delete missing[field];
+    assert.equal(parseReleaseVersionObservation(missing), null);
+    const nullPrototype = observation(); nullPrototype[field] = Object.assign(Object.create(null), nullPrototype[field]);
+    const parsed = parseReleaseVersionObservation(nullPrototype);
+    assert.deepEqual(parsed[field], { ...nullPrototype[field] }); assert.notEqual(parsed[field], nullPrototype[field]);
+    // Any shape-valid digest stays DATA. Admission cannot authenticate files or
+    // turn this observation into consent, a matching snapshot or build readiness.
+    const different = observation(); different[field].sha256 = 'c'.repeat(64);
+    assert.deepEqual(parseReleaseVersionObservation(different).assurance, assurance);
+    assert.deepEqual(parseReleaseVersionObservation(different)[field], different[field]);
+  }
+});
+
 test('DTO admission rejects extra fields, coercions, false assurance, unsafe display paths and oversized data', () => {
   const mutations = [
-    (v) => { v.extra = 'PRIVATE'; }, (v) => { v.schemaVersion = '1'; }, (v) => { v.observationScope = 'atomic'; },
+    (v) => { v.extra = 'PRIVATE'; }, (v) => { v.schemaVersion = '2'; }, (v) => { v.schemaVersion = 3; }, (v) => { v.observationScope = 'atomic'; },
     (v) => { delete v.source; }, (v) => { v.version.extra = 'PRIVATE'; }, (v) => { v.assurance.basis = 'schema-policy'; },
     (v) => { v.assurance.releaseReadiness = 'ready'; }, (v) => { v.assurance.extra = false; },
     ...['projectCodeExecuted', 'toolsProbed', 'credentialsRead', 'gitObserved', 'storeContacted', 'writesPerformed'].map((key) => (v) => { v.assurance[key] = true; }),
@@ -132,7 +180,7 @@ test('DTO admission rejects extra fields, coercions, false assurance, unsafe dis
   ];
   for (const mutate of mutations) { const value = observation(); mutate(value); assert.equal(parseReleaseVersionObservation(value), null); }
   let reads = 0;
-  for (const field of ['source', 'version', 'assurance']) {
+  for (const field of ['source', 'version', 'savedConfig', 'savedVersion', 'assurance']) {
     const value = observation(); Object.defineProperty(value, field, { enumerable: true, get() { reads += 1; return 'PRIVATE'; } });
     assert.equal(parseReleaseVersionObservation(value), null);
   }
@@ -144,6 +192,20 @@ test('DTO admission rejects extra fields, coercions, false assurance, unsafe dis
   assert.equal(parseReleaseVersionObservation(cyclic), null);
   const exotic = observation(); Object.setPrototypeOf(exotic.version, { toJSON() { reads += 1; } });
   assert.equal(parseReleaseVersionObservation(exotic), null);
+  for (const field of ['savedConfig', 'savedVersion']) {
+    for (const key of ['bytes', 'sha256']) {
+      const getter = observation(); Object.defineProperty(getter[field], key, { enumerable: true, get() { reads += 1; return 'PRIVATE'; } });
+      assert.equal(parseReleaseVersionObservation(getter), null);
+      const hidden = observation(); Object.defineProperty(hidden[field], key, { enumerable: false, value: hidden[field][key] });
+      assert.equal(parseReleaseVersionObservation(hidden), null);
+    }
+    const symbol = observation(); symbol[field][Symbol('extra')] = false;
+    assert.equal(parseReleaseVersionObservation(symbol), null);
+    const cyclic = observation(); cyclic[field].sha256 = cyclic[field];
+    assert.equal(parseReleaseVersionObservation(cyclic), null);
+    const exotic = observation(); Object.setPrototypeOf(exotic[field], { toJSON() { reads += 1; } });
+    assert.equal(parseReleaseVersionObservation(exotic), null);
+  }
   assert.equal(reads, 0);
 });
 
@@ -174,6 +236,9 @@ test('bridge uses exactly release_version_observe with the ID-only request, copi
   assert.deepEqual(calls, [{ command: 'release_version_observe', args: { projectId: 'p1' } }]);
   pending.resolve(raw); const value = await read;
   raw.version.build = 99; assert.equal(value.version.build, 24);
+  raw.savedConfig.bytes = 2048; raw.savedVersion.sha256 = 'c'.repeat(64);
+  assert.deepEqual(value.savedConfig, { bytes: 1024, sha256: 'a'.repeat(64) });
+  assert.deepEqual(value.savedVersion, { bytes: 35, sha256: 'b'.repeat(64) });
   let called = false;
   const refusing = createNativeApi('native', async () => { called = true; return observation(); });
   for (const input of [{ projectId: 'p1', root: '/PRIVATE' }, '/PRIVATE', 'x'.repeat(65), null]) {
@@ -184,6 +249,8 @@ test('bridge uses exactly release_version_observe with the ID-only request, copi
   await assert.rejects(unavailable.observeReleaseVersion('p1'), (error) => error.code === 'runtime_unavailable');
   const invalid = createNativeApi('native', async () => ({ ...observation(), stdout: 'PRIVATE' }));
   await assert.rejects(invalid.observeReleaseVersion('p1'), (error) => error.code === 'protocol_error' && !JSON.stringify(error).includes('PRIVATE'));
+  const legacy = createNativeApi('native', async () => legacyObservation());
+  await assert.rejects(legacy.observeReleaseVersion('p1'), (error) => error.code === 'protocol_error');
   for (const code of ['release_version_source_invalid', 'cleanup_unknown', 'quit_pending', 'environment_diagnostics_busy', 'unavailable', 'PRIVATE']) {
     const rejecting = createNativeApi('native', async () => { throw { code, message: 'PRIVATE', retryable: true }; });
     await assert.rejects(rejecting.observeReleaseVersion('p1'), (error) => error.code === (code === 'PRIVATE' ? 'protocol_error' : code) && !JSON.stringify(error).includes('PRIVATE') && error.retryable === false);
@@ -207,8 +274,32 @@ test('saved observation sends no draft or retained source, preserves dirty data 
   assert.deepEqual(h.selected, before); assert.equal(isDirty(h.selected), true); assert.equal(h.selected.lastSave, null);
   assert.equal(h.state.resultBinding, binding); assert.equal(h.state.result.assurance.releaseReadiness, 'unknown');
   assert.ok(Object.isFrozen(h.state) && Object.isFrozen(h.state.result.version) && Object.isFrozen(binding));
+  assert.ok(Object.isFrozen(h.state.result.savedConfig) && Object.isFrozen(h.state.result.savedVersion));
+  assert.notEqual(h.state.result.savedConfig, raw.savedConfig); assert.notEqual(h.state.result.savedVersion, raw.savedVersion);
   raw.version.name = 'changed'; assert.equal(h.state.result.version.name, '1.2.3-rc+4');
+  raw.savedConfig.sha256 = 'c'.repeat(64); raw.savedVersion.bytes = 64;
+  assert.deepEqual(h.state.result.savedConfig, { bytes: 1024, sha256: 'a'.repeat(64) });
+  assert.deepEqual(h.state.result.savedVersion, { bytes: 35, sha256: 'b'.repeat(64) });
   h.controller.dispose();
+});
+
+test('v1 replies never publish or refresh a pair; a previous whole v2 result stays stale until an explicit valid read', async () => {
+  const h = controlled({ dirty: true }), before = structuredClone(h.selected), oldRead = h.controller.read();
+  h.calls[0].resolve(legacyObservation()); await oldRead;
+  assert.equal(h.state.result, null); assert.equal(h.state.resultBinding, null); assert.equal(h.state.error.code, 'protocol_error');
+  assert.equal(h.calls.length, 1); assert.equal(h.controller.startReason(), null);
+  const read = h.controller.read(); h.calls[1].resolve(observation()); await read;
+  const original = h.state.result, binding = h.state.resultBinding, invalidRead = h.controller.read();
+  assert.equal(h.state.result, original); assert.equal(h.state.stale, true);
+  h.calls[2].resolve(legacyObservation()); await invalidRead;
+  assert.equal(h.state.result, original); assert.equal(h.state.resultBinding, binding); assert.equal(h.state.stale, true);
+  assert.equal(h.state.error.code, 'protocol_error'); assert.equal(h.calls.length, 3);
+  assert.deepEqual(h.state.result, observation()); assert.deepEqual(h.selected, before); assert.equal(h.selected.lastSave, null);
+  const fresh = observation('release/current.properties', '2.0.0', 25);
+  fresh.savedConfig = { bytes: 2048, sha256: 'c'.repeat(64) }; fresh.savedVersion = { bytes: 64, sha256: 'd'.repeat(64) };
+  const freshRead = h.controller.read(); h.calls[3].resolve(fresh); await freshRead;
+  assert.deepEqual(h.state.result, fresh); assert.equal(h.state.error, null); assert.equal(h.state.stale, false);
+  assert.notEqual(h.state.resultBinding, binding); assert.deepEqual(h.selected, before); h.controller.dispose();
 });
 
 test('reads do not require a synthesized draft or snapshot and native capability reasons remain visible', async () => {
@@ -308,10 +399,15 @@ test('same-project edits, successful refresh and service replacement stale data;
     const original = h.state.result, old = h.controller.read();
     change(h); assert.equal(h.state.result, original); assert.equal(h.state.stale, true); assert.equal(h.state.pending, null);
     assert.equal(releaseVersionPhase(h.state), 'stale'); assert.equal(h.calls.length, 2);
-    h.calls[1].resolve(observation('release/too-late.properties')); await old;
+    const late = observation('release/too-late.properties');
+    late.savedConfig = { bytes: 2048, sha256: 'c'.repeat(64) }; late.savedVersion = { bytes: 64, sha256: 'd'.repeat(64) };
+    h.calls[1].resolve(late); await old;
     assert.equal(h.state.result, original); assert.equal(h.state.stale, true);
-    const next = h.controller.read(); h.calls[2].resolve(observation('release/current.properties')); await next;
-    assert.equal(h.state.result.source, 'release/current.properties'); assert.equal(h.state.stale, false); h.controller.dispose();
+    assert.deepEqual(h.state.result.savedConfig, observation().savedConfig); assert.deepEqual(h.state.result.savedVersion, observation().savedVersion);
+    const current = observation('release/current.properties');
+    current.savedConfig = { bytes: 4096, sha256: 'e'.repeat(64) }; current.savedVersion = { bytes: 70, sha256: 'f'.repeat(64) };
+    const next = h.controller.read(); h.calls[2].resolve(current); await next;
+    assert.deepEqual(h.state.result, current); assert.equal(h.state.stale, false); h.controller.dispose();
   }
 });
 
@@ -385,7 +481,8 @@ test('source integration guards keep synchronous P2 hooks, returned-source label
   const intent = picker.indexOf('releaseVersion.setSelectionPending(true)');
   assert.ok(intent >= 0 && intent < picker.indexOf('await api.chooseProject()'));
   assert.ok(picker.includes('finally') && picker.includes('releaseVersion.setSelectionPending(false)'));
-  assert.ok(app.includes('releaseVersion.saveIntent(); configEdit.start(session.project.id)'));
+  // Preserve ON's selected-project reentrancy guard after synchronous retirement.
+  assert.ok(app.includes('releaseVersion.saveIntent(); if (workspaceRef.current.selectedId === session.project.id) configEdit.start(session.project.id)'));
   assert.ok(app.includes('releaseVersion.saveIntent(); return configEdit.apply(binding)'));
   assert.ok(app.includes("dispatch({ type: 'snapshot-start', projectId, requestId })") && module.includes("'snapshot-start', 'config-save-final', 'config-save-recovery'"));
   for (const label of ['Read saved version', 'Observed from saved version file', 'Unsaved draft not applied.', 'External changes are not continuously monitored.', 'Stale observation']) assert.ok(page.includes(label));
@@ -395,5 +492,6 @@ test('source integration guards keep synchronous P2 hooks, returned-source label
   assert.ok(page.includes('Release readiness</span>') && page.includes('Not assessed</strong>') && page.includes('No release operations are enabled'));
   assert.ok(page.includes('<DisabledAction label="Create release candidate"'));
   assert.match(releaseVersionHelp.what, /release\/mobile-release\.json/);
+  assert.match(releaseVersionHelp.what, /byte counts and SHA-256/); assert.match(releaseVersionHelp.failure, /not file custody or build consent/);
   assert.match(releaseVersionHelp.failure, /non-atomic/); assert.match(releaseVersionHelp.failure, /not an artifact check/);
 });

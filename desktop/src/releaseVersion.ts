@@ -6,10 +6,13 @@ import type { ProjectSession, WorkspaceAction } from './drafts.ts';
 import type { ApiError, AppInfo, Assurance, BridgeMode, DesktopApi, HelpContent } from './types.ts';
 
 export interface ReleaseVersionRequest { projectId: string }
+export interface ReleaseVersionInputContent { bytes: number; sha256: string }
 export interface ReleaseVersionObservation {
-  schemaVersion: 1;
+  schemaVersion: 2;
   source: string;
   version: { name: string; build: number };
+  savedConfig: ReleaseVersionInputContent;
+  savedVersion: ReleaseVersionInputContent;
   observationScope: 'single-request-non-atomic';
   assurance: Assurance & { basis: 'static-text' };
 }
@@ -53,20 +56,28 @@ function displaySource(value: unknown): value is string {
     !/^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(part) &&
     !['private', 'secrets', 'credentials', 'review', 'testflight', 'build', 'deriveddata', 'pods', 'node_modules', 'venv', 'dist', 'target', '__pycache__'].includes(part.toLowerCase()));
 }
+function contentComparison(value: unknown, maximum: number): ReleaseVersionInputContent | null {
+  const input = fields(value, ['bytes', 'sha256']);
+  if (!input || typeof input.bytes !== 'number' || !Number.isSafeInteger(input.bytes) || input.bytes < 1 || input.bytes > maximum ||
+      typeof input.sha256 !== 'string' || input.sha256.length !== 64 || /[^0-9a-f]/.test(input.sha256)) return null;
+  return { bytes: input.bytes, sha256: input.sha256 };
+}
 export function parseReleaseVersionObservation(value: unknown): ReleaseVersionObservation | null {
   try {
-    const input = fields(value, ['schemaVersion', 'source', 'version', 'observationScope', 'assurance']);
-    if (!input || input.schemaVersion !== 1 || !displaySource(input.source) || input.observationScope !== 'single-request-non-atomic') return null;
+    const input = fields(value, ['schemaVersion', 'source', 'version', 'savedConfig', 'savedVersion', 'observationScope', 'assurance']);
+    if (!input || input.schemaVersion !== 2 || !displaySource(input.source) || input.observationScope !== 'single-request-non-atomic') return null;
     const version = fields(input.version, ['name', 'build']);
+    const savedConfig = contentComparison(input.savedConfig, 512 * 1024), savedVersion = contentComparison(input.savedVersion, 64 * 1024);
     const assurance = fields(input.assurance, ['basis', 'projectCodeExecuted', 'toolsProbed', 'credentialsRead', 'gitObserved', 'storeContacted', 'writesPerformed', 'releaseReadiness']);
-    if (!version || typeof version.name !== 'string' || version.name.length === 0 || version.name.length > 64 || /[^0-9A-Za-z.+-]/.test(version.name) ||
+    if (!savedConfig || !savedVersion || !version || typeof version.name !== 'string' || version.name.length === 0 || version.name.length > 64 || /[^0-9A-Za-z.+-]/.test(version.name) ||
         typeof version.build !== 'number' || !Number.isSafeInteger(version.build) || version.build < 1 || version.build > 2_100_000_000 ||
         !assurance || assurance.basis !== 'static-text' || assurance.releaseReadiness !== 'unknown' ||
         !['projectCodeExecuted', 'toolsProbed', 'credentialsRead', 'gitObserved', 'storeContacted', 'writesPerformed'].every((key) => assurance[key] === false)) return null;
     // No renderer iOS/marketing-version rule: the saved configuration and core
     // shared release policy decide which names are valid for this project.
+    // Byte comparisons are copied DATA, not file custody or build consent.
     const result: ReleaseVersionObservation = {
-      schemaVersion: 1, source: input.source, version: { name: version.name, build: version.build },
+      schemaVersion: 2, source: input.source, version: { name: version.name, build: version.build }, savedConfig, savedVersion,
       observationScope: 'single-request-non-atomic', assurance: {
         basis: 'static-text', projectCodeExecuted: false, toolsProbed: false, credentialsRead: false,
         gitObserved: false, storeContacted: false, writesPerformed: false, releaseReadiness: 'unknown',
@@ -114,11 +125,11 @@ export function releaseVersionError(error: unknown): ApiError {
 
 export const releaseVersionHelp: HelpContent = {
   label: 'Read saved version', requiredness: 'optional', requiredWhen: 'Use this to inspect one saved release input before later release preparation.',
-  what: 'Reads release/mobile-release.json and only the version file selected by that saved configuration.',
+  what: 'Reads release/mobile-release.json and only the version file selected by that saved configuration, returning exact byte counts and SHA-256 comparisons for both.',
   why: 'See the version name and build number that shared core release policy resolves from saved files, not from an unsaved draft.',
   where: 'Choose the project root with the native folder picker. Save configuration separately; this action cannot select another path or save your draft.',
   format: 'The saved version.source points to a public UTF-8 KEY=VALUE file. Saved nameKey, buildKey and enabled platforms select the existing core version policy.',
-  failure: 'Missing, invalid, unsafe, changed or unavailable inputs produce no current observation. Reads are non-atomic and external changes are not monitored. This is not an artifact check, full preflight, native-tool check or release-readiness result.',
+  failure: 'Missing, invalid, unsafe, changed or unavailable inputs produce no current observation. Reads are non-atomic and external changes are not monitored. Byte comparisons are not file custody or build consent. This is not an artifact check, full preflight, native-tool check or release-readiness result.',
 };
 
 interface ProjectBinding {

@@ -742,8 +742,9 @@ class CliBuildTests(unittest.TestCase):
             with patch(
                 "mobile_release.android._bundletool_manifest",
                 return_value=(
-                    '<manifest package="com.example.reader" android:versionCode="42" '
-                    'android:versionName="1.2.3" />'
+                    '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                    'package="com.example.reader" android:versionCode="42" '
+                    'android:versionName="1.2.3"><application /></manifest>'
                 ),
             ):
                 findings = validate_aab(

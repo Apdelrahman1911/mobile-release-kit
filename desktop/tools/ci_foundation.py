@@ -258,6 +258,7 @@ GTK_CORE_PATHS = (
     "mobile_release/_store_lane_evidence.py",
     "mobile_release/_store_lane_files.py",
     "mobile_release/android.py",
+    "mobile_release/android_manifest.py",
     "mobile_release/android_upload_validation.py",
     "mobile_release/api/__init__.py",
     "mobile_release/api/_candidate_evidence.py",

@@ -47,7 +47,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
     def test_core_inventory_rejects_substitutions_and_malformed_rows(self):
         original = [{"path": path, "size": 1, "sha256": "4" * 64} for path in helper.GTK_CORE_PATHS]
         helper.validate_gtk_core_inventory(original)
-        self.assertEqual(len(original), 90)
+        self.assertEqual(len(original), 91)
         variants = (None, {}, tuple(original), original[:-1], original + [original[0]],
                     [original[0]] + original[:-1], list(reversed(original)))
         for value in variants:
@@ -80,7 +80,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         rust_paths = re.findall(r'^    source!\("([^\"]+)"\),$', rust_block, re.MULTILINE)
         self.assertEqual(python_paths, rust_paths)
         self.assertEqual(python_paths, sorted(set(python_paths)))
-        self.assertEqual(len(python_paths), 243)
+        self.assertEqual(len(python_paths), 244)
         self.assertNotIn("len(SOURCES) == 154", driver)
         self.assertNotIn("len(SOURCES) == 182", driver)
         self.assertNotIn("len(SOURCES) == 197", driver)
@@ -89,7 +89,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         self.assertNotIn("len(SOURCES) == 217", driver)
         self.assertNotIn("len(SOURCES) == 223", driver)
         self.assertNotIn("len(SOURCES) == 228", driver)
-        self.assertEqual(driver.count("len(SOURCES) == 243"), 2)
+        self.assertEqual(driver.count("len(SOURCES) == 244"), 2)
         self.assertEqual(len(helper.GTK_COMPILE_SOURCES), 56)
         for relative in (
                 "desktop/offline_preflight_bootstrap.py",

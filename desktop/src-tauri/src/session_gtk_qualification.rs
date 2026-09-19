@@ -324,6 +324,7 @@ const SOURCES: &[Source] = &[
     source!("src/mobile_release/_store_lane_evidence.py"),
     source!("src/mobile_release/_store_lane_files.py"),
     source!("src/mobile_release/android.py"),
+    source!("src/mobile_release/android_manifest.py"),
     source!("src/mobile_release/android_upload_validation.py"),
     source!("src/mobile_release/api/__init__.py"),
     source!("src/mobile_release/api/_candidate_evidence.py"),

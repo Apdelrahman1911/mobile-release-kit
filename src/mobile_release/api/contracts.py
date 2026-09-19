@@ -1,4 +1,4 @@
-"""Version-one read-only service data. Protocol framing belongs to the engine.
+"""Versioned read-only service data. Protocol framing belongs to the engine.
 
 All assurance flags describe what these services did, never release authority.
 The UI must not turn a format-valid configuration into native/Store verification.
@@ -42,10 +42,17 @@ class ObservedReleaseVersion(TypedDict):
     build: int
 
 
+class ReleaseVersionInputContent(TypedDict):
+    bytes: int
+    sha256: str
+
+
 class ReleaseVersionObservationResult(TypedDict):
-    schemaVersion: Literal[1]
+    schemaVersion: Literal[2]
     source: str
     version: ObservedReleaseVersion
+    savedConfig: ReleaseVersionInputContent
+    savedVersion: ReleaseVersionInputContent
     observationScope: Literal["single-request-non-atomic"]
     assurance: Assurance
 

@@ -176,14 +176,22 @@ with no links or portable aliases. The existing named reader holds original
 parents, checks file identities and absences, and settles original cleanup.
 Ordinary missing/invalid outcomes are retained until those contexts finish;
 change/limit findings supersede them and uncertain cleanup cannot become success.
-Only the admitted relative source and selected normalized name/build are returned,
-not the file text, other keys or raw parser/filesystem errors. The 8-KiB params
-and 4-KiB result DTO caps are separate from unchanged finite RPC framing limits.
+The version-2 result returns the admitted relative source, selected normalized
+name/build, and `savedConfig` / `savedVersion` comparisons. Each comparison has
+an exact positive byte count and 64-character lowercase SHA-256 digest of the
+original UTF-8 file bytes, not reserialized JSON, normalized lines or parsed
+version values. File text, other keys and raw parser/filesystem errors are not
+returned. Version-1 results are refused; explicitly read again rather than
+inventing missing hashes. The 8-KiB params and 4-KiB result DTO caps are separate
+from unchanged finite RPC framing limits.
 
 Observations are single-request, non-atomic and may become stale. Refresh, picker,
 service and save intents retire old UI requests synchronously; failed refresh,
 cancelled selection, unchanged/stale saves and recovery attention cannot reattach
-a late result. Retry is explicit, and retiring a UI result does not cancel or
+a late result. Both byte comparisons are retained or retired with the whole
+observation; they are not file custody, build consent or release-readiness evidence.
+This read does not match a build Prepare snapshot or implement a build Start
+recheck. Retry is explicit, and retiring a UI result does not cancel or
 claim settlement of its native owner. Browser preview never fabricates a read.
 Installed/production runtime execution remains disabled even with a valid
 manifest, and Windows observation remains unavailable. The card reports real

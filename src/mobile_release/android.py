@@ -363,40 +363,13 @@ def validate_aab(
             )
         )
     else:
-        expectations = {
-            "package": expected_application_id,
-            "versionCode": str(release.build),
-            "versionName": release.name,
-        }
-        for attribute, expected in expectations.items():
-            pattern = rf'(?:android:)?{attribute}="{re.escape(expected)}"'
-            if not re.search(pattern, manifest):
-                findings.append(
-                    Finding(
-                        f"android.aab.{attribute}",
-                        Status.FAIL,
-                        f"Final AAB {attribute} does not equal the configured release value.",
-                        category="android-artifact",
-                    )
-                )
-        if re.search(r'android:debuggable="true"|android:testOnly="true"', manifest):
-            findings.append(
-                Finding(
-                    "android.aab.release-flags",
-                    Status.FAIL,
-                    "Final AAB is debuggable or test-only.",
-                    category="android-artifact",
-                )
-            )
-        elif not any(item.status == Status.FAIL for item in findings):
-            findings.append(
-                Finding(
-                    "android.aab.manifest",
-                    Status.PASS,
-                    "Final AAB identity, version, and release flags match.",
-                    category="android-artifact",
-                )
-            )
+        # Same policy for CLI and future owned-artifact inspection. Root identity
+        # cannot be established by finding expected text in a comment/descendant.
+        from .android_manifest import validate_android_manifest
+        findings.extend(validate_android_manifest(
+            manifest, expected_application_id=expected_application_id, release=release,
+            cancellation=cancellation,
+        ))
 
     if not check_signer:
         findings.append(

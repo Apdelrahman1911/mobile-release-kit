@@ -256,7 +256,7 @@ test('App and Credentials keep retirement before awaits/reducer, original save r
   const picker = app.slice(app.indexOf('const chooseProject ='), app.indexOf('const changeApplicationRepository'));
   assert.ok(picker.indexOf('releaseInputs.setSelectionPending(true)') < picker.indexOf('await api.chooseProject()'));
   assert.ok(picker.includes('finally') && picker.includes('releaseInputs.setSelectionPending(false)'));
-  assert.ok(app.includes('releaseInputs.saveIntent(); releaseVersion.saveIntent(); configEdit.start(session.project.id)'));
+  assert.ok(app.includes('releaseInputs.saveIntent(); releaseVersion.saveIntent(); if (workspaceRef.current.selectedId === session.project.id) configEdit.start(session.project.id)'));
   assert.ok(app.includes('releaseInputs.saveIntent(); releaseVersion.saveIntent(); return configEdit.apply(binding)'));
   assert.ok(app.includes('releaseInputs.dispose()') && app.includes('() => setHelp(null)'));
   assert.ok(page.includes('<CredentialSession state={state} controller={controller}'));

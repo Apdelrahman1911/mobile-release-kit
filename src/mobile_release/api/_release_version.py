@@ -1,10 +1,12 @@
-"""One saved-config-derived release-version observation; never preflight.
+"""One saved-config-derived release-version/input-pair observation; never preflight.
 
 Ordinary policy refusals remain DATA until the original named/root contexts
 finish their normal-return rechecks and every original close has settled.
+Comparisons describe the exact bytes read, not file custody or build consent.
 """
 from __future__ import annotations
 
+import hashlib
 import unicodedata
 from typing import Any, cast
 
@@ -89,9 +91,13 @@ def _sensitive(text: str) -> bool:
 
 
 def _read_outcome(reader: _snapshot._NamedTextReads) -> tuple[str | None, ReleaseVersionObservationResult | None]:
-    config = reader.read(CONFIG_PATH, limit=MAX_CONFIG_BYTES)
-    if config is None:
+    config_raw = cast(bytes | None, reader.read(CONFIG_PATH, limit=MAX_CONFIG_BYTES, binary=True))
+    if config_raw is None:
         return "config_missing", None
+    try:
+        config = config_raw.decode("utf-8")
+    except UnicodeError:
+        return "encoding", None
     if _sensitive(config):
         return "sensitive", None
     try:
@@ -102,9 +108,13 @@ def _read_outcome(reader: _snapshot._NamedTextReads) -> tuple[str | None, Releas
     source = spec["source"]
     if not _source_path(source):
         return "unsafe", None
-    text = reader.read(source, limit=MAX_VERSION_BYTES)
-    if text is None:
+    version_raw = cast(bytes | None, reader.read(source, limit=MAX_VERSION_BYTES, binary=True))
+    if version_raw is None:
         return "source_missing", None
+    try:
+        text = version_raw.decode("utf-8")
+    except UnicodeError:
+        return "encoding", None
     if _sensitive(text):
         return "sensitive", None
     try:
@@ -116,8 +126,12 @@ def _read_outcome(reader: _snapshot._NamedTextReads) -> tuple[str | None, Releas
         # Includes Python's decimal-conversion digit limit; never echo inputs.
         return "source_invalid", None
     return None, {
-        "schemaVersion": 1, "source": source,
+        "schemaVersion": 2, "source": source,
         "version": {"name": version.name, "build": version.build},
+        # Never hash parsed/reformatted JSON or normalized version values.
+        # These remain provisional DATA until both original contexts settle.
+        "savedConfig": {"bytes": len(config_raw), "sha256": hashlib.sha256(config_raw).hexdigest()},
+        "savedVersion": {"bytes": len(version_raw), "sha256": hashlib.sha256(version_raw).hexdigest()},
         "observationScope": "single-request-non-atomic", "assurance": assurance("static-text"),
     }
 
