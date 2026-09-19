@@ -2,7 +2,8 @@
 
 All receipt values below are deliberately invented consumer data, never native
 evidence. They exercise the strict parser and scope boundary without executing
-main(), platform admission, Cargo, subprocesses, cleanup or the hosted fixture.
+main(), real platform admission, Cargo, subprocesses, cleanup or the hosted fixture.
+CLT preparation tests use invented host/metadata values and replace every lstat.
 """
 from __future__ import annotations
 
@@ -23,6 +24,11 @@ SPEC = importlib.util.spec_from_file_location("desktop_environment_ci_contract",
 assert SPEC is not None and SPEC.loader is not None
 helper = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(helper)
+
+CLT_SPEC = importlib.util.spec_from_file_location("desktop_environment_clt_metadata", SOURCE / "desktop/tools/environment_macos_clt.py")
+assert CLT_SPEC is not None and CLT_SPEC.loader is not None
+clt = importlib.util.module_from_spec(CLT_SPEC)
+CLT_SPEC.loader.exec_module(clt)
 
 
 def binding_environment(event: str = "push", attempt: str = "1", *, platform: str = "linux", ref: str | None = None) -> dict:
@@ -239,6 +245,67 @@ class EnvironmentNativeCIContracts(unittest.TestCase):
     def assert_refused(self, action, value) -> None:
         with self.assertRaises(helper.CheckFailure):
             action(value)
+
+    def test_clt_metadata_requires_real_root_owned_fixed_directories_and_git(self) -> None:
+        def facts(mode, *, uid=0, gid=0, links=1, size=4096):
+            return clt.os.stat_result((mode, 1, 1, links, uid, gid, size, 0, 0, 0))
+        for gid in (0, 80):
+            clt.validate_directory(facts(stat.S_IFDIR | 0o775, gid=gid), "clt")
+        clt.validate_git(facts(stat.S_IFREG | 0o755))
+        for value in (facts(stat.S_IFLNK | 0o777), facts(stat.S_IFDIR | 0o755, uid=501),
+                      facts(stat.S_IFDIR | 0o757), facts(stat.S_IFDIR | 0o775, gid=20)):
+            with self.subTest(directory=value), self.assertRaises(clt.SetupError):
+                clt.validate_directory(value, "clt")
+        invalid_git = [facts(stat.S_IFDIR | 0o755), facts(stat.S_IFLNK | 0o755),
+            facts(stat.S_IFREG | 0o755, uid=501), facts(stat.S_IFREG | 0o755, links=2),
+            facts(stat.S_IFREG | 0o755, size=0)]
+        invalid_git.extend(facts(stat.S_IFREG | mode) for mode in (0o655, 0o775, 0o757, 0o4755, 0o2755))
+        for value in invalid_git:
+            with self.subTest(git=value), self.assertRaises(clt.SetupError):
+                clt.validate_git(value)
+
+    def test_clt_host_and_ancestors_fail_before_any_later_namespace_read(self) -> None:
+        environment = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+            "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64", "MRK_DESKTOP_PLATFORM": "macos",
+            "MRK_DESKTOP_HOSTED_CHECKS": helper.ENVIRONMENT_NATIVE_SCOPE}
+        wrong = [(environment, "Linux", "arm64", 501), (environment, "Darwin", "x86_64", 501),
+                 (environment, "Darwin", "arm64", 0), (environment, "Darwin", "arm64", True)]
+        wrong.extend(({**environment, key: "unadmitted"}, "Darwin", "arm64", 501) for key in environment)
+        with patch.object(clt.os, "lstat", side_effect=AssertionError("no installed namespace read")) as observed:
+            for arguments in wrong:
+                with self.subTest(arguments=arguments), self.assertRaises(clt.SetupError):
+                    clt.inspect_installed(*arguments)
+            observed.assert_not_called()
+        paths = [path for _stage, path in clt.DIRECTORIES] + [clt.GIT]
+        directory = clt.os.stat_result((stat.S_IFDIR | 0o755, 1, 1, 1, 0, 0, 4096, 0, 0, 0))
+        executable = clt.os.stat_result((stat.S_IFREG | 0o755, 1, 1, 1, 0, 0, 4096, 0, 0, 0))
+        with patch.object(clt.os, "lstat", side_effect=lambda path: executable if path == clt.GIT else directory) as observed:
+            clt.inspect_installed(environment, "Darwin", "arm64", 501)
+            self.assertEqual([call.args[0] for call in observed.call_args_list], paths)
+        for refusal in (FileNotFoundError(), PermissionError(),
+                        clt.os.stat_result((stat.S_IFLNK | 0o777, 1, 1, 1, 0, 0, 4096, 0, 0, 0))):
+            with patch.object(clt.os, "lstat", side_effect=[directory, refusal]) as observed:
+                with self.subTest(refusal=refusal), self.assertRaises(clt.SetupError):
+                    clt.inspect_installed(environment, "Darwin", "arm64", 501)
+                self.assertEqual([call.args[0] for call in observed.call_args_list], paths[:2])
+
+    def test_complete_clt_lifecycle_keeps_full_xcode_observations_unexecuted(self) -> None:
+        context, result, digest = native_result("macos")
+        for name in ("R2", "R3"):
+            projection = result["cases"][helper.ENVIRONMENT_NATIVE_CASES.index(name)]["projection"]
+            terminal = projection["result"]
+            xcode = next(row for row in terminal["checks"] if row["id"] == "xcode")
+            xcode.update(state="not-run", reason="full-xcode-not-selected", version=None, build=None,
+                         returnCode=None, assessment="not-assessed")
+            terminal.update(outcome="partial", commandsAttempted=2)
+            terminal["lifetime"]["commands"] = 2
+            projection["outcome"] = "partial"
+            result["unexecuted"].append({"case": name, "check": "xcode", "reason": "full-xcode-not-selected"})
+        self.assertEqual(helper.validate_environment_result(result, context, digest), result)
+        self.assertTrue(all(row["assertion"] == "passed" for row in result["cases"]))
+        missing = deepcopy(result)
+        missing["unexecuted"] = []
+        self.assert_refused(lambda value: helper.validate_environment_result(value, context, digest), missing)
 
     def test_scope_is_closed_and_does_not_authorize_historical_or_gui_phases(self) -> None:
         self.assertEqual(helper.ENVIRONMENT_NATIVE_PHASES,
@@ -647,8 +714,24 @@ class EnvironmentNativeCIContracts(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", workflow)
         for phase in helper.ENVIRONMENT_NATIVE_PHASES:
             self.assertEqual(workflow.count("desktop/tools/ci_foundation.py " + phase), 1)
-        for unwanted in ("setup-node@", "sudo ", "apt-get", "cargo test", "continue-on-error", "contents: write"):
+        for unwanted in ("setup-node@", "apt-get", "cargo test", "continue-on-error", "contents: write"):
             self.assertNotIn(unwanted, workflow)
+        setup_marker = "      - name: Select installed root-owned CLT for macOS lifecycle verification\n"
+        prepare_marker = "      - name: Prepare exact bounded source and ZIP bindings\n"
+        setup = workflow.split(setup_marker, 1)[1].split(prepare_marker, 1)[0]
+        self.assertLess(workflow.index("uses: actions/setup-python@"), workflow.index(setup_marker))
+        self.assertLess(workflow.index(setup_marker), workflow.index(prepare_marker))
+        self.assertIn("if: matrix.platform == 'macos'", setup)
+        self.assertIn("timeout-minutes: 1", setup)
+        self.assertIn('"$MRK_PYTHON" -I -S -B desktop/tools/environment_macos_clt.py', setup)
+        self.assertEqual(setup.count("/usr/bin/sudo -n /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools </dev/null"), 1)
+        self.assertEqual(setup.count("/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC"), 2)
+        self.assertIn("/usr/bin/xcode-select -p </dev/null && printf '.'", setup)
+        self.assertIn('[[ "$selected" == $\'/Library/Developer/CommandLineTools\\n.\' ]]', setup)
+        self.assertNotIn("sudo", workflow.replace(setup, ""))
+        self.assertEqual(setup.count("sudo"), 1)
+        for forbidden in ("sudo -n /bin", "--install", "chown ", "chmod ", "--reset", "continue-on-error"):
+            self.assertNotIn(forbidden, setup)
         launch = workflow.index("desktop/tools/ci_foundation.py environment-native")
         self.assertLess(workflow.index('exec 3>"$MRK_DESKTOP_CI_ROOT/environment-native-outer.json"'), launch)
         self.assertLess(workflow.index('exec 4>"$MRK_DESKTOP_CI_ROOT/environment-native.stdout"'), launch)
