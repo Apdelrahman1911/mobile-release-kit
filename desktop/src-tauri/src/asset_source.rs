@@ -17,6 +17,13 @@ impl DirectoryIdentity {
         Self { dev: 1, ino: 2, mode: 0o40700, uid: 123, gid: 123 }
     }
     pub(crate) fn same_object(self, other: Self) -> bool { self.dev == other.dev && self.ino == other.ino }
+    pub(crate) fn preflight_identity(self) -> crate::offline_preflight_protocol::RootIdentity {
+        // Projection of the actual registered native directory, never a path
+        // hint, evidence test identity or descriptor/cleanup permission.
+        crate::offline_preflight_protocol::RootIdentity {
+            device: self.dev.to_string(), inode: self.ino.to_string(), mode: self.mode, uid: self.uid, gid: self.gid,
+        }
+    }
     pub(crate) fn evidence_identity(self) -> crate::candidate_evidence_protocol::RootIdentity {
         crate::candidate_evidence_protocol::RootIdentity {
             device: self.dev.to_string(), inode: self.ino.to_string(), mode: self.mode, uid: self.uid, gid: self.gid,

@@ -103,17 +103,21 @@ export class GitHubSetupController {
   private api: DesktopApi | null = null;
   private draft: JsonObject | null = null;
   private nextRequest = 0;
+  private passivePending = 0;
   private disposed = false;
   private listeners = new Set<() => void>();
   private readonly selectedProject: () => ProjectSession | null;
   private readonly onContextChange: (() => void) | undefined;
+  private readonly otherOperationReason: () => string | null;
 
-  constructor(selectedProject: () => ProjectSession | null, onContextChange?: () => void) {
+  constructor(selectedProject: () => ProjectSession | null, onContextChange?: () => void, otherOperationReason: () => string | null = () => null) {
     this.selectedProject = selectedProject;
-    this.onContextChange = onContextChange;
+    this.onContextChange = onContextChange; this.otherOperationReason = otherOperationReason;
   }
 
+  startReason = (): string | null => this.otherOperationReason() ?? githubSetupStartReason(this.state);
   getSnapshot = (): GitHubSetupState => this.state;
+  passiveBusyReason = (): string | null => this.passivePending > 0 ? 'An original workflow-proposal query is still pending.' : null;
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
@@ -236,7 +240,7 @@ export class GitHubSetupController {
 
   async propose(): Promise<void> {
     this.syncProject();
-    if (this.disposed || !this.api || this.api.mode !== 'native' || !this.draft || !this.state.project || githubSetupStartReason(this.state) !== null) return;
+    if (this.disposed || !this.api || this.api.mode !== 'native' || !this.draft || !this.state.project || this.startReason() !== null) return;
     const suppliedSnapshot = githubSnapshotFromInputs(this.state.inputs);
     if (suppliedSnapshot === undefined) return;
     const input = {
@@ -257,6 +261,8 @@ export class GitHubSetupController {
     this.update({ pending: binding, result: null, resultBinding: null, error: null, invalidated: false });
     // A synchronous subscriber can invalidate before invocation as well.
     if (!this.current(binding)) return;
+    if (this.otherOperationReason()) { this.invalidate({}); return; }
+    this.passivePending += 1;
     try {
       const raw: unknown = await api.proposeGitHubSetup(request);
       this.syncProject();
@@ -274,7 +280,7 @@ export class GitHubSetupController {
         reason: unavailable ? safe.message : this.state.reason,
         helpState: this.state.help ? 'previous' : 'unavailable',
       });
-    }
+    } finally { this.passivePending -= 1; this.update({}); }
   }
 
   dispose(): void {

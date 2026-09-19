@@ -1,3 +1,4 @@
+import { offlinePreflightError } from './offlinePreflightProtocol.ts';
 import fieldHelp from '../../src/mobile_release/api/data/field-help.json' with { type: 'json' };
 import projectSchema from '../../src/mobile_release/api/data/project.schema.json' with { type: 'json' };
 import githubSetupResource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
@@ -43,7 +44,7 @@ const example: ProjectSnapshot = {
   root: 'Example workspace · no folder has been read',
   observedAt: '', observationScope: 'single-request-non-atomic',
   config: {
-    path: 'mobile-release.json (illustration only)', state: 'unavailable', issues: [],
+    path: 'mobile-release.json (illustration only)', state: 'unavailable', content: null, issues: [],
     data: {
       schemaVersion: 1,
       version: { source: 'release/version.properties', nameKey: 'VERSION_NAME', buildKey: 'BUILD_NUMBER' },
@@ -70,6 +71,7 @@ const assetUnavailable = async (): Promise<never> => { throw assetError({ code: 
 const workflowUnavailable = async (): Promise<never> => { throw workflowEditError({ code: 'PreviewOnly' }); };
 const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
 const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
+const offlineUnavailable = (): Promise<never> => Promise.reject(offlinePreflightError({ code: 'offline_preflight_unavailable' }));
 const diagnosticsUnavailable = (): Promise<never> => Promise.reject(environmentDiagnosticsError({ code: 'environment_diagnostics_unavailable' }));
 
 // Deliberate design fixture, not a core assessment or a source of version policy.
@@ -146,6 +148,11 @@ export const previewApi: DesktopApi = {
   },
   // Browser requirements are explicit design examples. There is no successful
   // diagnostics fixture, native status, owner or fallback after a bridge error.
+  prepareOfflinePreflight: offlineUnavailable,
+  startOfflinePreflight: offlineUnavailable,
+  offlinePreflightStatus: offlineUnavailable,
+  cancelOfflinePreflight: offlineUnavailable,
+  subscribeOfflinePreflight: offlineUnavailable,
   startEnvironmentDiagnostics: diagnosticsUnavailable,
   cancelEnvironmentDiagnostics: diagnosticsUnavailable,
   environmentDiagnosticsStatus: diagnosticsUnavailable,

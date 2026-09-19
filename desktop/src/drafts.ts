@@ -1,6 +1,8 @@
 import { blockingAncestor, getValue, sameJson, setValue } from './catalog.ts';
 import { pathsOverlap } from './preparation.ts';
 import { isU32, normalEditResult } from './configEditProtocol.ts';
+import { savedConfigFromSnapshot } from './offlinePreflightProtocol.ts';
+import type { SavedConfigContent } from './offlinePreflightTypes.ts';
 import type { ConfigRecoveryAttention, ConfirmedConfigSave } from './configEdit.ts';
 import type { PreparationRequest } from './preparation.ts';
 import type { ApiError, ConfigPreview, ConfigSuggestion, JsonObject, JsonValue, ProjectReference, ProjectSnapshot, ValidationResult } from './types.ts';
@@ -34,6 +36,8 @@ export interface ProjectSession {
   snapshotRequest: number | null;
   snapshotError: ApiError | null;
   snapshotPredatesSave: boolean;
+  // Exact observed saved bytes, independent of draft/baseline serialization.
+  savedConfigContent: SavedConfigContent | null;
   observedAt: number | null;
   observationGeneration: number;
   baseline: JsonObject | null;
@@ -89,6 +93,7 @@ export type WorkspaceAction =
   | { type: 'suggest-done'; projectId: string; requestId: number; result: ConfigSuggestion }
   | { type: 'suggest-failed'; projectId: string; requestId: number; error: ApiError }
   | { type: 'adopt-suggestion'; projectId: string; requestId: number }
+  | { type: 'config-save-intent'; projectId: string }
   | { type: 'config-save-final'; projectId: string; receipt: ConfirmedConfigSave }
   | { type: 'config-save-recovery'; projectId: string; attention: ConfigRecoveryAttention };
 
@@ -164,7 +169,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       return { ...state, selectedId: action.project.id };
     }
     const session: ProjectSession = {
-      project: action.project, snapshot: null, snapshotRequest: null, snapshotError: null, snapshotPredatesSave: false,
+      project: action.project, snapshot: null, snapshotRequest: null, snapshotError: null, snapshotPredatesSave: false, savedConfigContent: null,
       observedAt: null, observationGeneration: 0, baseline: null, baselineGeneration: 0,
       draft: null, draftOrigin: null, revision: 0, sourceChanged: false,
       validation: null, validatedRevision: null, validatedBaselineGeneration: null, validationRequest: null, validationError: null,
@@ -182,7 +187,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
   let next: ProjectSession;
   switch (action.type) {
     case 'snapshot-start':
-      next = { ...session, snapshotRequest: action.requestId, snapshotError: null };
+      next = { ...session, snapshotRequest: action.requestId, snapshotError: null, savedConfigContent: null };
       break;
     case 'snapshot-done': {
       if (session.snapshotRequest !== action.requestId) return state;
@@ -193,6 +198,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       const changed = !sameJson(session.baseline, incoming);
       next = {
         ...session, snapshot: action.snapshot, snapshotRequest: null, snapshotError: null, snapshotPredatesSave: false,
+        savedConfigContent: savedConfigFromSnapshot(action.snapshot),
         observedAt: action.observedAt, sourceChanged: keepDraft && changed,
         observationGeneration: session.observationGeneration + 1,
         baseline: keepDraft ? session.baseline : incoming,
@@ -205,7 +211,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     }
     case 'snapshot-failed':
       if (session.snapshotRequest !== action.requestId) return state;
-      next = { ...session, snapshotRequest: null, snapshotError: action.error };
+      next = { ...session, snapshotRequest: null, snapshotError: action.error, savedConfigContent: null };
       break;
     case 'new-draft':
       if (session.draft !== null) return state;
@@ -302,6 +308,11 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       if (session.draft !== null || !suggestionFresh(session) || session.suggestion?.binding.id !== action.requestId) return state;
       next = { ...session, draft: structuredClone(session.suggestion.result.draft), draftOrigin: 'suggestion', revision: session.revision + 1, editError: null };
       break;
+    case 'config-save-intent':
+      // A Save attempt cannot reuse a prior read, even if it is later refused.
+      // Retire an in-flight snapshot too; only a new explicit refresh can bind.
+      next = { ...session, savedConfigContent: null, snapshotRequest: null };
+      break;
     case 'config-save-final': {
       const { binding, projection, sessionId, planToken, statusRevision, result } = action.receipt;
       const prepared = projection.prepared;
@@ -326,13 +337,13 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       // A successful older Apply is recorded, but cannot replace either a newer
       // draft or a newer baseline, clear its dirtiness, or evict undo copies.
       if (!matches) {
-        next = { ...session, lastSave, snapshotRequest: null, snapshotPredatesSave: true };
+        next = { ...session, lastSave, snapshotRequest: null, snapshotPredatesSave: true, savedConfigContent: null };
         break;
       }
       next = {
         ...session, lastSave, baseline: advance ? structuredClone(binding.draft) : session.baseline,
         baselineGeneration, draftOrigin: advance ? 'saved' : session.draftOrigin,
-        snapshotRequest: null, snapshotPredatesSave: true, sourceChanged: false,
+        snapshotRequest: null, snapshotPredatesSave: true, savedConfigContent: null, sourceChanged: false,
         validation: null, validatedRevision: null, validatedBaselineGeneration: null, validationRequest: null, validationError: null,
         review: null, reviewRequest: null, reviewError: null,
         suggestion: null, suggestionRequest: null, suggestionError: null, editError: null,
@@ -345,7 +356,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
           action.attention.coreOutcome?.journal !== 'recovery_required' || action.attention.coreOutcome.resources !== 'settled') return state;
       // Affected-project attention survives refresh and draft discard. No GUI
       // recovery or new owner is offered as a way to clear this native finding.
-      next = { ...session, saveRecoveryRequired: true };
+      next = { ...session, saveRecoveryRequired: true, savedConfigContent: null, snapshotRequest: null };
       break;
   }
   return { ...state, projects: { ...state.projects, [action.projectId]: next } };

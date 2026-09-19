@@ -1036,11 +1036,19 @@ class CliBuildTests(unittest.TestCase):
 
             def fake_checks(
                 _config: object, phase: str, *, environ: dict[str, str],
-                execution_source=None, cancellation=None,
+                execution_source=None, cancellation=None, invocation=None,
             ) -> list[Finding]:
                 self.assertIsNone(execution_source)
                 self.assertIsNotNone(cancellation)
                 cancellation.check()
+                self.assertIsNone(config._preflight_budget)
+                if phase == "preflight":
+                    self.assertIsNotNone(invocation)
+                    self.assertIs(invocation.cancellation, cancellation)
+                    invocation.require(root=config.root, cancellation=cancellation, signing_lease=None)
+                else:
+                    self.assertEqual(phase, "androidArtifact")
+                    self.assertIsNone(invocation)
                 if phase == "androidArtifact":
                     captured.update(environ)
                 return []
@@ -1619,11 +1627,15 @@ class CliBuildTests(unittest.TestCase):
 
             def fake_project_checks(
                 _config: object, _phase: str, *, environ: dict[str, str],
-                execution_source=None, cancellation=None,
+                execution_source=None, cancellation=None, invocation=None,
             ) -> list[object]:
                 self.assertIsNone(execution_source)
                 self.assertIsNotNone(cancellation)
                 cancellation.check()
+                self.assertIsNotNone(invocation)
+                self.assertIs(invocation.cancellation, cancellation)
+                invocation.require(root=config.root, cancellation=cancellation, signing_lease=None)
+                self.assertIsNone(config._preflight_budget)
                 captured_environment.update(environ)
                 return []
 

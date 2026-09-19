@@ -40,6 +40,7 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 | Pure credential assessment (internal only) | Core policy over explicitly supplied scalars and finite file observations, with a private result-sanitizing adapter | Renderer secret entry, file acquisition/parser qualification, password verification, native custody, storage or assignment |
 | Environment requirements | Current-draft prerequisites, fixed baseline guidance and missing-feature explanations | Observing installed tools, running doctor or native admission |
 | Build-tool diagnostics implementation (disabled) | Explicit, cancellable version observations through a separate native owner and the ordinary core command owner | Enabled diagnostics, complete SDK checks, native document/runtime qualification or release readiness |
+| Saved Android offline checks implementation (disabled) | Saved-input consent, the existing shared offline core policy and original cancellation/finality ownership; core builds disabled | Enabled execution, a sandbox, no-network/no-write behavior, native/runtime qualification or release readiness |
 | Candidate evidence inspector (disabled) | Separate evidence-folder picker, three fixed candidate documents, core-owned format/self-digest/binding checks and a guided documents-only summary | Artifact-byte inspection, authenticated provenance, source-project comparison, Store state, release readiness or safe recovery |
 | Credentials, releases, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
 
@@ -126,6 +127,8 @@ in [GitHub setup proposals](desktop-github-setup.md).
 The public-text scope, separate configuration prerequisite, raw-byte semantics
 and gated typed Save are documented in
 [guided metadata text](desktop-metadata-text.md).
+Saved-only consent, trusted project-code effects and the separate closed execution
+gate are documented in [saved offline checks (Android)](desktop-offline-preflight.md).
 
 The Artifacts screen always labels its result **“Local document consistency;
 provenance and artifact bytes unverified.”** Choosing evidence never replaces the

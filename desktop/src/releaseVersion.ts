@@ -174,16 +174,19 @@ export class ReleaseVersionController {
     pending: null, result: null, resultBinding: null, stale: false, error: null });
   private readonly selectedProject: () => ProjectSession | null;
   private readonly configurationBusy: (projectId: string) => boolean;
+  private readonly otherOperationReason: () => string | null;
   private api: DesktopApi | null = null;
+  private passivePending = 0;
   private draft: ProjectSession['draft'] = null;
   private disposed = false;
   private listeners = new Set<() => void>();
-  constructor(selectedProject: () => ProjectSession | null, configurationBusy: (projectId: string) => boolean = () => false) {
-    this.selectedProject = selectedProject; this.configurationBusy = configurationBusy;
+  constructor(selectedProject: () => ProjectSession | null, configurationBusy: (projectId: string) => boolean = () => false, otherOperationReason: () => string | null = () => null) {
+    this.selectedProject = selectedProject; this.configurationBusy = configurationBusy; this.otherOperationReason = otherOperationReason;
   }
   getSnapshot = (): ReleaseVersionState => this.state;
+  passiveBusyReason = (): string | null => this.passivePending > 0 ? 'An original saved-version query is still pending.' : null;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
-  startReason = (): string | null => releaseVersionStartReason(this.state) ??
+  startReason = (): string | null => this.otherOperationReason() ?? releaseVersionStartReason(this.state) ??
     (this.state.project && this.configurationBusy(this.state.project.projectId) ? saveReason : null);
   private update(patch: Partial<ReleaseVersionState>): void {
     if (this.disposed) return;
@@ -259,7 +262,8 @@ export class ReleaseVersionController {
     this.update({ readEpoch, pending: binding, error: null, stale: this.state.result !== null });
     this.syncProject();
     if (!this.current(binding)) return;
-    if (this.configurationBusy(binding.projectId)) { this.retire(); return; }
+    if (this.configurationBusy(binding.projectId) || this.otherOperationReason()) { this.retire(); return; }
+    this.passivePending += 1;
     try {
       // Only the registered ID crosses the bridge. Neither draft nor baseline
       // nor a snapshot version.source can select the observed saved files.
@@ -281,8 +285,8 @@ export class ReleaseVersionController {
       if (!this.current(binding)) return;
       this.update({ pending: null, error: safe, stale: this.state.result !== null,
         reason: ['cleanup_unknown', 'release_version_cleanup_unknown', 'shutting_down'].includes(safe.code) ? safe.message : this.state.reason });
-    }
-    // No finally clears a newer pending read or reissues a retired request.
+    } finally { this.passivePending -= 1; this.update({}); }
+    // Finally releases only this original Promise's accounting, never a newer display binding.
   }
   dispose(): void { this.connectionUnavailable(); this.disposed = true; this.listeners.clear(); this.draft = null; }
 }

@@ -403,7 +403,7 @@ def _platform_policy_findings(config: ReleaseConfig, platform: str) -> list[Find
             )
         ]
     status = section.get("identityStatus", "unverified")
-    findings: list[Finding] = []
+    findings: list[Finding] = ([] if config._preflight_budget is None else config._preflight_budget.list("finding"))
     if status == "blocked":
         findings.append(
             Finding(
@@ -574,11 +574,14 @@ def _platform_policy_findings(config: ReleaseConfig, platform: str) -> list[Find
 
 def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None, *, execution_source=None,
            cancellation: DefaultCancellation | None = None) -> Report:
-    report = Report("doctor", context={"config": str(config.path), "root": str(config.root)})
+    budget = config._preflight_budget
+    if budget is not None:
+        budget.checkpoint()
+    report = Report("doctor", context={"config": str(config.path), "root": str(config.root)}, budget=budget)
     selected = tuple(platforms if platforms is not None else config.enabled_platforms)
     try:
         release = config.release_version()
-        report.context["release"] = {"marketingVersion": release.name, "buildNumber": release.build}
+        report.set_context("release", {"marketingVersion": release.name, "buildNumber": release.build})
         report.add(
             "version.source",
             Status.PASS,
@@ -595,8 +598,8 @@ def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None, *, exe
         )
 
     discovered = discover_project(config.root, execution_source=execution_source, cancellation=cancellation)
-    report.context["discovery"] = discovered
-    report.context["git"] = discovered["git"]
+    report.set_context("discovery", discovered)
+    report.set_context("git", discovered["git"])
     if not selected:
         report.add(
             "platform.none",
@@ -605,6 +608,8 @@ def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None, *, exe
             category="configuration",
         )
     for platform in selected:
+        if budget is not None:
+            budget.checkpoint()
         if platform not in {"android", "ios"} or not config.platform_enabled(platform):
             report.add(
                 "platform.selection",
@@ -735,7 +740,12 @@ def doctor(config: ReleaseConfig, platforms: Iterable[str] | None = None, *, exe
 
     gitignore = config.root / ".gitignore"
     ignored = False
-    if gitignore.is_file():
+    if budget is not None:
+        from .config import _iter_text_lines
+        text = budget.read(gitignore, limit=10 * 1024 * 1024, errors="replace")
+        ignored = text is not None and any(
+            line.strip().rstrip("/") in {".mobile-release", "/.mobile-release"} for line in _iter_text_lines(text))
+    elif gitignore.is_file():
         ignored = any(
             line.strip().rstrip("/") in {".mobile-release", "/.mobile-release"}
             for line in gitignore.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -759,15 +769,23 @@ def run_project_checks(
     environ: Mapping[str, str] | None = None,
     execution_source=None,
     cancellation: DefaultCancellation | None = None,
+    invocation: InvocationCustody | None = None,
 ) -> list[Finding]:
-    findings: list[Finding] = []
+    budget = config._preflight_budget
+    findings: list[Finding] = [] if budget is None else budget.list("finding")
     execution_environment = (
         dict(environ)
         if environ is not None
         else scrub_credential_capabilities(os.environ)
     )
     for index, command in enumerate(config.commands(phase)):
-        expanded: list[str] = []
+        if budget is not None:
+            if invocation is not budget.invocation:
+                raise ValueError("Project checks lost their original invocation")
+            budget.checkpoint()
+        elif cancellation is not None:
+            cancellation.check()
+        expanded: list[str] = [] if budget is None else budget.list()
         missing_variable: str | None = None
         for argument in command:
             value = argument
@@ -795,6 +813,8 @@ def run_project_checks(
             )
             break
         try:
+            if invocation is not None:
+                invocation.require(root=config.root, cancellation=cancellation, signing_lease=invocation.signing_lease)
             result = run_owned(
                 expanded,
                 cwd=config.root,
@@ -805,6 +825,9 @@ def run_project_checks(
                 execution_scope=None if execution_source is None else execution_source.new_scope(),
             )
         except (ProcessError, FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+            if budget is not None:
+                # An incomplete call is not a complete-negative report row.
+                raise
             if isinstance(error, ProcessError) and error.fatal:
                 raise
             findings.append(
@@ -957,6 +980,12 @@ def _preflight(
     if mode not in {"offline", "signing", "online"}:
         raise ValidationError(f"unsupported preflight mode: {mode}")
     selected = tuple(platforms)
+    if config._preflight_budget is not None:
+        if (config._preflight_budget.invocation is not invocation or mode != "offline" or selected != ("android",)
+                or run_builds or artifacts is not None or credentials_file is not None or credentials_from_env
+                or require_tools or signing_lease is not None):
+            raise ValueError("Offline preflight fixed selection changed")
+        config._preflight_budget.checkpoint()
     execution_source = None if signing_lease is None else signing_lease.execution_source()
     cancellation = invocation.cancellation
     invocation.require(root=config.root, cancellation=cancellation, signing_lease=signing_lease)
@@ -970,7 +999,8 @@ def _preflight(
             f"Requested disabled platform(s): {', '.join(sorted(invalid))}",
             category="configuration",
         )
-    report.extend(metadata_findings(config, platforms=selected))
+    invocation.require(root=config.root, cancellation=cancellation, signing_lease=signing_lease)
+    report.extend(metadata_findings(config, platforms=selected, cancellation=cancellation))
     if (invalid or not selected) and mode == "online":
         report.add("store.online.gate", Status.SKIP,
                    "Non-publishing Store API checks were skipped because the platform selection is invalid.",
@@ -978,6 +1008,7 @@ def _preflight(
         return report
     if not report.ok and mode != "online":
         return _stop_preflight(report, "Application checks, credentials and builds were skipped because initial checks failed.")
+    invocation.require(root=config.root, cancellation=cancellation, signing_lease=signing_lease)
     credential_values = resolve_credential_values(
         config,
         credentials_file=credentials_file,
@@ -1026,7 +1057,7 @@ def _preflight(
     else:
         report.extend(
             run_project_checks(config, "preflight", environ=project_check_environment,
-                               execution_source=execution_source, cancellation=cancellation)
+                               execution_source=execution_source, cancellation=cancellation, invocation=invocation)
         )
     if (
         mode != "online"

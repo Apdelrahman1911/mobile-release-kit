@@ -31,7 +31,7 @@ const validation = { valid: true, state: 'format-valid', issues: [], requirement
 const project = (id) => ({ id, name: `Inert ${id}`, path: `/inert/not-opened/${id}` });
 const snapshot = (base) => ({
   root: '/inert/not-opened', observedAt: '', observationScope: 'single-request-non-atomic',
-  config: { path: 'release/mobile-release.json', state: base === null ? 'missing' : 'format-valid', data: structuredClone(base), issues: [] },
+  config: { content: null, path: 'release/mobile-release.json', state: base === null ? 'missing' : 'format-valid', data: structuredClone(base), issues: [] },
   discovery: { state: 'unverified', partial: false, hints: {}, scan: { entries: 0, sourceFiles: 0, sourceBytes: 0, excludedEntries: 0 }, limits: {} },
   assurance: { ...assurance, basis: 'static-text' }, issues: [],
 });

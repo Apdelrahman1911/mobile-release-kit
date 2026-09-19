@@ -1,6 +1,5 @@
 import type { AppInfo, HelpContent } from '../types.ts';
 import type { ProjectSession } from '../drafts.ts';
-import { environmentStartReason } from '../environment.ts';
 import type { EnvironmentController, EnvironmentPlatform, EnvironmentOperation, EnvironmentState } from '../environment.ts';
 import type { EnvironmentDiagnosticsController, EnvironmentDiagnosticsState } from '../environmentDiagnosticsController.ts';
 import { EnvironmentDiagnostics } from '../components/EnvironmentDiagnostics.tsx';
@@ -37,7 +36,7 @@ export function Environment({ info, preview, session, state, controller, diagnos
 }) {
   const runtime = info?.runtime;
   const capabilities = info?.capabilities;
-  const reason = environmentStartReason(state);
+  const reason = controller.startReason();
   const result = state.resultBinding?.projectId === session?.project.id ? state.result : null;
   const resultPreview = state.resultBinding?.mode === 'preview';
   const guide = result?.help ?? initialHelp;

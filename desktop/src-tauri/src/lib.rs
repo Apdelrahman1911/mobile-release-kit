@@ -10,6 +10,8 @@ mod release_version_protocol;
 mod candidate_evidence_protocol;
 mod environment_diagnostics_protocol;
 mod environment_diagnostics_owner;
+mod offline_preflight_protocol;
+mod offline_preflight_owner;
 pub mod runtime;
 // First protected-runtime inspection backend only. It is not connected to a
 // launch path and cannot construct an executable qualified-runtime capability.

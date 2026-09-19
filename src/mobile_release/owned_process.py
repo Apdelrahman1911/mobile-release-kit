@@ -152,6 +152,20 @@ def run_owned(
     """
     from ._command_process import run_command
 
+    source = None if cancellation is None else getattr(cancellation, "_preflight_source", None)
+    if source is not None:
+        from ._desktop_preflight_control import PreflightInput
+        from ._desktop_preflight_budget import budget_for
+        if type(source) is not PreflightInput or source.guard is not cancellation or cleanup:
+            raise ValueError("Offline preflight command has no original input binding")
+        timeout = source.remaining_timeout(timeout)
+        budget = budget_for(cancellation)
+        if budget is None:
+            raise ValueError("Offline preflight command has no original budget")
+        if capture:
+            output_limit = budget.capture(output_limit)
+        # Complete nonzero results remain ordinary policy DATA. This seam
+        # changes neither the C/A/W owner nor its original cleanup allowance.
     return run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture, text=text,
                        output_limit=output_limit, cancellation=cancellation, on_start=on_start,
                        cleanup=cleanup, execution_scope=execution_scope, journal_binding=journal_binding,

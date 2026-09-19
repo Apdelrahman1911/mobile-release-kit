@@ -134,8 +134,28 @@ def _stat(fd: int, name: str) -> os.stat_result | None:
         return None
 
 
-def _names(fd: int, limit: int = 4096) -> set[str]:
-    values = os.listdir(fd)
+def _names(fd: int, limit: int = 4096, *, cancellation=None) -> set[str]:
+    budget = None
+    if cancellation is not None and getattr(cancellation, "_preflight_source", None) is not None:
+        from ._desktop_preflight_budget import budget_for
+        budget = budget_for(cancellation)
+    if budget is None:
+        values = os.listdir(fd)
+    else:
+        values, keys = set(), set()
+        with budget.entries(fd) as entries:
+            for entry in entries:
+                if len(values) >= limit:
+                    budget.fail()
+                key = _name_key(entry.name)
+                _need(key not in keys, "ambiguous directory aliases")
+                # These retained names are DATA, not paths for a later reopen.
+                # Charge both the retained spelling and normalized alias key
+                # before insertion; do not materialize an uncharged key list.
+                budget.path(budget.root / entry.name)
+                budget.add(values, entry.name)
+                budget.add(keys, key)
+        return values
     _need(len(values) <= limit, "directory inventory exceeds its bound")
     keys = [_name_key(value) for value in values]
     _need(len(set(keys)) == len(keys), "ambiguous directory aliases")
@@ -152,9 +172,9 @@ def _name_key(name: str) -> str:
     return unicodedata.normalize("NFC", name).casefold()
 
 
-def _exact_reserved_names(fd: int, reserved: set[str]) -> set[str]:
+def _exact_reserved_names(fd: int, reserved: set[str], *, cancellation=None) -> set[str]:
     """Never adopt a different physical spelling of a fixed protocol name."""
-    names = _names(fd)
+    names = _names(fd, cancellation=cancellation)
     canonical = {_name_key(name): name for name in reserved}
     _need(all(_name_key(name) not in canonical or canonical[_name_key(name)] == name for name in names),
           "reserved namespace has a foreign alias")
@@ -166,17 +186,18 @@ def _private_is_ignored(content: bytes) -> bool:
     return sufficient_ignore_rules(content, (".mobile-release/",))
 
 
-def _init_pending_names_locked(fd: int) -> set[str]:
+def _init_pending_names_locked(fd: int, *, cancellation=None) -> set[str]:
     """Noncreating admission only; caller continuously owns the root flock."""
-    names = _exact_reserved_names(fd, {_PRIVATE, *INIT_STATES})
-    _need(not ({_name_key(name) for name in names} & {_name_key(name) for name in INIT_STATES}),
+    names = _exact_reserved_names(fd, {_PRIVATE, *INIT_STATES}, cancellation=cancellation)
+    pending = {_name_key(name) for name in INIT_STATES}
+    _need(not any(_name_key(name) in pending for name in names),
           "pending init transaction must be resolved separately")
     return names
 
 
-def _build_pending_names_locked(fd: int, *, recovery: bool = False) -> None:
+def _build_pending_names_locked(fd: int, *, recovery: bool = False, cancellation=None) -> None:
     """No second lock, status RPC, private reads or implicit recovery."""
-    names = _exact_reserved_names(fd, {_PENDING, _TERMINAL, _TERMINAL_STAGE})
+    names = _exact_reserved_names(fd, {_PENDING, _TERMINAL, _TERMINAL_STAGE}, cancellation=cancellation)
     if not recovery:
         _need(not (names & {_PENDING, _TERMINAL, _TERMINAL_STAGE}),
               "pending build-input state requires explicit recovery")
@@ -1573,6 +1594,7 @@ class InvocationCustody:
         self.project_started = False
         self.frames: list[_EnvironmentFrame] = []
         self.project_owner: _Project | None = None
+        self._original_project: _Project | None = None
         self.child: BuildInputs | None = None
         self.signing_lease: SigningLease | None = None
         self._cleanup_complete = False
@@ -1583,6 +1605,13 @@ class InvocationCustody:
             _need(getattr(lane_evidence, "_caller_invocation", None) is None,
                   "Store invocation already has its original environment owner")
             lane_evidence._caller_invocation = self
+        if getattr(guard, "_preflight_source", None) is not None:
+            from ._desktop_preflight_budget import budget_for
+            budget = budget_for(guard)
+            _need(budget is not None, "offline preflight has no original budget")
+            # Bind before acquire/yield: failed admission must not lose this
+            # original invocation's actual close/reservation record.
+            budget.bind(self)
 
     def _owner(self, *, cleanup: bool = False) -> None:
         _need(self.pid == os.getpid() and self.thread is threading.current_thread(),
@@ -1652,6 +1681,7 @@ class InvocationCustody:
             signing_lease.assert_owner()
         self.project_started = True
         project = _Project(self.root, self.cancellation, recovery=False)
+        self._original_project = project
         self.project_owner, self.signing_lease = project, signing_lease
         try:
             with _scope(project, self.cancellation, False):
@@ -1732,6 +1762,29 @@ class InvocationCustody:
                 and self.store_namespace is not None and self.store_namespace.closed()
                 and _ENV_OWNER is not self and not _ENV_TAINTED)
 
+    def _offline_preflight_root(self, guard: DefaultCancellation) -> tuple[int, dict[str, Any]]:
+        """Read-only borrowed original root; not a constructor or cleanup grant."""
+        self.require(root=self.root, cancellation=guard, signing_lease=None)
+        _need(self.mode == "build" and self.project_owner is self._original_project
+              and self.project_owner is not None and self.child is None, "offline preflight root is not admitted")
+        fd = self.project_owner.fd
+        value = os.fstat(fd)
+        return fd, {"device": str(value.st_dev), "inode": str(value.st_ino),
+                    "mode": value.st_mode, "uid": value.st_uid, "gid": value.st_gid}
+
+    def _offline_preflight_closed(self, guard: DefaultCancellation) -> bool:
+        self._owner(cleanup=True)
+        project = self._original_project
+        project_closed = ((not self.project_started and project is None) or project is not None
+                          and project.claimed and project.meta.close_state == "CLOSED"
+                          and all(slot.close_state == "CLOSED" for slot in project.directory.slots))
+        return (guard is self.cancellation and self.mode == "build" and self.signing_lease is None
+                and self.claimed and not self.active and self._cleanup_complete and not self.reserved
+                and not self.frames and self.child is None and self.project_owner is None and project_closed
+                and self.store_namespace is None and self.reservation_state in {"NEW", "REFUSED", "RELEASED"}
+                and (self.lock_result is None or self.lock_result is False)
+                and _ENV_OWNER is not self and not _ENV_TAINTED)
+
     def fork_close(self) -> None:
         self.active = False
         if self.child is not None:
@@ -1774,7 +1827,7 @@ class _Project:
     def check(self) -> None:
         self.directory.check()
         if self.meta.number is not None:
-            _need(_PRIVATE in _exact_reserved_names(self.fd, {_PRIVATE}), "private project directory is absent")
+            _need(_PRIVATE in _exact_reserved_names(self.fd, {_PRIVATE}, cancellation=self.guard), "private project directory is absent")
             _need(_directory(os.fstat(self.meta.number)) == self.meta_identity
                   and _directory(os.stat(_PRIVATE, dir_fd=self.fd, follow_symlinks=False)) == self.meta_identity,
                   "private project ancestry changed")
@@ -1789,14 +1842,14 @@ class _Project:
         except BlockingIOError:
             raise BuildInputError("build inputs: another owner holds this project") from None
         self.check()
-        names = _init_pending_names_locked(self.fd)
+        names = _init_pending_names_locked(self.fd, cancellation=self.guard)
         if _PRIVATE in names:
             self._open_meta()
         if self.meta.number is not None:
-            _build_pending_names_locked(self.meta.number, recovery=self.recovery)
+            _build_pending_names_locked(self.meta.number, recovery=self.recovery, cancellation=self.guard)
 
     def _open_meta(self) -> None:
-        _need(_PRIVATE in _exact_reserved_names(self.fd, {_PRIVATE}), "private project directory is absent")
+        _need(_PRIVATE in _exact_reserved_names(self.fd, {_PRIVATE}, cancellation=self.guard), "private project directory is absent")
         if self.meta.number is None:
             number = self.meta.open(_PRIVATE, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.fd)
             self.meta_identity = _directory(os.fstat(number))

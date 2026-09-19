@@ -856,3 +856,17 @@ main:focus { outline: none; }
 .environment-baseline dt { font-weight: 600; margin-top: 10px; }
 .environment-baseline dd { margin: 4px 0 0; overflow-wrap: anywhere; }
 @media (max-width: 620px) { .environment-controls { grid-template-columns: 1fr; } }
+
+/* Saved offline-preflight review: bounded report DATA, never a raw console. */
+.offline-preflight .notice p { margin: 0; }
+.offline-ack { display: flex; align-items: flex-start; gap: .7rem; margin: 1rem 0; line-height: 1.6; }
+.offline-ack input { flex: 0 0 auto; margin-top: .35rem; }
+.offline-global > div { min-width: 0; }
+.offline-counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(115px, 1fr)); gap: .65rem; }
+.offline-counts > div { padding: .65rem; border: 1px solid var(--line); border-radius: 8px; }
+.offline-counts dt { font-size: .75rem; font-weight: 700; overflow-wrap: anywhere; }
+.offline-counts dd { margin: .25rem 0 0; font-size: 1.1rem; }
+.offline-findings { padding-left: 1.6rem; }
+.offline-findings li { padding: .6rem .25rem; }
+.offline-findings .badge { margin-right: .6rem; }
+.offline-report { margin-top: 1.5rem; }

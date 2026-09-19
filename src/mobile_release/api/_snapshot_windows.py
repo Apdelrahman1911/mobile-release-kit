@@ -247,7 +247,7 @@ def _note_native(error: native_api.NativeError, inventory: policy._Inventory) ->
 
 def _configuration(native: native_api.Native, root: _Frame, relative: str,
                    inventory: policy._Inventory) -> ConfigObservation:
-    result: ConfigObservation = {"path": relative, "state": "unavailable", "data": None, "issues": []}
+    result: ConfigObservation = {"path": relative, "state": "unavailable", "data": None, "content": None, "issues": []}
     frames: list[_Frame] = []
     parts = tuple(relative.split("/"))
     parent = root
@@ -379,7 +379,7 @@ def project_snapshot(root: object, config_path: object = "release/mobile-release
             except (native_api.NativeError, policy._ReadProblem):
                 message = "Selected folder or an ancestor changed or became unobservable during this non-atomic observation."
                 inventory.note("snapshot.changed", message)
-                config = {"path": selected_config, "state": "unavailable", "data": None,
+                config = {"path": selected_config, "state": "unavailable", "data": None, "content": None,
                           "issues": [issue("snapshot.changed", message, partial=True)]}
     finally:
         native.close_all()

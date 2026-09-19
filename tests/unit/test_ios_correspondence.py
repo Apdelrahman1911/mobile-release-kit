@@ -787,10 +787,18 @@ class IOSPreflightCorrespondenceTests(unittest.TestCase):
             paths = artifact_set(root)
             phases, guards = [], []
 
-            def checks(_config, phase, *, environ, execution_source, cancellation):
+            def checks(_config, phase, *, environ, execution_source, cancellation, invocation=None):
                 self.assertIs(_config, config)
                 self.assertIsNone(execution_source)
                 self.assertIsInstance(cancellation, DefaultCancellation)
+                self.assertIsNone(config._preflight_budget)
+                if phase == "preflight":
+                    self.assertIsNotNone(invocation)
+                    self.assertIs(invocation.cancellation, cancellation)
+                    invocation.require(root=config.root, cancellation=cancellation, signing_lease=None)
+                else:
+                    self.assertEqual(phase, "iosArtifact")
+                    self.assertIsNone(invocation)
                 if guards:
                     self.assertIs(cancellation, guards[0])
                 else:

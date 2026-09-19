@@ -498,6 +498,27 @@ struct Inner {
 #[derive(Clone)]
 pub(crate) struct DocumentBinding { inner: Arc<Inner> }
 
+fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
+    // Existing passive services do not require editing/crash-hook qualification.
+    // The caller still holds this same document mutex through Supervisor claim.
+    if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
+    if state.stopping { return Err(BridgeError::shutdown()); }
+    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending {
+        return Err(BridgeError::new("busy", "Finish the original native operation first."));
+    }
+    Ok(())
+}
+fn preflight_document_gate(state: &DocumentState, profile: Option<crate::offline_preflight_protocol::Profile>)
+    -> Option<crate::offline_preflight_protocol::Availability> {
+    use crate::offline_preflight_protocol::Availability;
+    // A missing platform backend is not a lost qualified original. Before the
+    // first Finished event, no run/intent exists and binding is merely pending.
+    if profile.is_none() { Some(Availability::UnsupportedPlatform) }
+    else if state.lost_observed { Some(Availability::DocumentLost) }
+    else if !state.lifetime.original_bound() { Some(Availability::Busy) }
+    else { None }
+}
+
 impl DocumentBinding {
     pub(crate) fn new(bridge: Arc<DesktopBridge>) -> Self {
         let (changes, _) = watch::channel(0);
@@ -581,6 +602,7 @@ impl DocumentBinding {
         stop_quit(state, Instant::now());
         self.inner.bridge.edits.document_lost(MAIN);
         self.inner.bridge.diagnostics.document_lost();
+        self.inner.bridge.preflight.document_lost();
         state.revision = u32::MAX; self.inner.changes.send_replace(u32::MAX);
     }
     fn next_operation(&self, state: &mut DocumentState) -> Result<u32, AssetError> {
@@ -598,7 +620,7 @@ impl DocumentBinding {
         // This actual loss path is synchronous under the same admission lock.
         // EditOwner's first-loss tombstone was preallocated, with no loss RNG.
         self.inner.bridge.edits.document_lost(MAIN);
-        self.inner.bridge.diagnostics.document_lost(); self.bump(state);
+        self.inner.bridge.diagnostics.document_lost(); self.inner.bridge.preflight.document_lost(); self.bump(state);
     }
     fn apply(&self, state: &mut DocumentState, action: DocumentAction) {
         match action {
@@ -619,13 +641,15 @@ impl DocumentBinding {
     pub(crate) fn hook_installed(&self) { self.observe(DocumentLifetime::crash_hook_installed); }
     fn environment_gate(&self, state: &DocumentState) -> crate::environment_diagnostics_protocol::Availability {
         use crate::environment_diagnostics_protocol::Availability;
-        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() { return Availability::CleanupUnknown; }
-        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() { return Availability::Shutdown; }
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
+            || self.inner.bridge.preflight.disabled() { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || self.inner.bridge.preflight.stopping() { return Availability::Shutdown; }
         if !state.lifetime.original_bound() || state.lost_observed { return Availability::DocumentLost; }
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
             || state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
             || state.github.native_work_pending() || !self.inner.bridge.edits.can_exit()
-            || !self.inner.bridge.supervisor.can_exit() { return Availability::Busy; }
+            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.preflight.busy() { return Availability::Busy; }
         Availability::Available
     }
     pub(crate) fn environment_diagnostics_status(&self) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
@@ -636,12 +660,78 @@ impl DocumentBinding {
         self.inner.bridge.diagnostics.status(self.environment_gate(&state))
     }
     pub(crate) fn environment_diagnostics_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.diagnostics.subscribe() }
+    fn preflight_gate(&self, state: &DocumentState) -> crate::offline_preflight_protocol::Availability {
+        use crate::offline_preflight_protocol::Availability;
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() { return Availability::CleanupUnknown; }
+        if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+            || self.inner.bridge.diagnostics.stopping() { return Availability::Shutdown; }
+        if let Some(reason) = preflight_document_gate(state, crate::offline_preflight_protocol::Profile::current()) { return reason; }
+        // Saved checks require Disconnect, not merely an idle GitHub ticket.
+        // Observe the actual retained private session, never a public tombstone.
+        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending
+            || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+            || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() { return Availability::Busy; }
+        Availability::Available
+    }
+    pub(crate) fn offline_preflight_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.preflight.subscribe() }
+    pub(crate) fn offline_preflight_relay_lost(&self) {
+        // A lost status channel retires consent/sends original STOP; it never
+        // deletes the owner, reopens a slot or asserts native finality.
+        let _state = self.lock(); self.inner.bridge.preflight.document_lost();
+    }
+    pub(crate) fn offline_preflight_status(&self) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
+        let state = self.lock();
+        if !self.inner.bridge.preflight.registration_matches(self.inner.bridge.registry_generation()) { self.inner.bridge.preflight.context_changed(); }
+        self.inner.bridge.preflight.status(self.preflight_gate(&state))
+    }
+    pub(crate) fn prepare_offline_preflight(&self, args: crate::offline_preflight_protocol::Prepare) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
+        let mut state = self.lock();
+        let gate = self.preflight_gate(&state);
+        // All fixed errors here precede intent allocation. No project is opened.
+        if gate != crate::offline_preflight_protocol::Availability::Available {
+            return Err(if gate == crate::offline_preflight_protocol::Availability::Busy {
+                BridgeError::new("offline_preflight_busy", "Finish or cancel the original operation before reviewing saved offline checks.")
+            } else { crate::offline_preflight_owner::unavailable() });
+        }
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&args.project_id));
+        let (generation, root) = selected.map_err(|_| crate::offline_preflight_owner::unavailable())?;
+        self.inner.bridge.preflight.prepare(args, generation, root, gate)
+    }
+    pub(crate) fn start_offline_preflight(&self, args: crate::offline_preflight_protocol::Start) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
+        let admitted_at = Instant::now(); // Native T before lock/lookup/executor/runtime/enqueue/await.
+        let mut state = self.lock();
+        let project = self.inner.bridge.preflight.prepared_project(&args.operation_id, &args.owner_generation)?;
+        let selected = self.registry_result(&mut state, self.inner.bridge.native_project(&project)).ok();
+        let admitted = self.inner.bridge.preflight.start(args, admitted_at, selected, self.preflight_gate(&state))?;
+        // Real document/context/quit decisions cannot interleave registration,
+        // one-use consent consumption, original roster claim and release.
+        drop(state); Ok(admitted.release())
+    }
+    pub(crate) fn cancel_offline_preflight(&self, args: crate::offline_preflight_protocol::Cancel) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
+        let state = self.lock();
+        self.inner.bridge.preflight.cancel(&args.operation_id, &args.owner_generation, self.preflight_gate(&state))
+    }
+    /// The existing passive Supervisor claim is synchronous under this SAME
+    /// real mutex; a gate check before awaiting query() would leave a race.
+    /// This is not an offline-preflight runner or a new query resource owner.
+    pub(crate) fn passive_query(&self, bridge: &DesktopBridge, method: crate::protocol::Method, params: serde_json::Value) -> Result<crate::supervisor::PassiveQuery, BridgeError> {
+        let state = self.lock();
+        if !std::ptr::eq(bridge, self.inner.bridge.as_ref()) { return Err(BridgeError::invalid()); }
+        passive_document_gate(&state)?;
+        self.inner.bridge.preflight.ensure_idle()?;
+        self.inner.bridge.diagnostics.ensure_idle()?;
+        self.inner.bridge.supervisor.start_passive(method, params)
+    }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     pub(crate) fn environment_fixture_registration(&self,
         permit: &crate::environment_diagnostics_owner::EnvironmentRegistrationPermit, change: bool) -> Result<(), BridgeError> {
         let state = self.lock();
         if state.unknown || state.exhausted || !state.lifetime.original_bound() || state.lost_observed || state.stopping { return Err(BridgeError::cleanup_unknown()); }
+        self.inner.bridge.preflight.context_changed();
+        self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.environment_fixture_registration(permit, change)
     }
     pub(crate) fn start_environment_diagnostics(&self, args: crate::environment_diagnostics_protocol::Start) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
@@ -675,6 +765,8 @@ impl DocumentBinding {
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending { return Err(BridgeError::new("busy", "Finish the original native operation first.")); }
         if state.slot.as_ref().is_some_and(|slot| slot.operation.evidence()
             && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(evidence_wire::refused(EvidenceProblem::Busy)); }
+        self.inner.bridge.preflight.context_changed();
+        self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
         action(&self.inner.bridge)
     }
@@ -682,6 +774,8 @@ impl DocumentBinding {
     pub(crate) fn compatibility_picker_begin(&self) -> Result<(), BridgeError> {
         let mut state = self.lock();
         self.inner.bridge.diagnostics.context_changed();
+        self.inner.bridge.preflight.context_changed();
+        self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
         if state.stopping { return Err(BridgeError::shutdown()); }
         if state.compatibility_picker_pending { return Err(BridgeError::new("busy", "A native project picker is already open.")); }
@@ -697,6 +791,7 @@ impl DocumentBinding {
     pub(crate) fn compatibility_picker_publish(&self, path: std::path::PathBuf) -> Result<Project, BridgeError> {
         let state = self.lock();
         if !state.compatibility_picker_pending { return Err(BridgeError::invalid()); }
+        self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
         self.inner.bridge.register_picked_project(path)
     }
@@ -709,7 +804,7 @@ impl DocumentBinding {
     #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
     pub(crate) fn compatibility_quit_result(&self, accepted: bool) {
         let mut state = self.lock(); state.quit_pending = false;
-        if accepted { state.stopping = true; self.inner.bridge.diagnostics.request_shutdown(); }
+        if accepted { state.stopping = true; self.inner.bridge.diagnostics.request_shutdown(); self.inner.bridge.preflight.request_shutdown(); }
         self.bump(&mut state);
     }
     fn gate(&self, state: &DocumentState, session: bool) -> Result<(), AssetError> {
@@ -717,8 +812,10 @@ impl DocumentBinding {
         if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
         if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
         if self.inner.bridge.diagnostics.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
+        if self.inner.bridge.preflight.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
         if self.inner.bridge.diagnostics.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
-        if self.inner.bridge.diagnostics.busy() || state.compatibility_picker_pending { return Err(AssetError::new(Reason::Busy)); }
+        if self.inner.bridge.preflight.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
+        if self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy() || state.compatibility_picker_pending { return Err(AssetError::new(Reason::Busy)); }
         if session && state.slot.as_ref().is_some_and(|slot| slot.operation.evidence()
             && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
         if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
@@ -762,11 +859,13 @@ impl DocumentBinding {
         result
     }
     fn github_gate(&self, state: &DocumentState) -> GitHubReason {
-        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() { return GitHubReason::CleanupUnknown; }
+        if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
+            || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled() { return GitHubReason::CleanupUnknown; }
         if !self.github_qualified() { return GitHubReason::Unqualified; }
         if !state.lifetime.original_bound() || state.lost_observed || state.stopping
-            || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() || self.inner.bridge.diagnostics.stopping() { return GitHubReason::Cancelled; }
-        if self.inner.bridge.diagnostics.busy() || state.compatibility_picker_pending { return GitHubReason::Busy; }
+            || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() || self.inner.bridge.diagnostics.stopping()
+            || self.inner.bridge.preflight.stopping() { return GitHubReason::Cancelled; }
+        if self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy() || state.compatibility_picker_pending { return GitHubReason::Busy; }
         if state.quit_pending || state.retiring || state.lock_pending || state.slot.as_ref().is_some_and(|slot|
             slot.operation.blocks_context() && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return GitHubReason::Busy; }
         GitHubReason::None
@@ -889,6 +988,8 @@ impl DocumentBinding {
         }
         if state.stopping || self.inner.bridge.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.inner.bridge.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
+        self.inner.bridge.preflight.context_changed();
+        self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
         if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
         if state.retiring || state.lock_pending || state.slot.as_ref().is_some_and(|slot|
@@ -1047,7 +1148,7 @@ impl DocumentBinding {
             }
         }
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
-        self.inner.bridge.diagnostics.context_changed(); self.gate(&state, true)?;
+        self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed(); self.gate(&state, true)?;
         let (registry_generation, project) = self.registry_result(&mut state, self.inner.bridge.native_project(args.project_id))?;
         let Some(revision) = state.next_context.checked_add(1) else { self.exhaust(&mut state); return Err(AssetError::new(Reason::CleanupUnknown)); };
         // Bounded, already-admitted Value serialization, not source parsing or
@@ -1242,6 +1343,7 @@ impl DocumentBinding {
                 state.evidence.revoke(false);
                 state.github.retire(GitHubReason::Cancelled);
                 self.inner.bridge.diagnostics.request_shutdown();
+                self.inner.bridge.preflight.request_shutdown();
                 if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::Shutdown, now); }
                 stop_quit(&mut state, now);
                 fixture_event!(owner, QuitStop, 1);
@@ -2000,7 +2102,7 @@ impl DocumentBinding {
 
     pub(crate) fn choose_project(&self, app: tauri::AppHandle) -> Result<u32, AssetError> {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
-        self.inner.bridge.diagnostics.context_changed(); self.gate(&state, false)?; idle(&state)?;
+        self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed(); self.gate(&state, false)?; idle(&state)?;
         // Acquire the registry's checked generation before any native work;
         // poison is sticky document Unknown, never merely a later picker error.
         let generation = self.registry_result(&mut state, self.inner.bridge.native_generation())?;
@@ -2037,6 +2139,7 @@ impl DocumentBinding {
         if state.unknown { return Err(BridgeError::cleanup_unknown()); }
         if state.stopping { return Err(BridgeError::shutdown()); }
         if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
+        self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.diagnostics.ensure_idle()?;
         Ok(())
     }
@@ -2068,6 +2171,7 @@ impl DocumentBinding {
         // Only this already-ended quit original is joined here.
         ready && quit.is_some_and(|quit| quit.join_if_ended() == Some(true) && quit.resources_settled())
             && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
+            && self.inner.bridge.preflight.can_exit()
     }
     pub(crate) fn request_quit(&self, app: tauri::AppHandle) {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
@@ -2121,7 +2225,7 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     // join! does not short-circuit an error or abandon any original future.
     let settlement = async {
         let gui = async { if !dialog_ended { let _ = dialog.as_mut().await; } };
-        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown(), document.inner.bridge.diagnostics.shutdown());
+        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown(), document.inner.bridge.diagnostics.shutdown(), document.inner.bridge.preflight.shutdown());
     };
     tokio::pin!(settlement);
     loop {
@@ -2133,7 +2237,7 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     }
     // Late all-positive settlement may permit exit, never a successful import,
     // new owner, reassignment or reuse of this unknown session.
-    while !(document.retained_material_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit() && document.inner.bridge.diagnostics.can_exit()) {
+    while !(document.retained_material_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit() && document.inner.bridge.diagnostics.can_exit() && document.inner.bridge.preflight.can_exit()) {
         tokio::select! {
             _ = owner.wake.notified() => document.tick(),
             _ = tokio::time::sleep(Duration::from_millis(50)) => document.tick(),
@@ -2230,6 +2334,32 @@ mod tests {
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
     }
+
+    #[test]
+    fn offline_preflight_startup_and_unsupported_gates_preserve_passive_services() {
+        use crate::offline_preflight_protocol::{Availability, Profile};
+        let mut state = empty_state();
+        assert!(passive_document_gate(&state).is_ok());
+        assert_eq!(preflight_document_gate(&state, Some(Profile::LinuxX64)), Some(Availability::Busy));
+        assert_eq!(preflight_document_gate(&state, None), Some(Availability::UnsupportedPlatform));
+        state.lifetime.crash_hook_installed();
+        state.lifetime.started(true);
+        state.lifetime.finished(true);
+        assert!(state.lifetime.original_bound());
+        assert!(passive_document_gate(&state).is_ok());
+        assert_eq!(preflight_document_gate(&state, Some(Profile::LinuxX64)), None);
+        state.lifetime.invalidate(); state.lost_observed = true;
+        assert_eq!(preflight_document_gate(&state, Some(Profile::LinuxX64)), Some(Availability::DocumentLost));
+        assert_eq!(preflight_document_gate(&state, None), Some(Availability::UnsupportedPlatform));
+        // This is not native binding proof: Windows/no-hook passive behavior
+        // stays separate from an executing owner's real loss/Unknown gates.
+        assert!(passive_document_gate(&state).is_ok());
+        state.quit_pending = true; assert!(passive_document_gate(&state).is_err());
+        state.quit_pending = false; state.stopping = true; assert!(passive_document_gate(&state).is_err());
+        state.stopping = false; state.unknown = true; assert!(passive_document_gate(&state).is_err());
+        state.unknown = false; state.exhausted = true; assert!(passive_document_gate(&state).is_err());
+    }
+
     fn scalar() -> Arc<Payload> { Arc::new(Payload { kind: Kind::GoogleWif, material: None, fields: None }) }
     fn slot(target: Option<RecordKey>, review: Option<Instant>) -> Slot {
         let mut slot = Slot::new(OriginalWork::new(1, false, Weak::new()), Operation::Prepare, None, target, review);

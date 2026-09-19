@@ -32,7 +32,7 @@ const original = { android: { enabled: true, applicationId: 'com.example.inert' 
 const project = (id) => ({ id, name: `Inert ${id}`, path: `/inert/${id}` });
 const snapshot = (data) => ({
   root: '/inert/no-file-read', observedAt: '', observationScope: 'single-request-non-atomic',
-  config: { path: 'release/mobile-release.json', state: data === null ? 'missing' : 'format-valid', data, issues: [] },
+  config: { content: null, path: 'release/mobile-release.json', state: data === null ? 'missing' : 'format-valid', data, issues: [] },
   discovery: { state: 'unverified', partial: false, hints: {}, scan: { entries: 0, sourceFiles: 0, sourceBytes: 0, excludedEntries: 0 }, limits: {} },
   assurance: { ...assurance, basis: 'static-text' }, issues: [],
 });

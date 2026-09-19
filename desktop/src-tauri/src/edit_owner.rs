@@ -431,6 +431,9 @@ impl EditOwner {
     pub fn stopping(&self) -> bool { self.inner.lock().stopping }
     pub fn disabled(&self) -> bool { let r = self.inner.lock(); r.disabled || self.inner.poisoned.load(Ordering::SeqCst) || r.exhausted }
     pub fn can_exit(&self) -> bool { self.inner.lock().active.is_none() }
+    /// Read-only original recovery DATA; physical settlement does not clear an
+    /// unresolved Save/journal disposition or authorize project execution.
+    pub(crate) fn preflight_attention(&self) -> bool { !self.inner.lock().blocked_projects.is_empty() }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn workflow_fixture_registration_permitted(&self, path: &std::path::Path) -> bool {
         self.inner.fixture_workflow.lock().is_ok_and(|permit| permit.as_ref().is_some_and(|permit| permit.root(&self.inner, path)))

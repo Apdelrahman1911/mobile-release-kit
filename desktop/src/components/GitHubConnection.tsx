@@ -18,10 +18,11 @@ function FactLabel({ fact, retained }: { fact: GitHubFact<unknown>; retained: bo
     {fact.reason !== 'none' && <> {GITHUB_CONNECTION_REASON_HELP[fact.reason]}</>}</p>;
 }
 
-export function GitHubConnection({ state, controller, onHelp, repositoryInput, onRepository, projectSelected, handoff }: {
+export function GitHubConnection({ state, controller, onHelp, repositoryInput, onRepository, projectSelected, handoff, nativeBusyReason = null }: {
   state: GitHubConnectionViewState; controller: GitHubConnectionController; onHelp: (help: HelpContent) => void;
   repositoryInput: string; onRepository: (value: string) => void; projectSelected: boolean;
   handoff: GitHubConnectionTokenHandoff | null;
+  nativeBusyReason?: string | null;
 }) {
   const reasonId = useId(); const repositoryId = useId(); const tokenId = useId();
   const tokenInput = useRef<HTMLInputElement>(null);
@@ -84,6 +85,7 @@ export function GitHubConnection({ state, controller, onHelp, repositoryInput, o
       {state.help && <div className="button-row" aria-label="Core GitHub connection help">
         {[...state.help.inputs, ...state.help.guidance].map((entry) => <span key={entry.id}>{entry.label} <HelpButton content={helpContent(entry)} onHelp={onHelp} /></span>)}
       </div>}
+      {nativeBusyReason && <p className="review-caution" role="status">{nativeBusyReason} Original Status and Disconnect remain available.</p>}
       {state.error && <p className="review-caution" role="status">{GITHUB_CONNECTION_REASON_HELP[state.error]}</p>}
       {state.uncertain && <p className="review-caution" role="status">The original request has no conclusive acknowledgement. Read retained Status; do not repeat Connect or Refresh. An idle read can arrive before admission and is not proof of refusal.</p>}
       {state.retirementPending && <p className="save-note" role="status">Original retirement is pending. If Connect has not returned its session ID, only its late exact admission can identify what to disconnect; no replacement or sessionless cancellation is sent.</p>}

@@ -27,6 +27,20 @@ IGNORED_PARTS = {
 PRIVATE_PREFIXES = {("release", "private")}
 
 
+def _budget(cancellation):
+    if cancellation is None or getattr(cancellation, "_preflight_source", None) is None:
+        return None
+    from ._desktop_preflight_budget import budget_for
+    return budget_for(cancellation)
+
+
+def _put_hint(target: dict, key, value, budget) -> None:
+    if budget is None:
+        target[key] = value
+    else:
+        budget.put(target, key, value)
+
+
 def run_owned(*args, **kwargs):
     """Preserve the existing injectable command seam without an eager import."""
     from .owned_process import run_owned as owned_run
@@ -126,7 +140,7 @@ def _run(root: Path, argv: list[str], *, execution_source=None, cancellation=Non
             cancellation=cancellation,
         )
     except ProcessError as error:
-        if error.fatal:
+        if error.fatal or _budget(cancellation) is not None:
             raise
         return None
     if result.returncode != 0:
@@ -168,6 +182,9 @@ def git_context(root: Path, environ: dict[str, str] | None = None, *, execution_
     # when recovery observes a detached original-source checkout.
     branch = env.get("GITHUB_REF_NAME") or _run(root, ["git", "branch", "--show-current"], execution_source=execution_source, cancellation=cancellation)
     ref = env.get("GITHUB_REF") or (f"refs/heads/{branch}" if branch else None)
+    budget = _budget(cancellation)
+    if budget is not None:
+        budget.retain((repository, env.get("GITHUB_REPOSITORY_ID"), commit, tree, ref, branch, dirty))
     return GitContext(
         repository=repository,
         repository_id=env.get("GITHUB_REPOSITORY_ID"),
@@ -179,8 +196,12 @@ def git_context(root: Path, environ: dict[str, str] | None = None, *, execution_
     )
 
 
-def _candidate_files(root: Path, names: set[str], suffixes: tuple[str, ...] = ()) -> Iterable[Path]:
-    for path in root.rglob("*"):
+def _candidate_files(root: Path, names: set[str], suffixes: tuple[str, ...] = (), *, cancellation=None) -> Iterable[Path]:
+    budget = _budget(cancellation)
+    paths = root.rglob("*") if budget is None else budget.walk(root, discovery=True)
+    for path in paths:
+        if cancellation is not None:
+            cancellation.check()
         if _ignored_path(root, path) or not path.is_file():
             continue
         if path.name in names or path.name.endswith(suffixes):
@@ -199,7 +220,13 @@ def _ignored_path(root: Path, path: Path) -> bool:
     )
 
 
-def _read_small(path: Path, limit: int = 2_000_000) -> str:
+def _read_small(path: Path, limit: int = 2_000_000, *, cancellation=None) -> str:
+    budget = _budget(cancellation)
+    if budget is not None:
+        try:
+            return budget.read(path, limit=limit) or ""
+        except (UnicodeDecodeError, OSError):
+            return ""
     if path.stat().st_size > limit:
         return ""
     try:
@@ -208,15 +235,16 @@ def _read_small(path: Path, limit: int = 2_000_000) -> str:
         return ""
 
 
-def _gradle_application_aliases(root: Path) -> set[str]:
+def _gradle_application_aliases(root: Path, *, cancellation=None) -> set[str]:
     """Return safe `libs.plugins.*` accessors mapped to the Android app plugin."""
 
     catalog = root / "gradle/libs.versions.toml"
-    text = _read_small(catalog) if catalog.is_file() else ""
-    return parse_gradle_application_aliases(text)
+    budget = _budget(cancellation)
+    text = _read_small(catalog, cancellation=cancellation) if budget is not None or catalog.is_file() else ""
+    return parse_gradle_application_aliases(text, budget=budget)
 
 
-def parse_gradle_application_aliases(text: str) -> set[str]:
+def parse_gradle_application_aliases(text: str, *, budget=None) -> set[str]:
     """Parse already-admitted text; no paths, tools or project code are opened."""
     if not text:
         return set()
@@ -229,11 +257,16 @@ def parse_gradle_application_aliases(text: str) -> set[str]:
         return set()
     aliases: set[str] = set()
     for name, declaration in plugins.items():
+        if budget is not None:
+            budget.check()
         plugin_id = declaration.get("id") if isinstance(declaration, dict) else declaration
         if plugin_id == "com.android.application" and isinstance(name, str):
             accessor = re.sub(r"[-_.]+", ".", name)
             if re.fullmatch(r"[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*", accessor):
-                aliases.add(accessor)
+                if budget is None:
+                    aliases.add(accessor)
+                else:
+                    budget.add(aliases, accessor)
     return aliases
 
 
@@ -269,21 +302,25 @@ def _applies_android_application_plugin(text: str, catalog_aliases: set[str]) ->
     return False
 
 
-def discover_android(root: Path) -> dict[str, Any] | None:
-    build_files = list(_candidate_files(root, {"build.gradle", "build.gradle.kts"}))
-    catalog_aliases = _gradle_application_aliases(root)
+def discover_android(root: Path, *, cancellation=None) -> dict[str, Any] | None:
+    budget = _budget(cancellation)
+    build_files = [] if budget is None else budget.list("path")
+    build_files.extend(_candidate_files(root, {"build.gradle", "build.gradle.kts"}, cancellation=cancellation))
+    catalog_aliases = _gradle_application_aliases(root, cancellation=cancellation)
     return parse_android_sources(
-        ((path.relative_to(root).as_posix(), _read_small(path)) for path in build_files),
-        catalog_aliases=catalog_aliases,
+        ((path.relative_to(root).as_posix(), _read_small(path, cancellation=cancellation)) for path in build_files),
+        catalog_aliases=catalog_aliases, budget=budget,
     )
 
 
 def parse_android_sources(
-    build_files: Iterable[tuple[str, str]], *, catalog_aliases: set[str],
+    build_files: Iterable[tuple[str, str]], *, catalog_aliases: set[str], budget=None,
 ) -> dict[str, Any] | None:
     """Apply the existing static Android hints policy to a finite text inventory."""
-    candidates: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = [] if budget is None else budget.list()
     for relative, source_text in build_files:
+        if budget is not None:
+            budget.check()
         text = _strip_gradle_comments(source_text)
         if not _applies_android_application_plugin(text, catalog_aliases):
             continue
@@ -296,23 +333,56 @@ def parse_android_sources(
             r"namespace\s*(?:=\s*)?[\"']([A-Za-z][A-Za-z0-9_.]+)[\"']", text
         )
         suffix_match = re.search(r"applicationIdSuffix\s*(?:=\s*)?[\"']([^\"']+)[\"']", text)
-        candidates.append(
-            {
-                "module": module,
-                "buildFile": relative,
-                "applicationId": app_id_match.group(1) if app_id_match else None,
-                "namespace": namespace_match.group(1) if namespace_match else None,
-                "debugApplicationIdSuffix": suffix_match.group(1) if suffix_match else None,
-            }
-        )
+        candidate = {} if budget is None else budget.mapping()
+        for key, value in (
+            ("module", module),
+            ("buildFile", relative),
+            ("applicationId", app_id_match.group(1) if app_id_match else None),
+            ("namespace", namespace_match.group(1) if namespace_match else None),
+            ("debugApplicationIdSuffix", suffix_match.group(1) if suffix_match else None),
+        ):
+            _put_hint(candidate, key, value, budget)
+        candidates.append(candidate)
     if not candidates:
         return None
     if len(candidates) == 1:
         return candidates[0]
-    return {"ambiguous": True, "candidates": candidates}
+    result = {} if budget is None else budget.mapping()
+    _put_hint(result, "ambiguous", True, budget)
+    _put_hint(result, "candidates", candidates, budget)
+    return result
 
 
-def discover_ios(root: Path) -> dict[str, Any] | None:
+def discover_ios(root: Path, *, cancellation=None) -> dict[str, Any] | None:
+    budget = _budget(cancellation)
+    if budget is not None:
+        paths = budget.walk(root, discovery=True)
+        workspaces, projects, schemes, project_yml = (budget.list("path") for _ in range(4))
+        for path in paths:
+            budget.check()
+            if path.suffix == ".xcworkspace" and not any(parent.suffix == ".xcodeproj" for parent in path.parents):
+                workspaces.append(path)
+            if path.suffix == ".xcodeproj":
+                projects.append(path)
+            if path.suffix == ".xcscheme" and "xcshareddata" in path.parts:
+                schemes.append(path)
+            if path.name == "project.yml":
+                project_yml.append(path)
+        for group in (workspaces, projects, schemes, project_yml):
+            group.sort()
+        project_names, workspace_names, scheme_names, generated_names = (budget.list() for _ in range(4))
+        project_names.extend(str(path.relative_to(root)) for path in projects)
+        workspace_names.extend(str(path.relative_to(root)) for path in workspaces)
+        scheme_names.extend(path.stem for path in schemes)
+        generated_names.extend(str(path.relative_to(root)) for path in project_yml)
+        return parse_ios_sources(
+            projects=project_names,
+            workspaces=workspace_names,
+            scheme_names=scheme_names,
+            generated_sources=generated_names,
+            texts=(_read_small(path, cancellation=cancellation) for path in paths
+                   if path.is_file() and (path.name in {"project.pbxproj", "project.yml"} or path.suffix == ".xcconfig")),
+            budget=budget)
     workspaces = sorted(
         path
         for path in root.rglob("*.xcworkspace")
@@ -349,82 +419,121 @@ def discover_ios(root: Path) -> dict[str, Any] | None:
 
 def parse_ios_sources(
     *, projects: list[str], workspaces: list[str], scheme_names: list[str],
-    generated_sources: list[str], texts: Iterable[str],
+    generated_sources: list[str], texts: Iterable[str], budget=None,
 ) -> dict[str, Any] | None:
     """Parse finite static iOS hints; never evaluate Xcode or generated projects."""
     if not workspaces and not projects and not generated_sources:
         return None
-    merged = "\n".join(texts)
-    assignments: dict[str, str] = {}
-    for key, value in re.findall(
-        r"^[ \t]*([A-Z][A-Z0-9_]*)[ \t]*(?:=|:)[ \t]*[\"']?([^\s;\"']+)",
-        merged,
-        re.MULTILINE,
-    ):
-        if "$(" not in value:
-            assignments.setdefault(key, value)
-    raw_bundle_values = re.findall(
-        r"(?m)^[ \t]*PRODUCT_BUNDLE_IDENTIFIER[ \t]*(?:=|:)[ \t]*"
-        r"[\"']?([^\s;\"']+)",
-        merged,
-    )
+    # The desktop admits one text at a time. Keep first-assignment-wins over
+    # the entire inventory and defer bundle expansion until all assignments
+    # are known, exactly as the legacy merged-text policy does.
+    sources = ("\n".join(texts),) if budget is None else texts
+    assignments: dict[str, str] = {} if budget is None else budget.mapping()
+    raw_bundle_values = [] if budget is None else budget.list()
+    for source in sources:
+        if budget is not None:
+            budget.check()
+        for match in re.finditer(
+            r"^[ \t]*([A-Z][A-Z0-9_]*)[ \t]*(?:=|:)[ \t]*[\"']?([^\s;\"']+)",
+            source,
+            re.MULTILINE,
+        ):
+            key, value = match.group(1, 2)
+            if budget is not None:
+                budget.check()
+            if "$(" not in value and key not in assignments:
+                _put_hint(assignments, key, value, budget)
+        for match in re.finditer(
+            r"(?m)^[ \t]*PRODUCT_BUNDLE_IDENTIFIER[ \t]*(?:=|:)[ \t]*"
+            r"[\"']?([^\s;\"']+)",
+            source,
+        ):
+            raw_bundle_values.append(match.group(1))
     expanded: set[str] = set()
     for raw in raw_bundle_values:
+        if budget is not None:
+            budget.check()
         value = raw.rstrip(";\"'")
-        variables = re.findall(r"\$\(([A-Z][A-Z0-9_]*)\)", value)
+        variables = []
+        for variable in re.finditer(r"\$\(([A-Z][A-Z0-9_]*)\)", value):
+            variables.append(variable.group(1))
+            if len(variables) == 2:
+                break  # Only an exactly-one-variable value may be expanded.
         if len(variables) == 1 and variables[0] in assignments:
             value = value.replace(f"$({variables[0]})", assignments[variables[0]])
         if "$(" not in value and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]+", value):
-            expanded.add(value)
-    bundle_ids = sorted(expanded)
-
-    result: dict[str, Any] = {
-        "projects": projects,
-        "workspaces": workspaces,
-        "schemes": sorted(set(scheme_names)),
-        "bundleIds": bundle_ids,
-        "generatedProjectSources": generated_sources,
-    }
-    store_ids = [value for value in bundle_ids if not value.endswith((".debug", ".dev"))]
+            if budget is None:
+                expanded.add(value)
+            else:
+                budget.add(expanded, value)
+    bundle_ids = [] if budget is None else budget.list()
+    bundle_ids.extend(expanded)
+    bundle_ids.sort()
+    unique_schemes = set()
+    for name in scheme_names:
+        if budget is None:
+            unique_schemes.add(name)
+        else:
+            budget.add(unique_schemes, name)
+    schemes = [] if budget is None else budget.list()
+    schemes.extend(unique_schemes)
+    schemes.sort()
+    result: dict[str, Any] = {} if budget is None else budget.mapping()
+    for key, value in (
+        ("projects", projects), ("workspaces", workspaces), ("schemes", schemes),
+        ("bundleIds", bundle_ids), ("generatedProjectSources", generated_sources),
+    ):
+        _put_hint(result, key, value, budget)
+    store_ids = [] if budget is None else budget.list()
+    store_ids.extend(value for value in bundle_ids if not value.endswith((".debug", ".dev")))
     if len(store_ids) == 1:
-        result["bundleId"] = store_ids[0]
+        _put_hint(result, "bundleId", store_ids[0], budget)
     if len(projects) == 1:
-        result["project"] = projects[0]
+        _put_hint(result, "project", projects[0], budget)
     if len(workspaces) == 1:
-        result["workspace"] = workspaces[0]
+        _put_hint(result, "workspace", workspaces[0], budget)
     if len(result["schemes"]) == 1:
-        result["scheme"] = result["schemes"][0]
+        _put_hint(result, "scheme", result["schemes"][0], budget)
     return result
 
 
-def discover_version_source(root: Path) -> dict[str, str]:
+def discover_version_source(root: Path, *, cancellation=None) -> dict[str, str]:
+    budget = _budget(cancellation)
     common_paths = (
         root / "release/version.properties",
         root / "config/version.xcconfig",
         root / "version.properties",
     )
-    discovered_paths = sorted(
+    discovered_paths = [] if budget is None else budget.list("path")
+    discovered_paths.extend(
         path
-        for path in _candidate_files(root, set(), (".properties", ".xcconfig"))
+        for path in _candidate_files(root, set(), (".properties", ".xcconfig"), cancellation=cancellation)
         if "version" in path.name.lower() and path not in common_paths
     )
+    discovered_paths.sort()
     return parse_version_sources(
-        (path.relative_to(root).as_posix(), _read_small(path))
-        for path in (*common_paths, *discovered_paths)
-        if path.is_file() and not _ignored_path(root, path)
+        ((path.relative_to(root).as_posix(), _read_small(path, cancellation=cancellation))
+        for group in (common_paths, discovered_paths) for path in group
+        if path.is_file() and not _ignored_path(root, path)), budget=budget
     )
 
 
-def parse_version_sources(sources: Iterable[tuple[str, str]]) -> dict[str, str]:
+def parse_version_sources(sources: Iterable[tuple[str, str]], *, budget=None) -> dict[str, str]:
     """Suggest key names only, not an authoritative parsed release version."""
     for relative, text in sources:
-        keys = set(
-            re.findall(r"(?m)^[ \t]*([A-Z][A-Z0-9_]{0,63})[ \t]*=", text)
-        )
-        pairs: list[tuple[str, str]] = []
-        for name_key in sorted(
+        keys = set()
+        for match in re.finditer(r"(?m)^[ \t]*([A-Z][A-Z0-9_]{0,63})[ \t]*=", text):
+            if budget is None:
+                keys.add(match.group(1))
+            else:
+                budget.add(keys, match.group(1))
+        pairs: list[tuple[str, str]] = [] if budget is None else budget.list()
+        name_keys = [] if budget is None else budget.list()
+        name_keys.extend(
             key for key in keys if key == "MARKETING_VERSION" or key.endswith("VERSION_NAME")
-        ):
+        )
+        name_keys.sort()
+        for name_key in name_keys:
             prefix = name_key[: -len("VERSION_NAME")] if name_key.endswith("VERSION_NAME") else ""
             build_candidates = (
                 (f"{prefix}BUILD_NUMBER", f"{prefix}VERSION_CODE")
@@ -440,11 +549,11 @@ def parse_version_sources(sources: Iterable[tuple[str, str]]) -> dict[str, str]:
                 pairs.append((name_key, build_key))
         if len(pairs) == 1:
             name_key, build_key = pairs[0]
-            return {
-                "versionSource": relative,
-                "versionNameKey": name_key,
-                "versionBuildKey": build_key,
-            }
+            result = {} if budget is None else budget.mapping()
+            _put_hint(result, "versionSource", relative, budget)
+            _put_hint(result, "versionNameKey", name_key, budget)
+            _put_hint(result, "versionBuildKey", build_key, budget)
+            return result
     return {}
 
 
@@ -489,17 +598,27 @@ def parse_project_sources(
 
 
 def discover_project(root: Path, *, include_git: bool = True, execution_source=None, cancellation=None) -> dict[str, Any]:
-    root = root.resolve()
-    result: dict[str, Any] = {"root": str(root)}
-    result.update(discover_version_source(root))
-    android = discover_android(root)
-    ios = discover_ios(root)
+    budget = _budget(cancellation)
+    if budget is not None:
+        budget.checkpoint()
+        if root != budget.root:
+            raise ValueError("Discovery root differs from original preflight admission")
+    else:
+        root = root.resolve()
+    result: dict[str, Any] = {} if budget is None else budget.mapping()
+    _put_hint(result, "root", str(root), budget)
+    for key, value in discover_version_source(root, cancellation=cancellation).items():
+        _put_hint(result, key, value, budget)
+    android = discover_android(root, cancellation=cancellation)
+    ios = discover_ios(root, cancellation=cancellation)
     if android:
-        result["android"] = android
+        _put_hint(result, "android", android, budget)
     if ios:
-        result["ios"] = ios
+        _put_hint(result, "ios", ios, budget)
     if include_git:
-        result["git"] = git_context(root, execution_source=execution_source, cancellation=cancellation).as_dict()
+        _put_hint(result, "git", git_context(root, execution_source=execution_source, cancellation=cancellation).as_dict(), budget)
+    if budget is not None:
+        budget.checkpoint()
     return result
 
 

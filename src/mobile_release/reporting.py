@@ -50,6 +50,20 @@ class Report:
     command: str
     findings: list[Finding] = field(default_factory=list)
     context: dict[str, Any] = field(default_factory=dict)
+    budget: Any = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.budget is not None:
+            self.budget.retain(self.context)
+            original = self.findings
+            self.findings = self.budget.list("finding")
+            self.findings.extend(original)
+
+    def set_context(self, key: str, value: Any) -> None:
+        if self.budget is None:
+            self.context[key] = value
+        else:
+            self.budget.put(self.context, key, value)
 
     def add(
         self,

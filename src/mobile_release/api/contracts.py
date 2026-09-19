@@ -890,10 +890,16 @@ class GitHubSetupProposal(TypedDict):
 GitHubSetupResult = GitHubInvalidProposal | GitHubSetupProposal
 
 
+class SavedConfigContent(TypedDict):
+    bytes: int
+    sha256: str
+
+
 class ConfigObservation(TypedDict):
     path: str
     state: Literal["missing", "invalid", "format-valid", "unavailable"]
     data: dict[str, Any] | None
+    content: SavedConfigContent | None
     issues: list[Issue]
 
 

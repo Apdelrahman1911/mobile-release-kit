@@ -23,7 +23,7 @@ const clone = (value) => structuredClone(value);
 const flush = async () => { for (let i = 0; i < 12; i += 1) await Promise.resolve(); };
 function snapshot(data = BASE) {
   return { root: '/inert-never-forwarded', observedAt: '', observationScope: 'single-request-non-atomic',
-    config: { path: 'release/mobile-release.json', state: 'format-valid', data: clone(data), issues: [] },
+    config: { content: null, path: 'release/mobile-release.json', state: 'format-valid', data: clone(data), issues: [] },
     discovery: { state: 'unverified', partial: false, hints: {}, scan: { entries: 0, sourceFiles: 0, sourceBytes: 0, excludedEntries: 0 }, limits: {} },
     assurance: assurance('static-text'), issues: [] };
 }

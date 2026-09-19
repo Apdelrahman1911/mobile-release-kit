@@ -19,9 +19,12 @@ import { GITHUB_CONNECTION_ENTRY_AVAILABLE, GITHUB_CONNECTION_EVENT, githubConne
 import type { GitHubConnectionStatus } from './githubConnectionTypes.ts';
 import { metadataTextError, metadataTextRequestFits, parseMetadataTextEditStatus, parseMetadataTextGuide, parseMetadataTextObservation, parseMetadataTextValidation } from './metadataTextProtocol.ts';
 import type { MetadataTextCommand } from './metadataTextProtocol.ts';
+import { OFFLINE_PREFLIGHT_EVENT, encodeOfflinePreflightRequest, offlinePreflightError, parseOfflinePreflightStatus } from './offlinePreflightProtocol.ts';
+import type { OfflinePreflightCommand } from './offlinePreflightProtocol.ts';
+import type { OfflinePreflightStatus } from './offlinePreflightTypes.ts';
 
-export type NativeInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'environment-diagnostics-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -45,6 +48,17 @@ export function apiError(error: unknown): ApiError {
 }
 
 export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: NativeInvoke, listen?: NativeEditListen): DesktopApi {
+  const offlineCall = async (command: OfflinePreflightCommand, value: unknown): Promise<OfflinePreflightStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'offline_preflight_unavailable' };
+      const body = encodeOfflinePreflightRequest(command, value);
+      if (!body) throw { code: 'offline_preflight_invalid' };
+      // Uint8Array is Tauri Raw IPC. Never wrap JSON text in an object/string.
+      const status = parseOfflinePreflightStatus(await invoke<unknown>(command, body));
+      if (!status) throw { code: 'offline_preflight_protocol' };
+      return status;
+    } catch (error) { throw offlinePreflightError(error); }
+  };
   const evidenceCall = async (command: EvidenceCommand, args: Record<string, unknown>): Promise<EvidenceStatus> => {
     try {
       if (mode !== 'native') throw { code: 'artifact_evidence_unavailable' };
@@ -155,6 +169,16 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (!result) throw { code: 'protocol_error' };
         return result;
       } catch (error) { throw environmentError(error); }
+    },
+    prepareOfflinePreflight: (request) => offlineCall('prepare_offline_preflight', request),
+    startOfflinePreflight: (request) => offlineCall('start_offline_preflight', request),
+    offlinePreflightStatus: () => offlineCall('offline_preflight_status', {}),
+    cancelOfflinePreflight: (operationId, ownerGeneration) => offlineCall('cancel_offline_preflight', { operationId, ownerGeneration }),
+    subscribeOfflinePreflight: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'offline_preflight_unavailable' };
+        return await listen(OFFLINE_PREFLIGHT_EVENT, (value) => onStatus(parseOfflinePreflightStatus(value)));
+      } catch (error) { throw offlinePreflightError(error); }
     },
     startEnvironmentDiagnostics: (request) => diagnosticsCall('start_environment_diagnostics', request),
     cancelEnvironmentDiagnostics: (runId, ownerGeneration) => diagnosticsCall('cancel_environment_diagnostics', { runId, ownerGeneration }),

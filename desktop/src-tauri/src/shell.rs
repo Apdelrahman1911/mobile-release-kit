@@ -60,14 +60,14 @@ struct RelayBook { handle: Option<tauri::async_runtime::JoinHandle<()>>, settled
 #[tauri::command]
 async fn app_info(state: State<'_, ShellState>) -> Result<AppInfo, BridgeError> {
     fixture_command!(state, AppInfo, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
-    let result = Ok(state.bridge.app_info().await);
+    let result = Ok(state.bridge.app_info(&state.document).await);
     fixture_result!(observed, info, &result);
     result
 }
 #[tauri::command]
 async fn catalog(state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Catalog, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
-    let result = state.bridge.catalog().await;
+    let result = state.bridge.catalog(&state.document).await;
     fixture_result!(observed, value, &result);
     result
 }
@@ -77,7 +77,7 @@ async fn environment_requirements(webview: Webview, request: tauri::ipc::Request
     edit_window(&webview)?;
     let args = crate::environment::request(request_body(&request)?)?;
     not_closing(&state)?;
-    state.bridge.environment_requirements(args).await
+    state.bridge.environment_requirements(&state.document, args).await
 }
 #[tauri::command]
 async fn start_environment_diagnostics(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
@@ -100,6 +100,35 @@ async fn cancel_environment_diagnostics(webview: Webview, request: tauri::ipc::R
     edit_window(&webview)?;
     let args = crate::environment_diagnostics_protocol::cancel(request_body(&request)?)?;
     state.document.cancel_environment_diagnostics(args)
+}
+#[tauri::command]
+async fn prepare_offline_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::offline_preflight_protocol::invalid())?;
+    let value = preflight_request_body(request.body())?;
+    state.document.prepare_offline_preflight(crate::offline_preflight_protocol::prepare(&value)?)
+}
+#[tauri::command]
+async fn start_offline_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::offline_preflight_protocol::invalid())?;
+    let value = preflight_request_body(request.body())?;
+    state.document.start_offline_preflight(crate::offline_preflight_protocol::start(&value)?)
+}
+#[tauri::command]
+async fn offline_preflight_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::offline_preflight_protocol::invalid())?;
+    let value = preflight_request_body(request.body())?;
+    crate::offline_preflight_protocol::status_request(&value)?;
+    state.document.offline_preflight_status()
+}
+#[tauri::command]
+async fn cancel_offline_preflight(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::offline_preflight_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::offline_preflight_protocol::invalid())?;
+    let value = preflight_request_body(request.body())?;
+    state.document.cancel_offline_preflight(crate::offline_preflight_protocol::cancel(&value)?)
 }
 #[tauri::command]
 async fn artifact_evidence_choose(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::candidate_evidence_protocol::Status, BridgeError> {
@@ -128,23 +157,23 @@ async fn artifact_evidence_cancel(webview: Webview, request: tauri::ipc::Request
 #[tauri::command(rename_all = "camelCase")]
 async fn project_snapshot(project_id: String, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
-    state.bridge.project_snapshot(project_id).await
+    state.bridge.project_snapshot(&state.document, project_id).await
 }
 #[tauri::command]
 async fn validate_config(draft: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
-    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action.")); state.bridge.validate_config(draft).await }
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action.")); state.bridge.validate_config(&state.document, draft).await }
 #[tauri::command]
 async fn suggest_config(hints: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
-    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action.")); state.bridge.suggest_config(hints).await }
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action.")); state.bridge.suggest_config(&state.document, hints).await }
 #[tauri::command]
 async fn preview_config(base: Value, draft: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
-    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action.")); state.bridge.preview_config(base, draft).await }
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action.")); state.bridge.preview_config(&state.document, base, draft).await }
 #[tauri::command]
 async fn propose_github_setup(request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let input = crate::github_commands::proposal(request_body(&request)?)?;
     not_closing(&state)?;
-    state.bridge.propose_github_setup(input).await
+    state.bridge.propose_github_setup(&state.document, input).await
 }
 
 fn edit_window(webview: &Webview) -> Result<&str, BridgeError> {
@@ -157,6 +186,16 @@ fn request_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, B
         tauri::ipc::InvokeBody::Raw(_) => Err(BridgeError::invalid()),
     }
 }
+fn preflight_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, BridgeError> {
+    match body {
+        // Original length and duplicate-aware parsing precede all DTO copying.
+        tauri::ipc::InvokeBody::Raw(bytes) => crate::offline_preflight_protocol::raw_request(bytes),
+        tauri::ipc::InvokeBody::Json(_) => Err(crate::offline_preflight_protocol::invalid()),
+    }
+}
+#[cfg(test)]
+#[path = "offline_preflight_shell_tests.rs"]
+mod offline_preflight_shell_tests;
 fn not_closing(state: &ShellState) -> Result<(), BridgeError> {
     #[cfg(target_os = "linux")]
     { return state.document.not_quitting(); }
@@ -165,6 +204,7 @@ fn not_closing(state: &ShellState) -> Result<(), BridgeError> {
     if state.closing.load(Ordering::SeqCst) {
         return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action."));
     }
+    state.bridge.preflight.ensure_idle()?;
     Ok(())
     }
 }
@@ -262,7 +302,7 @@ async fn release_version_observe(webview: Webview, request: tauri::ipc::Request<
     let body = request_body(&request).map_err(crate::release_version_protocol::public_error)?;
     let args = crate::release_version_protocol::request(body)?;
     not_closing(&state).map_err(crate::release_version_protocol::public_error)?;
-    state.bridge.observe_release_version(args).await
+    state.bridge.observe_release_version(&state.document, args).await
 }
 #[tauri::command]
 async fn metadata_text_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<metadata_text_wire::Observation, BridgeError> {
@@ -270,7 +310,7 @@ async fn metadata_text_observe(webview: Webview, request: tauri::ipc::Request<'_
     edit_window(&webview)?;
     let args = metadata_text_commands::open(request_body(&request)?)?;
     not_closing(&state)?;
-    state.bridge.observe_metadata_text(args).await
+    state.bridge.observe_metadata_text(&state.document, args).await
 }
 #[tauri::command]
 async fn metadata_text_validate(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<metadata_text_wire::ValidationResult, BridgeError> {
@@ -278,7 +318,7 @@ async fn metadata_text_validate(webview: Webview, request: tauri::ipc::Request<'
     edit_window(&webview)?;
     let args = metadata_text_commands::validate(request_body(&request)?)?;
     not_closing(&state)?;
-    state.bridge.validate_metadata_text(args).await
+    state.bridge.validate_metadata_text(&state.document, args).await
 }
 #[tauri::command]
 async fn metadata_text_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
@@ -480,17 +520,25 @@ fn trusted_document(url: &tauri::Url) -> bool {
         && url.query().is_none() && url.fragment().is_none() && matches!(url.path(), "" | "/")
 }
 
+struct PreflightRelayGuard { document: DocumentBinding, closed: bool }
+impl Drop for PreflightRelayGuard {
+    fn drop(&mut self) { if !self.closed { self.document.offline_preflight_relay_lost(); } }
+}
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
     let mut revisions = edits.subscribe();
     let mut assets = document.subscribe();
     let mut diagnostics = document.environment_diagnostics_subscribe();
+    let mut preflight = document.offline_preflight_subscribe();
+    let mut preflight_guard = PreflightRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
     let (start, enter) = oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
         if enter.await.is_err() { return; }
         let mut metadata_revision = None;
         let mut diagnostics_revision = None;
+        let mut preflight_revision = None;
+        let mut preflight_relay_failed = false;
         loop {
-            if *stop.borrow() { return; }
+            if *stop.borrow() { preflight_guard.closed = true; return; }
             // status() releases its native locks before any renderer callback.
             // Events are best effort: the UI subscribes then fetches status and
             // orders both by native revision, never by arrival time.
@@ -517,12 +565,23 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                     let _ = app.emit_to(MAIN_WINDOW, crate::environment_diagnostics_protocol::EVENT, &status);
                 }
             }
+            if !preflight_relay_failed {
+                if let Ok(status) = document.offline_preflight_status() {
+                    if preflight_revision != Some(status.status_revision) {
+                        preflight_revision = Some(status.status_revision);
+                        if app.emit_to(MAIN_WINDOW, crate::offline_preflight_protocol::EVENT, &status).is_err() {
+                            preflight_relay_failed = true; document.offline_preflight_relay_lost();
+                        }
+                    }
+                }
+            }
             tokio::select! {
                 biased;
-                result = stop.changed() => { if result.is_err() || *stop.borrow() { return; } },
+                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; return; } },
                 result = revisions.changed() => { if result.is_err() { return; } },
                 result = assets.changed() => { if result.is_err() { return; } },
                 result = diagnostics.changed() => { if result.is_err() { return; } },
+                result = preflight.changed() => { if result.is_err() { return; } },
                 // Observation only: status checks fixed original endpoints and
                 // already-ended joins. It launches no operation or new clock.
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {},
@@ -607,8 +666,8 @@ fn request_shutdown(app: &tauri::AppHandle) {
         }
         app.state::<ShellState>().document.compatibility_quit_result(true);
         // No short circuit can skip another original owner's shutdown.
-        let (passive, edit, diagnostics) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown(), bridge.diagnostics.shutdown());
-        if passive.is_ok() && edit.is_ok() && diagnostics.is_ok() && bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() {
+        let (passive, edit, diagnostics, preflight) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown(), bridge.diagnostics.shutdown(), bridge.preflight.shutdown());
+        if passive.is_ok() && edit.is_ok() && diagnostics.is_ok() && preflight.is_ok() && bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() {
             if !settle_relay(&app).await { return; }
             app.state::<ShellState>().exit_ready.store(true, Ordering::SeqCst);
             app.exit(0);
@@ -1194,6 +1253,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             app_info, choose_project, project_snapshot, catalog, environment_requirements, release_version_observe,
             artifact_evidence_choose, artifact_evidence_status, artifact_evidence_observe, artifact_evidence_cancel,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,
+            prepare_offline_preflight, start_offline_preflight, offline_preflight_status, cancel_offline_preflight,
             validate_config, suggest_config, preview_config,
             propose_github_setup,
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,

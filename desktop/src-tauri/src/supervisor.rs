@@ -316,6 +316,18 @@ impl Drop for FinalObserverGuard {
     fn drop(&mut self) { if !self.retired { self.owner.unknown(&self.inner); } }
 }
 
+/// The SAME passive admission's original reply observer. This neither owns a
+/// second runner nor cancels/detaches original custody when a caller drops it.
+/// It lets DocumentBinding linearize the existing admission with preflight.
+pub(crate) struct PassiveQuery {
+    inner: Arc<Inner>, owner: Arc<Owner>, receiver: oneshot::Receiver<Result<Value, BridgeError>>,
+}
+impl PassiveQuery {
+    pub(crate) async fn wait(self) -> Result<Value, BridgeError> {
+        self.receiver.await.unwrap_or_else(|_| { self.owner.unknown(&self.inner); Err(BridgeError::cleanup_unknown()) })
+    }
+}
+
 impl Supervisor {
     pub fn new(runtime: RuntimeConfig) -> Self {
         Self { inner: Arc::new(Inner {
@@ -332,14 +344,17 @@ impl Supervisor {
     pub fn can_exit(&self) -> bool { lock(&self.inner.owners).is_empty() }
 
     pub async fn query(&self, method: Method, params: Value) -> Result<Value, BridgeError> {
+        self.start_passive(method, params)?.wait().await
+    }
+    /// Fixed passive method admission only. Original admission/roster/cleanup is
+    /// unchanged; desktop callers can hold their actual document gate through
+    /// this synchronous claim instead of releasing it before an async poll.
+    pub(crate) fn start_passive(&self, method: Method, params: Value) -> Result<PassiveQuery, BridgeError> {
         let (reply, receiver) = oneshot::channel();
         let owner = self.admit(AdmissionRequest::Passive { method, params: &params }, CompletionTarget::Passive(reply))?;
         // No owner/task cancellation on receiver abandonment. The registry retains
         // Child, IO tasks, startup handles and permits until actual settlement.
-        receiver.await.unwrap_or_else(|_| {
-            owner.unknown(&self.inner);
-            Err(BridgeError::cleanup_unknown())
-        })
+        Ok(PassiveQuery { inner: self.inner.clone(), owner, receiver })
     }
 
     /// Synchronous admission: the original roster exists before a native session

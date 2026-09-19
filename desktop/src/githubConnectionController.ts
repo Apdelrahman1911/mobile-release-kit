@@ -48,6 +48,8 @@ export class GitHubConnectionController {
   private disposed = false;
   private pending: Pending | null = null;
   private retirement: Retirement | null = null;
+  private otherOperationReason: () => string | null;
+  constructor(otherOperationReason: () => string | null = () => null) { this.otherOperationReason = otherOperationReason; }
 
   getSnapshot = (): GitHubConnectionViewState => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -242,7 +244,7 @@ export class GitHubConnectionController {
   canCheckStatus(): boolean { return !this.disposed && !!this.observer?.active && (this.observer.listening || this.observer.subscriptionFailed); }
   private contextReady(): boolean {
     const observer = this.observer; const status = this.state.status;
-    return !this.disposed && this.port?.mode === 'native' && !!observer && observer.port === this.port && observer.listening &&
+    return !this.disposed && !this.otherOperationReason() && this.port?.mode === 'native' && !!observer && observer.port === this.port && observer.listening &&
       !!this.state.context && !!status && observer.accepted?.revision === status.revision && this.matches(status) && status.capability.readOnlySessionAvailable &&
       this.state.helpState === 'current' && !this.state.blocked && !this.state.error && !this.state.uncertain &&
       !this.retirement && !this.state.retirementPending;

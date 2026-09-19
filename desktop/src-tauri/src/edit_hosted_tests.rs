@@ -2887,14 +2887,14 @@ mod metadata {
         }
         async fn observe(&mut self,project:&Project,selection:Selection,error:Option<&'static str>) -> Check<Result<metadata_wire::Observation,BridgeError>> {
             require(self.settled() && !self.batch.owner.disabled(),Failure::OriginalCustodyUnknown)?;
-            let reply=self.bridge.observe_metadata_text(selection.open(project)).await;
+            let reply=self.bridge.observe_metadata_text(&self.document, selection.open(project)).await;
             self.queries.push(self.passive.next(Method::MetadataTextObserve,error).await.map_err(|_| Failure::OriginalCustodyUnknown)?);
             Ok(reply)
         }
         async fn validate(&mut self,selection:Selection) -> Check<()> {
             require(self.settled() && !self.batch.owner.disabled(),Failure::OriginalCustodyUnknown)?;
             let fields=selection.fields();
-            let reply=self.bridge.validate_metadata_text(metadata_text_commands::Validate { platform:selection.platform,fields:fields.clone() }).await;
+            let reply=self.bridge.validate_metadata_text(&self.document, metadata_text_commands::Validate { platform:selection.platform,fields:fields.clone() }).await;
             self.queries.push(self.passive.next(Method::MetadataTextValidate,None).await.map_err(|_| Failure::OriginalCustodyUnknown)?);
             let value=reply.map_err(|_| Failure::UnexpectedOutcome)?;
             require(value.schema_version == 1 && value.platform == selection.platform && value.valid
@@ -2905,7 +2905,7 @@ mod metadata {
         }
         async fn catalogue(&mut self) -> Check<()> {
             require(self.settled() && !self.batch.owner.disabled(),Failure::OriginalCustodyUnknown)?;
-            let reply=self.bridge.catalog().await;
+            let reply=self.bridge.catalog(&self.document).await;
             self.queries.push(self.passive.next(Method::Catalog,None).await.map_err(|_| Failure::OriginalCustodyUnknown)?);
             let value=reply.map_err(|_| Failure::UnexpectedOutcome)?;
             let guide:Value=serde_json::from_slice(RESOURCE).map_err(|_| Failure::PayloadMismatch)?;

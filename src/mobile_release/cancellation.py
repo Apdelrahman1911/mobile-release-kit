@@ -116,6 +116,11 @@ class DefaultCancellation:
         self._environment_source: Any = None
         self._environment_source_installed = False
         self._environment_source_removed = False
+        # One separately typed saved-project execution domain, never diagnostics
+        # or a caller cancellation callback. The bindings are mutually exclusive.
+        self._preflight_source: Any = None
+        self._preflight_source_installed = False
+        self._preflight_source_removed = False
         self._ledger = LifetimeLedger(self)
         self._diagnostic_error: BaseException | None = None
         # Compatibility/diagnostics only: modifying this mapping grants nothing.
@@ -168,7 +173,11 @@ class DefaultCancellation:
     def _abort(self, error: BaseException) -> None:
         self._check_owner()
         try:
-            self._ledger._abort(error)
+            try:
+                if self._preflight_source is not None:
+                    self._preflight_source.failure_observed()
+            finally:
+                self._ledger._abort(error)
         except BaseException as diagnostic:
             # The original failure precedes optional diagnostics. Retain the
             # fatal bit even if diagnostic publication itself loses its return.
@@ -253,7 +262,7 @@ class DefaultCancellation:
         self._check_owner()
         if (type(source) is not EditInput or self.owner_thread is not threading.main_thread()
                 or self._edit_source_installed or self._edit_source_removed
-                or self._environment_source_installed):
+                or self._environment_source_installed or self._preflight_source_installed):
             raise self.restore_error("invalid edit cancellation source ownership")
         source.bind(self)
         self._edit_source_installed = True
@@ -266,6 +275,8 @@ class DefaultCancellation:
             self._edit_source.poll(self)
         if self._environment_source is not None:
             self._environment_source.poll(self)
+        if self._preflight_source is not None:
+            self._preflight_source.poll(self)
 
     def _remove_edit_source(self, source: Any) -> None:
         self._check_owner()
@@ -279,7 +290,7 @@ class DefaultCancellation:
         self._check_owner()
         if (type(source) is not EnvironmentInput or self.owner_thread is not threading.main_thread()
                 or self._environment_source_installed or self._environment_source_removed
-                or self._edit_source_installed):
+                or self._edit_source_installed or self._preflight_source_installed):
             raise self.restore_error("invalid environment cancellation source ownership")
         source.bind(self)
         self._environment_source_installed = True
@@ -291,6 +302,24 @@ class DefaultCancellation:
             raise self.restore_error("environment cancellation source did not settle")
         self._environment_source_removed = True
         self._environment_source = None
+
+    def _install_preflight_source(self, source: Any) -> None:
+        from ._desktop_preflight_control import PreflightInput
+        self._check_owner()
+        if (type(source) is not PreflightInput or self.owner_thread is not threading.main_thread()
+                or self._preflight_source_installed or self._preflight_source_removed
+                or self._edit_source_installed or self._environment_source_installed):
+            raise self.restore_error("invalid offline preflight cancellation source ownership")
+        source.bind(self)
+        self._preflight_source_installed = True
+        self._preflight_source = source
+
+    def _remove_preflight_source(self, source: Any) -> None:
+        self._check_owner()
+        if self._preflight_source is not source or self._preflight_source_removed or not source.closed:
+            raise self.restore_error("offline preflight cancellation source did not settle")
+        self._preflight_source_removed = True
+        self._preflight_source = None
 
     @contextmanager
     def deferred(self, *, check_on_exit: bool = True):
@@ -474,6 +503,10 @@ class CleanupScope:
             try:
                 if error is not None:
                     try:
+                        if self.cancellation._preflight_source is not None:
+                            # Concrete saved-preflight F, before the original
+                            # cleanup call; no deadline/owner change elsewhere.
+                            self.cancellation._preflight_source.failure_observed()
                         self.cancellation.lifetime_ledger._remember(error)
                     except BaseException as diagnostic:
                         self._record_failure(diagnostic)

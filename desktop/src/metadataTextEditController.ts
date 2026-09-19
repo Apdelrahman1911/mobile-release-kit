@@ -68,6 +68,7 @@ export interface MetadataTextState {
 interface Context {
   selectedProject: () => ProjectSession | null;
   otherEditReason: (projectId: string) => string | null;
+  otherOperationReason?: () => string | null;
   now?: () => number;
 }
 function freeze<T>(value: T): T {
@@ -237,12 +238,15 @@ export class MetadataTextEditController {
     if ([this.state.serviceGeneration, this.state.selectionGeneration, this.nextRequest].some((counter) => counter >= U32_MAX)) return 'A metadata binding counter is exhausted. No generation or request ID will be reused.';
     return null;
   }
+  passiveBusyReason(): string | null { return this.passivePending > 0 ? 'An original public-text observation or validation is still pending.' : null; }
   loadReason(): string | null {
+    const other = this.context.otherOperationReason?.(); if (other) return other;
     return this.state.mode !== 'native' ? metadataTextError(null).message : this.state.observeReason ?? (!this.state.help ? metadataTextError({ code: 'MetadataTextHelpUnavailable' }).message : null) ??
       this.liveContextReason() ?? (this.passivePending >= 2 ? 'Two bounded passive requests are already in flight. Wait for them to settle; no queue or replacement request is created.' : null) ??
       (this.selectedEntry()?.loadRequest ? 'The original text observation is still pending.' : null);
   }
   validateReason(): string | null {
+    const other = this.context.otherOperationReason?.(); if (other) return other;
     if (this.state.mode !== 'native') return metadataTextError(null).message;
     if (this.state.validateReason) return this.state.validateReason;
     if (!this.state.help) return metadataTextError({ code: 'MetadataTextHelpUnavailable' }).message;
@@ -279,10 +283,12 @@ export class MetadataTextEditController {
       editError: null, validation: null, validationRequest: null, validationError: null, lastSave: null,
     };
     const binding = this.binding(entry); if (!binding) return false;
-    if (!this.put({ ...entry, loadRequest: binding, loadError: null, validationRequest: null })) return false;
-    this.process();
     const api = this.passiveApi; this.passivePending += 1;
     try {
+      // Claim before publication: subscribers may retire the display binding,
+      // but cannot erase this original request from reciprocal admission.
+      if (!this.put({ ...entry, loadRequest: binding, loadError: null, validationRequest: null })) return false;
+      this.process();
       const value = parseMetadataTextObservation(await api.observeMetadataText({ projectId: context.projectId, platform: context.platform, locale: context.locale }));
       if (this.disposed || this.state.entries[context.key]?.loadRequest?.requestId !== binding.requestId) return false;
       if (!this.matches(binding)) throw { code: 'MetadataTextContextChanged' };
@@ -316,9 +322,9 @@ export class MetadataTextEditController {
     const entry = this.selectedEntry(); if (!entry?.fields) return false;
     const binding = this.binding(entry); if (!binding) return false;
     const api = this.passiveApi; const fields = structuredClone(entry.fields);
-    if (!this.put({ ...entry, validationRequest: binding, validationError: null })) return false;
     this.passivePending += 1;
     try {
+      if (!this.put({ ...entry, validationRequest: binding, validationError: null })) return false;
       const result = parseMetadataTextValidation(await api.validateMetadataText({ platform: entry.context.platform, fields }));
       const current = this.state.entries[entry.context.key];
       if (this.disposed || current?.validationRequest?.requestId !== binding.requestId) return false;

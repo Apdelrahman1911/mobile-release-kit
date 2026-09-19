@@ -62,7 +62,7 @@ function refreshFailure(h) {
 function refreshSuccess(h) {
   h.dispatch({ type: 'snapshot-start', projectId: 'p1', requestId: 91 });
   const snapshot = { root: '/inert/never-opened', observedAt: '', observationScope: 'single-request-non-atomic',
-    config: { path: 'release/mobile-release.json', state: 'format-valid', data: structuredClone(h.selected.baseline), issues: [] },
+    config: { content: null, path: 'release/mobile-release.json', state: 'format-valid', data: structuredClone(h.selected.baseline), issues: [] },
     discovery: { state: 'unverified', partial: false, hints: {}, scan: { entries: 0, sourceFiles: 0, sourceBytes: 0, excludedEntries: 0 }, limits: {} },
     assurance: { ...assurance }, issues: [] };
   h.dispatch({ type: 'snapshot-done', projectId: 'p1', requestId: 91, snapshot, observedAt: 1 });

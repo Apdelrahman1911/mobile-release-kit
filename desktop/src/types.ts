@@ -6,6 +6,7 @@ import type { EnvironmentRequest, EnvironmentResult } from './environment.ts';
 import type { EnvironmentDiagnosticsApi } from './environmentDiagnosticsTypes.ts';
 import type { ReleaseVersionApi } from './releaseVersion.ts';
 import type { CandidateEvidenceApi } from './candidateEvidence.ts';
+import type { OfflinePreflightApi, SavedConfigContent } from './offlinePreflightTypes.ts';
 
 // Closed passive service contracts. Python owns field policy and assurance.
 export type JsonPrimitive = string | number | boolean | null;
@@ -280,6 +281,7 @@ export interface ProjectSnapshot {
   config: {
     path: string;
     state: 'missing' | 'invalid' | 'format-valid' | 'unavailable';
+    content: SavedConfigContent | null;
     data: JsonObject | null;
     issues: Issue[];
   };
@@ -365,7 +367,7 @@ export interface PrepareConfigEditRequest {
   baselineGeneration: number;
 }
 
-export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, MetadataTextApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi {
+export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, MetadataTextApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, OfflinePreflightApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   chooseProject(): Promise<ProjectReference | null>;

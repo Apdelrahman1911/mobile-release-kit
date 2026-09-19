@@ -36,6 +36,7 @@ fn main() {
             "environment_requirements", "release_version_observe",
             "artifact_evidence_choose", "artifact_evidence_status", "artifact_evidence_observe", "artifact_evidence_cancel",
             "start_environment_diagnostics", "environment_diagnostics_status", "cancel_environment_diagnostics",
+            "prepare_offline_preflight", "start_offline_preflight", "offline_preflight_status", "cancel_offline_preflight",
             "validate_config", "suggest_config", "preview_config", "propose_github_setup",
             "open_config_edit", "prepare_config_edit", "apply_config_edit",
             "close_config_edit", "config_edit_status",

@@ -284,6 +284,25 @@ impl RuntimeConfig {
             Err(BridgeError::unavailable("Packaged build-tool diagnostics remain disabled until their fixed runtime, native owner and neutral cwd are qualified."))
         }
     }
+    /// Separate fixed saved-preflight bootstrap. The owner has its own closed
+    /// native/runtime qualification flags; another domain's permit is unusable.
+    pub(crate) fn resolve_offline_preflight(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(feature = "development-runtime", debug_assertions))]
+        {
+            let mut runtime = self.development(end)?;
+            let bootstrap = runtime.cwd.join("offline_preflight_bootstrap.py");
+            const BOOTSTRAP: &[u8] = include_bytes!("../../offline_preflight_bootstrap.py");
+            if read_checked(&bootstrap, BOOTSTRAP.len() as u64, end)?.as_slice() != BOOTSTRAP { return Err(unavailable()); }
+            deadline(end)?;
+            runtime.bootstrap = bootstrap;
+            Ok(runtime)
+        }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
+        {
+            let _ = end;
+            Err(BridgeError::unavailable("Saved offline checks remain disabled until their original native owner, runtime custody and neutral cwd are qualified."))
+        }
+    }
     /// Private profile, not another ambient development entry. The closed gate
     /// precedes even inspection. The latent branch additionally binds every
     /// selected path/CA byte to the existing explicit compiled manifest anchor;

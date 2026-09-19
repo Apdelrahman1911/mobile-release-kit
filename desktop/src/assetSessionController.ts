@@ -101,8 +101,11 @@ export class AssetSessionController {
   private intentPhase: IntentPhase | null = null;
   private selectedProject: () => ProjectSession | null;
   private now: () => number;
+  private otherOperationReason: () => string | null;
 
-  constructor(project: () => ProjectSession | null, now: () => number = () => performance.now()) { this.selectedProject = project; this.now = now; }
+  constructor(project: () => ProjectSession | null, now: () => number = () => performance.now(), otherOperationReason: () => string | null = () => null) {
+    this.selectedProject = project; this.now = now; this.otherOperationReason = otherOperationReason;
+  }
   getSnapshot = (): AssetDisplayState => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<AssetDisplayState>): void {
@@ -258,7 +261,7 @@ export class AssetSessionController {
   }
   submitContext(): void {
     const project = this.selectedProject();
-    if (this.disposed || !this.api || this.contextTask || this.api.mode !== 'native' || this.state.blocked || this.state.observationFailed ||
+    if (this.disposed || !this.api || this.contextTask || this.otherOperationReason() || this.api.mode !== 'native' || this.state.blocked || this.state.observationFailed ||
         this.state.status?.mode !== 'session' || !this.state.status.capability.available || !project?.draft) return;
     // One in-flight context submission; keystrokes coalesce into the latest
     // context, not a queued list of draft copies. No failed request is retried.
@@ -270,6 +273,7 @@ export class AssetSessionController {
     const input = structuredClone(proposed);
     const work = Promise.resolve().then(async () => {
       try {
+        if (this.otherOperationReason()) { this.contextDirty = true; return; }
         const reply = this.receive(await api.setAssetContext(input));
         if (!this.disposed && reply?.context && localRevision === this.localRevision && reply.context.projectId === input.projectId && sameScope(reply.context, input)) {
           this.contextAcknowledged = { localRevision, nativeRevision: reply.context.revision };
@@ -286,7 +290,7 @@ export class AssetSessionController {
     });
   }
   private run(action: NonNullable<AssetDisplayState['busy']>, invoke: () => Promise<AssetStatus>, phase?: IntentPhase): boolean {
-    if (this.disposed || this.state.busy) return false;
+    if (this.disposed || this.state.busy || action !== 'lock' && this.otherOperationReason()) return false;
     if (phase) this.intentPhase = phase;
     this.update({ busy: action, error: null, originPending: phase ? true : this.state.originPending, reviewReady: false, intent: phase?.intent ?? this.state.intent, entryGeneration: this.state.entryGeneration + 1 });
     void (async () => {
@@ -303,7 +307,7 @@ export class AssetSessionController {
     if (!this.api || assetSessionReason(this.state) || this.state.status?.mode !== 'closed') return false;
     return this.run('open', () => this.api!.openAssetSession());
   }
-  private contextReady(): boolean { this.syncProject(); return !!this.api && !assetContextReason(this.state) && this.current(); }
+  private contextReady(): boolean { this.syncProject(); return !!this.api && !this.otherOperationReason() && !assetContextReason(this.state) && this.current(); }
   private idle(): boolean { const op = this.state.status?.operation; return !op || (op.phase === 'idle' && op.settlement === 'known'); }
   choose(kind: AssetFileKind, replacement: AssetRecordRef | null = null): boolean {
     if (!this.contextReady() || !this.idle()) return false;

@@ -218,6 +218,8 @@ export class CandidateEvidenceController {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   private listeners = new Set<() => void>();
+  private otherOperationReason: () => string | null;
+  constructor(otherOperationReason: () => string | null = () => null) { this.otherOperationReason = otherOperationReason; }
   getSnapshot = (): EvidenceView => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<EvidenceView>): void {
@@ -244,6 +246,7 @@ export class CandidateEvidenceController {
     else this.update({ status: null, uncertain: false, error: evidenceError({ code: 'artifact_evidence_unavailable' }) });
   }
   startReason(): string | null {
+    const other = this.otherOperationReason(); if (other) return other;
     if (this.state.mode !== 'native' || this.state.status?.availability === 'unavailable') return messages.artifact_evidence_unavailable!;
     if (this.state.integrityFailed) return messages.artifact_evidence_protocol!;
     if (this.state.status?.phase === 'unknown') return messages.artifact_evidence_cleanup_unknown!;

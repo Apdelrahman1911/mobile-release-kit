@@ -12,7 +12,7 @@ const assurance = {
 };
 const snapshot = (id, name = 'com.example.original') => ({
   root: `/inert/${id}`, observedAt: '2026-09-17T00:00:00Z', observationScope: 'single-request-non-atomic',
-  config: { path: 'mobile-release.json', state: 'format-valid', data: { android: { enabled: true, applicationId: name } }, issues: [] },
+  config: { content: null, path: 'mobile-release.json', state: 'format-valid', data: { android: { enabled: true, applicationId: name } }, issues: [] },
   discovery: { state: 'unverified', partial: false, hints: {}, scan: { entries: 1, sourceFiles: 1, sourceBytes: 50, excludedEntries: 0 }, limits: {} },
   assurance, issues: [],
 });

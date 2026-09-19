@@ -192,12 +192,18 @@ export class EnvironmentController {
     platform: 'android', operation: 'build', connectionGeneration: 0, selectionGeneration: 0, contextGeneration: 0,
     pending: null, result: null, resultBinding: null, stale: false, error: null });
   private readonly selectedProject: () => ProjectSession | null;
+  private readonly otherOperationReason: () => string | null;
   private api: DesktopApi | null = null;
   private draft: JsonObject | null = null;
   private requestId = 0;
+  private passivePending = 0;
   private disposed = false;
   private listeners = new Set<() => void>();
-  constructor(selectedProject: () => ProjectSession | null) { this.selectedProject = selectedProject; }
+  constructor(selectedProject: () => ProjectSession | null, otherOperationReason: () => string | null = () => null) {
+    this.selectedProject = selectedProject; this.otherOperationReason = otherOperationReason;
+  }
+  startReason = (): string | null => this.otherOperationReason() ?? environmentStartReason(this.state);
+  passiveBusyReason = (): string | null => this.passivePending > 0 ? 'An original environment-requirements query is still pending.' : null;
   getSnapshot = (): EnvironmentState => this.state;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<EnvironmentState>): void {
@@ -249,7 +255,7 @@ export class EnvironmentController {
   }
   async refresh(): Promise<void> {
     this.syncProject();
-    if (this.disposed || !this.api || !this.draft || !this.state.project || environmentStartReason(this.state) !== null) return;
+    if (this.disposed || !this.api || !this.draft || !this.state.project || this.startReason() !== null) return;
     const input = { draft: this.draft, platform: this.state.platform, operation: this.state.operation };
     if (!environmentRequestFits(input)) { this.update({ error: environmentError({ code: 'environment_request_invalid' }) }); return; }
     const request = freeze(structuredClone(input)), api = this.api;
@@ -258,6 +264,8 @@ export class EnvironmentController {
       contextGeneration: this.state.contextGeneration, platform: request.platform, operation: request.operation, mode: this.state.mode });
     this.update({ pending: binding, error: null, stale: this.state.result !== null });
     if (!this.current(binding)) return;
+    if (this.otherOperationReason()) { this.invalidate({}); return; }
+    this.passivePending += 1;
     try {
       const raw: unknown = await api.environmentRequirements(request);
       this.syncProject();
@@ -271,8 +279,8 @@ export class EnvironmentController {
       const safe = environmentError(error);
       this.update({ pending: null, error: safe, stale: this.state.result !== null,
         reason: ['cleanup_unknown', 'shutting_down'].includes(safe.code) ? safe.message : this.state.reason });
-    }
-    // No unconditional finally can clear a newer request's pending binding.
+    } finally { this.passivePending -= 1; this.update({}); }
+    // Finally releases only this original Promise's accounting, never a newer display binding.
   }
   dispose(): void { this.connectionUnavailable(); this.disposed = true; this.listeners.clear(); this.draft = null; }
 }

@@ -3,7 +3,6 @@ import type { ReactNode } from 'react';
 import { getValue } from '../catalog.ts';
 import { futureReason } from '../certainty.ts';
 import type { ProjectSession } from '../drafts.ts';
-import { githubSetupStartReason } from '../githubSetupController.ts';
 import type { GitHubAssertionInput, GitHubSetupController, GitHubSetupState } from '../githubSetupController.ts';
 import { GITHUB_WORKFLOWS } from '../githubSetupProtocol.ts';
 import type { AppInfo, CredentialHelp, GitHubComparison, GitHubHelpText, GitHubSetupProposed, HelpContent, Page } from '../types.ts';
@@ -113,7 +112,7 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
 }) {
   const [inputHelpOpen, setInputHelpOpen] = useState({ repository: false, sha: false, snapshot: false });
   const helpOpened = (field: keyof typeof inputHelpOpen, open: boolean) => setInputHelpOpen((current) => current[field] === open ? current : { ...current, [field]: open });
-  const reason = githubSetupStartReason(state);
+  const reason = controller.startReason();
   const repositoryHelp = state.help?.inputs.find((entry) => entry.id === 'toolingRepository');
   const shaHelp = state.help?.inputs.find((entry) => entry.id === 'toolingSha');
   const snapshotHelp = state.help?.inputs.find((entry) => entry.id === 'suppliedSnapshot');

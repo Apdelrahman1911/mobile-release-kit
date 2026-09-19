@@ -7,6 +7,7 @@ original-parent Windows reader remains disabled pending independent qualificatio
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import sys
@@ -141,7 +142,7 @@ class _DescriptorCleanupError(RuntimeError):
     """Do not downgrade descriptor uncertainty into an ordinary partial scan."""
 
 
-def _close_handles(handles: list[int]) -> None:
+def _close_handles(handles: list[int], *, budget=None) -> None:
     """Retire each slot before its only close; attempt all independent closes.
 
     A close exception may have followed a successful kernel close. Never retry
@@ -152,7 +153,10 @@ def _close_handles(handles: list[int]) -> None:
     while handles:
         descriptor = handles.pop()
         try:
-            os.close(descriptor)
+            if budget is None:
+                os.close(descriptor)
+            else:
+                budget.close_fd(descriptor)
         except BaseException as error:
             failures += 1
             if first_error is None:
@@ -173,6 +177,9 @@ class _Inventory:
     partial: bool = False
     stopped: bool = False
     deadline: float = field(default_factory=lambda: time.monotonic() + SCAN_SECONDS)
+    # Uncapped positive original ancestry/close settlement, not issue inference.
+    root_settled: bool = False
+    budget: object = None  # Only borrowed_preflight_reads installs the exact type.
 
     def note(self, code: str, message: str) -> None:
         self.partial = True
@@ -180,6 +187,8 @@ class _Inventory:
             self.issues.append(issue(code, message, partial=True))
 
     def tick(self) -> bool:
+        if self.budget is not None:
+            self.budget.check()
         if not self.stopped and time.monotonic() >= self.deadline:
             self.note("snapshot.deadline", "Static scan reached its cooperative time limit; observations are incomplete.")
             self.stopped = True
@@ -190,6 +199,7 @@ class _Inventory:
 def _root_handles(root: str, inventory: _Inventory) -> Iterator[int]:
     handles: list[int] = []
     links: list[tuple[int, str, int]] = []
+    rechecked = False
     try:
         descriptor = os.open("/", _directory_flags())
         handles.append(descriptor)
@@ -206,11 +216,14 @@ def _root_handles(root: str, inventory: _Inventory) -> Iterator[int]:
                 raise ApiError("unsafe_path", "Selected folder changed during admission")
             links.append((parent, part, descriptor))
         yield descriptor
+        rechecked = True
         for parent, part, child in links:
             try:
                 if not _same_directory(os.stat(part, dir_fd=parent, follow_symlinks=False), os.fstat(child)):
+                    rechecked = False
                     inventory.note("snapshot.changed", "Selected folder or an ancestor changed during this non-atomic observation.")
             except OSError:
+                rechecked = False
                 inventory.note("snapshot.changed", "Selected folder or an ancestor is no longer observable at its original path.")
     except ApiError:
         raise
@@ -218,6 +231,7 @@ def _root_handles(root: str, inventory: _Inventory) -> Iterator[int]:
         raise ApiError("snapshot_unavailable", "Selected folder could not be opened safely; no alternate path was used") from error
     finally:
         _close_handles(handles)
+    inventory.root_settled = rechecked
 
 
 class _ReadProblem(Exception):
@@ -234,7 +248,8 @@ def _named_identity(value: os.stat_result) -> tuple[int, ...]:
 
 def _read_file(parent: int, name: str, relative: str, inventory: _Inventory, *,
                limit: int = MAX_SOURCE_BYTES,
-               receipts: list[tuple[int, str, tuple[int, ...] | None]] | None = None) -> str:
+               receipts: list[tuple[int, str, tuple[int, ...] | None]] | None = None,
+               binary: bool = False) -> str | bytes:
     if not inventory.tick():
         raise _ReadProblem("snapshot.deadline", "Static read was not attempted after its scan deadline.")
     if inventory.counts["sourceFiles"] >= MAX_SOURCE_FILES:
@@ -246,12 +261,14 @@ def _read_file(parent: int, name: str, relative: str, inventory: _Inventory, *,
         raise _ReadProblem("snapshot.unsafe-file", f"Skipped nonordinary, linked or symbolic source path: {relative}")
     if before.st_size > limit:
         raise _ReadProblem("snapshot.file-size", f"Static source file exceeds its byte limit: {relative}")
-    if before.st_size > MAX_TOTAL_BYTES - inventory.counts["sourceBytes"]:
+    total_limit = MAX_TOTAL_BYTES if inventory.budget is None else 64 * 1024 * 1024
+    if before.st_size > total_limit - inventory.counts["sourceBytes"]:
         inventory.stopped = True
         raise _ReadProblem("snapshot.byte-limit", "Static aggregate source-byte limit reached.")
     try:
-        descriptor = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
-                             | getattr(os, "O_CLOEXEC", 0), dir_fd=parent)
+        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        descriptor = (os.open(name, flags, dir_fd=parent) if inventory.budget is None
+                      else inventory.budget.open_fd(name, flags, parent=parent))
     except FileNotFoundError as error:
         raise _ReadProblem("snapshot.changed", f"Source path disappeared after initial observation: {relative}") from error
     try:
@@ -263,11 +280,14 @@ def _read_file(parent: int, name: str, relative: str, inventory: _Inventory, *,
         while True:
             if not inventory.tick():
                 raise _ReadProblem("snapshot.deadline", "Static file read exceeded the scan deadline.")
-            remaining = MAX_TOTAL_BYTES - inventory.counts["sourceBytes"]
+            remaining = total_limit - inventory.counts["sourceBytes"]
             if remaining <= 0:
                 inventory.stopped = True
                 raise _ReadProblem("snapshot.byte-limit", "Static aggregate source-byte limit reached before EOF was observed.")
-            chunk = os.read(descriptor, min(64 * 1024, limit + 1 - consumed, remaining))
+            requested = min(64 * 1024, limit + 1 - consumed, remaining)
+            if inventory.budget is not None:
+                inventory.budget.read_request(requested)
+            chunk = os.read(descriptor, requested)
             inventory.counts["sourceBytes"] += len(chunk)
             consumed += len(chunk)
             if consumed > limit:
@@ -284,14 +304,15 @@ def _read_file(parent: int, name: str, relative: str, inventory: _Inventory, *,
                 or consumed != ending.st_size):
             raise _ReadProblem("snapshot.changed", f"Source path or bytes changed during reading: {relative}")
         try:
-            text = b"".join(chunks).decode("utf-8")
+            raw = b"".join(chunks)
+            text = raw if binary else raw.decode("utf-8")
         except UnicodeError as error:
             raise _ReadProblem("snapshot.encoding", f"Static source is not UTF-8 text: {relative}") from error
         if receipts is not None:
             receipts.append((parent, name, _named_identity(ending)))
         return text
     finally:
-        _close_handles([descriptor])
+        _close_handles([descriptor], budget=inventory.budget)
 
 
 class _NamedTextReads:
@@ -321,6 +342,14 @@ class _NamedTextReads:
 
     def _alias(self, parent: int, name: str) -> None:
         key = unicodedata.normalize("NFC", name).casefold()
+        if self.inventory.budget is not None:
+            with self.inventory.budget.entries(parent) as entries:
+                for entry in entries:
+                    if not self.inventory.tick():
+                        raise _ReadProblem("snapshot.deadline", "Named observation exhausted its deadline.")
+                    if entry.name != name and unicodedata.normalize("NFC", entry.name).casefold() == key:
+                        raise _ReadProblem("snapshot.unsafe-file", "Named observation found a portable alias.")
+            return
         entries = os.scandir(parent)
         try:
             for entry in entries:
@@ -335,7 +364,9 @@ class _NamedTextReads:
             except BaseException as error:
                 raise _DescriptorCleanupError("Named observation directory iterator cleanup did not settle") from error
 
-    def read(self, relative: str, *, limit: int) -> str | None:
+    def read(self, relative: str, *, limit: int, binary: bool = False) -> str | bytes | None:
+        if self.inventory.budget is not None:
+            limit = self.inventory.budget.file_admission(self.inventory.budget.root / relative, limit)
         parent = self.root
         parts = relative.split("/")
         for index, name in enumerate(parts):
@@ -351,14 +382,15 @@ class _NamedTextReads:
             if index == len(parts) - 1:
                 try:
                     text = _read_file(parent, name, relative, self.inventory,
-                                      limit=limit, receipts=self.leaves)
+                                      limit=limit, receipts=self.leaves, binary=binary)
                 except FileNotFoundError as error:
                     raise _ReadProblem("snapshot.changed", "Named file disappeared during admission.") from error
                 if self.leaves[-1][2] != _named_identity(before):
                     raise _ReadProblem("snapshot.changed", "Named file changed before reading.")
                 return text
             try:
-                child = os.open(name, _directory_flags(), dir_fd=parent)
+                child = (os.open(name, _directory_flags(), dir_fd=parent) if self.inventory.budget is None
+                         else self.inventory.budget.open_fd(name, _directory_flags(), parent=parent))
             except FileNotFoundError as error:
                 raise _ReadProblem("snapshot.changed", "Named parent disappeared during admission.") from error
             self.handles.append(child)
@@ -367,6 +399,29 @@ class _NamedTextReads:
             self.links.append((parent, name, child, _named_identity(before)))
             parent = child
         raise _ReadProblem("snapshot.unsafe-file", "Named path is empty.")
+
+    def directory(self, relative: str) -> int:
+        """Borrowed preflight traversal only; same named-parent admission rules."""
+        if self.inventory.budget is None:
+            raise _ReadProblem("snapshot.unsafe-file", "Directory borrowing requires the original preflight domain.")
+        checked = self.inventory.budget.relative(self.inventory.budget.root / relative)
+        if checked != "." and len(checked.split("/")) > 32:
+            self.inventory.budget.fail()  # Before any parent/iterator acquisition.
+        parent = self.root
+        if relative == ".":
+            return parent
+        for name in relative.split("/"):
+            self.inventory.budget.check()
+            self._alias(parent, name)
+            before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            self._admit(before, directory=True)
+            child = self.inventory.budget.open_fd(name, _directory_flags(), parent=parent)
+            self.handles.append(child)
+            if _named_identity(before) != _named_identity(os.fstat(child)):
+                raise _ReadProblem("snapshot.changed", "Named parent changed during admission.")
+            self.links.append((parent, name, child, _named_identity(before)))
+            parent = child
+        return parent
 
     def check(self) -> None:
         if not self.inventory.tick():
@@ -398,11 +453,29 @@ def _named_text_reads(root: int, inventory: _Inventory) -> Iterator[_NamedTextRe
         yield reader
         reader.check()
     finally:
-        _close_handles(reader.handles)
+        _close_handles(reader.handles, budget=inventory.budget)
+
+
+@contextmanager
+def borrowed_preflight_reads(budget) -> Iterator[_NamedTextReads]:
+    """No root reopen: borrow the actual original non-signing project custody."""
+    from .._desktop_preflight_budget import OfflinePreflightBudget
+    if type(budget) is not OfflinePreflightBudget or budget.invocation is None:
+        raise ValueError("Named reader has no original offline preflight invocation")
+    budget.checkpoint()
+    root, _ = budget.invocation._offline_preflight_root(budget.guard)
+    inventory = _Inventory(budget=budget)
+    try:
+        with _named_text_reads(root, inventory) as reader:
+            yield reader
+    except _DescriptorCleanupError as error:
+        budget.guard._abort(error)
+        raise
+    budget.checkpoint()
 
 
 def _config(root: int, relative: str, inventory: _Inventory) -> ConfigObservation:
-    result: ConfigObservation = {"path": relative, "state": "unavailable", "data": None, "issues": []}
+    result: ConfigObservation = {"path": relative, "state": "unavailable", "data": None, "content": None, "issues": []}
     handles: list[int] = []
     links: list[tuple[int, str, int]] = []
     parent = root
@@ -445,6 +518,9 @@ def _config(root: int, relative: str, inventory: _Inventory) -> ConfigObservatio
             else:
                 result["data"] = data
                 result["state"] = "format-valid"
+                exact = raw.encode("utf-8")
+                if exact:
+                    result["content"] = {"bytes": len(exact), "sha256": hashlib.sha256(exact).hexdigest()}
     except FileNotFoundError:
         result["state"] = "missing"
         result["issues"].append(issue("config.missing", "No configuration was observed at the selected path.", partial=True))
@@ -571,6 +647,8 @@ def project_snapshot(root: object, config_path: object = "release/mobile-release
 
 def _assemble_snapshot(selected_root: str, observed_at: str, inventory: _Inventory,
                        config: ConfigObservation) -> SnapshotResult:
+    if not inventory.root_settled:
+        config["content"] = None
     try:
         hints = parse_project_sources(inventory.sources, inventory.directories)
         bounded = _bound_hints(hints, inventory)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -150,12 +151,17 @@ def _read_android_release_note(config: ReleaseConfig, path: Path) -> str:
     path = config.project_path(str(path))  # Reject every in-repository symlink component.
     relative = path.relative_to(config.root)
     try:
-        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
-        with os.fdopen(os.open(path, flags), "rb") as handle:
-            attributes = os.fstat(handle.fileno())
-            if not stat.S_ISREG(attributes.st_mode) or attributes.st_size > ANDROID_NOTE_MAX_BYTES:
-                raise ValidationError(f"Android release notes must be a bounded regular file: {relative}")
-            raw = handle.read(ANDROID_NOTE_MAX_BYTES + 1)
+        if config._preflight_budget is not None:
+            raw = config._preflight_budget.read(path, limit=ANDROID_NOTE_MAX_BYTES, binary=True)
+            if raw is None:
+                raise FileNotFoundError
+        else:
+            flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+            with os.fdopen(os.open(path, flags), "rb") as handle:
+                attributes = os.fstat(handle.fileno())
+                if not stat.S_ISREG(attributes.st_mode) or attributes.st_size > ANDROID_NOTE_MAX_BYTES:
+                    raise ValidationError(f"Android release notes must be a bounded regular file: {relative}")
+                raw = handle.read(ANDROID_NOTE_MAX_BYTES + 1)
         if len(raw) > ANDROID_NOTE_MAX_BYTES:
             raise ValidationError(f"Android release notes exceed the bounded UTF-8 file size: {relative}")
         # read_text() would translate CRLF, changing both the length and intent.
@@ -217,11 +223,16 @@ def _is_android_changelog(relative: Path) -> bool:
     )
 
 
-def _safe_files(root: Path) -> Iterable[Path]:
+def _safe_files(root: Path, *, budget=None) -> Iterable[Path]:
     if root.is_symlink() or not root.is_dir():
         raise ValidationError("metadata root must be a regular directory, not a symlink")
     count = 0
-    for path in sorted(root.rglob("*")):
+    paths = sorted(root.rglob("*")) if budget is None else budget.walk(root)
+    if budget is not None:
+        paths.sort()
+    for path in paths:
+        if budget is not None:
+            budget.check()
         if path.is_symlink():
             raise ValidationError(f"metadata must not contain symlinks: {path.relative_to(root)}")
         if path.is_file():
@@ -247,12 +258,12 @@ def _safe_files(root: Path) -> Iterable[Path]:
             yield path
 
 
-def _safe_platform_files(root: Path, platforms: Iterable[str]) -> list[Path]:
+def _safe_platform_files(root: Path, platforms: Iterable[str], *, budget=None) -> list[Path]:
     selected = tuple(dict.fromkeys(platforms))
     unknown = sorted(set(selected) - set(PLATFORM_METADATA_ROOTS))
     if unknown:
         raise ValidationError(f"unsupported metadata platform(s): {', '.join(unknown)}")
-    files: list[Path] = []
+    files: list[Path] = [] if budget is None else budget.list("path")
     for relative in dict.fromkeys(
         item for platform in selected for item in PLATFORM_METADATA_ROOTS[platform]
     ):
@@ -261,20 +272,32 @@ def _safe_platform_files(root: Path, platforms: Iterable[str]) -> list[Path]:
             raise ValidationError(f"metadata must not contain symlinks: {relative}")
         if not subtree.exists():
             continue
-        files.extend(_safe_files(subtree))
+        files.extend(_safe_files(subtree, budget=budget))
         if len(files) > MAX_FILE_COUNT:
             raise ValidationError("metadata tree contains too many files")
+    if budget is not None:
+        files.sort()
+        return files
     return sorted(files)
 
 
-def _image_dimensions(path: Path) -> tuple[int, int] | None:
-    with path.open("rb") as handle:
+def _image_dimensions(path: Path, *, budget=None) -> tuple[int, int] | None:
+    if budget is not None:
+        raw = budget.read(path, limit=MAX_FILE_SIZE, binary=True)
+        if raw is None:
+            return None
+        stream = io.BytesIO(raw)
+    else:
+        stream = path.open("rb")
+    with stream as handle:
         header = handle.read(32)
         if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) >= 24:
             return struct.unpack(">II", header[16:24])
         if header.startswith(b"\xff\xd8"):
             handle.seek(2)
             while True:
+                if budget is not None:
+                    budget.check()
                 marker_start = handle.read(1)
                 if not marker_start:
                     return None
@@ -282,6 +305,8 @@ def _image_dimensions(path: Path) -> tuple[int, int] | None:
                     continue
                 marker = handle.read(1)
                 while marker == b"\xff":
+                    if budget is not None:
+                        budget.check()
                     marker = handle.read(1)
                 if not marker:
                     return None
@@ -321,17 +346,24 @@ def metadata_findings(
     *,
     check_urls: bool = False,
     platforms: Iterable[str] | None = None,
+    cancellation=None,
 ) -> list[Finding]:
     del check_urls  # Network URL validation belongs to the explicit online Store preflight.
     metadata = config.section("metadata")
     relative_root = metadata.get("root", "release/store")
-    findings: list[Finding] = []
+    budget = config._preflight_budget
+    if budget is not None:
+        if budget.guard is not cancellation:
+            raise ValueError("Metadata lost its original preflight cancellation binding")
+        budget.checkpoint()
+    findings: list[Finding] = [] if budget is None else budget.list("finding")
     try:
         root = config.project_path(relative_root)
     except ConfigurationError as error:
-        return [Finding("metadata.paths", Status.INVALID, str(error), category="metadata")]
+        findings.append(Finding("metadata.paths", Status.INVALID, str(error), category="metadata"))
+        return findings
     if not root.is_dir():
-        return [
+        findings.append(
             Finding(
                 code="metadata.root",
                 status=Status.MISSING,
@@ -339,7 +371,8 @@ def metadata_findings(
                 message=f"Store metadata directory is missing: {relative_root}",
                 remediation="Create the configured metadata tree and add the required locales/assets.",
             )
-        ]
+        )
+        return findings
 
     selected = set(platforms if platforms is not None else config.enabled_platforms)
     android_build = None
@@ -353,6 +386,8 @@ def metadata_findings(
                 category="metadata", remediation="Fix the configured version source before selecting changelogs.",
             ))
     for platform, key in (("android", "androidLocales"), ("ios", "iosLocales")):
+        if cancellation is not None:
+            cancellation.check()
         if platform not in selected:
             continue
         if not config.platform_enabled(platform):
@@ -370,6 +405,8 @@ def metadata_findings(
             )
             continue
         for locale in locales:
+            if budget is not None:
+                budget.checkpoint()
             if not LOCALE_RE.fullmatch(locale):
                 findings.append(
                     Finding(
@@ -391,11 +428,15 @@ def metadata_findings(
                     )
                 )
             else:
-                public_files = [
-                    path
-                    for path in locale_root.rglob("*")
-                    if path.is_file() and not path.is_symlink() and path.name != ".gitkeep"
-                ]
+                if budget is None:
+                    public_files = [path for path in locale_root.rglob("*")
+                                    if path.is_file() and not path.is_symlink() and path.name != ".gitkeep"]
+                else:
+                    public_files = budget.list("path")
+                    for path in budget.walk(locale_root):
+                        budget.check()
+                        if path.is_file() and not path.is_symlink() and path.name != ".gitkeep":
+                            public_files.append(path)
                 if not public_files:
                     findings.append(
                         Finding(
@@ -456,7 +497,7 @@ def metadata_findings(
                 )
 
     try:
-        files = _safe_platform_files(root, selected)
+        files = _safe_platform_files(root, selected, budget=budget)
     except ValidationError as error:
         findings.append(
             Finding("metadata.paths", Status.INVALID, str(error), category="metadata")
@@ -469,6 +510,8 @@ def metadata_findings(
         return findings
 
     for path in files:
+        if budget is not None:
+            budget.checkpoint()
         relative = path.relative_to(root)
         if _is_android_changelog(relative):
             try:
@@ -482,7 +525,9 @@ def metadata_findings(
         suffix = path.suffix.lower()
         if suffix in {".txt", ".md", ".json"}:
             try:
-                text = path.read_text(encoding="utf-8")
+                text = path.read_text(encoding="utf-8") if budget is None else budget.read(path, limit=MAX_FILE_SIZE)
+                if text is None:
+                    raise FileNotFoundError
             except UnicodeDecodeError:
                 findings.append(
                     Finding(
@@ -563,7 +608,7 @@ def metadata_findings(
                     )
                 )
         elif suffix in {".png", ".jpg", ".jpeg"}:
-            dimensions = _image_dimensions(path)
+            dimensions = _image_dimensions(path, budget=budget)
             if not dimensions or dimensions[0] < 1 or dimensions[1] < 1:
                 findings.append(
                     Finding(

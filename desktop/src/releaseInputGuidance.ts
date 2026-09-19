@@ -146,18 +146,21 @@ export class ReleaseInputGuidanceController {
   private readonly selectedProject: () => ProjectSession | null;
   private readonly configurationBusy: (projectId: string) => boolean;
   private readonly retireHelp: () => void;
+  private readonly otherOperationReason: () => string | null;
   private api: GuidanceApi | null = null;
   private draft: JsonObject | null = null;
   // Nonreusable identities have no wrapping generation counter. Only the private
   // in-flight binding references the source draft; published state never does.
   private service: object = {}; private selection: object = {}; private context: object = {}; private help: object = {};
   private attempt: RequestBinding | null = null;
+  private passivePending = 0;
   private disposed = false;
   private listeners = new Set<() => void>();
-  constructor(selectedProject: () => ProjectSession | null, configurationBusy: (projectId: string) => boolean = () => false, retireHelp: () => void = () => {}) {
-    this.selectedProject = selectedProject; this.configurationBusy = configurationBusy; this.retireHelp = retireHelp;
+  constructor(selectedProject: () => ProjectSession | null, configurationBusy: (projectId: string) => boolean = () => false, retireHelp: () => void = () => {}, otherOperationReason: () => string | null = () => null) {
+    this.selectedProject = selectedProject; this.configurationBusy = configurationBusy; this.retireHelp = retireHelp; this.otherOperationReason = otherOperationReason;
   }
   getSnapshot = (): ReleaseInputGuidanceState => this.state;
+  passiveBusyReason = (): string | null => this.passivePending > 0 ? 'An original draft-requirements query is still pending.' : null;
   subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   private update(patch: Partial<ReleaseInputGuidanceState>): void {
     if (this.disposed) return;
@@ -216,6 +219,7 @@ export class ReleaseInputGuidanceController {
     this.retire({ project: next });
   }
   private blocked(includePending: boolean): string | null {
+    const other = this.otherOperationReason(); if (other) return other;
     if (this.disposed) return unavailable;
     if (this.state.loading) return 'Wait for the current core connection and catalogue attempt to settle.';
     if (this.state.mode === 'preview') return previewReason;
@@ -251,6 +255,7 @@ export class ReleaseInputGuidanceController {
     this.attempt = binding;
     this.update({ pending: true });
     if (!this.admitReply(binding)) return;
+    this.passivePending += 1;
     try {
       // Transport bounds only; configuration/service/requiredness policy stays core-owned.
       if (!boundedJson(binding.sourceDraft, 524288, 8000, 28) || !record(binding.sourceDraft)) throw new Error();
@@ -267,8 +272,8 @@ export class ReleaseInputGuidanceController {
       if (!this.admitReply(binding)) return;
       this.attempt = null;
       this.update({ pending: false, result: null, notice: failed });
-    }
-    // No finally clears a newer request; no automatic retry or native cancellation.
+    } finally { this.passivePending -= 1; this.update({}); }
+    // Finally releases only this original Promise's accounting, never a newer display binding.
   }
   dispose(): void { this.connectionUnavailable(); this.disposed = true; this.listeners.clear(); this.draft = null; }
 }

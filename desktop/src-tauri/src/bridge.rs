@@ -25,6 +25,7 @@ pub struct DesktopBridge {
     pub supervisor: Supervisor,
     pub edits: EditOwner,
     pub(crate) diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner,
+    pub(crate) preflight: crate::offline_preflight_owner::OfflinePreflightOwner,
     projects: Mutex<BTreeMap<String, RegisteredProject>>,
     project_generation: AtomicU32,
     #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
@@ -35,14 +36,17 @@ impl DesktopBridge {
         let runtime = RuntimeConfig::packaged(resource_dir);
         Self {
             supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime.clone()),
-            diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime),
+            diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime.clone()),
+            preflight: crate::offline_preflight_owner::OfflinePreflightOwner::new(runtime),
             projects: Mutex::new(BTreeMap::new()), project_generation: AtomicU32::new(1),
             #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
             sequence: AtomicU64::new(1),
         }
     }
-    pub async fn app_info(&self) -> AppInfo {
-        let result = self.supervisor.query(Method::Capabilities, json!({})).await;
+    pub(crate) async fn app_info(&self, document: &crate::asset_session::DocumentBinding) -> AppInfo {
+        let result = match document.passive_query(self, Method::Capabilities, json!({})) {
+            Ok(query) => query.wait().await, Err(error) => Err(error),
+        };
         let (runtime, capabilities) = match result {
             Ok(value) => (RuntimeStatus { state: "available", reason: None, mode: self.supervisor.runtime_mode() }, Some(value)),
             Err(error) => (RuntimeStatus {
@@ -52,43 +56,43 @@ impl DesktopBridge {
         };
         AppInfo { app_name: "Mobile Release Kit", app_version: env!("CARGO_PKG_VERSION"), runtime, capabilities }
     }
-    pub async fn catalog(&self) -> Result<Value, BridgeError> { self.supervisor.query(Method::Catalog, json!({})).await }
-    pub(crate) async fn environment_requirements(&self, input: crate::environment::Request) -> Result<crate::environment::Requirements, BridgeError> {
+    pub(crate) async fn catalog(&self, document: &crate::asset_session::DocumentBinding) -> Result<Value, BridgeError> { document.passive_query(self, Method::Catalog, json!({}))?.wait().await }
+    pub(crate) async fn environment_requirements(&self, document: &crate::asset_session::DocumentBinding, input: crate::environment::Request) -> Result<crate::environment::Requirements, BridgeError> {
         // Current draft DATA only; no selected path, tool or execution owner.
         let context = input.context();
-        let value = self.supervisor.query(Method::EnvironmentRequirements, input.into_params()?).await
+        let value = document.passive_query(self, Method::EnvironmentRequirements, input.into_params()?).map_err(crate::environment::public_error)?.wait().await
             .map_err(crate::environment::public_error)?;
         crate::environment::result(value, context)
     }
-    pub async fn validate_config(&self, draft: Value) -> Result<Value, BridgeError> {
+    pub(crate) async fn validate_config(&self, document: &crate::asset_session::DocumentBinding, draft: Value) -> Result<Value, BridgeError> {
         if !draft.is_object() { return Err(BridgeError::invalid()); }
-        self.supervisor.query(Method::ValidateConfig, json!({"draft": draft})).await
+        document.passive_query(self, Method::ValidateConfig, json!({"draft": draft}))?.wait().await
     }
-    pub async fn suggest_config(&self, hints: Value) -> Result<Value, BridgeError> {
+    pub(crate) async fn suggest_config(&self, document: &crate::asset_session::DocumentBinding, hints: Value) -> Result<Value, BridgeError> {
         if !hints.is_object() { return Err(BridgeError::invalid()); }
-        self.supervisor.query(Method::SuggestConfig, json!({"hints": hints})).await
+        document.passive_query(self, Method::SuggestConfig, json!({"hints": hints}))?.wait().await
     }
-    pub async fn preview_config(&self, base: Value, draft: Value) -> Result<Value, BridgeError> {
+    pub(crate) async fn preview_config(&self, document: &crate::asset_session::DocumentBinding, base: Value, draft: Value) -> Result<Value, BridgeError> {
         // Both documents are caller-owned draft data, never a disk revision or
         // permission to write. Only the core derives policy and change summaries.
         if !(base.is_null() || base.is_object()) || !draft.is_object() { return Err(BridgeError::invalid()); }
-        self.supervisor.query(Method::PreviewConfig, json!({"base": base, "draft": draft})).await
+        document.passive_query(self, Method::PreviewConfig, json!({"base": base, "draft": draft}))?.wait().await
     }
-    pub(crate) async fn propose_github_setup(&self, input: crate::github_commands::Proposal) -> Result<Value, BridgeError> {
+    pub(crate) async fn propose_github_setup(&self, document: &crate::asset_session::DocumentBinding, input: crate::github_commands::Proposal) -> Result<Value, BridgeError> {
         // A passive proposal has no selected-root, login, write or dispatch
         // authority. Only the core renders its fixed shipped workflow set.
-        self.supervisor.query(Method::ProposeGithubSetup, input.into_params()?).await
+        document.passive_query(self, Method::ProposeGithubSetup, input.into_params()?)?.wait().await
     }
-    pub async fn project_snapshot(&self, project_id: String) -> Result<Value, BridgeError> {
+    pub(crate) async fn project_snapshot(&self, document: &crate::asset_session::DocumentBinding, project_id: String) -> Result<Value, BridgeError> {
         let root = self.project_root(&project_id)?;
-        self.supervisor.query(Method::ProjectSnapshot, json!({"root": root})).await
+        document.passive_query(self, Method::ProjectSnapshot, json!({"root": root}))?.wait().await
     }
-    pub(crate) async fn observe_release_version(&self, input: crate::release_version_protocol::Request) -> Result<crate::release_version_protocol::Observation, BridgeError> {
+    pub(crate) async fn observe_release_version(&self, document: &crate::asset_session::DocumentBinding, input: crate::release_version_protocol::Request) -> Result<crate::release_version_protocol::Observation, BridgeError> {
         // Native-selected root only. The existing passive owner/runtime gate is
         // unchanged; this observation creates no write or preflight authority.
         let root = self.project_root(&input.project_id).map_err(crate::release_version_protocol::public_error)?;
         let params = crate::release_version_protocol::params(&root)?;
-        let value = self.supervisor.query(Method::ReleaseVersionObserve, params).await
+        let value = document.passive_query(self, Method::ReleaseVersionObserve, params).map_err(crate::release_version_protocol::public_error)?.wait().await
             .map_err(crate::release_version_protocol::public_error)?;
         crate::release_version_protocol::result(value)
     }
@@ -99,15 +103,15 @@ impl DesktopBridge {
         let value = self.supervisor.query(Method::CandidateEvidenceObserve, params).await?;
         crate::candidate_evidence_protocol::result(value)
     }
-    pub(crate) async fn observe_metadata_text(&self, input: crate::metadata_text_commands::Open) -> Result<crate::metadata_text_edit_protocol::Observation, BridgeError> {
+    pub(crate) async fn observe_metadata_text(&self, document: &crate::asset_session::DocumentBinding, input: crate::metadata_text_commands::Open) -> Result<crate::metadata_text_edit_protocol::Observation, BridgeError> {
         // Only the native-selected root reaches this bounded named-file query.
         // No checkout/write authority is created by a passive observation.
         let root = self.project_root(&input.project_id)?;
-        let value = self.supervisor.query(Method::MetadataTextObserve, json!({"root":root,"platform":input.platform,"locale":&input.locale})).await?;
+        let value = document.passive_query(self, Method::MetadataTextObserve, json!({"root":root,"platform":input.platform,"locale":&input.locale}))?.wait().await?;
         crate::metadata_text_edit_protocol::observation_result(value, input.platform, &input.locale)
     }
-    pub(crate) async fn validate_metadata_text(&self, input: crate::metadata_text_commands::Validate) -> Result<crate::metadata_text_edit_protocol::ValidationResult, BridgeError> {
-        let value = self.supervisor.query(Method::MetadataTextValidate, json!({"platform":input.platform,"fields":&input.fields})).await?;
+    pub(crate) async fn validate_metadata_text(&self, document: &crate::asset_session::DocumentBinding, input: crate::metadata_text_commands::Validate) -> Result<crate::metadata_text_edit_protocol::ValidationResult, BridgeError> {
+        let value = document.passive_query(self, Method::MetadataTextValidate, json!({"platform":input.platform,"fields":&input.fields}))?.wait().await?;
         crate::metadata_text_edit_protocol::validation_result(value, input.platform, &input.fields)
     }
     fn project_root(&self, project_id: &str) -> Result<PathBuf, BridgeError> {
@@ -146,6 +150,7 @@ impl DesktopBridge {
         Ok(())
     }
     pub fn open_config_edit(&self, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
+        self.preflight.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -256,6 +261,7 @@ impl DesktopBridge {
     }
     #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
     pub(crate) fn register_picked_project(&self, path: PathBuf) -> Result<Project, BridgeError> {
+        self.preflight.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() || self.edits.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() || self.edits.disabled() { return Err(BridgeError::cleanup_unknown()); }

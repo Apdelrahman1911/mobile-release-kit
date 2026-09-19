@@ -623,6 +623,9 @@ class ReleaseConfig:
     path: Path
     root: Path
     data: dict[str, Any]
+    # Only the dedicated saved-preflight service supplies its original domain.
+    # Not a renderer field or a change to ordinary CLI input policy.
+    _preflight_budget: object = None
 
     def section(self, name: str) -> dict[str, Any]:
         return dict(self.data.get(name, {}))
@@ -635,6 +638,8 @@ class ReleaseConfig:
         return tuple(name for name in ("android", "ios") if self.platform_enabled(name))
 
     def project_path(self, value: str) -> Path:
+        if self._preflight_budget is not None:
+            self._preflight_budget.checkpoint()
         supplied = Path(value).expanduser()
         if supplied.is_absolute():
             absolute = Path(os.path.abspath(supplied))
@@ -665,19 +670,30 @@ class ReleaseConfig:
             candidate.relative_to(self.root.resolve())
         except ValueError as error:
             raise ConfigurationError(f"project path escapes repository root: {value}") from error
+        if self._preflight_budget is not None:
+            self._preflight_budget.relative(candidate)
+            self._preflight_budget.checkpoint()
         return candidate
 
     def release_version(self) -> ReleaseVersion:
         spec = self.section("version")
         path = self.project_path(spec["source"])
-        values = parse_key_value_file(path)
+        values = parse_key_value_file(path, budget=self._preflight_budget)
         return release_version_from_values(
             values, name_key=spec["nameKey"], build_key=spec["buildKey"],
             ios_enabled=self.platform_enabled("ios"), source_label=str(path),
         )
 
     def commands(self, phase: str) -> list[list[str]]:
-        return [list(command) for command in self.data.get("projectChecks", {}).get(phase, [])]
+        commands = self.data.get("projectChecks", {}).get(phase, [])
+        if self._preflight_budget is None:
+            return [list(command) for command in commands]
+        result = self._preflight_budget.list()
+        for command in commands:
+            argv = self._preflight_budget.list()
+            argv.extend(command)
+            result.append(argv)
+        return result
 
 
 def _lexical_repository_root(start: Path) -> Path:
@@ -750,7 +766,15 @@ def find_repository_root(start: Path) -> Path:
     return current
 
 
-def parse_key_value_file(path: Path) -> dict[str, str]:
+def parse_key_value_file(path: Path, *, budget=None) -> dict[str, str]:
+    if budget is not None:
+        try:
+            text = budget.read(path, limit=MAX_VERSION_BYTES)
+        except UnicodeDecodeError as error:
+            raise ConfigurationError(f"version source must be UTF-8: {path}") from error
+        if text is None:
+            raise ConfigurationError(f"version source not found: {path}")
+        return parse_key_value_text(text, budget=budget)
     if not path.is_file():
         raise ConfigurationError(f"version source not found: {path}")
     if path.is_symlink():
@@ -764,10 +788,23 @@ def parse_key_value_file(path: Path) -> dict[str, str]:
     return parse_key_value_text(text)
 
 
-def parse_key_value_text(text: str) -> dict[str, str]:
+def _iter_text_lines(text: str):
+    """Incremental str.splitlines() semantics without its input-sized list."""
+    start = 0
+    for separator in re.finditer(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]", text):
+        yield text[start:separator.start()]
+        start = separator.end()
+    if start < len(text):
+        yield text[start:]
+
+
+def parse_key_value_text(text: str, *, budget=None) -> dict[str, str]:
     """Pure legacy version-file grammar; callers own UTF-8/byte/file admission."""
-    result: dict[str, str] = {}
-    for number, raw_line in enumerate(text.splitlines(), start=1):
+    result: dict[str, str] = {} if budget is None else budget.mapping()
+    lines = text.splitlines() if budget is None else _iter_text_lines(text)
+    for number, raw_line in enumerate(lines, start=1):
+        if budget is not None:
+            budget.check()
         line = raw_line.strip()
         if not line or line.startswith(("#", "//", ";")):
             continue
@@ -788,6 +825,9 @@ def parse_key_value_text(text: str) -> dict[str, str]:
             value = value[1:-1]
         if not value or value != value.strip():
             raise ConfigurationError(f"unsafe or empty version value on line {number}: {key}")
+        if budget is not None:
+            budget.retain(key)
+            budget.retain(value)
         result[key] = value
     return result
 

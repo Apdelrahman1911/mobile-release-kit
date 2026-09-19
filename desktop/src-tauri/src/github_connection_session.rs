@@ -170,6 +170,26 @@ mod tests {
     }
 
     #[test]
+    fn saved_preflight_requires_explicit_disconnect_of_retained_private_session() {
+        let at = Instant::now();
+        assert!(ConnectionState::new().registration().is_none());
+        let mut state = fixture(at); // Existing inert DATA, no original ticket.
+        state.status.session.as_mut().unwrap().state = SessionState::Connected;
+        state.status.operation.as_mut().unwrap().phase = Phase::Settled;
+        assert!(!state.native_work_pending());
+        assert!(!state.material_settled()); // The idle original still retains its token.
+        assert_eq!(state.registration(), Some(("project-1", 2)));
+        state.retire(Reason::Expired);
+        assert!(state.material_settled()); // Token retirement is not Disconnect.
+        assert!(!state.native_work_pending());
+        assert_eq!(state.registration(), Some(("project-1", 2)));
+        state.disconnect("github-session-1", at, Reason::None).unwrap();
+        assert!(state.registration().is_none());
+        assert!(state.snapshot().session.is_none());
+        assert!(state.material_settled());
+    }
+
+    #[test]
     fn admission_pair_preserves_subseconds_and_server_expiry_can_only_shorten() {
         let at = Instant::now();
         let wall = parse_utc("2026-09-17T12:00:00Z").unwrap() + Duration::from_millis(750);
