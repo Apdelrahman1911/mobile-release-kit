@@ -83,6 +83,27 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14.7'
+      - name: Select installed root-owned CLT for macOS lifecycle verification
+        if: matrix.platform == 'macos'
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          # Read fixed metadata only; never repair/chown/copy an installation.
+          "$MRK_PYTHON" -I -S -B desktop/tools/environment_macos_clt.py
+          # The only privileged operation is this fixed selection on this VM.
+          # Empty-origin environments prevent DEVELOPER_DIR overriding readback.
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC \
+            /usr/bin/sudo -n /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools </dev/null
+          # A nonnewline sentinel preserves the original terminator; && keeps a
+          # failed selector from becoming a successful printf/assignment.
+          selected="$(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC \
+            /usr/bin/xcode-select -p </dev/null && printf '.')"
+          [[ "$selected" == $'/Library/Developer/CommandLineTools\n.' ]]
+          echo 'CLT selected for lifecycle verification; full-Xcode observations remain unverified.'
       - name: Prepare exact bounded source and ZIP bindings
         id: prepare
         timeout-minutes: 2
