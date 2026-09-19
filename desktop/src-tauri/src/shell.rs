@@ -232,6 +232,15 @@ async fn github_workflow_edit_status(webview: Webview, request: tauri::ipc::Requ
 }
 
 #[tauri::command]
+async fn release_version_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::release_version_protocol::Observation, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(crate::release_version_protocol::public_error)?;
+    let body = request_body(&request).map_err(crate::release_version_protocol::public_error)?;
+    let args = crate::release_version_protocol::request(body)?;
+    not_closing(&state).map_err(crate::release_version_protocol::public_error)?;
+    state.bridge.observe_release_version(args).await
+}
+#[tauri::command]
 async fn metadata_text_observe(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<metadata_text_wire::Observation, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?;
@@ -1156,7 +1165,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            app_info, choose_project, project_snapshot, catalog, environment_requirements,
+            app_info, choose_project, project_snapshot, catalog, environment_requirements, release_version_observe,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,
             validate_config, suggest_config, preview_config,
             propose_github_setup,

@@ -5088,6 +5088,7 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
         metadata = {"mobile_release/api/_metadata_text.py",
                     "mobile_release/api/data/metadata-text-help-v1.json",
                     "mobile_release/metadata_text.py", "mobile_release/metadata_text_edit.py",
+                    "mobile_release/api/_release_version.py",
                     "mobile_release/api/_environment.py", "mobile_release/toolchain_policy.py",
                     "mobile_release/_desktop_environment_protocol.py", "mobile_release/_desktop_environment_control.py",
                     "mobile_release/_desktop_environment_engine.py", "mobile_release/environment_diagnostics.py",
@@ -5098,7 +5099,7 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 patch.object(helper.subprocess, "run", side_effect=forbidden), \
                 patch.object(helper.subprocess, "Popen", side_effect=forbidden):
             inventory = helper.workflow_core_inventory(SOURCE)
-            self.assertEqual(len(inventory), 83)
+            self.assertEqual(len(inventory), 84)
             self.assertTrue(metadata <= {row["path"] for row in inventory})
             helper.validate_gtk_core_inventory(inventory)
             with patch.multiple(helper, Path=PurePosixPath, ordinary=forbidden, hash_file=forbidden,
@@ -5126,15 +5127,18 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                     "mobile_release/metadata_text.py", "mobile_release/metadata_text_edit.py"}
         environment = {"mobile_release/api/_environment.py", "mobile_release/toolchain_policy.py"}
         diagnostics = {"mobile_release/_desktop_environment_protocol.py", "mobile_release/_desktop_environment_control.py",
-                       "mobile_release/_desktop_environment_engine.py", "mobile_release/environment_diagnostics.py",
-                       "mobile_release/environment_diagnostics_tools.py"}
+                        "mobile_release/_desktop_environment_engine.py", "mobile_release/environment_diagnostics.py",
+                        "mobile_release/environment_diagnostics_tools.py"}
+        release_version = {"mobile_release/api/_release_version.py"}
         inventory = [{"path": name, "size": 1, "sha256": "4" * 64} for name in helper.GTK_CORE_PATHS]
-        stale = [row for row in inventory if row["path"] not in metadata | environment | diagnostics]
-        pre_environment = [row for row in inventory if row["path"] not in environment | diagnostics]
-        pre_diagnostics = [row for row in inventory if row["path"] not in diagnostics]
+        stale = [row for row in inventory if row["path"] not in metadata | environment | diagnostics | release_version]
+        pre_environment = [row for row in inventory if row["path"] not in environment | diagnostics | release_version]
+        pre_diagnostics = [row for row in inventory if row["path"] not in diagnostics | release_version]
+        pre_version = [row for row in inventory if row["path"] not in release_version]
         self.assertEqual(len(stale), 72)
         self.assertEqual(len(pre_environment), 76)
         self.assertEqual(len(pre_diagnostics), 78)
+        self.assertEqual(len(pre_version), 83)
         extra = [*inventory, {"path": "mobile_release/unreviewed.py", "size": 1, "sha256": "4" * 64}]
         context, forbidden = self.context(), self.forbidden
         before = deepcopy(context)
@@ -5144,11 +5148,11 @@ class GitHubTLSCIIntegrationTests(unittest.TestCase):
                 run=forbidden, tools=forbidden), \
                 patch.object(helper.subprocess, "run", side_effect=forbidden), \
                 patch.object(helper.subprocess, "Popen", side_effect=forbidden):
-            for value, count in ((stale, 72), (pre_environment, 76), (pre_diagnostics, 78), (extra, 84)):
+            for value, count in ((stale, 72), (pre_environment, 76), (pre_diagnostics, 78), (pre_version, 83), (extra, 85)):
                 with self.subTest(count=count), self.assertRaises(helper.CheckFailure) as refused:
                     helper.prepare_github_tls_context(context, value)
                 self.assertEqual(str(refused.exception),
-                    f"Reviewed core inventory count differs: expected 83 files, observed {count}")
+                    f"Reviewed core inventory count differs: expected 84 files, observed {count}")
                 self.assertEqual(context, before)
 
     def test_tls_manifest_roles_source_ca_ssl_and_file_bounds_are_closed_data(self):

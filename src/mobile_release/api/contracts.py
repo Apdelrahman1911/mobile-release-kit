@@ -37,6 +37,19 @@ class Assurance(TypedDict):
     releaseReadiness: Literal["unknown"]
 
 
+class ObservedReleaseVersion(TypedDict):
+    name: str
+    build: int
+
+
+class ReleaseVersionObservationResult(TypedDict):
+    schemaVersion: Literal[1]
+    source: str
+    version: ObservedReleaseVersion
+    observationScope: Literal["single-request-non-atomic"]
+    assurance: Assurance
+
+
 EnvironmentPlatform = Literal["android", "ios"]
 EnvironmentOperation = Literal["build", "artifact-validation"]
 EnvironmentRole = Literal["android-jdk", "android-gradle-wrapper", "android-sdk", "android-bundletool",

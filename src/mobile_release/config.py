@@ -113,6 +113,7 @@ REQUIRED_ROOT_SECTIONS = {
     "projectChecks",
 }
 MAX_CONFIG_BYTES = 512 * 1024
+MAX_VERSION_BYTES = 64 * 1024
 
 
 def _section_data(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -588,6 +589,35 @@ class ReleaseVersion:
     build: int
 
 
+def release_version_from_values(
+    values: dict[str, str], *, name_key: str, build_key: str,
+    ios_enabled: bool, source_label: str,
+) -> ReleaseVersion:
+    """Shared release policy over parsed DATA; source_label is error context only.
+
+    File admission belongs to the caller. No path is resolved or read here, and
+    desktop callers must translate policy errors at their non-reflective boundary.
+    """
+    if name_key not in values:
+        raise ConfigurationError(f"version source does not contain {name_key}: {source_label}")
+    if build_key not in values:
+        raise ConfigurationError(f"version source does not contain {build_key}: {source_label}")
+    name = values[name_key]
+    if len(name) > 64 or not VERSION_RE.fullmatch(name):
+        raise ConfigurationError(f"invalid marketing version {name!r}; use dotted numeric form")
+    if ios_enabled and not IOS_MARKETING_VERSION_RE.fullmatch(name):
+        raise ConfigurationError(
+            "iOS marketing version must contain two or three dot-separated numeric components"
+        )
+    build_text = values[build_key]
+    if not re.fullmatch(r"[1-9][0-9]*", build_text):
+        raise ConfigurationError(f"{build_key} must be a canonical positive base-10 integer")
+    build = int(build_text, 10)
+    if build < 1 or build > 2_100_000_000:
+        raise ConfigurationError(f"{build_key} must be between 1 and 2100000000")
+    return ReleaseVersion(name=name, build=build)
+
+
 @dataclass(frozen=True)
 class ReleaseConfig:
     path: Path
@@ -641,26 +671,10 @@ class ReleaseConfig:
         spec = self.section("version")
         path = self.project_path(spec["source"])
         values = parse_key_value_file(path)
-        name_key = spec["nameKey"]
-        build_key = spec["buildKey"]
-        if name_key not in values:
-            raise ConfigurationError(f"version source does not contain {name_key}: {path}")
-        if build_key not in values:
-            raise ConfigurationError(f"version source does not contain {build_key}: {path}")
-        name = values[name_key]
-        if len(name) > 64 or not VERSION_RE.fullmatch(name):
-            raise ConfigurationError(f"invalid marketing version {name!r}; use dotted numeric form")
-        if self.platform_enabled("ios") and not IOS_MARKETING_VERSION_RE.fullmatch(name):
-            raise ConfigurationError(
-                "iOS marketing version must contain two or three dot-separated numeric components"
-            )
-        build_text = values[build_key]
-        if not re.fullmatch(r"[1-9][0-9]*", build_text):
-            raise ConfigurationError(f"{build_key} must be a canonical positive base-10 integer")
-        build = int(build_text, 10)
-        if build < 1 or build > 2_100_000_000:
-            raise ConfigurationError(f"{build_key} must be between 1 and 2100000000")
-        return ReleaseVersion(name=name, build=build)
+        return release_version_from_values(
+            values, name_key=spec["nameKey"], build_key=spec["buildKey"],
+            ios_enabled=self.platform_enabled("ios"), source_label=str(path),
+        )
 
     def commands(self, phase: str) -> list[list[str]]:
         return [list(command) for command in self.data.get("projectChecks", {}).get(phase, [])]
@@ -741,14 +755,19 @@ def parse_key_value_file(path: Path) -> dict[str, str]:
         raise ConfigurationError(f"version source not found: {path}")
     if path.is_symlink():
         raise ConfigurationError(f"version source must not be a symlink: {path}")
-    if path.stat().st_size > 64 * 1024:
+    if path.stat().st_size > MAX_VERSION_BYTES:
         raise ConfigurationError(f"version source is unexpectedly large: {path}")
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
         raise ConfigurationError(f"version source must be UTF-8: {path}") from error
+    return parse_key_value_text(text)
+
+
+def parse_key_value_text(text: str) -> dict[str, str]:
+    """Pure legacy version-file grammar; callers own UTF-8/byte/file admission."""
     result: dict[str, str] = {}
-    for number, raw_line in enumerate(lines, start=1):
+    for number, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith(("#", "//", ";")):
             continue

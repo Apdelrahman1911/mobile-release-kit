@@ -21,13 +21,15 @@ from ._preview import preview_config, suggest_config
 from ._github_setup import propose_github_setup
 from ._metadata_text import (metadata_text_observation_available, observe_metadata_text,
                              validate_metadata_text)
+from ._release_version import (observe_release_version,
+                              release_version_observation_available)
 from ._snapshot import project_snapshot, snapshot_available
 from .contracts import ApiError, CapabilitiesResult, ValidateResult, assurance, issue
 
 __all__ = ["ApiError", "execute"]
 METHODS = ("capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
            "github.setup.propose", "credentials.assess", "metadata.text.observe", "metadata.text.validate",
-           "environment.requirements")
+           "environment.requirements", "release.version.observe")
 _FUTURE_ACTIONS = (
     "project.initialize", "config.save", "doctor", "preflight.offline",
     "preflight.signing", "preflight.online", "android.build", "ios.build",
@@ -45,11 +47,14 @@ def capabilities() -> CapabilitiesResult:
         "hostPlatform": host, "mode": "read-only-foundation",
         "methods": [
             {"method": name, "available": (snapshot_available() if name == "project.snapshot" else
-                                           metadata_text_observation_available() if name == "metadata.text.observe" else True),
+                                           metadata_text_observation_available() if name == "metadata.text.observe" else
+                                           release_version_observation_available() if name == "release.version.observe" else True),
              "reason": ("Static snapshots are unavailable on this profile; the staged Windows reader awaits independent ABI/native qualification."
                         if name == "project.snapshot" and not snapshot_available()
-                        else "Selected public text observation is unavailable on this platform."
-                        if name == "metadata.text.observe" and not metadata_text_observation_available()
+                         else "Selected public text observation is unavailable on this platform."
+                         if name == "metadata.text.observe" and not metadata_text_observation_available()
+                         else "Saved release-version observation is unavailable on this platform."
+                         if name == "release.version.observe" and not release_version_observation_available()
                         else "Pure supplied-input assessment only; no selected files, native or service verification."
                         if name == "credentials.assess"
                         else "Implemented passive API; no native, signing or Store verification.")}
@@ -95,6 +100,8 @@ def execute(method: str, params: dict[str, Any]) -> dict[str, Any]:
         return observe_metadata_text(params)
     if method == "metadata.text.validate":
         return validate_metadata_text(params)
+    if method == "release.version.observe":
+        return observe_release_version(params)
     if type(params) is not dict or any(type(key) is not str for key in params):
         raise ApiError("invalid_params", "Method parameters must be a JSON object with string keys")
     allowed = {"project.snapshot": {"root", "configPath"}, "config.validate": {"draft"},

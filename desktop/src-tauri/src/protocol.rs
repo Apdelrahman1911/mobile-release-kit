@@ -12,7 +12,7 @@ pub const DEPTH_LIMIT: usize = 32;
 pub const NODE_LIMIT: usize = 20_000;
 
 #[derive(Clone, Copy, Debug)]
-pub enum Method { Capabilities, Catalog, ProjectSnapshot, ValidateConfig, SuggestConfig, PreviewConfig, ProposeGithubSetup, AssessCredentials, MetadataTextObserve, MetadataTextValidate, EnvironmentRequirements }
+pub enum Method { Capabilities, Catalog, ProjectSnapshot, ValidateConfig, SuggestConfig, PreviewConfig, ProposeGithubSetup, AssessCredentials, MetadataTextObserve, MetadataTextValidate, EnvironmentRequirements, ReleaseVersionObserve }
 impl Method {
     pub fn name(self) -> &'static str {
         match self {
@@ -24,6 +24,7 @@ impl Method {
             Self::MetadataTextObserve => "metadata.text.observe",
             Self::MetadataTextValidate => "metadata.text.validate",
             Self::EnvironmentRequirements => "environment.requirements",
+            Self::ReleaseVersionObserve => "release.version.observe",
         }
     }
 }
