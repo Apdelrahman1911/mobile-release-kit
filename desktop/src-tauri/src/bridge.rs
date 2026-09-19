@@ -149,6 +149,22 @@ impl DesktopBridge {
         }
         Ok(())
     }
+    /// Separate offline fixture permit and actual held-root identity. Never
+    /// upgrade the diagnostics fixture's identity:None registration in place.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    pub(crate) fn offline_fixture_registration(&self,
+        permit: &crate::offline_preflight_owner::OfflineRegistrationPermit) -> Result<(), BridgeError> {
+        let (id, root, generation) = permit.validate(&self.preflight)?;
+        let mut projects = self.projects.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+        if !projects.is_empty() || self.project_generation.load(Ordering::SeqCst) != 1 || generation != 2 {
+            return Err(BridgeError::invalid());
+        }
+        let view = Project { id: id.into(), name: "Synthetic saved offline project".into(), path: root.path.to_string_lossy().into_owned() };
+        projects.insert(id.into(), RegisteredProject { view, root: root.path.clone(), identity: Some(root.identity) });
+        self.project_generation.store(generation, Ordering::SeqCst);
+        Ok(())
+    }
     pub fn open_config_edit(&self, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
         self.preflight.ensure_idle()?;
         self.diagnostics.ensure_idle()?;

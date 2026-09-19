@@ -23,7 +23,7 @@ const FINALITY: Duration = Duration::from_secs(10);
 #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
     any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
 #[path = "environment_diagnostics_hosted_tests.rs"]
-mod hosted_tests;
+pub(crate) mod hosted_tests;
 #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
     any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
 pub(crate) use hosted_tests::{RegistrationPermit as EnvironmentRegistrationPermit, RuntimeSelection as EnvironmentRuntimeSelection};

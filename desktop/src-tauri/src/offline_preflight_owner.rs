@@ -29,7 +29,12 @@ impl Clocks {
 }
 #[derive(Clone)]
 pub(crate) struct OfflinePreflightOwner { inner: Arc<Inner> }
-struct Inner { runtime: RuntimeConfig, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify, poisoned: AtomicBool }
+struct Inner {
+    runtime: RuntimeConfig, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify, poisoned: AtomicBool,
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    fixture: Mutex<Option<std::sync::Weak<tests::hosted::Permit>>>,
+}
 struct Registry {
     revision: u32, exhausted: bool, disabled: bool, stopping: bool, document_lost: bool,
     capability: Availability, prepared: Option<Prepared>, active: Option<Active>, last: Option<wire::Projection>,
@@ -67,6 +72,9 @@ struct Session {
     manager: AsyncMutex<Option<JoinHandle<()>>>, observer: AsyncMutex<Option<JoinHandle<bool>>>,
     driver_return: Mutex<Option<Result<(), tokio::task::JoinError>>>, manager_return: Mutex<Option<Result<(), tokio::task::JoinError>>>,
     observer_return: Mutex<Option<Result<bool, tokio::task::JoinError>>>, watchdog_return: Mutex<Option<Result<bool, tokio::task::JoinError>>>,
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    fixture: Option<Arc<tests::hosted::Permit>>,
 }
 #[derive(Default)]
 struct Startup { attempted: bool, returned: bool, failed: bool, child: Option<Child> }
@@ -125,7 +133,11 @@ impl OfflinePreflightOwner {
         let (changes, _) = watch::channel(0);
         Self { inner: Arc::new(Inner { runtime, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
-            prepared: None, active: None, last: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false) }) }
+            prepared: None, active: None, last: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
+            #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            fixture: Mutex::new(None),
+        }) }
     }
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
     pub(crate) fn stopping(&self) -> bool { self.inner.lock().stopping }
@@ -201,7 +213,14 @@ impl OfflinePreflightOwner {
             resources: AsyncMutex::new(Resources { frames: Some(receiver), ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())), error: Arc::new(AsyncMutex::new(Pipe::default())),
             driver: AsyncMutex::new(None), watchdog: Mutex::new(None), manager: AsyncMutex::new(None), observer: AsyncMutex::new(None),
-            driver_return: Mutex::new(None), manager_return: Mutex::new(None), observer_return: Mutex::new(None), watchdog_return: Mutex::new(None) });
+            driver_return: Mutex::new(None), manager_return: Mutex::new(None), observer_return: Mutex::new(None), watchdog_return: Mutex::new(None),
+            #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+                any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+            fixture: self.inner.fixture.lock().ok().and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade)),
+        });
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        if let Some(permit) = &owner.fixture { permit.bind(&owner)?; }
         let (release, enter) = oneshot::channel();
         // Every new roster slot precedes publication/spawn. No hosted-fixture
         // alternate bootstrap, other-owner permission or caller-owned runner.
@@ -315,7 +334,13 @@ fn set_failure_outcome(p: &mut RunProjection) {
     });
 }
 impl Inner {
-    fn qualified(&self) -> bool { NATIVE_QUALIFIED && RUNTIME_QUALIFIED }
+    fn qualified(&self) -> bool {
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        if self.fixture.lock().ok().and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade))
+            .is_some_and(|permit| permit.permits(self)) { return true; }
+        NATIVE_QUALIFIED && RUNTIME_QUALIFIED
+    }
     fn lock(&self) -> MutexGuard<'_, Registry> {
         match self.registry.lock() { Ok(r) => r, Err(error) => { self.poisoned.store(true, Ordering::SeqCst); error.into_inner() } }
     }
@@ -568,6 +593,15 @@ fn spawn_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime) {
     {
         inner.endpoint(owner);
         if *owner.stop.borrow() || Instant::now() >= owner.clocks.work { return; }
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+            any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        if let Some(permit) = &owner.fixture {
+            // The independent offline permit can only check the fixed actual
+            // resolver tuple. It cannot supply another bootstrap/argv/cwd.
+            if permit.prepare_spawn(owner, &runtime).is_err() {
+                inner.stop(owner, Reason::RuntimeUnavailable); return;
+            }
+        }
         let mut command = Command::new(&runtime.python);
         command.args(["-I", "-S", "-B"]).arg(&runtime.bootstrap).arg(&runtime.core);
         command.current_dir(&runtime.cwd).env_clear().env("LANG", "C").env("LC_ALL", "C")
@@ -804,9 +838,15 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
     // Final observer owns no unjoined child/IO/acquisition at this point. Its
     // ORIGINAL handle remains with the watchdog until its actual Ready join.
     { let mut r = inner.lock(); inner.bump(&mut r); }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    if let Some(permit) = &owner.fixture { permit.observer_return(&owner, settled).await; }
     guard.complete = true; settled
 }
 
 #[cfg(test)]
 #[path = "offline_preflight_owner_tests.rs"]
 mod tests;
+#[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+pub(crate) use tests::hosted::RegistrationPermit as OfflineRegistrationPermit;

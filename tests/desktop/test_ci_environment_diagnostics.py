@@ -1,9 +1,10 @@
-"""Pure environment-native CI contracts. No tools, native owners or fixture IO.
+"""Pure environment/offline-native CI contracts. No tools, native owners or fixture IO.
 
 All receipt values below are deliberately invented consumer data, never native
 evidence. They exercise the strict parser and scope boundary without executing
 main(), real platform admission, Cargo, subprocesses, cleanup or the hosted fixture.
 CLT preparation tests use invented host/metadata values and replace every lstat.
+Offline CLI11/native rows are invented parser inputs, not physical verification.
 """
 from __future__ import annotations
 
@@ -239,6 +240,130 @@ def outer_value(context: dict, code: int = 0) -> dict:
     return {"schemaVersion": 1, "scope": helper.ENVIRONMENT_NATIVE_SCOPE,
         **{key: context[key] for key in ("sourceSha", "platform", "runId", "attempt")}, "originalWait": True,
         "exitCode": code, "outputWritersClosed": True, "statusWriterCloseGate": "original-step-success-required", "fileLimitBytes": 1048576}
+
+
+def offline_binding_environment(*, platform: str = "linux", ref: str | None = None, event: str = "push") -> dict:
+    route = helper.OFFLINE_NATIVE_REF if platform == "linux" else helper.OFFLINE_NATIVE_MACOS_REF
+    value = binding_environment(event, platform=platform, ref=route if ref is None else ref)
+    value["MRK_DESKTOP_HOSTED_CHECKS"] = helper.OFFLINE_NATIVE_SCOPE
+    return value
+
+
+def offline_inputs(platform: str = "linux") -> dict:
+    value = native_inputs(platform)
+    value.update(helper.environment_native_binding(offline_binding_environment(platform=platform)))
+    value.update(scope=helper.OFFLINE_NATIVE_SCOPE, bootstrapSha256="a" * 64)
+    sources = {row["path"]: row for row in value["sourceFiles"]}
+    for name in ("desktop/src-tauri/src/offline_preflight_owner.rs", "desktop/src-tauri/src/offline_preflight_owner_tests.rs",
+            "desktop/src-tauri/src/offline_preflight_protocol.rs", "tests/desktop/test_ci_environment_diagnostics.py",
+            "tests/desktop/test_native_environment_fixture_contract.py"):
+        sources[name] = {"path": name, "sha256": "4" * 64, "size": 1}
+    name = "desktop/offline_preflight_bootstrap.py"
+    sources[name] = {"path": name, "sha256": "a" * 64, "size": 1}
+    value["sourceFiles"] = [sources[name] for name in sorted(sources)]
+    value["originalDirectories"]["offline-cli11"] = {"device": "1", "inode": "99", "mode": stat.S_IFDIR | 0o700,
+                                                      "uid": 1001, "gid": 1001}
+    value["savedConfigs"] = helper.offline_saved_configs(value["python"])
+    return value
+
+
+def offline_context(platform: str = "linux") -> dict:
+    inputs = offline_inputs(platform)
+    return {**{key: inputs[key] for key in ("root", "source", "python", "platform", "sourceSha", "sourceTree",
+        "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt", "repository", "event", "ref")},
+        "executionScope": helper.OFFLINE_NATIVE_SCOPE, "environmentInputs": inputs,
+        "environmentInputsSha256": hashlib.sha256(helper.canonical_json(inputs) + b"\n").hexdigest()}
+
+
+def offline_cli11_values(context: dict) -> tuple[dict, dict, dict]:
+    common = {"schemaVersion": 1, "scope": helper.OFFLINE_NATIVE_SCOPE,
+        "inputsSha256": context["environmentInputsSha256"],
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "platform")},
+        "startedNs": 1_000_000_000, "deadlineNs": 91_000_000_000}
+    control = {**common, "python": context["python"], "source": context["source"], "root": context["root"],
+               "core": context["source"] + "/src"}
+    progress = {**common, "phase": "started", "selectedIds": list(helper.OFFLINE_CLI11_IDS)}
+    result = {**common, "finishedNs": 2_000_000_000, "status": "passed", "physicalFinality": True, "selected": 11,
+        "tests": [{"id": name, "status": "passed", "commands": 1, "invocations": 1, "guards": 1}
+                  for name in helper.OFFLINE_CLI11_IDS],
+        "savedConfigs": [{"case": row["case"], "sha256": row["sha256"]} for row in context["environmentInputs"]["savedConfigs"]],
+        "reason": "none"}
+    return control, progress, result
+
+
+def offline_outer(context: dict, *, phase: str = "environment-native", code: int = 0) -> dict:
+    return {**outer_value(context, code), "scope": helper.OFFLINE_NATIVE_SCOPE, "phase": phase}
+
+
+def offline_case_value(context: dict, case: str) -> dict:
+    # Deliberately invented complete DTOs, independent of any owner invocation.
+    saved = next(row for row in context["environmentInputs"]["savedConfigs"] if row["case"] == case)
+    outcome, reason, marker = {
+        "PF01": ("complete", "none", "pass\n"), "PF02": ("complete", "none", "exit-7\n"),
+        "PF03": ("failed", "command-incomplete", ""), "PF04a": ("refused", "saved-config-changed", ""),
+        "PF04b": ("refused", "project-admission-refused", ""), "PF05a": ("failed", "input-limit", ""),
+        "PF05b": ("failed", "result-limit", ""), "PF06": ("cancelled", "cancelled", "active\n"),
+        "PF07": ("complete", "none", "pass\n"),
+    }[case]
+    identity = {"projectId": f"offline-native-{case}", "draftRevision": 0, "baselineGeneration": 2,
+        "savedConfig": {"bytes": saved["size"], "sha256": saved["sha256"]}, "platform": "android", "operation": "offline-preflight"}
+    report = None
+    if outcome == "complete":
+        status = "FAIL" if case == "PF02" else "PASS"
+        report = {"schemaVersion": 1, "scope": "saved-offline-android-no-core-build", "usedConfig": identity["savedConfig"],
+            "findings": [{"ordinal": 0, "check": "configured-project-check", "status": status,
+                          "message": "configured-project-check", "projectCheckIndex": 0}],
+            "summary": {"total": 1, "shown": 1, "omitted": 0,
+                        "counts": {name: int(name == status) for name in helper.OFFLINE_CORE_STATUSES}},
+            "limitations": list(helper.OFFLINE_RESULT_LIMITATIONS)}
+    dispatched = case not in {"PF04a", "PF04b", "PF05a", "PF05b"}
+    core = {"schemaVersion": 1, "context": identity, "outcome": outcome, "reason": reason, "result": report,
+        "lifetime": {"complete": True, "fatal": False, "contained": True, "commandDispatched": dispatched,
+            "commands": 1 if dispatched else 0, "profileCalls": 0, "inputClosed": True, "handlersRestored": True,
+            "invocationClosed": True, "stopObserved": "cancelled" if case == "PF06" else "none"}}
+    ordinal = helper.OFFLINE_SAVED_CASES.index(case)
+    projection = {"operationId": f"{ordinal + 1:032x}", "ownerGeneration": f"{ordinal + 21:032x}", "context": identity,
+        "phase": "unknown" if case == "PF07" else "terminal", "intentUsable": False,
+        "outcome": "unknown" if case == "PF07" else outcome, "reason": "cleanup-unknown" if case == "PF07" else reason,
+        "result": None if case == "PF07" else report}
+    native = original_resources(case)
+    native["disabled"] = case == "PF07"
+    hold = {"observerHeldNs": 4_000_000_000, "firstStopNs": 5_000_000_000, "unknownObservedNs": 15_000_000_000,
+            "completeBeforeHold": True, "originalWatchdogOnly": True} if case == "PF07" else None
+    reciprocal = {"sameOwnerRecovered": True, "replayRejected": True, "foreignCancelRejected": True,
+        "passiveRefused": True, "diagnosticsRefusal": "unqualified", "writerRefused": True, "githubRefusal": "unqualified",
+        "privateSessionAbsent": True, "firstStopUnchanged": True} if case == "PF06" else None
+    return {"id": case, "classification": "real-fixed-bootstrap", "assertion": "passed", "projection": projection, "core": core,
+        "native": native, "files": {"setupClosed": True, "scriptClosed": True, "laterClosed": True,
+            "pendingClosed": True if case == "PF04b" else None, "rootsClosed": True},
+        "script": {"marker": marker, "secondExecuted": False, "expectedExit": 7 if case == "PF02" else
+            0 if case in {"PF01", "PF07"} else None, "pendingPreserved": case == "PF04b", "redacted": True},
+        "timing": {"workMs": 1_800_000, "hardMs": 1_810_000, "settlementMs": 10_000,
+            "firstStopNs": None if case in {"PF01", "PF02"} else 5_000_000_000, "hold": hold}, "reciprocal": reciprocal}
+
+
+def offline_result(platform: str = "linux") -> tuple[dict, dict, str]:
+    context = offline_context(platform)
+    digest = "f" * 64
+    gates = {"id": "PG01", "classification": "inert-document-gates", "assertion": "passed",
+        "gates": [{"gate": gate, "prepareRefused": True, "startRefused": True, "intentBurned": True, "originalAllocated": False}
+                  for gate in ("retained-private", "existing-work", "recovery-attention")],
+        "files": {"setupClosed": True, "scriptClosed": True, "laterClosed": True, "pendingClosed": None, "rootsClosed": True}}
+    aggregate = {"id": "PV01", "classification": "synthetic-reader-vectors", "assertion": "passed",
+        "aggregateBytes": 66000, "stdoutBytes": 33000, "stderrBytes": 33000, "stdoutFailed": True, "stderrFailed": True,
+        "originalCloses": 2, "unknown": True, "reportPublished": False}
+    late = {"id": "PV02", "classification": "synthetic-reader-vectors", "assertion": "passed",
+        "terminalBeforeStderr": True, "lateStderrUnknown": True, "unfinishedEofPending": True,
+        "unfinishedEofReportPublished": False, "originalReadersReturned": 3, "originalCloses": 3}
+    return context, {"schemaVersion": 1, "scope": helper.OFFLINE_NATIVE_SCOPE,
+        "inputsSha256": context["environmentInputsSha256"], "invocationSha256": digest,
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowSha", "runId", "attempt")},
+        "target": helper.TARGETS[platform], "caseOrder": list(helper.OFFLINE_NATIVE_CASES),
+        "cases": [gates, aggregate, late, *(offline_case_value(context, name) for name in helper.OFFLINE_SAVED_CASES)],
+        "unexecuted": [{"case": "full-work-expiry", "reason": "not-run"},
+                       {"case": "qualified-diagnostics-busy", "reason": "qualification-disabled"},
+                       {"case": "qualified-github-busy", "reason": "qualification-disabled"}],
+        "classification": "finite-complete-with-expected-finality-unknown"}, digest
 
 
 class EnvironmentNativeCIContracts(unittest.TestCase):
@@ -696,19 +821,25 @@ class EnvironmentNativeCIContracts(unittest.TestCase):
         self.assertIn("RLIMIT_FSIZE", gate)
         self.assertIn("os.fstat", gate)
 
-    def test_workflow_is_two_fixed_profiles_one_compile_and_preowned_original_wait(self) -> None:
+    def test_workflow_has_closed_scope_routes_one_compile_and_preowned_original_wait(self) -> None:
         workflow = (SOURCE / helper.ENVIRONMENT_NATIVE_WORKFLOW).read_text(encoding="utf-8")
         mac = '{"include":[{"platform":"macos","runner":"macos-26"}]}'
+        linux = '{"include":[{"platform":"linux","runner":"ubuntu-24.04"}]}'
         both = '{"include":[{"platform":"linux","runner":"ubuntu-24.04"},{"platform":"macos","runner":"macos-26"}]}'
-        self.assertIn("matrix: ${{ fromJSON(github.ref == '" + helper.ENVIRONMENT_NATIVE_MACOS_REF + "' && '" + mac + "' || '" + both + "') }}", workflow)
-        gate = 'case "$GITHUB_REF:$MRK_DESKTOP_PLATFORM" in'
-        pairs = helper.ENVIRONMENT_NATIVE_REF + ":linux|" + helper.ENVIRONMENT_NATIVE_REF + ":macos|" + helper.ENVIRONMENT_NATIVE_MACOS_REF + ":macos) ;;"
+        matrix = ("matrix: ${{ fromJSON((github.ref == '" + helper.ENVIRONMENT_NATIVE_MACOS_REF + "' || github.ref == '"
+                  + helper.OFFLINE_NATIVE_MACOS_REF + "') && '" + mac + "' || github.ref == '" + helper.OFFLINE_NATIVE_REF
+                  + "' && '" + linux + "' || '" + both + "') }}")
+        self.assertIn(matrix, workflow)
+        gate = 'case "$MRK_DESKTOP_HOSTED_CHECKS:$GITHUB_REF:$MRK_DESKTOP_PLATFORM" in'
+        pairs = "|".join(helper.ENVIRONMENT_NATIVE_SCOPE + ":" + ref + ":" + platform for ref, platform in
+                         ((helper.ENVIRONMENT_NATIVE_REF, "linux"), (helper.ENVIRONMENT_NATIVE_REF, "macos"),
+                          (helper.ENVIRONMENT_NATIVE_MACOS_REF, "macos"))) + ") ;;"
         self.assertIn(pairs, workflow)
         self.assertLess(workflow.index(gate), workflow.index("uses: actions/checkout@"))
         self.assertIn("*) exit 1 ;;", workflow[workflow.index(gate):workflow.index("uses: actions/checkout@")])
         fixture = (SOURCE / "desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs").read_text(encoding="utf-8")
-        self.assertIn('("' + helper.ENVIRONMENT_NATIVE_REF + '", "linux" | "macos")', fixture)
-        self.assertIn('("' + helper.ENVIRONMENT_NATIVE_MACOS_REF + '", "macos")', fixture)
+        self.assertIn('(SCOPE, "' + helper.ENVIRONMENT_NATIVE_REF + '", "linux" | "macos")', fixture)
+        self.assertIn('(SCOPE, "' + helper.ENVIRONMENT_NATIVE_MACOS_REF + '", "macos")', fixture)
         self.assertIn("contents: read", workflow)
         self.assertIn("persist-credentials: false", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
@@ -721,7 +852,7 @@ class EnvironmentNativeCIContracts(unittest.TestCase):
         setup = workflow.split(setup_marker, 1)[1].split(prepare_marker, 1)[0]
         self.assertLess(workflow.index("uses: actions/setup-python@"), workflow.index(setup_marker))
         self.assertLess(workflow.index(setup_marker), workflow.index(prepare_marker))
-        self.assertIn("if: matrix.platform == 'macos'", setup)
+        self.assertIn("if: matrix.platform == 'macos' && env.MRK_DESKTOP_HOSTED_CHECKS == 'environment-diagnostics-native-v1'", setup)
         self.assertIn("timeout-minutes: 1", setup)
         self.assertIn('"$MRK_PYTHON" -I -S -B desktop/tools/environment_macos_clt.py', setup)
         self.assertEqual(setup.count("/usr/bin/sudo -n /usr/bin/xcode-select --switch /Library/Developer/CommandLineTools </dev/null"), 1)
@@ -743,7 +874,374 @@ class EnvironmentNativeCIContracts(unittest.TestCase):
         self.assertIn('exit "$result"', workflow)
         self.assertIn("MRK_ENVIRONMENT_NATIVE_STEP_OUTCOME: ${{ steps.native.outcome }}", workflow)
         self.assertIn("path: ${{ steps.prepare.outputs.root }}/environment-native-public.json", workflow)
-        self.assertIn("if: always() && steps.prepare.outcome == 'success' && steps.native.outcome != 'skipped'", workflow)
+        self.assertIn("if: always() && steps.prepare.outcome == 'success' && (steps.native.outcome != 'skipped' || "
+                      "(env.MRK_DESKTOP_HOSTED_CHECKS == 'offline-preflight-native-v1' && steps.cli11.outcome != 'skipped'))", workflow)
+        self.assertIn("&& 'offline-preflight-native' || 'environment-diagnostics-native' }}-${{ matrix.platform }}", workflow)
+
+
+class OfflineNativeCIContracts(unittest.TestCase):
+    def assert_refused(self, action, value) -> None:
+        with self.assertRaises(helper.CheckFailure):
+            action(value)
+
+    def test_offline_scope_phases_and_two_separate_single_host_routes_are_closed(self) -> None:
+        self.assertEqual(helper.OFFLINE_NATIVE_PHASES,
+                         ("prepare", "offline-cli11", "acquire", "compile", "environment-native", "retain"))
+        self.assertEqual(helper.OFFLINE_NATIVE_CASES,
+                         ("PG01", "PV01", "PV02", "PF01", "PF02", "PF03", "PF04a", "PF04b", "PF05a", "PF05b", "PF06", "PF07"))
+        self.assertEqual(helper.ENVIRONMENT_NATIVE_SCOPES,
+                         frozenset({"environment-diagnostics-native-v1", "offline-preflight-native-v1"}))
+        for phase in helper.OFFLINE_NATIVE_PHASES:
+            helper.admit_phase(helper.OFFLINE_NATIVE_SCOPE, phase)
+        for phase in ("clean", "native", "github-tls", "workflow-owner", "metadata-owner", "windows-snapshot"):
+            self.assert_refused(lambda value: helper.admit_phase(helper.OFFLINE_NATIVE_SCOPE, value), phase)
+        self.assert_refused(lambda value: helper.admit_phase(helper.ENVIRONMENT_NATIVE_SCOPE, value), "offline-cli11")
+        self.assert_refused(lambda value: helper.admit_platform(helper.OFFLINE_NATIVE_SCOPE, value), "windows")
+        for platform in ("linux", "macos"):
+            for event in ("push", "workflow_dispatch"):
+                environment = offline_binding_environment(platform=platform, event=event)
+                self.assertEqual(helper.environment_native_binding(environment)["ref"], environment["GITHUB_REF"])
+        for ref, platform in ((helper.OFFLINE_NATIVE_REF, "macos"), (helper.OFFLINE_NATIVE_MACOS_REF, "linux"),
+                (helper.OFFLINE_NATIVE_REF + "-other", "linux"), (helper.ENVIRONMENT_NATIVE_REF, "linux"),
+                (helper.ENVIRONMENT_NATIVE_MACOS_REF, "macos"), ("refs/heads/main", "linux")):
+            self.assert_refused(helper.environment_native_binding, offline_binding_environment(platform=platform, ref=ref))
+        for scope in ("offline-preflight-native", "offline-preflight-native-v2", [], None):
+            self.assert_refused(helper.environment_native_profile, scope)
+
+    def test_shared_source_zip_catalog_contains_all_five_saved_offline_members_and_stays_exact(self) -> None:
+        members = {"mobile_release/_desktop_preflight_budget.py", "mobile_release/_desktop_preflight_control.py",
+            "mobile_release/_desktop_preflight_engine.py", "mobile_release/_desktop_preflight_protocol.py",
+            "mobile_release/desktop_preflight.py"}
+        self.assertTrue(members <= set(helper.GTK_CORE_PATHS))
+        self.assertEqual(helper.GTK_CORE_PATHS, tuple(sorted(set(helper.GTK_CORE_PATHS))))
+        for inputs in (native_inputs(), offline_inputs()):
+            helper.validate_gtk_core_inventory(inputs["coreFiles"])
+            original = inputs["coreFiles"]
+            variants = [original[:-1], original + [{"path": "mobile_release/unreviewed.py", "sha256": "4" * 64, "size": 1}],
+                        list(reversed(original)), [*original[:-1], deepcopy(original[0])]]
+            for rows in variants:
+                self.assert_refused(helper.validate_gtk_core_inventory, rows)
+        old_catalog = [row for row in offline_inputs()["coreFiles"] if row["path"] not in members]
+        self.assert_refused(helper.validate_gtk_core_inventory, old_catalog)
+
+    def test_saved_configs_are_exact_nine_bound_utf8_texts_not_reserialized_native_guesses(self) -> None:
+        inputs = offline_inputs()
+        self.assertEqual(helper.validate_environment_inputs(inputs), inputs)
+        self.assertEqual([row["case"] for row in inputs["savedConfigs"]],
+                         ["PF01", "PF02", "PF03", "PF04a", "PF04b", "PF05a", "PF05b", "PF06", "PF07"])
+        for row in inputs["savedConfigs"]:
+            raw = row["rawText"].encode("utf-8")
+            self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (row["size"], row["sha256"]))
+            parsed = json.loads(raw)
+            self.assertTrue(parsed["android"]["enabled"])
+            self.assertFalse(parsed["ios"]["enabled"])
+            command = parsed["projectChecks"]["preflight"]
+            if row["case"] == "PF03":
+                self.assertEqual(command, [["./offline-native-executable-does-not-exist"]])
+            else:
+                mode = "active" if row["case"] == "PF06" else "nonzero" if row["case"] == "PF02" else "pass"
+                self.assertEqual(command[0], [inputs["python"], "-I", "-S", "-B", "check.py", mode])
+                self.assertEqual(len(command), 2 if row["case"] == "PF02" else 1)
+                if row["case"] == "PF02":
+                    self.assertEqual(command[1], [inputs["python"], "-I", "-S", "-B", "check.py", "later"])
+        variants = [None, inputs["savedConfigs"][:-1], inputs["savedConfigs"] + [deepcopy(inputs["savedConfigs"][-1])],
+                    list(reversed(inputs["savedConfigs"]))]
+        for key, bad in (("case", "PF08"), ("rawText", "{}\n"), ("sha256", "f" * 64), ("size", True)):
+            rows = deepcopy(inputs["savedConfigs"])
+            rows[0][key] = bad
+            variants.append(rows)
+        reserialized = deepcopy(inputs["savedConfigs"])
+        row = reserialized[0]
+        row["rawText"] = json.dumps(json.loads(row["rawText"]), sort_keys=True) + "\n"
+        row["size"] = len(row["rawText"].encode())
+        row["sha256"] = hashlib.sha256(row["rawText"].encode()).hexdigest()
+        variants.append(reserialized)
+        for rows in variants:
+            self.assert_refused(helper.validate_environment_inputs, {**inputs, "savedConfigs": rows})
+        for key, bad in (("bootstrapSha256", "4" * 64), ("scope", helper.ENVIRONMENT_NATIVE_SCOPE),
+                         ("python", "/synthetic/other-python"), ("ref", helper.OFFLINE_NATIVE_MACOS_REF)):
+            self.assert_refused(helper.validate_environment_inputs, {**inputs, key: bad})
+        for field in ("savedConfigs", "sourceFiles", "originalDirectories"):
+            changed = deepcopy(inputs)
+            if field == "savedConfigs":
+                del changed[field]
+            elif field == "sourceFiles":
+                changed[field] = [row for row in changed[field] if row["path"] != "desktop/offline_preflight_bootstrap.py"]
+            else:
+                del changed[field]["offline-cli11"]
+            self.assert_refused(helper.validate_environment_inputs, changed)
+        for present in (None, [], inputs["savedConfigs"]):
+            self.assert_refused(helper.validate_environment_inputs, {**native_inputs(), "savedConfigs": present})
+
+    def test_offline_public_bindings_have_only_digests_and_no_private_configs_or_paths(self) -> None:
+        context = offline_context()
+        value = helper.environment_public_bindings(context["environmentInputs"], context["environmentInputsSha256"])
+        self.assertEqual(value["scope"], "desktop-offline-preflight-native-only-v1")
+        self.assertEqual(value["entry"], "offline_preflight_owner::tests::hosted::hosted_offline_preflight_original_resources")
+        self.assertEqual(value["savedConfigs"], [{key: row[key] for key in ("case", "size", "sha256")}
+                                               for row in context["environmentInputs"]["savedConfigs"]])
+        encoded = helper.canonical_json(value)
+        for private in (context["root"], context["source"], context["python"], "rawText", "projectChecks"):
+            self.assertNotIn(private.encode(), encoded)
+        self.assertEqual(value["notVerified"], list(helper.OFFLINE_NATIVE_NOT_VERIFIED))
+
+    def test_cli11_control_progress_and_pass_require_original_clock_exact_roster_and_saved_policies(self) -> None:
+        self.assertEqual(len(helper.OFFLINE_CLI11_IDS), 11)
+        self.assertEqual(len(set(helper.OFFLINE_CLI11_IDS)), 11)
+        self.assertEqual(helper.OFFLINE_CLI11_NS, 90_000_000_000)
+        for platform in ("linux", "macos"):
+            context = offline_context(platform)
+            control, progress, result = offline_cli11_values(context)
+            self.assertEqual(helper.validate_offline_cli11_control(control, context), control)
+            self.assertEqual(helper.validate_offline_cli11_progress(progress, context, control), progress)
+            self.assertEqual(helper.validate_offline_cli11_result(result, context, control, success=True), result)
+        context = offline_context()
+        control, progress, result = offline_cli11_values(context)
+        for key, bad in (("startedNs", 0), ("startedNs", True), ("deadlineNs", 92_000_000_000),
+                ("sourceSha", "3" * 40), ("core", context["source"] + "/other"), ("root", "/synthetic/other"),
+                ("python", "/synthetic/other-python"), ("scope", helper.ENVIRONMENT_NATIVE_SCOPE)):
+            self.assert_refused(lambda value: helper.validate_offline_cli11_control(value, context), {**control, key: bad})
+        for key, bad in (("phase", "finished"), ("selectedIds", list(reversed(helper.OFFLINE_CLI11_IDS))),
+                         ("startedNs", control["startedNs"] + 1)):
+            self.assert_refused(lambda value: helper.validate_offline_cli11_progress(value, context, control), {**progress, key: bad})
+        mutations = [(("selected",), 10), (("selected",), True), (("physicalFinality",), False),
+            (("finishedNs",), result["deadlineNs"] + 1), (("deadlineNs",), result["deadlineNs"] + 1),
+            (("startedNs",), result["startedNs"] + 1), (("sourceSha",), "3" * 40),
+            (("inputsSha256",), "0" * 64), (("status",), "skipped"), (("reason",), "/private/raw/error"),
+            (("tests",), result["tests"][:-1]), (("tests",), list(reversed(result["tests"]))),
+            (("tests", 0, "status"), "skipped"), (("tests", 0, "commands"), True),
+            (("tests", 10, "status"), "failed"), (("savedConfigs",), result["savedConfigs"][:-1]),
+            (("savedConfigs", 0, "sha256"), "f" * 64)]
+        for path, bad in mutations:
+            changed = deepcopy(result)
+            at = changed
+            for key in path[:-1]:
+                at = at[key]
+            at[path[-1]] = bad
+            with self.subTest(path=path):
+                self.assert_refused(lambda value: helper.validate_offline_cli11_result(value, context, control, success=True), changed)
+        failed = {**result, "status": "failed", "reason": "test-failed", "tests": [{**result["tests"][0], "status": "failed"}]}
+        self.assertEqual(helper.validate_offline_cli11_result(failed, context, control, success=False), failed)
+        self.assert_refused(lambda value: helper.validate_offline_cli11_result(value, context, control, success=True), failed)
+        admission = {**failed, "tests": [], "savedConfigs": [], "reason": "admission-failed"}
+        self.assertEqual(helper.validate_offline_cli11_result(admission, context, control, success=False), admission)
+
+    def test_cli11_outer_row_cannot_replace_original_success_close_or_replay_native_phase(self) -> None:
+        context = offline_context()
+        for phase in ("offline-cli11", "environment-native"):
+            outer = offline_outer(context, phase=phase)
+            validate = lambda value: helper.validate_environment_outer(value, context, step_outcome="success", success=True, phase=phase)
+            self.assertEqual(validate(outer), outer)
+            for key, bad in (("phase", "environment-native" if phase == "offline-cli11" else "offline-cli11"),
+                    ("originalWait", False), ("outputWritersClosed", False), ("exitCode", 1), ("exitCode", True),
+                    ("sourceSha", "3" * 40), ("statusWriterCloseGate", "row-written")):
+                self.assert_refused(validate, {**outer, key: bad})
+            self.assert_refused(lambda value: helper.validate_environment_outer(value, context, step_outcome="failure", success=True, phase=phase), outer)
+        failure = offline_outer(context, phase="offline-cli11", code=125)
+        self.assertEqual(helper.validate_environment_outer(failure, context, step_outcome="failure", success=False, phase="offline-cli11"), failure)
+
+    def test_failed_cli11_predecessor_blocks_every_native_successor_before_source_or_tool_probes(self) -> None:
+        context = offline_context()
+        for outcome in ("failure", "cancelled", "skipped"):
+            for phase in ("acquire", "compile", "environment-native"):
+                with self.subTest(outcome=outcome, phase=phase), \
+                        patch.dict(helper.os.environ, {"MRK_OFFLINE_CLI11_STEP_OUTCOME": outcome}, clear=True), \
+                        patch.object(helper, "read_bounded_json", side_effect=AssertionError("failed step must stop before DATA reads")), \
+                        patch.object(helper, "write_json", side_effect=AssertionError("no successor claim")), \
+                        patch.object(helper, "environment_source_unchanged", side_effect=AssertionError("source probe")), \
+                        patch.object(helper, "environment_inputs_unchanged", side_effect=AssertionError("runtime probe")), \
+                        patch.object(helper, "tools", side_effect=AssertionError("tool probe")), \
+                        patch.object(helper, "run", side_effect=AssertionError("compiler launch")), \
+                        patch.object(helper.os, "execve", side_effect=AssertionError("native launch")):
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.phase_environment_native(phase, context)
+        control, progress, result = offline_cli11_values(context)
+        rows = {"offline-cli11-started.json": helper.environment_phase_claim(context, "offline-cli11"),
+            "offline-cli11-control.json": control, "offline-cli11-progress.json": progress,
+            "offline-cli11-result.json": result, "offline-cli11-outer.json": offline_outer(context, phase="offline-cli11")}
+        reads = []
+        def read_data(path, _limit):
+            reads.append(path.name)
+            return deepcopy(rows[path.name])
+        with patch.dict(helper.os.environ, {"MRK_OFFLINE_CLI11_STEP_OUTCOME": "success"}, clear=True), \
+                patch.object(helper, "read_bounded_json", side_effect=read_data), \
+                patch.object(helper.os.path, "lexists", return_value=False):
+            helper.environment_predecessors(context, "acquire")
+        self.assertEqual(reads, list(rows))
+
+    def test_offline_native_consumer_requires_all_real_cases_and_original_physical_returns(self) -> None:
+        for platform in ("linux", "macos"):
+            context, original, digest = offline_result(platform)
+            self.assertEqual(helper.validate_offline_result(original, context, digest), original)
+        context, original, digest = offline_result()
+        index = {name: ordinal for ordinal, name in enumerate(helper.OFFLINE_NATIVE_CASES)}
+        mutations = [
+            (("classification",), "passed"), (("caseOrder",), list(reversed(helper.OFFLINE_NATIVE_CASES))),
+            (("cases",), original["cases"][:-1]), (("unexecuted",), []), (("invocationSha256",), "0" * 64),
+            (("cases", 0, "gates", 0, "originalAllocated"), True),
+            (("cases", 1, "classification"), "real-fixed-bootstrap"), (("cases", 1, "aggregateBytes"), 65536),
+            (("cases", 2, "unfinishedEofPending"), False),
+            (("cases", index["PF01"], "script", "marker"), ""),
+            (("cases", index["PF01"], "core", "lifetime", "commands"), 0),
+            (("cases", index["PF01"], "core", "result", "usedConfig", "sha256"), "f" * 64),
+            (("cases", index["PF01"], "core", "result", "findings", 0, "message"), "/private/check.py raw output"),
+            (("cases", index["PF02"], "timing", "firstStopNs"), 1),
+            (("cases", index["PF02"], "script", "expectedExit"), 0),
+            (("cases", index["PF02"], "script", "secondExecuted"), True),
+            (("cases", index["PF02"], "core", "result", "findings", 0, "status"), "PASS"),
+            (("cases", index["PF03"], "core", "outcome"), "complete"),
+            (("cases", index["PF03"], "native", "child", "waited"), False),
+            (("cases", index["PF04b"], "script", "pendingPreserved"), False),
+            (("cases", index["PF05a"], "core", "lifetime", "commandDispatched"), True),
+            (("cases", index["PF05b"], "core", "lifetime", "invocationClosed"), False),
+            (("cases", index["PF06"], "reciprocal", "sameOwnerRecovered"), False),
+            (("cases", index["PF06"], "reciprocal", "diagnosticsRefusal"), "busy"),
+            (("cases", index["PF06"], "reciprocal", "githubRefusal"), "busy"),
+            (("cases", index["PF06"], "reciprocal", "firstStopUnchanged"), False),
+            (("cases", index["PF06"], "native", "writer", "joined"), False),
+            (("cases", index["PF06"], "native", "stdout", "end", "eof"), False),
+            (("cases", index["PF06"], "native", "error", "close"), "unknown"),
+            (("cases", index["PF07"], "native", "observer", "receipt"), "not-joined"),
+            (("cases", index["PF07"], "native", "watchdog", "retained"), True),
+            (("cases", index["PF07"], "native", "disabled"), False),
+            (("cases", index["PF07"], "projection", "phase"), "terminal"),
+            (("cases", index["PF07"], "projection", "result"), original["cases"][index["PF07"]]["core"]["result"]),
+            (("cases", index["PF07"], "timing", "workMs"), 1800),
+            (("cases", index["PF07"], "timing", "hold", "observerHeldNs"), 6_000_000_000),
+            (("cases", index["PF07"], "timing", "hold", "unknownObservedNs"), 14_999_999_999),
+            (("cases", index["PF07"], "timing", "hold", "unknownObservedNs"), 17_000_000_001),
+            (("cases", index["PF07"], "timing", "hold", "originalWatchdogOnly"), False),
+            (("cases", index["PF07"], "files", "rootsClosed"), False),
+        ]
+        for path, bad in mutations:
+            changed = deepcopy(original)
+            at = changed
+            for component in path[:-1]:
+                at = at[component]
+            at[path[-1]] = bad
+            with self.subTest(path=path):
+                self.assert_refused(lambda value: helper.validate_offline_result(value, context, digest), changed)
+        # No collapsing of unrelated zero-command cases into config-invalid or
+        # generic failure, even when core and public projection agree together.
+        for name in ("PF04a", "PF04b", "PF05a", "PF05b"):
+            changed = deepcopy(original)
+            for key in ("projection", "core"):
+                changed["cases"][index[name]][key]["reason"] = "invalid-config"
+            self.assert_refused(lambda value: helper.validate_offline_result(value, context, digest), changed)
+        reused = deepcopy(original)
+        for key in ("operationId", "ownerGeneration"):
+            reused["cases"][index["PF07"]]["projection"][key] = reused["cases"][index["PF01"]]["projection"][key]
+        self.assert_refused(lambda value: helper.validate_offline_result(value, context, digest), reused)
+
+    def test_offline_progress_is_only_an_exact_prefix_not_a_passing_receipt(self) -> None:
+        context = offline_context()
+        for count in range(13):
+            value = {"schemaVersion": 1, "scope": helper.OFFLINE_NATIVE_SCOPE,
+                "inputsSha256": context["environmentInputsSha256"], "sourceSha": context["sourceSha"], "platform": context["platform"],
+                "classification": "native-not-settled", "completedCases": list(helper.OFFLINE_NATIVE_CASES[:count]),
+                "nextCase": helper.OFFLINE_NATIVE_CASES[count] if count < 12 else None,
+                "stage": "result" if count == 12 else "native-originals", "failureCode": None}
+            self.assertEqual(helper.validate_offline_progress(value, context), value)
+        for key, bad in (("completedCases", ["PG01", "PV02"]), ("classification", "passed"), ("nextCase", "PF07"),
+                         ("stage", "/private/raw/error"), ("failureCode", "raw-output")):
+            self.assert_refused(lambda row: helper.validate_offline_progress(row, context), {**value, key: bad})
+
+    def test_offline_precompiler_failure_retention_uses_one_snapshot_and_never_reopens_tools_or_artifacts(self) -> None:
+        context = offline_context()
+        control, progress, success = offline_cli11_values(context)
+        failed = {**success, "status": "failed", "reason": "test-failed",
+                  "tests": [{**success["tests"][0], "status": "failed"}]}
+        for step, result in (("failure", failed), ("success", success), ("success", None)):
+            with self.subTest(step=step, result="missing" if result is None else result["status"]):
+                rows = {"offline-cli11-started.json": helper.environment_phase_claim(context, "offline-cli11"),
+                    "offline-cli11-control.json": control, "offline-cli11-progress.json": progress,
+                    "offline-cli11-outer.json": offline_outer(context, phase="offline-cli11", code=1 if step == "failure" else 0)}
+                if result is not None:
+                    rows["offline-cli11-result.json"] = result
+                reads, writes = [], {}
+                def read_data(path, _limit):
+                    reads.append(path.name)
+                    if path.name not in rows:
+                        raise FileNotFoundError()
+                    return deepcopy(rows[path.name])
+                def write_data(path, value):
+                    writes[path.name] = deepcopy(value)
+                with patch.dict(helper.os.environ, {"MRK_OFFLINE_CLI11_STEP_OUTCOME": step,
+                        "MRK_ENVIRONMENT_NATIVE_STEP_OUTCOME": "skipped"}, clear=True), \
+                        patch.object(helper.os.path, "lexists", return_value=False), \
+                        patch.object(helper, "read_bounded_json", side_effect=read_data), \
+                        patch.object(helper, "write_json", side_effect=write_data), \
+                        patch.object(helper, "offline_cli11_predecessor", side_effect=AssertionError("no second snapshot")), \
+                        patch.object(helper, "environment_original_invocation", side_effect=AssertionError("no compiled artifact exists")), \
+                        patch.object(helper, "environment_source_unchanged", side_effect=AssertionError("source probe")), \
+                        patch.object(helper, "source_unchanged", side_effect=AssertionError("source probe")), \
+                        patch.object(helper, "environment_inputs_unchanged", side_effect=AssertionError("runtime probe")), \
+                        patch.object(helper, "tools", side_effect=AssertionError("tool probe")), \
+                        patch.object(helper, "run", side_effect=AssertionError("command launch")), \
+                        patch.object(helper.shutil, "rmtree", side_effect=AssertionError("cleanup")):
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.retain_offline_native(context)
+                self.assertEqual(len(reads), len(set(reads)))
+                self.assertFalse(any(name.endswith((".stdout", ".stderr")) for name in reads))
+                public = writes["environment-native-public.json"]
+                self.assertEqual(public["classification"], "native-not-verified")
+                self.assertEqual(public["physicalOriginals"], "unverified")
+                self.assertEqual(public["applicationFinality"], "unknown")
+                self.assertIsNone(public["native"])
+                self.assertFalse(public["normalApplicationExitProved"])
+                self.assertFalse(public["retention"]["deleted"])
+                self.assertFalse(public["retention"]["projectProbes"])
+                self.assertEqual(public["compilerData"], "incomplete" if step == "success" and result is not None else "not-admitted")
+                self.assertEqual(public["cli11"]["verified"], step == "success" and result is not None)
+                encoded = helper.canonical_json(public)
+                for private in (context["root"], context["source"], context["python"], "rawText"):
+                    self.assertNotIn(private.encode(), encoded)
+
+    def test_offline_source_keeps_original_exec_fixed_bootstrap_private_permit_clocks_and_pf07_last(self) -> None:
+        source = HELPER.read_text(encoding="utf-8")
+        self.assertLess(source.index("_OFFLINE_CLI11_STARTED_NS = _entry_time.monotonic_ns()"), source.index("import argparse"))
+        phase = source.split("def phase_environment_native(", 1)[1].split("def main(", 1)[0]
+        self.assertLess(phase.index("environment_predecessors(context, name)"), phase.index("environment_source_unchanged(context)"))
+        self.assertLess(phase.index('if name == "offline-cli11":'), phase.index("no_cargo_configuration("))
+        cli = source.split("def phase_offline_cli11(", 1)[1].split("OFFLINE_RESULT_LIMITATIONS", 1)[0]
+        self.assertIn("started = _OFFLINE_CLI11_STARTED_NS", cli)
+        self.assertIn('os.chmod(root / "offline-cli11-control.json", 0o400, follow_symlinks=False)', cli)
+        self.assertIn('argv = [context["python"], "-I", "-S", "-B", str(source / "tests/native_desktop_environment.py"),', cli)
+        self.assertIn('"--offline-cli11", str(source / "src"), str(root / "offline-cli11-control.json")]', cli)
+        self.assertEqual(cli.count("os.execve("), 1)
+        for forbidden in ("subprocess.", "shutil.rmtree", 'run([', "time.monotonic_ns() +"):
+            self.assertNotIn(forbidden, cli)
+        owner = (SOURCE / "desktop/src-tauri/src/offline_preflight_owner.rs").read_text(encoding="utf-8")
+        fixture = (SOURCE / "desktop/src-tauri/src/offline_preflight_owner_tests.rs").read_text(encoding="utf-8")
+        for text in ("const NATIVE_QUALIFIED: bool = false;", "const RUNTIME_QUALIFIED: bool = false;",
+                     "const WORK: Duration = Duration::from_secs(1800);", "const HARD: Duration = Duration::from_secs(1810);",
+                     "const SETTLEMENT: Duration = Duration::from_secs(10);"):
+            self.assertIn(text, owner)
+        self.assertIn('feature = "development-runtime", not(feature = "desktop-shell")', fixture)
+        self.assertIn('target_os = "linux", target_arch = "x86_64", target_env = "gnu"', fixture)
+        self.assertIn('target_os = "macos", target_arch = "aarch64"', fixture)
+        self.assertIn("pub(in crate::offline_preflight_owner) struct Permit", fixture)
+        self.assertIn('runtime.bootstrap == d.cwd.join("offline_preflight_bootstrap.py")', fixture)
+        self.assertIn('"PF05a", "PF05b", "PF06", "PF07"];', fixture)
+        self.assertIn("const ROSTER: Duration = Duration::from_secs(180);", fixture)
+        self.assertIn("const READY: Duration = Duration::from_secs(15);", fixture)
+        watch = fixture.split("let observed = loop {", 1)[1].split("require(observed >= first + SETTLEMENT", 1)[0]
+        self.assertIn("changes.changed()", watch)
+        for forbidden in ("offline_preflight_status(", ".endpoint(", ".advance("):
+            self.assertNotIn(forbidden, watch)
+        self.assertIn('"case":"full-work-expiry","reason":"not-run"', fixture)
+        self.assertIn('"case":"qualified-diagnostics-busy","reason":"qualification-disabled"', fixture)
+        self.assertIn('"case":"qualified-github-busy","reason":"qualification-disabled"', fixture)
+        workflow = (SOURCE / helper.ENVIRONMENT_NATIVE_WORKFLOW).read_text(encoding="utf-8")
+        cli_at = workflow.index("desktop/tools/ci_foundation.py offline-cli11")
+        self.assertLess(workflow.index("desktop/tools/ci_foundation.py prepare"), cli_at)
+        self.assertLess(cli_at, workflow.index("desktop/tools/ci_foundation.py acquire"))
+        self.assertEqual(workflow.count("desktop/tools/ci_foundation.py offline-cli11"), 1)
+        for number, name in ((3, "offline-cli11-outer.json"), (4, "offline-cli11.stdout"), (5, "offline-cli11.stderr")):
+            self.assertLess(workflow.index(f'exec {number}>"$MRK_DESKTOP_CI_ROOT/{name}"'), cli_at)
+        self.assertIn('"phase":"offline-cli11"', workflow)
+        self.assertIn('"phase":"environment-native"', workflow)
+        self.assertIn("MRK_OFFLINE_CLI11_STEP_OUTCOME: ${{ steps.cli11.outcome }}", workflow)
 
 
 if __name__ == "__main__":

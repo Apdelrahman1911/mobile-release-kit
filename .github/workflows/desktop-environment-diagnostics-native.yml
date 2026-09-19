@@ -4,7 +4,7 @@ on:
   push:
     # Initial ref creation is not verification evidence: require an observed run.
     # Publish ordinary updates to this dedicated ref without rewriting its history.
-    branches: [verify/desktop-environment-diagnostics-native, verify/desktop-environment-diagnostics-native-macos]
+    branches: [verify/desktop-environment-diagnostics-native, verify/desktop-environment-diagnostics-native-macos, verify/desktop-offline-preflight-native, verify/desktop-offline-preflight-native-macos]
     paths:
       - desktop/**
       - src/mobile_release/**
@@ -12,12 +12,21 @@ on:
       - tests/workflow/command_bootstrap_fixture.py
       - tests/desktop/test_ci_environment_diagnostics.py
       - tests/desktop/test_ci_foundation_contract.py
+      - tests/desktop/test_native_environment_fixture_contract.py
+      - tests/unit/test_cli_and_build.py
+      - tests/unit/test_owned_process.py
+      - tests/unit/test_default_cancellation.py
+      - tests/unit/test_build_inputs.py
+      - tests/unit/test_config_discovery.py
+      - tests/unit/test_credentials_metadata.py
+      - tests/unit/test_android_release_notes.py
+      - tests/unit/test_ios_correspondence.py
       - pyproject.toml
       - .github/workflows/desktop-environment-diagnostics-native.yml
   workflow_dispatch:
     inputs:
       expected_sha:
-        description: Exact reviewed environment-diagnostics source (synthetic verification only)
+        description: Exact reviewed diagnostics or saved-offline source (synthetic verification only)
         required: true
         type: string
 
@@ -35,12 +44,13 @@ jobs:
     timeout-minutes: 35
     strategy:
       fail-fast: false
-      # Only the exact sibling ref narrows the host; every selected host still
-      # runs the full original case roster. Unknown refs fail before checkout.
-      matrix: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-environment-diagnostics-native-macos' && '{"include":[{"platform":"macos","runner":"macos-26"}]}' || '{"include":[{"platform":"linux","runner":"ubuntu-24.04"},{"platform":"macos","runner":"macos-26"}]}') }}
+      # Offline's first route is Linux ONLY, never the diagnostics fanout. Its
+      # macOS sibling requires separate source/result admission after Linux.
+      # Unknown refs fail before checkout; no default/offline merge route.
+      matrix: ${{ fromJSON((github.ref == 'refs/heads/verify/desktop-environment-diagnostics-native-macos' || github.ref == 'refs/heads/verify/desktop-offline-preflight-native-macos') && '{"include":[{"platform":"macos","runner":"macos-26"}]}' || github.ref == 'refs/heads/verify/desktop-offline-preflight-native' && '{"include":[{"platform":"linux","runner":"ubuntu-24.04"}]}' || '{"include":[{"platform":"linux","runner":"ubuntu-24.04"},{"platform":"macos","runner":"macos-26"}]}') }}
     env:
       MRK_DESKTOP_PLATFORM: ${{ matrix.platform }}
-      MRK_DESKTOP_HOSTED_CHECKS: environment-diagnostics-native-v1
+      MRK_DESKTOP_HOSTED_CHECKS: ${{ (github.ref == 'refs/heads/verify/desktop-offline-preflight-native' || github.ref == 'refs/heads/verify/desktop-offline-preflight-native-macos') && 'offline-preflight-native-v1' || 'environment-diagnostics-native-v1' }}
       MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
       MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
     steps:
@@ -57,8 +67,9 @@ jobs:
           esac
           [[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
           [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]]
-          case "$GITHUB_REF:$MRK_DESKTOP_PLATFORM" in
-            refs/heads/verify/desktop-environment-diagnostics-native:linux|refs/heads/verify/desktop-environment-diagnostics-native:macos|refs/heads/verify/desktop-environment-diagnostics-native-macos:macos) ;;
+          case "$MRK_DESKTOP_HOSTED_CHECKS:$GITHUB_REF:$MRK_DESKTOP_PLATFORM" in
+            environment-diagnostics-native-v1:refs/heads/verify/desktop-environment-diagnostics-native:linux|environment-diagnostics-native-v1:refs/heads/verify/desktop-environment-diagnostics-native:macos|environment-diagnostics-native-v1:refs/heads/verify/desktop-environment-diagnostics-native-macos:macos) ;;
+            offline-preflight-native-v1:refs/heads/verify/desktop-offline-preflight-native:linux|offline-preflight-native-v1:refs/heads/verify/desktop-offline-preflight-native-macos:macos) ;;
             *) exit 1 ;;
           esac
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" != 0000000000000000000000000000000000000000 ]]
@@ -84,7 +95,7 @@ jobs:
         with:
           python-version: '3.14.7'
       - name: Select installed root-owned CLT for macOS lifecycle verification
-        if: matrix.platform == 'macos'
+        if: matrix.platform == 'macos' && env.MRK_DESKTOP_HOSTED_CHECKS == 'environment-diagnostics-native-v1'
         timeout-minutes: 1
         shell: bash
         env:
@@ -112,12 +123,42 @@ jobs:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py prepare'
+      - name: Verify exactly eleven ordinary CLI leaves before any offline native compiler work
+        id: cli11
+        if: env.MRK_DESKTOP_HOSTED_CHECKS == 'offline-preflight-native-v1'
+        # Original aggregate clock is 90s at driver entry, before imports/exec.
+        # This 2-minute shell infrastructure ceiling is not an application clock.
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set +o posix
+          unset POSIXLY_CORRECT
+          set -C
+          umask 077
+          ulimit -S -f 1024
+          exec 3>"$MRK_DESKTOP_CI_ROOT/offline-cli11-outer.json"
+          exec 4>"$MRK_DESKTOP_CI_ROOT/offline-cli11.stdout"
+          exec 5>"$MRK_DESKTOP_CI_ROOT/offline-cli11.stderr"
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py offline-cli11 </dev/null 1>&4 2>&5 3>&- 4>&- 5>&-
+          result=$?
+          set -e
+          exec 4>&- 5>&- || exit 125
+          printf '{"schemaVersion":1,"scope":"offline-preflight-native-v1","phase":"offline-cli11","sourceSha":"%s","platform":"%s","runId":"%s","attempt":"%s","originalWait":true,"exitCode":%s,"outputWritersClosed":true,"statusWriterCloseGate":"original-step-success-required","fileLimitBytes":1048576}\n' "$GITHUB_SHA" "$MRK_DESKTOP_PLATFORM" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$result" >&3 || exit 125
+          exec 3>&- || exit 125
+          exit "$result"
       - name: Acquire only locked active-platform headless compiler inputs
         timeout-minutes: 15
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_OFFLINE_CLI11_STEP_OUTCOME: ${{ steps.cli11.outcome }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
       - name: Compile one headless library-test artifact without execution
@@ -126,6 +167,7 @@ jobs:
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_OFFLINE_CLI11_STEP_OUTCOME: ${{ steps.cli11.outcome }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
       - name: Verify original environment owners once with original shell custody
@@ -137,6 +179,7 @@ jobs:
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_OFFLINE_CLI11_STEP_OUTCOME: ${{ steps.cli11.outcome }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
@@ -158,20 +201,25 @@ jobs:
           # Only this original shell retains these writer descriptors. A close
           # or write failure must fail the step, not overwrite result with zero.
           exec 4>&- 5>&- || exit 125
-          printf '{"schemaVersion":1,"scope":"environment-diagnostics-native-v1","sourceSha":"%s","platform":"%s","runId":"%s","attempt":"%s","originalWait":true,"exitCode":%s,"outputWritersClosed":true,"statusWriterCloseGate":"original-step-success-required","fileLimitBytes":1048576}\n' "$GITHUB_SHA" "$MRK_DESKTOP_PLATFORM" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$result" >&3 || exit 125
+          if [[ "$MRK_DESKTOP_HOSTED_CHECKS" == offline-preflight-native-v1 ]]; then
+            printf '{"schemaVersion":1,"scope":"offline-preflight-native-v1","phase":"environment-native","sourceSha":"%s","platform":"%s","runId":"%s","attempt":"%s","originalWait":true,"exitCode":%s,"outputWritersClosed":true,"statusWriterCloseGate":"original-step-success-required","fileLimitBytes":1048576}\n' "$GITHUB_SHA" "$MRK_DESKTOP_PLATFORM" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$result" >&3 || exit 125
+          else
+            printf '{"schemaVersion":1,"scope":"environment-diagnostics-native-v1","sourceSha":"%s","platform":"%s","runId":"%s","attempt":"%s","originalWait":true,"exitCode":%s,"outputWritersClosed":true,"statusWriterCloseGate":"original-step-success-required","fileLimitBytes":1048576}\n' "$GITHUB_SHA" "$MRK_DESKTOP_PLATFORM" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$result" >&3 || exit 125
+          fi
           exec 3>&- || exit 125
           exit "$result"
       - name: Validate DATA receipts only and retain required originals for VM disposal
         id: retain
         # A failed/timed-out native step licenses ONLY this bounded DATA
         # snapshot, never another native case, runtime probe or cleanup.
-        if: always() && steps.prepare.outcome == 'success' && steps.native.outcome != 'skipped'
+        if: always() && steps.prepare.outcome == 'success' && (steps.native.outcome != 'skipped' || (env.MRK_DESKTOP_HOSTED_CHECKS == 'offline-preflight-native-v1' && steps.cli11.outcome != 'skipped'))
         timeout-minutes: 2
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_ENVIRONMENT_NATIVE_STEP_OUTCOME: ${{ steps.native.outcome }}
+          MRK_OFFLINE_CLI11_STEP_OUTCOME: ${{ steps.cli11.outcome }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py retain'
       - name: Retain only the validated sanitized aggregate
@@ -180,7 +228,7 @@ jobs:
         if: always() && steps.prepare.outcome == 'success' && steps.retain.outcome != 'skipped'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: desktop-environment-diagnostics-native-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: desktop-${{ env.MRK_DESKTOP_HOSTED_CHECKS == 'offline-preflight-native-v1' && 'offline-preflight-native' || 'environment-diagnostics-native' }}-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.prepare.outputs.root }}/environment-native-public.json
           if-no-files-found: error
           retention-days: 14

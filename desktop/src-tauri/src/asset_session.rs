@@ -734,6 +734,64 @@ impl DocumentBinding {
         self.inner.bridge.preflight.ensure_idle()?;
         self.inner.bridge.environment_fixture_registration(permit, change)
     }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    pub(crate) fn offline_fixture_registration(&self,
+        permit: &crate::offline_preflight_owner::OfflineRegistrationPermit) -> Result<(), BridgeError> {
+        let state = self.lock();
+        if self.preflight_gate(&state) != crate::offline_preflight_protocol::Availability::Available {
+            return Err(crate::offline_preflight_owner::unavailable());
+        }
+        self.inner.bridge.preflight.ensure_idle()?;
+        self.inner.bridge.offline_fixture_registration(permit)
+    }
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    pub(crate) fn offline_fixture_gate(&self, permit: &crate::offline_preflight_owner::OfflineRegistrationPermit,
+        gate: &str, present: bool) -> Result<(), BridgeError> {
+        let (id, _, generation) = permit.validate(&self.inner.bridge.preflight)?;
+        if !permit.gate_evidence() { return Err(crate::offline_preflight_owner::unavailable()); }
+        let mut state = self.lock();
+        if state.unknown || state.exhausted || !state.lifetime.original_bound() || state.stopping {
+            return Err(crate::offline_preflight_owner::unavailable());
+        }
+        match (gate, present) {
+            ("retained-private", true) if state.github.registration().is_none() => {
+                state.github = github_session::offline_fixture_private(permit, &self.inner.bridge.preflight)?;
+            },
+            ("retained-private", false) if state.github.registration() == Some((id, generation))
+                && !state.github.native_work_pending() => {
+                // The real disconnect DATA path, not token retirement alone.
+                state.github.disconnect("github-session-1", Instant::now(), GitHubReason::None)?;
+                if state.github.registration().is_some() { return Err(crate::offline_preflight_owner::unavailable()); }
+            },
+            ("existing-work", true) if state.slot.is_none() => {
+                // Inert retained work: no coordinator/child/GUI is scheduled.
+                // Phase and unreturned OriginalWork are the actual gate inputs;
+                // removal below is not claimed as native physical settlement.
+                state.slot = Some(Slot { owner: OriginalWork::new(u32::MAX - 1, false, Arc::downgrade(&self.inner)),
+                    operation: Operation::ChooseFile, phase: Phase::Admitting, reason: Reason::None,
+                    source: SourceState::NotRun, settlement: Settlement::Pending, context: None, target: None,
+                    review_end: None, cleanup_end: None, candidate: None, selection: None, assessment: None,
+                    preview: None, assessment_context_revision: None, staged: None, error: None, project: None,
+                    discard: false, kind: None, result_record: None, retired_payload: None, evidence: None });
+            },
+            ("existing-work", false) if state.slot.as_ref().is_some_and(|slot|
+                slot.owner.id == u32::MAX - 1 && slot.phase == Phase::Admitting) => {
+                let slot = state.slot.as_ref().ok_or_else(crate::offline_preflight_owner::unavailable)?;
+                if slot.owner.coordinator.lock().map_err(|_| BridgeError::cleanup_unknown())?.handle.is_some()
+                    || slot.owner.child.try_lock().map_err(|_| BridgeError::cleanup_unknown())?.handle.is_some() {
+                    return Err(BridgeError::cleanup_unknown());
+                }
+                state.slot.take();
+            },
+            ("recovery-attention", _) => {
+                self.inner.bridge.edits.offline_fixture_attention(permit, &self.inner.bridge.preflight, present)?;
+            },
+            _ => return Err(crate::offline_preflight_owner::unavailable()),
+        }
+        self.bump(&mut state); Ok(())
+    }
     pub(crate) fn start_environment_diagnostics(&self, args: crate::environment_diagnostics_protocol::Start) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
         let ticket = self.inner.bridge.diagnostics.ticket()?; // Original T, entropy/executor before lock/effects.
         let state = self.lock();

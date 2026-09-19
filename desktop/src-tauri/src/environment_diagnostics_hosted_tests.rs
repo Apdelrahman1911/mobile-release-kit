@@ -10,24 +10,27 @@ use std::{collections::{BTreeMap, BTreeSet}, fs::{self, File, Metadata, OpenOpti
     io::{Read, Seek, SeekFrom, Write}, os::{fd::OwnedFd, unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt}},
     path::{Component, Path}, sync::{Condvar, Weak}};
 
-type Check<T> = Result<T, &'static str>;
+pub(crate) type Check<T> = Result<T, &'static str>;
 const SCOPE: &str = "environment-diagnostics-native-v1";
+const OFFLINE_SCOPE: &str = "offline-preflight-native-v1";
 const INPUT_ANCHOR: Option<&str> = option_env!("MRK_ENVIRONMENT_NATIVE_INPUTS_SHA256");
 const WORKFLOW: &str = ".github/workflows/desktop-environment-diagnostics-native.yml";
 const SHIM: &str = "tests/native_desktop_environment.py";
 const OBSERVER: &str = "tests/workflow/command_bootstrap_fixture.py";
 const ORDER: [&str; 20] = ["reader-shared-cap", "reader-late-stderr", "reader-no-eof", "reader-close-error", "wait-nonzero",
     "R1", "R2", "R3", "L1", "L2", "L3a", "L3b", "L3c", "L3d", "L4", "L5", "L6a", "L6b", "L6c", "L7"];
-fn require(ok: bool, code: &'static str) -> Check<()> { if ok { Ok(()) } else { Err(code) } }
-fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
-fn hex(value: &str, n: usize) -> bool { value.len() == n && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
-fn end_check(end: Instant) -> Check<()> { require(Instant::now() < end, "fixture_original_deadline") }
-fn close_file(file: File) -> Check<()> { let fd: OwnedFd = file.into(); nix::unistd::close(fd).map_err(|_| "fixture_original_close") }
-fn same(a: &Metadata, b: &Metadata) -> bool {
+// Shared source/IO helpers and bound DATA only. Offline owns a separate sealed
+// permit; none of these exports can enable diagnostics or choose a launcher.
+pub(crate) fn require(ok: bool, code: &'static str) -> Check<()> { if ok { Ok(()) } else { Err(code) } }
+pub(crate) fn hash(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+pub(crate) fn hex(value: &str, n: usize) -> bool { value.len() == n && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
+pub(crate) fn end_check(end: Instant) -> Check<()> { require(Instant::now() < end, "fixture_original_deadline") }
+pub(crate) fn close_file(file: File) -> Check<()> { let fd: OwnedFd = file.into(); nix::unistd::close(fd).map_err(|_| "fixture_original_close") }
+pub(crate) fn same(a: &Metadata, b: &Metadata) -> bool {
     a.dev() == b.dev() && a.ino() == b.ino() && a.mode() == b.mode() && a.uid() == b.uid() && a.gid() == b.gid()
         && a.len() == b.len() && a.mtime() == b.mtime() && a.mtime_nsec() == b.mtime_nsec() && a.nlink() == b.nlink()
 }
-fn anchored(path: &Path) -> Check<()> {
+pub(crate) fn anchored(path: &Path) -> Check<()> {
     require(path.is_absolute(), "fixture_absolute_path")?;
     let mut at = PathBuf::new();
     for part in path.components() {
@@ -37,7 +40,7 @@ fn anchored(path: &Path) -> Check<()> {
     }
     Ok(())
 }
-fn bound_file(path: &Path, limit: u64) -> Check<(File, Metadata)> {
+pub(crate) fn bound_file(path: &Path, limit: u64) -> Check<(File, Metadata)> {
     anchored(path)?;
     let before = fs::symlink_metadata(path).map_err(|_| "fixture_file_metadata")?;
     require(before.is_file() && before.nlink() == 1 && before.len() <= limit, "fixture_file_kind_size")?;
@@ -47,7 +50,7 @@ fn bound_file(path: &Path, limit: u64) -> Check<(File, Metadata)> {
     require(same(&before, &opened), "fixture_open_identity")?;
     Ok((file, opened))
 }
-fn read_bound(path: &Path, limit: u64) -> Check<Vec<u8>> {
+pub(crate) fn read_bound(path: &Path, limit: u64) -> Check<Vec<u8>> {
     let (mut file, opened) = bound_file(path, limit)?;
     let mut bytes = Vec::new();
     let read = Read::by_ref(&mut file).take(limit + 1).read_to_end(&mut bytes).map_err(|_| "fixture_original_read");
@@ -86,10 +89,10 @@ fn json_file<T: for<'de> Deserialize<'de>>(path: &Path, limit: u64) -> Check<(T,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct FileRow { path: String, size: u64, sha256: String }
+pub(crate) struct FileRow { pub(crate) path: String, pub(crate) size: u64, pub(crate) sha256: String }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Directory { device: String, inode: String, mode: u32, uid: u32, gid: u32 }
+pub(crate) struct Directory { pub(crate) device: String, pub(crate) inode: String, pub(crate) mode: u32, pub(crate) uid: u32, pub(crate) gid: u32 }
 impl Directory {
     fn check(&self, path: &Path) -> Check<()> {
         anchored(path)?; let meta = fs::symlink_metadata(path).map_err(|_| "fixture_directory_metadata")?;
@@ -99,18 +102,27 @@ impl Directory {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Host { system: String, kernel_release: String, machine: String, non_root: bool,
+pub(crate) struct Host { system: String, kernel_release: String, machine: String, non_root: bool,
     #[serde(rename = "imageOS")] image_os: String, image_version: String }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Inputs {
-    schema_version: u32, scope: String, root: PathBuf, source: PathBuf, python: PathBuf,
-    source_sha: String, source_tree: String, platform: String, target: String,
-    workflow_path: String, workflow_sha: String, workflow_ref: String, workflow_sha256: String,
-    run_id: String, attempt: String, repository: String, event: String, r#ref: String,
+pub(crate) struct Inputs {
+    schema_version: u32, pub(crate) scope: String, pub(crate) root: PathBuf, pub(crate) source: PathBuf, pub(crate) python: PathBuf,
+    pub(crate) source_sha: String, pub(crate) source_tree: String, pub(crate) platform: String, pub(crate) target: String,
+    workflow_path: String, pub(crate) workflow_sha: String, workflow_ref: String, workflow_sha256: String,
+    pub(crate) run_id: String, pub(crate) attempt: String, repository: String, event: String, r#ref: String,
     source_files: Vec<FileRow>, core_files: Vec<FileRow>, core_zip_sha256: String, core_zip_bytes: u64,
-    python_sha256: String, python_bytes: u64, bootstrap_sha256: String, cwd: PathBuf,
+    python_sha256: String, python_bytes: u64, bootstrap_sha256: String, pub(crate) cwd: PathBuf,
     original_directories: BTreeMap<String, Directory>, observed_host: Host,
+    #[serde(default, deserialize_with = "present_saved_configs")] pub(crate) saved_configs: Option<Vec<SavedConfig>>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SavedConfig { pub(crate) case: String, pub(crate) raw_text: String, pub(crate) size: usize, pub(crate) sha256: String }
+fn present_saved_configs<'de, D: serde::Deserializer<'de>>(value: D) -> Result<Option<Vec<SavedConfig>>, D::Error> {
+    // Missing is None; a present JSON null is NOT the diagnostics shape. An
+    // offline manifest must instead supply its exact nine bound byte records.
+    Vec::<SavedConfig>::deserialize(value).map(Some)
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -122,18 +134,25 @@ struct Invocation {
     platform: String, target: String, path: PathBuf, identity: ExecutableIdentity, size: u64, sha256: String,
     invocation_sha256: String, messages_sha256: String, compile_receipt_sha256: String,
 }
-struct BoundInputs { data: Inputs, digest: String, invocation: Invocation, invocation_digest: String }
+pub(crate) struct BoundInputs { pub(crate) data: Inputs, pub(crate) digest: String, invocation: Invocation, pub(crate) invocation_digest: String }
 impl BoundInputs {
     fn load() -> Check<Self> {
+        Self::load_scope(SCOPE)
+    }
+    pub(crate) fn load_offline() -> Check<Self> { Self::load_scope(OFFLINE_SCOPE) }
+    fn load_scope(scope: &str) -> Check<Self> {
         let locator = PathBuf::from(std::env::var_os("MRK_ENVIRONMENT_NATIVE_INPUTS").ok_or("fixture_locator_missing")?);
         let (data, digest): (Inputs, _) = json_file(&locator, 256 * 1024)?;
         require(INPUT_ANCHOR == Some(digest.as_str()) && locator == data.root.join("environment-native-inputs.json"), "fixture_input_anchor")?;
-        require(data.schema_version == 1 && data.scope == SCOPE && data.platform == std::env::consts::OS
+        require(data.schema_version == 1 && data.scope == scope && data.platform == std::env::consts::OS
             && data.target == crate::runtime::COMPILED_TARGET && hex(&data.source_sha, 40) && hex(&data.source_tree, 40)
             && data.workflow_sha == data.source_sha && data.workflow_path == WORKFLOW
-            && matches!((data.r#ref.as_str(), data.platform.as_str()),
-                ("refs/heads/verify/desktop-environment-diagnostics-native", "linux" | "macos")
-                | ("refs/heads/verify/desktop-environment-diagnostics-native-macos", "macos"))
+            && match (scope, data.r#ref.as_str(), data.platform.as_str()) {
+                (SCOPE, "refs/heads/verify/desktop-environment-diagnostics-native", "linux" | "macos")
+                | (SCOPE, "refs/heads/verify/desktop-environment-diagnostics-native-macos", "macos")
+                | (OFFLINE_SCOPE, "refs/heads/verify/desktop-offline-preflight-native", "linux")
+                | (OFFLINE_SCOPE, "refs/heads/verify/desktop-offline-preflight-native-macos", "macos") => true, _ => false,
+            }
             && ["push", "workflow_dispatch"].contains(&data.event.as_str()) && !data.repository.is_empty()
             && data.workflow_ref == format!("{}/{WORKFLOW}@{}", data.repository, data.r#ref)
             && !data.run_id.is_empty() && data.run_id.bytes().all(|b| b.is_ascii_digit())
@@ -147,7 +166,7 @@ impl BoundInputs {
         require(host.system == expected_host.0 && host.machine == expected_host.1 && host.non_root
             && !host.kernel_release.is_empty() && !host.image_os.is_empty() && !host.image_version.is_empty(), "fixture_host_binding")?;
         let (invocation, invocation_digest): (Invocation, _) = json_file(&data.root.join("environment-native-invocation.json"), 64 * 1024)?;
-        require(invocation.schema_version == 1 && invocation.scope == SCOPE && invocation.inputs_sha256 == digest
+        require(invocation.schema_version == 1 && invocation.scope == scope && invocation.inputs_sha256 == digest
             && invocation.source_sha == data.source_sha && invocation.source_tree == data.source_tree
             && invocation.platform == data.platform && invocation.target == data.target
             && hex(&invocation.invocation_sha256, 64) && hex(&invocation.messages_sha256, 64) && hex(&invocation.compile_receipt_sha256, 64)
@@ -157,10 +176,11 @@ impl BoundInputs {
         bound.recheck(Instant::now() + Duration::from_secs(30))?;
         Ok(bound)
     }
-    fn source_file(&self, path: &str) -> Check<&FileRow> { self.data.source_files.iter().find(|row| row.path == path).ok_or("fixture_source_member") }
-    fn recheck(&self, end: Instant) -> Check<()> {
+    pub(crate) fn source_file(&self, path: &str) -> Check<&FileRow> { self.data.source_files.iter().find(|row| row.path == path).ok_or("fixture_source_member") }
+    pub(crate) fn recheck(&self, end: Instant) -> Check<()> {
         let d = &self.data;
-        let directories = ["root", "source", "cwd", "home", "cargo", "rustup", "tmp", "target", "environment-native"];
+        let mut directories = vec!["root", "source", "cwd", "home", "cargo", "rustup", "tmp", "target", "environment-native"];
+        if d.scope == OFFLINE_SCOPE { directories.push("offline-cli11"); }
         require(d.original_directories.len() == directories.len(), "fixture_directory_roster")?;
         for name in directories {
             let path = match name { "root" => d.root.clone(), "source" => d.source.clone(), "cwd" => d.cwd.clone(), _ => d.root.join(name) };
@@ -207,8 +227,17 @@ impl BoundInputs {
         require(d.core_zip_bytes <= 40 * 1024 * 1024 && d.python_bytes <= 512 * 1024 * 1024, "fixture_runtime_limits")?;
         hash_file(&d.root.join("core.zip"), d.core_zip_bytes, &d.core_zip_sha256, end)?;
         hash_file(&d.python, d.python_bytes, &d.python_sha256, end)?;
-        require(self.source_file("desktop/environment_bootstrap.py")?.sha256 == d.bootstrap_sha256
+        let bootstrap = if d.scope == OFFLINE_SCOPE { "desktop/offline_preflight_bootstrap.py" } else { "desktop/environment_bootstrap.py" };
+        require(self.source_file(bootstrap)?.sha256 == d.bootstrap_sha256
             && self.source_file(WORKFLOW)?.sha256 == d.workflow_sha256, "fixture_bootstrap_workflow_hash")?;
+        if d.scope == OFFLINE_SCOPE {
+            let cases = ["PF01", "PF02", "PF03", "PF04a", "PF04b", "PF05a", "PF05b", "PF06", "PF07"];
+            let rows = d.saved_configs.as_ref().ok_or("fixture_saved_configs_missing")?;
+            require(rows.len() == cases.len() && rows.iter().zip(cases).all(|(row, case)| row.case == case
+                && row.size == row.raw_text.len() && row.size > 0 && row.size <= 8192
+                && row.raw_text.ends_with('\n') && hex(&row.sha256, 64) && hash(row.raw_text.as_bytes()) == row.sha256),
+                "fixture_saved_configs_binding")?;
+        } else { require(d.saved_configs.is_none(), "fixture_unexpected_saved_configs")?; }
         let i = &self.invocation; hash_file(&i.path, i.size, &i.sha256, end)?;
         let meta = fs::symlink_metadata(&i.path).map_err(|_| "fixture_executable_stat")?;
         let n = &i.identity;
@@ -339,14 +368,14 @@ impl Permit {
 struct CaseFiles { control: Option<File>, control_path: PathBuf, control_closed: Option<bool>,
     relay: Option<File>, relay_path: PathBuf, relay_identity: Metadata, relay_closed: Option<bool> }
 
-fn create_private(path: &Path) -> Check<File> {
+pub(crate) fn create_private(path: &Path) -> Check<File> {
     let file = OpenOptions::new().write(true).create_new(true).mode(0o600)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC).open(path).map_err(|_| "fixture_private_create")?;
     let meta = file.metadata().map_err(|_| "fixture_private_metadata")?;
     require(meta.is_file() && meta.nlink() == 1 && meta.mode() & 0o777 == 0o600 && meta.uid() != 0, "fixture_private_identity")?;
     Ok(file)
 }
-fn create_directory(path: &Path) -> Check<()> {
+pub(crate) fn create_directory(path: &Path) -> Check<()> {
     fs::create_dir(path).map_err(|_| "fixture_directory_create")?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| "fixture_directory_mode")
 }
@@ -850,7 +879,7 @@ fn wait_case() -> Check<Value> {
 }
 
 struct Outputs { progress: Option<File>, result: Option<File> }
-fn original_json(file: &mut File, value: &Value, limit: usize) -> Check<()> {
+pub(crate) fn original_json(file: &mut File, value: &Value, limit: usize) -> Check<()> {
     let mut bytes = serde_json::to_vec(value).map_err(|_| "fixture_output_encode")?; bytes.push(b'\n');
     require(bytes.len() <= limit, "fixture_output_limit")?;
     file.seek(SeekFrom::Start(0)).map_err(|_| "fixture_output_seek")?;

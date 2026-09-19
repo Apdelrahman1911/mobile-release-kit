@@ -18,6 +18,26 @@ pub(crate) fn qualified() -> bool {
             target_os = "linux", target_arch = "x86_64", target_env = "gnu"))
 }
 
+// Supplied private-session DATA for PG01 only. No ticket, socket, credential
+// collection or GitHub qualification is minted by the offline registration.
+#[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+pub(crate) fn offline_fixture_private(permit: &crate::offline_preflight_owner::OfflineRegistrationPermit,
+    owner: &crate::offline_preflight_owner::OfflinePreflightOwner) -> Result<ConnectionState, BridgeError> {
+    let (id, _, generation) = permit.validate(owner)?;
+    if !permit.gate_evidence() { return Err(crate::offline_preflight_owner::unavailable()); }
+    let mut state = tests::fixture(Instant::now());
+    let private = state.private.as_mut().ok_or_else(crate::offline_preflight_owner::unavailable)?;
+    private.project_id = id.into(); private.generation = generation;
+    let session = state.status.session.as_mut().ok_or_else(crate::offline_preflight_owner::unavailable)?;
+    session.project_id = id.into(); session.state = SessionState::Connected;
+    state.status.operation.as_mut().ok_or_else(crate::offline_preflight_owner::unavailable)?.phase = Phase::Settled;
+    if state.native_work_pending() || state.registration() != Some((id, generation)) {
+        return Err(crate::offline_preflight_owner::unavailable());
+    }
+    Ok(state)
+}
+
 /// These codes mean refusal before a NEW read ticket/session was installed.
 /// Do not map an unknown IPC/framework failure or a post-admission outcome here.
 pub(crate) fn refused(reason: Reason) -> BridgeError {
@@ -133,7 +153,7 @@ mod tests {
 
     // Supplied DATA only. There is deliberately no runtime, fake Child, ticket
     // factory, socket, filesystem fixture or claim of native finality here.
-    fn fixture(at: Instant) -> ConnectionState {
+    pub(super) fn fixture(at: Instant) -> ConnectionState {
         let mut state = ConnectionState::new();
         let clock = CredentialClock::new(at, parse_utc("2026-09-17T12:00:00Z").unwrap()).unwrap();
         state.private = Some(PrivateSession { id: "github-session-1".into(), project_id: "project-1".into(), repository: "owner/app".into(),

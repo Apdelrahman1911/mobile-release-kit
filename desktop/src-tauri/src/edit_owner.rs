@@ -434,6 +434,22 @@ impl EditOwner {
     /// Read-only original recovery DATA; physical settlement does not clear an
     /// unresolved Save/journal disposition or authorize project execution.
     pub(crate) fn preflight_attention(&self) -> bool { !self.inner.lock().blocked_projects.is_empty() }
+    // Only the sealed PG01 registration can install/remove this one inert
+    // recovery-attention datum. It never enables editing or clears real work.
+    #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+    pub(crate) fn offline_fixture_attention(&self, permit: &crate::offline_preflight_owner::OfflineRegistrationPermit,
+        owner: &crate::offline_preflight_owner::OfflinePreflightOwner, present: bool) -> Result<(), BridgeError> {
+        let (id, _, _) = permit.validate(owner)?;
+        if !permit.gate_evidence() { return Err(crate::offline_preflight_owner::unavailable()); }
+        let mut r = self.inner.lock();
+        if r.active.is_some() || r.disabled || r.exhausted || r.stopping
+            || r.blocked_projects.iter().any(|project| project != id) {
+            return Err(crate::offline_preflight_owner::unavailable());
+        }
+        let changed = if present { r.blocked_projects.insert(id.into()) } else { r.blocked_projects.remove(id) };
+        if !changed { return Err(crate::offline_preflight_owner::unavailable()); } Ok(())
+    }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn workflow_fixture_registration_permitted(&self, path: &std::path::Path) -> bool {
         self.inner.fixture_workflow.lock().is_ok_and(|permit| permit.as_ref().is_some_and(|permit| permit.root(&self.inner, path)))

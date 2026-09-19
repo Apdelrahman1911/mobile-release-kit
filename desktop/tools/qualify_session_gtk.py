@@ -42,7 +42,7 @@ API_INVENTORY: str | None = None
 AUDIT_PINS: tuple[str, str, str, str] | None = None
 FREEZE_FILE = Path("/opt/mrk-native-reviewed/session-gtk-freeze.json")
 ROSTER = ("picker-cancel", "picker-select", "source-select", "quit-cancel", "quit-ok")
-# Literal source DATA matched to Q's complete first-party roster. No runtime
+# Literal paired DATA for the current first-party runtime/compiler roster. No runtime
 # glob, Git discovery, source execution, generated include or module import.
 SOURCES = (
     '.github/workflows/desktop-environment-diagnostics-native.yml',
@@ -56,6 +56,7 @@ SOURCES = (
     'desktop/native/linux-mount-observation/Cargo.toml',
     'desktop/native/linux-mount-observation/src/lib.rs',
     'desktop/native/session_gtk_input_linux.c',
+    'desktop/offline_preflight_bootstrap.py',
     'desktop/package-lock.json',
     'desktop/package.json',
     'desktop/rust-toolchain.toml',
@@ -93,6 +94,11 @@ SOURCES = (
     'desktop/src-tauri/src/main.rs',
     'desktop/src-tauri/src/metadata_text_commands.rs',
     'desktop/src-tauri/src/metadata_text_edit_protocol.rs',
+    'desktop/src-tauri/src/offline_preflight_owner.rs',
+    'desktop/src-tauri/src/offline_preflight_owner_tests.rs',
+    'desktop/src-tauri/src/offline_preflight_protocol.rs',
+    'desktop/src-tauri/src/offline_preflight_protocol_tests.rs',
+    'desktop/src-tauri/src/offline_preflight_shell_tests.rs',
     'desktop/src-tauri/src/passive_management_tests.rs',
     'desktop/src-tauri/src/protocol.rs',
     'desktop/src-tauri/src/release_version_protocol.rs',
@@ -137,6 +143,7 @@ SOURCES = (
     'desktop/src/components/GitHubWorkflowApply.tsx',
     'desktop/src/components/Icon.tsx',
     'desktop/src/components/MetadataTextEditor.tsx',
+    'desktop/src/components/OfflinePreflight.tsx',
     'desktop/src/components/ReleaseInputGuidance.tsx',
     'desktop/src/components/RemovedFields.tsx',
     'desktop/src/configEdit.ts',
@@ -161,6 +168,9 @@ SOURCES = (
     'desktop/src/metadataText.ts',
     'desktop/src/metadataTextEditController.ts',
     'desktop/src/metadataTextProtocol.ts',
+    'desktop/src/offlinePreflight.ts',
+    'desktop/src/offlinePreflightProtocol.ts',
+    'desktop/src/offlinePreflightTypes.ts',
     'desktop/src/pages/Artifacts.tsx',
     'desktop/src/pages/Credentials.tsx',
     'desktop/src/pages/Dashboard.tsx',
@@ -191,6 +201,10 @@ SOURCES = (
     'src/mobile_release/_desktop_environment_engine.py',
     'src/mobile_release/_desktop_environment_protocol.py',
     'src/mobile_release/_desktop_github_engine.py',
+    'src/mobile_release/_desktop_preflight_budget.py',
+    'src/mobile_release/_desktop_preflight_control.py',
+    'src/mobile_release/_desktop_preflight_engine.py',
+    'src/mobile_release/_desktop_preflight_protocol.py',
     'src/mobile_release/_github_connection_transport.py',
     'src/mobile_release/_lifetime_evidence.py',
     'src/mobile_release/_native_process.py',
@@ -234,6 +248,7 @@ SOURCES = (
     'src/mobile_release/credential_requirements.py',
     'src/mobile_release/credentials.py',
     'src/mobile_release/data/apple-profile-roots.pem',
+    'src/mobile_release/desktop_preflight.py',
     'src/mobile_release/discovery.py',
     'src/mobile_release/environment_diagnostics.py',
     'src/mobile_release/environment_diagnostics_tools.py',
@@ -1596,7 +1611,7 @@ class Freeze:
         require(Path(__file__).resolve(strict=True) == launcher and os.getcwd() == str(repository / "desktop/src-tauri"), "fixed actual launcher source/cwd")
         require(type(v["display"]) is str and re.fullmatch(r":[1-9][0-9]{0,3}", v["display"]) is not None
                 and os.environ.get("DISPLAY") == v["display"], "fixed inherited display number")
-        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 228, "complete frozen228 source roster")
+        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 243, "complete frozen243 source roster")
         for path in SOURCES:
             h(v["sourceHashes"][path])
             actual, st = book.hash_file(exact_path(repository / path), 2 * 1024 * 1024)
@@ -2661,7 +2676,7 @@ def inert_source_tests() -> None:
     raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
     fixed(FiniteJson(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
     longest = max(SOURCES, key=len)
-    assert len(SOURCES) == 228 and 64 < len(longest) <= 128 and len(WITNESS) == 18
+    assert len(SOURCES) == 243 and 64 < len(longest) <= 128 and len(WITNESS) == 18
     raw = (json.dumps({longest: "a" * 64}, separators=(",", ":")) + "\n").encode("ascii")
     rejects(lambda data: FiniteJson(data, native=True).parse(lf=True), raw)
     base = {"response-decision": 1, "response-leave": 3, "close-dispatch": 2, "close-enter": 4, "close-ack": 5, "close-leave": 6,

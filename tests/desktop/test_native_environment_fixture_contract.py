@@ -988,3 +988,328 @@ class NativeEnvironmentFixtureContractTests(unittest.TestCase):
         self.assertEqual(seam.intercepts, 0)
         self.assertEqual(seam.missing_reason, "insufficient-work-margin")
         self.assertEqual(actual.input.stop_reason, "timed-out")
+
+
+class OfflineCLIContractTests(unittest.TestCase):
+    """Closed selector/owner bookkeeping with in-memory originals, not native evidence."""
+    def setUp(self):
+        self.modules = {name: module for name, module in sys.modules.items() if name.startswith("mobile_release")}
+        self.shim, self.fs = definition("shim"), FakeFS()
+        self.fs.lstat = lambda path: self.fs.details(self.fs.files[str(path)])
+        self.fs.path.lexists = lambda path: str(path) in self.fs.files
+        self.shim.os, self.shim.Path = self.fs, self.fs.Path
+        self.clock = types.SimpleNamespace(check=lambda: None)
+
+    def tearDown(self):
+        self.assertEqual({name: module for name, module in sys.modules.items() if name.startswith("mobile_release")}, self.modules)
+
+    @staticmethod
+    def control():
+        return {"schemaVersion": 1, "scope": "offline-preflight-native-v1", "inputsSha256": "a" * 64,
+                "sourceSha": "b" * 40, "sourceTree": "c" * 40, "runId": "12", "attempt": "1", "platform": "linux",
+                "python": "/inert/python", "core": "/inert/source/src", "source": "/inert/source", "root": "/inert/task",
+                "startedNs": 1_000_000_000, "deadlineNs": 91_000_000_000}
+
+    def observation(self):
+        class Outer:
+            def publish(actual):
+                return actual.outcome
+        class Guard:
+            def __init__(actual, *args, **kwargs):
+                actual.handler_state = "RESTORED"
+                actual.lifetime_ledger = types.SimpleNamespace(verdict=lambda: types.SimpleNamespace(
+                    complete=True, fatal=False, contained=True, cleanup_complete=True, profile_calls=0))
+        class Invocation:
+            def __init__(actual, *args, **kwargs):
+                actual.cancellation, actual.closed = Guard(), True
+            def _offline_preflight_closed(actual, guard):
+                return actual.closed and guard is actual.cancellation
+        class FD:
+            def __init__(actual, *args, **kwargs):
+                actual.number, actual.close_state = None, "CLOSED"
+        fs, events = self.fs, []
+        class Temporary:
+            def __init__(actual, name):
+                actual.name = name
+                fs.add(name, mode=stat.S_IFDIR | 0o700)
+            def cleanup(actual):
+                events.append(("cleanup", actual))
+                del fs.files[actual.name]
+        command = types.SimpleNamespace(_Outer=Outer, run_command=lambda *_args, **_kwargs: None, _RETAINED=[])
+        inputs = types.SimpleNamespace(InvocationCustody=Invocation, _FD=FD, _ENV_OWNER=None, _ENV_TAINTED=False)
+        observation = self.shim.OfflineCLIObservation(command, inputs, Guard,
+            types.SimpleNamespace(TemporaryDirectory=Temporary), self.clock)
+        return observation, types.SimpleNamespace(command=command, inputs=inputs, Guard=Guard,
+            Invocation=Invocation, temporary=Temporary, events=events)
+
+    def install(self, observation):
+        # None of these namespaces is a host/product module. No effect fallback.
+        def unused(*args, **kwargs):
+            raise AssertionError("unselected inert method")
+        class Archive:
+            __init__ = close = open = unused
+        inspect = lambda *_args, **_kwargs: ()
+        self.fs.fdopen, self.fs.scandir = unused, unused
+        observation.install(builtins=types.SimpleNamespace(open=unused), io=types.SimpleNamespace(open=unused),
+            zipfile=types.SimpleNamespace(ZipFile=Archive), config=types.SimpleNamespace(load_config=unused),
+            macho=types.SimpleNamespace(inspect_macho=inspect),
+            artifacts=types.SimpleNamespace(inspect_macho=inspect, _source_descriptor=unused),
+            metadata=types.SimpleNamespace(_read_android_release_note=unused))
+
+    def test_selector_control_and_original_deadline_are_closed(self):
+        import json
+        value = self.control()
+        self.assertEqual(self.shim.parse_offline_cli_control(json.dumps(value).encode()), value)
+        self.assertEqual(len(set(self.shim.OFFLINE_CLI_IDS)), 11)
+        self.assertTrue(all(name.startswith("tests.unit.") for name in self.shim.OFFLINE_CLI_IDS))
+        for key, replacement in (("extra", True), ("schemaVersion", True), ("deadlineNs", value["deadlineNs"] + 1),
+                                  ("startedNs", False), ("core", "/different/src"), ("scope", "environment-diagnostics-native-v1"),
+                                  ("source", "/inert/../source"), ("runId", "0"), ("sourceSha", "0" * 40)):
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                self.shim.parse_offline_cli_control(json.dumps({**value, key: replacement}).encode())
+        with self.assertRaises(AssertionError):
+            self.shim.parse_offline_cli_control(b'{"schemaVersion":1,"schemaVersion":1}')
+
+    def test_saved_configs_bind_exact_utf8_bytes_and_order(self):
+        import hashlib
+        raw = '{"value":"original\\r\\n"}\n'
+        rows = [{"case": name, "rawText": raw, "size": len(raw.encode()),
+                 "sha256": hashlib.sha256(raw.encode()).hexdigest()} for name in self.shim.OFFLINE_CASES]
+        self.assertIs(self.shim.offline_saved_configs(rows), rows)
+        for kind in ("order", "bytes", "digest", "length", "extra"):
+            changed = copy.deepcopy(rows)
+            if kind == "order":
+                changed[0], changed[1] = changed[1], changed[0]
+            elif kind == "bytes":
+                changed[0]["rawText"] = raw.rstrip()
+            elif kind == "digest":
+                changed[0]["sha256"] = "0" * 64
+            elif kind == "length":
+                changed[0]["size"] = True
+            else:
+                changed[0]["repair"] = True
+            with self.subTest(kind=kind), self.assertRaises(AssertionError):
+                self.shim.offline_saved_configs(changed)
+
+    def test_import_routes_bind_tests_namespace_and_workflow_modules(self):
+        source = self.fs.Path("/inert/source")
+        self.assertEqual(self.shim._offline_cli_import_paths("/inert/source/src", source),
+                         ("/inert/source/src", "/inert/source", "/inert/source/tests"))
+        with self.assertRaises(AssertionError):
+            self.shim._offline_cli_import_paths("/other/src", source)
+        paths = {"mobile_release": "src/mobile_release/__init__.py", "tests.unit": "tests/unit/__init__.py",
+                 "workflow": "tests/workflow/__init__.py", "workflow.profile_resource_fixture": "tests/workflow/profile_resource_fixture.py"}
+        modules = {name: types.SimpleNamespace(__file__=str(source / path)) for name, path in paths.items()}
+        modules["tests"] = types.SimpleNamespace(__path__=[str(source / "tests")])
+        self.shim.sys = types.SimpleNamespace(modules=modules)
+        names = frozenset(paths.values())
+        self.shim._offline_cli_modules(source, names)
+        for changed in (["/ambient/tests"], [str(source / "tests"), "/ambient/tests"], []):
+            modules["tests"].__path__ = changed
+            with self.subTest(namespace=changed), self.assertRaises(AssertionError):
+                self.shim._offline_cli_modules(source, names)
+        modules["tests"].__path__ = [str(source / "tests")]
+        modules["workflow.profile_resource_fixture"].__file__ = str(source / "tests/unit/__init__.py")
+        with self.assertRaises(AssertionError):
+            self.shim._offline_cli_modules(source, names)
+        modules["workflow.profile_resource_fixture"].__file__ = str(source / paths["workflow.profile_resource_fixture"])
+        with self.assertRaises(AssertionError):
+            self.shim._offline_cli_modules(source, names - {paths["workflow.profile_resource_fixture"]})
+
+    def test_closed_swallowed_scanner_error_latches_failure_not_unknown(self):
+        observation, _ = self.observation()
+        self.install(observation)
+        events, problem = [], OSError("inert scanner failure")
+        class Iterator:
+            def __enter__(actual):
+                return actual
+            def __next__(actual):
+                raise problem
+            def __exit__(actual, *_error):
+                events.append("original-exit")
+                return False
+        adapter = observation.scanner(lambda *_args: Iterator())("/inert/scan")
+        try:
+            with adapter:
+                next(adapter)
+        except OSError:
+            pass  # Models glob's swallowed error, not successful traversal.
+        self.assertEqual(events, ["original-exit"])
+        self.assertEqual(observation.resources[-1]["state"], "CLOSED")
+        self.assertIs(observation.resources[-1]["error"], problem)
+        observation.require_closed()
+        self.assertTrue(observation.scan_failed())
+        observation.restore()  # Positive original close allows safe restoration.
+        self.assertTrue(observation.closed)
+        self.assertTrue(observation.scan_failed())  # Restoration cannot repair success.
+
+    def test_diagnostic_is_fixed_bounded_original_stderr_and_never_retried(self):
+        calls = []
+        self.shim._CLI_MODE, self.shim._CLI_STAGE = True, "leaf-4"
+        def failed(number, raw):
+            calls.append((number, raw))
+            raise OSError("inert diagnostic write failure")
+        self.shim._CLI_DIAGNOSTIC_WRITE = failed
+        self.shim._offline_cli_diagnostic("test-failed")
+        self.shim._offline_cli_diagnostic("unsettled-originals")
+        self.assertEqual(calls, [(2, b"OFFLINE_CLI11_FAILURE stage=leaf-4 kind=test-failed\n")])
+        self.shim._CLI_DIAGNOSTIC_WRITTEN = False
+        self.shim._CLI_STAGE = "/private/untrusted-value"
+        self.shim._offline_cli_diagnostic("untrusted reason")
+        self.assertEqual(calls[-1], (2, b"OFFLINE_CLI11_FAILURE stage=entry kind=admission-failed\n"))
+
+    def test_scanner_original_close_return_and_failure_are_distinct(self):
+        events = []
+        class Iterator:
+            def __init__(actual, failed=False):
+                actual.values, actual.failed = iter([object()]), failed
+            def __next__(actual):
+                return next(actual.values)
+            def __enter__(actual):
+                return actual
+            def close(actual):
+                events.append(actual)
+                if actual.failed:
+                    raise ValueError("inert lost original close")
+            def __exit__(actual, *_error):
+                actual.close()
+                return False
+        row, original = {"state": "OPEN"}, Iterator()
+        adapter = self.shim.OfflineIterator(row, original)
+        self.assertIs(adapter.__enter__(), adapter)
+        self.assertEqual(len(list(adapter)), 1)
+        self.assertEqual(row["state"], "CLOSED")
+        adapter.__exit__(None, None, None)
+        adapter.close()
+        self.assertEqual(events, [original])
+        broken_row, broken = {"state": "OPEN"}, Iterator(True)
+        broken_adapter = self.shim.OfflineIterator(broken_row, broken)
+        with self.assertRaises(ValueError):
+            broken_adapter.close()
+        self.assertEqual(broken_row["state"], "UNKNOWN")
+        with self.assertRaises(AssertionError):
+            broken_adapter.close()
+        self.assertEqual(events, [original, broken])
+
+    def test_original_stream_identity_context_close_and_handoff_loss(self):
+        observation, _ = self.observation()
+        calls = []
+        class Stream:
+            closed = False
+            def __enter__(actual):
+                return actual
+            def __exit__(actual, *_error):
+                actual.close()
+            def close(actual):
+                calls.append(actual)
+                actual.closed = True
+        row, original = observation.row("stream"), Stream()
+        self.assertIs(observation.stream(row, original), original)
+        with original as returned:
+            self.assertIs(returned, original)
+        self.assertEqual(row["state"], "CLOSED")
+        original.close()
+        self.assertEqual(calls, [original])
+        def refused(_number):
+            raise OSError(9, "inert handoff failed")
+        with self.assertRaises(OSError):
+            observation.opener(refused, descriptor=True)(900001)
+        self.assertEqual(observation.resources[-1]["state"], "OPENING")
+        with self.assertRaises(self.shim.OfflineCLIUnknown):
+            observation.require_closed()
+
+    def test_command_attempt_precedes_call_and_missing_publication_stays_unknown(self):
+        observation, _ = self.observation()
+        outcome = types.SimpleNamespace(original_finality=object())
+        engine = types.SimpleNamespace(outcome=outcome, slot=types.SimpleNamespace(read=lambda: outcome))
+        def run():
+            self.assertEqual(observation.commands, [None])
+            self.assertEqual(observation.active, [0])
+            self.assertIs(observation.publish(engine), outcome)
+            return "original-return"
+        observation.original_run = run
+        self.assertEqual(observation.command_call(), "original-return")
+        observation.require_closed()
+        observation.original_run = lambda: (_ for _ in ()).throw(ValueError("inert lost publication"))
+        with self.assertRaises(ValueError):
+            observation.command_call()
+        self.assertEqual(observation.commands, [outcome, None])
+        with self.assertRaises(self.shim.OfflineCLIUnknown):
+            observation.require_closed()
+        self.assertTrue(issubclass(self.shim.OfflineCLIUnknown, KeyboardInterrupt))
+
+    def test_nested_temp_routing_keeps_outer_and_allows_closed_inner_cleanup(self):
+        observation, model = self.observation()
+        self.install(observation)
+        outer = model.temporary("/inert/outer")
+        parent = model.Invocation()
+        parent.closed, parent.cancellation.handler_state = False, "ACTIVE"
+        inner = model.temporary("/inert/inner")
+        inner.cleanup()
+        self.assertEqual(model.events, [("cleanup", inner)])
+        with self.assertRaises(self.shim.OfflineCLIUnknown):
+            outer.cleanup()
+        self.assertIn(outer.name, self.fs.files)
+        self.assertEqual(model.events, [("cleanup", inner)])
+        parent.closed, parent.cancellation.handler_state = True, "RESTORED"
+        observation.require_closed()  # Model-only facts, not native recovery.
+
+    def test_facility_restoration_waits_for_original_invocation(self):
+        observation, model = self.observation()
+        events = []
+        class Manager:
+            def __enter__(actual):
+                return actual
+            def __exit__(actual, *_error):
+                events.append("original-exit")
+                return False
+        wrapped = observation.context(Manager, facility=True)()
+        wrapped.__enter__()
+        parent = model.Invocation()
+        parent.closed = False
+        observation.invocations.append({"owner": parent, "ready": True})
+        with self.assertRaises(self.shim.OfflineCLIUnknown):
+            wrapped.__exit__(None, None, None)
+        self.assertEqual(events, [])
+        self.assertEqual(observation.resources[0]["state"], "OPEN")
+
+    def test_closed_assertion_failure_is_not_unknown_but_alias_drift_refuses(self):
+        observation, _ = self.observation()
+        self.install(observation)
+        try:
+            raise AssertionError("inert ordinary assertion")
+        except AssertionError:
+            observation.leaf_closed()
+        owner, name, _original, _replacement = observation.patches[-1]
+        setattr(owner, name, object())
+        with self.assertRaises(AssertionError):
+            observation.restore()
+        self.assertFalse(observation.closed)
+
+    def test_clock_uses_original_endpoint_and_restores_only_its_handler(self):
+        calls, handlers, tick, timer = [], {14: 0}, [50_000_000_000], [0.0, 0.0]
+        def setter(number, value):
+            previous, handlers[number] = handlers[number], value
+            calls.append(("handler", number, value))
+            return previous
+        def arm(kind, value):
+            previous = tuple(timer)
+            timer[:] = [value, 0.0]
+            calls.append(("timer", kind, value))
+            return previous
+        self.shim.time = types.SimpleNamespace(monotonic_ns=lambda: tick[0])
+        self.shim.signal = types.SimpleNamespace(SIGALRM=14, ITIMER_REAL=0, SIG_DFL=0,
+            getsignal=handlers.__getitem__, signal=setter, getitimer=lambda _kind: tuple(timer), setitimer=arm)
+        clock = self.shim.OfflineCLIClock(1_000_000_000, 91_000_000_000)
+        clock.install()
+        self.assertEqual([call[2] for call in calls if call[0] == "timer"], [41.0])
+        tick[0] = 91_000_000_000
+        with self.assertRaises(self.shim.OfflineCLIDeadline):
+            clock.check()
+        tick[0] = 50_000_000_000
+        with self.assertRaises(self.shim.OfflineCLIDeadline):
+            clock.check()
+        clock.finish()
+        self.assertEqual(clock.state, "CLOSED")
+        self.assertEqual(handlers, {14: 0})
+        self.assertEqual([call[2] for call in calls if call[0] == "timer"], [41.0, 0.0])

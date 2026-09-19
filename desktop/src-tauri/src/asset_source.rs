@@ -46,6 +46,25 @@ struct FileIdentity { common: DirectoryIdentity, nlink: u64, size: u64, mtime: (
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct RegisteredRoot { pub(crate) path: PathBuf, pub(crate) identity: DirectoryIdentity }
 
+/// Test-only registration from an actually held fixture directory. This is not
+/// a ProjectProbe or a picker/asset qualification, and no synthetic identity is
+/// accepted. The caller retains this original directory through native joins.
+#[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+pub(crate) fn offline_fixture_root(held: &std::fs::File, path: &Path) -> Result<RegisteredRoot, Reason> {
+    use std::os::unix::fs::MetadataExt;
+    let actual = held.metadata().map_err(|_| Reason::SourceRefused)?;
+    let named = std::fs::symlink_metadata(path).map_err(|_| Reason::SourceRefused)?;
+    if !path.is_absolute() || !actual.is_dir() || !named.is_dir() || actual.uid() == 0 || actual.mode() & 0o7777 != 0o700
+        || (actual.dev(), actual.ino(), actual.mode(), actual.uid(), actual.gid())
+            != (named.dev(), named.ino(), named.mode(), named.uid(), named.gid()) {
+        return Err(Reason::SourceRefused);
+    }
+    Ok(RegisteredRoot { path: path.to_path_buf(), identity: DirectoryIdentity {
+        dev: actual.dev(), ino: actual.ino(), mode: actual.mode(), uid: actual.uid(), gid: actual.gid(),
+    } })
+}
+
 // Native-only metadata hint. Not serialized, hashed into an ID, or a capability
 // to recapture bytes. Every later registration probe must match fresh originals.
 pub(crate) struct OriginWitness { path: PathBuf, ancestry: Vec<DirectoryIdentity>, leaf: FileIdentity }

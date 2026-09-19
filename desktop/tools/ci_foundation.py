@@ -7,6 +7,15 @@ Rust test owns and reports those original-child observations separately.
 """
 from __future__ import annotations
 
+# CLI11 keeps this original driver-entry clock across the sole exec. Capture
+# before the remaining heavy imports/main; importing this module for DATA tests
+# must not mint a replacement invocation clock.
+if __name__ == "__main__":
+    import time as _entry_time
+    _OFFLINE_CLI11_STARTED_NS = _entry_time.monotonic_ns()
+else:
+    _OFFLINE_CLI11_STARTED_NS = None
+
 import argparse
 import hashlib
 import json
@@ -120,12 +129,59 @@ ENVIRONMENT_NATIVE_NOT_VERIFIED = (
     "production-enablement", "installed-runtime-custody", "native-gui-picker-quit",
     "windows-diagnostics", "actual-os-close-or-wait-faults", "physical-device", "packaging", "store-or-release-operations",
 )
+OFFLINE_NATIVE_SCOPE = "offline-preflight-native-v1"
+OFFLINE_NATIVE_EVIDENCE_SCOPE = "desktop-offline-preflight-native-only-v1"
+OFFLINE_NATIVE_REF = "refs/heads/verify/desktop-offline-preflight-native"
+OFFLINE_NATIVE_MACOS_REF = "refs/heads/verify/desktop-offline-preflight-native-macos"
+OFFLINE_NATIVE_ROUTES = frozenset({(OFFLINE_NATIVE_REF, "linux"), (OFFLINE_NATIVE_MACOS_REF, "macos")})
+OFFLINE_NATIVE_PHASES = ("prepare", "offline-cli11", "acquire", "compile", "environment-native", "retain")
+OFFLINE_NATIVE_DIRECTORIES = (*ENVIRONMENT_NATIVE_DIRECTORIES, "offline-cli11")
+OFFLINE_NATIVE_TEST = "offline_preflight_owner::tests::hosted::hosted_offline_preflight_original_resources"
+OFFLINE_NATIVE_CASES = ("PG01", "PV01", "PV02", "PF01", "PF02", "PF03", "PF04a", "PF04b", "PF05a", "PF05b", "PF06", "PF07")
+OFFLINE_SAVED_CASES = OFFLINE_NATIVE_CASES[3:]
+OFFLINE_CLI11_NS = 90_000_000_000
+OFFLINE_CLI11_IDS = (
+    "tests.unit.test_cli_and_build.CliBuildTests.test_local_preflight_checks_receive_explicit_credentials_file_values",
+    "tests.unit.test_cli_and_build.CliBuildTests.test_offline_build_reports_private_dependency_token_gate_before_gradle",
+    "tests.unit.test_owned_process.CommandContractTests.test_adapter_passes_authoritative_objects_without_manufacturing_a_result",
+    "tests.unit.test_default_cancellation.DefaultCancellationTests.test_pending_cancellation_preserves_body_or_cleanup_error_and_checks_only_normal_exit",
+    "tests.unit.test_build_inputs.BuildInputTests.test_reserved_aliases_refuse_targets_and_early_project_admission",
+    "tests.unit.test_config_discovery.ConfigDiscoveryTests.test_shared_version_text_parser_preserves_file_grammar_and_errors",
+    "tests.unit.test_config_discovery.ConfigDiscoveryTests.test_empty_xcconfig_assignment_does_not_consume_next_line",
+    "tests.unit.test_credentials_metadata.CredentialMetadataTests.test_android_metadata_isolated_from_ios_changes_and_secret_patterns",
+    "tests.unit.test_android_release_notes.AndroidReleaseNotesTests.test_shared_corpus_checks_text_reader_and_preflight_without_normalization",
+    "tests.unit.test_cli_and_build.CliBuildTests.test_application_artifact_check_receives_only_minimal_runtime_environment",
+    "tests.unit.test_ios_correspondence.IOSPreflightCorrespondenceTests.test_project_artifact_check_cannot_modify_the_original_after_validation",
+)
+OFFLINE_NATIVE_NOT_VERIFIED = (
+    "production-enablement", "installed-runtime-custody", "native-gui-picker-quit", "windows-offline-preflight",
+    "actual-os-close-or-wait-faults", "full-1800-second-work-expiry", "qualified-diagnostics-busy-attribution", "qualified-github-busy-attribution",
+    "network-isolation", "physical-device", "packaging", "store-or-release-operations",
+)
+ENVIRONMENT_NATIVE_SCOPES = frozenset({ENVIRONMENT_NATIVE_SCOPE, OFFLINE_NATIVE_SCOPE})
+
+
+def environment_native_profile(scope: str) -> dict:
+    """Two literal source-bound variants of the same driver, not a selector API."""
+    require(type(scope) is str and scope in ENVIRONMENT_NATIVE_SCOPES, "Unknown environment/offline native scope")
+    if scope == OFFLINE_NATIVE_SCOPE:
+        return {"scope": scope, "evidence": OFFLINE_NATIVE_EVIDENCE_SCOPE, "routes": OFFLINE_NATIVE_ROUTES,
+                "phases": OFFLINE_NATIVE_PHASES, "directories": OFFLINE_NATIVE_DIRECTORIES,
+                "bootstrap": "desktop/offline_preflight_bootstrap.py", "test": OFFLINE_NATIVE_TEST,
+                "cases": OFFLINE_NATIVE_CASES, "notVerified": OFFLINE_NATIVE_NOT_VERIFIED}
+    return {"scope": scope, "evidence": ENVIRONMENT_NATIVE_EVIDENCE_SCOPE, "routes": ENVIRONMENT_NATIVE_ROUTES,
+            "phases": ENVIRONMENT_NATIVE_PHASES, "directories": ENVIRONMENT_NATIVE_DIRECTORIES,
+            "bootstrap": "desktop/environment_bootstrap.py", "test": ENVIRONMENT_NATIVE_TEST,
+            "cases": ENVIRONMENT_NATIVE_CASES, "notVerified": ENVIRONMENT_NATIVE_NOT_VERIFIED}
+
+
 BOUNDARY_PHASES = ("prepare", "acquire", "compile", "native", "config-owner", "config-task-loss",
                    "config-owner-delta", "config-transaction-eof", "config-core", "clean")
 GTK_COMPILE_SOURCES = (
     ".github/workflows/desktop-environment-diagnostics-native.yml",
     "desktop/environment_bootstrap.py",
     "desktop/github_connection_bootstrap.py",
+    "desktop/offline_preflight_bootstrap.py",
     "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock",
     "desktop/src-tauri/src/asset_session.rs", "desktop/src-tauri/src/asset_source.rs",
     "desktop/src-tauri/src/edit_owner.rs", "desktop/src-tauri/src/hosted_tests.rs",
@@ -141,6 +197,11 @@ GTK_COMPILE_SOURCES = (
     "desktop/src-tauri/src/environment_diagnostics_owner.rs",
     "desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs",
     "desktop/src-tauri/src/environment_diagnostics_protocol.rs",
+    "desktop/src-tauri/src/offline_preflight_owner.rs",
+    "desktop/src-tauri/src/offline_preflight_owner_tests.rs",
+    "desktop/src-tauri/src/offline_preflight_protocol.rs",
+    "desktop/src-tauri/src/offline_preflight_protocol_tests.rs",
+    "desktop/src-tauri/src/offline_preflight_shell_tests.rs",
     "desktop/src-tauri/src/runtime.rs",
     "desktop/src-tauri/src/shell.rs", "desktop/src-tauri/src/supervisor.rs",
     "desktop/src-tauri/src/session_gtk_qualification.rs",
@@ -184,6 +245,10 @@ GTK_CORE_PATHS = (
     "mobile_release/_desktop_environment_engine.py",
     "mobile_release/_desktop_environment_protocol.py",
     "mobile_release/_desktop_github_engine.py",
+    "mobile_release/_desktop_preflight_budget.py",
+    "mobile_release/_desktop_preflight_control.py",
+    "mobile_release/_desktop_preflight_engine.py",
+    "mobile_release/_desktop_preflight_protocol.py",
     "mobile_release/_github_connection_transport.py",
     "mobile_release/_lifetime_evidence.py",
     "mobile_release/_native_process.py",
@@ -227,6 +292,7 @@ GTK_CORE_PATHS = (
     "mobile_release/credential_requirements.py",
     "mobile_release/credentials.py",
     "mobile_release/data/apple-profile-roots.pem",
+    "mobile_release/desktop_preflight.py",
     "mobile_release/discovery.py",
     "mobile_release/environment_diagnostics.py",
     "mobile_release/environment_diagnostics_tools.py",
@@ -878,15 +944,15 @@ def require(condition: bool, message: str) -> None:
 
 def admit_phase(scope: str, phase: str) -> None:
     """Closed scope selection, before context, tools, or native dispatch."""
-    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, ENVIRONMENT_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
+    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
     if scope in COMPILE_PROFILES:
         require(phase in COMPILE_PHASES, "Compiler-only scope cannot execute a native phase")
     elif scope == WORKFLOW_NATIVE_SCOPE:
         require(phase in WORKFLOW_NATIVE_PHASES, "Workflow-only scope cannot execute an unrelated native phase")
     elif scope == METADATA_NATIVE_SCOPE:
         require(phase in METADATA_NATIVE_PHASES, "Metadata-only scope cannot execute an unrelated native phase")
-    elif scope == ENVIRONMENT_NATIVE_SCOPE:
-        require(phase in ENVIRONMENT_NATIVE_PHASES, "Environment-only scope cannot execute an unrelated phase")
+    elif scope in ENVIRONMENT_NATIVE_SCOPES:
+        require(phase in environment_native_profile(scope)["phases"], "Environment-only scope cannot execute an unrelated phase")
     elif scope == WINDOWS_SNAPSHOT_SCOPE:
         require(phase in WINDOWS_SNAPSHOT_PHASES, "Windows snapshot scope cannot execute an unrelated phase")
     elif scope == GITHUB_READONLY_SCOPE:
@@ -902,7 +968,7 @@ def admit_platform(scope: str, platform: str) -> None:
     require(scope != GTK_COMPILE_SCOPE or platform == "linux", "SG1 compilation requires Linux")
     require(scope != WORKFLOW_NATIVE_SCOPE or platform == "linux", "Workflow native verification requires Linux")
     require(scope != METADATA_NATIVE_SCOPE or platform == "linux", "Metadata native verification requires Linux")
-    require(scope != ENVIRONMENT_NATIVE_SCOPE or platform in {"linux", "macos"}, "Environment native verification requires its exact Linux or macOS host")
+    require(scope not in ENVIRONMENT_NATIVE_SCOPES or platform in {"linux", "macos"}, "Environment native verification requires its exact Linux or macOS host")
     require(scope != WINDOWS_SNAPSHOT_SCOPE or platform == "windows", "Windows snapshot verification requires Windows")
     require(scope != GITHUB_READONLY_SCOPE or platform == "linux", "G1 native verification requires Linux")
     require(scope != GITHUB_TLS_SCOPE or platform == "linux", "TLS verification requires Linux")
@@ -1124,9 +1190,9 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
 def admitted_host(*, retention_only: bool = False) -> str:
     require(os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, ENVIRONMENT_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
+            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
             "This fixed check requires an explicitly admitted disposable hosted job")
-    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, ENVIRONMENT_NATIVE_SCOPE},
+    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES},
             "DATA-only admission is restricted to fixed retention")
     platform = os.environ.get("MRK_DESKTOP_PLATFORM", "")
     require(platform in TARGETS and platform == {
@@ -1139,7 +1205,7 @@ def admitted_host(*, retention_only: bool = False) -> str:
         require(os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"
                 and os.environ.get("ImageOS") == "ubuntu24" and (retention_only or os.uname().machine == "x86_64")
                 and os.geteuid() != 0, "Workflow native checks require the non-root Ubuntu 24 x86_64 runner")
-    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == ENVIRONMENT_NATIVE_SCOPE:
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in ENVIRONMENT_NATIVE_SCOPES:
         environment_native_binding(os.environ)
         if not retention_only:
             environment_observed_host(platform)
@@ -4895,7 +4961,7 @@ def metadata_public_bindings(context: dict) -> dict:
 def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, "prepare")
     admit_platform(scope, platform)
-    if scope == ENVIRONMENT_NATIVE_SCOPE:
+    if scope in ENVIRONMENT_NATIVE_SCOPES:
         prepare_environment_native(platform)
         return
     windows = scope == WINDOWS_SNAPSHOT_SCOPE
@@ -5051,7 +5117,7 @@ def metadata_invocation() -> dict:
 
 def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: bool = False) -> dict:
     admit_platform(scope, platform)
-    if scope == ENVIRONMENT_NATIVE_SCOPE:
+    if scope in ENVIRONMENT_NATIVE_SCOPES:
         return load_environment_native_context(platform, retention_only=retention_only)
     require(not retention_only or scope == METADATA_NATIVE_SCOPE, "Unexpected DATA-only context route")
     metadata_binding = metadata_native_binding(os.environ) if scope == METADATA_NATIVE_SCOPE else None
@@ -5582,9 +5648,9 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, name)
     admit_platform(scope, platform)
     context = (load_context(platform, scope, retention_only=True) if (scope == METADATA_NATIVE_SCOPE and name == "clean"
-               or scope == ENVIRONMENT_NATIVE_SCOPE and name == "retain")
+               or scope == ENVIRONMENT_NATIVE_SCOPE and name == "retain" or scope == OFFLINE_NATIVE_SCOPE)
                else load_context(platform, scope))
-    if scope == ENVIRONMENT_NATIVE_SCOPE:
+    if scope in ENVIRONMENT_NATIVE_SCOPES:
         phase_environment_native(name, context)
         return
     if scope == METADATA_NATIVE_SCOPE:
@@ -5859,6 +5925,7 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
 
 def environment_native_binding(environment: dict[str, str]) -> dict[str, str]:
     """Closed two-host verification route; never a diagnostic capability."""
+    profile = environment_native_profile(environment.get("MRK_DESKTOP_HOSTED_CHECKS", ""))
     sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
     run_id, attempt = environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
     ref, platform = environment.get("GITHUB_REF", ""), environment.get("MRK_DESKTOP_PLATFORM", "")
@@ -5867,8 +5934,7 @@ def environment_native_binding(environment: dict[str, str]) -> dict[str, str]:
             "Environment source identity differs")
     require(all(type(value) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None for value in (run_id, attempt)),
             "Environment original run identity differs")
-    require(environment.get("MRK_DESKTOP_HOSTED_CHECKS") == ENVIRONMENT_NATIVE_SCOPE
-            and type(ref) is str and type(platform) is str and (ref, platform) in ENVIRONMENT_NATIVE_ROUTES
+    require(type(ref) is str and type(platform) is str and (ref, platform) in profile["routes"]
             and environment.get("GITHUB_WORKFLOW_SHA") == sha
             and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{ENVIRONMENT_NATIVE_WORKFLOW}@{ref}",
             "Environment workflow/ref/scope binding differs")
@@ -5911,10 +5977,53 @@ def environment_observed_host(platform: str) -> dict:
         "imageOS": os.environ.get("ImageOS", ""), "imageVersion": os.environ.get("ImageVersion", "")}, platform)
 
 
-def environment_directory_bindings(root: Path, source: Path) -> dict:
+def environment_directory_bindings(root: Path, source: Path, scope: str = ENVIRONMENT_NATIVE_SCOPE) -> dict:
     return {"root": workflow_directory_identity(root), "source": workflow_directory_identity(source),
             "cwd": workflow_directory_identity(source / "desktop"),
-            **{name: workflow_directory_identity(root / name) for name in ENVIRONMENT_NATIVE_DIRECTORIES}}
+            **{name: workflow_directory_identity(root / name) for name in environment_native_profile(scope)["directories"]}}
+
+
+def offline_saved_configs(python: str) -> list[dict]:
+    """Fixed synthetic saved bytes. The CLI11 prelude parses THESE exact texts.
+
+    Native writes rawText unchanged; no independently serialized native config
+    can replace this source/phase-bound policy admission. No command is run here.
+    """
+    require(type(python) is str and python.startswith("/") and len(python) <= 4096
+            and not any(ord(char) < 32 or ord(char) == 127 for char in python), "Offline saved Python path differs")
+    rows = []
+    for case in OFFLINE_SAVED_CASES:
+        command = [python, "-I", "-S", "-B", "check.py", "active" if case == "PF06" else "nonzero" if case == "PF02" else "pass"]
+        checks = [["./offline-native-executable-does-not-exist"]] if case == "PF03" else [command]
+        if case == "PF02":
+            checks.append([python, "-I", "-S", "-B", "check.py", "later"])
+        value = {"schemaVersion": 1,
+            "version": {"source": "release/version.properties", "nameKey": "VERSION_NAME", "buildKey": "BUILD_NUMBER"},
+            "source": {"candidateBranch": "main", "productionBranch": "main"},
+            "android": {"enabled": True, "applicationId": "com.example.reader", "identityStatus": "approved",
+                "module": ":app", "variant": "release", "externalTrack": {"name": "closed-testing", "kind": "closed"},
+                "uploadCertificateSha256": "a" * 64},
+            "ios": {"enabled": False},
+            "metadata": {"root": "release/store", "androidLocales": ["en-US"], "iosLocales": []},
+            "services": {"androidFirebase": "disabled", "iosFirebase": "disabled"},
+            "projectChecks": {"preflight": checks, "androidArtifact": [], "iosArtifact": []}}
+        raw = json.dumps(value, ensure_ascii=True, sort_keys=True, indent=2) + "\n"
+        data = raw.encode("utf-8")
+        require(0 < len(data) <= 8192, "Offline saved fixture config exceeds its bound")
+        rows.append({"case": case, "rawText": raw, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    return rows
+
+
+def validate_offline_saved_configs(value: object, python: str) -> list[dict]:
+    require(type(value) is list and len(value) == len(OFFLINE_SAVED_CASES), "Offline saved config roster differs")
+    for row, case in zip(value, OFFLINE_SAVED_CASES):
+        closed_object(row, {"case", "rawText", "size", "sha256"}, "Offline saved config fields differ")
+        require(row["case"] == case and type(row["rawText"]) is str and row["rawText"].endswith("\n")
+                and integer_between(row["size"], 1, 8192) and sha256_value(row["sha256"]), "Offline saved config shape differs")
+        raw = row["rawText"].encode("utf-8")
+        require(len(raw) == row["size"] and hashlib.sha256(raw).hexdigest() == row["sha256"], "Offline saved config bytes differ")
+    require(same_compile_json(value, offline_saved_configs(python)), "Offline saved config is not the fixed case DATA")
+    return value
 
 
 def validate_environment_inventory(value: object, *, maximum: int) -> list[dict]:
@@ -5935,12 +6044,16 @@ def validate_environment_inventory(value: object, *, maximum: int) -> list[dict]
 
 def validate_environment_inputs(value: object) -> dict:
     """Private precompile DATA, authenticated by a separate compiled digest."""
+    require(type(value) is dict, "Environment native inputs are not an object")
+    profile = environment_native_profile(value.get("scope", ""))
     fields = {"schemaVersion", "scope", "root", "source", "python", "sourceSha", "sourceTree", "platform", "target",
         "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt", "repository", "event", "ref",
         "sourceFiles", "coreFiles", "coreZipSha256", "coreZipBytes", "pythonSha256", "pythonBytes", "bootstrapSha256",
         "cwd", "originalDirectories", "observedHost"}
+    if profile["scope"] == OFFLINE_NATIVE_SCOPE:
+        fields.add("savedConfigs")
     value = closed_object(value, fields, "Environment native input fields differ")
-    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["scope"] == ENVIRONMENT_NATIVE_SCOPE
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
             and type(value["platform"]) is str and value["platform"] in {"linux", "macos"}
             and value["target"] == TARGETS[value["platform"]],
             "Environment native input profile differs")
@@ -5948,7 +6061,7 @@ def validate_environment_inputs(value: object) -> dict:
         require(type(value[name]) is str and re.fullmatch(r"[0-9a-f]{40}", value[name]) is not None and value[name] != "0" * 40,
                 "Environment native source/tree identity differs")
     require(value["workflowSha"] == value["sourceSha"] and value["workflowPath"] == ENVIRONMENT_NATIVE_WORKFLOW
-            and type(value["ref"]) is str and (value["ref"], value["platform"]) in ENVIRONMENT_NATIVE_ROUTES and type(value["event"]) is str
+            and type(value["ref"]) is str and (value["ref"], value["platform"]) in profile["routes"] and type(value["event"]) is str
             and value["event"] in {"push", "workflow_dispatch"}
             and type(value["repository"]) is str and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value["repository"]) is not None
             and value["workflowRef"] == f"{value['repository']}/{ENVIRONMENT_NATIVE_WORKFLOW}@{value['ref']}"
@@ -5969,18 +6082,24 @@ def validate_environment_inputs(value: object) -> dict:
     core = validate_environment_inventory(value["coreFiles"], maximum=32 * 1024 * 1024)
     validate_gtk_core_inventory(core)  # The same complete core package DATA, not a GTK invocation.
     by_path = {row["path"]: row for row in sources}
-    required = {ENVIRONMENT_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py", "desktop/environment_bootstrap.py",
+    required = {ENVIRONMENT_NATIVE_WORKFLOW, "desktop/tools/ci_foundation.py", profile["bootstrap"],
         "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
         "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/environment_diagnostics_owner.rs",
         "desktop/src-tauri/src/environment_diagnostics_hosted_tests.rs", "tests/native_desktop_environment.py",
         "tests/workflow/command_bootstrap_fixture.py"}
+    if profile["scope"] == OFFLINE_NATIVE_SCOPE:
+        required.update({"desktop/src-tauri/src/offline_preflight_owner.rs", "desktop/src-tauri/src/offline_preflight_owner_tests.rs",
+            "desktop/src-tauri/src/offline_preflight_protocol.rs", "src/mobile_release/desktop_preflight.py",
+            "src/mobile_release/_desktop_preflight_budget.py", "tests/desktop/test_ci_environment_diagnostics.py",
+            "tests/desktop/test_native_environment_fixture_contract.py"})
+        validate_offline_saved_configs(value["savedConfigs"], value["python"])
     require(required <= by_path.keys() and by_path[ENVIRONMENT_NATIVE_WORKFLOW]["sha256"] == value["workflowSha256"]
-            and by_path["desktop/environment_bootstrap.py"]["sha256"] == value["bootstrapSha256"],
+            and by_path[profile["bootstrap"]]["sha256"] == value["bootstrapSha256"],
             "Environment complete source inventory is missing its actual fixture/runtime")
     for row in core:
         require(same_compile_json(by_path.get("src/" + row["path"]), {**row, "path": "src/" + row["path"]}),
                 "Environment source and ZIP package inventories disagree")
-    directories = closed_object(value["originalDirectories"], {"root", "source", "cwd", *ENVIRONMENT_NATIVE_DIRECTORIES},
+    directories = closed_object(value["originalDirectories"], {"root", "source", "cwd", *profile["directories"]},
                                 "Environment original directory roster differs")
     for row in directories.values():
         closed_object(row, {"device", "inode", "mode", "uid", "gid"}, "Environment original directory fields differ")
@@ -5996,8 +6115,9 @@ def validate_environment_inputs(value: object) -> dict:
 
 def environment_public_bindings(inputs: dict, digest: str) -> dict:
     validate_environment_inputs(inputs)
+    profile = environment_native_profile(inputs["scope"])
     require(sha256_value(digest), "Environment public input digest differs")
-    return {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_EVIDENCE_SCOPE,
+    value = {"schemaVersion": 1, "scope": profile["evidence"],
         **{key: inputs[key] for key in ("sourceSha", "sourceTree", "platform", "target", "workflowPath", "workflowSha",
                                       "workflowRef", "workflowSha256", "runId", "attempt")},
         "inputsSha256": digest, "host": inputs["observedHost"],
@@ -6005,14 +6125,18 @@ def environment_public_bindings(inputs: dict, digest: str) -> dict:
         "rust": {"release": RUST, "target": inputs["target"]},
         "sourceFiles": len(inputs["sourceFiles"]), "coreFiles": len(inputs["coreFiles"]),
         "coreZipSha256": inputs["coreZipSha256"], "bootstrapSha256": inputs["bootstrapSha256"],
-        "features": ["development-runtime"], "entry": ENVIRONMENT_NATIVE_TEST,
-        "notVerified": list(ENVIRONMENT_NATIVE_NOT_VERIFIED)}
+        "features": ["development-runtime"], "entry": profile["test"],
+        "notVerified": list(profile["notVerified"])}
+    if inputs["scope"] == OFFLINE_NATIVE_SCOPE:
+        value["savedConfigs"] = [{key: row[key] for key in ("case", "size", "sha256")} for row in inputs["savedConfigs"]]
+        value["cli11"] = list(OFFLINE_CLI11_IDS)
+    return value
 
 
 def environment_inputs_unchanged(context: dict, inputs: dict) -> None:
     """Pre-native source inspection only. Never called by DATA-only retain."""
     root, source = Path(context["root"]), Path(context["source"])
-    require(same_compile_json(environment_directory_bindings(root, source), inputs["originalDirectories"]),
+    require(same_compile_json(environment_directory_bindings(root, source, context["executionScope"]), inputs["originalDirectories"]),
             "Environment original directories changed")
     require(same_compile_json(fixed_file_inventory(source, tuple(row["path"] for row in inputs["sourceFiles"])), inputs["sourceFiles"])
             and same_compile_json(workflow_core_inventory(source), inputs["coreFiles"]),
@@ -6026,18 +6150,19 @@ def environment_inputs_unchanged(context: dict, inputs: dict) -> None:
 
 def prepare_environment_native(platform: str) -> None:
     binding = environment_native_binding(os.environ)
+    profile = environment_native_profile(os.environ["MRK_DESKTOP_HOSTED_CHECKS"])
     source, temp = Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True), Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
     for name in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/target", "desktop/src-tauri/gen"):
         require(not os.path.lexists(source / name), "Environment checkout contains an existing generated output")
     no_cargo_configuration((source / "desktop/src-tauri", source / "desktop", source, *source.parents, temp, *temp.parents))
     root = temp / f"mrk-desktop-foundation-environment-{binding['runId']}-{binding['attempt']}"
     root.mkdir(mode=0o700)  # Exactly one root per original job attempt; never a replacement after failure.
-    for name in ENVIRONMENT_NATIVE_DIRECTORIES:
+    for name in profile["directories"]:
         (root / name).mkdir(mode=0o700)
     (root / "gitconfig-empty").touch(mode=0o600, exist_ok=False)
     git, rustup = shutil.which("git"), shutil.which("rustup")
     require(git is not None and rustup is not None, "Environment hosted compiler tools unavailable")
-    context = {"root": str(root), "source": str(source), "platform": platform, "executionScope": ENVIRONMENT_NATIVE_SCOPE,
+    context = {"root": str(root), "source": str(source), "platform": platform, "executionScope": profile["scope"],
         "git": git, "rustup": rustup, "python": str(Path(sys.executable).resolve(strict=True)), **binding,
         "originalInvocation": metadata_invocation()}
     environment = clean_environment(root)
@@ -6058,13 +6183,15 @@ def prepare_environment_native(platform: str) -> None:
             member = zipfile.ZipInfo(row["path"], date_time=(1980, 1, 1, 0, 0, 0))
             member.create_system, member.external_attr = 3, (stat.S_IFREG | 0o644) << 16
             archive.writestr(member, data, compress_type=zipfile.ZIP_DEFLATED)
-    inputs = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_SCOPE, "root": str(root), "source": str(source),
+    inputs = {"schemaVersion": 1, "scope": profile["scope"], "root": str(root), "source": str(source),
         "python": context["python"], "sourceTree": tree, "platform": platform, "target": TARGETS[platform], **binding,
         "workflowSha256": hash_file(source / ENVIRONMENT_NATIVE_WORKFLOW), "sourceFiles": sources, "coreFiles": core,
         "coreZipSha256": hash_file(root / "core.zip"), "coreZipBytes": (root / "core.zip").stat().st_size,
         "pythonSha256": hash_file(Path(context["python"])), "pythonBytes": Path(context["python"]).stat().st_size,
-        "bootstrapSha256": hash_file(source / "desktop/environment_bootstrap.py"), "cwd": str(source / "desktop"),
-        "originalDirectories": environment_directory_bindings(root, source), "observedHost": environment_observed_host(platform)}
+        "bootstrapSha256": hash_file(source / profile["bootstrap"]), "cwd": str(source / "desktop"),
+        "originalDirectories": environment_directory_bindings(root, source, profile["scope"]), "observedHost": environment_observed_host(platform)}
+    if profile["scope"] == OFFLINE_NATIVE_SCOPE:
+        inputs["savedConfigs"] = offline_saved_configs(context["python"])
     validate_environment_inputs(inputs)
     write_json(root / "environment-native-inputs.json", inputs)
     context.update(sourceTree=tree, workflowSha256=inputs["workflowSha256"], environmentInputsSha256=hash_file(root / "environment-native-inputs.json"))
@@ -6079,6 +6206,7 @@ def prepare_environment_native(platform: str) -> None:
 
 def load_environment_native_context(platform: str, *, retention_only: bool = False) -> dict:
     binding = environment_native_binding(os.environ)
+    scope = environment_native_profile(os.environ["MRK_DESKTOP_HOSTED_CHECKS"])["scope"]
     root = Path(os.environ["MRK_DESKTOP_CI_ROOT"])
     require(root.is_absolute() and root.parent == Path(os.environ["RUNNER_TEMP"])
             and root.name == f"mrk-desktop-foundation-environment-{binding['runId']}-{binding['attempt']}"
@@ -6087,12 +6215,13 @@ def load_environment_native_context(platform: str, *, retention_only: bool = Fal
             "originalInvocation", "sourceTree", "workflowSha256", "environmentInputsSha256"}
     context = closed_object(read_bounded_json(root / "context.json", ENVIRONMENT_NATIVE_INPUT_LIMIT), keys,
                             "Environment original context fields differ")
-    require(context["root"] == str(root) and context["platform"] == platform and context["executionScope"] == ENVIRONMENT_NATIVE_SCOPE
+    require(context["root"] == str(root) and context["platform"] == platform and context["executionScope"] == scope
             and all(context[key] == value for key, value in binding.items())
             and same_compile_json(context["originalInvocation"], metadata_invocation()), "Environment original invocation changed")
     inputs_path = root / "environment-native-inputs.json"
     require(hash_file(inputs_path) == context["environmentInputsSha256"], "Environment original input digest changed")
     inputs = validate_environment_inputs(read_bounded_json(inputs_path, ENVIRONMENT_NATIVE_INPUT_LIMIT))
+    require(inputs["scope"] == scope, "Environment input scope differs from the original invocation")
     require(all(same_compile_json(inputs[key], context[key]) for key in ("root", "source", "python", "platform", "sourceTree", "workflowSha256", *binding)),
             "Environment original input/context correspondence differs")
     require(same_compile_json(read_bounded_json(root / "public-bindings.json", 16384),
@@ -6183,16 +6312,17 @@ def validate_environment_compiled_summary(value: object) -> dict:
 
 
 def environment_phase_value(context: dict, name: str, *, compiled: dict | None = None) -> dict:
-    require(name in ENVIRONMENT_NATIVE_CHECKS and context["executionScope"] == ENVIRONMENT_NATIVE_SCOPE,
+    profile = environment_native_profile(context["executionScope"])
+    require(name in ENVIRONMENT_NATIVE_CHECKS,
             "Unknown environment compiler phase")
-    value = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_EVIDENCE_SCOPE, "phase": name, "status": "passed",
+    value = {"schemaVersion": 1, "scope": profile["evidence"], "phase": name, "status": "passed",
         **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha",
                                        "workflowRef", "workflowSha256", "runId", "attempt")},
         "inputsSha256": context["environmentInputsSha256"], "python": PYTHON,
         "rust": {"release": RUST, "target": TARGETS[context["platform"]]},
         "features": ["development-runtime"], "testTarget": "lib", "execution": "no-run",
         "checks": [{"check": check, "exitCode": 0} for check in ENVIRONMENT_NATIVE_CHECKS[name]],
-        "notVerified": list(ENVIRONMENT_NATIVE_NOT_VERIFIED)}
+        "notVerified": list(profile["notVerified"])}
     if name == "compile":
         value["compiledTest"] = validate_environment_compiled_summary(compiled)
     else:
@@ -6209,27 +6339,37 @@ def validate_environment_phase_receipt(value: object, context: dict, name: str) 
 
 
 def environment_phase_claim(context: dict, name: str) -> dict:
-    require(name in ENVIRONMENT_NATIVE_PHASES[1:], "Unknown environment original phase claim")
-    return {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_SCOPE, "phase": name,
+    profile = environment_native_profile(context["executionScope"])
+    require(name in profile["phases"][1:], "Unknown environment original phase claim")
+    return {"schemaVersion": 1, "scope": profile["scope"], "phase": name,
         **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "runId", "attempt")},
         "inputsSha256": context["environmentInputsSha256"]}
 
 
+def validate_environment_phase_claim(value: object, context: dict, name: str) -> dict:
+    require(same_compile_json(value, environment_phase_claim(context, name)), "Environment original phase claim differs")
+    return value
+
+
 def environment_predecessors(context: dict, name: str) -> None:
-    phases = ENVIRONMENT_NATIVE_PHASES[1:]
+    phases = environment_native_profile(context["executionScope"])["phases"][1:]
     require(name in phases, "Unknown environment phase successor")
     root = Path(context["root"])
     previous = phases[:phases.index(name)]
     for prior in previous:
-        require(same_compile_json(read_bounded_json(root / f"{prior}-started.json", 4096),
-                                  environment_phase_claim(context, prior)), "Environment original phase claim changed")
-        if prior in ENVIRONMENT_NATIVE_CHECKS:
-            validate_environment_phase_receipt(read_bounded_json(root / f"{prior}-checks.json", 16384), context, prior)
+        if prior == "offline-cli11":
+            # Before source inspection or Cargo, require the ordinary original
+            # leaf aggregate AND the actual shell wait/output-close gate.
+            offline_cli11_predecessor(context)
+        else:
+            validate_environment_phase_claim(read_bounded_json(root / f"{prior}-started.json", 4096), context, prior)
+            if prior in ENVIRONMENT_NATIVE_CHECKS:
+                validate_environment_phase_receipt(read_bounded_json(root / f"{prior}-checks.json", 16384), context, prior)
     for later in phases[len(previous):]:
         require(not os.path.lexists(root / f"{later}-started.json")
                 and not os.path.lexists(root / f"{later}-checks.json"),
                 "Environment phase was already claimed; retain original outputs")
-    if name in {"acquire", "compile"}:
+    if name in {"offline-cli11", "acquire", "compile"}:
         require(not os.path.lexists(root / "environment-native-invocation.json"),
                 "Environment compiled invocation already exists")
     if name != "retain":
@@ -6244,7 +6384,7 @@ def validate_environment_invocation(value: object, *, context: dict, compile_rec
     fields = {"schemaVersion", "scope", "inputsSha256", "sourceSha", "sourceTree", "platform", "target", "path",
               "identity", "size", "sha256", "invocationSha256", "messagesSha256", "compileReceiptSha256"}
     value = closed_object(value, fields, "Environment invocation fields differ")
-    expected = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_SCOPE,
+    expected = {"schemaVersion": 1, "scope": environment_native_profile(context["executionScope"])["scope"],
                 **{key: context[key] for key in ("sourceSha", "sourceTree", "platform")},
                 "target": TARGETS[context["platform"]], "inputsSha256": context["environmentInputsSha256"],
                 "compileReceiptSha256": compile_digest}
@@ -6291,7 +6431,7 @@ def environment_compile_record(context: dict, argv: list[str], messages: Path) -
         raw = stream.read(16 * 1024 * 1024 + 1)
     root = Path(context["root"])
     path = environment_compiled_test(raw, source=Path(context["source"]), root=root, platform=context["platform"])
-    artifact = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_SCOPE,
+    artifact = {"schemaVersion": 1, "scope": environment_native_profile(context["executionScope"])["scope"],
         "inputsSha256": context["environmentInputsSha256"],
         **{key: context[key] for key in ("sourceSha", "sourceTree", "platform")},
         "target": TARGETS[context["platform"]], "path": str(path), **environment_artifact_identity(path, context),
@@ -6314,7 +6454,7 @@ def environment_native_environment(context: dict) -> dict[str, str]:
     root, source = Path(context["root"]), Path(context["source"])
     environment = clean_environment(root)
     host = context["environmentInputs"]["observedHost"]
-    environment.update(MRK_DESKTOP_HOSTED_CHECKS=ENVIRONMENT_NATIVE_SCOPE,
+    environment.update(MRK_DESKTOP_HOSTED_CHECKS=environment_native_profile(context["executionScope"])["scope"],
         MRK_DESKTOP_PLATFORM=context["platform"], MRK_ENVIRONMENT_NATIVE_INPUTS=str(root / "environment-native-inputs.json"),
         MRK_DESKTOP_DEV_PYTHON=context["python"], MRK_DESKTOP_DEV_CORE=str(source / "src"),
         GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
@@ -6330,14 +6470,16 @@ def environment_native_environment(context: dict) -> dict[str, str]:
     return environment
 
 
-def environment_original_outer_outputs(context: dict) -> None:
+def environment_original_outer_outputs(context: dict, *, phase: str = "environment-native") -> None:
     """Pre-exec only: the shell owns these bounded originals, not a launcher."""
+    require(phase == "environment-native" or phase == "offline-cli11" and context["executionScope"] == OFFLINE_NATIVE_SCOPE,
+            "Unknown original shell output phase")
     import resource  # POSIX scope admitted above; never imported on Windows.
     require(resource.getrlimit(resource.RLIMIT_FSIZE)[0] == ENVIRONMENT_NATIVE_PUBLIC_LIMIT,
             "Environment original shell file-size limit differs")
     root = Path(context["root"])
     seen = set()
-    for fd, name in ((1, "environment-native.stdout"), (2, "environment-native.stderr")):
+    for fd, name in ((1, f"{phase}.stdout"), (2, f"{phase}.stderr")):
         path = root / name
         ordinary(path)
         actual, expected = os.fstat(fd), path.lstat()
@@ -6348,7 +6490,7 @@ def environment_original_outer_outputs(context: dict) -> None:
                 and actual.st_size <= ENVIRONMENT_NATIVE_PUBLIC_LIMIT,
                 "Environment original shell output descriptor differs")
         seen.add(identity)
-    outer = root / "environment-native-outer.json"
+    outer = root / f"{phase}-outer.json"
     ordinary(outer)
     require(outer.stat().st_size == 0 and stat.S_IMODE(outer.stat().st_mode) == 0o600,
             "Environment original shell wait writer was already used")
@@ -6663,14 +6805,22 @@ def validate_environment_progress(value: object, context: dict) -> dict:
     return progress
 
 
-def validate_environment_outer(value: object, context: dict, *, step_outcome: str, success: bool) -> dict:
-    outer = closed_object(value, {"schemaVersion", "scope", "sourceSha", "platform", "runId", "attempt",
-        "originalWait", "exitCode", "outputWritersClosed", "statusWriterCloseGate", "fileLimitBytes"},
+def validate_environment_outer(value: object, context: dict, *, step_outcome: str, success: bool,
+                               phase: str = "environment-native") -> dict:
+    require(phase == "environment-native" or phase == "offline-cli11" and context["executionScope"] == OFFLINE_NATIVE_SCOPE,
+            "Unknown original shell receipt phase")
+    fields = {"schemaVersion", "scope", "sourceSha", "platform", "runId", "attempt",
+        "originalWait", "exitCode", "outputWritersClosed", "statusWriterCloseGate", "fileLimitBytes"}
+    if context["executionScope"] == OFFLINE_NATIVE_SCOPE:
+        fields.add("phase")
+    outer = closed_object(value, fields,
         "Environment original shell wait fields differ")
-    fixed = {"schemaVersion": 1, "scope": ENVIRONMENT_NATIVE_SCOPE,
+    fixed = {"schemaVersion": 1, "scope": environment_native_profile(context["executionScope"])["scope"],
         **{key: context[key] for key in ("sourceSha", "platform", "runId", "attempt")},
         "originalWait": True, "outputWritersClosed": True,
         "statusWriterCloseGate": "original-step-success-required", "fileLimitBytes": ENVIRONMENT_NATIVE_PUBLIC_LIMIT}
+    if context["executionScope"] == OFFLINE_NATIVE_SCOPE:
+        fixed["phase"] = phase
     require(same_compile_json({key: outer[key] for key in fixed}, fixed)
             and integer_between(outer["exitCode"], 0, 255), "Environment original shell wait/source/custody differs")
     if success:
@@ -6838,6 +6988,406 @@ def environment_optional_data(path: Path, limit: int, validator) -> tuple[dict |
         return None, "invalid"
 
 
+OFFLINE_CLI11_COMMON = frozenset({"schemaVersion", "scope", "inputsSha256", "sourceSha", "sourceTree",
+    "runId", "attempt", "platform", "startedNs", "deadlineNs"})
+OFFLINE_CLI11_REASONS = frozenset({"none", "test-failed", "deadline", "admission-failed", "restoration-failed"})
+
+
+def offline_cli11_common(context: dict, started_ns: int) -> dict:
+    require(context["executionScope"] == OFFLINE_NATIVE_SCOPE
+            and integer_between(started_ns, 1, 2**63 - 1 - OFFLINE_CLI11_NS), "Offline CLI11 original clock is missing")
+    return {"schemaVersion": 1, "scope": OFFLINE_NATIVE_SCOPE,
+        "inputsSha256": context["environmentInputsSha256"],
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "platform")},
+        "startedNs": started_ns, "deadlineNs": started_ns + OFFLINE_CLI11_NS}
+
+
+def offline_cli11_control(context: dict, started_ns: int) -> dict:
+    return {**offline_cli11_common(context, started_ns), "python": context["python"],
+        "core": str(Path(context["source"]) / "src"), "source": context["source"], "root": context["root"]}
+
+
+def validate_offline_cli11_control(value: object, context: dict) -> dict:
+    value = closed_object(value, {*OFFLINE_CLI11_COMMON, "python", "core", "source", "root"}, "Offline CLI11 control fields differ")
+    require(same_compile_json(value, offline_cli11_control(context, value["startedNs"])), "Offline CLI11 original control binding differs")
+    return value
+
+
+def validate_offline_cli11_progress(value: object, context: dict, control: dict) -> dict:
+    validate_offline_cli11_control(control, context)
+    value = closed_object(value, {*OFFLINE_CLI11_COMMON, "phase", "selectedIds"}, "Offline CLI11 progress fields differ")
+    require(same_compile_json({key: value[key] for key in OFFLINE_CLI11_COMMON},
+                              offline_cli11_common(context, control["startedNs"]))
+            and value["phase"] == "started" and same_compile_json(value["selectedIds"], list(OFFLINE_CLI11_IDS)),
+            "Offline CLI11 original selection or progress clock differs")
+    return value
+
+
+def validate_offline_cli11_result(value: object, context: dict, control: dict, *, success: bool) -> dict:
+    validate_offline_cli11_control(control, context)
+    value = closed_object(value, {*OFFLINE_CLI11_COMMON, "finishedNs", "status", "physicalFinality", "selected",
+        "tests", "savedConfigs", "reason"}, "Offline CLI11 result fields differ")
+    require(same_compile_json({key: value[key] for key in OFFLINE_CLI11_COMMON},
+                              offline_cli11_common(context, control["startedNs"]))
+            and integer_between(value["finishedNs"], control["startedNs"], 2**63 - 1)
+            and value["physicalFinality"] is True and type(value["selected"]) is int and value["selected"] == 11
+            and type(value["status"]) is str and value["status"] in {"passed", "failed"}
+            and type(value["reason"]) is str and value["reason"] in OFFLINE_CLI11_REASONS,
+            "Offline CLI11 original finality/status/clock differs")
+    rows = value["tests"]
+    require(type(rows) is list and len(rows) <= 11, "Offline CLI11 leaf roster exceeds its fixed bound")
+    for index, row in enumerate(rows):
+        closed_object(row, {"id", "status", "commands", "invocations", "guards"}, "Offline CLI11 leaf fields differ")
+        require(row["id"] == OFFLINE_CLI11_IDS[index] and type(row["status"]) is str and row["status"] in {"passed", "failed"}
+                and all(integer_between(row[name], 0, 4096) for name in ("commands", "invocations", "guards"))
+                and (row["status"] == "passed" or index == len(rows) - 1), "Offline CLI11 leaf order or original receipts differ")
+    expected_saved = [{"case": row["case"], "sha256": row["sha256"]} for row in context["environmentInputs"]["savedConfigs"]]
+    # Prelude failure can have no validated config rows; it can never authorize
+    # a compiler or native successor. Any populated rows must be an exact prefix.
+    saved = value["savedConfigs"]
+    require(type(saved) is list and len(saved) <= len(expected_saved)
+            and same_compile_json(saved, expected_saved[:len(saved)]), "Offline CLI11 exact saved-byte policy evidence differs")
+    if value["status"] == "passed":
+        require(value["reason"] == "none" and value["finishedNs"] <= value["deadlineNs"] and len(rows) == 11
+                and all(row["status"] == "passed" for row in rows) and same_compile_json(saved, expected_saved),
+                "Offline CLI11 did not close exactly eleven passing leaves and all saved policies in the original clock")
+    else:
+        require(value["reason"] != "none", "Offline CLI11 failed result has no closed diagnostic")
+    require(not success or value["status"] == "passed", "Offline CLI11 failure cannot admit native work")
+    return value
+
+
+def offline_cli11_predecessor(context: dict) -> dict:
+    """Only bounded original DATA; no source/tool probe after a failed CLI tail."""
+    root = Path(context["root"])
+    require(os.environ.get("MRK_OFFLINE_CLI11_STEP_OUTCOME") == "success", "Offline CLI11 original step did not succeed")
+    require(same_compile_json(read_bounded_json(root / "offline-cli11-started.json", 4096),
+                              environment_phase_claim(context, "offline-cli11")), "Offline CLI11 original phase claim differs")
+    control = validate_offline_cli11_control(read_bounded_json(root / "offline-cli11-control.json", 16384), context)
+    progress = validate_offline_cli11_progress(read_bounded_json(root / "offline-cli11-progress.json", 16384), context, control)
+    result = validate_offline_cli11_result(read_bounded_json(root / "offline-cli11-result.json", 32768), context, control, success=True)
+    outer = validate_environment_outer(read_bounded_json(root / "offline-cli11-outer.json", 4096), context,
+        step_outcome="success", success=True, phase="offline-cli11")
+    return {"result": result, "progress": progress, "outer": outer}
+
+
+def phase_offline_cli11(context: dict) -> None:
+    require(context["executionScope"] == OFFLINE_NATIVE_SCOPE, "CLI11 is restricted to the offline native scope")
+    started = _OFFLINE_CLI11_STARTED_NS
+    control = offline_cli11_control(context, started)
+    require(time.monotonic_ns() < control["deadlineNs"], "Offline CLI11 driver entry deadline expired before admission")
+    root, source = Path(context["root"]), Path(context["source"])
+    for name in ("offline-cli11-control.json", "offline-cli11-progress.json", "offline-cli11-result.json"):
+        require(not os.path.lexists(root / name), "Offline CLI11 originals already exist; no replacement invocation")
+    environment_original_outer_outputs(context, phase="offline-cli11")
+    write_json(root / "offline-cli11-control.json", control)
+    os.chmod(root / "offline-cli11-control.json", 0o400, follow_symlinks=False)
+    environment = environment_native_environment(context)
+    argv = [context["python"], "-I", "-S", "-B", str(source / "tests/native_desktop_environment.py"),
+            "--offline-cli11", str(source / "src"), str(root / "offline-cli11-control.json")]
+    require(time.monotonic_ns() < control["deadlineNs"], "Offline CLI11 original deadline expired before exec")
+    os.chdir(root / "offline-cli11")
+    os.execve(context["python"], argv, environment)
+    raise CheckFailure("Offline CLI11 original executable unexpectedly returned from exec")
+
+
+OFFLINE_RESULT_LIMITATIONS = (
+    "saved-inputs-not-atomic", "project-code-effects-possible", "not-network-isolated", "core-builds-disabled",
+    "artifact-validation-not-requested", "toolkit-signing-credentials-store-not-requested", "release-readiness-not-assessed",
+)
+OFFLINE_CORE_STATUSES = ("PASS", "FAIL", "MISSING", "BLOCKED", "INVALID", "SKIP", "MANUAL", "CONFIGURED", "NOT_APPLICABLE")
+OFFLINE_CORE_CHECKS = frozenset({"version-source", "platform-selection", "android-module", "android-gradle-wrapper",
+    "android-debug-identity", "workspace-private-output", "android-artifact", "preflight-early-exit", "configuration-policy",
+    "metadata-policy", "configured-project-check", "core-lifecycle", "other-core-finding"})
+OFFLINE_NATIVE_EXPECTED = {
+    "PF01": ("complete", "none", "pass\n"), "PF02": ("complete", "none", "exit-7\n"),
+    "PF03": ("failed", "command-incomplete", ""), "PF04a": ("refused", "saved-config-changed", ""),
+    "PF04b": ("refused", "project-admission-refused", ""), "PF05a": ("failed", "input-limit", ""),
+    "PF05b": ("failed", "result-limit", ""), "PF06": ("cancelled", "cancelled", "active\n"),
+    "PF07": ("complete", "none", "pass\n"),
+}
+
+
+def validate_offline_progress(value: object, context: dict) -> dict:
+    value = closed_object(value, {"schemaVersion", "scope", "inputsSha256", "sourceSha", "platform", "classification",
+        "completedCases", "nextCase", "stage", "failureCode"}, "Offline conservative progress fields differ")
+    fixed = {"schemaVersion": 1, "scope": OFFLINE_NATIVE_SCOPE, "inputsSha256": context["environmentInputsSha256"],
+        "sourceSha": context["sourceSha"], "platform": context["platform"], "classification": "native-not-settled"}
+    require(context["executionScope"] == OFFLINE_NATIVE_SCOPE
+            and same_compile_json({key: value[key] for key in fixed}, fixed), "Offline progress binding differs")
+    completed = value["completedCases"]
+    require(type(completed) is list and len(completed) <= len(OFFLINE_NATIVE_CASES)
+            and same_compile_json(completed, list(OFFLINE_NATIVE_CASES[:len(completed)]))
+            and value["nextCase"] == (OFFLINE_NATIVE_CASES[len(completed)] if len(completed) < len(OFFLINE_NATIVE_CASES) else None),
+            "Offline progress is not an exact original case prefix")
+    require(type(value["stage"]) is str and value["stage"] in {"inputs", "document-gates", "reader-vectors", "native-admission",
+                "native-originals", "final-observer-hold", "original-only-retirement", "result"}
+            and (value["failureCode"] is None or type(value["failureCode"]) is str
+                and value["failureCode"] in {"required-predicate", "original-physical-finality"})
+            and (len(completed) < len(OFFLINE_NATIVE_CASES) or value["stage"] == "result"),
+            "Offline progress stage or diagnostic differs")
+    return value
+
+
+def validate_offline_report(value: object, saved: dict, case: str) -> dict:
+    value = closed_object(value, {"schemaVersion", "scope", "usedConfig", "findings", "summary", "limitations"}, "Offline report fields differ")
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+            and value["scope"] == "saved-offline-android-no-core-build"
+            and same_compile_json(value["usedConfig"], {"bytes": saved["size"], "sha256": saved["sha256"]})
+            and same_compile_json(value["limitations"], list(OFFLINE_RESULT_LIMITATIONS)), "Offline report scope or saved fingerprint differs")
+    summary = closed_object(value["summary"], {"total", "shown", "omitted", "counts"}, "Offline summary fields differ")
+    counts = closed_object(summary["counts"], set(OFFLINE_CORE_STATUSES), "Offline summary status roster differs")
+    require(integer_between(summary["total"], 0, 4096) and integer_between(summary["shown"], 0, 128)
+            and summary["shown"] == min(summary["total"], 128) and type(summary["omitted"]) is int
+            and summary["omitted"] == summary["total"] - summary["shown"]
+            and all(integer_between(n, 0, 4096) for n in counts.values()) and sum(counts.values()) == summary["total"],
+            "Offline bounded summary counts differ")
+    rows = value["findings"]
+    require(type(rows) is list and len(rows) == summary["shown"], "Offline findings count differs")
+    seen = {status: 0 for status in OFFLINE_CORE_STATUSES}
+    configured = []
+    for ordinal, row in enumerate(rows):
+        closed_object(row, {"ordinal", "check", "status", "message", "projectCheckIndex"}, "Offline redacted finding fields differ")
+        require(type(row["ordinal"]) is int and row["ordinal"] == ordinal
+                and type(row["check"]) is str and row["check"] in OFFLINE_CORE_CHECKS and row["message"] == row["check"]
+                and type(row["status"]) is str and row["status"] in OFFLINE_CORE_STATUSES
+                and (row["projectCheckIndex"] is None or row["check"] == "configured-project-check"
+                     and integer_between(row["projectCheckIndex"], 0, 31)), "Offline finding is not closed redacted DATA")
+        seen[row["status"]] += 1
+        if row["check"] == "configured-project-check":
+            configured.append(row)
+    require(all(seen[status] <= counts[status] for status in seen), "Offline displayed counts exceed the actual report")
+    require(len(configured) == 1 and configured[0]["projectCheckIndex"] == 0
+            and configured[0]["status"] == ("FAIL" if case == "PF02" else "PASS"), "Offline actual configured check finding is missing")
+    if case != "PF02":
+        require(all(counts[status] == 0 for status in ("FAIL", "MISSING", "BLOCKED", "INVALID")), "Offline success baseline did not reach passing policy")
+    return value
+
+
+def validate_offline_resources(value: object, case: str) -> dict:
+    value = closed_object(value, {"startup", "inspection", "acquisition", "child", "input", "output", "error", "writer", "stdout", "stderr",
+        "driver", "manager", "observer", "watchdog", "outputBytes", "resourceUnknown", "activeRetained", "disabled", "canExit"},
+        "Offline original native resource fields differ")
+    require(same_compile_json(value["startup"], {"attempted": True, "returned": True, "failed": False})
+            and same_compile_json(value["child"], {"present": True, "waited": True, "code": 0, "waitFailed": False}),
+            "Offline actual core acquisition or original wait differs")
+    for name in ("inspection", "acquisition"):
+        require(same_compile_json(value[name], {"joined": True, "failed": False, "retained": False}), "Offline original startup join is missing")
+    for name in ("input", "output", "error"):
+        require(same_compile_json(value[name], {"close": "settled", "retained": False}), "Offline original pipe close is missing")
+    require(same_compile_json(value["writer"], {"joined": True, "failed": False, "end": {"sent": True, "closed": True, "failed": False}}),
+            "Offline held original writer did not close and join")
+    for name in ("stdout", "stderr"):
+        require(same_compile_json(value[name], {"joined": True, "failed": False,
+            "end": {"frames": 2 if name == "stdout" else 0, "eof": True, "closed": True, "failed": False}}),
+            "Offline original reader frame/EOF/close/join evidence differs")
+    for name in ("driver", "manager", "observer", "watchdog"):
+        require(same_compile_json(value[name], {"receipt": "ok-true" if name in {"observer", "watchdog"} else "ok-unit", "retained": False}),
+                "Offline original task return/join evidence differs")
+    require(integer_between(value["outputBytes"], 1, 64 * 1024) and value["resourceUnknown"] is False
+            and value["activeRetained"] is False and value["canExit"] is True and value["disabled"] is (case == "PF07"),
+            "Offline physical finality or sticky management Unknown differs")
+    return value
+
+
+def validate_offline_case(value: object, context: dict, case: str) -> dict:
+    value = closed_object(value, {"id", "classification", "assertion", "projection", "core", "native", "files", "script", "timing", "reciprocal"},
+                          "Offline fixed-bootstrap case fields differ")
+    require(value["id"] == case and value["classification"] == "real-fixed-bootstrap" and value["assertion"] == "passed",
+            "Offline required case is absent, waived, or not actually native")
+    saved = next(row for row in context["environmentInputs"]["savedConfigs"] if row["case"] == case)
+    expected_context = {"projectId": f"offline-native-{case}", "draftRevision": 0, "baselineGeneration": 2,
+        "savedConfig": {"bytes": saved["size"], "sha256": saved["sha256"]}, "platform": "android", "operation": "offline-preflight"}
+    projection = closed_object(value["projection"], {"operationId", "ownerGeneration", "context", "phase", "intentUsable", "outcome", "reason", "result"},
+                               "Offline projection fields differ")
+    core = closed_object(value["core"], {"schemaVersion", "context", "outcome", "reason", "result", "lifetime"}, "Offline core terminal fields differ")
+    require(all(type(projection[key]) is str and re.fullmatch(r"[0-9a-f]{32}", projection[key]) is not None
+                for key in ("operationId", "ownerGeneration")) and projection["intentUsable"] is False
+            and same_compile_json(projection["context"], expected_context) and same_compile_json(core["context"], expected_context)
+            and type(core["schemaVersion"]) is int and core["schemaVersion"] == 1, "Offline original operation/context identity differs")
+    outcome, reason, marker = OFFLINE_NATIVE_EXPECTED[case]
+    require(core["outcome"] == outcome and core["reason"] == reason, "Offline actual core predicate/reason differs")
+    lifetime = closed_object(core["lifetime"], {"complete", "fatal", "contained", "commandDispatched", "commands", "profileCalls",
+        "inputClosed", "handlersRestored", "invocationClosed", "stopObserved"}, "Offline original lifetime fields differ")
+    require(all(lifetime[key] is True for key in ("complete", "contained", "inputClosed", "handlersRestored", "invocationClosed"))
+            and lifetime["fatal"] is False and type(lifetime["commandDispatched"]) is bool
+            and integer_between(lifetime["commands"], 0, 4096) and type(lifetime["profileCalls"]) is int and lifetime["profileCalls"] == 0
+            and lifetime["stopObserved"] == ("cancelled" if case == "PF06" else "none"), "Offline original core custody did not settle")
+    if case in {"PF04a", "PF04b", "PF05a", "PF05b"}:
+        require(lifetime["commands"] == 0 and lifetime["commandDispatched"] is False,
+                "Offline zero-command refusal/budget case must retain its actual distinct reason")
+    else:
+        require(lifetime["commands"] > 0 and lifetime["commandDispatched"] is True, "Offline required command was not actually dispatched")
+    if outcome == "complete":
+        validate_offline_report(core["result"], saved, case)
+    else:
+        require(core["result"] is None, "Offline failed/refused/cancelled core cannot publish a report")
+    if case == "PF07":
+        require(projection["phase"] == "unknown" and projection["outcome"] == "unknown" and projection["reason"] == "cleanup-unknown"
+                and projection["result"] is None, "Offline late positive originals reversed sticky Unknown")
+    else:
+        require(projection["phase"] == "terminal" and projection["outcome"] == outcome and projection["reason"] == reason
+                and same_compile_json(projection["result"], core["result"]), "Offline settled projection differs from the original core")
+    validate_offline_resources(value["native"], case)
+    require(same_compile_json(value["files"], {"setupClosed": True, "scriptClosed": True, "laterClosed": True,
+        "pendingClosed": True if case == "PF04b" else None, "rootsClosed": True}), "Offline original fixture files/directories did not close")
+    require(same_compile_json(value["script"], {"marker": marker, "secondExecuted": False,
+        "expectedExit": 7 if case == "PF02" else 0 if case in {"PF01", "PF07"} else None,
+        "pendingPreserved": case == "PF04b", "redacted": True}), "Offline actual fixed script/pending-input/redaction predicate differs")
+    timing = closed_object(value["timing"], {"workMs", "hardMs", "settlementMs", "firstStopNs", "hold"}, "Offline original timing fields differ")
+    require(same_compile_json({key: timing[key] for key in ("workMs", "hardMs", "settlementMs")},
+        {"workMs": 1_800_000, "hardMs": 1_810_000, "settlementMs": 10_000}), "Offline application clocks were replaced or shortened")
+    if case in {"PF01", "PF02"}:
+        require(timing["firstStopNs"] is None, "Offline complete policy-negative finding manufactured first failure")
+    else:
+        require(integer_between(timing["firstStopNs"], 0, 180_000_000_000), "Offline original first-stop observation is missing")
+    if case == "PF07":
+        hold = closed_object(timing["hold"], {"observerHeldNs", "firstStopNs", "unknownObservedNs", "completeBeforeHold", "originalWatchdogOnly"},
+                             "Offline original final-observer hold fields differ")
+        require(hold["firstStopNs"] == timing["firstStopNs"] and type(hold["firstStopNs"]) is int
+                and integer_between(hold["observerHeldNs"], 0, hold["firstStopNs"])
+                and integer_between(hold["unknownObservedNs"], hold["firstStopNs"] + 10_000_000_000,
+                                    min(180_000_000_000, hold["firstStopNs"] + 12_000_000_000))
+                and hold["completeBeforeHold"] is True and hold["originalWatchdogOnly"] is True,
+                "Offline autonomous original F+10 Unknown predicate differs")
+    else:
+        require(timing["hold"] is None, "Offline case claims an unrelated timed final-observer hold")
+    if case == "PF06":
+        require(same_compile_json(value["reciprocal"], {"sameOwnerRecovered": True, "replayRejected": True, "foreignCancelRejected": True,
+            "passiveRefused": True, "diagnosticsRefusal": "unqualified", "writerRefused": True, "githubRefusal": "unqualified",
+            "privateSessionAbsent": True, "firstStopUnchanged": True}), "Offline original active cancellation/admission predicate differs")
+    else:
+        require(value["reciprocal"] is None, "Offline case claims unrelated reciprocal admission evidence")
+    return value
+
+
+def validate_offline_result(value: object, context: dict, invocation_digest: str) -> dict:
+    value = closed_object(value, {"schemaVersion", "scope", "inputsSha256", "invocationSha256", "sourceSha", "sourceTree", "platform", "target",
+        "workflowSha", "runId", "attempt", "caseOrder", "cases", "unexecuted", "classification"}, "Offline native result fields differ")
+    fixed = {"schemaVersion": 1, "scope": OFFLINE_NATIVE_SCOPE, "inputsSha256": context["environmentInputsSha256"],
+        "invocationSha256": invocation_digest, **{key: context[key] for key in ("sourceSha", "sourceTree", "platform", "workflowSha", "runId", "attempt")},
+        "target": TARGETS[context["platform"]], "caseOrder": list(OFFLINE_NATIVE_CASES),
+        "classification": "finite-complete-with-expected-finality-unknown",
+        "unexecuted": [{"case": "full-work-expiry", "reason": "not-run"},
+            {"case": "qualified-diagnostics-busy", "reason": "qualification-disabled"}, {"case": "qualified-github-busy", "reason": "qualification-disabled"}]}
+    require(context["executionScope"] == OFFLINE_NATIVE_SCOPE and sha256_value(invocation_digest)
+            and same_compile_json({key: value[key] for key in fixed}, fixed), "Offline native source/artifact/roster/omissions differ")
+    cases = value["cases"]
+    require(type(cases) is list and len(cases) == 12, "Offline native result must contain every required original case")
+    require(same_compile_json(cases[0], {"id": "PG01", "classification": "inert-document-gates", "assertion": "passed",
+        "gates": [{"gate": gate, "prepareRefused": True, "startRefused": True, "intentBurned": True, "originalAllocated": False}
+                  for gate in ("retained-private", "existing-work", "recovery-attention")],
+        "files": {"setupClosed": True, "scriptClosed": True, "laterClosed": True, "pendingClosed": None, "rootsClosed": True}}),
+        "Offline inert original DocumentBinding gate evidence differs")
+    require(same_compile_json(cases[1], {"id": "PV01", "classification": "synthetic-reader-vectors", "assertion": "passed",
+        "aggregateBytes": 66000, "stdoutBytes": 33000, "stderrBytes": 33000, "stdoutFailed": True, "stderrFailed": True,
+        "originalCloses": 2, "unknown": True, "reportPublished": False}), "Offline aggregate reader vector differs")
+    require(same_compile_json(cases[2], {"id": "PV02", "classification": "synthetic-reader-vectors", "assertion": "passed",
+        "terminalBeforeStderr": True, "lateStderrUnknown": True, "unfinishedEofPending": True,
+        "unfinishedEofReportPublished": False, "originalReadersReturned": 3, "originalCloses": 3}), "Offline late-stderr/unfinished-EOF vectors differ")
+    owners = set()
+    for name, row in zip(OFFLINE_SAVED_CASES, cases[3:], strict=True):
+        validate_offline_case(row, context, name)
+        owner = (row["projection"]["operationId"], row["projection"]["ownerGeneration"])
+        require(owner not in owners, "Offline cases substituted an earlier original owner")
+        owners.add(owner)
+    require(len(canonical_json(value)) + 1 <= ENVIRONMENT_NATIVE_PUBLIC_LIMIT, "Offline redacted result exceeds its bound")
+    return value
+
+
+def retain_offline_native(context: dict) -> None:
+    """Separate failure-tolerant DATA retention, including precompiler CLI failure.
+
+    No source/runtime/artifact/tool lookup, recursive inspection or cleanup is
+    reachable here. Missing original output is recorded once and never retried.
+    """
+    require(context["executionScope"] == OFFLINE_NATIVE_SCOPE, "Wrong offline retention scope")
+    root = Path(context["root"])
+    cli_step = os.environ.get("MRK_OFFLINE_CLI11_STEP_OUTCOME")
+    native_step = os.environ.get("MRK_ENVIRONMENT_NATIVE_STEP_OUTCOME")
+    require(cli_step in {"success", "failure", "cancelled", "skipped"}
+            and native_step in {"success", "failure", "cancelled", "skipped"}, "Offline retention has no original step outcomes")
+    require(not os.path.lexists(root / "retain-started.json") and not os.path.lexists(root / "environment-native-public.json"),
+            "Offline DATA retention was already claimed")
+    write_json(root / "retain-started.json", environment_phase_claim(context, "retain"))
+    cli_claim, cli_claim_state = environment_optional_data(root / "offline-cli11-started.json", 4096,
+        lambda value: validate_environment_phase_claim(value, context, "offline-cli11"))
+    control, control_state = environment_optional_data(root / "offline-cli11-control.json", 16384,
+        lambda value: validate_offline_cli11_control(value, context))
+    cli_progress, cli_progress_state = (None, "missing")
+    cli_result, cli_result_state = (None, "missing")
+    if control is not None:
+        cli_progress, cli_progress_state = environment_optional_data(root / "offline-cli11-progress.json", 16384,
+            lambda value: validate_offline_cli11_progress(value, context, control))
+        cli_result, cli_result_state = environment_optional_data(root / "offline-cli11-result.json", 32768,
+            lambda value: validate_offline_cli11_result(value, context, control, success=False))
+    cli_outer, cli_outer_state = (None, "missing")
+    if cli_step != "skipped":
+        cli_outer, cli_outer_state = environment_optional_data(root / "offline-cli11-outer.json", 4096,
+            lambda value: validate_environment_outer(value, context, step_outcome=cli_step,
+                                                      success=cli_step == "success", phase="offline-cli11"))
+    # Decide only from the single snapshots above. In particular, never call
+    # the successor admission helper here: rereading an unsettled original
+    # writer could upgrade the retained failure tail on a second observation.
+    cli_verified = (cli_step == "success" and cli_claim is not None and control is not None
+        and cli_progress is not None and cli_result is not None and cli_result["status"] == "passed" and cli_outer is not None)
+    compiler, compiler_state, invocation_digest = [], "not-admitted", None
+    if cli_verified:
+        compiler_state = "incomplete"
+        for phase in ("acquire", "compile"):
+            try:
+                require(same_compile_json(read_bounded_json(root / f"{phase}-started.json", 4096),
+                                          environment_phase_claim(context, phase)), "Offline original compiler claim differs")
+                compiler.append(validate_environment_phase_receipt(read_bounded_json(root / f"{phase}-checks.json", 16384), context, phase))
+            except (OSError, CheckFailure):
+                break
+        if len(compiler) == 2:
+            try:
+                _, invocation_digest = environment_original_invocation(context, inspect_artifact=False)
+                compiler_state = "available"
+            except (OSError, CheckFailure):
+                compiler_state = "invalid"
+    progress, progress_state = environment_optional_data(root / "environment-native-progress.json", 16384,
+        lambda value: validate_offline_progress(value, context))
+    outer, outer_state = (None, "missing")
+    if native_step != "skipped":
+        outer, outer_state = environment_optional_data(root / "environment-native-outer.json", 4096,
+            lambda value: validate_environment_outer(value, context, step_outcome=native_step, success=native_step == "success"))
+    result, diagnostic = None, "offline-cli11-not-verified" if not cli_verified else "compiler-not-verified"
+    if cli_verified and invocation_digest is not None:
+        diagnostic = "native-not-verified"
+        if native_step == "success":
+            try:
+                require(same_compile_json(read_bounded_json(root / "environment-native-started.json", 4096),
+                                          environment_phase_claim(context, "environment-native")), "Offline native claim differs")
+                require(outer is not None and progress is not None and progress["completedCases"] == list(OFFLINE_NATIVE_CASES)
+                        and progress["nextCase"] is None and progress["stage"] == "result" and progress["failureCode"] is None,
+                        "Offline original outer/final progress is missing")
+                result = validate_offline_result(read_bounded_json(root / "environment-native-result.json", ENVIRONMENT_NATIVE_PUBLIC_LIMIT),
+                                                 context, invocation_digest)
+                diagnostic = None
+            except (OSError, CheckFailure):
+                pass
+    public = {"schemaVersion": 1, "scope": OFFLINE_NATIVE_EVIDENCE_SCOPE,
+        "classification": result["classification"] if result is not None else "native-not-verified",
+        "bindings": environment_public_bindings(context["environmentInputs"], context["environmentInputsSha256"]),
+        "cli11": {"externalStepOutcome": cli_step, "verified": cli_verified, "claimData": cli_claim_state, "controlData": control_state,
+            "progress": cli_progress, "progressData": cli_progress_state, "result": cli_result, "resultData": cli_result_state,
+            "outer": cli_outer, "outerData": cli_outer_state},
+        "compiler": compiler, "compilerData": compiler_state, "externalStepOutcome": native_step,
+        "outer": outer, "outerData": outer_state, "progress": progress, "progressData": progress_state,
+        "diagnostic": diagnostic, "native": result,
+        "retention": {"deleted": False, "laterNativeWork": False, "projectProbes": False, "vmDisposalRequired": True,
+            "reason": "expected-finality-unknown" if result is not None else "original-finality-unverified"},
+        "applicationFinality": "unknown", "normalApplicationExitProved": False,
+        "physicalOriginals": "verified-finite-fixture-only" if result is not None else "unverified",
+        "notVerified": list(OFFLINE_NATIVE_NOT_VERIFIED)}
+    require(len(canonical_json(public)) + 1 <= ENVIRONMENT_NATIVE_PUBLIC_LIMIT, "Offline sanitized evidence exceeds its bound")
+    write_json(root / "environment-native-public.json", public)
+    require(result is not None and cli_verified, "Offline required originals are not verified; preserved DATA for VM disposal")
+    print("Retained the finite offline fixture and CLI11 evidence; product/runtime qualification remains false.")
+
+
 def retain_environment_native(context: dict) -> None:
     """DATA only, including failure diagnostics. Never a cleanup capability."""
     root = Path(context["root"])
@@ -6899,17 +7449,24 @@ def retain_environment_native(context: dict) -> None:
 
 
 def phase_environment_native(name: str, context: dict) -> None:
-    require(context.get("executionScope") == ENVIRONMENT_NATIVE_SCOPE
+    require(context.get("executionScope") in ENVIRONMENT_NATIVE_SCOPES
             and context.get("platform") in {"linux", "macos"}, "Wrong environment native scope")
-    admit_phase(ENVIRONMENT_NATIVE_SCOPE, name)
+    profile = environment_native_profile(context["executionScope"])
+    admit_phase(profile["scope"], name)
     require(name != "prepare", "Environment preparation has a separate fixed entry")
     if name == "retain":
-        retain_environment_native(context)
+        if profile["scope"] == OFFLINE_NATIVE_SCOPE:
+            retain_offline_native(context)
+        else:
+            retain_environment_native(context)
         return
     environment_predecessors(context, name)
     root, source = Path(context["root"]), Path(context["source"])
     write_json(root / f"{name}-started.json", environment_phase_claim(context, name))
     environment_source_unchanged(context)
+    if name == "offline-cli11":
+        phase_offline_cli11(context)
+        return
     no_cargo_configuration((root, *root.parents, source / "desktop/src-tauri", source / "desktop", source, *source.parents))
     if name == "environment-native":
         # No subprocess timeout/second launcher. The already-prepared original
@@ -6919,7 +7476,7 @@ def phase_environment_native(name: str, context: dict) -> None:
         environment_original_outer_outputs(context)
         environment = environment_native_environment(context)
         os.chdir(context["environmentInputs"]["cwd"])
-        os.execve(artifact["path"], [artifact["path"], ENVIRONMENT_NATIVE_TEST,
+        os.execve(artifact["path"], [artifact["path"], profile["test"],
                                   "--exact", "--ignored", "--test-threads=1"], environment)
         raise CheckFailure("Environment original executable unexpectedly returned from exec")
     environment = clean_environment(root)
@@ -6961,7 +7518,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core",
                         "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
-                        "environment-native", "retain"))
+                         "environment-native", "offline-cli11", "retain"))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)
@@ -6969,7 +7526,8 @@ def main() -> int:
         scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")
         admit_phase(scope, args.phase)
         platform = (admitted_host(retention_only=True) if (scope == METADATA_NATIVE_SCOPE and args.phase == "clean"
-                    or scope == ENVIRONMENT_NATIVE_SCOPE and args.phase == "retain") else admitted_host())
+                    or scope == ENVIRONMENT_NATIVE_SCOPE and args.phase == "retain"
+                    or scope == OFFLINE_NATIVE_SCOPE and args.phase != "prepare") else admitted_host())
         prepare(platform, scope) if args.phase == "prepare" else phase(args.phase, platform, scope)
     except Exception as error:
         reason = str(error) if isinstance(error, CheckFailure) else type(error).__name__

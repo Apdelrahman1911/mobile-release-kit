@@ -47,7 +47,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
     def test_core_inventory_rejects_substitutions_and_malformed_rows(self):
         original = [{"path": path, "size": 1, "sha256": "4" * 64} for path in helper.GTK_CORE_PATHS]
         helper.validate_gtk_core_inventory(original)
-        self.assertEqual(len(original), 85)
+        self.assertEqual(len(original), 90)
         variants = (None, {}, tuple(original), original[:-1], original + [original[0]],
                     [original[0]] + original[:-1], list(reversed(original)))
         for value in variants:
@@ -80,7 +80,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         rust_paths = re.findall(r'^    source!\("([^\"]+)"\),$', rust_block, re.MULTILINE)
         self.assertEqual(python_paths, rust_paths)
         self.assertEqual(python_paths, sorted(set(python_paths)))
-        self.assertEqual(len(python_paths), 228)
+        self.assertEqual(len(python_paths), 243)
         self.assertNotIn("len(SOURCES) == 154", driver)
         self.assertNotIn("len(SOURCES) == 182", driver)
         self.assertNotIn("len(SOURCES) == 197", driver)
@@ -88,8 +88,18 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         self.assertNotIn("len(SOURCES) == 213", driver)
         self.assertNotIn("len(SOURCES) == 217", driver)
         self.assertNotIn("len(SOURCES) == 223", driver)
-        self.assertEqual(driver.count("len(SOURCES) == 228"), 2)
-        self.assertEqual(len(helper.GTK_COMPILE_SOURCES), 50)
+        self.assertNotIn("len(SOURCES) == 228", driver)
+        self.assertEqual(driver.count("len(SOURCES) == 243"), 2)
+        self.assertEqual(len(helper.GTK_COMPILE_SOURCES), 56)
+        for relative in (
+                "desktop/offline_preflight_bootstrap.py",
+                "desktop/src-tauri/src/offline_preflight_owner.rs",
+                "desktop/src-tauri/src/offline_preflight_owner_tests.rs",
+                "desktop/src-tauri/src/offline_preflight_protocol.rs",
+                "desktop/src-tauri/src/offline_preflight_protocol_tests.rs",
+                "desktop/src-tauri/src/offline_preflight_shell_tests.rs",
+        ):
+            self.assertIn(relative, helper.GTK_COMPILE_SOURCES)
         self.assertEqual(tuple(path.removeprefix("src/") for path in python_paths if path.startswith("src/")),
                          helper.GTK_CORE_PATHS)
         package = root / "src/mobile_release"
@@ -99,6 +109,25 @@ class SessionGtkCompileContractTests(unittest.TestCase):
             if path.is_file():
                 observed.append(path.relative_to(root / "src").as_posix())
         self.assertEqual(tuple(sorted(observed)), helper.GTK_CORE_PATHS)
+        # Current saved-offline runtime/compiler/UI members, not a new SG1 qualification.
+        for relative in (
+                "desktop/offline_preflight_bootstrap.py",
+                "desktop/src-tauri/src/offline_preflight_owner.rs",
+                "desktop/src-tauri/src/offline_preflight_owner_tests.rs",
+                "desktop/src-tauri/src/offline_preflight_protocol.rs",
+                "desktop/src-tauri/src/offline_preflight_protocol_tests.rs",
+                "desktop/src-tauri/src/offline_preflight_shell_tests.rs",
+                "desktop/src/components/OfflinePreflight.tsx",
+                "desktop/src/offlinePreflight.ts",
+                "desktop/src/offlinePreflightProtocol.ts",
+                "desktop/src/offlinePreflightTypes.ts",
+                "src/mobile_release/_desktop_preflight_budget.py",
+                "src/mobile_release/_desktop_preflight_control.py",
+                "src/mobile_release/_desktop_preflight_engine.py",
+                "src/mobile_release/_desktop_preflight_protocol.py",
+                "src/mobile_release/desktop_preflight.py",
+        ):
+            self.assertIn(relative, python_paths)
         library = (root / "desktop/src-tauri/src/lib.rs").read_text(encoding="utf-8")
         integration = (root / "desktop/src-tauri/tests/session_gtk_qualification.rs").read_text(encoding="utf-8")
         modules = re.findall(r"^(?:pub )?mod ([a-z_]+);$", library, re.MULTILINE)
