@@ -1,0 +1,1227 @@
+name: Desktop packaged host tool inputs (DATA only)
+
+on:
+  push:
+    branches: [verify/desktop-packaged-host-tools]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-packaged-host-tools
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-packaged-host-tools' && github.event.deleted == false && github.run_attempt == '1' && github.repository == 'Apdelrahman1911/mobile-release-kit' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Observe fixed installed inputs and original Python self DATA
+        id: observer
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+        working-directory: /
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          BASH_ENV: /dev/null
+          ENV: /dev/null
+          # Literal public source and fixed compressed JSON DATA, not caller code.
+          # The short heredoc adds the final LF of the exact collector source.
+          # Collector SHA256: e1f3e8726b7b4bd6f8f3eb23e6a760e20fc28890a8a00bcab326d606f84144ff
+          # Policy SHA256: f9df2617dee80f6fa6b523334ac2fa9de741272a06ba73f4a85bc18543344d15
+          MRK_H1_PROGRAM: |-
+            """Fixed H1 installed-input DATA observation; never tool/build admission.
+            
+            The workflow embeds this exact source. Its separately pinned, bounded JSON DATA
+            is passed through one literal environment value, removed before context capture.
+            Importing this module does not observe a host, create outputs or launch anything.
+            """
+            import base64
+            import errno
+            import hashlib
+            import json
+            import os
+            import re
+            import resource
+            import stat
+            import sys
+            import zlib
+            
+            POLICY_SHA256 = 'f9df2617dee80f6fa6b523334ac2fa9de741272a06ba73f4a85bc18543344d15'
+            POLICY_BYTES = 197755
+            POLICY_ENCODED_BYTES = 27665
+            DATASET_SHA256 = '6cf2895fb722f183434a7cb49c487b0494dc70715feef085886452e02801f20d'
+            PROFILE = "mrk-packaged-host-tool-inputs-1"
+            ROLE_NAMES = ("ar", "as", "cc", "cc1", "cc1plus", "collect2", "cxx", "host_python", "ld", "make", "perl", "ranlib", "sh")
+            STAT_KEYS = ("device", "inode", "mode", "uid", "gid", "links", "bytes", "blocks", "mtimeNs", "ctimeNs")
+            D = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+            F = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+            BODY = META = SUPPORT = 0
+            CACHE, ORIGINALS, GAPS = {}, {}, {}
+            P = None
+            PHASE = "BOOTSTRAP_CONTEXT"
+            ENVIRONMENT = ('PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TZ', 'ImageOS', 'ImageVersion', 'GITHUB_WORKSPACE', 'RUNNER_TEMP', 'GITHUB_ENV', 'GITHUB_OUTPUT', 'GITHUB_PATH', 'GITHUB_STEP_SUMMARY', 'GITHUB_EVENT_PATH', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_EVENT_NAME', 'RUNNER_ENVIRONMENT', 'GITHUB_REF')
+            PATTERNS = {'GITHUB_ENV': '/home/runner/work/_temp/_runner_file_commands/set_env_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', 'GITHUB_OUTPUT': '/home/runner/work/_temp/_runner_file_commands/set_output_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', 'GITHUB_PATH': '/home/runner/work/_temp/_runner_file_commands/add_path_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', 'GITHUB_RUN_ID': '[1-9][0-9]{0,19}', 'GITHUB_SHA': '(?!0{40}$)[0-9a-f]{40}', 'GITHUB_STEP_SUMMARY': '/home/runner/work/_temp/_runner_file_commands/step_summary_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', 'ImageOS': '[A-Za-z0-9_.-]{1,32}', 'ImageVersion': '[0-9]{8}\\.[0-9]{1,6}\\.[0-9]{1,6}'}
+            FIXED_ENVIRONMENT = {'GITHUB_EVENT_NAME': 'push', 'GITHUB_EVENT_PATH': '/home/runner/work/_temp/_github_workflow/event.json', 'GITHUB_REF': 'refs/heads/verify/desktop-packaged-host-tools', 'GITHUB_REPOSITORY': 'Apdelrahman1911/mobile-release-kit', 'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_WORKSPACE': '/home/runner/work/mobile-release-kit/mobile-release-kit', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8', 'PATH': '/usr/bin:/bin', 'RUNNER_ENVIRONMENT': 'github-hosted', 'RUNNER_TEMP': '/home/runner/work/_temp', 'TZ': 'UTC'}
+            PUBLIC_RUN = ('ImageOS', 'ImageVersion', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_EVENT_NAME', 'RUNNER_ENVIRONMENT', 'GITHUB_REF')
+            GAP_CODES = frozenset(("OBJECT_UNAVAILABLE", "OBJECT_NONORDINARY", "OBJECT_MODE", "ALIAS_DIFFERENT", "ABSENCE_NOT_ESTABLISHED",
+                "PROVIDER_UNAVAILABLE", "PROVIDER_INVALID", "PROVIDER_MISSING", "PROVIDER_DUPLICATE", "PROVIDER_DIFFERENT",
+                "ROLE_BODY_DIFFERENT", "ROLE_DECLARATION_MISSING", "ROLE_DECLARATION_DUPLICATE", "SELF_EXE_DIFFERENT",
+                "MAP_UNKNOWN", "MAP_DELETED", "MAP_CHANGED", "MAP_INVALID", "MAP_SELF_MISSING", "PYTHON_STARTUP_NOT_QUALIFIED",
+                "PERL_NAMESPACE_NOT_QUALIFIED", "COMPILER_RUNTIME_NOT_QUALIFIED"))
+            
+            
+            class Refused(Exception):
+                """Closed failure, never populated from input or exception messages."""
+            
+            
+            class CleanupUnknown(Refused):
+                pass
+            
+            
+            def need(value):
+                if not value:
+                    raise Refused()
+            
+            
+            def canonical(value):
+                return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+            
+            
+            def unique(pairs):
+                result = {}
+                for key, value in pairs:
+                    need(key not in result)
+                    result[key] = value
+                return result
+            
+            
+            def load_policy(encoded):
+                """Only the frozen DATA body, never a configurable path policy."""
+                need(type(encoded) is str and len(encoded) == POLICY_ENCODED_BYTES and len(encoded) <= 48 * 1024)
+                try:
+                    packed = base64.b85decode(encoded.encode("ascii"))
+                    decoder = zlib.decompressobj()
+                    raw = decoder.decompress(packed, 512 * 1024 + 1)
+                    need(len(raw) == POLICY_BYTES <= 512 * 1024 and decoder.eof
+                         and not decoder.unconsumed_tail and not decoder.unused_data)
+                    need(hashlib.sha256(raw).hexdigest() == POLICY_SHA256)
+                    value = json.loads(raw, object_pairs_hook=unique)
+                    need(canonical(value) == raw)
+                    validate_policy(value)
+                    return value
+                except (ValueError, TypeError, UnicodeError, zlib.error):
+                    raise Refused() from None
+            
+            
+            def validate_policy(value):
+                need(type(value) is dict and set(value) == {"schemaVersion", "profile", "paths", "roles", "providers", "aliases",
+                    "metadataIndices", "cacheIndices", "absenceIndices", "directoryIndices", "mapFileIndices", "sourceDatasetSha256"})
+                need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["profile"] == PROFILE
+                     and value["sourceDatasetSha256"] == DATASET_SHA256)
+                paths = value["paths"]
+                need(type(paths) is list and len(paths) == 3460 and paths == sorted(set(paths)))
+                need(all(type(p) is str and len(p) <= 512 and re.fullmatch(r"/[A-Za-z0-9_./+@=:-]+", p)
+                         and os.path.normpath(p) == p for p in paths))
+                need(type(value["roles"]) is dict and tuple(sorted(value["roles"])) == ROLE_NAMES)
+                for role in value["roles"].values():
+                    need(type(role) is dict and set(role) == {"path", "index", "package", "bytes", "mode", "sha256"})
+                    need(type(role["index"]) is int and 0 <= role["index"] < len(paths) and paths[role["index"]] == role["path"])
+                    need(type(role["bytes"]) is int and 0 < role["bytes"] <= 512 * 2**20 and role["mode"] == 0o755)
+                    need(type(role["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", role["sha256"]) is not None)
+                need(type(value["providers"]) is list and len(value["providers"]) == 42)
+                names = []
+                for provider in value["providers"]:
+                    need(type(provider) is dict and set(provider) == {"path", "index", "package", "architecture", "version"})
+                    need(type(provider["index"]) is int and 0 <= provider["index"] < len(paths)
+                         and paths[provider["index"]] == provider["path"] and provider["path"].startswith("/var/lib/dpkg/info/"))
+                    names.append(provider["package"])
+                need(names == sorted(set(names)) and all(role["package"] in names for role in value["roles"].values()))
+                for key, count in (("metadataIndices", 43), ("cacheIndices", 568), ("absenceIndices", 63), ("mapFileIndices", 156)):
+                    rows = value[key]
+                    need(type(rows) is list and len(rows) == count and rows == sorted(set(rows))
+                         and all(type(i) is int and 0 <= i < len(paths) for i in rows))
+                need(type(value["directoryIndices"]) is list and value["directoryIndices"] == sorted(set(value["directoryIndices"])))
+                need(all(type(i) is int and 0 <= i < len(paths) for i in value["directoryIndices"]))
+                need(type(value["aliases"]) is dict and all(p in paths and target in paths for p, target in value["aliases"].items()))
+                # The digest binds the complete roster, not only these structural guards.
+                need(hashlib.sha256(canonical(value)).hexdigest() == POLICY_SHA256)
+            
+            
+            def gap(code, count=1):
+                need(code in GAP_CODES and type(count) is int and 0 < count <= 8192)
+                GAPS[code] = GAPS.get(code, 0) + count
+                need(len(GAPS) <= 192 and GAPS[code] <= 16384)
+            
+            
+            def close_all(descriptors):
+                """Attempt each retained original once; close failure cannot become absence."""
+                failed = False
+                for descriptor in descriptors:
+                    if descriptor is not None:
+                        try:
+                            os.close(descriptor)
+                        except BaseException:
+                            failed = True
+                if failed:
+                    raise CleanupUnknown() from None
+            
+            
+            def ident(s):
+                return dict(zip(STAT_KEYS, (s.st_dev, s.st_ino, stat.S_IMODE(s.st_mode), s.st_uid, s.st_gid,
+                    s.st_nlink, s.st_size, s.st_blocks, s.st_mtime_ns, s.st_ctime_ns)))
+            
+            
+            def link_body(descriptor, name):
+                """Reserve before each readlink, including original-self rechecks."""
+                global META, BODY
+                need(META + 4096 <= 8 * 2**20 and BODY + 4096 <= 3 * 2**30)
+                link = os.readlink(name, dir_fd=descriptor)
+                length = len(os.fsencode(link))
+                need(length <= 512)
+                META += length
+                BODY += length
+                return link
+            
+            
+            def parent(path):
+                need(type(path) is str and path.startswith("/") and os.path.normpath(path) == path and len(path) <= 512)
+                if path.startswith("/proc/self/"):
+                    need(path in ("/proc/self/maps", "/proc/self/exe"))
+                    proc = directory("/proc")
+                    descriptor = None
+                    try:
+                        link = link_body(proc, "self")
+                        need(link == str(os.getpid()))
+                        descriptor = os.open("self", D & ~os.O_NOFOLLOW, dir_fd=proc)
+                    finally:
+                        try:
+                            close_all([proc])
+                        except BaseException:
+                            close_all([descriptor])
+                            raise
+                    return descriptor, path.rsplit("/", 1)[1]
+                descriptor = os.open("/", D)
+                try:
+                    parts = path.split("/")[1:]
+                    for part in parts[:-1]:
+                        child = os.open(part, D, dir_fd=descriptor)
+                        previous, descriptor = descriptor, child
+                        close_all([previous])
+                    return descriptor, parts[-1]
+                except BaseException:
+                    close_all([descriptor])
+                    raise
+            
+            
+            def at(path):
+                descriptor, name = parent(path)
+                try:
+                    return os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                finally:
+                    close_all([descriptor])
+            
+            
+            def directory(path):
+                descriptor, name = parent(path)
+                child = None
+                try:
+                    child = os.open(name, D, dir_fd=descriptor)
+                finally:
+                    try:
+                        close_all([descriptor])
+                    except BaseException:
+                        close_all([child])
+                        raise
+                return child
+            
+            
+            def body(path, cap, metadata=False, support=False):
+                """H0 bounded original-parent read; only close handling is tightened."""
+                global BODY, META, SUPPORT
+                if path in CACHE:
+                    row, raw = CACHE[path]
+                    need(ident(at(path)) == row["stat"] and row["stat"]["bytes"] <= cap)
+                    return row, raw
+                parent_fd, name = parent(path)
+                descriptor = None
+                try:
+                    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    need(stat.S_ISREG(before.st_mode) and before.st_size <= cap)
+                    descriptor = os.open(name, F, dir_fd=parent_fd)
+                    need(ident(os.fstat(descriptor)) == ident(before))
+                    digest, raw, total = hashlib.sha256(), bytearray(), 0
+                    pseudo = path == "/proc/self/maps"
+                    while pseudo or total < before.st_size:
+                        room = min(cap - total, 3 * 2**30 - BODY, 8 * 2**20 - META if metadata else cap,
+                                   2 * 2**30 - SUPPORT if support else cap)
+                        need(room > 0)
+                        chunk = os.read(descriptor, min(65536, room, cap if pseudo else before.st_size - total))
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        BODY += len(chunk)
+                        META += len(chunk) if metadata else 0
+                        SUPPORT += len(chunk) if support else 0
+                        need(total <= cap and BODY <= 3 * 2**30 and META <= 8 * 2**20 and SUPPORT <= 2 * 2**30)
+                        digest.update(chunk)
+                        if metadata:
+                            raw.extend(chunk)
+                    need(total == before.st_size or pseudo)
+                    need(ident(before) == ident(os.fstat(descriptor)) == ident(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)))
+                    need(ident(before) == ident(at(path)))
+                    row = {"path": path, "kind": "regular", "stat": ident(before), "sha256": digest.hexdigest(), "aliasTarget": None}
+                    CACHE[path] = (row, bytes(raw))
+                    return CACHE[path]
+                finally:
+                    close_all([descriptor, parent_fd])
+            
+            
+            def measure(path, metadata=False):
+                try:
+                    before = at(path)
+                    if stat.S_ISREG(before.st_mode):
+                        cap = 4 * 2**20 if path == "/var/lib/dpkg/status" else 256 * 1024 if metadata else 512 * 2**20
+                        row = body(path, cap, metadata=metadata, support=not metadata)[0]
+                        ORIGINALS[path] = ident(before)
+                        return row
+                    target = None
+                    if stat.S_ISLNK(before.st_mode):
+                        need(before.st_size <= 512)
+                        descriptor, name = parent(path)
+                        try:
+                            link = link_body(descriptor, name)
+                        finally:
+                            close_all([descriptor])
+                        dest = os.path.normpath(os.path.join(os.path.dirname(path), link))
+                        if P["aliases"].get(path) == dest:
+                            target = dest
+                    need(ident(before) == ident(at(path)))
+                    ORIGINALS[path] = ident(before)
+                    kind = "alias" if stat.S_ISLNK(before.st_mode) else "directory" if stat.S_ISDIR(before.st_mode) else "nonordinary"
+                    return {"path": path, "kind": kind, "stat": ident(before), "sha256": None, "aliasTarget": target}
+                except OSError as error:
+                    need(error.errno in (errno.ENOENT, errno.EACCES, errno.EPERM, errno.ENOTDIR, errno.ELOOP))
+                    ORIGINALS[path] = error.errno
+                    return {"path": path, "kind": "unavailable", "stat": None, "sha256": None, "aliasTarget": None}
+            
+            
+            def recheck_originals():
+                for path, expected in ORIGINALS.items():
+                    try:
+                        current = ident(at(path))
+                    except OSError as error:
+                        current = error.errno
+                    need(current == expected)
+            
+            
+            def provider_status(raw, providers):
+                """Selected declarations, never installed-byte authentication or lookup."""
+                result = {p["package"]: [] for p in providers}
+                if raw is None:
+                    return {name: {"state": "unavailable"} for name in result}
+                if type(raw) is not bytes or len(raw) > 4 * 2**20 or b"\r" in raw:
+                    return {name: {"state": "invalid"} for name in result}
+                try:
+                    text = raw.decode("utf-8")
+                    for stanza in text.split("\n\n"):
+                        fields, invalid, previous = {}, False, None
+                        for line in stanza.splitlines():
+                            if line.startswith((" ", "\t")):
+                                invalid |= previous is None or previous in ("package", "status", "version", "architecture")
+                                continue
+                            if ":" not in line:
+                                invalid = True
+                                continue
+                            name, value = line.split(":", 1)
+                            name = name.lower()
+                            invalid |= re.fullmatch(r"[a-z0-9][a-z0-9-]*", name) is None or name in fields
+                            fields[name], previous = value.lstrip(" \t"), name
+                        name = fields.get("package")
+                        if name in result:
+                            valid = not invalid and fields.get("status") == "install ok installed" and all(
+                                re.fullmatch(r"[A-Za-z0-9_.+:~=-]{1,96}", fields.get(key, "")) for key in ("version", "architecture"))
+                            result[name].append({key: fields[key] for key in ("version", "architecture")} if valid else None)
+                except UnicodeError:
+                    return {name: {"state": "invalid"} for name in result}
+                compared = {}
+                for provider in providers:
+                    name = provider["package"]
+                    rows = result[name]
+                    if not rows:
+                        compared[name] = {"state": "missing"}
+                    elif len(rows) != 1:
+                        compared[name] = {"state": "duplicate"}
+                    elif rows[0] is None:
+                        compared[name] = {"state": "invalid"}
+                    else:
+                        compared[name] = {"state": "matches-declaration" if rows[0] == {key: provider[key] for key in ("version", "architecture")} else "different", **rows[0]}
+                return compared
+            
+            
+            def declared_members(raw, allowed, aliases):
+                """Provider names can select only existing indices, never authorize reads."""
+                if type(raw) is not bytes or len(raw) > 256 * 1024:
+                    return None
+                try:
+                    result, seen = set(), set()
+                    for name in raw.decode("utf-8").splitlines():
+                        for old, target in aliases.items():
+                            if name.startswith(old + "/"):
+                                name = target + name[len(old):]
+                                break
+                        if name in allowed:
+                            need(name not in seen)
+                            seen.add(name)
+                            result.add(allowed[name])
+                    return result
+                except (UnicodeError, Refused):
+                    return None
+            
+            
+            def role_observation(expected, row, declarations):
+                matches = row["kind"] == "regular" and row["sha256"] == expected["sha256"] and all(
+                    row["stat"][key] == value for key, value in (("bytes", expected["bytes"]), ("mode", expected["mode"]), ("uid", 0), ("gid", 0), ("links", 1)))
+                owners = sorted(name for name, indices in declarations.items() if indices is not None and expected["index"] in indices)
+                return {"index": expected["index"], "body": "matches-retained-member" if matches else "different-or-unavailable",
+                        "declaredProviders": owners, "expectedProviderDeclared": expected["package"] in owners,
+                        "scope": "fixed-provider-declarations-not-global-ownership"}
+            
+            
+            _MAP = re.compile(r"([0-9a-f]{1,16})-([0-9a-f]{1,16}) ([r-][w-][x-][ps]) ([0-9a-f]{1,16}) ([0-9a-f]{1,8}):([0-9a-f]{1,8}) ([0-9]{1,20})(?: +(.+))?\Z")
+            _KERNEL = frozenset(("[heap]", "[stack]", "[vvar]", "[vvar_vclock]", "[vdso]", "[vsyscall]"))
+            
+            
+            def normalized_maps(raw, rows, allowed_indices, aliases, self_index):
+                """No filesystem operations, raw path export, process search or authority."""
+                result = {"mappedIndices": [], "anonymousMappings": 0, "kernelMappings": 0, "gaps": {}}
+                def note(code):
+                    result["gaps"][code] = result["gaps"].get(code, 0) + 1
+                if type(raw) is not bytes or not raw or len(raw) > 256 * 1024 or not raw.endswith(b"\n"):
+                    note("MAP_INVALID")
+                    return result
+                try:
+                    lines = raw.decode("ascii").splitlines()
+                except UnicodeError:
+                    note("MAP_INVALID")
+                    return result
+                if len(lines) > 2048:
+                    note("MAP_INVALID")
+                    return result
+                by_path = {rows[i]["path"]: (i, rows[i]) for i in allowed_indices}
+                mapped, last = set(), 0
+                for line in lines:
+                    match = _MAP.fullmatch(line) if len(line) <= 8192 else None
+                    if match is None:
+                        note("MAP_INVALID")
+                        continue
+                    start, end, inode = int(match[1], 16), int(match[2], 16), int(match[7])
+                    if not last <= start < end or inode >= 2**64:
+                        note("MAP_INVALID")
+                        continue
+                    last = end
+                    path = match[8]
+                    if path is None and inode == 0:
+                        result["anonymousMappings"] += 1
+                        continue
+                    if path in _KERNEL and inode == 0:
+                        result["kernelMappings"] += 1
+                        continue
+                    if path is None:
+                        note("MAP_UNKNOWN")
+                        continue
+                    if path.endswith(" (deleted)"):
+                        note("MAP_DELETED")
+                        continue
+                    for old, target in aliases.items():
+                        if path.startswith(old + "/"):
+                            path = target + path[len(old):]
+                            break
+                    if path not in by_path:
+                        note("MAP_UNKNOWN")
+                        continue
+                    index, row = by_path[path]
+                    identity = row["stat"]
+                    if row["kind"] != "regular" or identity is None or identity["inode"] != inode or (
+                        os.major(identity["device"]), os.minor(identity["device"])) != (int(match[5], 16), int(match[6], 16)):
+                        note("MAP_CHANGED")
+                        continue
+                    mapped.add(index)
+                result["mappedIndices"] = sorted(mapped)
+                if self_index not in mapped:
+                    note("MAP_SELF_MISSING")
+                return result
+            
+            
+            def self_observation(rows, aliases):
+                descriptor, name = parent("/proc/self/exe")
+                try:
+                    before = os.stat(name, dir_fd=descriptor, follow_symlinks=True)
+                    target = link_body(descriptor, name)
+                    _, raw = body("/proc/self/maps", 256 * 1024, metadata=True)
+                    need(ident(before) == ident(os.stat(name, dir_fd=descriptor, follow_symlinks=True)))
+                    need(target == link_body(descriptor, name))
+                finally:
+                    close_all([descriptor])
+                index = P["roles"]["host_python"]["index"]
+                row = rows[index]
+                bound = row["kind"] == "regular" and target == P["paths"][index] and row["stat"] == ident(before)
+                if not bound:
+                    gap("SELF_EXE_DIFFERENT")
+                result = normalized_maps(raw, rows, P["mapFileIndices"], aliases, index)
+                for code, count in result["gaps"].items():
+                    gap(code, count)
+                return {"scope": "original-observer-self-only", "executableIndex": index if bound else None, **result}
+            
+            
+            def candidates():
+                metadata = set(P["metadataIndices"])
+                rows = [measure(path, index in metadata) for index, path in enumerate(P["paths"])]
+                allowed = {path: i for i, path in enumerate(P["paths"])}
+                aliases = {row["path"]: row["aliasTarget"] for row in rows if row["kind"] == "alias" and row["aliasTarget"]
+                           and row["path"] in ("/bin", "/lib", "/lib64", "/sbin")}
+                for i, row in enumerate(rows):
+                    if row["kind"] == "unavailable" and i not in P["cacheIndices"] and i not in P["absenceIndices"] and i not in P["directoryIndices"]:
+                        gap("OBJECT_UNAVAILABLE")
+                    if row["kind"] == "nonordinary":
+                        gap("OBJECT_NONORDINARY")
+                    if row["kind"] == "alias" and row["aliasTarget"] is None:
+                        gap("ALIAS_DIFFERENT")
+                    if row["kind"] == "regular" and (row["stat"]["uid"] != 0 or row["stat"]["links"] != 1 or row["stat"]["mode"] & 0o7022):
+                        gap("OBJECT_MODE")
+                    if i in P["absenceIndices"] and row["kind"] != "unavailable":
+                        gap("ABSENCE_NOT_ESTABLISHED")
+                declarations = {}
+                for provider in P["providers"]:
+                    cached = CACHE.get(provider["path"])
+                    declarations[provider["package"]] = declared_members(cached[1] if cached else None, allowed, aliases)
+                    if declarations[provider["package"]] is None:
+                        gap("PROVIDER_UNAVAILABLE")
+                cached = CACHE.get("/var/lib/dpkg/status")
+                statuses = provider_status(cached[1] if cached else None, P["providers"])
+                for value in statuses.values():
+                    if value["state"] != "matches-declaration":
+                        gap("PROVIDER_" + value["state"].upper())
+                roles = {name: role_observation(expected, rows[expected["index"]], declarations) for name, expected in P["roles"].items()}
+                for value in roles.values():
+                    if value["body"] != "matches-retained-member":
+                        gap("ROLE_BODY_DIFFERENT")
+                    if not value["expectedProviderDeclared"]:
+                        gap("ROLE_DECLARATION_MISSING")
+                    if len(value["declaredProviders"]) > 1:
+                        gap("ROLE_DECLARATION_DUPLICATE")
+                original_self = self_observation(rows, aliases)
+                recheck_originals()
+                # Compact exact identity arrays leave the unchanged 2-MiB return bound room
+                # for the complete frozen roster; indices refer only to its pinned path table.
+                compact = [[row["kind"], [row["stat"][key] for key in STAT_KEYS] if row["stat"] else None,
+                            row["sha256"], allowed[row["aliasTarget"]] if row["aliasTarget"] else None] for row in rows]
+                return {"schema": "mrk-h1-host-candidate-files-1", "scope": "candidate-only", "state": "UNSEALED", "nativeQualification": "not-established",
+                        "profile": PROFILE, "sourceDatasetSha256": DATASET_SHA256, "policySha256": POLICY_SHA256,
+                        "objectColumns": ["kind", "stat", "sha256", "aliasTargetIndex"], "statColumns": list(STAT_KEYS),
+                        "objects": compact, "roles": roles, "providerDeclarations": statuses, "self": original_self}
+            
+            
+            def context():
+                global PHASE
+                e = dict(os.environ)
+                need(set(e) == set(ENVIRONMENT))
+                need(all(re.fullmatch(pattern, e[key]) is not None for key, pattern in PATTERNS.items()))
+                need(all(e[key] == value for key, value in FIXED_ENVIRONMENT.items()))
+                scratch = "/tmp/mrk-packaged-host-tools-" + e["GITHUB_RUN_ID"] + "-1"
+                need(all(e[key] == scratch + "/tmp" for key in ("TMPDIR", "TMP", "TEMP")))
+                need(e["HOME"] == scratch + "/home" and os.getcwd() == scratch + "/neutral")
+                need(os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid())
+                need(sys.version_info[:2] == (3, 12) and sys.platform == "linux" and sys.flags.isolated == 1
+                     and sys.flags.no_site == 1 and sys.flags.dont_write_bytecode == 1 and sys.flags.optimize == 0)
+                PHASE = "EVENT"
+                _, raw = body(e["GITHUB_EVENT_PATH"], 2**20, metadata=True)
+                event = json.loads(raw, object_pairs_hook=unique)
+                need(type(event) is dict and event.get("deleted") is False and event.get("ref") == e["GITHUB_REF"]
+                     and event.get("after") == e["GITHUB_SHA"] and type(event.get("repository")) is dict
+                     and event["repository"].get("full_name") == e["GITHUB_REPOSITORY"])
+                return e, scratch
+            
+            
+            def bounded_outputs(values):
+                encoded = {name: canonical(value) for name, value in values.items()}
+                need(sum(map(len, encoded.values())) <= 2 * 2**20)
+                return encoded
+            
+            
+            def main():
+                global P, PHASE
+                os.umask(0o077)
+                for key, value in ((resource.RLIMIT_AS, 512 * 2**20), (resource.RLIMIT_CPU, 60), (resource.RLIMIT_NOFILE, 128),
+                                   (resource.RLIMIT_FSIZE, 8 * 2**20), (resource.RLIMIT_CORE, 0)):
+                    resource.setrlimit(key, (value, value))
+                encoded_policy = os.environ.pop("MRK_H1_POLICY_B85", None)
+                P = load_policy(encoded_policy)
+                e, scratch = context()
+                PHASE = "OWNED_SCRATCH"
+                owned_dirs = {p: ident(at(p)) for p in (scratch, scratch + "/home", scratch + "/tmp", scratch + "/neutral")}
+                for path, identity in owned_dirs.items():
+                    need(identity["uid"] == os.getuid() and identity["mode"] == 0o700 and stat.S_ISDIR(at(path).st_mode))
+                    descriptor = directory(path)
+                    try:
+                        names = []
+                        with os.scandir(descriptor) as entries:
+                            for entry in entries:
+                                need(len(names) < 5)
+                                names.append(entry.name)
+                        need(set(names) == ({"home", "tmp", "neutral", "stdout.bin", "stderr.bin"} if path == scratch else set()))
+                    finally:
+                        close_all([descriptor])
+                captures = {}
+                for descriptor, name in ((1, "stdout.bin"), (2, "stderr.bin")):
+                    value = os.fstat(descriptor)
+                    need(stat.S_ISREG(value.st_mode) and ident(value) == ident(at(scratch + "/" + name)))
+                    need(value.st_uid == os.getuid() and stat.S_IMODE(value.st_mode) == 0o600 and value.st_nlink == 1 and value.st_size == 0)
+                    captures[name] = ident(value)
+                stdin = os.fstat(0)
+                need(stat.S_ISFIFO(stdin.st_mode) or (stat.S_ISREG(stdin.st_mode) and stdin.st_size <= 65536))
+                need(sys.argv == ["-"])
+                reservation = 26 * 2**20 + 512 * 1024
+                need(reservation < 32 * 2**20 and os.statvfs(scratch).f_frsize <= 4096)
+                def charge(value):
+                    return max(4096, value.st_blocks * 512, ((value.st_size + 4095) // 4096) * 4096)
+                need(sum(charge(at(path)) for path in owned_dirs) + charge(os.fstat(1)) + charge(os.fstat(2))
+                     + (charge(stdin) if stat.S_ISREG(stdin.st_mode) else 0) <= 256 * 1024)
+                PHASE = "CANDIDATES"
+                files = candidates()
+                for code in ("PYTHON_STARTUP_NOT_QUALIFIED", "PERL_NAMESPACE_NOT_QUALIFIED", "COMPILER_RUNTIME_NOT_QUALIFIED"):
+                    gap(code)
+                kernel = os.uname()
+                need(all(re.fullmatch(r"[A-Za-z0-9_.+~-]{1,128}", item) for item in (kernel.sysname, kernel.release, kernel.machine)))
+                common = {"scope": "candidate-only", "state": "UNSEALED", "nativeQualification": "not-established", "profile": PROFILE}
+                facts = {**common, "schema": "mrk-h1-host-facts-1", "policySha256": POLICY_SHA256,
+                         "run": {k: e[k] for k in PUBLIC_RUN}, "uid": os.getuid(), "gid": os.getgid(),
+                         "kernel": {"system": kernel.sysname, "release": kernel.release, "machine": kernel.machine}}
+                shape = {**common, "schema": "mrk-h1-ci-shape-1", "return": None, "originalObserver": {
+                    "argv": ["/usr/bin/env", "-i"] + [key + "=" + e[key] for key in ENVIRONMENT] +
+                        ["MRK_H1_POLICY_B85=" + encoded_policy, "/usr/bin/timeout", "--signal=TERM", "--kill-after=5s", "180s", "/usr/bin/python3.12", "-I", "-S", "-B", "-"],
+                    "validatedPushNonDeletion": True, "pythonArgv": sys.argv, "environment": e,
+                    "policyEnvironment": {"key": "MRK_H1_POLICY_B85", "decodedSha256": POLICY_SHA256, "decodedBytes": POLICY_BYTES, "encodedBytes": POLICY_ENCODED_BYTES},
+                    "stdinKind": "pipe" if stat.S_ISFIFO(stdin.st_mode) else "regular-heredoc", "captures": captures,
+                    "scratchDirectories": owned_dirs, "reservedBytes": reservation, "hostBodyReadBytes": BODY, "selectedMetadataBytes": META, "supportBodyReadBytes": SUPPORT,
+                    "limits": {name: list(resource.getrlimit(key)) for name, key in (("addressSpaceBytes", resource.RLIMIT_AS), ("cpuSeconds", resource.RLIMIT_CPU),
+                        ("fileDescriptors", resource.RLIMIT_NOFILE), ("fileSizeBytes", resource.RLIMIT_FSIZE), ("coreBytes", resource.RLIMIT_CORE))}}}
+                gaps = {**common, "schema": "mrk-h1-fit-gaps-1", "storageBoundary": "bounded-observer-scratch-not-build-admission",
+                        "observedGaps": [{"predicate": code, "count": count} for code, count in sorted(GAPS.items())]}
+                PHASE = "ENCODE"
+                encoded = bounded_outputs(dict(zip(("host-facts.json", "host-candidate-files.json", "ci-shape.json", "fit-gaps.json"), (facts, files, shape, gaps))))
+                PHASE = "WRITE"
+                root = directory(scratch)
+                index = {"schema": "mrk-h1-index-1", "root": owned_dirs[scratch], "directories": owned_dirs, "files": {}}
+                try:
+                    for name, raw in encoded.items():
+                        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=root)
+                        try:
+                            view = memoryview(raw)
+                            while view:
+                                count = os.write(descriptor, view)
+                                need(count > 0)
+                                view = view[count:]
+                            os.fsync(descriptor)
+                            need(ident(os.fstat(descriptor)) == ident(os.stat(name, dir_fd=root, follow_symlinks=False)))
+                            index["files"][name] = {"stat": ident(os.fstat(descriptor)), "sha256": hashlib.sha256(raw).hexdigest()}
+                        finally:
+                            close_all([descriptor])
+                    raw = canonical(index)
+                    need(len(raw) <= 2**20)
+                    descriptor = os.open("index.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=root)
+                    try:
+                        need(os.write(descriptor, raw) == len(raw))
+                        os.fsync(descriptor)
+                    finally:
+                        close_all([descriptor])
+                    os.fsync(root)
+                finally:
+                    close_all([root])
+            
+            
+            if __name__ == "__main__":
+                try:
+                    main()
+                except BaseException as error:
+                    # Never print an exception, target, map, path, body or raw environment.
+                    os.write(2, b"MRK_H1_REFUSED\n")
+                    phases = ("BOOTSTRAP_CONTEXT", "EVENT", "OWNED_SCRATCH", "CANDIDATES", "ENCODE", "WRITE")
+                    offset = 0 if isinstance(error, Refused) else 1 if isinstance(error, OSError) else 2
+                    sys.exit(79 if isinstance(error, CleanupUnknown) else 80 + phases.index(PHASE) * 3 + offset)
+          MRK_H1_POLICY_B85: "c-pnS*>>Z&vL<~0KSthe+Y$#&`_7h~nXdFymUF1;b(R)HLK4fIii0g>ukL66BPhwDWr;up)a#t>N}Jyo2n2wLz(DYSe-e{i#-6;6{lJs?r~m#h%dy)h@WaL*F8=7^k3Rfx@PUI59DLy51E+stw;c<AIQXN3KYI9M06$!O;Nk-pAGr9y#RnaH(7^{Ce9*xM9emKm2VH#7#Rpw{(8UKme9*%OJ$%r^2R(ey#|M3U(8mXTe9*@S1AH*R2LpUCzy||(V6`p$;oy%B{^;Qkd|=@N3m;hcz`_R>KCtnDjSp;mVB-TDA7ITbthwcM{^#VA2m_I$8UOdE)+C5O{r6L=%(LpBC!bnjFxmVC|GD~0*RA~xeu2N{HEO=*t^ut@zdP=_r(qD6i_=+L;vXl!?Xx^Nv(DNzQ3~XltCH$v%e1J_Dyds!rGrXtF-5FW*9{K;PbE_>QlY2o7I`)Rv_kH58X&f>lDffxRHa>K{v<+hS0(ffsAB;HkG&*X*Ur@uUdL;d5v7&oluh>rJnN{X26>2J+fhk<1D-i*ssD&L&y!fo7Io~I<*J2;zaxR@j!N<y5CnHrQlr#EtkMn}9Q>c9mO0I|I@=rY%vMW{y)pwg_o^lN9aud)QW48gPjU^aA=k^KecIP@J$3AvWu4h7;h7XZ{6T6ti+5nP?0lMuNNPE^8dPUI=l_O5AssD~)Ulv-S0%d$;%TDQid&?*5r1o$VTFQ$q>`2wzMjAh5C(GdFivF_wmN4{b0>I1y=(oh+Y0?P3Mi*tw{myQ%IzbpMdovn$&VWC{2B27=j4+oym>7NbnO$!+8}3hyC;yex&0H!+B)qMNZUI03FK`Z_XHBRPWJ>dw@&{AQnzmV1ah~oeFDi_*FAykt=m0;^sU=Jf&8u4K7j<TXP-a@*K<!Gh3j=sAcyPqPauiww@)C8>)R)g#`WD3$m9Cm6G-Ix{S(OK2JI6_<p%Z%<Z=V|1d_Qy_XM)JLH`8OIjap>DP(k38xm7U>Z~^8rjXZJZAeccwX@ogx<YnmS%8BC&$0jqIi6(!4$?f!0vu#|mIXLS_AE?)A>Xqw1BR5(!Xy~7J`3|;Nc=2Jg(3H|s%+T8+!)hf_#fuPfUDACz&V&Q1I`5;<iQr$)B>YgF5tkj7MRuo+ge~;3#@B_c`dN71qQaj!WNj=0vlUkWDBfpftf9^vjv8>z|t0&+5%f!U~CJlZGpKhu(t&Ux4_~SnA`%JTVQkxtZsqXEwH-<hPS}-7MR`w+go6K3#@N}`7N-&1r1<93s}$u7PNr{jbK45SkMd>w1Wi=VL?k+&=eN5g$0daL2Fph92Tb6&>l8s*w7w!yGs2rx5qRdGj>eQF%Lhn!Cp2_7r<UN&KPhefs+QXmyPoVu$PTf2e6lovj?!3jS~p4myL4>u$PU~2(XupGYPPljgtwmmyPoYu$PTf3b2=rvkI`6jS~y7myL4^u$KdU!GXTuK-=TA$ANaonU4eQ?tpGM#c@D4oaH#6n*(|{poar`IG~3EdN@#)17$f-mIGxuV0#B_?||(cu)PDecfj@z*xmu#J79YUZ0~^W9k9Ivws*kx4%prS+dE);2W;<v?H#ba3$}B?b}rb?ZR78Q6Bqij3w_xI{aw)Cg?{NmzjUEry3j9O=$Ed8V;G)+on5Gl3w3d!E-uu?g}S(4XBX`3;#kMQ4t92N#N&|1F^_{D>gR%;U9htYc6K}H6aWWycEQdr)ZK-;yHIx*>h6M_U9htYc6PzeZWlcW;Gkc+&@WxEjSIGM!8R_~#s%BBU>g@~<Mz<i01j;9f^A%|jSIGM!8R_~#s%BBU>g@~<Mz=f0S@}53;oiCe(6HLbfI6m&@Wx+moD^67y6|;K<9<t3)~m<%MSF*4)n_o^ve#|wga~9fNeWq+YZ>aW1*V^9N4x4w(WqQ=zyQ-fS>4qpXfke>42Z;K!54j=nnx0{iOqbq62=S1Ad|d?a_hu=s<gPpglU!9vufAC*YtxI?x^+XpauGM+e%Y1MSg)_UJ%+bf7&tE_ztNL3?zdJvz`H9cYhkAO8ow7V6xEdUm0nU8rXl>e+>Q_Mk33s7tSn{|2vXq1y$&3w7y1U3yTLo{fGOeg~a<HvSI27<BG|&OOkn=iq;V4?6Wgryl6k1D$%HQxDp^2kqU1_U=J@_n^J|V3$7Fr4M%LgN(k7{{^28_3lHx`wqHw@as_TKGeGpW%QwpK9tdiGWt+PAIj)M8GRT1Kj5I=eW-UI>fMLF*N48>A7CVaPylrtKph8A#{txF0CgNV7#tuvKp6ulV*q*%K+gf_IRHHe&?g7bCkN0c2VIOGAOrg30Q%$r`s4um<N*5Q0Q%$r`s4um<N*5Qpof75aL^|Q&?g7bCkN;&+f|^cB25))s#sG6n=0C1xM^EeTtYBLoHmA>HpZMb2AwuWoi>J@HpZPc2A(!Xo;HS^HpZPc2A(!X30yaUABe+1(Z)!DD=6>-!5A#sohs^~WQ-TMpaQ|Kih$L>kc-Z~joup<Mc@ZA(1EwngX8iD{HS7O6)Z7YVpy%>Y86<k$hr!ZRjfpvt7ut;%PL-0!LW*kRp_f?UlshS=vRfmD*jagu!?Y1Xscpd72K-mR)x1JzEuIPif~ovs$y3aysGF`g|8}ZRe`IDSXIcXVpbKjs;E_kttviYfU+<`Ss0Eij7Js*Bd9?Y^)b|A^Vrxtw$=NelTUt-Nv}w<<u*IQVoop}7+{>M0#Ox-s?bx#o+|iM(Fa41<62#i6p8e65Z0I4FmpJ;LNR=wpk*<JLU=sE1t*AC82(OhfI?^OL1*n@DuuZeCR3PAVLFBR6ed(vMg=&`slYNl=&U{HtUWML5A4$e2igM%+5<E7`j~nF4s6r|6ZODCJ?I)e=ovle7(M70J?Iua=oLM5ECWo^V4y;U`_Li!&>#BH9s1Dw`(VjF7_tvtzYn(TTbRwEW55Ke%Al$gs>+|L1PZe!8`CG-sd6lYVCIBrfQ31Lg$aO#(ci+*Z(-cGFz8!oYzsrah4J1(i(6=H3&XsHG2X%;Z()RoA4tP|$i`&I#!SfWRco46-iApVW_Av0<y1LcmC#k$T$RdId0e%U=~USarZSkXw5w%L%v9Q#rnE6f!J%s7D7A5b+Bi0C9F{hYNce#dFc)cKBGSezq}{~_U3}2P2R(ey!w0=8SHcH<e9*@SeSFZz2mLC8!UqF<Fu(@`d;l$F<H)sf(Aqd&ZA^o0%z<r8fNjivZA^V_%zJGd$hKAWH|%bh>)M#;+L-0qnBv+vq-{)YZOm-#D%GlTEl9SoQ_Dj5q7d6&4ZR(+BTT7W3v(t+tX#~jTuiN8%&lA~2!3ETWn(&JBg009jSL4F4l*2MILL62fjJo_G7e@k4yH1WTjgagGF)W1$Z(P2BBRRKs+6tD*{Y<?tui@ebdb?OMh6)kWOR_xK?Y`anBKsT0aP^=#T+a6X|tXy3lAn>IOnRSPdk4~;_1h~ocYz#=HaKiGrV`mIL}{$!kfSQBhKVDtIKao%A0>2oFLZMmEZrfH4*u|{=2{PyNqAzzeeI&zWe<dTxR_b8wKBfUl#KucFruj{?{UiWKtIOKkeG$RAkMM^Tx-s|NQ6Fa+)EYr-DFhO{RV$BopzvF=|Wwn<;#lcp{Xo;aOQs`>mVd`26zn@oF?`#0>9mZqA>snlVp*Jv1Y(FR$*Nu0LN7&!4XE?;4@ESLdVek5{)qP~b+R^DkGU*66R%xb}N9>HhBO>HP7pM$p~)ZF6nzzTaLwUJn~F59be8kBx|@tDCEbub@yf>iWGh+b-N1kEdl(W^z0}OP2>Ra~Xz7GbCMO;GaPp6x!f)S$Us2(OY3pVSWojJerg|6%k!R#cEQxrsbQ#v`eXxH<n~@MX(s>Wtt{g!J&Ie7(yx-Bym0#=)*Z8aKmMs2HtZhxdJko=b!|K?gx2M7D1Sg^JQMhXdERzM@}TN=Q4#r!Ky@(8?{5a<eEQSLaHJ$(lFW53nCHn$U(y6g-JZ)F!P|0lQIa4AkJC*B1^fZg5HHGN-)FJa6JB))X+s1bKExx;@P<J&Kwc1QaopJnoCZ%<8?U^Oj)$J2xggh35q3$oy}5_vBsvzIkrJZ0J$ZD=ubGTAO}CpA^x@*Ebk#prUA=eV;T|rBI8hJ0gqL1OzO?c_?g3tIPt?ve95GFIg^;AEMk~s;LKRmD1}ZV!jMHq=UENnj7Klzq5uS+`~rou*y)l<%OoextqvbCc=-#1h4IV_MV`x?$L3}q{M5q_rc+)|fNYV&O1wg{!ibE^h(SZ&>_sV)8N_MHQFa<fqFRcfGc&Q8MR2%9%4^GM8GA*Ngq%WWGL~83;rbVgT_mg#3d9sf8jp!CjKd5Qj&&hdOXs|Xnf(qpU3V^WW`T1l(tkO;NN`eF@LJ3+8$`3Y&k27p;YoQ3B5RHoq{8=cQqJH$%jIj5adId;L00{n!>!i0I7B?pNT)?22q(#c$@BzgfJ6{yi)G4+(^2A=p_~S>&q}{yS!A4{631Nc4n&@Fj*Bu2Z7#WtCX$sUCMk0YkfbsbMUt_o1$S1QaO#Lg<+WzYniaDb6<0)Va*zhRF_u2ha3zw%3`H?bvWP_ua^|!sO;Ro~4;IW3mZn({a{^h)Ub0B@LKLh9Wvx}E%kg@q%p!Z?Bx4a_mcrouTgp<hcnP#5gP4ifPdGh2lWE55uUUu<0uF%{`?4}-Edb>3A5I#SOD~hG{+i3MI@rVF&Sm%_S;SB-SUje)%!64hc*KHL!HAo~<gw37_w&SiW-aNjh`G#OSY18Oq=D~Rv19PIF|YdqpPSF*IjcuNU|`Z9>ISTp+q{4PIAar2aDzN@$(ldr<pd(H$D0f0Wh^*bWBD>F#Dv!gH~Vx9E|eLII9{@-88bU6WC*h>o`Wf5l(LIm6t5X;9$L&<tEg|=og6MqeFIMSEs|#$b9upUmSr>Hv3V2WJ#)E{2t!s5Sg`V3m}eKfuE$)%03NURlqHK4aI&{ok;R~8&Z4psu=N=L7IQMml2_i2+`?yO<G+Jcq$!UWM3f^o_0v&@4|44uf@(t6&pI{ZHb<HcqxPO$It;HJP&y2%pF=u~S|2xR0=(_(HG<YVcuklfX?$EA1v(6PcjBi3wmI0-08yOZIn3NWrgIosJB@P?)M)tXY|Y`PwIei#L7S5@hY@*`digT;f<)uQ<`x-=Al5^&4|eVsu`ZY|0!PzWzDWJ~%0Vfs6QIUo$m#Y$NrlLtO@vTqa{Fau3Anh}$S%h1BNv`bDcjTggy8Zl`2M*JQ~eEsy@HH83b>(XGycqg9R-WP$db^%1+G$=4?K`mB%b~v|2`Sj`lpG2tc+u`9<f=rGdD<{hm}oCL=<8+lbQC)<$f6uF(adj9K#Kw2b_TeN==0r@vH2?NW$thA|nx*h;vK|&4l3UqJe-ihJ4((kG}@74|A5|3952%qMUl-pv-&T<p+A`TL0H0th%WZyAA3Z(6`vF#Ohk27KxSEoq(&x>l%0!J~d!7HE10SmAKuQr$bnWHYIc&!IZd7pi%;N<B^)M2|H@!TXfNYu7ZdfNEj=%kf4Rtfvp|98o2S}YUI{kYhWv{ti;uwuM)iDW3}-sS9%b>eyQT{bAQtCaP^AB;pe~Y!w=tHcsPvMyw`9TF$)?W77fa;UPd_lIBFOW)w!a^r(WLtJV~3LzpZ|0O#0uW+0*$$V)Wlgs!M2GQh9sdp#kysT0;W{@BGVPG-w&A1~#zKo0N5EqZPd+9an{#G{W1G3Q@FVUm<Mekqu-uFS71oDC5r_&RWYR%JzksCe-G=7!{^^{iOkvE}Ng?%PfZh)jKPPALlO(533C!o!-3x@_Y0i2_je+upwv!BIXMq9D>=yhQLeNP1{JoDl4tLu9*r~RX_!L)AKN}x>8lA6KsI|PViBJ$h{!o)8`@|Kg%UwKy~jcpN_*j)pvO-0joNz?7XR(3b(3(3bj%6Ag=y4S`$dIIpt3xjjpspvHQ_3-7ljFldAs)`7SfYE4B5hm5z-DY1|A$Kvm*lglbQ4^YUH;psDHCui_m9NPNFSqwP01cI)pEAY;t7{V~4(lJmvPAuo{G_(g=}`aoR97gq7{Z5{&=Nf>xbLbCT!#%ksl>AxuYQG_?gniPCKW<hZgiCD}G47zILjNiO6%Mt_nR7&5lPgE~I5?(p^C}Gt@4e5|i26>S!*<ylXRSmu|BS_kzH?aAJ4Y3+nZ2Ia5zR{qftbMQ9@12~=zwYy8D$dqrDUn;xq=42OkOH~!Gb-47ccMVQc?}hA<s1~Knh#JQw?kb4T#sli)Z4&Spts{w0o)8j6%1NWJF>6AhT;8#6p^OT<wT)>Th$>!rLX;J?g0_xi2OkUWNI@*5gZr#QAimU0rcp?OiY}_N0LN%*S;p9-Z^x-=c*6rAaz_^1zfeL4w5qHwpP_aziS2^LS=0QP|x43BdP*b3!Dn1Vnd^H>v-B%$1T;ce6O@u$od;yW-<sXAp0e(LhQKOkT4Sz%sR#b=FhojW|7Hn`v{f6bRyDz&EkNJwC(f^CE$(j#v*KE5tiLC7U8x{McADqh_K8>*ybV}a}ln&h>p34uDOVwxrn}@2)k$6Ag*oN9<H&o=(J78N6$8vU|fq{&$L_ijr~O5c#QWu=C$Y=OXwL(FdbR_u5nv*En^ABt=V;qCAh{CjC)kqxJPvdrV@I_b};r21IM&K3|vz?3=DmgEWPnRK|Z$IZTA?07H!*d%mt;!BAzoN5wnTaZ#!*688*_)L_8bu=W=m`S<E~gXGtVtGbcX(ZA1_JSeOaO6T5BOrk!gmW^5fxkbN{kro*@<%Q==H!fINhD8nHQV*35gz`WH~QrgE6b0lq?<A`yOBc^j4G2Nqxv5z9<I0inBeUD?_<5;(M6e<0qNHI&M{z>LyVkF@?3HsyATts0mqBIln8$ZuzBq9_=5F7g1NO)tBiAmrYi}A7q6w*Gb*&t|{1z~sujiw^Y17j((Ov-0tDS;<L5&On+sz$es#Z<}Waikoh$%`_34)VE~oQdInL?R<2ek#H!F;gKeywoyWFHXyNNw_L^zmU}q-Vr7?nRp$Sae#uxGWSGkrdO5}rkPki52gi9q>m%Td_wRh%6w*DfIeNrmEkh>@g8gG8%jA^o0rAZG*MlN7*CF&$T&2YVz{ie5^;>`fRrOtr)MmoZ!Te+Yu`zDKuUQ8fA<?uOfj2N1{x<E6t5O+f$z=?=-}~afF^Er0ze1+w$ZNv-t6b=K&x$gEnu}fuZgsEk+|2ciFDhVNZdKsMOxZOTN~+UBVBD|M;qDIM)tIkeLW;@ENcOA|5y*G+c|MJSPO`ozIs62qHzmX3)t7~mwnyN*6(N+-PHy5bb*?k0{28UftD^%*F0TE7wGB&bq(ItHF$TR3GC_WsM{ZLXHXC5YU()9>*4RV^Yrnn++G)->LQ;r9pq-KO$%zT@)Zr_vkq*#Kc)kI+XmAC|JFfOn_4=!?cNm$J+_E=n~K-$Xz%uwX!z#i!5<iUoo>4sL;<%+Xqs$?gmy{j4hh|*plu46R7X-3Ni`%@utx#+DPS$vzuJ}10IoM5bdiNNveZJZb__I-n~ebtXl?yp6aBW#uZ!QT=4;|ti}sq})!Mu!c(Vkr316?YYob>R>J%`+hMVPa9r#3VPL7M+8nE@6whnT=bgcv3tWaxU-z`LI;P<RI>#$bK${NV+>M;eZ9mIFmf;AYMC0`Bbc4b!!Of}+qomLx(>zDfAP#df_GuW=7>Vx%l=;;Fc+Q4dkQwLn?kCxhMWdpiwa21;`DK`REA51<BS$`M#FyQU;$A=-SZ%7?}{`N8BgOK_+iyJ`Ir-_@MS6?7*0yMvlSA9?T@YBs_gAXI{>%a$}ZaxBh7*Kud_wZx<r0?OUMWk~#$Qs6eOYZ|;#zjyB+HdH6;FIndsMv2MHdj*hR^_}XQZ0j3Fav|_@VzjQ+FyzM$WD^yK>i~#GXXi5PWt{@#a`F9*}&Us>ELn&YOUl!(B>=G4S?!n)(y|`3RC=}x&zg*>|S(0i2kLL2Lw!#q{s{XZ)K^(;ChD4^uJ-aU!G~Tz){X2+0wp$WxtfHx)CBbl931aaZV!<gj@7#0vaz4t>LyEfP~(*vj$C5mu;)*fMp@@LN(F=tdWi|68B4kKcxky+w2!tyA1Y761VBtapd7uD94nCe?5{Y!c`ahM7=d7scY3+j6~GPllRfK_9xLQGm{w2x$~B>@ta!EJSj6z>vGKftRsx$1LD{N`G7nxi6ZTrb(GThqwavfP|k$6Jd!j{0N*c(8-({uV}|3JFp5v8(bkPmBaudSjkj(}5=k>gZwahXzP7&xM<3aINpBG6Y2)4cO}7*UDPGmqc>DD~c@k?luQiPAtv>L5S>3wErLQk-<I;0a;0HIjbnMg=?xwQM=H1k(8MRTp8C7X`5b`XSctzl00Q`FDFXJ!~KDdn4mn7;HKK<~G#yrsxg&%@Af|%8Z6~<nCL}ByiBMMt@cOOyW`}blEg}r}Q(@<FPdK_Wfi|~&juDbL77=k|B;cg~rTwRfT3~|-1-N%zO{&3GZSKiL8*K9HC+p3QsYO`{E1X1W+k0B?_(=3@DMbhs`979fZFW_WZ$PY)*jU=wWzp?XmaIVNS$%92ckK|FhSoL|XV+hLs4I$Zejv^{QN|#4BGbyK2nH@`-C(__(vVatL$C9?nrB}Tzlt+^quT}_;S?`sO^PS6KO(f#L3gyv6E*4d_Q*Vx0W|$vGW?oKKVl%nBBEc7mwV#&1e;-5I?<AH%JUvE^TU{KR93xwccJ8KRib?Xk(#e-EN05foW}wKUh+0jnk01(qRTL!0=va$I7)0R9{bR}+JDsD5gK>mOBwJQ2s~K#=yf49T?KM50&A{PkEEsH&>@|aZB357CG7tcM%@6e#<TfJK<tnTDCjKxI)3t+7@n+*mvS<c)O}kxqb+Y1nPEq2QAs**yTy5CN-Za|$BZJ-cO`@PJ;?)MlafA_eS(+qGlkAyvx}ZrI9;G>gnDr+R@*{{!_1C<b#iTMGqpglA>}ZBxiOf^+8m}fBN0#{-#M*CgH_9Y^m9a_E`WwaOf->os#~PNK++du~MRt^ieUn&Z!h1f7$VxYV43p7B`>2Lmo=5p=V52zfaL16djJ<i5#KCWQ1ZjlhAiH8}j$b<lZT!17!7rm|$q05E-qAwdM}fwHZzYmr#+r}S=2S6E8~qllv>9pR9>+)YTi{`EsCEAsMp)EUw9u!jzID4xP<@|%7r%A!1j>6)PA6_0wl?#<UnbH#Rr0*cs=TZ|yyi@`NzGftu`IHN&F?r?oNtHcjpx?mqRc{DfhnU&<KRuw=GS(h(<?rPm83;=B)S37P(G^PXoa-t1NUj*JvYsZSI-q^9nzq&W2Mit=5|g)QGhRsnh-(W{Jm*#E{f;itD2iSO|zisJT&fW1dYbZ3sE!~qG%Yj>2kdOD0~yf3ny9Ab3gGEkH?yaGv9&PvHyUSB7u&T(`BrA2bEs!do(=87v~N?&qVAe4c#!)`4n7c^a;3KwkL8q)t;<<V6S>q#-_*6rQ;%J@=33dAbC^UM&rI!N`czw-Uw5@jFQPTYjiAGi28)M{@(y9<EAg&=U}gfLo2!TGTBs-T;jpj#*ZH6a~ZzKrstttG(B#1;dwA?Jae80MN{FCB9iB^-}u@`o<Jg1sGh5G-SuXt#u(osBN4=UNVZGZFJfIVUxYsqX<(ZOD5I1}Uze%0Rweo{DwFD1xdJJD0Kyd67j9f1eh4AI`6*;BjWH`PGCV_|c%FhIYQ&UHXDRb?qMSnIWh@#lUC5VFAtsF$U*@Xa1dtGmI9@g(vgRbKkRi+q8ofm!qf{j%FEobv8m1cKYZ!Zg@8Oe1_XmC^XW8y?ED9h0FwV;qPajZZz~44S>st3c#mt0<WO>nton5Xd=vIYxMx&4v`_(yzV+g}ty5p#Y9q$-&(php0F`1l(Qam3=R9=R~@gyCk;UF=@kD5R0Z)K^(9j#C0;zf>S{BjgovMAG|2&zs69YYfS;dou5$i-2H&Fb5~M-cQ1@#A>HsvgRfv~j=sfne=rDTIwP)#t2zraqx^jrwr(fcof-qoXjY&PydwOjP$yBo?(T-h2&#Qn?fYe&spz2{i{nAmxJ6M--p>{(#?(Y6539c$*1t8DleSofGONcU!nwVz*C@fE0Bu!<6Qi_DjO83sD?JPLfGeIh&*EN2=cX9f4y>Tc$}dmwAvMN#N>?^Ra{-IE>4YwLbZFB+Zgz*()uUN0O9#S&$yf^0<WO8w;tH>5in)>S%v%JRFNT9t}QTPk0qsj2DfWh^vjlyeKC**&*){a3mMqEO}Mu{P>db@{>Z&^e<3S$=+znHE2yCJrT8lrb}4IEdm_FlOB9G3hA+Sf{iBWLrl@*y$>CloO*=NqwE9%JyJrfOU<q85#D=mO-|*cHL>q}u^#8m<!ZurJ*ysV*MT;(-mPUSpvx5Gia6HXBHv3gbE6H?@c52D_5+U-AP>uhzl~St=8rAUKDI#T*aF>S3+x<QVE5Ppd&d^oKeoWZaRh>}@%r}Ce7t%)h%fi!*rPaw+7RQ>Y$nfP@?0jb!{l|DydIO+XYvLl-ku)VKwlKEjhFou^QQZ?-$H2vB#30t6atfH87m$)9_}oXDAc=obBp9h%Y7n9=Z*GC&|kgT$ELjC@FqZY0_hEy>DXRz$QO?sOU2`f@SYWrNQ7b2NyDP)q+?NLMWZWJRG}JVho6_wjWl<lYf#l5e+|m+vj=35_WJkBfGLUzznU7335z9rrI_;ZU106eyH^5X^LjrY<~$~R(thH82_@nBuDudgC-HJ45hb41GY~*{6>7`JKCB*owXUiLYr@tYPYrC|0o=lpCI|WkQ*AD7fo1c>Xm7wx+iM`p#sisexaL!zWu_VM-++AI`B8$*vLxfvSEv5i^i2L+>L0P%D<Dsk*hqzBk`$zzXDwu9IaO;Zjzz9f8#}0R>*^|jwOSp<mQBxshDELy8NX=s*fmU*7OY|HZoP+3N(VM;VTUz*6-~#!U!{1?<g^JenPkapV`IGLvjBu>SapkJTWp^Q;@uZ}MUbwu-6vsnG3uD~!u~!vlu5)sJ|Xz-qrZqSfa$9wicsGV@`hC1PrCuWH>eV>m^N%+%@J*bdb7eo<ic-$FJz(h)t80YM_-WcCsFGz@#Sa5p{Wg4PpK7ht5~fBnrcU=-Mg0#k|>ii0|64>0-TgV=o?if!h7D5DAhhTa!3fiaK@LAmSJcn0sh9b#=0exz3836mFSvXwXluv>urD=D=C3BV>DuAkxALQ3S}hY;yU)ivgsAz4~&P#_fS8;pWxp*aJ`Ye!EU?2PCfLy!9h_~1&<)7s=0|AhR69R#52*x({997&YNpC;}&gH+kIlH5zCOV;x%fWi-l(WR!F0|eGnlRo=hp9Y}qHJs^#jEeFG`$e91rp{7yOGy-x)EjaQMHA(f3-x0e#UF^dxTR(mCKTgfJ9mU?;}a|JZ%m%9>3-<{jTC(St4eATz#)-YA>{X0lSnl?Vi7x6SKyG5#|+*>5O5%!B9O}yVk;GGhb`mOQix_=N<eI%13r1|TbfL$H5YJjY7nbonw7RoolUKym%`0N)^{7&@~m;EC4UAU_yMD-z>Epn};2J%gr_t@Q=Ra-MJiC<PfPggtLITe3aS)h>>`s-id$!XU;%ab#^nGj4SQ~%UHbM4c7nHMtJxdV1D<F}2Ht+Td1^2}9XJw$eusOsYkC{rJ)qiKas5bh|U#T0RET^#<O3hPf!J7<oD?N<q)PW`vYvw<2tod$^Q>*7GFvPEb3H3ywWeFN&43c=&`{1rGZ6|YrBlvbA02cC7*QiD9KMx>(+gf5|!`j3cn{IG<ME$Y}a%T)`nZX5=5M;i!&m0-PI5v88ic--LN|133jnrRlk2A<h!sqyMFD6d+Q-+|RlR()DUPjU^aA=k^KecIRZWOeMBWvOGz+fDB}F6A9qEjyRhuUbAZpJpPGRH%-J*nG7^$9#1x)KJ-u`D*wpJAP3m9y&c^i&S@v-&*Ecq0~D5&I?~p;06dTq}hR_G7C>9BA2c6vPf>$CkrA?&QN424c+=G#mkbwS>Mn?!;fcpaxkQE<}1y#S+BmnT9?aMP>p+)WpP4)FL2UBDqzi^w#jENE<yqvXKokpuNZv-jrOIQ>X9g`#cC2|luD05X?>6J?l%(eNk%D+^0iuG(&v1UMUob+n<OR-o3A3Dx4u_fjk=WUdkVIy3W-3iH&7meltvgy`MkO$ibM*l4}nrB>-*lwl-Bj#)f0>Nz+rvAyZ%MsJq%m-sf=wp#nGqS1bIR1nh*CQN<BuN2t`ILW7P{r;)UXIsr_KIj3x;|sVBK8zyU%^{4>e?oJf2U6Ds9r^$vhGC0KbHea5d5HEN2Y$bv~(NJ3Qvq&^tWtC&8?IV{Cu!w##8pzAnFE3eKZmbr<itDs6O_C1+a@>_6O4KZ5DJ7ikP;MpKd(F$B~Xyv^5C{7J`$h49xSGRU}v|{T_TAAx$v36#(Qr~lF<!*;|eU#J6-!FrvM<(I_iRG?1+T~2Dli<4k3(tTQc+^{)uq64%3QnCLZ7ws_FJ>x5QD%gCPXifJq8z?VKcfVb>cpHjc>T>bU3>zm10Ln4GXhF#pNdRUT7l94c-Jc>6)y3x6byx@q;)=%`hBU!yYP6lXvX8E6DF@<@rF|t?Mm=y|9-#rWy0cq8D8*syaxQ5^9&00i;G}tn~(z@Ier*2i6bU4=h^lT-q`qq*CIE(5p~0>+ui5kpF<||lFj@!9DZg~`K7WI78a8i$@4JaIiEXT_qlsv(H`KBm(t@6<q^--jXWl8!Qwsfiu=x^{osX-pFC5JvHflgxTE1OIvHV*sI>0R`P?5?yKTa@jL1es+eU21i0vA&J0@(SY8%zsF==eaHXs|B+ci<!sHr+eC7T$mYod17MD3nQ$$b;@fJ+Y3xoG{xBVTx}^BX?(j!nJbGx>!MM{Md9ztk&(QlHpVeyiS%ZrR*>zL_4`%%5BX2YxVQj~pQ1vdQ6d>yA4F(xNrwQ}6iHdmeRo#WmCLn$7$<{A|Fz<#WH86nw*{KJlsF*;M$0&n9~iKn$oi2HZyj?vn}o!hmW}?4?1uci#-S20GvW;B$X)%T1#6YQgQ%muz=+iTkizu1wj~fSovA7HBLs_bT?-+|Rff$K@t*!6skFfdM&B*xXzEASjc2Co(>F!lx$jP{awprAGhq^&XWI18&OZ{*W27gIwVePVQK|Lbt^xKV&jzlLa?~1M@4JdB<l8HuWcy872P&Z2K+>1L{NIvFTri7p>tPpL_L-&%OC!!hPbCA0GHz?xY#HzqrQoxHCayPWjZBO}*hW`Bl9M`P7I{P59K3O}*taJw8?Psr<fl$7lL{D!(t?@jJu=pUH342fmda_#NVb@0T6|KGmRYayE6uXY!kM^vtL7z2S&&;J^7yZqsBY`S_R2AaDCB+3OEq^MbvZ{&ktoW!z#WPuG|1b@c1Y5u56d3Q?4K>pTpTSMD77P0FL(oVetPd0M8jbt$K!42x?cAy*48Eb|~S5>nmZW-8<+h=M};-;IRaCB<+qGGQtNk8hdE_;r10B;tOOC!s8)k&s7;7re;WNXV1)=I~cDtA39+SIzK*$b>z3<CfJPxA|ntglwCUEk4;XDcLn4cMQn35tnZ+6Kgp}<=SknNh7%iI-9g_$EaMst-1y}cMWvz8tLq?xjlpW_6@iLKKEhRx=4zGyV+9{a2^|oxRKMskbWNfj|L*RsdYuZe~}ram!*M-$6z)$F~L)knz6xt7m2Zm8{1rjG#2p~7>M{0<fRDjGp>lyuyy_-W|^1^0}&TN?3V`op@@qh3{6xRCUKs`!ZsJ-n2T`DMRd$Xbj?Nd%tiFgMGVYE#0Db1$S8<K5g3TLj$eX2n1lu*?#kyv81bWtH1QMn#oUPhP-gNQjB*1Jqa`?r>K+%ih^Hi$w<3Es5b-0(L?ny^<RY6HNl0F0Xv)8osi}zTn7P#T$E<bEJv@WlP)^z83pr<VFGa}aeim6C{AE!1X9MmR!8h1fF*o4G!8CYG*aE&8D1IX%Huo<1BMD-IK6;lVeDa?LwSF|{CL_Tg&?71N6@D`4V?V_!o68@M?6dE{yks+P*vv;Z^NG!5uGZg7TIbh%>J6KEan7e+u&Kj8_*8yfhqr7h_ed2`zwj02?w26-j!zx2sdolc{>Zt1U{fFN`P4@?^-q3XNBr^1J?VA>d2hzuYP!YmS}?iQ4Hw))RVy;P<VzsmnUL8f<24!lqQ4o{`kPU;znRn<QiOm_y@NR}pUhmyyL)N1*-VSiG$^!f#5E%uvJL14wzm0Hhfj6+)DEB8<x_inYM)OX@Tp^y+Kvr+#n_-*j1Bt5*rdMvHsV{#ZW~aIxMpMnwn5)8V73jYMqD$p0o!EoI|hT$fY~;n8gb3Yd^SIhbqoq^8*$CZd^W!~cMS?{8*$CZd^SH*=@}H-HsYF*`D}jJ?;8}_HsYF*`D}hJIxr}-ZNxPrGuaRP3tk>XF<QoKHvF}99>!&4!q4+y7IR;Bs6<?ZB7QdDf5}8TH{jzB{D_8$h$Igd4`pm3A`7^;K~(%vDm?kXJ)TjCcnS*c!HSA+XvAM@D;kKX?*BZGm!=|ybK6{mFctAR2~9;@Uk=ShjEqI(*QO%wyt%0e@Rr6RGTU54Vk+X#k}2X(Jody57o&^T`4gMU-K8AyZ*KtV=X*Bw=88|{m&)Dr1L|nVr}Eo%l(MPcAJ|mx&fVye-TR+p7O}}*>pT+^Hu*xvGd6jca_<2`@-hqA<V*P?_~bI>m;6O08J`>qzO}z3u@O1qlQZrS=ZY+!`Q-8+18bMu_fUZR)u772<+s$=AmexKZz47z$3CBYBMQF3Zh~lHK#uw3+i=Mr7q=!O^0o~5&htK7@|$WD#B)A*nR#sTlZg19_eqBQ;rzEro&R1gmt69qb?%3e0ox$DBRh)uY?I^w*z@PyfSsfXpFI@M1~!KYwh22)3j?-6PPH&fsuo6B)dFu>eKuelBxQ@%RWT3vY?GXBVU*M@jIz3gQChb!%Ig+JiQU2|vs)OYb_<i-Zef(%0b5QCs%?@R0y{F&Jc?63+axgs_FQBp?8u0n{A0j2$f<#C<koJCY<?pW6LMiN#7w3G$Tq6B!E9n-G@V!&%_kN{6AEB2O$N!G;J&L_v7ZgPn#ojX(R!GN243wknHx0NXr37u4Q6p>?70EkU=p~1S>SA9!hX(7*kNhHjzSZ*$?!Ir{sMb03`WUQFeyyfnL%Is5fldOUwOIUv;UI64dU-#2Hd}m#;4hW#oxbw|K_nxb~3)3+_LvQP5JLl{b1kB`6J=J_zKLYj884uROT+=PyS{pQWu5fMysFvy;h)py<t<oowKRj9bTZ`Uht{>y58QgsdxMy^>ZX=c({lyfV)}y%itp4U(}m?i)sHXjWp3OBFpvBuOf?sc*bC~GC2$K0uObmsjbeL)7L|t*}6FVMp&c|#=DlhAeS`KXr8==azP_O6r+~&E5j>e^cnain@r|;>ruS6E`A58&1U}%a2h$D1~WQiJk$Fs)DCMd#mkb!d-W;GU0#eo2O+7sE=3_)mt~X^dOy<Siws*24-W~h(35!*S4#=3U?%gTb$i)iuts0cNvvfoZW7_s>~R%)i7)Al)_E9+oWZ+T7M$XSe|*Dx+6oaDoKo@YKnzmr>)#w6d2p_YR~N&}>mi3&{U_rxgP5c3m(gw8arzu)34V{k`{RK{YJIi;<`Mt69`zW^Z;vce%Wm8Dm_@$5zP)OFmAuhkXSc3L_v1<rma!{IcOv2p@zFAx;E853@#!an^c}N7mgieDTi>5P(>h0%#R-M**^3L3Jurs0E|dIAm`un#7HO19k40*oN5M?ok9g$aa`uY%u5q|mX~I<ba~XR@08xlXzZJ}K??*O|2t9SdWB#~hw#?5UcBtCI1g7=92*TD-grxrd<?`Z|oH%~P&(~scEE4D|Lmz*o(66oj9q#1Kf_O@D0oV65G~|vMkwLW|P`--TCzBq6luSuz{Q)Q=$k12!zY=Mo^a?5|@t!4*)VjXAdg3v^-(CMAF&~Dl+k8f)jASIzd6G#oaV|3H-^z$gT;@M0oSOh9Nz{S-Mr!>cdAKUE!S8H!T{7*@GAX3Leu0m`#hbt`g4uOkv_6Zx0Pjc&Aa@+^Nb)!LtP)ac-t}-lqILP|owECuWXx^W)Cf91gO+<D6d8l~5(o-w#4-G+QjR=g=w5DABpKBQkID&Mvt{1;n&d@HoNpix{ud^sp79h!vh_81lsTF85J*pwStIEsu}>;(Gc_4P;1slVmK|#ACV}q4l5m$~kqCp|B=UG}r}J@&;byK)5_xnwld;SKuQdsZ9G_LEZ+Iet#KZZP0XgTgQ+%~~Tr5+`7Ll*VDW4rA?7|_1kFW(!H(zKo6Jx@s*TSIhu=)(IuNd@^I(3ZGGd>&BA3l3QFPzn_ncbP&|G53Gj3FEKc`Qadu8H&}Tob9SR}@(=DGOS_6lIaLE?O67lbp`U6B_5^4&Hhnk6QRaK}H(kuHb5G&`6)H7_v66ezlcHE`H6UmbcyqeA^GCmb=R*m%rUq-0UrqRrn}^ti{`2<7&f^tileTT>jgxWwmojF8)28S^DVfd9?$|EPX?#mR{SXTy0fS%l{yNslo6LH!Yc^ugJ`jSG$m#%}AyO?}czRS#3^pRami^W#jJO1GnfEnOX9;N8CVUmb@Y}OJ423Z8qYV8oU?6)a2<W?&>i$Sdp0}zwPd=_Xn9e?24gkQ|<k&cL1p>)VbtxYg>qKTZv=^_6cEWQc2+Ju%$Cff442Q+M8l1u}2D3m$z-M+J+ZZlYKI%dhFQ*t8Ir-HENc|*R5Jb<SSFrsinW$-`j5VQMEWAhOEs!?i-Q|uUO==)*Cmg-5YY5@7UC`w|hCPHs7IBORwz+Z8nCe8tf54)?&{l(RR0ptWcvgs%~!^P_?Znsz&={Q1y7*rmAgNQT5m-gRDoj^R?LkBWv)EO)b0HLtF2pQA@6K$>qM^irenVk(D?kh^Z0o@U6D_n3`+_Ff~|h7H;+onOeLT!qns?5Y-MOQ-=+mTKd~AW^F%{s=_`QWIa{~E7lvGWDVZ2$z`wiO1GP)<nljAAnQ=uN8N6ylJ(dtg`>-AZ+5dq%hBV#1gZ|(o!<3+FI9yP0$3VUyT<FiW0nSW0aOikw}Ur3%2Y)T$>Hkrwz*u}X6EX&PZm|L?IuTkzk{mLekoL4qOAHKx%3T>T3#mM|H-ATSk$tLc_xLQxAN+A+4?`^viD2j>azYXTZ;{!P(E%>LKjJ*z#G2?z8rf=8CNd=&S^3xOXy**c*u!J^pbeGI&ecI%GeJ?%%sKD3nOIeOOPdTB;$fko`#7iV#axf8k<a;$s$RMv6p0$%dNKC$>i!p!YTP|!In#>;c1IgKPjt&VnpuhOhI);AC<WpbX84HMTWP=8%Q9N^Xi=OsV}{d$z{@PIxm=s>U9SW6TCzr7X^nZUtqk#xQlbfs0BVQneke7Ltd4A3>h4HEW$C<ba5H6wMOpx7!`+}7s7ky5ufwl9O7yi(wQ(%6TY9Zh;rRA1t+4=PcqeLHj`H!yrOgS@iY`OMjZ=3fYA&8W4MhXE4^YILGHWYlC#$^;q=2LE}(=Q9!xNq?tH}!{Rx|!iek>>l4+~qcDhQLnVCWXvr^jWvo~5^ohPOed0HZ?H6EjL!U1F=;02sHSAd6I*^C|dY<^H>IBYu9eY~Eh7>KBH0TTfji%s|@9l)^ptB7jAuKZz;yhzVXM8b}k@5E$fE@sk920PDqC#7;Hsi|2|3N$ZM2(sC2i{y;U20u!7i6sW~)4+$(7!*r7y*fY43zPIS(lr_@k$x3H!OMP-2_3X38Pp{6sWFc8ej9xiMy{?c&?ihKSRjMxH9g#Ks1y$Vo)_gLKc$uR#-osk*ECgsrN1MxqA}n1SdpRg`*@p`J`Y!b2~|r{(y@Npd&H}0FhzT)ugGRZhIg7mGD|ZP-LQ~ww>;qFR1&%0Ac?+8RI$i&(~3o(HmzyI83?k_n~*uh5)3cOupk?sJnoQGGS<D2hk=90VHjR60<s;#AYzbct-IL=AvlQl8#xpvJ)h8RoX+kIi(U8KFRjpDGk|_to%MQm(V|>PuQl_$kJ2rt<#`qXnucYr4Nt;qf%pxNFaB1w%!5LXv1T71Y26)Jp{o|!_c)&f@!P-OgAV+;#@&6;I**ro-ihCXOVidc6|oZZkipbR57inK?_ai7Vq1?guP*v0Q(8|lSMV}#9suj<-9-eAxYp)sJ#B*8&YNxQ^<^>dE=1h}FN@^E<%RoUqcjYf6}@O(%2d3+{&OGdJ{_l7@S<wF3&^wQk;tAKQNxGxJ0$=sFi$cy?xNheVdnsDD7?A6ooPtKHv&UhXvn;jlX9j5o5IvU`os6Pc^pE6*R484wV|YiP9Qm(=DOg`yi0|?T6i)=Enq--WtKyahTa0xB536$g+9RrHtCPcEDQt1nB1W*MHG(Xq!<S{?7;o{WOkY*p3L(xG=WZk`uy~u1!~2z$UF^bkmbcw5NWjh*C!A=3<DV#x?oJo<025DMtiQ@%ZDpB51_B1ofkT=X>vdLM-BY;D#Bo@(Qj^kKD55)GCQAX+2K|eLJx($`$cAj%rx<zS95Gl^jGNGNw(BP-^y&JEBPUlnfy1`L_f-Z%OI2Mvm9EKox2H}pg*7$eNiO3HvH=xuW468100+>>Lz}v<L&PfjlTO3ma`z%#Z^|C20EofG7_a4efQ5&mKx$lbNTLew*xT9Hhu@G8u$HCqeXr|9-<6DB1@G3ye;)bF)Bil=a9SMYH>4g^RE8RCE)vz=;c-)V#s$cqCAMkL)xt$jmXOj#p5cmR=Joh4CWN8D(T|o?k&`f=pZiM-7(n+j!Q)^t6_I;`QL-B-mD+Va5^f=$wXz4>Q!_NNDFWE*TE?V>Sd69xSVkhs*KVX5h_OMRXl^lX0E`zG(TUYi83~AKpKMzx<0<FmA8f$Wf1yG!8_>cEh{4BAr!?l$)ercR7u?T_o<SoKZDp$UUNfw>tZ-G74gMf#O>$@TZZ79ABIGh1U{GU?Or!bV*4U9VM}kE<Wnv^$!$$)5=GVb{|MmL?X50eV}0QRnlf596i8AQ%TcwfL*iAx5;?y#$MjV+k(!3RUQGx|U|rca!9+Px-37P4>5dxRu5f!hK7V(crve)<wXqlSexwZ^62>&ZFA1VA2?HMBx56U`zx&zI#=gHeT!nQ8ZEf_Qclu5E{pa<aK3F@*0$4k$B9>s|-Al}s=z(sV{H2K#&l3Na5#cS3b&x%*4|jcPv0gMLQ#D!~Or@^(xeej~A84YVCrMJ|MJ7^RLcWa9y=i*<ha3AsXsZ4oyk~tk`+&>Tx^ZL;ZteRJjux$qi<=;pMBY_(%!$Il--060E$C^P;$`DRbZZ#-M8<WTmc^}ZFL|Tgmj#RWv`jSzRRJSIHTnN63Pn3quR&wZv~wZy0VJ+Fh)fHZF4d^dvhd~_ut1SyzFph{22T|pu);o6r=V4+CmE$`6z(D@QPrl45~VQ@UoSh10^FKWAY=bRkyCuBUH}7U9?x`eqoTPTs-^g+K#_k{SJr&IZu$Taue5m*vs@q9x|D@fETFw7+^C%I_5F6q?c5hBHo@-K`}A0sa;mQP9^UoaK}t=caw4<~u4ZV8*!+$|sz0^fUsNl&yI{=_SEoISSE^cn6SVr9rBrqEDw77mArmUf=4&DkD&Y6n`_SjhSf|zZFm?OyK5DGhMs;SqWRbSN5qLTStqv!f@Jq!Y5a@M>kw7PX*HKHkL4o&qsnRmU+@~_OwNOqY>W|U=UF+dN2h+Mpl29rR{;VcK)f{Jaj87j6Evp#e`v@9mUUq33*}~=;ug~}vx<0b?lnGBy@^xJ3;#xc3t!W0|D0)~OtFP{(rWqdfjj%dTvrq${GR1`aRz}JDuVoy>XdiRi;I9^Gkm*71NP<T+^v5s4>;YH1;9%HHDs#9Utj6-~nt=mO7l)DC5Ae*5V&YZfNG<7jh`<+$BOZ5Gzn+=_5cyT!w!)|vg%Ea`L_#seK$z+%(Hhe_*Fs%sp{})1H(DsPyO+f3ir(F6)bvhyUJ6kU_YaO56vXOA8r^Crr97C0pm~xPs<TLli=`GU&5|O~0p>D$QQ;m$CZfDGoJ;Rn1;ojY){&{|AjJJhxhk`|)lLIaU3|Cy<8FH>iNC6kBHSbHD)&UHSUp4Bz7LY_M}94$Pz$vC5w88nTSXp)n5t=Rg7{gDgx~$d)5TRu`ct9}|00X~w8-!8wHZ&z`Q7N60M~8UEknzKZ|J)$nNA6K_>F*mEGV*{WEPR&i-H1wCV+owbZU)sc?)Y@gu;8iP#m+X;dL8+4Obtnu7k@cJ<ql5_m1&PaW=6=`1(Y{UI^71?+)Qc&V=Gvb&c^ynHM@;cMV79GLoM1NO_F{L1Lcx+6p~n$xOL|P{)^HSoyt-&bW&Gr{r12bmpiKS;6FD_u^71w8y8<y3mna-C?AOuKx3sN$oLC8BvHG;yZn@J|&R;eOY||s!hm5oGZ^i?jyi>pO8tT2zrYy>lejCfa8IRkBUqRb%fAr1q9*lLXzo0?{QDM$bx67hsRjvDfaac{C#zIMFVOirV2pSt6P_WVl!j)CF+rQQTPx%gsQQ6wEhfB6XfaqLA~yYpwD<qYEkGMqkIonx8N>5&XZ8m8P&ug3}rY1r>zPL`z6qs%2kk$a7HP*jISb#RS~O(Q=Z^O?ET~))gBzeG$P*?);ga-Xq_ovx~MU}z@#t|+VE>I8%6vE-#X7Su_Ut|R&QjHc^dw55ACz?l<(!#Xt!lp1h`(Q-#!|zsD40$V+g{eq_S|cQWar8vK~SaQz@C4MS@6DzH$4J@;!czlUJ&CI&Y_ZWGUZ8`amJ}osl<}xN4b^39Ubp37s@bgE%IXmXw(%Y3TJk$t+UqY9YO{P%dX5<ZH!?y-bZGB?q|=s^fGAnUCTXp6PP2I|lh2x|%XK*~9vo1**42FlTGw`iw?afzY8MzgvNH-j1%2ST8(8r$DM)2ENUs^9oBHxXlLiDR@R;^=%MsipJZB@9_8wMWq#9Cn<c#O8n$95HmGHD+8*&P?}^K)znx(s&Kky*i>Jn%GYrB;2%r1Z>+H{VKy-ng+?)DE?dd75@)Lst@DR#Jyh!gQlDql)M^VKZf@7nLRYUx#GcfKgTe3}d!5AR5UX{i+}k+Jg}5xa+^^+?$sGM#ihQoor&jdQ>H<b3R@V>}uF4y=!CG!$1HSrrNuGkRxoAO~@tLChm(3m9n)th<klNsT?UsSStKlNwz{*s+1|B^JsXn-z6gt6jgU6gfD^IR*e%RX3pCTv-oke%VZo#ediE@7Qff7MHQ=GQ@NXj9vA{K=HHA_Mo=}LJ6$p?y_v#JsBJ`Osg^`uVHcX`TP<PQwUU<saX%^{4Z72^?as3DqJeUfQK(N8OD*p_lmP~r8O8c^G~q}7{t7*%c_#6q8}?|7~shI**hWfr_>S#b-lW`jD8_$f*7-4fM#{1sTaiNA$aw@GBN2sL~D>WjVDzj9k+cdtgmZ|tfUj<<N7?z=#TI?3dV8g~J+Ajk%NHL{wM{=^G;)mU&b8mOPDSJR%>AG1(GG;UW}14sB0(p)*k38c<?XCO6}Edr^vLQ%mK_eyL)tveA(Uu&)uNUf8Uh<lV%Ee&*L&Il`f&3faD=|!edb|hEle$}v9RH#mSRk-RlMm=cJyc+%e?)t~o<LJD3)$zlJ|Ni)fCu}=p(w7U{v1~H!kL%H|w%zWNiQizzD5CQ|+5>pzfKD4h!ll@)+(-L+UQ$b2pCcF3voxf$G8QXmv3_${6Uk!59F`|oES5FAlEqqbSU#&>z8s5UoX(kCh*2@C?fiVgp-EO@GGVcD9&21=m<=$f1&1|dwfi*SvG^@M#jKV=W3}Bh8}r8bj5T8Cg2#Gg(OBl6vl@KP3LSHv5m{~z-;H3fSY!JiRx>|8vskRr^2`c}&k2vks#y5Ua&sZ8W+AVv7Y-|8nImGgbHo~#5z87eD^ka-_KI^>S4<)ni)F-=<pfezGiNMo<SY$yR#?dc9&7AZXDJy})+oza=Fk6Su~^+If8nvlndGHN1*?}7tX@*E<`)Iag%mt%uo|tLjlE^Y>RTnNAD1jOUs!|mg=NTB!RjHetiqNo*6%rwHJ(&UU@Yov!X&0a%w*<8_ROUI*396)4=<aSvG91<Ou5BY!O~Y1?AJ)+%>3AcKj9r(%`5w&ED}GEI+)hTOH$eTQi{x{;?)N(HYDY)&ju*9jyQZk<ENbp8EKK`f$GAW4Ki097eHXC*fvsLpbg`0s=N(jf**`kLgF$~K{8cAs*6-6We^sM1>VWBQ1s9WF`ln()ovJzdi~wgxy09(X(m0@i8DVCvpC6%z-unjuP!QY4p^J7U_#i)V)$>fM7e<90z7T5*j$-vd?sTW$WXCKh&Q$?_nCv{_iv$3%9+Avg{l*eq56)`NEQM=OCyx7L2*zJe3yd%0>7wk;@E&%FyJPt4@hmms>3^}`m{#%EjPb8*y6vZ;@?I&c`#F6Nt!2$Gdj8YpgF$qrg%FiS6zr*Vl>XGYvU#Xj-u-86^$m?P%b52B9-L9s@G^R?yBo4wSgLH<EeqWB#X49J|(U5nbd_|c-qKlrVULe`p`lbI-KevuY@-8-|yGHV)LU0|1!MLhH4x3Yp!jA)y;HMn}`pz@i86-(#4MSvAMQ2{?P7ae`uTSM!P%SXzO|RdHCm0AACsxe;W=zQ_v*Y6itMs4~^t`7-$c?JMG51d(lPWJ3!#BwR`(WdoYhYedIzH`lK!NyEgKNwk!LoUHLKE^@au?4S#9jtLd=@4sQ&FsMfkWC&7PM?KY8MQSsCQY%0N_5?m^wLnKhEK&^p8Yy`)q;i(34iTY6O*`dlO*0)R4r%TkQN0i?u;s*qLn9fD(FKzsV*TR#21oRyReL(_~L=Q(4^c6|=6;1XN1x>Q{-RPDAzbDo5kplinFiGGCLrNb6{4E6^KDX`&Ju59*LlXLqgud5C53dNd99~nvKZl=b@LLl68&UiX3H?Muf2W{DE`18#^IGRL^bHOENP|BS2^TapP532E`rS7goTkkE4-)(bL3$FUR|`U~xugu$OMLHv0GBBR9Z-V*Wpy_T1%4HK6!_;LCc%@qpy03LfQHW#3j9|36!@KDCu0{rA)%9aDB^@<&e6Xlg+}Fs22UyQAJyxsn)s{gBPaSD`3i?D1^<xAoPrmGr~u%v6!0AhEGX!o`rs(}C!knlQP9v2fk$C{8D6x8cO>}LFB1Ib2NC{6!sBNv2yjB4kMLiFx_X4{7r|2!I;Nm+NMMrMHz5ffk<bYVT~g4uB(O(9OA?yYl6NGqPePMg@{ZIt4<s<j+7F~kK9Jhxfixx`0uq{Lz?^~}k-#K#kDf_r(s&<{O!7AgOt4=@%!0mTw5a@5QYJZH^MbPd@O7EaW!%yan%9?<HKXgx5e1FM?20mPorhuaN=WP9h>vn}4nv!XU!uTo>4`EduBp7Mg%_52kWhKoF^_i>L_s0_?^NDhQVann7(Cp$Wzc?IUs7536TJJkkW}6yo_&dAOyxaEZw`MY8>RYSTa-}BlL=)Q#4W2mZj<m95pR?6776bV<-0_DhlaPQa8hlFm364nZ3>)dNtdP!(e53pbW&BjG-bLpWx7;l916Tg)4flF4@mHbVe29(3c?y=jdLE;ST}N7&>82k|43sIlAsE|{%S!<V?745Ik7rVNlGR_^)C_*>&9lWB!~4F&{#i$ycFSmMqrJGt@9T#%fwvJSQkO;mo&;y#6=K>#Dc0X7{tP6u^bl5WwAOeR+q)<u~>Z;YrtZ~G}aec-E$YvSl97OkOz~H#=0w?3qhseS$!JkzL--f4`n95!4RRbMoSn})p2?X>nVxlt;n8ftRF!pB0=TkBAZc3FkcNBluMa1Sl6-s-1v`K>zuH^hwxBNDfkOHr@${oNP&MASswgFE8;T^{zZ`L`&G<o@Hm(Tj|qkIji%9!h$!&8<c|d3FQIV~68=wG4IXJNHWH)(Fp`p_{1dH(e=6?(*@2TfGv!befG;WF8w&W50)C=^^;ffQCav>p68eUMzBnhLFDU5YA0#wM@8K;4P1t}1^cRvQghf9@-;vNG3i^(QCiTJl2MYS(o`im+p#LQ4JtFmQ!shi2BqbSPh4WSvl*3ikOH70<*cF~4{}S+bL_9@4zWhWg;2X6D->6miMyvyV@qvQAQ(Z5(i`So?-@UZj6tG1C(?qwaa5A1wpfPCHu}Nr$gmy{j4hh{Qp?f5BpM)Ne&|{+JV_E}^X)QFSHPM);JIRowirQ@&nhGc5X#`p`(ZFpQnhGc5X$0c<aA-Z425!^PR5%$=B9Po^hbFpBg_H3l0;$JzX`<UyI2lhOkOEncCb~_9lkp@1DR}g0qT5tB8BZdRQiuUfbejq%<Mjy-r1#$*L@`>%6axPJJglw~BT@1^n8k$iX%*`t6!9~S@+A}LoJPSP_|+UDE6Ib!Lm3lUSwMIbsG^Kg;mHTWMpMOl3JSu0QAMHK;Mdv+G*)$w#Cg1Au!eJ+#S#qG=OkpXt}lly)`-K(uNka6Z_Z#nh=Rk)Y!)kFu>LIdS%2cbD8cQGE?VbL6f|KqdPI7`2hgAIDd?Lk5}G8Num%k1(U62D*?W{y(BB^@Xu_)Q=#tW@s_$|W@LuaY6B7#lLdG)+ewY&8WkkH{2Iw99rF;=2e3_Euf00Q>!iR!npD#&F#YZH3MmSbe;pH<4U;ab0Pf0l42l%fv^#M*Y=hq-3b)Rn{rr~3sguf95slGQsG@;>R68<(^lDgY1u{+<EA;~@5XG@YjM?pL%;g^|5!9R(J<W8PsNb3H76ZQXlxm*(Pi`KaxMl=E~U?3riNd#hu0mA$_rxB7gArXe+nPw%JAP@;jTF?lzz`CGD)&(`RF7QT;XBvSPj2Eq|VjhqP#PGeK#_t6+fG?;Kd_fK23u+8sP=ok_8pRjHFutJ1aUjSEtqR1*4}^%SQWU2o0x`J&!dzrTLPRAb|Ii4uga-)JA$>!&(v3)n_=471iAfj|s8yh)Z3}ANwxA|%3u@*Dge9@>-3h`8>x%G9YiMFJxoADiL)wUbOy)GJj^-Jy&XC}e33D2OmJ%-@C!S4+gy)P%2umU%3W)^ba3Ci3K$r_!=X(k!1(A@^TKY#&&<MZsazP^eC4bYL{a-Zr-_*`co-h6V`}c2c0&zL+JMkU$?`cXp@%e*t55$jzaM~QePZ<eaQqcN~!aqq%--uomlHfsqk`~JW{q=@|{&r456BgnDeS1Mdlk~p5qoD6d?fG*gXSicY;Sd(sf6*>e`K5oG3jBBcESIlI<|~#bifO;`<1Q~k@y#E6ZCdrEqBW+K$(dX<BcnXX=Zz4pFHCJfSY(hF2fo|X!9PI_EA#s4^Q;xb)1>;2*(rWADnAQ>d=NBmdK|=M5rp~aqTfC3x~C!hzBrx5WdjGBt|B#I()84FC{q1qMQ8u{4^iOE^N0-iZDWuBipcM}3hZzD)H-YHK)q8Ctbla21ZB&#u(XiHR7*8~0)4UQx;j|7NQGYM(`nGx!Oi?hbc)}E5{0X&1X8-X*eJEMtPtd(?dSmi5pkX;u~zBf??`lXfKlo>dbnw()lFir%yOB(YJpQPllE!<RLfA6KLY2a*#POXm?yDwX4$7v5C@S6iLAWv;SV~bObUR;QdhNHRz5+iJLl6(L{bm>Zx|HP(X(crhq`00z<+49=Wno?TGdEA%ZA6;&ZpIvG8LF8@k<Cnr&UC2z<%fm4dCDKt2Jw?LS9{@_UV64KBZZLG4RuWKSkN|DP%#<VkZ65d6E~WMUsT4L7bLFerkQHurGlRQU23^|JVQiBr<OfP37UI8-ZSx2B0AJ<>J$S9oOmsV<itBZ=)>=62%<;rWKUeSp~o?r<{~=QCjV@&Zqx#qM<>5M}xVl?D@x1J7@NpZJpYyvR%D`2k#0#lq583qe?BdD%xkRed?|hw9l-zmX3D2uH#!$(x}si)Mcx~;LJT;w@>%X(bK?sr@{V|r&*uoG^yTo&YZLMX?Ja-|7*KvZTHO5Q`4@i>8pB?zqc1bm&LKWRzR=&+D^UT0~uVSE{d%0NcM5xskuLGY*w>5)jX1#ow}N}T(wcPgE_6~=<Dukv&x2*%Ir&;YX&-NpY<V@SSxkfy0+=<Xj3KJDqY@X<#l^FgVXj(f&SS*Pl5if0$pY4-NOySP++jDKs8fPDzRriQEQF=x@Yd0(>-<Z8`HjCTR81qO<*RX)Z@c!#jt-m){YjNd5%hx{qv!EICakK{(t;wKC@4Idb-#<x~%3=Doysyw(3^tp1no&_L*K>cbpwfaGs{p<KtXztAzvoqkC#mx`(@?!p;;>rA_0EvF=E02mJ^|v(6sPx|%9=kF3kCd#z@&N<}_ScWWKyzg-MIRnOh@o35sRb$0!0HD6Y#vu9FWPblo}sk1VPt`@sab~71QDYAdkULQ-Adums@*m|1mdfRHMuTo>rdO+Q;Kx6y|Cb40-?7*n%oW8|Cy=>Io^}D#Lpi=4M%0s=|!gOsjwl$l`wLT~@&AMtWKCEkO)o@|{LRMqf<GwA3s8l(ya<WyYd*=SfZrg6#f{f4FL?yj$<L<iOx1|@AS_jr>YK_%?A0_ql+4aS>)g7fqhZcg~h06Y!eG2iC7Ny)>NBnW|K&hQ#-KieIEXcREgU!;5>2CM1j;l2*f{ObVxy&`(_1X0WGL>?N7t^+SVcSv?LwDDGZ&u(`%IsgMs~f1Z3253qf7gMpSNN2w>{|#lOjSF(j{9v1QK`-TwZ?bpSqGixMkBqR)7f?6>t#x%I{Q{L>&igibv6?l=+%0w2%TMDzFG-YDYI|A^f+F;v+KpH1y_|mdsb!Zp|*3@S<fkKQl#s=bK$tC+o(u=)wdpEol|$6pK99Ror`{3EN(3O!;&&RQiS0<CAuG!sINw=mD#s;Z63Zl?;I~Nb{$?PHx3A$cm8*^#@?vQzGe9O;s7Ry)oj8!s}G_7Ir)?&xK93G)Cqr1mIeOW>GTHnn?ksL3k?9exC4i}+>9IKfNKF{T!)-OfhV8xxv)E39OmFX#MG8jIF2*vd)<z-gg+VBgRVRE`qM$L-*v>K-FBwJa;5{{vSGU00b6-~&!0%J>nD-ds?dYh?e@2Iu>POaA+OiLw#0O5yMsx0U{5-pV+lz0+dX$+O$WB^dlPpsbuGtsq|>#%PS3Z6FPv$|mcBpfO)&<2^1NCdthVj6omxXU2P&an3O!hb6}4UsYcd%0?XCsYk=<_J7G1}c9XXZl!NdpM{b{G~$xdIkCw70@hw53bm~<xnf#nQ5ySu7}RjY^7cKf|S-`!Tk?i{L$dT}1BQZ2ej57%=)RH<b-EiAuQrH*fPd!U|W^<8QE67u`b#I?I}Vt3ui)N<UO4fV6T{-iHEUU%XRdXU`qEm!uXJ$2VrO2e|=#T>ia>sa+pW}}ne-$KeYb<Jv3I@GGxciR)kv8R)+ExqovJ8*^9>-o^<WOpE^y=lKaY5Uzl$AWIwA2>Z%OxsfSM5o=gI~~8OS`vofjqG~eoNgPv_O@mnqrRuC*+zw0)m-12Ixh6W&ZO6MCLI_$(Ceh#w`|w8h1-$suH!jvVNb1r?TWTH?K-~G9So+9usZ#!YKz7D0oAkYdV?7?*Zu)jQQr+Hr{hQ%JH9;-J$umcdbZu2OuHU>G|%%SSlaJ<0zAglf@T7jHj$p^OzpmB_qw>O{0VnS$E%Q2t53gew+FTQ;5Ovm`ZUJ2O;xs_y7scu_T6q@_9t!OPbck8&jFt`>Gvj%H-+};+XK%PeGl3R`jpr2c7*6p{Hb&&6RXpnqV}O*Zv>|^c-IK-{|na~`e&1=|E?kfPlEccXW4eUH|Vveb`M7U)NA+TKy<qk*Rs0MLEL`V?oS{X^&IF)ZCeZ`lZj(Zup(93wylcY8T8vV^B)=`JK5ew>GhxAH1vD@Nq=hjZ76r*!H}MU?->ZNwQV~Sh%5c+#2IwDUDt+);&)-d`w~Wj?2D-wbTLb>lB=4AE`$)bu43;{580C$zI6<gS<`bWobII8nb?*bxKr15CtXX3cBen-xsK;Sa2vR?H-!-@+WpSdm(%IQo<KC|_oP3tD?Kw2<J9|L&e8dQ(J9u2*7J@w`0N4N9UO~iL6x8zK(r86UvzEDpTGd^+0u0&RDg}A1Mv4&AGqLT<v><>M?SCjZX2X+Bb{|9&h6~(Zd6|XdF$T0K6r)hbkZ9PBsg^e3JM>*qT7e88YX~kPuTrluMHlr3ktbiuLBtr{G~g^rup=LP(g1lBk^OC5JD=HCuQczOHn|B7o#_0c;Ipd9VpBOm)gfI0MWy=#e?`gX}bg0_j>J~)tO2;g_iC2F>Qmm*>77@yA84A|NH*|WJw;0"
+        run: |
+          # Fixed trusted diagnostic bootstrap. No xtrace, caller command or tool probe.
+          set +x
+          set -euo pipefail
+          set +o posix
+          umask 077
+          unset CDPATH ENV BASH_ENV POSIXLY_CORRECT
+          export PATH=/usr/bin:/bin
+          fail() { printf 'MRK-H1 ERROR BOOTSTRAP\n'; exit 70; }
+          [[ ${GITHUB_EVENT_NAME-} == push && ${GITHUB_REF-} == refs/heads/verify/desktop-packaged-host-tools ]] || fail
+          [[ ${GITHUB_REPOSITORY-} == Apdelrahman1911/mobile-release-kit && ${RUNNER_ENVIRONMENT-} == github-hosted ]] || fail
+          [[ ${GITHUB_RUN_ID-} =~ ^[1-9][0-9]{0,19}$ && ${GITHUB_RUN_ATTEMPT-} == 1 ]] || fail
+          [[ ${GITHUB_SHA-} =~ ^[0-9a-f]{40}$ && ${GITHUB_SHA-} != 0000000000000000000000000000000000000000 ]] || fail
+          [[ ${GITHUB_WORKSPACE-} == /home/runner/work/mobile-release-kit/mobile-release-kit && ${RUNNER_TEMP-} == /home/runner/work/_temp ]] || fail
+          [[ ${GITHUB_EVENT_PATH-} == /home/runner/work/_temp/_github_workflow/event.json ]] || fail
+          [[ ${ImageOS-} =~ ^[A-Za-z0-9_.-]{1,32}$ && ${ImageVersion-} =~ ^[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}$ ]] || fail
+          uuid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+          [[ ${GITHUB_ENV-} =~ ^/home/runner/work/_temp/_runner_file_commands/set_env_${uuid}$ ]] || fail
+          [[ ${GITHUB_OUTPUT-} =~ ^/home/runner/work/_temp/_runner_file_commands/set_output_${uuid}$ ]] || fail
+          [[ ${GITHUB_PATH-} =~ ^/home/runner/work/_temp/_runner_file_commands/add_path_${uuid}$ ]] || fail
+          [[ ${GITHUB_STEP_SUMMARY-} =~ ^/home/runner/work/_temp/_runner_file_commands/step_summary_${uuid}$ ]] || fail
+          [[ $UID == "$EUID" && $EUID -gt 0 && -d /tmp && ! -L /tmp ]] || fail
+          [[ ${MRK_H1_PROGRAM+x} == x ]] || fail
+          readonly MRK_H1_PROGRAM
+          [[ ${MRK_H1_POLICY_B85+x} == x ]] || fail
+          readonly MRK_H1_POLICY_B85
+          [[ ${#MRK_H1_POLICY_B85} -eq 27665 ]] || fail
+          [[ ${#MRK_H1_PROGRAM} -eq 31171 ]] || fail
+          S="/tmp/mrk-packaged-host-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          readonly S
+          [[ ! -e $S && ! -L $S ]] || fail
+          # Bash's non-POSIX ulimit -f units are 1024 bytes. Python reapplies exact bytes.
+          { ulimit -v 524288 && ulimit -t 60 && ulimit -n 128 && ulimit -f 8192 && ulimit -c 0; } 2>/dev/null || fail
+          /usr/bin/mkdir -m 700 -- "$S" 2>/dev/null || fail
+          /usr/bin/mkdir -m 700 -- "$S/home" "$S/tmp" "$S/neutral" 2>/dev/null || fail
+          export HOME="$S/home" TMPDIR="$S/tmp" TMP="$S/tmp" TEMP="$S/tmp"
+          cd -- "$S/neutral" 2>/dev/null || fail
+          set -C
+          printf 'MRK-H1 SCRATCH %s\n' "$S"
+          start=$EPOCHREALTIME
+          set +e
+          {
+            /usr/bin/env -i \
+              PATH=/usr/bin:/bin \
+              HOME="$S/home" \
+              TMPDIR="$S/tmp" \
+              TMP="$S/tmp" \
+              TEMP="$S/tmp" \
+              LANG=C.UTF-8 \
+              LC_ALL=C.UTF-8 \
+              TZ=UTC \
+              ImageOS="$ImageOS" \
+              ImageVersion="$ImageVersion" \
+              GITHUB_WORKSPACE=/home/runner/work/mobile-release-kit/mobile-release-kit \
+              RUNNER_TEMP=/home/runner/work/_temp \
+              GITHUB_ENV="$GITHUB_ENV" \
+              GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+              GITHUB_PATH="$GITHUB_PATH" \
+              GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
+              GITHUB_EVENT_PATH=/home/runner/work/_temp/_github_workflow/event.json \
+              GITHUB_SHA="$GITHUB_SHA" \
+              GITHUB_REPOSITORY=Apdelrahman1911/mobile-release-kit \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+              GITHUB_RUN_ATTEMPT=1 \
+              GITHUB_EVENT_NAME=push \
+              RUNNER_ENVIRONMENT=github-hosted \
+              GITHUB_REF=refs/heads/verify/desktop-packaged-host-tools \
+              MRK_H1_POLICY_B85="$MRK_H1_POLICY_B85" \
+              /usr/bin/timeout --signal=TERM --kill-after=5s 180s \
+              /usr/bin/python3.12 -I -S -B - <<MRK_H1_PY
+          ${MRK_H1_PROGRAM}
+          MRK_H1_PY
+          } >"$S/stdout.bin" 2>"$S/stderr.bin"
+          rc=$?
+          end=$EPOCHREALTIME
+          set -e
+          # This is the actual foreground timeout wait, not a later process-name search.
+          [[ $start =~ ^[0-9]{10,12}\.[0-9]{6}$ && $end =~ ^[0-9]{10,12}\.[0-9]{6}$ ]] || fail
+          { printf '{"endUnix":"%s","schema":"mrk-h1-shell-wait-1","startUnix":"%s","status":%s}\n' "$end" "$start" "$rc" >"$S/wait.json"; } 2>/dev/null || fail
+          printf 'MRK-H1 OBSERVER-WAIT %s\n' "$rc"
+          if [[ $rc -ne 0 ]]; then
+            # Closed failure labels only; original nonzero result is retained.
+            case "$rc" in
+              79) printf 'MRK-H1 OBSERVER-FAILURE CLEANUP_UNKNOWN\n' ;;
+              80) printf 'MRK-H1 OBSERVER-FAILURE BOOTSTRAP_CONTEXT REFUSED\n' ;;
+              81) printf 'MRK-H1 OBSERVER-FAILURE BOOTSTRAP_CONTEXT IO\n' ;;
+              82) printf 'MRK-H1 OBSERVER-FAILURE BOOTSTRAP_CONTEXT DATA_OR_INTERNAL\n' ;;
+              83) printf 'MRK-H1 OBSERVER-FAILURE EVENT REFUSED\n' ;;
+              84) printf 'MRK-H1 OBSERVER-FAILURE EVENT IO\n' ;;
+              85) printf 'MRK-H1 OBSERVER-FAILURE EVENT DATA_OR_INTERNAL\n' ;;
+              86) printf 'MRK-H1 OBSERVER-FAILURE OWNED_SCRATCH REFUSED\n' ;;
+              87) printf 'MRK-H1 OBSERVER-FAILURE OWNED_SCRATCH IO\n' ;;
+              88) printf 'MRK-H1 OBSERVER-FAILURE OWNED_SCRATCH DATA_OR_INTERNAL\n' ;;
+              89) printf 'MRK-H1 OBSERVER-FAILURE CANDIDATES REFUSED\n' ;;
+              90) printf 'MRK-H1 OBSERVER-FAILURE CANDIDATES IO\n' ;;
+              91) printf 'MRK-H1 OBSERVER-FAILURE CANDIDATES DATA_OR_INTERNAL\n' ;;
+              92) printf 'MRK-H1 OBSERVER-FAILURE ENCODE REFUSED\n' ;;
+              93) printf 'MRK-H1 OBSERVER-FAILURE ENCODE IO\n' ;;
+              94) printf 'MRK-H1 OBSERVER-FAILURE ENCODE DATA_OR_INTERNAL\n' ;;
+              95) printf 'MRK-H1 OBSERVER-FAILURE WRITE REFUSED\n' ;;
+              96) printf 'MRK-H1 OBSERVER-FAILURE WRITE IO\n' ;;
+              97) printf 'MRK-H1 OBSERVER-FAILURE WRITE DATA_OR_INTERNAL\n' ;;
+              *) : ;;
+            esac
+            printf 'MRK-H1 ERROR OBSERVER_RETAINED\n'
+            exit "$rc"
+          fi
+          # No body is sent here. The next fixed step must independently verify the
+          # original wait, identities, closed DTOs and empty capture EOF before framing.
+      - name: Return bounded original DATA and remove only identified outputs
+        if: ${{ success() && steps.observer.outcome == 'success' }}
+        shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+        working-directory: /
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          BASH_ENV: /dev/null
+          ENV: /dev/null
+        run: |
+          set +x
+          set -euo pipefail
+          set +o posix
+          umask 077
+          unset CDPATH ENV BASH_ENV POSIXLY_CORRECT
+          export PATH=/usr/bin:/bin
+          fail() { printf 'MRK-H1 ERROR RETURN_BOOTSTRAP\n'; exit 70; }
+          [[ ${GITHUB_EVENT_NAME-} == push && ${GITHUB_REF-} == refs/heads/verify/desktop-packaged-host-tools ]] || fail
+          [[ ${GITHUB_REPOSITORY-} == Apdelrahman1911/mobile-release-kit && ${RUNNER_ENVIRONMENT-} == github-hosted ]] || fail
+          [[ ${GITHUB_RUN_ID-} =~ ^[1-9][0-9]{0,19}$ && ${GITHUB_RUN_ATTEMPT-} == 1 ]] || fail
+          [[ ${GITHUB_SHA-} =~ ^[0-9a-f]{40}$ && ${GITHUB_SHA-} != 0000000000000000000000000000000000000000 ]] || fail
+          [[ ${GITHUB_WORKSPACE-} == /home/runner/work/mobile-release-kit/mobile-release-kit && ${RUNNER_TEMP-} == /home/runner/work/_temp ]] || fail
+          [[ ${GITHUB_EVENT_PATH-} == /home/runner/work/_temp/_github_workflow/event.json ]] || fail
+          [[ ${ImageOS-} =~ ^[A-Za-z0-9_.-]{1,32}$ && ${ImageVersion-} =~ ^[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}$ ]] || fail
+          uuid='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+          [[ ${GITHUB_ENV-} =~ ^/home/runner/work/_temp/_runner_file_commands/set_env_${uuid}$ ]] || fail
+          [[ ${GITHUB_OUTPUT-} =~ ^/home/runner/work/_temp/_runner_file_commands/set_output_${uuid}$ ]] || fail
+          [[ ${GITHUB_PATH-} =~ ^/home/runner/work/_temp/_runner_file_commands/add_path_${uuid}$ ]] || fail
+          [[ ${GITHUB_STEP_SUMMARY-} =~ ^/home/runner/work/_temp/_runner_file_commands/step_summary_${uuid}$ ]] || fail
+          [[ $UID == "$EUID" && $EUID -gt 0 && -d /tmp && ! -L /tmp ]] || fail
+          S="/tmp/mrk-packaged-host-tools-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          readonly S
+          [[ -d $S && ! -L $S ]] || fail
+          { ulimit -v 524288 && ulimit -t 60 && ulimit -n 128 && ulimit -f 8192 && ulimit -c 0; } 2>/dev/null || fail
+          export HOME="$S/home" TMPDIR="$S/tmp" TMP="$S/tmp" TEMP="$S/tmp"
+          cd -- "$S/neutral" 2>/dev/null || fail
+          set +e
+          {
+            /usr/bin/env -i \
+              PATH=/usr/bin:/bin \
+              HOME="$S/home" \
+              TMPDIR="$S/tmp" \
+              TMP="$S/tmp" \
+              TEMP="$S/tmp" \
+              LANG=C.UTF-8 \
+              LC_ALL=C.UTF-8 \
+              TZ=UTC \
+              ImageOS="$ImageOS" \
+              ImageVersion="$ImageVersion" \
+              GITHUB_WORKSPACE=/home/runner/work/mobile-release-kit/mobile-release-kit \
+              RUNNER_TEMP=/home/runner/work/_temp \
+              GITHUB_ENV="$GITHUB_ENV" \
+              GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+              GITHUB_PATH="$GITHUB_PATH" \
+              GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
+              GITHUB_EVENT_PATH=/home/runner/work/_temp/_github_workflow/event.json \
+              GITHUB_SHA="$GITHUB_SHA" \
+              GITHUB_REPOSITORY=Apdelrahman1911/mobile-release-kit \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+              GITHUB_RUN_ATTEMPT=1 \
+              GITHUB_EVENT_NAME=push \
+              RUNNER_ENVIRONMENT=github-hosted \
+              GITHUB_REF=refs/heads/verify/desktop-packaged-host-tools \
+              /usr/bin/timeout --signal=TERM --kill-after=5s 20s \
+              /usr/bin/python3.12 -I -S -B - <<'MRK_H1_RETURN'
+          """Original DATA return, after observer wait."""
+          import base64
+          import hashlib
+          import json
+          import os
+          import re
+          import resource
+          import stat
+          import sys
+          
+          COLLECTOR_SHA256 = "e1f3e8726b7b4bd6f8f3eb23e6a760e20fc28890a8a00bcab326d606f84144ff"
+          POLICY_SHA256 = "f9df2617dee80f6fa6b523334ac2fa9de741272a06ba73f4a85bc18543344d15"
+          COMMON = ("scope", "state", "nativeQualification", "profile", "schema")
+          SHAPES = {
+              "host-facts.json": COMMON + ("policySha256", "run", "uid", "gid", "kernel"),
+              "host-candidate-files.json": COMMON + ("sourceDatasetSha256", "policySha256", "objectColumns", "statColumns", "objects", "roles", "providerDeclarations", "self"),
+              "ci-shape.json": COMMON + ("return", "originalObserver"),
+              "fit-gaps.json": COMMON + ("storageBoundary", "observedGaps"),
+          }
+          ENVIRONMENT = ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'TZ', 'ImageOS', 'ImageVersion', 'GITHUB_WORKSPACE', 'RUNNER_TEMP', 'GITHUB_ENV', 'GITHUB_OUTPUT', 'GITHUB_PATH', 'GITHUB_STEP_SUMMARY', 'GITHUB_EVENT_PATH', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_EVENT_NAME', 'RUNNER_ENVIRONMENT', 'GITHUB_REF']
+          PUBLIC_RUN = ['ImageOS', 'ImageVersion', 'GITHUB_SHA', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_EVENT_NAME', 'RUNNER_ENVIRONMENT', 'GITHUB_REF']
+          NAMES = ("host-facts.json", "host-candidate-files.json", "ci-shape.json", "fit-gaps.json")
+          D = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+          F = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+          ROOT = None
+          
+          
+          def need(value):
+              if not value:
+                  raise ValueError()
+          
+          
+          def canonical(value):
+              return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+          
+          
+          def unique(pairs):
+              result = {}
+              for key, value in pairs:
+                  need(key not in result)
+                  result[key] = value
+              return result
+          
+          
+          def decode(raw):
+              value = json.loads(raw, object_pairs_hook=unique)
+              need(type(value) is dict and canonical(value) == raw)
+              return value
+          
+          
+          def validate_values(values):
+              need(set(values) == set(SHAPES))
+              for name, value in values.items():
+                  need(type(value) is dict and set(value) == set(SHAPES[name]))
+                  need(value["schema"] == "mrk-h1-" + name.removesuffix(".json") + "-1")
+                  need(value["state"] == "UNSEALED" and value["scope"] == "candidate-only"
+                       and value["nativeQualification"] == "not-established" and value["profile"] == "mrk-packaged-host-tool-inputs-1")
+              need(values["host-facts.json"]["policySha256"] == POLICY_SHA256 and values["ci-shape.json"]["return"] is None)
+              need(values["fit-gaps.json"]["storageBoundary"] == "bounded-observer-scratch-not-build-admission")
+              files = values["host-candidate-files.json"]
+              need(files["sourceDatasetSha256"] == '6cf2895fb722f183434a7cb49c487b0494dc70715feef085886452e02801f20d' and files["policySha256"] == POLICY_SHA256)
+              need(len(files["objects"]) == 3460 and len(files["roles"]) == 13 and len(files["providerDeclarations"]) == 42)
+          
+          
+          def ident(s):
+              return dict(zip(("device", "inode", "mode", "uid", "gid", "links", "bytes", "blocks", "mtimeNs", "ctimeNs"),
+                              (s.st_dev, s.st_ino, stat.S_IMODE(s.st_mode), s.st_uid, s.st_gid, s.st_nlink,
+                               s.st_size, s.st_blocks, s.st_mtime_ns, s.st_ctime_ns)))
+          
+          
+          def owned(actual, expected):
+              return all(actual[k] == expected[k] for k in ("device", "inode", "mode", "uid", "gid"))
+          
+          
+          def directory(path):
+              fd = os.open("/", D)
+              try:
+                  for part in path.split("/")[1:]:
+                      nxt = os.open(part, D, dir_fd=fd)
+                      os.close(fd)
+                      fd = nxt
+                  return fd
+              except BaseException:
+                  os.close(fd)
+                  raise
+          
+          
+          def entries(fd, cap):
+              before, names = ident(os.fstat(fd)), []
+              with os.scandir(fd) as items:
+                  for item in items:
+                      need(len(names) < cap)
+                      names.append(item.name)
+              need(ident(os.fstat(fd)) == before)
+              return set(names)
+          
+          
+          def read(name, cap, expected=None):
+              before = os.stat(name, dir_fd=ROOT, follow_symlinks=False)
+              need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and stat.S_IMODE(before.st_mode) == 0o600)
+              need(before.st_nlink == 1 and before.st_size <= cap)
+              fd = os.open(name, F, dir_fd=ROOT)
+              try:
+                  need(ident(os.fstat(fd)) == ident(before))
+                  raw = bytearray()
+                  while len(raw) < before.st_size:
+                      chunk = os.read(fd, min(65536, before.st_size - len(raw)))
+                      need(chunk)
+                      raw.extend(chunk)
+                  # Original capture EOF, after wait=0.
+                  need(os.read(fd, 1) == b"")
+                  need(ident(before) == ident(os.fstat(fd)) == ident(os.stat(name, dir_fd=ROOT, follow_symlinks=False)))
+                  row = {"stat": ident(before), "sha256": hashlib.sha256(raw).hexdigest()}
+                  if expected is not None:
+                      need(row == expected)
+                  return bytes(raw), row
+              finally:
+                  os.close(fd)
+          
+          
+          def main():
+              global ROOT
+              os.umask(0o077)
+              for key, value in ((resource.RLIMIT_AS, 512 * 2**20), (resource.RLIMIT_CPU, 60), (resource.RLIMIT_NOFILE, 128),
+                                 (resource.RLIMIT_FSIZE, 8 * 2**20), (resource.RLIMIT_CORE, 0)):
+                  resource.setrlimit(key, (value, value))
+              e = dict(os.environ)
+              need(set(e) == set(ENVIRONMENT) and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid())
+              need(e["GITHUB_REPOSITORY"] == "Apdelrahman1911/mobile-release-kit" and e["GITHUB_EVENT_NAME"] == "push")
+              need(e["GITHUB_REF"] == "refs/heads/verify/desktop-packaged-host-tools" and e["RUNNER_ENVIRONMENT"] == "github-hosted")
+              need(re.fullmatch(r"[1-9][0-9]{0,19}", e["GITHUB_RUN_ID"]) and e["GITHUB_RUN_ATTEMPT"] == "1")
+              need(re.fullmatch(r"(?!0{40}$)[0-9a-f]{40}", e["GITHUB_SHA"]))
+              scratch = "/tmp/mrk-packaged-host-tools-" + e["GITHUB_RUN_ID"] + "-1"
+              need(os.getcwd() == scratch + "/neutral" and e["HOME"] == scratch + "/home")
+              need(all(e[k] == scratch + "/tmp" for k in ("TMPDIR", "TMP", "TEMP")))
+              ROOT = directory(scratch)
+              root_stat = os.fstat(ROOT)
+              need(root_stat.st_uid == os.getuid() and stat.S_IMODE(root_stat.st_mode) == 0o700)
+              index_raw, index_row = read("index.json", 2**20)
+              index = decode(index_raw)
+              need(set(index) == {"schema", "root", "directories", "files"} and index["schema"] == "mrk-h1-index-1")
+              need(owned(ident(root_stat), index["root"]) and set(index["files"]) == set(NAMES))
+              need(set(index["directories"]) == {scratch, scratch + "/home", scratch + "/tmp", scratch + "/neutral"})
+              for path, expected in index["directories"].items():
+                  fd = directory(path)
+                  try:
+                      s = ident(os.fstat(fd))
+                      need(s["uid"] == os.getuid() and s["mode"] == 0o700 and owned(s, expected))
+                      if path != scratch:
+                          need(entries(fd, 1) == set())
+                  finally:
+                      os.close(fd)
+              expected_names = set(NAMES) | {"index.json", "wait.json", "stdout.bin", "stderr.bin", "home", "tmp", "neutral"}
+              need(entries(ROOT, 16) == expected_names)
+              originals, values = {"index.json": index_row}, {}
+              for name in NAMES:
+                  raw, row = read(name, 2 * 2**20, index["files"][name])
+                  value = decode(raw)
+                  values[name], originals[name] = value, row
+              validate_values(values)
+              facts, ci = values["host-facts.json"], values["ci-shape.json"]
+              need(facts["run"] == {k: e[k] for k in PUBLIC_RUN} and facts["uid"] == os.getuid() and facts["gid"] == os.getgid())
+              observer = ci["originalObserver"]
+              need(observer["validatedPushNonDeletion"] is True and observer["pythonArgv"] == ["-"])
+              need(observer["scratchDirectories"] == index["directories"] and set(observer["captures"]) == {"stdout.bin", "stderr.bin"})
+              wait_raw, wait_row = read("wait.json", 4096)
+              wait = decode(wait_raw)
+              need(set(wait) == {"schema", "status", "startUnix", "endUnix"} and wait["schema"] == "mrk-h1-shell-wait-1")
+              need(type(wait["status"]) is int and wait["status"] == 0)
+              need(all(type(wait[k]) is str and re.fullmatch(r"[0-9]{10,12}\.[0-9]{6}", wait[k]) for k in ("startUnix", "endUnix")))
+              need(int(wait["endUnix"].replace(".", "")) >= int(wait["startUnix"].replace(".", "")))
+              originals["wait.json"] = wait_row
+              captures = {}
+              for name in ("stdout.bin", "stderr.bin"):
+                  raw, row = read(name, 0)
+                  need(row["stat"] == observer["captures"][name])
+                  originals[name] = row
+                  captures[name] = {"stat": row["stat"], "bytes": 0, "sha256": row["sha256"], "eofAfterWait": True}
+              ci["return"] = {"collectorSha256": COLLECTOR_SHA256, "policySha256": POLICY_SHA256,
+                  "sourceCiShapeSha256": originals["ci-shape.json"]["sha256"], "observerWait": wait, "captures": captures,
+                  "finalizerArgv": ["/usr/bin/env", "-i"] + [k + "=" + e[k] for k in ENVIRONMENT] +
+                      ["/usr/bin/timeout", "--signal=TERM", "--kill-after=5s", "20s", "/usr/bin/python3.12", "-I", "-S", "-B", "-"],
+                  "finalizerWait": "pending-original-shell-wait", "cleanup": "pending-after-finalizer-wait",
+                  "jobCompletionAndDisposal": "requires-independent-original-service-evidence"}
+              encoded = {name: canonical(values[name]) for name in NAMES}
+              need(sum(map(len, encoded.values())) <= 2 * 2**20)
+              frames, summary = [], []
+              for number, name in enumerate(NAMES, 1):
+                  raw = encoded[name]
+                  digest, parts = hashlib.sha256(raw).hexdigest(), (len(raw) + 3071) // 3072
+                  frames.append(f"MRK-H1 BEGIN {number} {name} {len(raw)} {digest}\n".encode())
+                  for part, offset in enumerate(range(0, len(raw), 3072), 1):
+                      frames.append(f"MRK-H1 DATA {number} {part:06d} ".encode() + base64.b64encode(raw[offset:offset + 3072]) + b"\n")
+                  frames.append(f"MRK-H1 END {number} {parts} {len(raw)} {digest}\n".encode())
+                  summary.append([number, name, len(raw), parts, digest])
+              frames.append(f"MRK-H1 COMPLETE 4 {sum(map(len, encoded.values()))} {hashlib.sha256(canonical(summary)).hexdigest()}\n".encode())
+              need(sum(map(len, frames)) <= 4 * 2**20)
+              ledger = canonical({"schema": "mrk-h1-return-ledger-1", "root": index["root"],
+                                  "directories": index["directories"], "files": originals})
+              need(len(ledger) <= 65536 and entries(ROOT, 16) == expected_names)
+              fd = os.open("return-ledger.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=ROOT)
+              try:
+                  view = memoryview(ledger)
+                  while view:
+                      count = os.write(fd, view)
+                      need(count > 0)
+                      view = view[count:]
+                  os.fsync(fd)
+                  need(ident(os.fstat(fd)) == ident(os.stat("return-ledger.json", dir_fd=ROOT, follow_symlinks=False)))
+              finally:
+                  os.close(fd)
+              os.fsync(ROOT)
+              again = directory(scratch)
+              try:
+                  need(owned(ident(os.fstat(again)), index["root"]))
+              finally:
+                  os.close(again)
+              for frame in frames:
+                  view = memoryview(frame)
+                  while view:
+                      count = os.write(1, view)
+                      need(count > 0)
+                      view = view[count:]
+          
+          
+          if __name__ == "__main__":
+              try:
+                  main()
+              except BaseException:
+                  os.write(1, b"MRK-H1 ERROR RETURN\n")
+                  sys.exit(70)
+              finally:
+                  if ROOT is not None:
+                      os.close(ROOT)
+          MRK_H1_RETURN
+          } 2>/dev/null
+          rc=$?
+          set -e
+          printf 'MRK-H1 FINALIZER-WAIT %s\n' "$rc"
+          if [[ $rc -ne 0 ]]; then
+            printf 'MRK-H1 ERROR RETURN_RETAINED\n'
+            exit "$rc"
+          fi
+          cd / 2>/dev/null || fail
+          set +e
+          {
+            /usr/bin/env -i \
+              PATH=/usr/bin:/bin \
+              HOME="$S/home" \
+              TMPDIR="$S/tmp" \
+              TMP="$S/tmp" \
+              TEMP="$S/tmp" \
+              LANG=C.UTF-8 \
+              LC_ALL=C.UTF-8 \
+              TZ=UTC \
+              ImageOS="$ImageOS" \
+              ImageVersion="$ImageVersion" \
+              GITHUB_WORKSPACE=/home/runner/work/mobile-release-kit/mobile-release-kit \
+              RUNNER_TEMP=/home/runner/work/_temp \
+              GITHUB_ENV="$GITHUB_ENV" \
+              GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+              GITHUB_PATH="$GITHUB_PATH" \
+              GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" \
+              GITHUB_EVENT_PATH=/home/runner/work/_temp/_github_workflow/event.json \
+              GITHUB_SHA="$GITHUB_SHA" \
+              GITHUB_REPOSITORY=Apdelrahman1911/mobile-release-kit \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+              GITHUB_RUN_ATTEMPT=1 \
+              GITHUB_EVENT_NAME=push \
+              RUNNER_ENVIRONMENT=github-hosted \
+              GITHUB_REF=refs/heads/verify/desktop-packaged-host-tools \
+              /usr/bin/timeout --signal=TERM --kill-after=5s 10s \
+              /usr/bin/python3.12 -I -S -B - <<'MRK_H1_CLEANUP'
+          """Remove identified originals after both waits."""
+          import json
+          import os
+          import re
+          import resource
+          import stat
+          import sys
+          
+          D = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+          FILES = {"host-facts.json", "host-candidate-files.json", "ci-shape.json", "fit-gaps.json", "index.json", "wait.json", "stdout.bin", "stderr.bin"}
+          
+          
+          def need(value):
+              if not value:
+                  raise ValueError()
+          
+          
+          def ident(s):
+              return dict(zip(("device", "inode", "mode", "uid", "gid", "links", "bytes", "blocks", "mtimeNs", "ctimeNs"),
+                              (s.st_dev, s.st_ino, stat.S_IMODE(s.st_mode), s.st_uid, s.st_gid, s.st_nlink,
+                               s.st_size, s.st_blocks, s.st_mtime_ns, s.st_ctime_ns)))
+          
+          
+          def owned(actual, expected):
+              return all(actual[k] == expected[k] for k in ("device", "inode", "mode", "uid", "gid"))
+          
+          
+          def directory(path):
+              fd = os.open("/", D)
+              try:
+                  for part in path.split("/")[1:]:
+                      nxt = os.open(part, D, dir_fd=fd)
+                      os.close(fd)
+                      fd = nxt
+                  return fd
+              except BaseException:
+                  os.close(fd)
+                  raise
+          
+          
+          def entries(fd, cap):
+              before, names = ident(os.fstat(fd)), []
+              with os.scandir(fd) as items:
+                  for item in items:
+                      need(len(names) < cap)
+                      names.append(item.name)
+              need(ident(os.fstat(fd)) == before)
+              return set(names)
+          
+          
+          def main():
+              for key, value in ((resource.RLIMIT_AS, 512 * 2**20), (resource.RLIMIT_CPU, 60), (resource.RLIMIT_NOFILE, 128),
+                                 (resource.RLIMIT_FSIZE, 8 * 2**20), (resource.RLIMIT_CORE, 0)):
+                  resource.setrlimit(key, (value, value))
+              e = os.environ
+              need(os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid() and os.getcwd() == "/")
+              need(e["GITHUB_REPOSITORY"] == "Apdelrahman1911/mobile-release-kit" and e["GITHUB_EVENT_NAME"] == "push")
+              need(e["GITHUB_REF"] == "refs/heads/verify/desktop-packaged-host-tools" and e["RUNNER_ENVIRONMENT"] == "github-hosted")
+              need(re.fullmatch(r"[1-9][0-9]{0,19}", e["GITHUB_RUN_ID"]) and e["GITHUB_RUN_ATTEMPT"] == "1")
+              need(re.fullmatch(r"(?!0{40}$)[0-9a-f]{40}", e["GITHUB_SHA"]))
+              scratch = "/tmp/mrk-packaged-host-tools-" + e["GITHUB_RUN_ID"] + "-1"
+              parent = directory("/tmp")
+              root = os.open(scratch.rsplit("/", 1)[1], D, dir_fd=parent)
+              try:
+                  before = os.stat("return-ledger.json", dir_fd=root, follow_symlinks=False)
+                  need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1)
+                  need(stat.S_IMODE(before.st_mode) == 0o600 and before.st_size <= 65536)
+                  fd = os.open("return-ledger.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=root)
+                  try:
+                      need(ident(os.fstat(fd)) == ident(before))
+                      raw = bytearray()
+                      while len(raw) < before.st_size:
+                          chunk = os.read(fd, before.st_size - len(raw))
+                          need(chunk)
+                          raw.extend(chunk)
+                      need(os.read(fd, 1) == b"")
+                      need(ident(before) == ident(os.fstat(fd)) == ident(os.stat("return-ledger.json", dir_fd=root, follow_symlinks=False)))
+                  finally:
+                      os.close(fd)
+                  ledger = json.loads(raw)
+                  need(set(ledger) == {"schema", "root", "directories", "files"} and ledger["schema"] == "mrk-h1-return-ledger-1")
+                  need(set(ledger["files"]) == FILES and owned(ident(os.fstat(root)), ledger["root"]))
+                  need(ledger["root"]["uid"] == os.getuid() and ledger["root"]["mode"] == 0o700)
+                  need(set(ledger["directories"]) == {scratch, scratch + "/home", scratch + "/tmp", scratch + "/neutral"})
+                  need(entries(root, 16) == FILES | {"return-ledger.json", "home", "tmp", "neutral"})
+                  for name, expected in ledger["files"].items():
+                      s = os.stat(name, dir_fd=root, follow_symlinks=False)
+                      need(stat.S_ISREG(s.st_mode) and s.st_uid == os.getuid() and s.st_nlink == 1 and stat.S_IMODE(s.st_mode) == 0o600)
+                      need(ident(s) == expected["stat"])
+                  for name in ("home", "tmp", "neutral"):
+                      fd = os.open(name, D, dir_fd=root)
+                      try:
+                          s = ident(os.fstat(fd))
+                          need(s["uid"] == os.getuid() and s["mode"] == 0o700 and owned(s, ledger["directories"][scratch + "/" + name]))
+                          need(entries(fd, 1) == set())
+                      finally:
+                          os.close(fd)
+                  need(owned(ident(os.stat(scratch.rsplit("/", 1)[1], dir_fd=parent, follow_symlinks=False)), ledger["root"]))
+                  # Preflight all originals; later failure reports partial cleanup.
+                  for name in sorted(FILES):
+                      need(ident(os.stat(name, dir_fd=root, follow_symlinks=False)) == ledger["files"][name]["stat"])
+                      os.unlink(name, dir_fd=root)
+                  need(ident(os.stat("return-ledger.json", dir_fd=root, follow_symlinks=False)) == ident(before))
+                  os.unlink("return-ledger.json", dir_fd=root)
+                  for name in ("home", "tmp", "neutral"):
+                      need(owned(ident(os.stat(name, dir_fd=root, follow_symlinks=False)), ledger["directories"][scratch + "/" + name]))
+                      os.rmdir(name, dir_fd=root)
+                  need(entries(root, 1) == set())
+                  need(owned(ident(os.stat(scratch.rsplit("/", 1)[1], dir_fd=parent, follow_symlinks=False)), ledger["root"]))
+                  os.rmdir(scratch.rsplit("/", 1)[1], dir_fd=parent)
+              finally:
+                  os.close(root)
+                  os.close(parent)
+          
+          
+          if __name__ == "__main__":
+              try:
+                  main()
+              except BaseException:
+                  sys.exit(70)
+          MRK_H1_CLEANUP
+          } 2>/dev/null
+          rc=$?
+          set -e
+          printf 'MRK-H1 CLEANUP-WAIT %s\n' "$rc"
+          if [[ $rc -ne 0 ]]; then
+            printf 'MRK-H1 ERROR CLEANUP_PARTIAL_OR_RETAINED\n'
+            exit "$rc"
+          fi
