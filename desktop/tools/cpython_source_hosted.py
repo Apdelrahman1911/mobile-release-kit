@@ -801,20 +801,26 @@ def namespaces() -> dict:
     return {name: os.stat("/proc/self/ns/" + name).st_ino for name in NS_NAMES}
 
 
-def mounts() -> dict:
+def mounts(*, only: str | None = None) -> dict:
     rows = {}
     for line in kernel(Path("/proc/self/mountinfo"), MiB).splitlines():
         left, right = line.split(" - ", 1)
         fields, fs = left.split(), right.split()
         point = fields[4]
-        need(point not in rows and "\\" not in point, "Ambiguous mountpoint spelling")
+        # The controller needs only its fresh work mount. Unrelated host stacks
+        # and escaped names do not describe that mount. The inside caller keeps
+        # the default complete view, including every writable-mount check.
+        if only is not None and point != only:
+            continue
+        need(point not in rows, "Duplicate mountpoint in required view")
+        need("\\" not in point, "Escaped mountpoint in required view")
         rows[point] = {"options": fields[5].split(","), "type": fs[0], "source": fs[1],
                        "superOptions": fs[2].split(","), "device": fields[2]}
     return rows
 
 
 def task_capacity(path: Path) -> dict:
-    item, table = os.statvfs(path), mounts()
+    item, table = os.statvfs(path), mounts(only=str(path))
     need(str(path) in table and table[str(path)]["type"] == "tmpfs", "Original work mount is not tmpfs")
     row = table[str(path)]
     need({"rw", "nosuid", "nodev"} <= set(row["options"])

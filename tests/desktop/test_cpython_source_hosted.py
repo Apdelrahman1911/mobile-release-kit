@@ -325,6 +325,48 @@ class HostedSourceTests(unittest.TestCase):
         checked.assert_called_once_with()
         owner.assert_not_called()
 
+    def test_task_capacity_selects_exact_host_mount_without_relaxing_inside_view(self):
+        target = f"31 1 0:31 / {H.WORK} rw,nosuid,nodev - tmpfs mrk-work rw\n"
+        capacity = SimpleNamespace(f_blocks=H.WORK_BYTES // 4096, f_frsize=4096,
+            f_files=H.WORK_INODES, f_bavail=100, f_favail=200)
+        unrelated = (
+            ("21 1 0:21 / /runner-overlay rw - tmpfs first rw\n"
+             "22 1 0:22 / /runner-overlay rw - tmpfs second rw\n", "Duplicate mountpoint"),
+            ("23 1 0:23 / /runner\\040directory rw - tmpfs runner rw\n", "Escaped mountpoint"),
+        )
+        for other, diagnostic in unrelated:
+            with self.subTest(layout=diagnostic), \
+                 mock.patch.object(H, "kernel", return_value=other + target), \
+                 mock.patch.object(H.os, "statvfs", return_value=capacity):
+                result = H.task_capacity(H.WORK)
+                self.assertEqual((result["bytes"], result["inodes"]), (H.WORK_BYTES, H.WORK_INODES))
+                self.assertEqual(result["mount"]["source"], "mrk-work")
+                self.assertEqual(set(H.mounts(only=str(H.WORK))), {str(H.WORK)})
+                # inside() still requests the complete view; no filtered view
+                # can silently suppress its unexpected writable-mount checks.
+                with self.assertRaisesRegex(H.Refused, diagnostic):
+                    H.mounts()
+
+    def test_task_capacity_refuses_ambiguous_missing_or_unsafe_target(self):
+        target = f"31 1 0:31 / {H.WORK} rw,nosuid,nodev - tmpfs mrk-work rw\n"
+        capacity = dict(f_blocks=H.WORK_BYTES // 4096, f_frsize=4096,
+            f_files=H.WORK_INODES, f_bavail=100, f_favail=200)
+        cases = (
+            ("duplicate", target + target, {}, "Duplicate mountpoint"),
+            ("missing", target.replace(str(H.WORK), "/different-work"), {}, "not tmpfs"),
+            ("type", target.replace("- tmpfs ", "- ext4 "), {}, "not tmpfs"),
+            ("read-only", target.replace("rw,nosuid,nodev", "ro,nosuid,nodev"), {}, "limits differ"),
+            ("suid", target.replace("rw,nosuid,nodev", "rw,nodev"), {}, "limits differ"),
+            ("devices", target.replace("rw,nosuid,nodev", "rw,nosuid"), {}, "limits differ"),
+            ("bytes", target, {"f_blocks": capacity["f_blocks"] + 1}, "limits differ"),
+            ("inodes", target, {"f_files": H.WORK_INODES + 1}, "limits differ"),
+        )
+        for name, table, changed, diagnostic in cases:
+            with self.subTest(case=name), mock.patch.object(H, "kernel", return_value=table), \
+                 mock.patch.object(H.os, "statvfs", return_value=SimpleNamespace(**{**capacity, **changed})), \
+                 self.assertRaisesRegex(H.Refused, diagnostic):
+                H.task_capacity(H.WORK)
+
     def test_host_thread_supplementary_gid_also_blocks_account(self):
         ordinary = {"Uid": "1000 1000 1000 1000", "Gid": "1000 1000 1000 1000", "Groups": "4 27 1000"}
         self.assertFalse(H.thread_uses_account(ordinary, 999, 998))
