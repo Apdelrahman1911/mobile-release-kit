@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -93,6 +94,25 @@ class _Policy(NamedTuple):
 
 _PRODUCTION_POLICY = _Policy(APPROVED_OUTPUT_INVENTORY_SHA256, APPROVED_STATIC_LINK_PROVENANCE_SHA256,
                              APPROVED_NOTICE_INVENTORY_SHA256, LICENSE_BYTES, LICENSE_SHA256)
+
+# Separate literal source-built/projected origin. These do not relax legacy
+# original-link semantics or inherit any TLS/private-W acceptance.
+SOURCE_PROFILE = "cpython-3.14.7-linux-x86_64-source-v1"
+APPROVED_SOURCE_OUTPUT_SHA256: str | None = None
+APPROVED_SOURCE_COMPONENTS_SHA256: str | None = None
+APPROVED_SOURCE_NOTICES_SHA256: str | None = None
+
+
+class _SourcePolicy(NamedTuple):
+    output_inventory_sha256: str | None
+    components_sha256: str | None
+    notice_inventory_sha256: str | None
+    license_size: int
+    license_sha256: str
+
+
+_SOURCE_PRODUCTION_POLICY = _SourcePolicy(APPROVED_SOURCE_OUTPUT_SHA256, APPROVED_SOURCE_COMPONENTS_SHA256,
+    APPROVED_SOURCE_NOTICES_SHA256, LICENSE_BYTES, LICENSE_SHA256)
 
 
 class _Item(NamedTuple):
@@ -287,7 +307,7 @@ def _host_inputs(raw: bytes, policy: _Policy) -> None:
     records = _records(document["files"], max_files=MAX_EVIDENCE_FILES, max_bytes=MAX_EVIDENCE_BYTES,
                        file_limit=MAX_EVIDENCE_FILE_BYTES, absolute=True)
     _need(records.get(interpreter["path"]) == interpreter, "Host Python missing from pinned host closure")
-    if policy is _PRODUCTION_POLICY:
+    if policy is _PRODUCTION_POLICY or policy is _SOURCE_PRODUCTION_POLICY:
         _need(os.path.realpath(sys.executable) == interpreter["path"] and sys.flags.isolated == 1
               and sys.flags.no_site == 1 and sys.flags.dont_write_bytecode == 1,
               "Use only the pinned host Python with -I -S -B; never the candidate")
@@ -482,7 +502,8 @@ def _stage_items(root: Path, document: dict, policy: _Policy) -> tuple[list[_Ite
 def _notice_items(root: Path, raw: bytes, policy: _Policy) -> list[_Item]:
     document = _keys(_decode(raw), {"schemaVersion", "profile", "pythonChangeSummary", "files"})
     _version(document)
-    _need(document["profile"] == PROFILE and document["pythonChangeSummary"] == "PYTHON-CHANGES.txt",
+    expected_profile = SOURCE_PROFILE if type(policy) is _SourcePolicy else PROFILE
+    _need(document["profile"] == expected_profile and document["pythonChangeSummary"] == "PYTHON-CHANGES.txt",
           "A new direct-build Python change summary is required, not the PBS summary")
     records = _records(document["files"], max_files=MAX_NOTICE_FILES, max_bytes=MAX_NOTICE_BYTES,
                        file_limit=MAX_NOTICE_BYTES)
@@ -618,6 +639,335 @@ def prepare(stage: Path, output_inventory: Path, receipts: Path, provenance: Pat
     """Closed production entry. No caller hash, policy, skip or approval override."""
     return _prepare_with_policy(stage, output_inventory, receipts, provenance, notices, notice_inventory,
                                 host_inputs, output, report, _PRODUCTION_POLICY)
+
+
+def _source_helpers():
+    spec = importlib.util.spec_from_file_location("_mrk_source_copy_inputs", Path(__file__).with_name("cpython_static_inputs.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _require_source_policy(policy: _SourcePolicy) -> None:
+    _need(type(policy) is _SourcePolicy and all(value is not None for value in policy[:3]),
+          "Source preparation closed: accepted output, components and public notices missing")
+    for value in (*policy[:3], policy.license_sha256):
+        _sha(value)
+    _need(type(policy.license_size) is int and 0 < policy.license_size <= MAX_NOTICE_BYTES, "Invalid source license policy")
+
+
+def _source_output_inventory(raw: bytes) -> dict:
+    helper = _source_helpers()
+    doc = _keys(_decode(raw), {"schema", "profile", "target", "inputLockSha256", "hostInputsSha256",
+                              "rootfsSha256", "result", "stage"})
+    _need(doc["schema"] == "mrk-cpython-source-output-1" and doc["profile"] == SOURCE_PROFILE
+          and doc["target"] == TARGET, "Different source output profile/schema")
+    for field in ("inputLockSha256", "hostInputsSha256", "rootfsSha256"):
+        _sha(doc[field])
+    _need(_record(doc["result"], limit=MAX_RECEIPT_BYTES)["path"] == "source-result.json", "Different original source result")
+    stage = _keys(doc["stage"], {"sourcePrefix", "files", "directories", "omissions"})
+    _need(stage["sourcePrefix"] == "/work/stage" and type(stage["files"]) is list, "Different direct projection root")
+    records = []
+    for row in stage["files"]:
+        _keys(row, {"path", "size", "sha256", "mode", "origin"})
+        records.append({k: row[k] for k in ("path", "size", "sha256")})
+        _need(row["mode"] == (0o755 if row["path"] == _EXEC_DESTINATION else 0o644), "Different projection mode")
+        origin = row["origin"]
+        _need(type(origin) is dict, "Missing original source/build projection binding")
+        if origin.get("kind") == "generated-landmark":
+            _keys(origin, {"kind", "rule"})
+            _need((row["path"], origin["rule"]) in {(n, rule) for n, _, rule in _GENERATED}, "Unknown generated payload member")
+        else:
+            _keys(origin, {"kind", "path", "producerPhase"})
+            _need(origin["kind"] in {"source-built", "source-projected"}, "Installed/link-id origin is not a source projection")
+            _absolute(Path(origin["path"]))
+            if origin["kind"] == "source-built":
+                _need(type(row["size"]) is int and row["size"] > 0, "Empty original built/generated output")
+                if row["path"] == _EXEC_DESTINATION:
+                    wanted = ("/work/build/cpython/python", "python-build")
+                elif row["path"] in {"python/lib/libcrypto.so.3", "python/lib/libssl.so.3"}:
+                    wanted = ("/work/build/openssl/" + row["path"].rsplit("/", 1)[-1], "openssl-build")
+                else:
+                    leaf = row["path"].rsplit("/", 1)[-1]
+                    _need(row["path"] in {"python/" + n for n in (_SYSCONFIG_PY, _SYSCONFIG_JSON, _BUILD_DETAILS)}
+                          and re.fullmatch(r"/work/build/cpython/build/[A-Za-z0-9._+\-]+/" + re.escape(leaf), origin["path"]),
+                          "Unexpected built/generated projection")
+                    wanted = (origin["path"], "python-build")
+                _need((origin["path"], origin["producerPhase"]) == wanted, "Different original producer path/phase")
+            else:
+                if row["path"] == "python/LICENSE.txt":
+                    wanted = "/work/inputs/sources/cpython/LICENSE"
+                else:
+                    _need(row["path"].startswith("python/lib/python3.14/"), "Source projection outside stdlib")
+                    leaf = row["path"][len("python/lib/python3.14/"):]
+                    wanted = "/work/inputs/sources/cpython/Lib/" + leaf
+                    _need(helper.source_stdlib_destination(leaf)[0] == row["path"],
+                          "Excluded source member was projected")
+                _need(origin["path"] == wanted and origin["producerPhase"] == "authenticated-source",
+                      "Source projection lacks authenticated original path")
+    listed = _records(records, max_files=MAX_FILES, max_bytes=MAX_TOTAL_BYTES - RESOURCE_BYTE_HEADROOM,
+                      file_limit=MAX_FILE_BYTES)
+    directories = stage["directories"]
+    _need(type(directories) is list and directories == sorted(_ancestors(listed)), "Projection directory roster differs")
+    required = {_EXEC_DESTINATION, "python/LICENSE.txt", "python/lib/libcrypto.so.3", "python/lib/libssl.so.3",
+                *("python/" + n for n in (_SYSCONFIG_PY, _SYSCONFIG_JSON, _BUILD_DETAILS)),
+                *(n for n, _, _ in _GENERATED), *("python/lib/python3.14/" + n for n in (
+                    "os.py", "encodings/__init__.py", "ssl.py", "socket.py", "ctypes/__init__.py",
+                    "xml/__init__.py", "xml/parsers/__init__.py", "xml/parsers/expat.py"))}
+    _need(required <= listed.keys(), "Required projected interpreter/stdlib/TLS/XML/metadata absent")
+    _need(type(stage["omissions"]) is list and len(stage["omissions"]) <= MAX_EVIDENCE_FILES, "Omission roster ceiling")
+    omitted = []
+    for row in stage["omissions"]:
+        _keys(row, {"path", "size", "sha256", "reason"})
+        _record({k: row[k] for k in ("path", "size", "sha256")}, limit=MAX_EVIDENCE_FILE_BYTES, absolute=True)
+        prefix = "/work/inputs/sources/cpython/Lib/"
+        _need(row["path"].startswith(prefix), "Unexpected omission source")
+        destination, reason = helper.source_stdlib_destination(row["path"][len(prefix):])
+        _need(destination is None and row["reason"] == reason, "Different deterministic source omission")
+        omitted.append(row["path"])
+    _need(omitted == sorted(set(omitted)), "Duplicate/unsorted source omissions")
+    return doc
+
+
+def _source_coverage(document: dict, rootfs: dict, notices: dict) -> None:
+    """Closed conservative superset; reviewed conditions, not blanket RLE claims."""
+    _need(document["coverage"] == "closed-input-conservative-superset"
+          and document["sourceAvailabilityNotice"] == "SOURCE-AVAILABILITY.txt"
+          and document["sourceAvailabilityNotice"] in notices, "Missing source-availability/coverage binding")
+    expat_notice = _keys(document["bundledExpatNotice"], {"member", "file"})
+    expat_file = _record(expat_notice["file"], limit=MAX_NOTICE_BYTES)
+    _need(expat_notice["member"] == "Python-3.14.7/Modules/expat/COPYING" and expat_file["size"] == 1144
+          and notices.get(expat_file["path"]) == expat_file, "Exact bundled Expat COPYING binding missing")
+
+    def obligations(row: dict) -> None:
+        _need(type(row["notices"]) is list and row["notices"] and row["notices"] == sorted(set(row["notices"]))
+              and set(row["notices"]) <= notices.keys(), "Component notice coverage absent")
+        _need(type(row["conditions"]) is list and row["conditions"] and len(row["conditions"]) <= 32
+              and all(type(s) is str and 0 < len(s) <= 2048 for s in row["conditions"]),
+              "File-scoped source/license/relinking conditions missing")
+
+    roots = {r["id"]: r for r in rootfs["sources"]}
+    packages = {}
+    for row in rootfs["packages"]:
+        packages.setdefault(row["sourceId"], []).append(row["id"])
+    _need(len(roots) == 85 and sum(len(rows) for rows in packages.values()) == 151
+          and roots.keys() == packages.keys(), "Different complete selected package/source closure")
+    systems = document["systemSources"]
+    _need(type(systems) is list and [r["sourceId"] for r in systems] == sorted(roots), "System-source coverage incomplete")
+    possible = set()
+    for row in systems:
+        _keys(row, {"sourceId", "packageIds", "artifacts", "classification", "notices", "conditions"})
+        _need(row["packageIds"] == sorted(packages[row["sourceId"]])
+              and row["artifacts"] == roots[row["sourceId"]]["artifacts"], "Version/patch/package coverage differs")
+        _need(row["classification"] in {"build-only", "possible-incorporation"}, "Different component classification")
+        if row["classification"] == "possible-incorporation":
+            possible.add(row["sourceId"])
+            obligations(row)
+        else:
+            _need(row["notices"] == [] and type(row["conditions"]) is list and row["conditions"],
+                  "Build-only classification needs its reviewed reason")
+    _need({"gcc-13@13.3.0-6ubuntu2~24.04.1", "gcc-14@14.2.0-4ubuntu2~24.04.1",
+           "glibc@2.39-0ubuntu8.9", "linux@6.8.0-139.139", "libxcrypt@1:4.4.36-4build1"} <= possible,
+          "Compiler/runtime/startup/UAPI/libxcrypt conservative coverage absent")
+    helper = _source_helpers()
+    expected = {
+        "cpython": ("3.14.7", "cpython", ["."]),
+        "hacl": ("bundled-in-cpython-3.14.7", "cpython", ["Modules/_hacl/"]),
+        "expat": ("2.8.2", "cpython", ["Include/pyexpat.h", "Modules/expat/", "Modules/pyexpat.c"]),
+        "zlib": ("1.3.2", "zlib", ["."]), "libffi": ("3.4.8", "libffi", ["."]),
+        "openssl": ("3.5.8", "openssl", ["."])}
+    _need(type(document["nativeSources"]) is list and [r["id"] for r in document["nativeSources"]] == sorted(expected),
+          "Native source coverage incomplete")
+    for row in document["nativeSources"]:
+        _keys(row, {"id", "version", "archiveSha256", "scope", "notices", "conditions"})
+        version, archive, scope = expected[row["id"]]
+        _need((row["version"], row["archiveSha256"], row["scope"]) ==
+              (version, helper.SOURCE_ARCHIVES[archive][2], scope), "Different incorporated native version/subtree")
+        obligations(row)
+        if row["id"] == "expat":
+            _need(expat_file["path"] in row["notices"], "Expat component omits its exact bundled COPYING")
+    # Every native output is covered by the complete conservative union. This
+    # intentionally does not claim these are observed per-link selected members.
+    union = sorted(possible | set(expected))
+    _need(document["outputCoverage"] == [{"path": name, "components": union} for name in
+          sorted({_EXEC_DESTINATION, "python/lib/libcrypto.so.3", "python/lib/libssl.so.3"})],
+          "Native outputs lack the full conservative component union")
+
+
+def _source_evidence(root: Path, raw: bytes, output: dict, notice_raw: bytes, policy: _SourcePolicy) -> dict:
+    doc = _keys(_decode(raw), {"schema", "profile", "inputLockSha256", "rootfsSha256", "resultSha256",
+        "noticeInventorySha256", "coverage", "sourceAvailabilityNotice", "bundledExpatNotice", "nativeSources", "systemSources",
+        "outputCoverage", "files", "configurationReview", "obligationReview"})
+    _need(doc["schema"] == "mrk-cpython-source-components-1" and doc["profile"] == SOURCE_PROFILE
+          and doc["inputLockSha256"] == output["inputLockSha256"] and doc["rootfsSha256"] == output["rootfsSha256"]
+          and doc["resultSha256"] == output["result"]["sha256"]
+          and doc["noticeInventorySha256"] == policy.notice_inventory_sha256, "Source result/coverage/notice bindings differ")
+    records = _records(doc["files"], max_files=MAX_EVIDENCE_FILES, max_bytes=MAX_EVIDENCE_BYTES,
+                       file_limit=MAX_EVIDENCE_FILE_BYTES)
+    actual, _ = _tree(root, max_files=MAX_EVIDENCE_FILES, max_entries=MAX_EVIDENCE_ENTRIES)
+    _need(actual.keys() == records.keys(), "Source evidence extra/missing/renamed")
+    for name, row in records.items():
+        _checked(actual[name], row["sha256"], size=row["size"], limit=MAX_EVIDENCE_FILE_BYTES)
+    for name in ("configurationReview", "obligationReview"):
+        row = _record(doc[name], limit=MAX_RECEIPT_BYTES)
+        _need(records.get(row["path"]) == row and row["size"] > 0, "Independent configuration/conditions review absent")
+    _need(records.get("source-result.json") == output["result"] and records.get("rootfs.json", {}).get("sha256") == output["rootfsSha256"]
+          and records.get("input-lock.json", {}).get("sha256") == output["inputLockSha256"], "Original input/result evidence absent")
+    rootfs = _decode(_read_checked(actual["rootfs.json"], limit=MAX_INVENTORY_BYTES))
+    _need(rootfs["schema"] == "mrk-cpython-source-rootfs-1" and rootfs["profile"] == SOURCE_PROFILE, "Different root origin")
+    notice = _decode(notice_raw)
+    _need(notice["profile"] == SOURCE_PROFILE, "Cross-profile source notices")
+    notice_records = _records(notice["files"], max_files=MAX_NOTICE_FILES, max_bytes=MAX_NOTICE_BYTES, file_limit=MAX_NOTICE_BYTES)
+    _source_coverage(doc, rootfs, notice_records)
+    result = _keys(_decode(_read_checked(actual["source-result.json"], limit=MAX_RECEIPT_BYTES)),
+        {"schema", "profile", "inputLockSha256", "rootfsSha256", "executionReviewSha256", "state", "nativeQualification", "startMonotonicNs",
+         "deadlineMonotonicNs", "endMonotonicNs", "phases", "projectionSha256"})
+    _need(result["schema"] == "mrk-cpython-source-result-1" and result["profile"] == SOURCE_PROFILE
+          and result["inputLockSha256"] == output["inputLockSha256"] and result["rootfsSha256"] == output["rootfsSha256"]
+          and result["state"] == "mandatory-work-complete" and result["nativeQualification"] == "not-established"
+          and all(type(result[k]) is int for k in ("startMonotonicNs", "endMonotonicNs", "deadlineMonotonicNs"))
+          and result["startMonotonicNs"] < result["endMonotonicNs"] < result["deadlineMonotonicNs"]
+          and result["deadlineMonotonicNs"] - result["startMonotonicNs"] == 2400 * 1_000_000_000,
+          "Original source result failed/late or claims readiness")
+    helper = _source_helpers()
+    _need(records.get("execution-review.json", {}).get("sha256") == _sha(result["executionReviewSha256"]),
+          "Original prerequisite execution review absent")
+    helper.source_execution_review(_read_checked(actual["execution-review.json"], limit=MAX_INVENTORY_BYTES),
+                                   result["executionReviewSha256"])
+    spec = importlib.util.spec_from_file_location("_mrk_source_copy_recipe", Path(__file__).with_name("cpython_source_recipe.py"))
+    recipe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(recipe)
+    phase_specs = {row["name"]: row for row in recipe.fixed_phases()}
+    _need([r["path"] for r in result["phases"]] == [name + ".json" for name in helper.SOURCE_PHASES],
+          "Mandatory original source phase roster differs")
+    previous = result["startMonotonicNs"]
+    log_bytes = 0
+    for name, row in zip(helper.SOURCE_PHASES, result["phases"]):
+        _need(records.get(row["path"]) == _record(row, limit=MAX_RECEIPT_BYTES), "Original source phase record differs")
+        phase = _keys(_decode(_read_checked(actual[row["path"]], limit=MAX_RECEIPT_BYTES)),
+            {"schema", "profile", "inputLockSha256", "phase", "kind", "argv", "cwd", "environmentSha256",
+             "startMonotonicNs", "endMonotonicNs", "deadlineMonotonicNs", "originalExitCode", "state",
+             "observedIgnoredError", "stdout", "stderr", "dataFiles"})
+        native = name not in {"openssl-layout", "python-project"}
+        _need(phase["schema"] == helper.SOURCE_PHASE_SCHEMA and phase["profile"] == SOURCE_PROFILE
+              and phase["inputLockSha256"] == output["inputLockSha256"] and phase["phase"] == name
+              and phase["kind"] == ("native" if native else "data") and phase["state"] == "complete"
+              and (type(phase["originalExitCode"]) is int and phase["originalExitCode"] == 0 if native else phase["originalExitCode"] is None)
+              and phase["observedIgnoredError"] is False
+              and all(type(phase[k]) is int for k in ("startMonotonicNs", "endMonotonicNs", "deadlineMonotonicNs"))
+              and previous <= phase["startMonotonicNs"] <= phase["endMonotonicNs"] < result["endMonotonicNs"]
+              and phase["deadlineMonotonicNs"] == result["deadlineMonotonicNs"], "Original mandatory phase failed/incomplete/late")
+        previous = phase["endMonotonicNs"]
+        _sha(phase["environmentSha256"])
+        planned = phase_specs[name]
+        _need(phase["argv"] == planned["argv"] and phase["cwd"] == planned["cwd"]
+              and phase["environmentSha256"] == _digest(_canonical(planned["environment"])),
+              "Original phase argv/cwd/environment differs from fixed recipe")
+        stream_bytes = 0
+        for field in ("stdout", "stderr"):
+            stream = _record(phase[field], limit=16 << 20)
+            _need(stream["path"] == name + "." + field and records.get(stream["path"]) == stream, "Original phase stream missing")
+            stream_bytes += stream["size"]
+        log_bytes += stream_bytes
+        _need(stream_bytes <= 16 << 20 and log_bytes <= 256 << 20, "Original source log bound exceeded")
+        for item in phase["dataFiles"]:
+            _need(records.get(item["path"]) == _record(item, limit=MAX_INVENTORY_BYTES), "Original phase DATA missing")
+        required_data = []
+        if name in {"python-configure", "python-build"}:
+            required_data = [name + "-" + relative.replace("/", "-") for relative in helper.SOURCE_CONFIG_FILES]
+            if name == "python-build":
+                required_data.append("python-build-pybuilddir.txt")
+        elif name in {"openssl-configure", "openssl-build", "openssl-install"}:
+            required_data = [name + "-" + relative.replace("/", "-") for relative in
+                             (helper.SOURCE_OPENSSL_FILES[:2] if name == "openssl-configure" else helper.SOURCE_OPENSSL_FILES)]
+        elif name in {"zlib-configure", "libffi-configure"}:
+            required_data = [name + ("-configure.log" if name == "zlib-configure" else "-config.log")]
+        elif name in {"openssl-layout", "python-project"}:
+            required_data = ["openssl-layout.json" if name == "openssl-layout" else "source-projection.json"]
+        _need([r["path"] for r in phase["dataFiles"]] == required_data, "Mandatory generated/configuration DATA missing")
+    projection = _read_checked(actual["source-projection.json"], limit=MAX_INVENTORY_BYTES)
+    _need(_digest(projection) == result["projectionSha256"]
+          and _decode(projection) == {"profile": SOURCE_PROFILE, **output["stage"]}, "Projection/result byte correspondence differs")
+    for phase in ("python-configure", "python-build"):
+        files = {name: _read_checked(actual[phase + "-" + name.replace("/", "-")], limit=MAX_INVENTORY_BYTES)
+                 for name in helper.SOURCE_CONFIG_FILES}
+        helper.source_material_configuration(files, _read_checked(Path(__file__).with_name("cpython_source_setup.local"), limit=1 << 20),
+            _read_checked(actual["source-patchlevel.h"], limit=1 << 20))
+    generated = "/work/build/cpython/" + helper.source_pybuilddir(_read_checked(actual["python-build-pybuilddir.txt"], limit=4096)) + "/"
+    for row in output["stage"]["files"]:
+        leaf = row["path"].rsplit("/", 1)[-1]
+        if leaf in helper.SOURCE_GENERATED_NAMES:
+            _need(row["origin"]["path"] == generated + leaf, "Generated projection differs from original pybuilddir.txt")
+    return doc
+
+
+def _source_stage_items(root: Path, document: dict, policy: _SourcePolicy) -> list[_Item]:
+    stage = document["stage"]
+    actual, directories = _tree(root, max_files=MAX_FILES, max_entries=MAX_ENTRIES)
+    records = {row["path"]: row for row in stage["files"]}
+    _need(actual.keys() == records.keys() and directories == set(stage["directories"]), "Source projection roster changed")
+    helper, items = _source_helpers(), []
+    for name, row in records.items():
+        raw = _checked(actual[name], row["sha256"], size=row["size"], limit=MAX_FILE_BYTES)
+        _need(stat.S_IMODE(_ordinary(actual[name]).st_mode) == row["mode"], "Source projection mode changed")
+        if name == _EXEC_DESTINATION:
+            helper.source_elf(raw, "python")
+        elif name in {"python/lib/libcrypto.so.3", "python/lib/libssl.so.3"}:
+            helper.source_elf(raw, name.rsplit("/", 1)[-1])
+        elif name == "python/LICENSE.txt":
+            _need((len(raw), _digest(raw)) == (policy.license_size, policy.license_sha256), "Exact CPython license changed")
+        if row["origin"]["kind"] == "generated-landmark":
+            _need(any(name == n and raw == data and row["origin"]["rule"] == rule for n, data, rule in _GENERATED),
+                  "Generated landmark bytes differ")
+        items.append(_Item(name, raw, {**row["origin"], "outputInventorySha256": policy.output_inventory_sha256}))
+    return items
+
+
+def _prepare_source_with_policy(stage: Path, output_inventory: Path, receipts: Path, components: Path,
+        notices: Path, notice_inventory: Path, host_inputs: Path, output: Path, report: Path, policy: _SourcePolicy) -> dict:
+    _require_source_policy(policy)  # Before any caller path inspection or output effect.
+    inputs = (stage, output_inventory, receipts, components, notices, notice_inventory, host_inputs)
+    for path in (*inputs, output, report):
+        _absolute(path)
+    _need(report != output and output not in report.parents and all(path not in inputs
+          and all(root not in path.parents for root in (stage, receipts, notices)) for path in (output, report)),
+          "Source copy output/report overlaps input")
+    _directory(output.parent)
+    _directory(report.parent)
+    _absent(output)
+    _absent(report)
+    document = _source_output_inventory(_checked(output_inventory, policy.output_inventory_sha256, limit=MAX_INVENTORY_BYTES))
+    notice_raw = _checked(notice_inventory, policy.notice_inventory_sha256, limit=MAX_NOTICE_INVENTORY_BYTES)
+    component_raw = _checked(components, policy.components_sha256, limit=MAX_INVENTORY_BYTES)
+    _host_inputs(_checked(host_inputs, document["hostInputsSha256"], limit=MAX_INVENTORY_BYTES), policy)
+    _source_evidence(receipts, component_raw, document, notice_raw, policy)
+    items = _source_stage_items(stage, document, policy)
+    items.extend(_notice_items(notices, notice_raw, policy))
+    directories = _preflight_items(items)
+    production = policy is _SOURCE_PRODUCTION_POLICY
+    mapping = _canonical({"schemaVersion": 1, "profile": SOURCE_PROFILE if production else "not-a-production-profile",
+        "evidenceKind": "descriptive-source-copy-mapping" if production else "inert-algorithm-test",
+        "notACompletionOrHandoffReceipt": True, "qualification": "no-native-supply-or-legal-qualification",
+        "inputLockSha256": document["inputLockSha256"], "outputInventorySha256": policy.output_inventory_sha256,
+        "componentsSha256": policy.components_sha256, "noticeInventorySha256": policy.notice_inventory_sha256,
+        "hostInputsSha256": document["hostInputsSha256"], "originalResult": document["result"],
+        "files": [dict(record, origin=item.origin) for item, record in
+                  zip(sorted(items, key=lambda item: item.path), _inventory(items))],
+        "omissions": document["stage"]["omissions"], "inputDirectories": document["stage"]["directories"],
+        "reservedPayloadFiles": list(RESERVED_PAYLOAD_FILES), "reservedEntriesIncludingManifest": RESERVED_ENTRIES,
+        "resourceByteHeadroom": RESOURCE_BYTE_HEADROOM})
+    _need(len(mapping) <= MAX_REPORT_BYTES, "Source copy report ceiling")
+    _write_payload(output, report, items, directories, mapping)
+    return {"operation": "source-publisher-copy-completed", "reportSha256": _digest(mapping),
+            "evidenceKind": "descriptive-source-copy-mapping" if production else "inert-algorithm-test",
+            "qualification": "no-native-supply-or-legal-qualification"}
+
+
+def prepare_source(stage: Path, output_inventory: Path, receipts: Path, components: Path,
+        notices: Path, notice_inventory: Path, host_inputs: Path, output: Path, report: Path) -> dict:
+    """Literal closed source policy; no caller approval/hash/profile/skip option."""
+    return _prepare_source_with_policy(stage, output_inventory, receipts, components, notices, notice_inventory,
+                                       host_inputs, output, report, _SOURCE_PRODUCTION_POLICY)
 
 
 def _parser() -> argparse.ArgumentParser:

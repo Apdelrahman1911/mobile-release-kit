@@ -8,12 +8,14 @@ reviewed publisher envelope. Every output is private build evidence.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import shlex
 import stat
+import struct
 import sys
 
 PROFILE = "cpython-3.14.7-linux-x86_64-static-v1"
@@ -417,7 +419,8 @@ def materialize(lock_path: Path, expected: str) -> None:
                                              for k, v in sorted(env.items())).encode("ascii"))
 
 
-def configuration_names(config: bytes, makefile: bytes) -> list[str]:
+def _configuration_names(config: bytes, makefile: bytes, modules: tuple[str, ...],
+                         disabled: tuple[str, ...]) -> list[str]:
     """Audit generated configuration as data, not a runtime builtin observation."""
     table = re.search(rb"struct _inittab _PyImport_Inittab\[\] = \{(.*?)\n\};", config, re.S)
     need(table is not None, "Generated builtin table missing")
@@ -427,15 +430,19 @@ def configuration_names(config: bytes, makefile: bytes) -> list[str]:
     rest = re.sub(row, b"", body).strip()
     need(re.fullmatch(rb"\{\s*0\s*,\s*0\s*\}", rest) is not None,
          "Unsupported generated builtin table syntax")
-    expected = set(BOOTSTRAP_MODULES + INTRINSIC_MODULES + STATIC_MODULES)
+    expected = set(BOOTSTRAP_MODULES + INTRINSIC_MODULES + modules)
     need(len(names) == len(expected) and set(names) == expected, "Generated builtin-name roster differs")
-    for key, wanted in ((b"MODBUILT_NAMES", set(BOOTSTRAP_MODULES + STATIC_MODULES)),
-                        (b"MODSHARED_NAMES", set()), (b"MODDISABLED_NAMES", set(DISABLED_MODULES))):
+    for key, wanted in ((b"MODBUILT_NAMES", set(BOOTSTRAP_MODULES + modules)),
+                        (b"MODSHARED_NAMES", set()), (b"MODDISABLED_NAMES", set(disabled))):
         values = re.findall(rb"^" + key + rb"[ \t]*=[ \t]*(.*)$", makefile, re.M)
         need(len(values) == 1, "Generated module Makefile assignment missing or repeated")
         words = values[0].decode("ascii").split()
         need(len(words) == len(wanted) and set(words) == wanted, "Generated Makefile module roster differs")
     return sorted(names)
+
+
+def configuration_names(config: bytes, makefile: bytes) -> list[str]:
+    return _configuration_names(config, makefile, STATIC_MODULES, DISABLED_MODULES)
 
 
 def phase_record(lock_path: Path, expected: str, name: str, status: int) -> None:
@@ -474,6 +481,504 @@ def phase_record(lock_path: Path, expected: str, name: str, status: int) -> None
             "inputLockSha256": expected, "builtinNamesFromGeneratedSource": names,
             "notARuntimeBuiltinObservation": True,
             "files": [{"path": p, "size": len(b), "sha256": digest(b)} for p, b in sorted(captured.items())]}))
+
+
+# Conventional source origin. None of these selectors inherit legacy/H approval.
+SOURCE_PROFILE = "cpython-3.14.7-linux-x86_64-source-v1"
+SOURCE_LOCK_SCHEMA = "mrk-cpython-source-lock-1"
+SOURCE_PHASE_SCHEMA = "mrk-cpython-source-phase-1"
+SOURCE_OUTPUT_SCHEMA = "mrk-cpython-source-output-1"
+SOURCE_COMPONENTS_SCHEMA = "mrk-cpython-source-components-1"
+SOURCE_EXECUTION_REVIEW_PATH = Path("/work/inputs/source-execution-review.json")
+SOURCE_ARCHIVES = {**SOURCE_PINS, "openssl": ("3.5.8", 53213818,
+    "a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2",
+    "https://www.openssl.org/source/openssl-3.5.8.tar.gz")}
+SOURCE_STATIC_MODULES = tuple(sorted((*STATIC_MODULES, "_socket", "_ssl", "pyexpat", "resource")))
+SOURCE_DISABLED_MODULES = tuple(n for n in DISABLED_MODULES if n not in {"_socket", "_ssl", "pyexpat", "resource"})
+SOURCE_PYTHON_CONFIGURE = (*PYTHON_CONFIGURE, "--with-openssl=/work/deps", "--with-openssl-rpath=no",
+                          "--with-ssl-default-suites=python", "--without-system-expat")
+SOURCE_OPENSSL_CONFIGURE = ("linux-x86_64", "shared", "no-module", "no-dso", "no-engine",
+    "no-autoload-config", "no-legacy", "no-tests", "--prefix=/work/deps", "--libdir=lib",
+    "--openssldir=/nonexistent/mobile-release-kit/openssl")
+SOURCE_PHASES = (*PHASES[:6], "openssl-configure", "openssl-build", "openssl-install", "openssl-layout",
+                 "python-configure", "builtin-archives", "python-build", "python-project")
+SOURCE_BUILD_FILES = ("cpython_source_recipe.py", "cpython_source_setup.local", "cpython_static_inputs.py",
+    "cpython_static_builder_data.py", "prepare_cpython_static_payload.py", "prepare_cpython_source_payload.py")
+SOURCE_CORE_HANDOFFS = frozenset({"desktop/engine_bootstrap.py", "desktop/config_edit_bootstrap.py",
+    "desktop/github_connection_bootstrap.py", "desktop/environment_bootstrap.py",
+    "desktop/offline_preflight_bootstrap.py", "desktop/android_build_bootstrap.py",
+    "desktop/tools/prepare_runtime.py", "desktop/github-ca.pem"})
+SOURCE_CA = (240216, "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f")
+SOURCE_TOOLS = {
+    "cc": "/usr/bin/x86_64-linux-gnu-gcc-13", "cxx": "/usr/bin/x86_64-linux-gnu-g++-13",
+    "ar": "/usr/bin/x86_64-linux-gnu-ar", "ranlib": "/usr/bin/x86_64-linux-gnu-ranlib",
+    "ld": "/usr/bin/x86_64-linux-gnu-ld.bfd", "make": "/usr/bin/make",
+    "sh": "/usr/bin/dash", "perl": "/usr/bin/perl", "host_python": "/usr/bin/python3.12"}
+SOURCE_ENV = {**FIXED_ENV, "SOURCE_DATE_EPOCH": "1785925789", "CONFIG_SHELL": SOURCE_TOOLS["sh"],
+    "CC": SOURCE_TOOLS["cc"], "CXX": SOURCE_TOOLS["cxx"], "AR": SOURCE_TOOLS["ar"],
+    "RANLIB": SOURCE_TOOLS["ranlib"], "LD": SOURCE_TOOLS["ld"], "MAKE": SOURCE_TOOLS["make"],
+    "PERL": SOURCE_TOOLS["perl"]}
+SOURCE_OPENSSL_LDFLAGS = "LDFLAGS=-Wl,--enable-new-dtags,-z,origin,-rpath,'$$ORIGIN'"
+SOURCE_PYTHON_LDFLAGS = "LDFLAGS=-Wl,--enable-new-dtags,-z,origin,-rpath,'$$ORIGIN/../lib'"
+SOURCE_PYTHON_MAKE = (SOURCE_PYTHON_LDFLAGS, "PYTHON_FOR_BUILD=./$(BUILDPYTHON) -E -B",
+                      "PYTHON_FOR_FREEZE=./_bootstrap_python -B")
+SOURCE_ARCHIVE_TARGETS = tuple("Modules/_hacl/" + n for n in (
+    "libHacl_Hash_MD5.a", "libHacl_Hash_SHA1.a", "libHacl_Hash_SHA2.a", "libHacl_Hash_SHA3.a",
+    "libHacl_Hash_BLAKE2.a", "libHacl_HMAC.a")) + ("Modules/expat/libexpat.a",)
+SOURCE_LIBRARIES = ("libcrypto.so.3", "libssl.so.3")
+SOURCE_LAYOUT_ROOTS = ("/work/build/cpython/lib", "/work/build/lib", "/work/stage/python/lib")
+SOURCE_GENERATED_NAMES = ("_sysconfigdata__linux_x86_64-linux-gnu.py",
+    "_sysconfig_vars__linux_x86_64-linux-gnu.json", "build-details.json")
+SOURCE_CONFIG_FILES = ("Makefile", "pyconfig.h", "Modules/config.c", "Modules/Setup.local",
+                       "Modules/Setup.bootstrap", "Modules/Setup.stdlib", "config.log")
+SOURCE_OPENSSL_FILES = ("Makefile", "configdata.pm", "include/openssl/configuration.h", "include/openssl/opensslv.h")
+
+
+def _source_admission():
+    # A is a constants-only external trust root, not a self-hashed input in L.
+    # Final command admission must hash-pin A and all helpers BEFORE any import.
+    spec = importlib.util.spec_from_file_location("_mrk_cpython_source_admission",
+                                                Path(__file__).with_name("cpython_source_admission.py"))
+    admission = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(admission)
+    return admission
+
+
+def require_source_build():
+    # First public build operation: no caller path, import of the core, or mkdir before this.
+    admission = _source_admission()
+    pins = (admission.APPROVED_SOURCE_LOCK_SHA256, admission.APPROVED_SOURCE_EXECUTION_REVIEW_SHA256,
+            admission.APPROVED_SOURCE_CORE_INPUTS_SHA256)
+    need(all(x is not None for x in pins), "Conventional source build closed: input/core/execution reviews missing")
+    for value in pins:
+        sha(value)
+    return admission
+
+
+def source_read(path: Path, limit: int = MAX_FILE) -> bytes:
+    """Bounded ordinary/no-follow single-link DATA; close failure is a failure."""
+    ordinary_directory(path.parent)
+    before = path.lstat()
+    need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= limit,
+         "Conventional source input is not bounded ordinary DATA")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        need(_state(os.fstat(descriptor)) == _state(before), "Source input changed before open")
+        blocks, total = [], 0
+        while True:
+            block = os.read(descriptor, min(1 << 20, before.st_size - total + 1))
+            if not block:
+                break
+            total += len(block)
+            need(total <= before.st_size, "Source input grew during read")
+            blocks.append(block)
+        need(total == before.st_size and _state(os.fstat(descriptor)) == _state(before)
+             and _state(path.lstat()) == _state(before), "Source input changed during read")
+    finally:
+        os.close(descriptor)
+    return b"".join(blocks)
+
+
+def source_bound(record: dict, limit: int = MAX_FILE) -> bytes:
+    file_shape(record)
+    raw = source_read(absolute(record["path"]), limit)
+    need((len(raw), digest(raw)) == (record["size"], record["sha256"]), "Source input hash/size differs")
+    return raw
+
+
+def source_write(path: Path, raw: bytes, mode: int = 0o600) -> dict:
+    ordinary_directory(path.parent)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+    try:
+        os.fchmod(descriptor, mode)
+        need(os.write(descriptor, raw) == len(raw), "Short conventional source output write")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    need(source_read(path, len(raw)) == raw and stat.S_IMODE(path.lstat().st_mode) == mode,
+         "Conventional source write/readback differs")
+    return {"path": str(path), "size": len(raw), "sha256": digest(raw)}
+
+
+def source_configuration() -> dict:
+    return {"pythonConfigure": list(SOURCE_PYTHON_CONFIGURE), "zlibConfigure": list(ZLIB_CONFIGURE),
+        "libffiConfigure": list(FFI_CONFIGURE), "opensslConfigure": list(SOURCE_OPENSSL_CONFIGURE),
+        "staticModules": list(SOURCE_STATIC_MODULES), "disabledModules": list(SOURCE_DISABLED_MODULES),
+        "phases": list(SOURCE_PHASES), "cpythonCommit": CPYTHON_COMMIT, "bundledExpatVersion": "2.8.2",
+        "pythonMakeAssignments": list(SOURCE_PYTHON_MAKE), "opensslMakeAssignment": SOURCE_OPENSSL_LDFLAGS}
+
+
+def source_lock_shape(value: object) -> dict:
+    value = keys(value, {"schema", "profile", "state", "target", "rootfs", "hostInputs",
+                         "sources", "coreSourceFiles", "recipeFiles", "environment", "configuration"})
+    need(value["schema"] == SOURCE_LOCK_SCHEMA and value["profile"] == SOURCE_PROFILE
+         and value["state"] == "sealed-inputs-only" and canonical(value["target"]) == canonical(TARGET),
+         "Different conventional source lock")
+    need(value["environment"] == SOURCE_ENV and value["configuration"] == source_configuration(),
+         "Different conventional recipe configuration")
+    for field in ("rootfs", "hostInputs"):
+        file_shape(value[field])
+    need(type(value["sources"]) is list and [s["id"] for s in value["sources"]] == sorted(SOURCE_ARCHIVES),
+         "Exactly four pinned source archives required")
+    for source in value["sources"]:
+        keys(source, {"id", "version", "archive", "url", "root", "inventory", "patches"})
+        pin = SOURCE_ARCHIVES[source["id"]]
+        file_shape(source["archive"])
+        file_shape(source["inventory"])
+        need((source["version"], source["archive"]["size"], source["archive"]["sha256"], source["url"]) == pin
+             and source["patches"] == [] and source["root"] == str(SOURCE_ROOT / source["id"]),
+             "Unreviewed source bytes, root or patches")
+    core = value["coreSourceFiles"]
+    need(type(core) is list and 8 < len(core) <= 2048, "Whole core plus eight fixed handoff inputs required")
+    names = []
+    for record in core:
+        file_shape(record)
+        name = absolute(record["path"]).relative_to(CORE_ROOT).as_posix()
+        need(name in SOURCE_CORE_HANDOFFS or name.startswith("src/mobile_release/"), "Foreign core input")
+        names.append(name)
+        if name == "desktop/github-ca.pem":
+            need((record["size"], record["sha256"]) == SOURCE_CA, "Different public CA")
+    need(names == sorted(set(names)) and SOURCE_CORE_HANDOFFS <= set(names), "Core/handoff roster incomplete")
+    recipe = value["recipeFiles"]
+    need(type(recipe) is list and len(recipe) == len(SOURCE_BUILD_FILES), "Recipe file roster differs")
+    for record in recipe:
+        file_shape(record)
+    expected = sorted(str(Path(__file__).parent / name) for name in SOURCE_BUILD_FILES)
+    need([record["path"] for record in recipe] == expected, "Foreign or incomplete recipe source")
+    return value
+
+
+def source_inventory(source: dict) -> dict[str, dict]:
+    document = keys(decode(source_bound(source["inventory"], MAX_JSON)), {"files"})
+    need(type(document["files"]) is list and 0 < len(document["files"]) <= MAX_INPUT_FILES,
+         "Bounded archive-derived source inventory required")
+    records, total = {}, 0
+    for row in document["files"]:
+        file_shape(row, extra={"mode"})
+        path = absolute(row["path"])
+        need(path.is_relative_to(absolute(source["root"])) and row["mode"] in {0o644, 0o755}
+             and path.name not in {".git", "INCOMPLETE"} and row["path"] not in records,
+             "Different extracted source member")
+        records[row["path"]] = row
+        total += row["size"]
+    need(list(records) == sorted(records) and total <= MAX_INPUT_BYTES, "Source inventory ordering/bound")
+    return records
+
+
+def source_execution_review(raw: bytes, expected_sha256: str) -> dict:
+    """Fixed-path prerequisite E identity, not final-command authorization."""
+    need(digest(raw) == sha(expected_sha256) and type(decode(raw)) is dict,
+         "Source execution-envelope review binding differs")
+    return {"path": str(SOURCE_EXECUTION_REVIEW_PATH), "size": len(raw), "sha256": digest(raw)}
+
+
+def load_source_lock(path: Path) -> dict:
+    admission = require_source_build()
+    raw = source_read(absolute(str(path)), MAX_JSON)
+    need(digest(raw) == admission.APPROVED_SOURCE_LOCK_SHA256, "Source lock is not the independently admitted lock")
+    lock = source_lock_shape(decode(raw))
+    need(digest(canonical(lock["coreSourceFiles"])) == admission.APPROVED_SOURCE_CORE_INPUTS_SHA256,
+         "Source core review binding differs")
+    review = source_execution_review(source_read(SOURCE_EXECUTION_REVIEW_PATH, MAX_JSON),
+                                     admission.APPROVED_SOURCE_EXECUTION_REVIEW_SHA256)
+    # Root report is input correspondence, not transferable native authority.
+    root = decode(source_bound(lock["rootfs"], MAX_JSON))
+    need(type(root) is dict and root.get("schema") == "mrk-cpython-source-rootfs-1"
+         and root.get("profile") == SOURCE_PROFILE and root.get("nativeQualification") == "not-established",
+         "Different source root provenance")
+    source_bound(lock["hostInputs"], MAX_JSON)
+    for row in (*lock["recipeFiles"], *lock["coreSourceFiles"]):
+        source_bound(row)
+    actual = ordinary_tree(CORE_ROOT / "src/mobile_release")
+    need(set(actual) == {r["path"] for r in lock["coreSourceFiles"] if r["path"].startswith(str(CORE_ROOT / "src/mobile_release") + "/")},
+         "Current whole core is not the frozen N+8 input roster")
+    for source in lock["sources"]:
+        source_bound(source["archive"])
+        inventory = source_inventory(source)
+        need(set(ordinary_tree(absolute(source["root"]))) == set(inventory), "Extracted source roster differs")
+        for row in inventory.values():
+            source_bound({k: row[k] for k in ("path", "size", "sha256")})
+            need(stat.S_IMODE(Path(row["path"]).lstat().st_mode) == row["mode"], "Source mode differs")
+    need(os.path.realpath(sys.executable) == SOURCE_TOOLS["host_python"] and sys.flags.isolated == 1
+         and sys.flags.no_site == 1 and sys.flags.dont_write_bytecode == 1,
+         "Use the qualified root's original host Python with -I -S -B")
+    return {**lock, "_digest": digest(raw), "_executionReview": review}
+
+
+def source_workspace(lock: dict) -> None:
+    need(dict(os.environ) == SOURCE_ENV, "Entry requires the literal empty-origin source environment")
+    ordinary_directory(WORK)
+    need(stat.S_IMODE(WORK.lstat().st_mode) == 0o700, "Source /work must be private")
+    for name in ("build", "deps", "stage", "receipts", "home", "tmp"):
+        (WORK / name).mkdir(mode=0o700)  # No reuse/adoption/retry/cleanup.
+    for name in SOURCE_ARCHIVES:
+        (WORK / "build" / name).mkdir(mode=0o700)
+    copies = []
+    for source in lock["sources"]:
+        if source["id"] not in {"zlib", "openssl"}:
+            continue
+        for row in source_inventory(source).values():
+            path = Path(row["path"])
+            destination = WORK / "build" / source["id"] / path.relative_to(source["root"])
+            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            record = {k: row[k] for k in ("path", "size", "sha256")}
+            copies.append({"original": record, "copy": source_write(destination, source_bound(record), row["mode"])})
+    modules = WORK / "build/cpython/Modules"
+    modules.mkdir(mode=0o700)
+    source_write(modules / "Setup.local", source_read(Path(__file__).with_name("cpython_source_setup.local")), 0o644)
+    source_write(RECEIPTS / "source-copies.json", canonical(copies))
+
+
+def source_configuration_names(config: bytes, makefile: bytes) -> list[str]:
+    return _configuration_names(config, makefile, SOURCE_STATIC_MODULES, SOURCE_DISABLED_MODULES)
+
+
+def _make_value(raw: bytes, name: str) -> str:
+    values = re.findall(rb"^" + re.escape(name.encode("ascii")) + rb"[ \t]*=[ \t]*(.*)$", raw, re.M)
+    need(len(values) == 1, "Material make assignment missing/repeated")
+    return values[0].decode("ascii").strip()
+
+
+def source_material_configuration(files: dict[str, bytes], setup: bytes, patchlevel: bytes) -> list[str]:
+    """Material DATA predicates only; full files remain retained for review."""
+    need(files["Modules/Setup.local"] == setup, "Source Setup.local differs")
+    names = source_configuration_names(files["Modules/config.c"], files["Makefile"])
+    header, make = files["pyconfig.h"], files["Makefile"]
+    for name in ("WITH_PYMALLOC", "HAVE_FORK", "HAVE_POSIX_SPAWN", "HAVE_SYS_RESOURCE_H",
+                 "HAVE_WAITPID", "HAVE_PIPE2", "HAVE_POLL", "HAVE_SOCKETPAIR"):
+        need(re.findall(rb"^#define " + name.encode() + rb"[ \t]+(.*)$", header, re.M) == [b"1"],
+             "Required ABI/POSIX configuration missing")
+    for name in ("Py_GIL_DISABLED", "Py_DEBUG", "Py_TRACE_REFS", "WITH_MIMALLOC", "Py_ENABLE_SHARED"):
+        need(re.search(rb"^#define " + name.encode() + rb"\b", header, re.M) is None,
+             "Different GIL/allocator/shared/debug ABI")
+    need(re.findall(rb'^#define PY_VERSION[ \t]+"([^"]+)"', patchlevel, re.M) == [b"3.14.7"],
+         "Different CPython source version")
+    expected = {"VERSION": "3.14", "MACHDEP": "linux", "MULTIARCH": "x86_64-linux-gnu",
+        "HOST_GNU_TYPE": "x86_64-pc-linux-gnu", "ABIFLAGS": "", "PY_ENABLE_SHARED": "0",
+        "CONFIGURE_CFLAGS": FIXED_ENV["CFLAGS"], "CC": SOURCE_TOOLS["cc"],
+        "MODULE_ZLIB_LDFLAGS": "/work/deps/lib/libz.a", "MODULE__CTYPES_LDFLAGS": "/work/deps/lib/libffi.a -ldl",
+        "MODULE_PYEXPAT_CFLAGS": "-I$(srcdir)/Modules/expat", "MODULE_PYEXPAT_LDFLAGS": "-lm $(LIBEXPAT_A)",
+        "MODULE_PYEXPAT_DEPS": "$(LIBEXPAT_HEADERS) $(LIBEXPAT_A)", "LIBEXPAT_A": "Modules/expat/libexpat.a"}
+    for name, wanted in expected.items():
+        need(_make_value(make, name) == wanted, "Material Python make configuration differs")
+    need(_make_value(make, "MODULE__SSL_CFLAGS").split() == ["-I/work/deps/include"]
+         and _make_value(make, "MODULE__SSL_LDFLAGS").split() == ["-L/work/deps/lib", "-lssl", "-lcrypto"],
+         "Unselected OpenSSL module headers/link flags")
+    need(tuple(shlex.split(_make_value(make, "CONFIG_ARGS"))) == SOURCE_PYTHON_CONFIGURE,
+         "Original Python configure arguments differ")
+    for name in ("CONFIGURE_CFLAGS", "CONFIGURE_CFLAGS_NODIST", "CONFIGURE_LDFLAGS", "CONFIGURE_LDFLAGS_NODIST"):
+        need(not any(flag in _make_value(make, name) for flag in ("-flto", "-fprofile", "-B/work/capture")),
+             "Unselected optimized/instrumented compiler configuration")
+    return names
+
+
+def source_elf(raw: bytes, name: str) -> dict:
+    """Finite ELF64 dynamic metadata read; never dlopen or a native query."""
+    need(name in {"python", *SOURCE_LIBRARIES} and 64 <= len(raw) <= 64 << 20,
+         "Different native output/byte bound")
+    need(raw[:7] == b"\x7fELF\x02\x01\x01", "Expected little-endian ELF64")
+    kind, machine = struct.unpack_from("<HH", raw, 16)
+    phoff = struct.unpack_from("<Q", raw, 32)[0]
+    phsize, count = struct.unpack_from("<HH", raw, 54)
+    need(kind in {2, 3} and machine == 62 and phsize == 56 and 0 < count <= 128
+         and phoff + count * phsize <= len(raw), "ELF program table differs")
+    loads, dynamic = [], []
+    for index in range(count):
+        tag, flags, offset, address, _, size, memsize, align = struct.unpack_from("<IIQQQQQQ", raw, phoff + index * phsize)
+        need(offset + size <= len(raw), "ELF segment extent differs")
+        if tag == 1:
+            loads.append((address, size, offset))
+        if tag == 2:
+            dynamic.append((offset, size))
+    need(len(dynamic) == 1 and dynamic[0][1] % 16 == 0 and dynamic[0][1] <= 64 << 10,
+         "ELF dynamic table differs")
+    tags, terminated = {}, False
+    offset, size = dynamic[0]
+    for index in range(offset, offset + size, 16):
+        tag, value = struct.unpack_from("<qQ", raw, index)
+        if tag == 0:
+            terminated = True
+            break
+        tags.setdefault(tag, []).append(value)
+    need(terminated and len(tags.get(5, [])) == len(tags.get(10, [])) == 1
+         and 15 not in tags and len(tags.get(29, [])) == 1, "ELF needs one RUNPATH and no RPATH")
+    address, size = tags[5][0], tags[10][0]
+    found = [offset + address - start for start, length, offset in loads if start <= address and address + size <= start + length]
+    need(len(found) == 1 and size <= 1 << 20, "ELF string table differs")
+    strings = raw[found[0]:found[0] + size]
+
+    def string(index: int) -> str:
+        need(index < len(strings), "ELF string index outside table")
+        end = strings.find(b"\0", index)
+        need(index < end <= index + 4096, "ELF string missing/oversized")
+        return strings[index:end].decode("ascii")
+
+    runpath = string(tags[29][0])
+    needed = [string(index) for index in tags.get(1, [])]
+    allowed = {"libc.so.6", "libm.so.6", "libgcc_s.so.1", "libdl.so.2", "libpthread.so.0"}
+    required = {"libc.so.6"}
+    if name == "python":
+        required |= set(SOURCE_LIBRARIES)
+        allowed |= set(SOURCE_LIBRARIES)
+    elif name == "libssl.so.3":
+        required.add("libcrypto.so.3")
+        allowed.add("libcrypto.so.3")
+    need(len(needed) == len(set(needed)) and required <= set(needed) <= allowed
+         and runpath == ("$ORIGIN/../lib" if name == "python" else "$ORIGIN"),
+         "Unselected loader dependencies or RUNPATH")
+    if name != "python":
+        need(len(tags.get(14, [])) == 1 and string(tags[14][0]) == name, "OpenSSL SONAME differs")
+    return {"needed": needed, "runpath": runpath, "notALoaderQualification": True}
+
+
+def source_capture_configuration(phase: str) -> list[dict]:
+    if phase in {"python-configure", "python-build"}:
+        root, names = WORK / "build/cpython", SOURCE_CONFIG_FILES
+    elif phase in {"openssl-build", "openssl-install"}:
+        root, names = WORK / "build/openssl", SOURCE_OPENSSL_FILES
+    elif phase == "openssl-configure":
+        root, names = WORK / "build/openssl", ("Makefile", "configdata.pm")
+    elif phase in {"zlib-configure", "libffi-configure"}:
+        root, names = WORK / "build" / phase.split("-", 1)[0], ("configure.log",) if phase == "zlib-configure" else ("config.log",)
+    else:
+        return []
+    captured, records = {}, []
+    for name in names:
+        raw = source_read(root / name, MAX_JSON)
+        captured[name] = raw
+        records.append(source_write(RECEIPTS / (phase + "-" + name.replace("/", "-")), raw))
+    if phase == "python-build":
+        raw = source_read(root / "pybuilddir.txt", 4096)
+        source_pybuilddir(raw)
+        records.append(source_write(RECEIPTS / "python-build-pybuilddir.txt", raw))
+    if phase.startswith("python-"):
+        source_material_configuration(captured, source_read(Path(__file__).with_name("cpython_source_setup.local")),
+            source_read(SOURCE_ROOT / "cpython/Include/patchlevel.h", 1 << 20))
+    elif phase in {"openssl-build", "openssl-install"}:
+        for macro in ("MODULE", "DSO", "ENGINE", "AUTOLOAD_CONFIG", "LEGACY"):
+            need(re.search(rb"^#[ \t]*define[ \t]+OPENSSL_NO_" + macro.encode() + rb"\b",
+                           captured["include/openssl/configuration.h"], re.M) is not None,
+                 "OpenSSL optional loading control differs")
+        need(re.search(rb'^#[ \t]*define[ \t]+OPENSSL_VERSION_STR[ \t]+"3\.5\.8"',
+                       captured["include/openssl/opensslv.h"], re.M) is not None, "OpenSSL version differs")
+    return records
+
+
+def source_openssl_layout() -> dict:
+    rows = []
+    for name in SOURCE_LIBRARIES:
+        path = WORK / "build/openssl" / name
+        raw = source_read(path, 64 << 20)
+        source_elf(raw, name)
+        need(source_read(WORK / "deps/lib" / name, 64 << 20) == raw,
+             "OpenSSL install_dev changed the original built bytes")
+        original = {"path": str(path), "size": len(raw), "sha256": digest(raw)}
+        copies = []
+        for prefix in SOURCE_LAYOUT_ROOTS:
+            destination = Path(prefix) / name
+            destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            copies.append(source_write(destination, raw, 0o644))
+        rows.append({"original": original, "producerPhase": "openssl-build", "projections": copies})
+    return source_write(RECEIPTS / "openssl-layout.json", canonical({"profile": SOURCE_PROFILE, "libraries": rows}))
+
+
+def source_pybuilddir(raw: bytes) -> str:
+    need(0 < len(raw) <= 4096 and raw.endswith(b"\n") and raw.count(b"\n") == 1,
+         "pybuilddir.txt must be one bounded relative DATA line")
+    name = raw[:-1].decode("ascii")
+    need(re.fullmatch(r"build/[A-Za-z0-9._+\-]+", name) is not None and ".." not in name.split("/"),
+         "pybuilddir.txt escapes the original build directory")
+    return name
+
+
+def source_stdlib_destination(name: str) -> tuple[str | None, str | None]:
+    """Deterministic original-source omission rule, not an upstream installation."""
+    parts = name.split("/")
+    need(parts and all(p not in {"", ".", ".."} for p in parts) and not name.startswith("/"), "Invalid Lib member")
+    leaf = parts[-1]
+    need(not (leaf.endswith((".so", ".dll", ".dylib", ".pyd")) or ".so." in leaf),
+         "Unexpected native source member; do not prune it into acceptance")
+    if "__pycache__" in parts or leaf.endswith((".pyc", ".pyo")):
+        return None, "bytecode-or-cache"
+    if parts[0] in {"test", "ensurepip", "idlelib", "turtledemo", "venv", "site-packages", "tkinter", "turtle.py"}:
+        return None, "excluded-stdlib-subtree"
+    if not leaf.endswith(".py"):
+        return None, "non-python-stdlib-data"
+    need(not leaf.startswith(("_sysconfigdata_", "_sysconfig_vars_")), "Source cannot stand in for generated sysconfig")
+    return "python/lib/python3.14/" + name, None
+
+
+def source_project(lock: dict) -> dict:
+    """Byte-preserving DATA projection. Keep all original objects/archives."""
+    files, omissions = [], []
+
+    def copy(path: Path, destination: str, producer: str, *, admitted: dict | None = None) -> None:
+        raw = source_bound(admitted) if admitted is not None else source_read(path, 512 << 20)
+        target = WORK / "stage" / destination
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        mode = 0o755 if destination == "python/bin/python3" else 0o644
+        source_write(target, raw, mode)
+        files.append({"path": destination, "size": len(raw), "sha256": digest(raw), "mode": mode,
+            "origin": {"kind": "source-built" if producer != "authenticated-source" else "source-projected",
+                "path": str(path), "producerPhase": producer}})
+
+    original = WORK / "build/cpython"
+    build_tree = ordinary_tree(original)
+    for path in build_tree.values():
+        leaf = path.name
+        if leaf.endswith((".so", ".dll", ".dylib", ".pyd")) or ".so." in leaf:
+            need(path.parent == original / "lib" and leaf in SOURCE_LIBRARIES,
+                 "Unexpected Python shared native output; no pruning into success")
+    source_elf(source_read(original / "python", 64 << 20), "python")
+    copy(original / "python", "python/bin/python3", "python-build")
+    layout = decode(source_read(RECEIPTS / "openssl-layout.json", MAX_JSON))
+    for row in layout["libraries"]:
+        raw = source_bound(row["original"], 64 << 20)
+        for projection in row["projections"]:
+            need(source_bound(projection, 64 << 20) == raw, "OpenSSL projection changed during Python build")
+        name = Path(row["original"]["path"]).name
+        source_elf(raw, name)
+        files.append({"path": "python/lib/" + name, "size": len(raw), "sha256": digest(raw), "mode": 0o644,
+            "origin": {"kind": "source-built", "path": row["original"]["path"], "producerPhase": "openssl-build"}})
+    source = next(s for s in lock["sources"] if s["id"] == "cpython")
+    inventory = source_inventory(source)
+    lib = SOURCE_ROOT / "cpython/Lib"
+    for row in inventory.values():
+        path = Path(row["path"])
+        if not path.is_relative_to(lib):
+            continue
+        record = {k: row[k] for k in ("path", "size", "sha256")}
+        destination, reason = source_stdlib_destination(path.relative_to(lib).as_posix())
+        if destination is None:
+            omissions.append({**record, "reason": reason})
+        else:
+            copy(path, destination, "authenticated-source", admitted=record)
+    license_path = SOURCE_ROOT / "cpython/LICENSE"
+    copy(license_path, "python/LICENSE.txt", "authenticated-source",
+         admitted={k: inventory[str(license_path)][k] for k in ("path", "size", "sha256")})
+    generated = original / source_pybuilddir(source_read(original / "pybuilddir.txt", 4096))
+    ordinary_directory(generated)
+    for name in SOURCE_GENERATED_NAMES:
+        copy(generated / name, "python/lib/python3.14/" + name, "python-build")
+    for destination, raw, rule in (
+        ("python/lib/python314.zip", b"PK\x05\x06" + b"\0" * 18, "empty-zip-v1"),
+        ("python/lib/python3.14/lib-dynload/README.mrk", b"No shared extension modules are shipped in this profile.\n", "static-module-landmark-v1")):
+        path = WORK / "stage" / destination
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        source_write(path, raw, 0o644)
+        files.append({"path": destination, "size": len(raw), "sha256": digest(raw), "mode": 0o644,
+                      "origin": {"kind": "generated-landmark", "rule": rule}})
+    required = {"os.py", "encodings/__init__.py", "ssl.py", "socket.py", "ctypes/__init__.py",
+                "xml/__init__.py", "xml/parsers/__init__.py", "xml/parsers/expat.py"}
+    need({"python/lib/python3.14/" + name for name in required} <= {r["path"] for r in files},
+         "Selected stdlib/API source leaves absent")
+    need(set(ordinary_tree(WORK / "stage")) == {str(WORK / "stage" / row["path"]) for row in files},
+         "Projection has unexpected files")
+    directories = sorted({str(parent.relative_to(WORK / "stage")) for row in files
+        for parent in (WORK / "stage" / row["path"]).parents if parent.is_relative_to(WORK / "stage") and parent != WORK / "stage"})
+    document = {"profile": SOURCE_PROFILE, "sourcePrefix": "/work/stage", "files": sorted(files, key=lambda r: r["path"]),
+                "directories": directories, "omissions": sorted(omissions, key=lambda r: r["path"])}
+    return source_write(RECEIPTS / "source-projection.json", canonical(document))
 
 
 def main() -> None:

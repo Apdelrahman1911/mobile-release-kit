@@ -1,0 +1,84 @@
+# CPython 3.14.7 conventional-source profile; source review only, not admission.
+# 23 optional + 27 bootstrap + 10 intrinsic builtins; 55 disabled; no shared modules.
+*static*
+_bisect _bisectmodule.c
+_heapq _heapqmodule.c
+_json _json.c
+_random _randommodule.c
+_struct _struct.c
+math mathmodule.c
+binascii binascii.c
+zlib zlibmodule.c
+fcntl fcntlmodule.c
+_posixsubprocess _posixsubprocess.c
+select selectmodule.c
+unicodedata unicodedata.c
+_ctypes _ctypes/_ctypes.c _ctypes/callbacks.c _ctypes/callproc.c _ctypes/stgdict.c _ctypes/cfield.c
+_socket socketmodule.c
+_ssl _ssl.c
+# No explicit flags: retain configure's internal Expat CFLAGS/archive dependency.
+pyexpat pyexpat.c
+resource resource.c
+# makesetup treats explicit .a operands as linker-only; retain configured CFLAGS.
+_md5 md5module.c $(MODULE__MD5_CFLAGS) Modules/_hacl/libHacl_Hash_MD5.a
+_sha1 sha1module.c $(MODULE__SHA1_CFLAGS) Modules/_hacl/libHacl_Hash_SHA1.a
+_sha2 sha2module.c $(MODULE__SHA2_CFLAGS) Modules/_hacl/libHacl_Hash_SHA2.a
+_sha3 sha3module.c $(MODULE__SHA3_CFLAGS) Modules/_hacl/libHacl_Hash_SHA3.a
+_blake2 blake2module.c $(MODULE__BLAKE2_CFLAGS) Modules/_hacl/libHacl_Hash_BLAKE2.a
+_hmac hmacmodule.c $(MODULE__HMAC_CFLAGS) Modules/_hacl/libHacl_HMAC.a
+*disabled*
+_asyncio
+_bz2
+_codecs_cn
+_codecs_hk
+_codecs_iso2022
+_codecs_jp
+_codecs_kr
+_codecs_tw
+_csv
+_ctypes_test
+_curses
+_curses_panel
+_dbm
+_decimal
+_elementtree
+_gdbm
+_hashlib
+_interpchannels
+_interpqueues
+_interpreters
+_lsprof
+_lzma
+_multibytecodec
+_multiprocessing
+_pickle
+_posixshmem
+_queue
+_remote_debugging
+_scproxy
+_sqlite3
+_statistics
+_testbuffer
+_testcapi
+_testclinic
+_testclinic_limited
+_testimportmultiple
+_testinternalcapi
+_testlimitedcapi
+_testmultiphase
+_testsinglephase
+_tkinter
+_uuid
+_xxtestfuzz
+_zoneinfo
+_zstd
+array
+cmath
+grp
+mmap
+readline
+syslog
+termios
+xxlimited
+xxlimited_35
+xxsubtype
