@@ -36,7 +36,7 @@ import urllib.request
 import ssl
 
 
-APPROVED_HOSTED_INPUTS_SHA256: str | None = "7b0025e39041776df5118b54e2393d82f6e0d91e27da092adac8ca6e74ab4975"
+APPROVED_HOSTED_INPUTS_SHA256: str | None = "ccc9b7f7bab328f73a8034b6f8b914015f5ff270872e2aa085f3b87eca46b4a8"
 PROFILE = "cpython-3.14.7-linux-x86_64-source-v1"
 PREP = Path("/var/tmp/mrk-cpython-source-preparation-v1")
 BWRAP_PATH = PREP / "controller/bwrap"
@@ -1376,6 +1376,9 @@ def retain(data: dict, projection: dict) -> dict:
                 inventory.append({"path": name, "originalPath": expected["path"], "size": expected["size"],
                                   "sha256": expected["sha256"], "originalMode": item["mode"]})
         output.flush()
+        # main's private umask masks creation0444 to0400. Only this completed
+        # public archive must be readable by the nonroot artifact uploader.
+        os.fchmod(output.fileno(), 0o444)
         os.fsync(output.fileno())
     # Independently read every member of the original archive and require its
     # exact bytes, closed roster and complete count before exporting a summary.
@@ -1393,6 +1396,8 @@ def retain(data: dict, projection: dict) -> dict:
                     hashed.update(block)
             need((count, hashed.hexdigest()) == (expected["size"], expected["sha256"]), "Public archive bytes differ")
         need(next(members, None) is None, "Public archive lost an original member")
+    need(stat.S_IMODE(archive_path.lstat().st_mode) == 0o444,
+         "Public archive mode differs; uploader cannot read the evidence")
     saved = write(PUBLIC / "retained-files.json", canonical({"schema": "mrk-cpython-source-retention-1",
         "profile": PROFILE, "coverage": "conservative-component-review-required", "files": inventory}))
     archive_record = record(archive_path, PUBLIC_BYTES)

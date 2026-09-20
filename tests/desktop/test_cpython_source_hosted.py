@@ -782,6 +782,65 @@ class HostedSourceTests(unittest.TestCase):
                 writer.write(b"overflow")
         self.assertEqual(sink.getvalue(), b"four")
 
+    def test_retention_archive_mode_and_chmod_failure_gate_publication(self):
+        # Exercise the real DATA tar writer under the controller's umask, not
+        # a native build. Seed only fixed input reads inside this owned fixture.
+        original_record, original_chmod = H.record, H.os.fchmod
+        for outcome in ("success", "failure", "no-op"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                work, prep, control, public = (root / part for part in ("work", "prep", "control", "public"))
+                for path in (work, prep, control, public, *(work / "build" / source for source in H.SOURCES)):
+                    path.mkdir(parents=True, exist_ok=True)
+                archive_path = public / "hosted-evidence.tar"
+                observed = {}
+
+                def seeded_record(path, limit=H.GiB):
+                    self.assertTrue(path.is_relative_to(root))
+                    if not path.exists():
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_bytes(b"inert public retention fixture\n")
+                    return original_record(path, limit)
+
+                def chmod(fd, mode):
+                    state = H.os.fstat(fd)
+                    archive = archive_path.stat()
+                    if (state.st_dev, state.st_ino) == (archive.st_dev, archive.st_ino):
+                        observed["fd"] = fd
+                        self.assertEqual(H.stat.S_IMODE(state.st_mode), 0o400)
+                        self.assertEqual(mode, 0o444)
+                        if outcome == "failure":
+                            raise OSError("inert archive chmod failure")
+                        if outcome == "no-op":
+                            return
+                    original_chmod(fd, mode)
+
+                data = {"lock": {"sources": []}, "recipient": {"texts": [], "sourceArchives": []},
+                        "core": [], "transport": {"rootArchiveTransports": []}}
+                previous = H.os.umask(0o077)
+                try:
+                    with mock.patch.multiple(H, WORK=work, PREP=prep, CONTROL=control, PUBLIC=public,
+                                             BWRAP_RECEIPT=prep / "controller-bubblewrap.json"), \
+                         mock.patch.object(H, "record", side_effect=seeded_record), \
+                         mock.patch.object(H.os, "fchmod", side_effect=chmod):
+                        if outcome == "success":
+                            result = H.retain(data, {"files": []})
+                            self.assertEqual(H.stat.S_IMODE(archive_path.stat().st_mode), 0o444)
+                            self.assertEqual(result["archive"], original_record(archive_path))
+                            self.assertTrue((public / "retained-files.json").is_file())
+                        else:
+                            error, message = ((OSError, "inert archive chmod failure") if outcome == "failure"
+                                              else (H.Refused, "Public archive mode differs"))
+                            with self.assertRaisesRegex(error, message):
+                                H.retain(data, {"files": []})
+                            self.assertFalse((public / "retained-files.json").exists())
+                    self.assertIn("fd", observed)
+                    with self.assertRaises(OSError) as closed:
+                        H.os.fstat(observed["fd"])
+                    self.assertEqual(closed.exception.errno, H.errno.EBADF)
+                finally:
+                    H.os.umask(previous)
+
     def test_failure_diagnostic_is_stage_and_safe_class_not_arbitrary_exception_message(self):
         fake_sys = SimpleNamespace(argv=["entry", "inside"], flags=SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1))
         for error, expected in ((ValueError("private-url-and-token"), "ValueError"),

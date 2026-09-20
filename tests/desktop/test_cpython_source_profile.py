@@ -391,8 +391,10 @@ class SourceProfileTests(unittest.TestCase):
         owner.run_owned.assert_called_once()
 
     def test_pybuilddir_is_data_not_shell_or_an_escape(self):
-        self.assertEqual(I.source_pybuilddir(b"build/lib.linux-x86_64-3.14\n"), "build/lib.linux-x86_64-3.14")
-        for raw in (b"/tmp/elsewhere\n", b"build/../elsewhere\n", b"build/$(bad)\n", b"build/x\nbuild/y\n", b"build/x"):
+        self.assertEqual(I.source_pybuilddir(b"build/lib.linux-x86_64-3.14"), "build/lib.linux-x86_64-3.14")
+        for raw in (b"", b"/tmp/elsewhere", b"build/../elsewhere", b"build/.", b"build/..",
+                    b"build/$(bad)", b"build/x y", b"build/x\nbuild/y", b"build/x\n",
+                    b"build/x\r", b"build/x\0", b"build/\xff", b"build/" + b"x" * 4091):
             with self.subTest(raw=raw), self.assertRaises(I.InputError):
                 I.source_pybuilddir(raw)
 
