@@ -316,6 +316,61 @@ class PublisherCI(unittest.TestCase):
             files.assert_not_called()
             read.assert_not_called()
 
+    def test_accepted_u_uses_lifecycle_deadline_format_after_complete_byte_admission(self):
+        # Synthetic JSON and mocked transport only; the decoder and original
+        # finality decision are real. No package/tool/process is opened.
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        accepted = {"sourceSha": "a" * 40, "runId": "10", "attempt": "1", "artifactId": "20", "files": []}
+        pin = {"size": 1, "sha256": "b" * 64}
+        packages = {label: {**pin, "manifestSha256": manifest, "version": "0.0.0+mrk.lifecycle." + version}
+                    for label, manifest, version in (("P0", S.C.CONVENTIONAL_SMOKE_INPUTS["manifestSha256"], "0"),
+                                                     ("F1", S.F1_MANIFEST_SHA256, "1"))}
+        unit = "mrk-ubuntu-native-10-1.service"
+        start = {"sourceSha": accepted["sourceSha"], "entrySha256": "c" * 64, "handoffSha256": "d" * 64,
+                 "invocationId": "e" * 32, "deadline": 1231.74561711, "namespaces": {}, "effective": {},
+                 "unit": {"Id": unit, "InvocationID": "e" * 32, "Result": "success", "ControlGroup": "/system.slice/" + unit},
+                 "events": {"memory.events": {"max": 0, "oom": 0, "oom_kill": 0}, "pids.events": {"max": 0}}}
+        body = b"inert result DATA"
+        stop = {**deepcopy(start), "completion": {"SERVICE_RESULT": "success", "EXIT_CODE": "exited", "EXIT_STATUS": "0"},
+                "result": {"path": "unit-result.json", "size": len(body), "sha256": hashlib.sha256(body).hexdigest()}}
+        documents = {
+            "compiler.json": S.D.canonical({"sourceSha": accepted["sourceSha"], "library": pin}),
+            "result.json": S.D.canonical({"sourceSha": accepted["sourceSha"], "commands": [{"phase": "root-lifecycle", "exitCode": 0}],
+                                           "lifecycle": {"state": "p0-f1-lifecycle-observed"}, "helper11Rerun": False,
+                                           "qualified": False, "packages": packages}),
+            "lifecycle-unit-start.json": S.D.canonical(start),
+            "lifecycle-unit-stop.json": S.D.canonical(stop),
+            "lifecycle-unit-result.json": body,
+        }
+        with self.assertRaisesRegex(ValueError, "Unexpected DATA scalar"):
+            S.D.decode(documents["lifecycle-unit-start.json"])
+        with patch.object(S, "INSTALLED_U_INPUTS", accepted), \
+             patch.object(S.C, "conventional_files") as files, \
+             patch.object(S.D, "read", side_effect=lambda path, limit: documents[path.name]) as read, \
+             patch.object(S.D, "file_record", side_effect=lambda path, limit: {"path": path.name, **pin}), \
+             patch.object(S, "local", return_value=lifecycle) as loaded, \
+             patch.object(lifecycle, "decode", wraps=lifecycle.decode) as decode, \
+             patch.object(lifecycle, "verify_finality", wraps=lifecycle.verify_finality) as finality:
+            library, observed, compiler, identity = S.installed_u_inputs(Path("/inert-work"))
+            files.assert_called_once_with(S.D, Path("/inert-work/admitted-u"), accepted["files"])
+            self.assertEqual(set(observed), {"P0", "F1"})
+            self.assertEqual(identity, {key: value for key, value in accepted.items() if key != "files"})
+            self.assertEqual(decode.call_args_list, [unittest.mock.call(documents[name], 1 << 20)
+                                                   for name in ("lifecycle-unit-start.json", "lifecycle-unit-stop.json")])
+            finality.assert_called_once_with(start, stop, 0)
+            self.assertIs(type(finality.call_args.args[0]["deadline"]), float)
+            self.assertEqual(finality.call_args.args[0]["deadline"], 1231.74561711)
+            # A changed original endpoint is still a finality failure.
+            documents["lifecycle-unit-stop.json"] = S.D.canonical({**stop, "deadline": 1232.74561711})
+            with self.assertRaisesRegex(ValueError, "correspondence differs: deadline"):
+                S.installed_u_inputs(Path("/inert-work"))
+            # Incomplete/changed artifact bytes never reach either parser.
+            read.reset_mock(); loaded.reset_mock(); decode.reset_mock(); finality.reset_mock()
+            files.side_effect = ValueError("inert complete-member refusal")
+            with self.assertRaisesRegex(ValueError, "complete-member refusal"):
+                S.installed_u_inputs(Path("/inert-work"))
+            read.assert_not_called(); loaded.assert_not_called(); decode.assert_not_called(); finality.assert_not_called()
+
     def test_only_exact_fresh_compiler_artifact_is_selected(self):
         source, root = Path("/source"), Path("/target")
         for library in (False, True):

@@ -1277,8 +1277,11 @@ def installed_u_inputs(work):
     C.conventional_files(D, artifact, accepted["files"])
     compiler = D.decode(D.read(artifact / "compiler.json", 1 << 20))
     result = D.decode(D.read(artifact / "result.json", 1 << 20))
-    start = D.decode(D.read(artifact / "lifecycle-unit-start.json", 1 << 20))
-    stop = D.decode(D.read(artifact / "lifecycle-unit-stop.json", 1 << 20))
+    # These already byte-pinned records use the lifecycle's decimal deadline,
+    # not the conventional inventory's integer-only DATA format.
+    lifecycle = local("ubuntu_publication_lifecycle")
+    start = lifecycle.decode(D.read(artifact / "lifecycle-unit-start.json", 1 << 20), 1 << 20)
+    stop = lifecycle.decode(D.read(artifact / "lifecycle-unit-stop.json", 1 << 20), 1 << 20)
     body = D.read(artifact / "lifecycle-unit-result.json", 1 << 20)
     commands = [row for row in result["commands"] if row["phase"] == "root-lifecycle"]
     D.need(len(commands) == 1 and compiler["sourceSha"] == result["sourceSha"] == start["sourceSha"] == accepted["sourceSha"]
@@ -1286,7 +1289,7 @@ def installed_u_inputs(work):
            and stop["result"] == {"path": "unit-result.json", "size": len(body), "sha256": hashlib.sha256(body).hexdigest()}
            and result["lifecycle"]["state"] == "p0-f1-lifecycle-observed" and result["helper11Rerun"] is False
            and result["qualified"] is False, "Pinned U original source/lifecycle/finality differs")
-    local("ubuntu_publication_lifecycle").verify_finality(start, stop, commands[0]["exitCode"])
+    lifecycle.verify_finality(start, stop, commands[0]["exitCode"])
     packages = {}
     for label, manifest, version in (("P0", C.CONVENTIONAL_SMOKE_INPUTS["manifestSha256"], "0.0.0+mrk.lifecycle.0"),
                                      ("F1", F1_MANIFEST_SHA256, "0.0.0+mrk.lifecycle.1")):
