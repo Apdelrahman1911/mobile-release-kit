@@ -398,6 +398,67 @@ class LifecycleData(unittest.TestCase):
         self.assertEqual(first["ExitType"], "cgroup")
         self.assertEqual(first["Restart"], "no")
 
+    def test_namespace_keys_survive_reopen_but_original_checks_stay_exact(self):
+        expected = {"user": [7, 0xeffffffd], "pid": [7, 0xeffffffc], "mnt": [7, 45]}
+        for case in ("root", "reopened", "device", "inode", "drift", "owner", "type", "close"):
+            roles = [(0xeffffffd, 0x10000000), (0xeffffffc, 0x20000000), (46 if case == "inode" else 45, 0x00020000)]
+            if case == "root": roles.append(roles[-1])
+            rows, calls = {}, {}
+            for fd, (inode, _) in enumerate(roles, 10):
+                item = needrestart_stat(stat.S_IFREG | 0o444, ino=inode, uid=1 if case == "owner" else 0)
+                item.st_dev = 8 if case == "device" else 7
+                item.st_mtime_ns = item.st_ctime_ns = 10 if case == "root" else 20
+                rows[fd], calls[fd] = item, 0
+            def fstat(fd):
+                calls[fd] += 1
+                item = SimpleNamespace(**vars(rows[fd]))
+                if case == "drift" and calls[fd] > 1: item.st_ctime_ns += 1
+                return item
+            def close(fd):
+                if case == "close" and fd == 12: raise OSError("original close refused")
+            with self.subTest(case=case), patch.object(L.os, "open", side_effect=range(10, 10 + len(roles))) as opened, \
+                    patch.object(L.os, "fstat", side_effect=fstat), patch.object(L.os, "close", side_effect=close) as closed, \
+                    patch.object(L.fcntl, "ioctl", side_effect=lambda fd, _: roles[fd - 10][1] ^ (1 if case == "type" else 0)), \
+                    patch.object(L, "_kernel", return_value="0 0 4294967295\n"):
+                if case in {"drift", "owner", "type", "close"}:
+                    with self.assertRaises(ValueError): L._namespaces(case == "root")
+                else:
+                    actual = L._namespaces(case == "root")
+                    self.assertEqual(actual, L.decode(L.canonical(actual)))
+                    if case in {"root", "reopened"}: self.assertEqual(actual, expected)
+                    else: self.assertNotEqual(actual, expected)
+                self.assertEqual([call.args[0] for call in closed.call_args_list],
+                                 list(reversed(range(10, 10 + opened.call_count))))
+
+    def test_observer_namespace_and_deadline_gates_precede_tree_observation(self):
+        namespaces = {"user": [7, 0xeffffffd], "pid": [7, 0xeffffffc], "mnt": [7, 45]}
+        start = {"unit": {"Id": "mrk-ubuntu-native-10-1.service"}, "runnerUid": 1001, "runnerGid": 1001,
+                 "namespaces": namespaces, "deadline": 120}
+        status = {"Uid": "1001 1001 1001 1001", "Gid": "1001 1001 1001 1001", "NoNewPrivs": "1",
+                  **{name: "0" for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")}}
+        for case in ("admitted", "changed", "expired"):
+            actual = {**namespaces, "mnt": [7, 46]} if case == "changed" else namespaces
+            boundary = RuntimeError("inert first absence observation")
+            with self.subTest(case=case), patch.object(L, "__file__", "/var/lib/mrk-ubuntu-native-10-1/entry.py"), \
+                    patch.object(L, "directory"), patch.object(L, "read", return_value=L.canonical(start)), \
+                    patch.object(L, "_modules"), patch.object(L, "_status", return_value=status), \
+                    patch.object(L.os, "getresuid", return_value=(1001,) * 3), \
+                    patch.object(L.os, "getresgid", return_value=(1001,) * 3), patch.object(L.os, "getgroups", return_value=[]), \
+                    patch.object(L, "_namespaces", return_value=actual) as observed, \
+                    patch.object(L.time, "monotonic", return_value=121 if case == "expired" else 100) as clock, \
+                    patch.object(L, "_absent", side_effect=boundary) as absent, patch.object(L, "_tree") as tree:
+                if case == "admitted":
+                    with self.assertRaises(RuntimeError) as stopped: L.observe("unpacked")
+                    self.assertIs(stopped.exception, boundary)
+                    absent.assert_called_once_with(L.PREFIX / (".publish-" + L.M))
+                else:
+                    message = "Observer namespace identity differs" if case == "changed" else "Observer original endpoint expired"
+                    with self.assertRaisesRegex(ValueError, message): L.observe("unpacked")
+                    absent.assert_not_called()
+                observed.assert_called_once_with(False)
+                self.assertEqual(clock.call_count, 0 if case == "changed" else 1)
+                tree.assert_not_called()
+
     def test_native_failure_diagnostic_uses_only_original_bounded_capture(self):
         argv = ["/inert-native-fixture-never-executed"]
         raw = b'\0\x1b\xff"' + b"a" * 1500

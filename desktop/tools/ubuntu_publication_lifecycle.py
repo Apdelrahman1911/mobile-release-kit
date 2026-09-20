@@ -360,7 +360,10 @@ def _namespaces(root_role):
                 failure = error
         if failure is not None:
             raise Refused("Original namespace close failed") from failure
-    return result
+    # namespaces(7): cross-process identity is device/inode. nsfs may recreate
+    # its pseudo-inode timestamps after close; full original-FD checks above
+    # remain exact throughout each observation. Lists survive JSON unchanged.
+    return {name: row[:2] for name, row in result.items()}
 
 
 def _modules(root, *, owner):
@@ -885,7 +888,8 @@ def observe(phase):
          and all(status[key].split() == [str(number)] * 4 for key, number in (("Uid", uid), ("Gid", gid)))
          and status["NoNewPrivs"].strip() == "1"
          and all(int(status[key], 16) == 0 for key in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")), "Dropped observer credentials differ")
-    need(_namespaces(False) == start["namespaces"] and time.monotonic() < start["deadline"], "Observer namespace or original endpoint differs")
+    need(_namespaces(False) == start["namespaces"], "Observer namespace identity differs")
+    need(time.monotonic() < start["deadline"], "Observer original endpoint expired")
     for manifest in (M, F1):
         _absent(PREFIX / (".publish-" + manifest))
     labels = [] if phase == "unpacked" else (["P0"] if phase == "p0" else ["P0", "F1"])
