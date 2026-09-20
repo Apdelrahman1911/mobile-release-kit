@@ -94,12 +94,12 @@ jobs:
             MRK_SOURCE_SHA="$GITHUB_SHA" MRK_RUN_ID="$GITHUB_RUN_ID" MRK_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
             /usr/bin/python3.12 -I -S -B \
             /var/tmp/mrk-cpython-source-preparation-v1/inputs/recipe/cpython_source_hosted.py build </dev/null
-      - name: Retain only fixed bounded public evidence or classified failure
+      - name: Retain only fixed bounded diagnostics or completion metadata
         if: always()
         timeout-minutes: 5
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: conventional-cpython-source-${{ github.sha }}-${{ github.run_id }}
+          name: conventional-cpython-diagnostics-${{ github.sha }}-${{ github.run_id }}
           path: |
             /var/tmp/mrk-cpython-source-public-v1/hosted-summary.json
             /var/tmp/mrk-cpython-source-public-v1/hosted-failure.json
@@ -109,6 +109,22 @@ jobs:
             /var/tmp/mrk-cpython-source-public-v1/diagnostic-unit-start.json
             /var/tmp/mrk-cpython-source-public-v1/diagnostic-unit-stop.json
             /var/tmp/mrk-cpython-source-public-v1/diagnostic-preparation.json
+            /var/tmp/mrk-cpython-source-public-v1/retained-files.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
+      - name: Retain completed native evidence with corresponding sources and notices
+        # A failed/partial retention must never upload its native-bearing tar.
+        # H must finish original work, readback and cleanup before this step.
+        if: success()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conventional-cpython-source-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            /var/tmp/mrk-cpython-source-public-v1/hosted-summary.json
             /var/tmp/mrk-cpython-source-public-v1/retained-files.json
             /var/tmp/mrk-cpython-source-public-v1/hosted-evidence.tar
           if-no-files-found: error

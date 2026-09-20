@@ -38,7 +38,7 @@ class HostedSourceTests(unittest.TestCase):
         mkdir.assert_not_called()
 
     def test_index_is_closed_and_separates_admission_from_six_helpers(self):
-        self.assertEqual(len(H.CONTROLS), 15)
+        self.assertEqual(len(H.CONTROLS), 16)
         self.assertEqual(len(H.HELPERS), 7)
         self.assertIn("cpython_source_admission.py", H.HELPERS)
         self.assertNotIn(H.ENTRY_NAME, H.HELPERS)
@@ -98,6 +98,10 @@ class HostedSourceTests(unittest.TestCase):
         self.assertLess(argv.index("--ro-bind"), argv.index("/usr/bin/setpriv"))
         self.assertLess(argv.index("/usr/bin/setpriv"), argv.index("/usr/bin/python3.12"))
         self.assertEqual(argv[-1], "inside")
+        self.assertEqual([argv[i + 1] for i, part in enumerate(argv) if part == "--chdir"], ["/"])
+        self.assertEqual([argv[i + 1] for i, part in enumerate(argv) if part == "--cap-drop"], ["ALL"])
+        self.assertEqual([argv[i + 1] for i, part in enumerate(argv) if part == "--cap-add"],
+                         ["CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP"])
         for flag in ("--unshare-user", "--unshare-user-try", "--unshare-all", "--assert-userns-disabled"):
             self.assertNotIn(flag, argv)
         for flag in ("--unshare-net", "--clear-groups", "--no-new-privs", "--inh-caps=-all",
@@ -111,6 +115,78 @@ class HostedSourceTests(unittest.TestCase):
         self.assertTrue(H.userns_denied(str(0x6c020000)))
         for value in ("user mnt uts ipc pid net", "yes", "no", str(0x7c020000), "mnt uts pid"):
             self.assertFalse(H.userns_denied(value))
+
+    def test_inside_enters_private_work_after_admission_and_before_recipe_exec(self):
+        context = {"uid": 999, "gid": 998, "hostNamespaces": {name: "host-" + name for name in H.NS_NAMES}}
+        namespaces = {name: ("host-" if name == "user" else "inside-") + name for name in H.NS_NAMES}
+        fields = {"NoNewPrivs": "1", "Seccomp": "2", "Seccomp_filters": "1",
+                  **{name: "0" for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb")}}
+        table = {name: {"options": ["ro"]} for name in ("/", str(H.INPUTS), "/proc", "/dev")}
+        table.update({name: {"options": ["rw"]} for name in ("/work", "/dev/shm")})
+        environment = {"PATH": "/usr/bin:/bin"}
+        fake_sys = SimpleNamespace(executable="/usr/bin/python3.12",
+                                  flags=SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1))
+        directory = SimpleNamespace(st_uid=999, st_mode=H.stat.S_IFDIR | 0o700)
+        null_device = H.os.makedev(1, 3)
+
+        for scenario in ("success", "late-admission-refusal", "cwd-failure"):
+            events = []
+
+            def admitted(*args):
+                events.append("admitted-inputs")
+                return {"lock": {"environment": environment if scenario != "late-admission-refusal" else {}}}
+
+            def chdir(path):
+                self.assertEqual(path, "/work")
+                self.assertEqual(H._STAGE, "original-recipe-cwd")
+                events.append("cwd")
+                if scenario == "cwd-failure":
+                    raise PermissionError("inert cwd failure")
+
+            def execute(*args):
+                self.assertEqual(H._STAGE, "original-recipe-exec")
+                events.append("exec")
+
+            fake_os = SimpleNamespace(
+                getresuid=lambda: (999,) * 3, getresgid=lambda: (998,) * 3, getgroups=lambda: [],
+                getuid=lambda: 999, getgid=lambda: 998, environ=environment,
+                listdir=lambda path: ["0", "1", "2"], makedev=H.os.makedev,
+                fstat=lambda fd: SimpleNamespace(st_mode=H.stat.S_IFCHR if fd == 0 else H.stat.S_IFIFO,
+                                                st_rdev=null_device if fd == 0 else 0),
+                stat=lambda path: SimpleNamespace(st_dev=1, st_ino=1 if path == "/work" else 2),
+                statvfs=lambda path: SimpleNamespace(f_blocks=1, f_frsize=H.DEV_BYTES),
+                path=SimpleNamespace(realpath=lambda path: "/usr/bin/python3.12"),
+                chdir=mock.Mock(side_effect=chdir), execve=mock.Mock(side_effect=execute))
+            with self.subTest(scenario=scenario), mock.patch.object(H, "os", fake_os), \
+                 mock.patch.object(H, "sys", fake_sys), mock.patch.object(H, "_STAGE", "admission"), \
+                 mock.patch.object(H, "read", return_value=H.canonical(context)), \
+                 mock.patch.object(H, "namespaces", return_value=namespaces), \
+                 mock.patch.object(H, "status_fields", return_value=fields), \
+                 mock.patch.object(H.resource, "getrlimit", side_effect=lambda kind: (H.LIMITS[kind],) * 2), \
+                 mock.patch.object(H, "mounts", return_value=table), \
+                 mock.patch.object(H, "task_capacity", return_value={"inert": True}), \
+                 mock.patch.object(H.Path, "stat", return_value=directory), \
+                 mock.patch.object(H.Path, "exists", return_value=False), \
+                 mock.patch.object(H, "admission", side_effect=admitted), \
+                 mock.patch.object(H, "write", side_effect=lambda *args: events.append("inside-receipt")):
+                if scenario == "success":
+                    H.inside()
+                    self.assertEqual(events, ["admitted-inputs", "inside-receipt", "cwd", "exec"])
+                    command = ["/usr/bin/python3.12", "-I", "-S", "-B",
+                               str(H.INPUTS / "recipe/cpython_source_recipe.py"), str(H.INPUTS / "source-lock.json")]
+                    fake_os.execve.assert_called_once_with(command[0], command, environment)
+                elif scenario == "late-admission-refusal":
+                    with self.assertRaisesRegex(H.Refused, "Fixed root Python/environment differs"):
+                        H.inside()
+                    self.assertEqual(events, ["admitted-inputs"])
+                    fake_os.chdir.assert_not_called()
+                    fake_os.execve.assert_not_called()
+                else:
+                    with self.assertRaises(PermissionError):
+                        H.inside()
+                    self.assertEqual(events, ["admitted-inputs", "inside-receipt", "cwd"])
+                    self.assertEqual(H._STAGE, "original-recipe-cwd")
+                    fake_os.execve.assert_not_called()
 
     def test_root_controller_mount_setuid_exception_is_exact(self):
         def check(path, uid, mode):
@@ -152,7 +228,7 @@ class HostedSourceTests(unittest.TestCase):
 
     def test_preparation_copy_and_owner_failures_have_distinct_safe_stages(self):
         fake_sys = SimpleNamespace(flags=SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1))
-        data = {"blobs": {"github-ca.pem": b"fixture-ca"},
+        data = {"blobs": {"github-ca.pem": b"fixture-ca"}, "recipient": {"texts": []},
                 "helpers": {"cpython_source_admission.py": b"fixture-helper"},
                 "core": [{"path": str(H.INPUTS / "core-source/src/mobile_release" / leaf), "size": 0,
                           "sha256": H.digest(b"")} for leaf in ("errors.py", "owned_process.py")]}
@@ -176,6 +252,97 @@ class HostedSourceTests(unittest.TestCase):
                     H.prepare()
                 self.assertEqual(H._STAGE, failed_stage)
             download.assert_not_called()
+
+    def _recipient_fixture(self):
+        texts = {name: ("INERT recipient text " + name + "\n").encode() for name in H.RECIPIENT_DOCS}
+        doc = {"schema": "mrk-cpython-recipient-materials-1", "profile": H.PROFILE,
+               "scope": "hosted-source-verification-only", "sourceRoute": "LGPL-2.1-6a-6d",
+               "texts": [{"path": name, "size": len(body), "sha256": H.digest(body)}
+                         for name, body in sorted(texts.items())],
+               "sourceArchives": [{"id": identifier, "path": name, "transport": {"format": kind,
+                   "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/glibc/" + name,
+                   "bytes": 1, "sha256": H.digest(b"x")}} for identifier, name, kind in H.RECIPIENT_SOURCES]}
+        return doc, texts
+
+    def test_recipient_manifest_and_text_identity_are_closed_data(self):
+        original, texts = self._recipient_fixture()
+        self.assertEqual(H.recipient_manifest(H.canonical(original)), original)
+        changes = (
+            lambda doc: doc.update(scope="installed-runtime"),
+            lambda doc: doc.update(sourceRoute="unreviewed-replacement"),
+            lambda doc: doc["texts"].append(doc["texts"][0]),
+            lambda doc: doc["texts"][0].update(path="../escape"),
+            lambda doc: doc["texts"][0].update(size=True),
+            lambda doc: doc["texts"][0].update(size=(256 << 10) + 1),
+            lambda doc: [row.update(size=256 << 10) for row in doc["texts"]],
+            lambda doc: doc.update(texts=[row for row in doc["texts"] if row["path"] != "REBUILD.md"]),
+            lambda doc: doc["sourceArchives"].pop(),
+            lambda doc: doc["sourceArchives"][0].update(path="different.tar.xz"),
+            lambda doc: doc["sourceArchives"][0]["transport"].update(url="https://example.test/source"),
+            lambda doc: doc["sourceArchives"][0]["transport"].update(sha256="bad-pin"),
+            lambda doc: [row["transport"].update(bytes=6 * H.MiB) for row in doc["sourceArchives"]])
+        for number, change in enumerate(changes):
+            changed = copy.deepcopy(original)
+            change(changed)
+            with self.subTest(change=number), self.assertRaises(H.Refused):
+                H.recipient_manifest(H.canonical(changed))
+        with mock.patch.object(H, "read", side_effect=lambda path, limit: texts[path.name]):
+            self.assertEqual(H.recipient_text_inputs(Path("/inert/recipient"), original), texts)
+        with mock.patch.object(H, "read", return_value=b"changed"), self.assertRaisesRegex(H.Refused, "Pinned bytes"):
+            H.recipient_text_inputs(Path("/inert/recipient"), original)
+
+    def test_recipient_text_refusal_precedes_preparation_effects(self):
+        doc, _ = self._recipient_fixture()
+        fake_sys = SimpleNamespace(flags=SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1))
+        with mock.patch.object(H, "sys", fake_sys), mock.patch.object(H.os, "getresuid", return_value=(0, 0, 0)), \
+             mock.patch.object(H, "admission", return_value={"recipient": doc}), \
+             mock.patch.object(H, "context_from_environment", return_value={}), \
+             mock.patch.object(H, "platform_tools", return_value=[]), \
+             mock.patch.object(H, "_STAGE", "admission"), mock.patch.object(H, "read", return_value=b"changed"), \
+             mock.patch.object(H.Path, "mkdir") as mkdir, mock.patch.object(H, "write") as write, \
+             mock.patch.object(H, "download_inputs") as download:
+            with self.assertRaisesRegex(H.Refused, "Pinned bytes"):
+                H.prepare()
+            self.assertEqual(H._STAGE, "recipient-text-admission")
+        for effect in (mkdir, write, download):
+            effect.assert_not_called()
+
+    def test_recipient_retention_includes_sources_and_refuses_changed_material_before_tar(self):
+        doc, _ = self._recipient_fixture()
+        # Reuse the original complete core DATA roster, not another census.
+        core = H.decode((ROOT / "desktop/cpython-source-inputs/core-source-files.json").read_bytes())
+        data = {"recipient": doc, "core": core, "lock": {"sources": []}}
+        rows = list(H.recipient_retention_inputs(data))
+        names = {name for _, name, _ in rows}
+        core_names = {"inputs/core-source/" + str(Path(row["path"]).relative_to(H.INPUTS / "core-source")) for row in core}
+        expected_names = core_names | {"recipient/notices/" + row["path"] for row in doc["texts"]} | {
+            "recipient/sources/" + row["path"] for row in doc["sourceArchives"]} | {
+            "preparation/controller-bubblewrap.json", "preparation/controller-bubblewrap.stderr"}
+        self.assertEqual(len(core_names), 111)
+        self.assertEqual(names, expected_names)
+        self.assertEqual(len(rows), len(names))
+        self.assertNotIn("preparation/controller-bubblewrap.deb", names)
+        self.assertNotIn("preparation/controller-bubblewrap.stdout", names)
+        expected = {str(path): {**item, "path": str(path)} for path, _, item in rows if item is not None}
+        for failure, changed_path in (("changed-text", H.PREP / "recipient/REBUILD.md"),
+                                      ("missing-source", H.PREP / "objects" / doc["sourceArchives"][0]["transport"]["sha256"])):
+            def recorded(path):
+                if path == changed_path:
+                    if failure == "missing-source":
+                        raise FileNotFoundError("inert missing source")
+                    return {**expected[str(path)], "sha256": "0" * 64}
+                return expected.get(str(path), {"path": str(path), "size": 0, "sha256": H.digest(b"")})
+
+            with self.subTest(failure=failure), mock.patch.object(H, "record", side_effect=recorded), \
+                 mock.patch.object(H.Path, "exists", return_value=False), \
+                 mock.patch.object(H.Path, "lstat", return_value=SimpleNamespace(st_mode=H.stat.S_IFREG | 0o444)), \
+                 mock.patch.object(H.os, "scandir") as scan, mock.patch.object(H.os, "open") as opened, \
+                 mock.patch.object(H.tarfile, "open") as archive:
+                scan.return_value.__enter__.return_value = iter(())
+                with self.assertRaises(H.Refused if failure == "changed-text" else FileNotFoundError):
+                    H.retain(data, {"files": []})
+                opened.assert_not_called()
+                archive.assert_not_called()
 
     def test_controller_bubblewrap_member_admission_is_pinned_and_closed(self):
         payload = b"fixture-member-not-native-code\n"
@@ -540,6 +707,17 @@ class HostedSourceTests(unittest.TestCase):
                 self.assertNotIn(forbidden, raw)
         self.assertIn("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", raw)
         self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", raw)
+        diagnostics, native = raw.split("      - name: Retain completed native evidence with corresponding sources and notices\n")
+        self.assertIn("if: always()", diagnostics)
+        self.assertIn("hosted-summary.json", diagnostics)  # A successful build still has diagnostics metadata.
+        self.assertIn("name: conventional-cpython-diagnostics-", diagnostics)
+        self.assertNotIn("hosted-evidence.tar", diagnostics)
+        self.assertIn("if: success()", native)
+        self.assertIn("name: conventional-cpython-source-", native)
+        self.assertEqual(native.count("/var/tmp/mrk-cpython-source-public-v1/hosted-evidence.tar"), 1)
+        for segment in (diagnostics, native):
+            self.assertIn("overwrite: false", segment)
+            self.assertIn("if-no-files-found: error", segment)
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@ import urllib.request
 import ssl
 
 
-APPROVED_HOSTED_INPUTS_SHA256: str | None = "2da462f7472ec13331d624514d0d60c5123da77d1fb934ff26a823031f7d0cb1"
+APPROVED_HOSTED_INPUTS_SHA256: str | None = "2353367ac7f626843559c5626360345201a42ffb25076435d5aeb42954bcd610"
 PROFILE = "cpython-3.14.7-linux-x86_64-source-v1"
 PREP = Path("/var/tmp/mrk-cpython-source-preparation-v1")
 BWRAP_PATH = PREP / "controller/bwrap"
@@ -48,6 +48,7 @@ INPUTS = Path("/work/inputs")
 INNER_CONTEXT = Path("/work/hosted-context.json")
 ENTRY_NAME = "cpython_source_hosted.py"
 INDEX_NAME = "hosted-inputs.json"
+RECIPIENT_NAME = "recipient-materials.json"
 HELPERS = tuple(sorted(("cpython_source_admission.py", "cpython_source_recipe.py",
     "cpython_source_setup.local", "cpython_static_inputs.py", "cpython_static_builder_data.py",
     "prepare_cpython_static_payload.py", "prepare_cpython_source_payload.py")))
@@ -55,7 +56,7 @@ SOURCES = ("cpython", "libffi", "openssl", "zlib")
 CONTROLS = tuple(sorted(("transport-map.json", "expected-members.json", "selection.json",
     "root-request.json", "rootfs.json", "host-inputs.json", "source-lock.json",
     "source-execution-review.json", "core-source-files.json", "inventory-provenance.json",
-    "github-ca.pem", *(name + "-source-inventory.json" for name in SOURCES))))
+    "github-ca.pem", RECIPIENT_NAME, *(name + "-source-inventory.json" for name in SOURCES))))
 PHASES = ("zlib-configure", "zlib-build", "zlib-install", "libffi-configure", "libffi-build",
     "libffi-install", "openssl-configure", "openssl-build", "openssl-install", "openssl-layout",
     "python-configure", "builtin-archives", "python-build", "python-project")
@@ -90,6 +91,13 @@ SHOW = ("Id", "InvocationID", "ControlGroup", "Type", "ExitType", "Restart", "Ki
 NS_NAMES = ("user", "mnt", "pid", "net", "ipc", "uts")
 HOST_TOOLS = ("/usr/bin/python3.12", "/usr/bin/systemd-run", "/usr/bin/systemctl",
     "/usr/bin/mount", "/usr/bin/gzip", "/usr/bin/dpkg-deb", "/usr/sbin/useradd", "/usr/sbin/userdel")
+RECIPIENT_SOURCES = (
+    ("recipient-glibc-packaging", "glibc_2.39-0ubuntu8.9.debian.tar.xz", "tar-xz"),
+    ("recipient-glibc-dsc", "glibc_2.39-0ubuntu8.9.dsc", "dsc"),
+    ("recipient-glibc-upstream", "glibc_2.39.orig.tar.xz", "tar-xz"),
+    ("recipient-glibc-signature", "glibc_2.39.orig.tar.xz.asc", "signature"))
+RECIPIENT_DOCS = frozenset({"00-RUNTIME-NOTICE.txt", "PYTHON-CHANGES.txt", "SOURCE-AVAILABILITY.txt",
+    "REBUILD.md", "MOBILE-RELEASE-KIT-LICENSE.txt", "34-LGPL-2.1.txt"})
 # One authenticated controller-only package, outside the L/source/root roster.
 # No installation: in particular its sysctl.d member is never materialized.
 CONTROLLER_BWRAP = {
@@ -288,6 +296,46 @@ def literal(raw: bytes, name: str) -> str:
     return sha(values[0].value)
 
 
+def recipient_manifest(raw: bytes) -> dict:
+    """Pinned recipient DATA only, not another native source/tool input."""
+    doc = decode(raw)
+    need(type(doc) is dict and set(doc) == {"schema", "profile", "scope", "sourceRoute", "texts", "sourceArchives"}
+         and doc["schema"] == "mrk-cpython-recipient-materials-1" and doc["profile"] == PROFILE
+         and doc["scope"] == "hosted-source-verification-only" and doc["sourceRoute"] == "LGPL-2.1-6a-6d",
+         "Different recipient material contract")
+    texts = doc["texts"]
+    need(type(texts) is list and 1 <= len(texts) <= 40, "Recipient text count bound")
+    names = []
+    for row in texts:
+        need(type(row) is dict and set(row) == {"path", "size", "sha256"}
+             and type(row["size"]) is int and 0 < row["size"] <= 256 << 10, "Recipient text extent differs")
+        name = relative(row["path"])
+        need("/" not in name, "Recipient texts must be flat ordinary filenames")
+        sha(row["sha256"])
+        names.append(name)
+    need(names == sorted(set(names)) and RECIPIENT_DOCS <= set(names)
+         and sum(row["size"] for row in texts) <= MiB, "Recipient text roster/aggregate differs")
+    sources = doc["sourceArchives"]
+    need(type(sources) is list and len(sources) == len(RECIPIENT_SOURCES), "Recipient source roster differs")
+    for row, (identifier, name, kind) in zip(sources, RECIPIENT_SOURCES):
+        need(type(row) is dict and set(row) == {"id", "path", "transport"}
+             and row["id"] == identifier and row["path"] == name, "Different recipient source role")
+        item = row["transport"]
+        need(type(item) is dict and set(item) == {"url", "format", "bytes", "sha256"}
+             and item["format"] == kind and type(item["bytes"]) is int and 0 < item["bytes"] <= 20 * MiB
+             and item["url"] == "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/glibc/" + name,
+             "Different recipient source transport")
+        sha(item["sha256"])
+    need(sum(row["transport"]["bytes"] for row in sources) <= 20 * MiB, "Recipient source aggregate bound")
+    return doc
+
+
+def recipient_text_inputs(root: Path, doc: dict) -> dict[str, bytes]:
+    # Only prepare() reads sibling text bodies. The inside admission sees the
+    # small read-only control manifest, never these outside source/notice paths.
+    return {row["path"]: bound(root / row["path"], row, 256 << 10) for row in doc["texts"]}
+
+
 def admission(controls: Path, helpers: Path) -> dict:
     sha(APPROVED_HOSTED_INPUTS_SHA256)  # No mkdir, import, child or network before this gate.
     raw = read(controls / INDEX_NAME, 64 << 10)
@@ -378,8 +426,12 @@ def admission(controls: Path, helpers: Path) -> dict:
          and sum(r["regularBytes"] for r in provenance["sources"]) <= 384 * MiB
          and sum(r["regularFiles"] for r in provenance["sources"]) <= 13000,
          "Supplier source census/projection footprint differs")
+    recipient = recipient_manifest(blobs[RECIPIENT_NAME])
+    prerequisite = decode(blobs["source-execution-review.json"])
+    need(prerequisite["requiredRecipientMaterials"]["manifest"] == {
+        **pins[RECIPIENT_NAME], "path": str(INPUTS / RECIPIENT_NAME)}, "Recipient prerequisite binding differs")
     return {"index": index, "blobs": blobs, "helpers": helper_bytes, "lock": lock, "core": core,
-            "transport": transport, "provenance": provenance}
+            "transport": transport, "provenance": provenance, "recipient": recipient}
 
 
 def owner_modules(root: Path, rows: list[dict]):
@@ -459,7 +511,8 @@ def download_inputs(data: dict, deadline: float) -> None:
     need(type(token) is str and 0 < len(token) <= 12 << 10 and all(33 <= ord(c) <= 126 for c in token),
          "Anonymous pull token format differs")
     objects = [*data["transport"]["rootArchiveTransports"],
-        *data["transport"]["directSourceArchiveTransports"], *data["transport"]["baseIdentityMetadata"], CONTROLLER_BWRAP]
+        *data["transport"]["directSourceArchiveTransports"], *data["transport"]["baseIdentityMetadata"], CONTROLLER_BWRAP,
+        *data["recipient"]["sourceArchives"]]
     for row in objects:
         stage("transport-" + row["id"])
         item = row["transport"]
@@ -707,12 +760,14 @@ def prepare() -> None:
     context = context_from_environment()
     deadline = started + PREP_SECONDS
     tools = platform_tools()
+    stage("recipient-text-admission")
+    texts = recipient_text_inputs(checkout / "desktop/cpython-source-inputs/recipient", data["recipient"])
     stage("input-directories")
     # The fixed preinstalled tools have refused before preparation effects.
     # Source/control files are copied once, not by another packaging framework.
     PREP.mkdir(mode=0o700)
     for name in ("controls", "controller", "objects", "decoded", "inputs", "inputs/recipe", "inputs/archives",
-                 "inputs/sources", "inputs/core-source", "preparation-results"):
+                 "inputs/sources", "inputs/core-source", "preparation-results", "recipient"):
         (PREP / name).mkdir(mode=0o700)
     write(PREP / "INCOMPLETE", b"Input preparation has no successful result.\n")
     for leaf, raw in data["blobs"].items():
@@ -724,6 +779,9 @@ def prepare() -> None:
     index = read(checkout / "desktop/cpython-source-inputs" / INDEX_NAME, 64 << 10)
     write(PREP / "controls" / INDEX_NAME, index)
     write(PREP / "inputs" / INDEX_NAME, index)
+    stage("recipient-text-copy")
+    for name, raw in texts.items():
+        write(PREP / "recipient" / name, raw)
     for leaf, raw in data["helpers"].items():
         stage("input-helper-" + leaf)
         write(PREP / "inputs/recipe" / leaf, raw)
@@ -973,7 +1031,9 @@ def bwrap_argv(context: dict) -> list[str]:
                          ("stdout", "/proc/self/fd/1"), ("stderr", "/proc/self/fd/2")):
         command.extend(("--symlink", target, "/dev/" + name))
     command += ["--dir", "/dev/shm", "--remount-ro", "/dev", "--bind", str(WORK / "shm"), "/dev/shm",
-        "--chdir", "/work", "--", "/usr/bin/setpriv", "--reuid", str(context["uid"]),
+        # The capability-limited root bootstrap cannot enter task-owned0700
+        # work. Enter it only after setpriv and inside()'s effective checks.
+        "--chdir", "/", "--", "/usr/bin/setpriv", "--reuid", str(context["uid"]),
         "--regid", str(context["gid"]), "--clear-groups", "--no-new-privs", "--inh-caps=-all",
         "--ambient-caps=-all", "--bounding-set=-all", "--", "/usr/bin/python3.12", "-I", "-S", "-B",
         str(INPUTS / "recipe" / ENTRY_NAME), "inside"]
@@ -1074,6 +1134,8 @@ def inside() -> None:
         "nativeQualification": "not-established"}))
     command = ["/usr/bin/python3.12", "-I", "-S", "-B", str(INPUTS / "recipe/cpython_source_recipe.py"),
                str(INPUTS / "source-lock.json")]
+    stage("original-recipe-cwd")
+    os.chdir("/work")
     stage("original-recipe-exec")
     os.execve(command[0], command, data["lock"]["environment"])
 
@@ -1159,6 +1221,25 @@ class CappedTarWriter:
         return len(raw)
 
 
+def recipient_retention_inputs(data: dict):
+    """Fixed additions to the same bounded archive, not a new publisher."""
+    for row in data["recipient"]["texts"]:
+        yield PREP / "recipient" / row["path"], "recipient/notices/" + row["path"], row
+    for row in data["recipient"]["sourceArchives"]:
+        item = row["transport"]
+        yield (PREP / "objects" / item["sha256"], "recipient/sources/" + row["path"],
+               {"size": item["bytes"], "sha256": item["sha256"]})
+    for row in data["core"]:
+        name = Path(row["path"]).relative_to(INPUTS / "core-source").as_posix()
+        yield PREP / "inputs/core-source" / name, "inputs/core-source/" + name, row
+    # The original JSON preserves the decoder result and capture hashes. Its
+    # stdout is the package's binary-bearing tar, not a recipient build input.
+    # Keep raw capture private; do not redistribute it or the controller deb.
+    for suffix in (".json", ".stderr"):
+        path = BWRAP_RECEIPT.with_suffix(suffix)
+        yield path, "preparation/" + path.name, None
+
+
 def retain(data: dict, projection: dict) -> dict:
     """One allowlisted DATA archive, never runner/HOME/workspace recursion.
 
@@ -1230,12 +1311,8 @@ def retain(data: dict, projection: dict) -> dict:
                  "client.json", "client.stdout", "client.stderr"):
         add(CONTROL / name, "controller/" + name)
     add(PREP / "prepared.json", "preparation/prepared.json")
-    item = CONTROLLER_BWRAP["transport"]
-    add(PREP / "objects" / item["sha256"], "preparation/controller-bubblewrap.deb",
-        {"size": item["bytes"], "sha256": item["sha256"]})
-    for suffix in (".json", ".stdout", ".stderr"):
-        path = BWRAP_RECEIPT.with_suffix(suffix)
-        add(path, "preparation/" + path.name)
+    for source, name, expected in recipient_retention_inputs(data):
+        add(source, name, expected)
     for row in data["transport"]["rootArchiveTransports"]:
         add(PREP / "preparation-results" / (row["id"] + ".json"), "preparation/" + row["id"] + ".json")
     inventory = []
