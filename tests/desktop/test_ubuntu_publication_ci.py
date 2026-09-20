@@ -10,6 +10,7 @@ import struct
 import subprocess
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -93,6 +94,134 @@ def package_data(data_files, control_files, *, mutate=None, trailing=False, tar_
 
 
 class PublisherCI(unittest.TestCase):
+    def test_native_notice_diagnostic_traces_strict_refusal_and_never_continues(self):
+        selected = Path("/usr/share/doc/gcc-13-x86-64-linux-gnu/copyright")
+        alias = selected.parent
+        copyright = Path("/usr/share/doc/gcc-13-base/copyright")
+        common = Path("/usr/share/common-licenses/GPL-3")
+        bodies = {copyright: b"Inert /usr/share/common-licenses/GPL-3.\n/usr/share/common-licenses/GPL-3\n",
+                  common: b"Inert common-license DATA; never executed.\n"}
+        real_lstat, real_resolve, real_readlink = Path.lstat, Path.resolve, os.readlink
+        real_read, real_record = S.D.read, S.D.file_record
+        stop = "Diagnostic-only native notice observation ended; no lifecycle continuation was requested"
+        ancestry_refusal = "Native OS input has nonordinary/writable/special ancestry"
+        cases = (("copyright-writable", copyright, stat.S_IFREG | 0o664, 0, ancestry_refusal),
+                 ("common-writable", common, stat.S_IFREG | 0o664, 0, ancestry_refusal),
+                 ("common-directory", common, stat.S_IFDIR | 0o755, 0, ancestry_refusal),
+                 ("common-owner", common, stat.S_IFREG | 0o644, 1001, "Native OS input has a nonroot owner"),
+                 ("all-protected", None, stat.S_IFREG | 0o644, 0, None))
+        for label, rejected, mode, uid, reason in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory(prefix="mrk-notice-diagnostic-data-") as name:
+                root = Path(name)
+                (root / "public").mkdir()
+                preparation = {"deadline": "1100.0", "sourceSha": "a" * 40, "runId": "10", "attempt": "1",
+                               "runnerUid": 1001, "runnerGid": 1001}
+                (root / "preparation.json").write_bytes(S.D.canonical(preparation))
+                nodes = {}
+                for index, path in enumerate((Path("/"), Path("/usr"), Path("/usr/share"),
+                                              Path("/usr/share/doc"), copyright.parent, common.parent,
+                                              alias, copyright, common)):
+                    kind = stat.S_IFLNK | 0o777 if path == alias else (
+                        stat.S_IFREG | 0o644 if path in bodies else stat.S_IFDIR | 0o755)
+                    nodes[path] = SimpleNamespace(st_dev=1, st_ino=index + 1, st_mode=kind,
+                        st_uid=0, st_gid=0, st_nlink=1, st_size=len(bodies.get(path, b"")),
+                        st_mtime_ns=1, st_ctime_ns=1)
+                if rejected is not None:
+                    nodes[rejected].st_mode, nodes[rejected].st_uid = mode, uid
+                records, reads = [], []
+
+                def virtual(path):
+                    return path == Path("/") or path.is_relative_to("/usr")
+
+                def lstat(path, *args, **kwargs):
+                    if virtual(path):
+                        self.assertIn(path, nodes, "Unexpected native diagnostic path")
+                        return nodes[path]
+                    return real_lstat(path, *args, **kwargs)
+
+                def resolve(path, *args, **kwargs):
+                    if virtual(path):
+                        return copyright if path == selected else path
+                    return real_resolve(path, *args, **kwargs)
+
+                def readlink(path, *args, **kwargs):
+                    if virtual(Path(path)):
+                        self.assertEqual(Path(path), alias)
+                        return "gcc-13-base"
+                    return real_readlink(path, *args, **kwargs)
+
+                def file_record(path, limit=S.D.MAX_ARCHIVE):
+                    if virtual(path):
+                        self.assertIn(path, bodies)
+                        self.assertLessEqual(len(bodies[path]), limit)
+                        records.append((path, limit))
+                        return {"path": path.name, "size": len(bodies[path]),
+                                "sha256": hashlib.sha256(bodies[path]).hexdigest()}
+                    return real_record(path, limit)
+
+                def read(path, limit=32 << 20):
+                    if virtual(path):
+                        self.assertEqual(path, copyright)
+                        self.assertIn((copyright, 2 << 20), records, "References read before protected admission")
+                        self.assertLessEqual(len(bodies[path]), limit)
+                        reads.append(path)
+                        return bodies[path]
+                    return real_read(path, limit)
+
+                with patch.object(Path, "lstat", lstat), patch.object(Path, "resolve", resolve), \
+                     patch.object(S.os, "readlink", readlink), patch.object(S.D, "file_record", file_record), \
+                     patch.object(S.D, "read", read), patch.object(S.time, "monotonic", return_value=100), \
+                     patch.object(S.os, "uname", return_value=SimpleNamespace(sysname="Linux", machine="x86_64",
+                                  release="mock-kernel", version="mock-version")), \
+                     patch.dict(S.os.environ, {"ImageOS": "ubuntu24", "ImageVersion": "mock-image"}), \
+                     patch.object(S.sys, "argv", ["ci_ubuntu_publication.py", "diagnose-native-notices"]), \
+                     patch.object(S, "prepare", return_value=root) as prepare, \
+                     patch.object(S, "verify", side_effect=AssertionError("Lifecycle continuation")) as verify, \
+                     patch.object(S, "Check", side_effect=AssertionError("Command owner setup")) as check, \
+                     patch.object(S, "local", side_effect=AssertionError("Lifecycle import")) as local:
+                    with self.assertRaises(S.D.Refused) as stopped:
+                        S.main()
+                    self.assertEqual(str(stopped.exception), stop)
+                    prepare.assert_called_once_with()
+                    verify.assert_not_called()
+                    check.assert_not_called()
+                    local.assert_not_called()
+                raw = (root / "public/native-notice-diagnostic.json").read_bytes()
+                report = S.D.decode(raw, 128 << 10)
+                self.assertTrue(report["dataOnly"])
+                self.assertFalse(report["qualified"])
+                self.assertEqual({key: report[key] for key in preparation if key != "deadline"},
+                                 {key: value for key, value in preparation.items() if key != "deadline"})
+                self.assertEqual(report["originalDeadline"], preparation["deadline"])
+                self.assertEqual(report["imageVersion"], "mock-image")
+                self.assertEqual(report["kernel"]["release"], "mock-kernel")
+                self.assertLessEqual(len(report["trace"]), 256)
+                link = next(row for row in report["trace"] if row["operation"] == "readlink")
+                self.assertEqual((link["selectedPath"], link["candidate"], link["expectedType"], link["linkTarget"]),
+                                 (str(selected), str(alias), "directory", "gcc-13-base"))
+                if rejected is not None:
+                    failed = report["paths"][-1]
+                    self.assertFalse(failed["checked"])
+                    self.assertEqual(failed["reason"], reason)
+                    last = report["trace"][-1]
+                    self.assertEqual(last["selectedPath"], str(selected if rejected == copyright else common))
+                    self.assertEqual((last["candidate"], last["component"], last["expectedType"],
+                                      last["mode"], last["fileType"], last["permissions"], last["uid"], last["gid"]),
+                                     (str(rejected), rejected.name, "file", mode, stat.S_IFMT(mode),
+                                      stat.S_IMODE(mode), uid, 0))
+                else:
+                    self.assertTrue(all(row["checked"] for row in report["paths"]))
+                    self.assertEqual(records, [(copyright, 2 << 20), (common, 256 << 10)])
+                if rejected == copyright:
+                    self.assertFalse(report["references"]["derived"])
+                    self.assertEqual(report["references"]["names"], [])
+                    self.assertEqual((records, reads), ([], []))
+                    self.assertEqual([row["selectedPath"] for row in report["paths"]], [str(selected)])
+                else:
+                    self.assertEqual(report["references"], {"derived": True, "names": ["GPL-3"]})
+                    self.assertEqual(reads, [copyright])
+                    self.assertEqual([row["selectedPath"] for row in report["paths"]], [str(selected), str(common)])
+
     def test_fixed_route_and_compiler_profiles(self):
         env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
                "RUNNER_ARCH": "X64", "GITHUB_EVENT_NAME": "push", "GITHUB_REF": S.REF,

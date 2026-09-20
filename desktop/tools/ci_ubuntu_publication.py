@@ -59,6 +59,9 @@ SONAME_PACKAGES = {name: "libc6:amd64" for name in (
     "libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
     "libpthread.so.0", "librt.so.1", "libutil.so.1")}
 SONAME_PACKAGES["libgcc_s.so.1"] = "libgcc-s1:amd64"
+COMMON_LICENSE_PATTERN = rb"/usr/share/common-licenses/([A-Za-z0-9][A-Za-z0-9.+_\-]*)"
+COMMON_LICENSES = {"GPL", "GPL-1", "GPL-2", "GPL-3", "LGPL", "LGPL-2", "LGPL-2.1", "LGPL-3",
+                   "GFDL", "GFDL-1.2", "GFDL-1.3", "Apache-2.0", "Artistic", "BSD", "CC0-1.0", "MPL-1.1", "MPL-2.0"}
 
 
 def route(env):
@@ -496,6 +499,7 @@ def prepare():
         pin = D.write(root / "preparation.json", D.canonical(row))
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             output.write("preparation_sha256=" + pin["sha256"] + "\ndeadline=" + deadline + "\n")
+        return root
     except BaseException as error:
         retain_failure(root, "prepare", [], error)
         raise
@@ -520,12 +524,22 @@ def resumed_preparation():
     return sha, source, temporary, root, deadline
 
 
-def protected_host_file(path, limit=MAX_BINARY):
+def protected_host_file(path, limit=MAX_BINARY, *, trace=None):
     """Root-owned OS DATA, resolving only protected original link ancestry."""
     path = Path(path)
     D.need(path.is_absolute() and ".." not in path.parts, "Absolute native OS input required")
+
+    def observe_metadata(candidate, info, expected, operation="lstat", target=None):
+        if trace is not None:
+            trace({"selectedPath": str(path), "candidate": str(candidate), "component": candidate.name or "/",
+                   "expectedType": expected, "operation": operation, "uid": info.st_uid, "gid": info.st_gid,
+                   "mode": info.st_mode, "fileType": stat.S_IFMT(info.st_mode), "permissions": stat.S_IMODE(info.st_mode),
+                   "device": info.st_dev, "inode": info.st_ino, "links": info.st_nlink, "size": info.st_size,
+                   "linkTarget": target})
+
     links, ancestry, pending, resolved = [], {}, list(path.parts[1:]), Path("/")
     root_stat = resolved.lstat()
+    observe_metadata(resolved, root_stat, "directory")
     D.need(stat.S_ISDIR(root_stat.st_mode) and root_stat.st_uid == root_stat.st_gid == 0
            and not root_stat.st_mode & 0o7022, "Unprotected native OS root")
     ancestry[str(resolved)] = [root_stat.st_dev, root_stat.st_ino, root_stat.st_mode, root_stat.st_uid, root_stat.st_gid]
@@ -541,9 +555,11 @@ def protected_host_file(path, limit=MAX_BINARY):
             continue
         candidate = resolved / part
         st = candidate.lstat()
+        observe_metadata(candidate, st, "directory" if pending else "file")
         D.need(st.st_uid == st.st_gid == 0, "Native OS input has a nonroot owner")
         if stat.S_ISLNK(st.st_mode):
             target = os.readlink(candidate)
+            observe_metadata(candidate, st, "directory" if pending else "file", "readlink", target if len(target) <= 4096 else None)
             D.need(len(links) < 40 and 0 < len(target) <= 4096 and D.state(candidate.lstat()) == D.state(st),
                    "Native OS input link changed/exceeded bound")
             links.append([str(candidate), list(D.state(st)), target])
@@ -574,6 +590,68 @@ def protected_host_file(path, limit=MAX_BINARY):
            "Native OS input binding changed")
     return {**row, "path": str(resolved), "selectedPath": str(path), "identity": list(D.state(st)),
             "links": links, "ancestry": ancestry}
+
+
+def diagnose_native_notices(root):
+    """One fresh-host, nonroot DATA observation; never enter the lifecycle."""
+    preparation = D.decode(D.read(root / "preparation.json", 16384), 16384)
+    deadline = float(preparation["deadline"])
+    D.need(math.isfinite(deadline) and 0 < deadline - time.monotonic() <= 1200,
+           "Original notice diagnostic endpoint expired/invalid")
+    events, paths, retained_bytes = [], [], 0
+
+    def observe(row):
+        nonlocal retained_bytes
+        size = len(D.canonical(row))
+        D.need(len(events) < 256 and retained_bytes + size <= 96 << 10 and time.monotonic() < deadline,
+               "Native notice diagnostic trace/endpoint bound")
+        events.append(row)
+        retained_bytes += size
+
+    def inspect(path, limit):
+        D.need(len(paths) < 32, "Native notice diagnostic path bound")
+        row = {"selectedPath": str(path), "checked": False}
+        paths.append(row)
+        try:
+            pinned = protected_host_file(path, limit, trace=observe)
+        except (D.Refused, OSError) as error:
+            row.update(reason=failure_reason(error), errorType=type(error).__name__,
+                       errno=error.errno if isinstance(error, OSError) else None)
+            return None
+        row.update(checked=True, file={key: pinned[key] for key in ("path", "size", "sha256")})
+        return pinned
+
+    # The first selected package is from original run35517013573's retained
+    # dpkg owner/version DATA. This observation describes THIS new VM only.
+    copyright = inspect(Path("/usr/share/doc/gcc-13-x86-64-linux-gnu/copyright"), 2 << 20)
+    references = {"derived": False, "names": [], "reason": "Protected copyright read refused; common-license derivation skipped"}
+    if copyright is not None:
+        try:
+            body = D.read(Path(copyright["path"]), 2 << 20)
+            D.need(len(body) == copyright["size"] and hashlib.sha256(body).hexdigest() == copyright["sha256"],
+                   "Native notice diagnostic copyright changed before reference read")
+            names = list(dict.fromkeys(found.decode("ascii").rstrip(".") for found in re.findall(COMMON_LICENSE_PATTERN, body)))
+            D.need(len(names) <= 31 and all(name in COMMON_LICENSES for name in names),
+                   "Unreviewed common native license reference")
+        except (D.Refused, OSError) as error:
+            references["reason"] = failure_reason(error)
+        else:
+            references = {"derived": True, "names": names}
+            for name in names:
+                inspect(Path("/usr/share/common-licenses") / name, 256 << 10)
+    kernel = os.uname()
+    report = {"scope": "native-notice-data-only", "dataOnly": True, "qualified": False,
+              "sourceSha": preparation["sourceSha"], "runId": preparation["runId"], "attempt": preparation["attempt"],
+              "runnerUid": preparation["runnerUid"], "runnerGid": preparation["runnerGid"],
+              "imageOS": os.environ["ImageOS"], "imageVersion": os.environ["ImageVersion"],
+              "kernel": {key: getattr(kernel, key) for key in ("sysname", "machine", "release", "version")},
+              "originalDeadline": preparation["deadline"], "paths": paths, "references": references, "trace": events,
+              "comparisonScope": "Fresh-job metadata; not retained filesystem facts from failed run35517013573",
+              "continuation": "No A/toolchain acquisition, compiler, package, native or root lifecycle continuation"}
+    raw = D.canonical(report)
+    D.need(len(raw) <= 128 << 10 and time.monotonic() < deadline, "Native notice diagnostic report/endpoint bound")
+    D.write(root / "public/native-notice-diagnostic.json", raw)
+    raise D.Refused("Diagnostic-only native notice observation ended; no lifecycle continuation was requested")
 
 
 def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw):
@@ -697,11 +775,9 @@ def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw):
         if not target.exists():
             D.copy(Path(doc["path"]), target, {key: doc[key] for key in ("path", "size", "sha256")}, 0o644)
         body = D.read(Path(doc["path"]), 2 << 20)
-        for found in re.findall(rb"/usr/share/common-licenses/([A-Za-z0-9][A-Za-z0-9.+_\-]*)", body):
+        for found in re.findall(COMMON_LICENSE_PATTERN, body):
             item = found.decode("ascii").rstrip(".")
-            D.need(item in {"GPL", "GPL-1", "GPL-2", "GPL-3", "LGPL", "LGPL-2", "LGPL-2.1", "LGPL-3",
-                            "GFDL", "GFDL-1.2", "GFDL-1.3", "Apache-2.0", "Artistic", "BSD", "CC0-1.0", "MPL-1.1", "MPL-2.0"},
-                   "Unreviewed common native license reference")
+            D.need(item in COMMON_LICENSES, "Unreviewed common native license reference")
             if item not in common_notices:
                 common = host(Path("/usr/share/common-licenses") / item, 256 << 10)
                 destination = notices / "host/common" / item
@@ -1128,13 +1204,19 @@ def verify():
         raise
 
 
+def main():
+    if sys.argv[1:] == ["diagnose-native-notices"]:
+        diagnose_native_notices(prepare())
+    elif sys.argv[1:] == ["prepare"]:
+        prepare()
+    else:
+        D.need(len(sys.argv) == 1, "Expected prepare, diagnose-native-notices or the no-argument lifecycle verification entry")
+        verify()
+
+
 if __name__ == "__main__":
     try:
-        if sys.argv[1:] == ["prepare"]:
-            prepare()
-        else:
-            D.need(len(sys.argv) == 1, "Expected prepare or the no-argument lifecycle verification entry")
-            verify()
+        main()
     except Exception as error:
         print("Publisher check refused: " + failure_reason(error) + ". Preserve original evidence; no qualification.", file=sys.stderr)
         raise SystemExit(1)
