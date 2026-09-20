@@ -568,7 +568,10 @@ impl Publisher {
         // Failure here may leave a published name. Never remove or retry it.
         self.sync(parent)
     }
-    fn run(&mut self, release: &Release<'_>) -> Result<()> {
+    // The same original read-only admission is used by publication and its
+    // narrowly opted-in hosted platform observation. No source/output selection
+    // or filesystem mutation has occurred when this method returns.
+    fn root_context(&mut self) -> Result<(Slot, Slot)> {
         admin_ids()?;
         let root = self.open(None, "/", read_flags(true), ResolveFlags::empty())?;
         self.protected(root, FileType::Directory, None)?;
@@ -584,6 +587,10 @@ impl Publisher {
         let os_size = u64::try_from(os_stat.st_size).map_err(|_| PublicationError::Bounds)?;
         policy::ubuntu_2404(&self.read_bytes(os_release, STATUS_LIMIT, Some(os_size))?).map_err(|_| PublicationError::Profile)?;
         self.originals.close(os_release)?;
+        Ok((root, lib))
+    }
+    fn run(&mut self, release: &Release<'_>) -> Result<()> {
+        let (root, lib) = self.root_context()?;
         let mut source = lib;
         for name in ["mobile-release-kit", "runtime-input", TARGET, release.manifest] { source = self.keep_child(source, name)?; }
         let manifest = self.open(Some(source), "manifest.json", read_flags(false), beneath())?;
@@ -933,5 +940,37 @@ mod tests {
         assert_eq!(DirectoryKey::of(&publisher.stat(source)?), DirectoryKey::of(&before));
         assert_eq!(publisher.unchanged(source, Identity::of(&before)), Err(PublicationError::Identity));
         publisher.originals.settle()
+    }
+}
+
+// Separate from the eleven ordinary helper cases: this observes genuine
+// administrator platform admission and must never run on the shared VPS.
+#[cfg(test)]
+mod platform_native_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "reviewed disposable Ubuntu root platform observation only"]
+    fn root_exact_ubuntu_platform() {
+        assert!(matches!(std::env::var("MRK_UBUNTU_PUBLICATION_NATIVE").as_deref(), Ok("1")));
+        assert!(matches!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true")));
+        assert!(matches!(std::env::var("RUNNER_ENVIRONMENT").as_deref(), Ok("github-hosted")));
+        assert_eq!(admin_ids(), Ok(())); // No original descriptor exists yet.
+
+        let mut publisher = Publisher::new();
+        let mut phase = "root-context";
+        let result = (|| -> Result<()> {
+            let (root, _) = publisher.root_context()?;
+            phase = "protected-opt";
+            publisher.keep_child(root, "opt")?;
+            phase = "retained-recheck";
+            publisher.check_retained()?;
+            admin_ids()?;
+            publisher.tick()
+        })();
+        // No assertion can bypass the one ordinary settlement after the real
+        // synchronous body returned. Failure never enters publication.
+        let settled = publisher.originals.settle();
+        assert_eq!((result, settled), (Ok(()), Ok(())), "root platform phase: {phase}");
     }
 }

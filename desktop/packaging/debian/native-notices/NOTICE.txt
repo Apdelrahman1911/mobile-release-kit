@@ -1,0 +1,48 @@
+Mobile Release Kit — native Rust publisher/fixture notice INPUTS
+
+Preparation-only reusable source assets; bind to actual package outputs before use.
+Mobile Release Kit local crates: MIT; notices/mobile-release-kit/LICENSE.
+Rust 1.98.0 standard library: Apache-2.0 OR MIT, with original per-component notices/exceptions.
+Keep notices/rust-1.98.0/COPYRIGHT-library.html, its licenses/ files and source-package/ originals.
+The planned std-only fixture adds no registry crates; do not infer its ELF dependencies from U.
+
+Publisher resolved/compiled registry inputs (build/proc-macro entries retained conservatively):
+- bitflags 2.13.2: MIT OR Apache-2.0; target-library artifact; notices/crates/bitflags-2.13.2/
+- block-buffer 0.10.4: MIT OR Apache-2.0; target-library artifact; notices/crates/block-buffer-0.10.4/
+- bytes 1.12.1: MIT; target-library artifact; notices/crates/bytes-1.12.1/
+- cfg-if 1.0.5: MIT OR Apache-2.0; target-library artifact; notices/crates/cfg-if-1.0.5/
+- cfg_aliases 0.2.2: MIT; build/proc-macro artifact only; notices/crates/cfg_aliases-0.2.2/
+- cpufeatures 0.2.17: MIT OR Apache-2.0; target-library artifact; notices/crates/cpufeatures-0.2.17/
+- crypto-common 0.1.7: MIT OR Apache-2.0; target-library artifact; notices/crates/crypto-common-0.1.7/
+- digest 0.10.7: MIT OR Apache-2.0; target-library artifact; notices/crates/digest-0.10.7/
+- errno 0.3.14: MIT OR Apache-2.0; target-library artifact; notices/crates/errno-0.3.14/
+- generic-array 0.14.7: MIT; target-library artifact; notices/crates/generic-array-0.14.7/
+- getrandom 0.3.4: MIT OR Apache-2.0; target-library artifact; notices/crates/getrandom-0.3.4/
+- itoa 1.0.18: MIT OR Apache-2.0; target-library artifact; notices/crates/itoa-1.0.18/
+- libc 0.2.189: MIT OR Apache-2.0; target-library artifact; notices/crates/libc-0.2.189/
+- linux-raw-sys 0.12.1: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; target-library artifact; notices/crates/linux-raw-sys-0.12.1/
+- memchr 2.8.3: Unlicense OR MIT; target-library artifact; notices/crates/memchr-2.8.3/
+- mio 1.2.3: MIT; target-library artifact; notices/crates/mio-1.2.3/
+- nix 0.30.1: MIT; target-library artifact; notices/crates/nix-0.30.1/
+- pin-project-lite 0.2.17: Apache-2.0 OR MIT; target-library artifact; notices/crates/pin-project-lite-0.2.17/
+- proc-macro2 1.0.107: MIT OR Apache-2.0; build/proc-macro artifact only; notices/crates/proc-macro2-1.0.107/
+- quote 1.0.47: MIT OR Apache-2.0; build/proc-macro artifact only; notices/crates/quote-1.0.47/
+- rustix 1.1.5: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; target-library artifact; notices/crates/rustix-1.1.5/
+- ryu 1.0.23: Apache-2.0 OR BSL-1.0; target-library artifact; notices/crates/ryu-1.0.23/
+- serde 1.0.228: MIT OR Apache-2.0; target-library artifact; notices/crates/serde-1.0.228/
+- serde_core 1.0.228: MIT OR Apache-2.0; target-library artifact; notices/crates/serde_core-1.0.228/
+- serde_derive 1.0.228: MIT OR Apache-2.0; build/proc-macro artifact only; notices/crates/serde_derive-1.0.228/
+- serde_json 1.0.145: MIT OR Apache-2.0; target-library artifact; notices/crates/serde_json-1.0.145/
+- sha2 0.10.9: MIT OR Apache-2.0; target-library artifact; notices/crates/sha2-0.10.9/
+- signal-hook-registry 1.4.8: MIT OR Apache-2.0; target-library artifact; notices/crates/signal-hook-registry-1.4.8/
+- syn 2.0.119: MIT OR Apache-2.0; build/proc-macro artifact only; notices/crates/syn-2.0.119/
+- tokio 1.48.0: MIT; target-library artifact; notices/crates/tokio-1.48.0/
+- tokio-macros 2.6.1: MIT; build/proc-macro artifact only; notices/crates/tokio-macros-2.6.1/
+- typenum 1.20.1: MIT OR Apache-2.0; target-library artifact; notices/crates/typenum-1.20.1/
+- unicode-ident 1.0.25: (MIT OR Apache-2.0) AND Unicode-3.0; build/proc-macro artifact only; notices/crates/unicode-ident-1.0.25/
+- version_check 0.9.5: MIT/Apache-2.0; build/proc-macro artifact only; notices/crates/version_check-0.9.5/
+
+Original notices/license texts are copied verbatim, not replaced by this SPDX summary.
+The legacy metadata spelling MIT/Apache-2.0 for version_check denotes the alternatives; keep its original texts.
+Native libc/loader/libgcc package versions and notices must come from the actual admitted job inputs.
+This input set neither redistributes those system libraries nor claims final notice completeness.

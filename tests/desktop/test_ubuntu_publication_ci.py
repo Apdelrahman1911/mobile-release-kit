@@ -1,10 +1,14 @@
 """Inert publisher CI contract tests; no compiler, process or native operation."""
 from copy import deepcopy
+import hashlib
 import importlib.util
+import io
 from pathlib import Path
 import os
 import stat
+import struct
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -13,6 +17,79 @@ SOURCE = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("publisher_ci", SOURCE / "desktop/tools/ci_ubuntu_publication.py")
 S = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(S)
+
+
+def elf_data(extra_tag=None, *, definitions=False):
+    """A small structural ELF fixture with no executable program body."""
+    raw = bytearray(1536)
+    strings = b"\0libc.so.6\0GLIBC_2.34\0"
+    interpreter = b"/lib64/ld-linux-x86-64.so.2\0"
+    raw[:16] = b"\x7fELF\x02\x01\x01" + b"\0" * 9
+    struct.pack_into("<HHIQQQIHHHHHH", raw, 16, 3, 62, 1, 0, 64, 0, 0, 64, 56, 3, 0, 0, 0)
+    dynamic = [(1, 1), (5, 1024), (10, len(strings)),
+               (0x6ffffffe, 1152), (0x6fffffff, 1)]
+    if definitions:
+        dynamic += [(0x6ffffffc, 1280), (0x6ffffffd, 1)]
+    if extra_tag is not None:
+        dynamic.append((extra_tag, 1))
+    dynamic.append((0, 0))
+    for index, values in enumerate((
+        (1, 4, 0, 0, 0, len(raw), len(raw), 4096),
+        (3, 4, 512, 512, 512, len(interpreter), len(interpreter), 1),
+        (2, 4, 640, 640, 640, len(dynamic) * 16, len(dynamic) * 16, 8),
+    )):
+        struct.pack_into("<IIQQQQQQ", raw, 64 + 56 * index, *values)
+    raw[512:512 + len(interpreter)] = interpreter
+    for index, pair in enumerate(dynamic):
+        struct.pack_into("<qQ", raw, 640 + 16 * index, *pair)
+    raw[1024:1024 + len(strings)] = strings
+    struct.pack_into("<HHIII", raw, 1152, 1, 1, 1, 16, 0)
+    struct.pack_into("<IHHII", raw, 1168, 0, 0, 2, 11, 0)
+    if definitions:
+        struct.pack_into("<HHHHIII", raw, 1280, 1, 0, 2, 1, 0, 20, 0)
+        struct.pack_into("<II", raw, 1300, 11, 0)
+    return bytes(raw)
+
+
+def package_rows(files):
+    rows = {".": {"type": "directory", "mode": 0o755}}
+    for name, raw in files.items():
+        for parent in reversed(Path(name).parents):
+            if parent.as_posix() != ".":
+                rows[parent.as_posix()] = {"type": "directory", "mode": 0o755}
+        rows[name] = {"type": "file", "mode": 0o644, "size": len(raw),
+                      "sha256": hashlib.sha256(raw).hexdigest()}
+    return rows
+
+
+def package_data(data_files, control_files, *, mutate=None, trailing=False, tar_format=tarfile.USTAR_FORMAT):
+    """Construct inert, uncompressed .deb DATA; never call a packaging tool."""
+    members = [("debian-binary", b"2.0\n")]
+    for archive, files in (("control.tar", control_files), ("data.tar", data_files)):
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w", format=tar_format) as writer:
+            for name, row in package_rows(files).items():
+                info = tarfile.TarInfo("./" if name == "." else "./" + name)
+                info.mode = row["mode"]
+                info.type = tarfile.DIRTYPE if row["type"] == "directory" else tarfile.REGTYPE
+                raw = b"" if info.isdir() else files[name]
+                info.size = len(raw)
+                if mutate is not None:
+                    info, raw = mutate(archive, name, info, raw)
+                if info is not None:
+                    writer.addfile(info, None if info.isdir() else io.BytesIO(raw))
+        raw = output.getvalue()
+        if trailing and archive == "data.tar":
+            raw += b"unaccounted trailing data"
+        members.append((archive, raw))
+    result = bytearray(b"!<arch>\n")
+    for name, raw in members:
+        header = f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{'100644':<8}{len(raw):<10}" + chr(96) + "\n"
+        result.extend(header.encode("ascii"))
+        result.extend(raw)
+        if len(raw) % 2:
+            result.extend(b"\n")
+    return bytes(result)
 
 
 class PublisherCI(unittest.TestCase):
@@ -68,6 +145,85 @@ class PublisherCI(unittest.TestCase):
         with self.assertRaises(ValueError):
             S.test_result(raw, b"unexpected diagnostic")
 
+    def test_single_native_selection_requires_one_actual_exact_pass(self):
+        name = "installed_runtime::tests::kernel_scope_is_reviewed_ubuntu"
+        raw = ("running 1 test\n"
+               f"test {name} ... ok\n"
+               "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+               "99 filtered out; finished in 0.01s\n").encode("ascii")
+        S.exact_test_result(raw, b"", name)
+        for changed in (b"running 0 tests\n", raw.replace(name.encode(), b"different::test"),
+                        raw.replace(b" ... ok", b" ... ignored"),
+                        raw.replace(b"1 passed; 0 failed", b"0 passed; 1 failed"),
+                        raw.replace(b"0 ignored", b"1 ignored"),
+                        raw + f"test {name} ... ok\n".encode("ascii")):
+            with self.subTest(output=changed), self.assertRaises(ValueError):
+                S.exact_test_result(changed, b"", name)
+        with self.assertRaises(ValueError):
+            S.exact_test_result(raw, b"unexpected diagnostic", name)
+
+    def test_elf_dependency_reader_rejects_loader_overrides_and_out_of_bounds(self):
+        observed = S.elf_dependencies(elf_data())
+        self.assertEqual(observed["interpreter"], "/lib64/ld-linux-x86-64.so.2")
+        self.assertEqual(observed["needed"], ["libc.so.6"])
+        self.assertEqual(observed["versionNeeds"], {"libc.so.6": ["GLIBC_2.34"]})
+        self.assertEqual(S.elf_dependencies(elf_data(definitions=True))["versionDefinitions"], ["GLIBC_2.34"])
+        for tag in (15, 29, 0x6ffffefb, 0x6ffffefc, 0x7ffffffd, 0x7fffffff):
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                S.elf_dependencies(elf_data(tag))
+        for raw in (elf_data()[:1100], b"inert non-ELF data", elf_data().replace(b"GLIBC_2.34\0", b"GLIBC_2.34x")):
+            with self.assertRaises(ValueError):
+                S.elf_dependencies(raw)
+        outside = bytearray(elf_data())
+        struct.pack_into("<Q", outside, 640 + 16 + 8, 1 << 60)
+        with self.assertRaises(ValueError):
+            S.elf_dependencies(bytes(outside))
+
+    def test_complete_deb_readback_rejects_changed_unowned_or_hidden_members(self):
+        files, controls = {"usr/share/inert": b"DATA"}, {"control": b"Package: inert-fixture\n"}
+        expected, expected_control = package_rows(files), package_rows(controls)
+        with tempfile.TemporaryDirectory(prefix="mrk-deb-readback-data-") as name:
+            path = Path(name) / "fixture.deb"
+            path.write_bytes(package_data(files, controls))
+            S.deb_readback(path, expected, expected_control)
+            # Real manifest-addressed package paths require GNU long-name DATA.
+            long_name = "usr/lib/mobile-release-kit/runtime-input/" + "a" * 64 + "/python/bin/python3"
+            long_files = {long_name: b"inert long-name payload"}
+            path.write_bytes(package_data(long_files, controls, tar_format=tarfile.GNU_FORMAT))
+            S.deb_readback(path, package_rows(long_files), expected_control)
+            path.write_bytes(package_data(long_files, controls, tar_format=tarfile.PAX_FORMAT))
+            with self.assertRaises(ValueError):
+                S.deb_readback(path, package_rows(long_files), expected_control)
+            for change in ("owner", "mode", "bytes", "missing", "link"):
+                def mutate(archive, member, info, raw):
+                    if archive == "data.tar" and member == "usr/share/inert":
+                        if change == "owner":
+                            info.uid = 1000
+                        elif change == "mode":
+                            info.mode = 0o600
+                        elif change == "bytes":
+                            raw = b"EVIL"
+                        elif change == "missing":
+                            return None, b""
+                        else:
+                            info.type, info.linkname, info.size = tarfile.SYMTYPE, "/outside", 0
+                            raw = b""
+                    return info, raw
+                path.write_bytes(package_data(files, controls, mutate=mutate))
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    S.deb_readback(path, expected, expected_control)
+            extra = {**files, "usr/share/unexpected": b"extra"}
+            path.write_bytes(package_data(extra, controls))
+            with self.assertRaises(ValueError):
+                S.deb_readback(path, expected, expected_control)
+            forbidden = {**files, "opt/unexpected": b"never package published versions"}
+            path.write_bytes(package_data(forbidden, controls))
+            with self.assertRaises(ValueError):
+                S.deb_readback(path, package_rows(forbidden), expected_control)
+            path.write_bytes(package_data(files, controls, trailing=True))
+            with self.assertRaises(ValueError):
+                S.deb_readback(path, expected, expected_control)
+
     def test_failed_or_expired_command_never_becomes_success(self):
         with tempfile.TemporaryDirectory(prefix="mrk-publisher-ci-data-") as name:
             root = Path(name)
@@ -76,7 +232,8 @@ class PublisherCI(unittest.TestCase):
             outcome = subprocess.CompletedProcess(argv, 7, b"synthetic output", b"synthetic failure")
             with patch.object(S.time, "monotonic", return_value=100), patch.object(S.D, "write", wraps=S.D.write):
                 owner = unittest.mock.Mock(return_value=outcome)
-                check = S.Check(root, owner)
+                check = S.Check(root, owner, deadline=120)
+                self.assertEqual(check.end, 120)
                 with self.assertRaises(ValueError):
                     check.command("failed", argv, {}, root)
                 self.assertEqual(owner.call_count, 1)
@@ -86,8 +243,7 @@ class PublisherCI(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     check.command("must-not-launch", argv, {}, root)
                 self.assertEqual(owner.call_count, 1)
-                expired = S.Check(root, owner)
-                expired.end = 99
+                expired = S.Check(root, owner, deadline=99)
                 with self.assertRaises(ValueError):
                     expired.command("expired", argv, {}, root)
                 self.assertEqual(owner.call_count, 1)

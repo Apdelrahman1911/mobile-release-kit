@@ -66,9 +66,11 @@ The offline CPython payload transformer is publisher preparation, not runtime
 admission. Its production notice/static-link anchors remain absent and its
 public entry point refuses before parsing/writing. The new Linux original-
 descriptor inspection module is also not an executable runtime constructor or
-launch path. Its initial Ubuntu 24.04 / GA6.8 / x86_64 GNU / same-root ext4/XFS
-scope requires separate native qualification. Adding these source modules does
-not enable either the packaged-runtime or native-save gate.
+launch path. Its Ubuntu 24.04 / x86_64 GNU / same-root ext4/XFS ABI selector
+recognizes GA6.8 and the source-reviewed exact `6.17.0-1022-azure` kernel, not
+arbitrary newer kernels. Native observations and installed-runtime qualification
+remain separate requirements. Adding these source modules does not enable either
+the packaged-runtime or native-save gate.
 
 Manifest exact keys:
 `schemaVersion:1`, `protocol:1`, `coreVersion:"0.3.0"`, `target`, `coreSha256`,

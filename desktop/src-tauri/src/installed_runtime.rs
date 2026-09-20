@@ -44,8 +44,8 @@ const LIVE_COUNT: usize = 48;
 const BLOCK_SIZE: usize = 64 * 1024;
 const PREFIX_COUNT: usize = 6;
 const RETAINED_COUNT: usize = PREFIX_COUNT + 2;
-// Initial namespace inodes from include/linux/proc_ns.h at Linux v6.8.
-// These are deliberately version-bound, not portable namespace detection.
+// Initial namespace inodes from Linux v6.8 proc_ns.h and the exact reviewed
+// Ubuntu Azure 6.17.0-1022.22 nsfs.h. Not portable namespace detection.
 pub(crate) const INITIAL_USER_INODE: u64 = 0xefff_fffd;
 pub(crate) const INITIAL_PID_INODE: u64 = 0xefff_fffc;
 
@@ -1570,8 +1570,10 @@ fn validate_inventory(manifest: Manifest, protocol_anchor: &str) -> AdmissionRes
 
 pub(crate) fn supported_kernel(sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
     if sysname != b"Linux" || machine != b"x86_64" { return false; }
-    // Ubuntu's GA 6.8 ABI naming, not a >=6.8 or HWE/custom-kernel fallback.
-    // This name check is NOT a kernel provenance/qualification claim.
+    // Exactly one source-reviewed Azure ABI, plus the existing GA 6.8 rule.
+    // This name check is NOT boot provenance or runtime qualification. All
+    // native observations and consumer gates remain independently required.
+    if release == b"6.17.0-1022-azure" { return true; }
     let Some(abi) = release.strip_prefix(b"6.8.0-").and_then(|value| value.strip_suffix(b"-generic")) else { return false; };
     !abi.is_empty() && abi.len() <= 10 && abi[0] != b'0' && abi.iter().all(u8::is_ascii_digit)
 }
@@ -1809,14 +1811,19 @@ mod pure_tests {
     }
 
     #[test]
-    fn kernel_scope_is_exact_ga_68() {
+    fn kernel_scope_is_reviewed_ubuntu() {
         assert!(supported_kernel(b"Linux", b"x86_64", b"6.8.0-91-generic"));
+        assert!(supported_kernel(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
         for release in [b"6.8.0-generic".as_slice(), b"6.8.0-0-generic", b"6.8.0-91-lowlatency",
-            b"6.8.0-91-generic-custom", b"6.11.0-29-generic", b"6.8.0-+91-generic"] {
+            b"6.8.0-91-generic-custom", b"6.11.0-29-generic", b"6.8.0-+91-generic",
+            b"6.17.0-1021-azure", b"6.17.0-1023-azure", b"6.17.0-1022-generic",
+            b"6.17.0-1022-azure-custom", b"6.17.0-01022-azure"] {
             assert!(!supported_kernel(b"Linux", b"x86_64", release));
         }
         assert!(!supported_kernel(b"Linux", b"aarch64", b"6.8.0-91-generic"));
         assert!(!supported_kernel(b"FreeBSD", b"x86_64", b"6.8.0-91-generic"));
+        assert!(!supported_kernel(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+        assert!(!supported_kernel(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
     }
 
     #[test]
@@ -2039,5 +2046,66 @@ mod pure_tests {
         assert_eq!(observed.live_originals(), 0);
         assert_eq!(observed.positive_closes(), 0);
         assert!(slots.acquisition.is_none());
+    }
+}
+
+// Read-only platform observations, not a qualified runtime or a test bypass of
+// the consumer gates. Hosted execution is separately reviewed and explicitly
+// selected; the existing pure and publisher-helper rosters do not include it.
+#[cfg(test)]
+mod platform_native_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "reviewed disposable Ubuntu nonroot platform observation only"]
+    fn nonroot_exact_ubuntu_platform() {
+        assert!(matches!(std::env::var("MRK_UBUNTU_PUBLICATION_NATIVE").as_deref(), Ok("1")));
+        assert!(matches!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true")));
+        assert!(matches!(std::env::var("RUNNER_ENVIRONMENT").as_deref(), Ok("github-hosted")));
+        assert_ne!(rustix::process::getuid().as_raw(), 0);
+        assert_ne!(rustix::process::getgid().as_raw(), 0);
+
+        let (_sender, stop) = watch::channel(false);
+        let end = Instant::now() + std::time::Duration::from_secs(20);
+        let mut book = OriginalDescriptorBook::new();
+        book.phase = Phase::Inspecting;
+        let mut phase = "kernel";
+        let result = (|| -> AdmissionResult<()> {
+            book.inspect_kernel(end, &stop)?;
+            phase = "credentials";
+            let credentials = book.current_credentials(end, &stop)?;
+            book.credentials = Some(credentials);
+            phase = "protected-root";
+            let root = book.acquire_root(end, &stop)?;
+            book.root_mount = Some(book.inspect_protected(root, FileType::Directory, None, end, &stop)?);
+            phase = "namespace-controls";
+            book.inspect_namespace_controls(root, credentials, end, &stop)?;
+            phase = "os-release";
+            book.inspect_os_release(root, end, &stop)?;
+            phase = "protected-opt";
+            let opt = book.acquire_child(root, "opt", true, Purpose::OsDirectory, end, &stop)?;
+            book.inspect_protected(opt, FileType::Directory, None, end, &stop)?;
+            book.inspect_protected(root, FileType::Directory, None, end, &stop)?;
+            phase = "credential-recheck";
+            if book.current_credentials(end, &stop)? != credentials { return Err(AdmissionFailure::Namespace); }
+            checkpoint(end, &stop)
+        })();
+        match result {
+            Ok(()) => {
+                // This is the actual normal body return, not an interrupted
+                // Inspecting state. Never clear a preexisting unknown latch.
+                if !book.unknown {
+                    book.operation = Operation::Idle;
+                    book.phase = Phase::InspectedOnly;
+                }
+                let _ = book.settle_originals();
+            }
+            Err(failure) => { let _ = book.refuse_and_settle(failure); }
+        }
+        let observed = book.observation();
+        assert_eq!(result, Ok(()), "nonroot platform phase: {phase}; settlement: {observed:?}");
+        assert_eq!(observed.phase(), "settled", "nonroot platform original settlement");
+        assert_eq!((observed.live_originals(), observed.pending_acquisitions(), observed.uncertain_closes()), (0, 0, 0));
+        assert!(observed.records() > 0 && observed.positive_closes() > 0);
     }
 }

@@ -1,6 +1,7 @@
 //! A single read-only mount query, not installed-runtime qualification.
 //!
-//! First reviewed ABI: Ubuntu 24.04 x86_64 GNU / GA Linux 6.8. This crate
+//! Reviewed ABIs: Ubuntu 24.04 x86_64 GNU / GA Linux 6.8 and the exact Ubuntu
+//! Azure 6.17.0-1022.22 source. This is not native/product qualification. This crate
 //! neither selects paths nor acquires/closes descriptors, changes namespaces,
 //! raises privilege, retries unsupported syscalls, or launches a process.
 //! Its caller retains the borrowed original descriptor and the deadline owner.

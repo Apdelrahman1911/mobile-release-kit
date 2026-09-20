@@ -65,7 +65,8 @@ real native outputs or replacement successful-link evidence.
 
 A Ubuntu24 container does not qualify a kernel/mount adapter. The old hosted
 6.17 development result is not a build of this candidate or a qualification of
-the frozen installed GA6.8 adapter. Unexpected DSOs stop handoff for review;
+the installed adapter. Its exact Azure `6.17.0-1022` source/ABI review does not
+replace native or installed-runtime qualification. Unexpected DSOs stop handoff for review;
 `ldd` is neither permitted here nor original-link provenance.
 
 ## Input lock, not an approval flag
