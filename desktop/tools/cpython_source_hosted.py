@@ -1158,8 +1158,14 @@ def inside() -> None:
     stage("sandbox-inputs")
     data = admission(INPUTS, INPUTS / "recipe")
     stage("sandbox-environment")
-    need(dict(os.environ) == data["lock"]["environment"] and os.path.realpath(sys.executable) == "/usr/bin/python3.12"
-         and sys.flags.isolated and sys.flags.no_site and sys.flags.dont_write_bytecode, "Fixed root Python/environment differs")
+    # Bubblewrap publishes its actual --chdir as PWD. This is the wrapper's
+    # exact environment, not an added variable in the unchanged source recipe.
+    need(dict(os.environ) == {**data["lock"]["environment"], "PWD": "/"} and os.getcwd() == "/",
+         "Fixed wrapper environment/cwd differs")
+    stage("sandbox-interpreter")
+    need(os.path.realpath(sys.executable) == "/usr/bin/python3.12"
+         and sys.flags.isolated and sys.flags.no_site and sys.flags.dont_write_bytecode,
+         "Fixed root Python/flags differ")
     stage("sandbox-receipt")
     write(Path("/work/hosted-inside.json"), canonical({"schema": "mrk-cpython-source-inside-1",
         "uid": os.getuid(), "gid": os.getgid(), "namespaces": actual, "capacity": capacity,

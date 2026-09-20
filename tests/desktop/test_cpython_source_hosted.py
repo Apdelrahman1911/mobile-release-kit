@@ -125,8 +125,12 @@ class HostedSourceTests(unittest.TestCase):
         table = {name: {"options": ["ro"]} for name in ("/", str(H.INPUTS), "/proc", "/dev")}
         table.update({name: {"options": ["rw"]} for name in ("/work", "/dev/shm")})
         environment = {"PATH": "/usr/bin:/bin"}
-        fake_sys = SimpleNamespace(executable="/usr/bin/python3.12",
-                                  flags=SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1))
+        wrapper_environment = {**environment, "PWD": "/"}
+        bad_environments = {
+            "missing-pwd": environment.copy(), "wrong-pwd": {**environment, "PWD": "/work"},
+            "missing-locked-key": {"PWD": "/"}, "changed-locked-key": {**wrapper_environment, "PATH": "/bin"},
+            "extra-key": {**wrapper_environment, "UNEXPECTED": "inert"}}
+        required_flags = ("isolated", "no_site", "dont_write_bytecode")
         directory = SimpleNamespace(st_uid=999, st_mode=H.stat.S_IFDIR | 0o700)
         null_device = H.os.makedev(1, 3)
 
@@ -134,8 +138,12 @@ class HostedSourceTests(unittest.TestCase):
             "context-failure": "sandbox-context", "namespaces-failure": "sandbox-namespaces",
             "privileges-failure": "sandbox-privileges", "descriptors-failure": "sandbox-descriptors",
             "mounts-failure": "sandbox-mounts", "inputs-failure": "sandbox-inputs"}
-        for scenario in ("success", "late-admission-refusal", "cwd-failure", *failed_reads):
+        for scenario in ("success", "late-admission-refusal", "wrong-wrapper-cwd", "wrong-interpreter",
+                         *required_flags, *bad_environments, "cwd-failure", *failed_reads):
             events = []
+            fake_sys = SimpleNamespace(executable="/usr/bin/other-python" if scenario == "wrong-interpreter"
+                                       else "/usr/bin/python3.12",
+                                       flags=SimpleNamespace(**{name: int(scenario != name) for name in required_flags}))
 
             def observed(kind, value):
                 if scenario == kind + "-failure":
@@ -160,13 +168,14 @@ class HostedSourceTests(unittest.TestCase):
 
             fake_os = SimpleNamespace(
                 getresuid=lambda: (999,) * 3, getresgid=lambda: (998,) * 3, getgroups=lambda: [],
-                getuid=lambda: 999, getgid=lambda: 998, environ=environment,
+                getuid=lambda: 999, getgid=lambda: 998, environ=bad_environments.get(scenario, wrapper_environment),
+                getcwd=lambda: "/work" if scenario == "wrong-wrapper-cwd" else "/",
                 listdir=lambda path: observed("descriptors", ["0", "1", "2"]), makedev=H.os.makedev,
                 fstat=lambda fd: SimpleNamespace(st_mode=H.stat.S_IFCHR if fd == 0 else H.stat.S_IFIFO,
                                                 st_rdev=null_device if fd == 0 else 0),
                 stat=lambda path: SimpleNamespace(st_dev=1, st_ino=1 if path == "/work" else 2),
                 statvfs=lambda path: SimpleNamespace(f_blocks=1, f_frsize=H.DEV_BYTES),
-                path=SimpleNamespace(realpath=lambda path: "/usr/bin/python3.12"),
+                path=SimpleNamespace(realpath=lambda path: path),
                 chdir=mock.Mock(side_effect=chdir), execve=mock.Mock(side_effect=execute))
             with self.subTest(scenario=scenario), mock.patch.object(H, "os", fake_os), \
                  mock.patch.object(H, "sys", fake_sys), mock.patch.object(H, "_STAGE", "admission"), \
@@ -186,10 +195,21 @@ class HostedSourceTests(unittest.TestCase):
                     command = ["/usr/bin/python3.12", "-I", "-S", "-B",
                                str(H.INPUTS / "recipe/cpython_source_recipe.py"), str(H.INPUTS / "source-lock.json")]
                     fake_os.execve.assert_called_once_with(command[0], command, environment)
-                elif scenario == "late-admission-refusal":
-                    with self.assertRaisesRegex(H.Refused, "Fixed root Python/environment differs"):
+                    self.assertIs(fake_os.execve.call_args.args[2], environment)
+                    self.assertNotIn("PWD", environment)
+                    self.assertEqual(wrapper_environment, {**environment, "PWD": "/"})
+                elif scenario in {"late-admission-refusal", "wrong-wrapper-cwd", *bad_environments}:
+                    with self.assertRaisesRegex(H.Refused, "Fixed wrapper environment/cwd differs"):
                         H.inside()
                     self.assertEqual(events, ["admitted-inputs"])
+                    self.assertEqual(H._STAGE, "sandbox-environment")
+                    fake_os.chdir.assert_not_called()
+                    fake_os.execve.assert_not_called()
+                elif scenario == "wrong-interpreter" or scenario in required_flags:
+                    with self.assertRaisesRegex(H.Refused, "Fixed root Python/flags differ"):
+                        H.inside()
+                    self.assertEqual(events, ["admitted-inputs"])
+                    self.assertEqual(H._STAGE, "sandbox-interpreter")
                     fake_os.chdir.assert_not_called()
                     fake_os.execve.assert_not_called()
                 elif scenario == "cwd-failure":
