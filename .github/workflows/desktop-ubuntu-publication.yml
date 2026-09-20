@@ -67,7 +67,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Independently reviewed entry bytes; verified before root imports.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'ad1f529a5d4239e5667d30db600f6be3efb6a7639bf5acff059d45a2f81820a0'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '6ebc4690a02f3492a6fa203c018967289ebd39e1a1380cea63e00d66026ae0d7'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

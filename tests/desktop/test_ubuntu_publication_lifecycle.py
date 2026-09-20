@@ -381,6 +381,55 @@ class LifecycleData(unittest.TestCase):
         self.assertEqual(first["ExitType"], "cgroup")
         self.assertEqual(first["Restart"], "no")
 
+    def test_native_failure_diagnostic_uses_only_original_bounded_capture(self):
+        argv = ["/inert-native-fixture-never-executed"]
+        raw = b'\0\x1b\xff"' + b"a" * 1500
+        prefix = "Native platform failure DATA: "
+        for case in ("root-failed", "user-failed", "late", "success", "other-command", "owner-error", "malformed", "sink-error"):
+            label = "native-user" if case == "user-failed" else "unpack" if case == "other-command" else "native-root"
+            result = subprocess.CompletedProcess(argv, 0 if case in {"late", "success"} else 7, raw, raw[::-1])
+            if case == "malformed": result.stdout = "not an admitted byte capture"
+            owner_error, sink_error = RuntimeError("original owner refused"), OSError("diagnostic writer refused")
+            owner = Mock(return_value=result, side_effect=owner_error if case == "owner-error" else None)
+            emitted = []
+            def write(text):
+                self.assertTrue(L._FAILED, "Diagnostic emission cleared the failure latch")
+                emitted.append(text)
+                if case == "sink-error": raise sink_error
+                return len(text)
+            with self.subTest(case=case), patch.multiple(L, _END=120, _FAILED=False, _COMMANDS=[],
+                    _OWNER=SimpleNamespace(run_owned=owner)), patch.object(L, "_root_ids"), \
+                    patch.object(L, "_retain") as retain, patch.object(L.sys, "stderr", SimpleNamespace(write=write)), \
+                    patch.object(L.time, "monotonic", side_effect=[100, 121 if case == "late" else 100]) as clock:
+                if case == "success":
+                    self.assertIs(L.command(label, argv, env={}), result)
+                    self.assertFalse(L._FAILED)
+                else:
+                    with self.assertRaises((ValueError, RuntimeError, OSError)) as refused:
+                        L.command(label, argv, env={})
+                    if case == "owner-error": self.assertIs(refused.exception, owner_error)
+                    if case == "sink-error": self.assertIs(refused.exception, sink_error)
+                    self.assertTrue(L._FAILED)
+                    observed = list(emitted)
+                    with self.assertRaises(ValueError): L.command("must-not-launch", argv, env={})
+                    self.assertEqual(emitted, observed)
+                owner.assert_called_once()
+                self.assertEqual(clock.call_count, 2 if case in {"late", "success"} else 1)
+                self.assertEqual(retain.call_count, 0 if case in {"owner-error", "malformed"} else 2)
+                if case in {"root-failed", "user-failed", "late", "sink-error"}:
+                    self.assertEqual(len(emitted), 1)
+                    text = emitted[0]
+                    self.assertTrue(text.startswith(prefix) and text.endswith("\n"))
+                    self.assertTrue(all(32 <= ord(char) < 127 for char in text[:-1]))
+                    self.assertLess(len(text), 14 * 1024)
+                    self.assertEqual(L.decode(text[len(prefix):].encode("ascii")), {
+                        "phase": label, "exitCode": result.returncode,
+                        "stdoutBytes": len(raw), "stderrBytes": len(raw),
+                        "stdoutPrefix": raw[:1024].decode("utf-8", errors="backslashreplace"),
+                        "stderrPrefix": raw[::-1][:1024].decode("utf-8", errors="backslashreplace")})
+                else:
+                    self.assertEqual(emitted, [])
+
     def test_mocked_owner_failure_or_late_return_cannot_launch_again(self):
         argv = ["/inert-command-never-executed"]
         for case in ("nonzero", "owner-error", "late", "boolean-exit"):
