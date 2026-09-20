@@ -94,6 +94,70 @@ def package_data(data_files, control_files, *, mutate=None, trailing=False, tar_
 
 
 class PublisherCI(unittest.TestCase):
+    def test_ubuntu_supplier_notice_inventory_and_exact_packages(self):
+        root = SOURCE / "desktop/packaging/debian/native-notices"
+        raw = S.D.read(root / "inputs.json", 1 << 20)
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), S.NOTICE_INPUTS_SHA256)
+        admitted = S.D.decode(raw, 1 << 20)
+        rows = S.D.records(admitted["files"])
+        S.C.conventional_files(S.D, root, sorted(
+            [*rows.values(), S.D.file_record(root / "inputs.json")], key=lambda row: row["path"]))
+        real_open = S.D._open
+
+        def notice_only(path, limit):
+            self.assertTrue(path.is_relative_to(root), "Notice lookup touched live host files")
+            return real_open(path, limit)
+
+        observed = {}
+        with patch.object(S.D, "_open", side_effect=notice_only), \
+             patch.object(S, "protected_host_file", side_effect=AssertionError("Live OS notice lookup")):
+            for name, expected in admitted["ubuntu"]["packages"].items():
+                actual = {key: expected[key] for key in ("version", "architecture", "sourcePackage", "sourceVersion")}
+                actual["binaryPackage"] = name + ":amd64"
+                owned = {"/" + row["path"] for row in expected["ownedDocumentation"]}
+                observed[name] = S.ubuntu_package_notice(admitted, rows, root, actual, owned)
+                self.assertEqual(observed[name]["source"], "reviewed-ubuntu-package-member-data")
+                self.assertEqual(observed[name]["packageArchive"], expected["archive"])
+        self.assertEqual(len(observed), 11)
+        self.assertEqual(observed["gcc-13-x86-64-linux-gnu"]["documentationPackages"], ["gcc-13-base"])
+        self.assertEqual(observed["libgcc-s1"]["documentationPackages"], ["gcc-14-base"])
+        self.assertEqual(observed["binutils-x86-64-linux-gnu"]["documentationPackages"], ["libbinutils", "binutils-common"])
+        self.assertEqual(observed["libbinutils"]["documentationPackages"], ["binutils-common"])
+        self.assertEqual(observed["libc6"]["documentationPackages"], [])
+        for alias, target in (("GPL", "GPL-3"), ("LGPL", "LGPL-3"), ("GFDL", "GFDL-1.3")):
+            row = admitted["ubuntu"]["commonLicenses"][alias]
+            self.assertEqual(row["alias"]["target"], target)
+            self.assertEqual(row["member"]["path"], "usr/share/common-licenses/" + target)
+
+    def test_ubuntu_supplier_notices_refuse_tuple_roster_reference_and_byte_changes(self):
+        root = SOURCE / "desktop/packaging/debian/native-notices"
+        admitted = S.D.decode(S.D.read(root / "inputs.json", 1 << 20), 1 << 20)
+        rows = S.D.records(admitted["files"])
+        name = "gcc-13-x86-64-linux-gnu"
+        expected = admitted["ubuntu"]["packages"][name]
+        actual = {key: expected[key] for key in ("version", "architecture", "sourcePackage", "sourceVersion")}
+        actual["binaryPackage"] = name
+        owned = {"/" + row["path"] for row in expected["ownedDocumentation"]}
+        with patch.object(S, "protected_host_file", side_effect=AssertionError("Live OS notice lookup")):
+            for key in ("version", "architecture", "sourcePackage", "sourceVersion"):
+                with self.subTest(changed=key), self.assertRaisesRegex(S.D.Refused, "package tuple differs"):
+                    S.ubuntu_package_notice(admitted, rows, root, {**actual, key: "other"}, owned)
+            with self.assertRaisesRegex(S.D.Refused, "No reviewed Ubuntu notice mapping"):
+                S.ubuntu_package_notice(admitted, rows, root, {**actual, "binaryPackage": "other"}, owned)
+            with self.assertRaisesRegex(S.D.Refused, "documentation roster differs"):
+                S.ubuntu_package_notice(admitted, rows, root, actual, set())
+            missing = deepcopy(admitted)
+            del missing["ubuntu"]["commonLicenses"]["GPL"]
+            with self.assertRaisesRegex(S.D.Refused, "Missing reviewed Ubuntu common license GPL"):
+                S.ubuntu_package_notice(missing, rows, root, actual, owned)
+            with tempfile.TemporaryDirectory(prefix="mrk-supplier-notice-data-") as name:
+                temporary = Path(name)
+                target = temporary / expected["copyright"]["noticePath"]
+                target.parent.mkdir(parents=True)
+                target.write_bytes(b"Not the original Ubuntu copyright.\n")
+                with self.assertRaisesRegex(S.D.Refused, "original copyright bytes differ"):
+                    S.ubuntu_package_notice(admitted, rows, temporary, actual, owned)
+
     def test_native_notice_diagnostic_traces_strict_refusal_and_never_continues(self):
         selected = Path("/usr/share/doc/gcc-13-x86-64-linux-gnu/copyright")
         alias = selected.parent

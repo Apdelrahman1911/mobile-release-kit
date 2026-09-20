@@ -54,7 +54,7 @@ MAX_DEB = 512 << 20
 KERNEL_SELECTOR = "installed_runtime::tests::kernel_scope_is_reviewed_ubuntu"
 F1_MANIFEST_SHA256 = "3a075688d6bc7f69dbdaa017b5327d8ca892e12b49b0c2012a6cbea1f79a6061"
 FIXTURE_SOURCE = b"fn main() { std::process::exit(78); }\n"
-NOTICE_INPUTS_SHA256 = "10653f438f9a99f06673e7a6159081cc721de1393aacbeed5ecfa4f3b14f6138"
+NOTICE_INPUTS_SHA256 = "1b91c9ebcfbb2adced572570f1049f3ac3dd6cf9c9e915a5e5180b75b6173f17"
 SONAME_PACKAGES = {name: "libc6:amd64" for name in (
     "libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
     "libpthread.so.0", "librt.so.1", "libutil.so.1")}
@@ -654,6 +654,37 @@ def diagnose_native_notices(root):
     raise D.Refused("Diagnostic-only native notice observation ended; no lifecycle continuation was requested")
 
 
+def ubuntu_package_notice(admitted, rows, notices, actual, owned_files):
+    """Bind notice DATA to the actual package, without trusting live /usr/share."""
+    name = actual["binaryPackage"].split(":")[0]
+    expected = admitted["ubuntu"]["packages"].get(name)
+    D.need(expected is not None, "No reviewed Ubuntu notice mapping for " + name)
+    keys = ("version", "architecture", "sourcePackage", "sourceVersion")
+    D.need(all(actual[key] == expected[key] for key in keys),
+           "Ubuntu notice package tuple differs for " + name + ": " + actual["version"])
+    D.need(all("/" + entry["path"] in owned_files for entry in expected["ownedDocumentation"]),
+           "Ubuntu package documentation roster differs for " + name)
+    copyright = expected["copyright"]
+    path = notices / copyright["noticePath"]
+    body = D.read(path, 2 << 20)
+    pin = rows[copyright["noticePath"]]
+    D.need(len(body) == pin["size"] and hashlib.sha256(body).hexdigest() == pin["sha256"],
+           "Ubuntu original copyright bytes differ for " + name)
+    references = sorted({found.decode("ascii").rstrip(".") for found in re.findall(COMMON_LICENSE_PATTERN, body)})
+    D.need(references == copyright["commonReferences"] and all(item in COMMON_LICENSES for item in references),
+           "Ubuntu copyright common-license references differ for " + name)
+    common = admitted["ubuntu"]["commonLicenses"]
+    selected = {}
+    for item in references:
+        D.need(item in common, "Missing reviewed Ubuntu common license " + item)
+        row = common[item]
+        D.bound(notices / row["noticePath"], rows[row["noticePath"]])
+        selected[item] = row
+    return {"source": "reviewed-ubuntu-package-member-data", "packageArchive": expected["archive"],
+            "copyright": copyright, "documentationPackages": expected["documentationPackages"],
+            "commonLicenseSource": admitted["ubuntu"]["commonLicenseSource"], "commonLicenses": selected}
+
+
 def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw):
     """Standard toolchain/support input provenance, not a linked-object census."""
     notice_source = source / "desktop/packaging/debian/native-notices"
@@ -736,7 +767,7 @@ def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw):
     for path in [manifest_path, *component_manifests, *(toolchain / name for name in sorted(compiler_names | std_names | {"bin/cargo"}))]:
         inputs.append({**D.file_record(path, 512 << 20), "path": str(path)})
     D.need(sum(row["size"] for row in inputs) <= 1 << 30, "Native compiler/component input bound")
-    os_files, os_packages, package_files, common_notices = {}, {}, {}, set()
+    os_files, os_packages, package_files = {}, {}, {}
     counter = 0
 
     def host(path, limit=MAX_BINARY):
@@ -769,25 +800,12 @@ def native_inputs(check, source, work, environment, cargo, rustc, metadata_raw):
                "sourcePackage": values[4], "sourceVersion": values[5], "queryArgv": argv,
                "querySha256": hashlib.sha256(result.stdout).hexdigest()}
         os_packages[name], package_files[name] = row, set(files)
-        doc = host(Path("/usr/share/doc") / name.split(":")[0] / "copyright", 2 << 20)
-        target = notices / "host" / name.split(":")[0] / "copyright"
-        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if not target.exists():
-            D.copy(Path(doc["path"]), target, {key: doc[key] for key in ("path", "size", "sha256")}, 0o644)
-        body = D.read(Path(doc["path"]), 2 << 20)
-        for found in re.findall(COMMON_LICENSE_PATTERN, body):
-            item = found.decode("ascii").rstrip(".")
-            D.need(item in COMMON_LICENSES, "Unreviewed common native license reference")
-            if item not in common_notices:
-                common = host(Path("/usr/share/common-licenses") / item, 256 << 10)
-                destination = notices / "host/common" / item
-                destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                D.copy(Path(common["path"]), destination, {k: common[k] for k in ("path", "size", "sha256")}, 0o644)
-                common_notices.add(item)
-        row["copyright"] = {key: doc[key] for key in ("selectedPath", "path", "size", "sha256")}
-        # A package's documentation directory may be a protected link to its
-        # compiler/base package. Bind that original owner/version too.
-        owner_of(Path(doc["path"]))
+        # The hosted image has a writable /usr/share. Copyright is inert DATA
+        # from reviewed original package members, never authority from that
+        # installed path. Bind each actual package in the original alias chain.
+        row["copyright"] = ubuntu_package_notice(admitted, rows, notices, row, package_files[name])
+        for documentation_package in row["copyright"]["documentationPackages"]:
+            package(documentation_package)
         return row
 
     def owner_of(path):

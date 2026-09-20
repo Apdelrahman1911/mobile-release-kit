@@ -37,17 +37,14 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Diagnose native notice paths only; stop before downloads or builds
+      - name: Prepare one bounded package lifecycle check
         id: prepare
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
           MRK_UBUNTU_PUBLICATION_VERIFY: '1'
-        run: |
-          /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py diagnose-native-notices
-          # This diagnostic is not a lifecycle pass, even if Python returns zero.
-          exit 1
+        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py prepare
       # The token is confined to this fixed, read-only artifact transport.
       # The driver validates every admitted member before any compilation/use.
       - name: Download the exact accepted runtime preparation as DATA

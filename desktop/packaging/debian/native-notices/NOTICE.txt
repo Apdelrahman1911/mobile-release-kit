@@ -44,5 +44,9 @@ Publisher resolved/compiled registry inputs (build/proc-macro entries retained c
 
 Original notices/license texts are copied verbatim, not replaced by this SPDX summary.
 The legacy metadata spelling MIT/Apache-2.0 for version_check denotes the alternatives; keep its original texts.
-Native libc/loader/libgcc package versions and notices must come from the actual admitted job inputs.
+Native executable/linker/CRT/DSO bytes remain protected actual job inputs.
+Ubuntu copyright/common-license originals under notices/ubuntu are reviewed package-member DATA.
+inputs.json binds actual binary/source/version/architecture and complete documentation-owner chains.
+Never trust writable live /usr/share or substitute a nearby package version for these originals.
+base-files supplies fixed standard license text, not a claim about the host base-files version.
 This input set neither redistributes those system libraries nor claims final notice completeness.
