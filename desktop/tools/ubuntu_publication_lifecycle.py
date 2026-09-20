@@ -53,6 +53,17 @@ SHOW = ("Id", "InvocationID", "ControlGroup", "Type", "User", "Group", "WorkingD
 TOOLS = ("/usr/bin/python3.12", "/usr/bin/systemctl", "/usr/bin/dpkg", "/usr/bin/dpkg-query",
          "/usr/bin/dpkg-deb", "/usr/bin/dpkg-split", "/usr/bin/tar", "/usr/bin/setpriv", "/usr/bin/env", "/usr/bin/dash",
          "/usr/sbin/ldconfig", "/usr/sbin/start-stop-daemon")
+NEEDRESTART_CONFIG = Path("/etc/dpkg/dpkg.cfg.d/needrestart")
+NEEDRESTART_CONFIG_PIN = (274, "a906969392a7a72cbe731718792a98c396f8aee414760b8b0c51fbc7477d5ca7")
+NEEDRESTART_SCRIPT = Path("/usr/lib/needrestart/dpkg-status")
+NEEDRESTART_SCRIPT_PIN = (1045, "7431617eeb9f795caa235078f4d3c59fc46661f68f6188ebc80c781ad83f4010")
+NEEDRESTART_OPTION = "status-logger=(test -x /usr/lib/needrestart/dpkg-status && /usr/lib/needrestart/dpkg-status || cat > /dev/null)"
+NEEDRESTART_TOOLS = ("cat", "mkdir", "touch")
+NEEDRESTART_MARKERS = {"unpacked", "errored"}
+TOOLS += tuple("/usr/bin/" + name for name in NEEDRESTART_TOOLS)
+PACKAGE_ACTIONS = {"unpack": "--unpack", "configure": "--configure", "upgrade": "--install",
+                   "upgrade-unpack": "--unpack", "upgrade-configure": "--configure",
+                   "duplicate": "--install", "remove": "--remove", "purge": "--purge"}
 SCRIPT_PINS = {"postinst": (403, "1592b55fbace8275427a0275528a45e5a92539d8b5c1cb063105a7bd8a956df4"),
                "prerm": (264, "0416fe9a7db28e04499f68e4280a55041001d379335c51b5d53ff47abc246b00"),
                "postrm": (216, "6170e316095f747b772f081778c610734651136cebcde0cf7a3cebbc0bb3737a")}
@@ -521,6 +532,16 @@ def config_options(raw):
     return options
 
 
+def dpkg_config_options(path, raw):
+    # The generic hook refusal stays closed. Only this complete distribution
+    # file, at its fixed pathname, selects the independently reviewed logger.
+    if path == NEEDRESTART_CONFIG:
+        need(type(raw) is bytes and (len(raw), hashlib.sha256(raw).hexdigest()) == NEEDRESTART_CONFIG_PIN,
+             "Exact needrestart configuration differs")
+        return [NEEDRESTART_OPTION]
+    return config_options(raw)
+
+
 def protected_record(path, limit=FILE_LIMIT):
     directory(path.parent, protected=True)
     before = path.lstat()
@@ -530,8 +551,158 @@ def protected_record(path, limit=FILE_LIMIT):
     return {**result, "identity": list(identity(before))}
 
 
+def needrestart_inputs():
+    script = protected_record(NEEDRESTART_SCRIPT, NEEDRESTART_SCRIPT_PIN[0])
+    need((script["size"], script["sha256"]) == NEEDRESTART_SCRIPT_PIN
+         and stat.S_IMODE(script["identity"][2]) == 0o755, "Exact needrestart logger differs")
+    search = []
+    for name in NEEDRESTART_TOOLS:
+        shadow = Path("/usr/sbin") / name
+        directory(shadow.parent, protected=True)
+        _absent(shadow)  # DPKG_PATH searches this before the admitted /usr/bin.
+        search.append(str(shadow))
+    null = Path("/dev/null")
+    directory(null.parent, protected=True)
+    parents = {str(path): list(identity(path.lstat())[:5]) for path in (null.parent, *null.parent.parents)}
+    for path in (null.parent, *null.parent.parents):
+        _xattrs(path, True)
+    before = null.lstat()
+    need(stat.S_ISCHR(before.st_mode) and before.st_uid == before.st_gid == 0 and before.st_nlink == 1
+         and stat.S_IMODE(before.st_mode) == 0o666 and (os.major(before.st_rdev), os.minor(before.st_rdev)) == (1, 3),
+         "Fallback is not the original root-owned null device")
+    _xattrs(null, False)
+    need(identity(null.lstat()) == identity(before)
+         and all(list(identity(Path(path).lstat())[:5]) == row for path, row in parents.items()), "Null-device binding drift")
+    return {"script": script, "absentEarlierSearch": search,
+            "nullDevice": {"identity": list(identity(before)[:6]), "device": [1, 3], "parents": parents}}
+
+
+def needrestart_state():
+    # Mutable package-manager state is deliberately NOT part of dpkg_policy's
+    # immutable equality. Nothing here creates, repairs or adopts a host object.
+    run, base = Path("/run"), Path("/run/needrestart")
+    directory(run, protected=True)
+    _xattrs(run, True)
+    run_identity = list(identity(run.lstat())[:5])
+    try:
+        before = base.lstat()
+    except FileNotFoundError:
+        _absent(base)
+        need(list(identity(run.lstat())[:5]) == run_identity, "Marker parent drift")
+        return {"runIdentity": run_identity, "directory": None, "markers": {}}
+    directory(base, protected=True)
+    need(not before.st_mode & 0o7000 and before.st_nlink == 2, "Nonordinary marker directory")
+    _xattrs(base, True)
+    markers = {}
+    with os.scandir(base) as entries:
+        for entry in entries:
+            need(entry.name in NEEDRESTART_MARKERS and entry.name not in markers and len(markers) < 2,
+                 "Unexpected needrestart marker entry")
+            path = base / entry.name
+            _xattrs(path, False)
+            markers[entry.name] = protected_record(path, 0)
+    need(identity(base.lstat()) == identity(before) and list(identity(run.lstat())[:5]) == run_identity,
+         "Marker namespace changed during observation")
+    return {"runIdentity": run_identity, "directory": list(identity(before)), "markers": markers}
+
+
+def needrestart_transition(before, after):
+    # These snapshots do not acknowledge logger completion, consumed input or
+    # guaranteed marker creation. Dpkg does not wait for/ack its status logger.
+    def original(row, kind, links):
+        need(type(row) is list and len(row) == 9 and all(type(number) is int for number in row)
+             and row[0] >= 0 and row[1] > 0 and stat.S_IFMT(row[2]) == kind
+             and row[3] == row[4] == 0 and row[5] == links and row[6] >= 0 and not row[2] & 0o7022,
+             "Unprotected or aliased marker identity")
+    empty_sha = hashlib.sha256(b"").hexdigest()
+    for value in (before, after):
+        need(type(value) is dict and set(value) == {"runIdentity", "directory", "markers"}
+             and type(value["runIdentity"]) is list and len(value["runIdentity"]) == 5
+             and all(type(number) is int for number in value["runIdentity"])
+             and stat.S_ISDIR(value["runIdentity"][2]) and value["runIdentity"][3:] == [0, 0]
+             and not value["runIdentity"][2] & 0o7022
+             and type(value["markers"]) is dict and set(value["markers"]) <= NEEDRESTART_MARKERS,
+             "Invalid bounded marker observation")
+        if value["directory"] is None:
+            need(not value["markers"], "Markers without the original directory")
+        else:
+            original(value["directory"], stat.S_IFDIR, 2)
+        aliases = set()
+        for name, row in value["markers"].items():
+            need(type(row) is dict and set(row) == {"path", "size", "sha256", "identity"}
+                 and row["path"] == "/run/needrestart/" + name and type(row["size"]) is int
+                 and row["size"] == 0 and row["sha256"] == empty_sha, "Marker content or name differs")
+            original(row["identity"], stat.S_IFREG, 1)
+            pair = tuple(row["identity"][:2])
+            need(row["identity"][6] == 0 and pair not in aliases, "Nonempty or aliased marker")
+            aliases.add(pair)
+    need(before["runIdentity"] == after["runIdentity"], "Original marker parent replaced")
+    if before["directory"] is not None:
+        need(after["directory"] is not None and before["directory"][:6] == after["directory"][:6],
+             "Original marker directory replaced or changed authority")
+        if set(before["markers"]) == set(after["markers"]):
+            need(before["directory"][6] == after["directory"][6], "Marker directory changed without a known creation")
+    elif after["directory"] is not None:
+        need(stat.S_IMODE(after["directory"][2]) == 0o755, "New marker directory did not use dpkg umask 022")
+    need(set(before["markers"]) <= set(after["markers"]), "Existing marker removed")
+    for name, row in after["markers"].items():
+        if name in before["markers"]:
+            need(row["identity"][:7] == before["markers"][name]["identity"][:7], "Original marker replaced or changed authority/content")
+        else:
+            need(stat.S_IMODE(row["identity"][2]) == 0o644, "New marker did not use dpkg umask 022")
+
+
+def package_command(label, argv, *, policy, codes=(0,), endpoint=None):
+    global _FAILED, _PHASE
+    try:
+        _PHASE = label
+        need(not _FAILED and label in PACKAGE_ACTIONS and type(argv) is list and len(argv) == 5
+             and argv[:3] == ["/usr/bin/dpkg", "--debug=2", "--no-triggers"] and argv[3] == PACKAGE_ACTIONS[label],
+             "Fixed package mutation required")
+        need(dpkg_policy() == policy, "Dpkg configuration/helper input changed before " + label)
+        before = needrestart_state()
+        needrestart_transition(before, before)
+        previous = [row["needrestartMarkers"]["after"] for row in _COMMANDS if "needrestartMarkers" in row]
+        if previous:
+            needrestart_transition(previous[-1], before)
+        options = {} if endpoint is None else {"endpoint": endpoint}
+        result = command(label, argv, maximum=240, codes=codes, env={**_environment(), "PATH": DPKG_PATH}, **options)
+        # Only a positive return of the SAME original command owner permits any
+        # post-state access (including expected dpkg collision exit 1).
+        _FAILED = True
+        after = needrestart_state()
+        needrestart_transition(before, after)
+        need(time.monotonic() < min(_END, _END if endpoint is None else endpoint), "Package observation completed late")
+        need(_COMMANDS and _COMMANDS[-1]["phase"] == label and _COMMANDS[-1]["argv"] == argv,
+             "Original package command record missing")
+        _COMMANDS[-1]["needrestartMarkers"] = {"before": before, "after": after, "loggerCompletionClaimed": False}
+        _FAILED = False
+        return result
+    except BaseException:
+        _FAILED = True
+        raise
+
+
+def verify_package_observations(commands):
+    previous = None
+    for row in commands:
+        if row["phase"] not in PACKAGE_ACTIONS:
+            need("needrestartMarkers" not in row and row["argv"][0] != "/usr/bin/dpkg", "Unwrapped package command")
+            continue
+        need(row["argv"][:4] == ["/usr/bin/dpkg", "--debug=2", "--no-triggers", PACKAGE_ACTIONS[row["phase"]]]
+             and len(row["argv"]) == 5, "Closed package command differs")
+        observed = row.get("needrestartMarkers")
+        need(type(observed) is dict and set(observed) == {"before", "after", "loggerCompletionClaimed"}
+             and observed["loggerCompletionClaimed"] is False, "Marker observation is missing or claims logger acknowledgement")
+        if previous is not None:
+            needrestart_transition(previous, observed["before"])
+        needrestart_transition(observed["before"], observed["after"])
+        previous = observed["after"]
+
+
 def dpkg_policy():
-    result = {"tools": [protected_record(Path(name)) for name in TOOLS], "configs": [], "shellLinks": []}
+    result = {"tools": [protected_record(Path(name)) for name in TOOLS], "configs": [], "shellLinks": [],
+              "needrestartInputs": needrestart_inputs()}
     for name, targets in (("/bin", {"usr/bin", "/usr/bin"}), ("/sbin", {"usr/sbin", "/usr/sbin"}),
                           ("/usr/bin/sh", {"dash", "/usr/bin/dash"})):
         path = Path(name)
@@ -554,7 +725,7 @@ def dpkg_policy():
     paths.extend(children)
     for path in paths:
         row = protected_record(path, 64 << 10)
-        row["options"] = config_options(read(path, 64 << 10))
+        row["options"] = dpkg_config_options(path, read(path, 64 << 10))
         need(protected_record(path, 64 << 10) == {key: row[key] for key in ("path", "size", "sha256", "identity")}, "Dpkg config drift")
         result["configs"].append(row)
     need(before == identity(fragments.stat()), "Dpkg config directory drift")
@@ -851,9 +1022,8 @@ def unit_start():
         need(actual == {"status": status, "version": VERSIONS[variant][1] if variant else ""}, "Actual package state differs in " + phase)
 
     def mutate(phase, action, item, expected, *, collision=False, published=False):
-        need(dpkg_policy() == policy, "Dpkg configuration/helper input changed before " + phase)
         argv = ["/usr/bin/dpkg", "--debug=2", "--no-triggers", action, str(item)]
-        result = command(phase, argv, maximum=240, codes=(1,) if collision else (0,), env={**_environment(), "PATH": DPKG_PATH})
+        result = package_command(phase, argv, policy=policy, codes=(1,) if collision else (0,))
         traces[phase] = script_trace(result.stderr, expected)
         if collision:
             line = REFUSAL.format("a staging or published name already exists").encode("ascii")
@@ -921,6 +1091,7 @@ def unit_start():
     observation("purge")
     need(tuple(row["phase"] for row in _COMMANDS) == ROOT_PHASES and not _FAILED and time.monotonic() < _END,
          "Original fixed root command roster incomplete or late")
+    verify_package_observations(_COMMANDS)
     _retain("mutation-denials.txt", canonical({phase: row["denials"] for phase, row in observations.items()}))
     _retain("unit-result.json", canonical({"sourceSha": value["sourceSha"], "handoffSha256": request_sha,
         "entrySha256": start["entrySha256"], "invocationId": start["invocationId"], "unit": start["unit"]["Id"],
@@ -1022,6 +1193,7 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
     for row in outcome["commands"]:
         codes = (0, 1) if row["phase"] in {"state-initial", "state-purge"} else ((1,) if row["phase"] in {"nonroot-helper", "duplicate"} else (0,))
         need(type(row["exitCode"]) is int and row["exitCode"] in codes, "Original lifecycle phase exit differs")
+    verify_package_observations(outcome["commands"])
     rows = outcome["files"] + stop["files"] + [stop["result"]]
     for name in ("unit-stop.json",):
         pin = record(root / "public" / name, JSON_LIMIT)

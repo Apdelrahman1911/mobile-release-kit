@@ -37,17 +37,14 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Diagnose dpkg configuration only; stop before downloads or builds
+      - name: Prepare one bounded package lifecycle check
         id: prepare
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
           MRK_UBUNTU_PUBLICATION_VERIFY: '1'
-        run: |
-          /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py diagnose-dpkg-config
-          # Diagnostic completion is never permission to continue the lifecycle.
-          exit 1
+        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py prepare
       # The token is confined to this fixed, read-only artifact transport.
       # The driver validates every admitted member before any compilation/use.
       - name: Download the exact accepted runtime preparation as DATA
@@ -70,7 +67,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Independently reviewed entry bytes; verified before root imports.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'c865b205b91787a61ad9a81c22b9b946650bfc732a182ff33ebbaa1fee47e7fa'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'dfd29303beb6ac52d192c1a2693090115fd088013eea843c9b3e8710b79583fa'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path
@@ -113,18 +110,18 @@ jobs:
             write(r/'private/bootstrap-pins.txt',(entry_sha+'\n'+request_sha+'\n').encode('ascii'))
             os.execv('/usr/bin/python3.12',['/usr/bin/python3.12','-I','-S','-B',str(r/'entry.py'),'unit-start'])
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py
-      # Keep failure diagnosis small without discarding the complete evidence.
-      - name: Retain lightweight failure diagnostics
-        if: failure() && steps.prepare.outputs.root != ''
+      # Review bounded text records without downloading the compiled payloads.
+      # The complete artifact below remains required for full-artifact consumers.
+      - name: Retain lightweight lifecycle evidence
+        if: always() && steps.prepare.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-ubuntu-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.prepare.outputs.root }}/public/*.stdout
             ${{ steps.prepare.outputs.root }}/public/*.stderr
-            ${{ steps.prepare.outputs.root }}/public/failure.json
-            ${{ steps.prepare.outputs.root }}/public/dpkg-configuration-diagnostic.json
-            ${{ steps.prepare.outputs.root }}/public/compiler*.json
+            ${{ steps.prepare.outputs.root }}/public/*.json
+            ${{ steps.prepare.outputs.root }}/public/*.txt
           if-no-files-found: error
           retention-days: 14
       - name: Retain original public package lifecycle evidence
