@@ -723,6 +723,30 @@ def footprint(root: Path, maximum: int, entries: int, *, seal: bool = False) -> 
             "maximumEntries": entries}
 
 
+def admit_root_report(expected: bytes) -> None:
+    # The root materializer intentionally writes private0600 reports. This one
+    # authenticated, nonsecret control must also be readable by the inside UID.
+    # Do not change its writer/defaults or any other file's permissions.
+    path = PREP / "inputs/rootfs.json"
+    before = path.lstat()
+    need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and before.st_uid == 0
+         and stat.S_IMODE(before.st_mode) == 0o600, "Original root report identity/mode differs")
+    need(read(path) == expected, "Actual root materialization differs from expectation")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        need(state(os.fstat(fd)) == state(before) == state(path.lstat()), "Root report changed before admission")
+        os.fchmod(fd, 0o444)
+        after = os.fstat(fd)
+        # fchmod deliberately changes mode/ctime, not identity or content.
+        need(stat.S_IMODE(after.st_mode) == 0o444 and all(getattr(after, name) == getattr(before, name)
+             for name in ("st_dev", "st_ino", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns")),
+             "Root report mode/identity readback differs")
+        need(read(path) == expected and state(os.fstat(fd)) == state(after) == state(path.lstat()),
+             "Root report admission readback differs")
+    finally:
+        os.close(fd)  # A failed original close also refuses further preparation.
+
+
 def context_from_environment() -> dict:
     source, run_id = os.environ.get("MRK_SOURCE_SHA", ""), os.environ.get("MRK_RUN_ID", "")
     need(re.fullmatch(r"[0-9a-f]{40}", source) is not None and source != "0" * 40
@@ -816,7 +840,8 @@ def prepare() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)  # Every imported helper was hash-pinned above.
     module.materialize_source_root(PREP / "controls/root-request.json", PREP / "root", PREP / "inputs/rootfs.json")
-    need(read(PREP / "inputs/rootfs.json") == data["blobs"]["rootfs.json"], "Actual root materialization differs from expectation")
+    stage("root-report-admission")
+    admit_root_report(data["blobs"]["rootfs.json"])
     for source in data["lock"]["sources"]:
         stage("source-materialization-" + source["id"])
         target = PREP / "inputs/archives" / (source["id"] + ".archive")
@@ -1079,14 +1104,17 @@ def unit_stop() -> None:
 
 
 def inside() -> None:
-    stage("sandbox-readback")
+    stage("sandbox-context")
     context = decode(read(INNER_CONTEXT, 64 << 10))
+    stage("sandbox-identity")
     need(os.getresuid() == (context["uid"],) * 3 and os.getresgid() == (context["gid"],) * 3
          and context["uid"] > 0 and context["gid"] > 0 and os.getgroups() == [], "Real host credentials not dropped")
+    stage("sandbox-namespaces")
     actual = namespaces()
     need(actual["user"] == context["hostNamespaces"]["user"]
          and all(actual[name] != context["hostNamespaces"][name] for name in NS_NAMES if name != "user"),
          "Missing namespace separation or remapped host UID")
+    stage("sandbox-privileges")
     fields = status_fields()
     need(fields["NoNewPrivs"].strip() == "1" and fields["Seccomp"].strip() == "2"
          and int(fields["Seccomp_filters"]) >= 1
@@ -1094,6 +1122,7 @@ def inside() -> None:
          "Privilege regain/capabilities or namespace filter failure")
     for kind, value in LIMITS.items():
         need(resource.getrlimit(kind) == (value, value), "Effective nonraiseable rlimit differs")
+    stage("sandbox-descriptors")
     descriptors = os.listdir("/proc/self/fd")
     need(len(descriptors) <= 129 and all(name.isdecimal() for name in descriptors), "Descriptor roster bound")
     for fd in (int(name) for name in descriptors if int(name) > 2):
@@ -1105,6 +1134,7 @@ def inside() -> None:
             raise Refused("Inherited outside descriptor")
     need(stat.S_ISCHR(os.fstat(0).st_mode) and os.fstat(0).st_rdev == os.makedev(1, 3)
          and all(stat.S_ISFIFO(os.fstat(fd).st_mode) for fd in (1, 2)), "Stdio is not null plus original bounded pipes")
+    stage("sandbox-mounts")
     table = mounts()
     need(table["/"]["options"].count("ro") == 1 and "ro" in table[str(INPUTS)]["options"]
          and "ro" in table["/proc"]["options"] and "ro" in table["/dev"]["options"],
@@ -1125,9 +1155,12 @@ def inside() -> None:
     need(Path("/work").stat().st_uid == context["uid"] and stat.S_IMODE(Path("/work").stat().st_mode) == 0o700
          and not any((Path("/work") / name).exists() for name in ("build", "deps", "stage", "receipts", "home", "tmp")),
          "Work ownership/fresh recipe paths differ")
+    stage("sandbox-inputs")
     data = admission(INPUTS, INPUTS / "recipe")
+    stage("sandbox-environment")
     need(dict(os.environ) == data["lock"]["environment"] and os.path.realpath(sys.executable) == "/usr/bin/python3.12"
          and sys.flags.isolated and sys.flags.no_site and sys.flags.dont_write_bytecode, "Fixed root Python/environment differs")
+    stage("sandbox-receipt")
     write(Path("/work/hosted-inside.json"), canonical({"schema": "mrk-cpython-source-inside-1",
         "uid": os.getuid(), "gid": os.getgid(), "namespaces": actual, "capacity": capacity,
         "capabilities": "all-zero", "noNewPrivileges": True, "seccomp": 2,

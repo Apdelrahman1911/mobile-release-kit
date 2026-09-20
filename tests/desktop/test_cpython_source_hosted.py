@@ -9,6 +9,7 @@ import copy
 import importlib.util
 import io
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -129,10 +130,20 @@ class HostedSourceTests(unittest.TestCase):
         directory = SimpleNamespace(st_uid=999, st_mode=H.stat.S_IFDIR | 0o700)
         null_device = H.os.makedev(1, 3)
 
-        for scenario in ("success", "late-admission-refusal", "cwd-failure"):
+        failed_reads = {
+            "context-failure": "sandbox-context", "namespaces-failure": "sandbox-namespaces",
+            "privileges-failure": "sandbox-privileges", "descriptors-failure": "sandbox-descriptors",
+            "mounts-failure": "sandbox-mounts", "inputs-failure": "sandbox-inputs"}
+        for scenario in ("success", "late-admission-refusal", "cwd-failure", *failed_reads):
             events = []
 
+            def observed(kind, value):
+                if scenario == kind + "-failure":
+                    raise PermissionError("inert read failure, never a public pathname")
+                return value
+
             def admitted(*args):
+                observed("inputs", None)
                 events.append("admitted-inputs")
                 return {"lock": {"environment": environment if scenario != "late-admission-refusal" else {}}}
 
@@ -150,7 +161,7 @@ class HostedSourceTests(unittest.TestCase):
             fake_os = SimpleNamespace(
                 getresuid=lambda: (999,) * 3, getresgid=lambda: (998,) * 3, getgroups=lambda: [],
                 getuid=lambda: 999, getgid=lambda: 998, environ=environment,
-                listdir=lambda path: ["0", "1", "2"], makedev=H.os.makedev,
+                listdir=lambda path: observed("descriptors", ["0", "1", "2"]), makedev=H.os.makedev,
                 fstat=lambda fd: SimpleNamespace(st_mode=H.stat.S_IFCHR if fd == 0 else H.stat.S_IFIFO,
                                                 st_rdev=null_device if fd == 0 else 0),
                 stat=lambda path: SimpleNamespace(st_dev=1, st_ino=1 if path == "/work" else 2),
@@ -159,11 +170,11 @@ class HostedSourceTests(unittest.TestCase):
                 chdir=mock.Mock(side_effect=chdir), execve=mock.Mock(side_effect=execute))
             with self.subTest(scenario=scenario), mock.patch.object(H, "os", fake_os), \
                  mock.patch.object(H, "sys", fake_sys), mock.patch.object(H, "_STAGE", "admission"), \
-                 mock.patch.object(H, "read", return_value=H.canonical(context)), \
-                 mock.patch.object(H, "namespaces", return_value=namespaces), \
-                 mock.patch.object(H, "status_fields", return_value=fields), \
+                 mock.patch.object(H, "read", side_effect=lambda *args: observed("context", H.canonical(context))), \
+                 mock.patch.object(H, "namespaces", side_effect=lambda: observed("namespaces", namespaces)), \
+                 mock.patch.object(H, "status_fields", side_effect=lambda: observed("privileges", fields)), \
                  mock.patch.object(H.resource, "getrlimit", side_effect=lambda kind: (H.LIMITS[kind],) * 2), \
-                 mock.patch.object(H, "mounts", return_value=table), \
+                 mock.patch.object(H, "mounts", side_effect=lambda: observed("mounts", table)), \
                  mock.patch.object(H, "task_capacity", return_value={"inert": True}), \
                  mock.patch.object(H.Path, "stat", return_value=directory), \
                  mock.patch.object(H.Path, "exists", return_value=False), \
@@ -181,12 +192,85 @@ class HostedSourceTests(unittest.TestCase):
                     self.assertEqual(events, ["admitted-inputs"])
                     fake_os.chdir.assert_not_called()
                     fake_os.execve.assert_not_called()
-                else:
+                elif scenario == "cwd-failure":
                     with self.assertRaises(PermissionError):
                         H.inside()
                     self.assertEqual(events, ["admitted-inputs", "inside-receipt", "cwd"])
                     self.assertEqual(H._STAGE, "original-recipe-cwd")
                     fake_os.execve.assert_not_called()
+                else:
+                    with self.assertRaises(PermissionError):
+                        H.inside()
+                    self.assertEqual(H._STAGE, failed_reads[scenario])
+                    self.assertEqual(events, [])
+                    fake_os.chdir.assert_not_called()
+                    fake_os.execve.assert_not_called()
+
+    @unittest.skipUnless(H.os.geteuid() == 0, "requires the reviewed root-owned inert DATA fixture")
+    def test_generated_root_report_admission_preserves_inode_bytes_and_other_modes(self):
+        previous = H.os.umask(0o077)
+        try:
+            with tempfile.TemporaryDirectory(prefix="mrk-root-report-") as scratch:
+                prep = Path(scratch)
+                (prep / "inputs").mkdir(mode=0o700)
+                report = prep / "inputs/rootfs.json"
+                raw = b'{"inert":"root-report"}\n'
+                H.write(report, raw, 0o600)  # Same explicit default as the real materializer.
+                H.write(prep / "private.txt", b"inert private DATA\n", 0o600)
+                H.write(prep / "context.json", b"inert public context\n")
+                before = report.stat()
+                with mock.patch.object(H, "PREP", prep):
+                    H.admit_root_report(raw)
+                after = report.stat()
+                self.assertEqual((before.st_dev, before.st_ino, before.st_uid, before.st_gid),
+                                 (after.st_dev, after.st_ino, after.st_uid, after.st_gid))
+                self.assertEqual((H.stat.S_IMODE(before.st_mode), H.stat.S_IMODE(after.st_mode)), (0o600, 0o444))
+                self.assertEqual(report.read_bytes(), raw)
+                self.assertEqual(H.stat.S_IMODE((prep / "private.txt").stat().st_mode), 0o600)
+                self.assertEqual(H.stat.S_IMODE((prep / "context.json").stat().st_mode), 0o444)
+                self.assertEqual(H.stat.S_IMODE((prep / "inputs").stat().st_mode), 0o700)
+        finally:
+            H.os.umask(previous)
+
+    @unittest.skipUnless(H.os.geteuid() == 0, "requires the reviewed root-owned inert DATA fixture")
+    def test_root_report_admission_refuses_changed_bytes_modes_and_original_io_failure(self):
+        raw = b'{"inert":"root-report"}\n'
+        for scenario in ("changed-bytes", "changed-mode", "chmod-failure", "close-failure"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(prefix="mrk-root-report-") as scratch:
+                prep = Path(scratch)
+                (prep / "inputs").mkdir(mode=0o700)
+                report = prep / "inputs/rootfs.json"
+                H.write(report, raw, 0o644 if scenario == "changed-mode" else 0o600)
+                original_chmod, original_close = H.os.fchmod, H.os.close
+                selected = {"fd": None, "closes": 0}
+
+                def chmod(fd, mode):
+                    selected["fd"] = fd
+                    if scenario == "chmod-failure":
+                        raise PermissionError("inert chmod failure")
+                    original_chmod(fd, mode)
+
+                def close(fd):
+                    original_close(fd)
+                    if fd == selected["fd"]:
+                        selected["closes"] += 1
+                        if scenario == "close-failure":
+                            # The real test descriptor is already closed; inject
+                            # an error without leaking or guessing another fd.
+                            raise OSError("inert original close failure")
+
+                continuation = mock.Mock()
+                with mock.patch.object(H, "PREP", prep), mock.patch.object(H.os, "fchmod", side_effect=chmod) as changed, \
+                     mock.patch.object(H.os, "close", side_effect=close):
+                    with self.assertRaises(H.Refused if scenario in {"changed-bytes", "changed-mode"} else OSError):
+                        H.admit_root_report(b"different" if scenario == "changed-bytes" else raw)
+                        continuation()
+                continuation.assert_not_called()
+                if scenario in {"changed-bytes", "changed-mode"}:
+                    changed.assert_not_called()
+                else:
+                    self.assertEqual(selected["closes"], 1)
+                self.assertEqual(report.read_bytes(), raw)
 
     def test_root_controller_mount_setuid_exception_is_exact(self):
         def check(path, uid, mode):
