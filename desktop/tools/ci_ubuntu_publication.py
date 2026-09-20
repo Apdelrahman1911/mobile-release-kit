@@ -654,6 +654,77 @@ def diagnose_native_notices(root):
     raise D.Refused("Diagnostic-only native notice observation ended; no lifecycle continuation was requested")
 
 
+def diagnose_dpkg_config(root):
+    """Fresh nonroot config DATA only; never relax policy or start a lifecycle."""
+    preparation = D.decode(D.read(root / "preparation.json", 16384), 16384)
+    deadline = float(preparation["deadline"])
+    D.need(math.isfinite(deadline) and 0 < deadline - time.monotonic() <= 1200,
+           "Original dpkg diagnostic endpoint expired/invalid")
+    lifecycle = local("ubuntu_publication_lifecycle")
+    base, fragments = Path("/etc/dpkg"), Path("/etc/dpkg/dpkg.cfg.d")
+    names = {"no-debsig", "log", "force-unsafe-io", "force-safe-io", "force-confdef", "force-confold",
+             "force-bad-path", "path-exclude", "path-include", "pre-invoke", "post-invoke", "status-logger",
+             "root", "admindir", "instdir", "include"}
+    rows, options_seen = [], 0
+    complete, reason = False, None
+    try:
+        lifecycle.directory(base, protected=True)
+        lifecycle.directory(fragments, protected=True)
+        before = lifecycle.identity(fragments.lstat())
+        children = []
+        for path in fragments.iterdir():
+            D.need(len(children) < 64, "Dpkg diagnostic configuration entry bound")
+            children.append(path)
+        for path in [base / "dpkg.cfg", *sorted(children)]:
+            D.need(time.monotonic() < deadline, "Original dpkg diagnostic endpoint expired")
+            # Only ordinary fixed-parent names enter public diagnostics. Never
+            # retain arbitrary configuration bodies or hook/option values.
+            D.need(re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", path.name) is not None,
+                   "Dpkg diagnostic has an unreviewed configuration filename")
+            pin = lifecycle.protected_record(path, 64 << 10)
+            raw = lifecycle.read(path, 64 << 10)
+            D.need(len(raw) == pin["size"] and hashlib.sha256(raw).hexdigest() == pin["sha256"],
+                   "Dpkg diagnostic classified bytes differ from their binding")
+            row = {"file": pin, "acceptedByCurrentPolicy": False, "options": []}
+            try:
+                lifecycle.config_options(raw)
+            except (lifecycle.Refused, UnicodeDecodeError) as error:
+                row["reason"] = failure_reason(error)
+            else:
+                row["acceptedByCurrentPolicy"] = True
+            if raw.isascii() and b"\0" not in raw:
+                for number, text in enumerate(raw.decode("ascii").splitlines(), 1):
+                    line = text.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    options_seen += 1
+                    D.need(options_seen <= 256, "Dpkg diagnostic active-option bound")
+                    name = re.split(r"[\s=]", line, maxsplit=1)[0]
+                    row["options"].append({"line": number, "name": name if name in names else "unlisted-option",
+                                           "exactFlag": line == name and name in names,
+                                           "valueRetained": False})
+            # A parser refusal must still finish the same input readback.
+            D.need(lifecycle.protected_record(path, 64 << 10) == pin,
+                   "Dpkg diagnostic configuration changed after classification")
+            rows.append(row)
+        lifecycle.directory(base, protected=True)
+        lifecycle.directory(fragments, protected=True)
+        D.need(lifecycle.identity(fragments.lstat()) == before, "Dpkg diagnostic directory drift")
+        complete = True
+    except (D.Refused, lifecycle.Refused, OSError) as error:
+        reason = failure_reason(error)
+    report = {"scope": "dpkg-configuration-data-only", "qualified": False, "complete": complete, "reason": reason,
+              "sourceSha": preparation["sourceSha"], "runId": preparation["runId"], "attempt": preparation["attempt"],
+              "imageOS": os.environ["ImageOS"], "imageVersion": os.environ["ImageVersion"],
+              "originalDeadline": preparation["deadline"], "configs": rows,
+              "comparisonScope": "Fresh diagnostic VM only; not filesystem facts from failed run35521380991",
+              "continuation": "No download, compiler, package, native, root service or lifecycle continuation"}
+    raw = D.canonical(report)
+    D.need(len(raw) <= 128 << 10 and time.monotonic() < deadline, "Dpkg diagnostic report/endpoint bound")
+    D.write(root / "public/dpkg-configuration-diagnostic.json", raw)
+    raise D.Refused("Diagnostic-only dpkg configuration observation ended; no lifecycle continuation was requested")
+
+
 def ubuntu_package_notice(admitted, rows, notices, actual, owned_files):
     """Bind notice DATA to the actual package, without trusting live /usr/share."""
     name = actual["binaryPackage"].split(":")[0]
@@ -1225,10 +1296,12 @@ def verify():
 def main():
     if sys.argv[1:] == ["diagnose-native-notices"]:
         diagnose_native_notices(prepare())
+    elif sys.argv[1:] == ["diagnose-dpkg-config"]:
+        diagnose_dpkg_config(prepare())
     elif sys.argv[1:] == ["prepare"]:
         prepare()
     else:
-        D.need(len(sys.argv) == 1, "Expected prepare, diagnose-native-notices or the no-argument lifecycle verification entry")
+        D.need(len(sys.argv) == 1, "Expected prepare, a fixed diagnostic or the no-argument lifecycle verification entry")
         verify()
 
 

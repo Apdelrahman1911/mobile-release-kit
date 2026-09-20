@@ -158,6 +158,94 @@ class PublisherCI(unittest.TestCase):
                 with self.assertRaisesRegex(S.D.Refused, "original copyright bytes differ"):
                     S.ubuntu_package_notice(admitted, rows, temporary, actual, owned)
 
+    def test_dpkg_diagnostic_binds_classified_bytes_and_never_continues(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        base, fragments = Path("/etc/dpkg/dpkg.cfg"), Path("/etc/dpkg/dpkg.cfg.d")
+        fragment = fragments / "test-fragment"
+        ordinary = b"# ordinary inert configuration\nno-debsig\nlog /var/log/dpkg.log\n"
+        hook = b"pre-invoke=/private-value-that-must-not-appear\n"
+        cases = (("allowed", b"no-debsig\n"), ("unsafe-io", b"# inert\nforce-unsafe-io\n"),
+                 ("hook", hook), ("changed-body", b"no-debsig\n"), ("changed-file", b"no-debsig\n"),
+                 ("changed-directory", b"no-debsig\n"), ("entry-bound", b"no-debsig\n"),
+                 ("option-bound", b"no-debsig\n" * 257))
+        original_iterdir, original_lstat = Path.iterdir, Path.lstat
+        stop = "Diagnostic-only dpkg configuration observation ended; no lifecycle continuation was requested"
+        for case, body in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="mrk-dpkg-diagnostic-data-") as name:
+                root = Path(name)
+                (root / "public").mkdir()
+                preparation = {"sourceSha": "a" * 40, "runId": "10", "attempt": "1", "deadline": "1100.0"}
+                (root / "preparation.json").write_bytes(S.D.canonical(preparation))
+                bodies, calls, reads, directory_reads = {base: ordinary, fragment: body}, [], [], []
+                children = [fragments / ("fragment-" + str(i)) for i in range(65)] if case == "entry-bound" else [fragment]
+
+                def binding(path, limit):
+                    self.assertEqual(limit, 64 << 10)
+                    self.assertIn(path, bodies)
+                    calls.append(path)
+                    value = {"path": str(path), "size": len(bodies[path]),
+                             "sha256": hashlib.sha256(bodies[path]).hexdigest(), "identity": [1, 2, 3]}
+                    if case == "changed-file" and path == fragment and calls.count(path) == 2:
+                        value["identity"] = [1, 20, 3]
+                    return value
+
+                def read(path, limit):
+                    self.assertEqual(limit, 64 << 10)
+                    self.assertIn(path, calls, "Configuration read before protected admission")
+                    reads.append(path)
+                    return hook if case == "changed-body" and path == fragment else bodies[path]
+
+                def lstat(path, *args, **kwargs):
+                    if path != fragments:
+                        return original_lstat(path, *args, **kwargs)
+                    directory_reads.append(path)
+                    changed = case == "changed-directory" and len(directory_reads) == 2
+                    return SimpleNamespace(st_dev=1, st_ino=2 if changed else 1, st_mode=stat.S_IFDIR | 0o755,
+                        st_uid=0, st_gid=0, st_nlink=2, st_size=1, st_mtime_ns=1, st_ctime_ns=1)
+
+                with patch.object(S, "local", return_value=lifecycle), \
+                     patch.object(lifecycle, "directory") as directories, \
+                     patch.object(lifecycle, "protected_record", side_effect=binding), \
+                     patch.object(lifecycle, "read", side_effect=read), \
+                     patch.object(Path, "iterdir", lambda path: iter(children) if path == fragments else original_iterdir(path)), \
+                     patch.object(Path, "lstat", lstat), \
+                     patch.object(S.time, "monotonic", return_value=100), \
+                     patch.dict(S.os.environ, {"ImageOS": "ubuntu24", "ImageVersion": "mock-image"}), \
+                     patch.object(S.sys, "argv", ["ci_ubuntu_publication.py", "diagnose-dpkg-config"]), \
+                     patch.object(S, "prepare", return_value=root) as prepare, \
+                     patch.object(S, "verify", side_effect=AssertionError("Lifecycle continuation")) as verify, \
+                     patch.object(S, "Check", side_effect=AssertionError("Command owner setup")) as check:
+                    with self.assertRaisesRegex(S.D.Refused, stop):
+                        S.main()
+                    prepare.assert_called_once_with()
+                    verify.assert_not_called()
+                    check.assert_not_called()
+                raw = (root / "public/dpkg-configuration-diagnostic.json").read_bytes()
+                self.assertNotIn(b"private-value-that-must-not-appear", raw)
+                report = S.D.decode(raw, 128 << 10)
+                self.assertFalse(report["qualified"])
+                self.assertEqual(report["sourceSha"], preparation["sourceSha"])
+                self.assertEqual(report["originalDeadline"], preparation["deadline"])
+                self.assertEqual(report["imageVersion"], "mock-image")
+                self.assertIn("Fresh diagnostic VM only", report["comparisonScope"])
+                complete = case in {"allowed", "unsafe-io", "hook"}
+                self.assertEqual(report["complete"], complete)
+                self.assertTrue(all(call.kwargs == {"protected": True} for call in directories.call_args_list))
+                if complete:
+                    self.assertIsNone(report["reason"])
+                    self.assertEqual(calls, [base, base, fragment, fragment])
+                    self.assertEqual(reads, [base, fragment])
+                    self.assertEqual(len(directory_reads), 2)
+                    observed = report["configs"][1]
+                    self.assertEqual(observed["acceptedByCurrentPolicy"], case == "allowed")
+                    self.assertEqual(observed["options"], [{"line": 2 if case == "unsafe-io" else 1,
+                        "name": {"allowed": "no-debsig", "unsafe-io": "force-unsafe-io", "hook": "pre-invoke"}[case],
+                        "exactFlag": case != "hook", "valueRetained": False}])
+                else:
+                    self.assertIsNotNone(report["reason"])
+                    if case == "entry-bound":
+                        self.assertEqual(calls, [])
+
     def test_native_notice_diagnostic_traces_strict_refusal_and_never_continues(self):
         selected = Path("/usr/share/doc/gcc-13-x86-64-linux-gnu/copyright")
         alias = selected.parent
