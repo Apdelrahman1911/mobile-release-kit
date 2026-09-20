@@ -1217,11 +1217,11 @@
       "libc-bin": {
         "architecture": "amd64",
         "archive": {
-          "sha256": "066398a06ef1a218d4109461d4c636eafe83322ad19b179de9ef7af42b3fec58",
-          "size": 682164,
-          "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/glibc/libc-bin_2.39-0ubuntu8.9_amd64.deb"
+          "sha256": "64625a2e1b51e736c71f4916268c496278bbc789b1b189d1621607a33f455473",
+          "size": 681710,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260901T000000Z/pool/main/g/glibc/libc-bin_2.39-0ubuntu8.8_amd64.deb"
         },
-        "controlIndexSha256": "1ae9316fbbebbc1ca2da902e6b04bf5070280df9f161bf4c0ac3e2310d0b356d",
+        "controlIndexSha256": "07b6559b7bfbe46482e62b3b4d9dac7ad36e5d5e66fc887f3c94642a45e5e8ab",
         "copyright": {
           "commonReferences": [
             "GFDL-1.3",
@@ -1242,13 +1242,13 @@
           "noticePath": "notices/ubuntu/libc6-copyright.txt",
           "package": "libc-bin"
         },
-        "dataIndexSha256": "be9e071234b1b879fe876ce0947f39c55622f896f84a94981099bc89f0bd796f",
+        "dataIndexSha256": "5872994171f0135a1f303cbae5fac7c3ed007cdc95502ebfdd3129a91e0ce1ff",
         "documentationPackages": [],
         "ownedDocumentation": [
           {
             "gid": 0,
             "mode": 493,
-            "mtime": 1788444912,
+            "mtime": 1784827093,
             "path": "usr/share/doc/libc-bin",
             "sha256": null,
             "size": 0,
@@ -1269,17 +1269,17 @@
           }
         ],
         "sourcePackage": "glibc",
-        "sourceVersion": "2.39-0ubuntu8.9",
-        "version": "2.39-0ubuntu8.9"
+        "sourceVersion": "2.39-0ubuntu8.8",
+        "version": "2.39-0ubuntu8.8"
       },
       "libc6": {
         "architecture": "amd64",
         "archive": {
-          "sha256": "ff5557d99b51f761c4b7c92368b9cc45565eda17df9bf9eb4b134d09825008be",
-          "size": 3264314,
-          "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/glibc/libc6_2.39-0ubuntu8.9_amd64.deb"
+          "sha256": "3b8d5391b6b484a4c81fd000b6064885ad967ec3cb966bc57603f3fb3ebf0ed5",
+          "size": 3262434,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260901T000000Z/pool/main/g/glibc/libc6_2.39-0ubuntu8.8_amd64.deb"
         },
-        "controlIndexSha256": "2e1b12989fcbeb2e4b27ae0ba6853ac8676d8697979dde44df6e6c01a68db45a",
+        "controlIndexSha256": "d4fa859c73eecc58544d66bfa6901104bbd6332ef976ba06b8b602d4bec2738c",
         "copyright": {
           "commonReferences": [
             "GFDL-1.3",
@@ -1300,13 +1300,13 @@
           "noticePath": "notices/ubuntu/libc6-copyright.txt",
           "package": "libc6"
         },
-        "dataIndexSha256": "9d19d3348737d935025a0d040cabb2d2402fdd5b22a28dfa2b3f975f8a4ac0dc",
+        "dataIndexSha256": "cfe529bbdb66476aea4c44145a5cf8a5ff8cb669ed518f41a1314bbfbca53496",
         "documentationPackages": [],
         "ownedDocumentation": [
           {
             "gid": 0,
             "mode": 493,
-            "mtime": 1788444912,
+            "mtime": 1784827093,
             "path": "usr/share/doc/libc6",
             "sha256": null,
             "size": 0,
@@ -1327,17 +1327,17 @@
           }
         ],
         "sourcePackage": "glibc",
-        "sourceVersion": "2.39-0ubuntu8.9",
-        "version": "2.39-0ubuntu8.9"
+        "sourceVersion": "2.39-0ubuntu8.8",
+        "version": "2.39-0ubuntu8.8"
       },
       "libc6-dev": {
         "architecture": "amd64",
         "archive": {
-          "sha256": "e13d5fcc1b2a86f75bca8e0026a8e39f24fe97ca86e92be79991f8697eb1306f",
-          "size": 2125612,
-          "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/glibc/libc6-dev_2.39-0ubuntu8.9_amd64.deb"
+          "sha256": "bb8741966e7c1d2e2c0b84bb311717a0908fb563d9b2247b7212710e3cd88b94",
+          "size": 2125374,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260901T000000Z/pool/main/g/glibc/libc6-dev_2.39-0ubuntu8.8_amd64.deb"
         },
-        "controlIndexSha256": "5963e067aee08e2eae7c96f71c383731c78d338d2004058d1992f73ef8653e9f",
+        "controlIndexSha256": "9702dff95222e3b128cec00d91859cd51baad0a3847ee4c344caa44872c7c4c5",
         "copyright": {
           "commonReferences": [
             "GFDL-1.3",
@@ -1358,13 +1358,13 @@
           "noticePath": "notices/ubuntu/libc6-copyright.txt",
           "package": "libc6-dev"
         },
-        "dataIndexSha256": "4adb46d236b4c6ebdc4890030b080d46d94e445dee9b496a08bd889b776fab1e",
+        "dataIndexSha256": "f28105360a806a00a26ccefd634e30316cc5cceb106e2b6b8f222712998fe322",
         "documentationPackages": [],
         "ownedDocumentation": [
           {
             "gid": 0,
             "mode": 493,
-            "mtime": 1788444912,
+            "mtime": 1784827093,
             "path": "usr/share/doc/libc6-dev",
             "sha256": null,
             "size": 0,
@@ -1385,8 +1385,8 @@
           }
         ],
         "sourcePackage": "glibc",
-        "sourceVersion": "2.39-0ubuntu8.9",
-        "version": "2.39-0ubuntu8.9"
+        "sourceVersion": "2.39-0ubuntu8.8",
+        "version": "2.39-0ubuntu8.8"
       },
       "libgcc-13-dev": {
         "architecture": "amd64",

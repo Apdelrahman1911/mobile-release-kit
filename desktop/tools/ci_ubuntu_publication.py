@@ -54,7 +54,7 @@ MAX_DEB = 512 << 20
 KERNEL_SELECTOR = "installed_runtime::tests::kernel_scope_is_reviewed_ubuntu"
 F1_MANIFEST_SHA256 = "3a075688d6bc7f69dbdaa017b5327d8ca892e12b49b0c2012a6cbea1f79a6061"
 FIXTURE_SOURCE = b"fn main() { std::process::exit(78); }\n"
-NOTICE_INPUTS_SHA256 = "1b91c9ebcfbb2adced572570f1049f3ac3dd6cf9c9e915a5e5180b75b6173f17"
+NOTICE_INPUTS_SHA256 = "2fbc48569a79952aa40ac99c4ce8dc875723d3369e712c7981456dfd6a304791"
 SONAME_PACKAGES = {name: "libc6:amd64" for name in (
     "libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
     "libpthread.so.0", "librt.so.1", "libutil.so.1")}
