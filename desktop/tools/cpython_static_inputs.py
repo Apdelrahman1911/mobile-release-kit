@@ -927,12 +927,12 @@ def source_openssl_layout() -> dict:
 
 
 def source_pybuilddir(raw: bytes) -> str:
-    need(0 < len(raw) <= 4096 and raw.endswith(b"\n") and raw.count(b"\n") == 1,
-         "pybuilddir.txt must be one bounded relative DATA line")
-    name = raw[:-1].decode("ascii")
-    need(re.fullmatch(r"build/[A-Za-z0-9._+\-]+", name) is not None and ".." not in name.split("/"),
+    # Pinned sysconfig writes the path itself, without a line terminator.
+    need(0 < len(raw) <= 4096, "pybuilddir.txt must be bounded relative DATA")
+    need(re.fullmatch(rb"build/[A-Za-z0-9._+\-]+", raw) is not None
+         and raw not in {b"build/.", b"build/.."},
          "pybuilddir.txt escapes the original build directory")
-    return name
+    return raw.decode("ascii")
 
 
 def source_stdlib_destination(name: str) -> tuple[str | None, str | None]:
