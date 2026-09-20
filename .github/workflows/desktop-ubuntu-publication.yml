@@ -67,45 +67,51 @@ jobs:
           set -euo pipefail
           sudo /usr/bin/python3.12 -I -S -B - <<'PY'
           import json, os, stat
-          def need(ok):
-              if not ok: raise SystemExit(70)
+          def need(ok, check, observed=None):
+              if not ok:
+                  diagnostic = json.dumps({'scope': 'exact-/usr/share-mode', 'failedCheck': check,
+                                           'observed': observed}, sort_keys=True, separators=(',', ':'))
+                  print(diagnostic if len(diagnostic.encode('ascii')) <= 1024
+                        else 'Fixed directory preparation refused; diagnostic bound exceeded.', flush=True)
+                  raise SystemExit(70)
           def identity(s):
               return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
-          def protected(s):
-              need(stat.S_ISDIR(s.st_mode) and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022)
+          def protected(s, role):
+              need(stat.S_ISDIR(s.st_mode) and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
+                   role + '-policy', record(s))
           def record(s):
               return {'dev': s.st_dev, 'ino': s.st_ino, 'uid': s.st_uid, 'gid': s.st_gid,
                       'mode': format(stat.S_IMODE(s.st_mode), '04o')}
-          need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0))
+          need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0), 'root-credentials')
           flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
           root = os.open('/', flags)
           usr = share = None
           try:
               root_before = os.fstat(root)
-              protected(root_before)
-              need(identity(root_before) == identity(os.stat('/', follow_symlinks=False)))
+              protected(root_before, 'root')
+              need(identity(root_before) == identity(os.stat('/', follow_symlinks=False)), 'root-name')
               usr = os.open('usr', flags, dir_fd=root)
               usr_before = os.fstat(usr)
-              protected(usr_before)
-              need(identity(usr_before) == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)))
+              protected(usr_before, 'usr')
+              need(identity(usr_before) == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)), 'usr-name')
               share = os.open('share', flags, dir_fd=usr)
               before = os.fstat(share)
               need(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
-                   and stat.S_IMODE(before.st_mode) in (0o755, 0o775))
-              need(identity(before) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)))
+                   and stat.S_IMODE(before.st_mode) in (0o755, 0o775), 'share-policy', record(before))
+              need(identity(before) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)), 'share-name')
               # No recursive repair: this sole known directory may lose only group-write.
               if stat.S_IMODE(before.st_mode) == 0o775:
                   os.fchmod(share, 0o755)
               after = os.fstat(share)
               need(identity(after) == (before.st_dev, before.st_ino, before.st_mode & ~0o020,
-                                       before.st_uid, before.st_gid))
-              need(identity(after) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)))
-              need(identity(root_before) == identity(os.fstat(root)) == identity(os.stat('/', follow_symlinks=False)))
+                                       before.st_uid, before.st_gid), 'share-mode-change', record(after))
+              need(identity(after) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)), 'share-name-after')
+              need(identity(root_before) == identity(os.fstat(root)) == identity(os.stat('/', follow_symlinks=False)), 'root-final')
               need(identity(usr_before) == identity(os.fstat(usr))
-                   == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)))
+                   == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)), 'usr-final')
               receipt = json.dumps({'scope': 'exact-/usr/share-mode', 'before': record(before), 'after': record(after)},
                                    sort_keys=True, separators=(',', ':'))
-              need(len(receipt.encode('ascii')) <= 512)
+              need(len(receipt.encode('ascii')) <= 512, 'receipt-bound')
               print(receipt, flush=True)
           finally:
               for fd in (share, usr, root):
@@ -202,45 +208,51 @@ jobs:
           set -euo pipefail
           sudo /usr/bin/python3.12 -I -S -B - <<'PY'
           import json, os, stat
-          def need(ok):
-              if not ok: raise SystemExit(70)
+          def need(ok, check, observed=None):
+              if not ok:
+                  diagnostic = json.dumps({'scope': 'exact-/usr/share-mode', 'failedCheck': check,
+                                           'observed': observed}, sort_keys=True, separators=(',', ':'))
+                  print(diagnostic if len(diagnostic.encode('ascii')) <= 1024
+                        else 'Fixed directory preparation refused; diagnostic bound exceeded.', flush=True)
+                  raise SystemExit(70)
           def identity(s):
               return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
-          def protected(s):
-              need(stat.S_ISDIR(s.st_mode) and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022)
+          def protected(s, role):
+              need(stat.S_ISDIR(s.st_mode) and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
+                   role + '-policy', record(s))
           def record(s):
               return {'dev': s.st_dev, 'ino': s.st_ino, 'uid': s.st_uid, 'gid': s.st_gid,
                       'mode': format(stat.S_IMODE(s.st_mode), '04o')}
-          need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0))
+          need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0), 'root-credentials')
           flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
           root = os.open('/', flags)
           usr = share = None
           try:
               root_before = os.fstat(root)
-              protected(root_before)
-              need(identity(root_before) == identity(os.stat('/', follow_symlinks=False)))
+              protected(root_before, 'root')
+              need(identity(root_before) == identity(os.stat('/', follow_symlinks=False)), 'root-name')
               usr = os.open('usr', flags, dir_fd=root)
               usr_before = os.fstat(usr)
-              protected(usr_before)
-              need(identity(usr_before) == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)))
+              protected(usr_before, 'usr')
+              need(identity(usr_before) == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)), 'usr-name')
               share = os.open('share', flags, dir_fd=usr)
               before = os.fstat(share)
               need(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
-                   and stat.S_IMODE(before.st_mode) in (0o755, 0o775))
-              need(identity(before) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)))
+                   and stat.S_IMODE(before.st_mode) in (0o755, 0o775), 'share-policy', record(before))
+              need(identity(before) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)), 'share-name')
               # No recursive repair: this sole known directory may lose only group-write.
               if stat.S_IMODE(before.st_mode) == 0o775:
                   os.fchmod(share, 0o755)
               after = os.fstat(share)
               need(identity(after) == (before.st_dev, before.st_ino, before.st_mode & ~0o020,
-                                       before.st_uid, before.st_gid))
-              need(identity(after) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)))
-              need(identity(root_before) == identity(os.fstat(root)) == identity(os.stat('/', follow_symlinks=False)))
+                                       before.st_uid, before.st_gid), 'share-mode-change', record(after))
+              need(identity(after) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)), 'share-name-after')
+              need(identity(root_before) == identity(os.fstat(root)) == identity(os.stat('/', follow_symlinks=False)), 'root-final')
               need(identity(usr_before) == identity(os.fstat(usr))
-                   == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)))
+                   == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)), 'usr-final')
               receipt = json.dumps({'scope': 'exact-/usr/share-mode', 'before': record(before), 'after': record(after)},
                                    sort_keys=True, separators=(',', ':'))
-              need(len(receipt.encode('ascii')) <= 512)
+              need(len(receipt.encode('ascii')) <= 512, 'receipt-bound')
               print(receipt, flush=True)
           finally:
               for fd in (share, usr, root):
