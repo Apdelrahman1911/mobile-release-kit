@@ -28,9 +28,7 @@ def fixed_phases() -> tuple[dict, ...]:
     """Literal table only; callers cannot provide argv, phases or environment."""
     make = I.SOURCE_TOOLS["make"]
     dependency_env = {**I.SOURCE_ENV, "CFLAGS": I.FIXED_ENV["CFLAGS"] + " -fPIC"}
-    python_env = {**I.SOURCE_ENV, "CPPFLAGS": "-I/work/deps/include", "LDFLAGS": "-L/work/deps/lib",
-        "ZLIB_CFLAGS": "-I/work/deps/include", "ZLIB_LIBS": "/work/deps/lib/libz.a",
-        "LIBFFI_CFLAGS": "-I/work/deps/include", "LIBFFI_LIBS": "/work/deps/lib/libffi.a"}
+    python_env = dict(I.SOURCE_PYTHON_ENV)
     specifications = (
         ("zlib-configure", "zlib", (I.SOURCE_TOOLS["sh"], "./configure", *I.ZLIB_CONFIGURE), dependency_env),
         ("zlib-build", "zlib", (make, "-j1"), dependency_env),

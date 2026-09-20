@@ -71,7 +71,8 @@ def generated_config():
         "MODULE_PYEXPAT_CFLAGS": "-I$(srcdir)/Modules/expat", "MODULE_PYEXPAT_LDFLAGS": "-lm $(LIBEXPAT_A)",
         "MODULE_PYEXPAT_DEPS": "$(LIBEXPAT_HEADERS) $(LIBEXPAT_A)", "LIBEXPAT_A": "Modules/expat/libexpat.a",
         "MODULE__SSL_CFLAGS": "-I/work/deps/include", "MODULE__SSL_LDFLAGS": "-L/work/deps/lib  -lssl -lcrypto",
-        "CONFIG_ARGS": " ".join(shlex.quote(arg) for arg in I.SOURCE_PYTHON_CONFIGURE)}
+        "CONFIG_ARGS": " ".join(shlex.quote(arg) for arg in (*I.SOURCE_PYTHON_CONFIGURE,
+            *(name + "=" + I.SOURCE_PYTHON_ENV[name] for name in I.SOURCE_PYTHON_PRECIOUS)))}
     header = b"".join(("#define " + name + " 1\n").encode() for name in (
         "WITH_PYMALLOC", "HAVE_FORK", "HAVE_POSIX_SPAWN", "HAVE_SYS_RESOURCE_H", "HAVE_WAITPID",
         "HAVE_PIPE2", "HAVE_POLL", "HAVE_SOCKETPAIR"))
@@ -274,6 +275,24 @@ class SourceProfileTests(unittest.TestCase):
         for name, data in changes:
             with self.subTest(name=name), self.assertRaises(I.InputError):
                 I.source_material_configuration({**files, name: data}, setup, patchlevel)
+
+    def test_material_configure_args_preserve_original_precious_environment(self):
+        files, setup, patchlevel = generated_config()
+        env = R.fixed_phases()[10]["environment"]
+        precious = ("CC", "CFLAGS", "LDFLAGS", "CPPFLAGS", "LIBFFI_CFLAGS", "LIBFFI_LIBS", "ZLIB_CFLAGS", "ZLIB_LIBS")
+        expected = (*I.SOURCE_PYTHON_CONFIGURE, *(name + "=" + env[name] for name in precious))
+        self.assertEqual(tuple(shlex.split(I._make_value(files["Makefile"], "CONFIG_ARGS"))), expected)
+        self.assertNotIn("-ldl", env["LIBFFI_LIBS"])
+        self.assertEqual(len(I.source_material_configuration(files, setup, patchlevel)), 60)
+        mutations = (expected[:-1], (*expected, "CPP=other"), (*expected, expected[-1]),
+                     ("--enable-shared", *expected[1:]),
+                     tuple(arg + " -ldl" if arg.startswith("LIBFFI_LIBS=") else arg for arg in expected),
+                     (*expected[:-2], expected[-1], expected[-2]))
+        prefix = files["Makefile"].split(b"CONFIG_ARGS=", 1)[0]
+        for args in mutations:
+            make = prefix + ("CONFIG_ARGS=" + " ".join(shlex.quote(arg) for arg in args) + "\n").encode()
+            with self.subTest(args=args), self.assertRaisesRegex(I.InputError, "Original Python configure arguments"):
+                I.source_material_configuration({**files, "Makefile": make}, setup, patchlevel)
 
     def test_fixed_fourteen_operations_keep_required_generators(self):
         phases = R.fixed_phases()

@@ -36,7 +36,7 @@ import urllib.request
 import ssl
 
 
-APPROVED_HOSTED_INPUTS_SHA256: str | None = "2353367ac7f626843559c5626360345201a42ffb25076435d5aeb42954bcd610"
+APPROVED_HOSTED_INPUTS_SHA256: str | None = "7b0025e39041776df5118b54e2393d82f6e0d91e27da092adac8ca6e74ab4975"
 PROFILE = "cpython-3.14.7-linux-x86_64-source-v1"
 PREP = Path("/var/tmp/mrk-cpython-source-preparation-v1")
 BWRAP_PATH = PREP / "controller/bwrap"
