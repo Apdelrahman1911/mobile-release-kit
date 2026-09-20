@@ -478,14 +478,15 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None):
     _retain(label + ".stderr", result.stderr)
     _COMMANDS.append({"phase": label, "argv": argv, "exitCode": result.returncode, "timeoutSeconds": seconds})
     accepted = result.returncode in codes and time.monotonic() < _END
-    if not accepted and label in {"native-root", "native-user"}:
+    if not accepted and label in {"native-root", "native-user", "observe-unpacked", "observe-p0",
+                                 "observe-upgrade", "observe-duplicate", "observe-remove", "observe-purge"}:
         # Only these fixed credential-free fixtures may expose bounded DATA
         # from the SAME returned capture. This is not another read or receipt.
-        diagnostic = {"phase": label, "exitCode": result.returncode,
+        diagnostic = {"phase": label, "exitCode": result.returncode, "timeoutSeconds": seconds,
             "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr),
             "stdoutPrefix": result.stdout[:1024].decode("utf-8", errors="backslashreplace"),
             "stderrPrefix": result.stderr[:1024].decode("utf-8", errors="backslashreplace")}
-        sys.stderr.write("Native platform failure DATA: " + canonical(diagnostic).decode("ascii"))
+        sys.stderr.write("Fixture command failure DATA: " + canonical(diagnostic).decode("ascii"))
     need(accepted, "Original root command failed or completed late")
     _FAILED = False
     return result

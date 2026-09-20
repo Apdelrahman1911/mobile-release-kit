@@ -401,9 +401,11 @@ class LifecycleData(unittest.TestCase):
     def test_native_failure_diagnostic_uses_only_original_bounded_capture(self):
         argv = ["/inert-native-fixture-never-executed"]
         raw = b'\0\x1b\xff"' + b"a" * 1500
-        prefix = "Native platform failure DATA: "
-        for case in ("root-failed", "user-failed", "late", "success", "other-command", "owner-error", "malformed", "sink-error"):
-            label = "native-user" if case == "user-failed" else "unpack" if case == "other-command" else "native-root"
+        prefix = "Fixture command failure DATA: "
+        for case in ("root-failed", "user-failed", "observer-failed", "late", "success", "other-command",
+                     "unlisted-observer", "owner-error", "malformed", "sink-error"):
+            label = {"user-failed": "native-user", "observer-failed": "observe-unpacked",
+                     "other-command": "unpack", "unlisted-observer": "observe-unknown"}.get(case, "native-root")
             result = subprocess.CompletedProcess(argv, 0 if case in {"late", "success"} else 7, raw, raw[::-1])
             if case == "malformed": result.stdout = "not an admitted byte capture"
             owner_error, sink_error = RuntimeError("original owner refused"), OSError("diagnostic writer refused")
@@ -433,14 +435,14 @@ class LifecycleData(unittest.TestCase):
                 owner.assert_called_once()
                 self.assertEqual(clock.call_count, 2 if case in {"late", "success"} else 1)
                 self.assertEqual(retain.call_count, 0 if case in {"owner-error", "malformed"} else 2)
-                if case in {"root-failed", "user-failed", "late", "sink-error"}:
+                if case in {"root-failed", "user-failed", "observer-failed", "late", "sink-error"}:
                     self.assertEqual(len(emitted), 1)
                     text = emitted[0]
                     self.assertTrue(text.startswith(prefix) and text.endswith("\n"))
                     self.assertTrue(all(32 <= ord(char) < 127 for char in text[:-1]))
                     self.assertLess(len(text), 14 * 1024)
                     self.assertEqual(L.decode(text[len(prefix):].encode("ascii")), {
-                        "phase": label, "exitCode": result.returncode,
+                        "phase": label, "exitCode": result.returncode, "timeoutSeconds": 20,
                         "stdoutBytes": len(raw), "stderrBytes": len(raw),
                         "stdoutPrefix": raw[:1024].decode("utf-8", errors="backslashreplace"),
                         "stderrPrefix": raw[::-1][:1024].decode("utf-8", errors="backslashreplace")})
