@@ -63,6 +63,15 @@ separate closed gates; this reader does not implement or enable them.
 
 The UI distinguishes *configured*, *format-valid*, *observed hint*, *unknown*,
 *partial*, *stale*, *unavailable*, *native-verified*, and *service-verified*.
+
+Recovery also lists the three file-edit controllers' retained per-project alerts
+from the current app session, including alerts older than the latest result.
+This is not persistent history, journal inspection or a recovery action. Loaded
+projects can be opened through ordinary navigation without discarding drafts;
+unloaded-project alerts stay visible. Public-text alerts retain no locale or file
+outcome. An empty list never establishes clean state or permission to retry, and
+existing original/uncertain-operation status controls remain unchanged.
+
 `identityStatus=approved` is a user's policy value, not a successful service
 check. A core report without failures does not itself prove release readiness.
 Draft validation does not save or execute configured commands. Draft edits must

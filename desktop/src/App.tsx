@@ -3,8 +3,8 @@ import { desktopApi } from './api.ts';
 import { apiError } from './bridge.ts';
 import { emptyDraft } from './catalog.ts';
 import { methodReason } from './certainty.ts';
-import { initialWorkspace, isDirty, workspaceReducer } from './drafts.ts';
-import type { WorkspaceAction } from './drafts.ts';
+import { initialWorkspace, isDirty, retainedEditAttention, workspaceReducer } from './drafts.ts';
+import type { RetainedEditAttention, WorkspaceAction } from './drafts.ts';
 import { configurationOwnerReason, editRetainsDraft, editStartReason } from './configEdit.ts';
 import { ConfigEditController } from './configEditController.ts';
 import { GitHubSetupController } from './githubSetupController.ts';
@@ -561,6 +561,15 @@ export function App() {
     if (key) metadataText.selectContext(key);
     navigate('metadata');
   };
+  const showRetainedEditProject = (attention: RetainedEditAttention) => {
+    const projects = workspaceRef.current.projects;
+    if (connectionPicking.current || !Object.hasOwn(projects, attention.projectId) ||
+        projects[attention.projectId]?.project.id !== attention.projectId) return;
+    // Preserve ordinary context retirement and drafts. This does not recover an
+    // edit, reload its original outcome, or infer a public-text locale.
+    dispatch({ type: 'switch', projectId: attention.projectId });
+    navigate(attention.page);
+  };
 
   return <div className="app-shell">
     <a className="skip-link" href="#main-content">Skip to workspace</a>
@@ -613,7 +622,9 @@ export function App() {
             onReadVersion={() => void releaseVersion.read()} versionReason={releaseVersion.startReason()} onHelp={setHelp} />} />}
         {page === 'artifacts' && <><Artifacts state={evidenceState} controller={candidateEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />
           <AndroidBuildResultView state={androidBuildState} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null} /></>}
-        {page === 'recovery' && <Recovery info={info} />}
+        {page === 'recovery' && <Recovery info={info}
+          attention={retainedEditAttention(workspace.projects, saveState.recoveryProjects, workflowState.recoveryProjects, metadataState.edit.recoveryProjects)}
+          choosingProject={choosing} onOpenProject={showRetainedEditProject} onHelp={setHelp} />}
         <footer className="workspace-footer"><span><Icon name="shield" size={14} />Configuration is not verification.</span><span>{preview ? 'Illustration only · no engine connected' : 'Configuration desktop slice · not a completed release product'}</span></footer>
       </main>
     </div>

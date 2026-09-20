@@ -71,6 +71,33 @@ export interface WorkspaceState {
 
 export const initialWorkspace: WorkspaceState = { selectedId: null, projects: {} };
 
+export interface RetainedEditAttention {
+  projectId: string;
+  projectName: string | null;
+  domain: 'Project settings' | 'GitHub workflow files' | 'Public Store text';
+  page: 'settings' | 'github' | 'metadata';
+}
+
+// A session-only view of existing negative attention, not a recovery assessment
+// or history. In particular, metadata retains only project IDs, not locales or
+// original outcomes. Never project drafts, paths, tokens or owner objects here.
+export function retainedEditAttention(
+  projects: Readonly<Record<string, ProjectSession>>,
+  configuration: readonly { projectId: string }[],
+  workflows: readonly { projectId: string }[],
+  metadataProjects: readonly string[],
+): RetainedEditAttention[] {
+  const row = (projectId: string, domain: RetainedEditAttention['domain'], page: RetainedEditAttention['page']): RetainedEditAttention => {
+    const loaded = Object.hasOwn(projects, projectId) ? projects[projectId] : undefined;
+    return { projectId, projectName: loaded?.project.id === projectId ? loaded.project.name : null, domain, page };
+  };
+  return [
+    ...configuration.map(({ projectId }) => row(projectId, 'Project settings', 'settings')),
+    ...workflows.map(({ projectId }) => row(projectId, 'GitHub workflow files', 'github')),
+    ...metadataProjects.map((projectId) => row(projectId, 'Public Store text', 'metadata')),
+  ];
+}
+
 export type WorkspaceAction =
   | { type: 'select'; project: ProjectReference }
   | { type: 'switch'; projectId: string }

@@ -1,7 +1,7 @@
 // Inert UI state checks only. No DOM, filesystem fixtures, network, or child tools.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { initialWorkspace, isDirty, validationFresh, workspaceReducer as reduce } from '../src/drafts.ts';
+import { initialWorkspace, isDirty, retainedEditAttention, validationFresh, workspaceReducer as reduce } from '../src/drafts.ts';
 import { configurationStatus, draftStatus } from '../src/certainty.ts';
 
 const project = (id) => ({ id, name: `Inert ${id}`, path: `/inert/${id}` });
@@ -17,6 +17,43 @@ const snapshot = (id, name = 'com.example.original') => ({
   assurance, issues: [],
 });
 const validation = { valid: true, state: 'format-valid', issues: [], requirements: [], assurance: { ...assurance, basis: 'schema-policy' } };
+
+test('retained edit attention lists earlier projects and every edit domain without owner details', () => {
+  const projects = { a: { project: project('a'), draft: { private: 'never project this' } }, b: { project: project('b') } };
+  const config = [{ projectId: 'a', sessionId: 'private-session', coreOutcome: { journal: 'recovery_required' } }];
+  const workflow = [{ projectId: 'b', prepared: { planToken: 'private-plan' } }];
+  // The selector intentionally has no lastTerminal input: these earlier alerts
+  // survive its replacement without adopting a different operation's result.
+  const metadata = ['a'];
+  const before = structuredClone({ projects, config, workflow, metadata });
+  const rows = retainedEditAttention(projects, config, workflow, metadata);
+  assert.deepEqual(rows, [
+    { projectId: 'a', projectName: 'Inert a', domain: 'Project settings', page: 'settings' },
+    { projectId: 'b', projectName: 'Inert b', domain: 'GitHub workflow files', page: 'github' },
+    { projectId: 'a', projectName: 'Inert a', domain: 'Public Store text', page: 'metadata' },
+  ]);
+  assert.deepEqual({ projects, config, workflow, metadata }, before);
+  assert.equal(JSON.stringify(rows).includes('private'), false);
+  assert.equal(Object.hasOwn(rows[2], 'locale'), false);
+  assert.equal(Object.hasOwn(rows[2], 'coreOutcome'), false);
+});
+
+test('retained edit attention keeps unloaded, inherited and mismatched projects without navigation names', () => {
+  const projects = Object.create({ inherited: { project: project('inherited') } });
+  projects.mismatch = { project: project('different') };
+  const rows = retainedEditAttention(projects, [{ projectId: 'missing' }, { projectId: 'inherited' }], [{ projectId: 'mismatch' }], ['missing']);
+  assert.equal(rows.length, 4);
+  assert.ok(rows.every((row) => row.projectName === null));
+  assert.deepEqual(rows.map((row) => row.projectId), ['missing', 'inherited', 'mismatch', 'missing']);
+});
+
+test('retained edit attention returns only observations, never a clean-state or recovery decision', () => {
+  assert.deepEqual(retainedEditAttention({}, [], [], []), []);
+  const rows = retainedEditAttention({}, [], [], ['unloaded']);
+  assert.deepEqual(Object.keys(rows[0]).sort(), ['domain', 'page', 'projectId', 'projectName']);
+  assert.equal(Object.hasOwn(rows[0], 'canRetry'), false);
+  assert.equal(Object.hasOwn(rows[0], 'recovered'), false);
+});
 
 function loaded(id = 'a') {
   let state = reduce(initialWorkspace, { type: 'select', project: project(id) });
