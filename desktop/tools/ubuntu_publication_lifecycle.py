@@ -42,6 +42,8 @@ INSTALLED_TESTS = {key: "supervisor::tests::installed_candidate_a_" + suffix for
     ("overlap", "child_spans_f1_publication"))}
 CHILD_MARKER = "MRK_INSTALLED_NATIVE_CHILD="
 EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
+SHELL_CASES = ("normal", "positive", "quit-outstanding")
+SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
 OS_SONAMES = {"libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
               "libpthread.so.0", "librt.so.1", "libutil.so.1", "libgcc_s.so.1"}
 PRIVATE_SONAMES = {"libssl.so.3", "libcrypto.so.3"}
@@ -258,8 +260,10 @@ def handoff(path, digest):
     raw = read(path)
     need(hashlib.sha256(raw).hexdigest() == digest, "Handoff bytes differ")
     value = decode(raw)
-    need(type(value) is dict and set(value) == {"sourceSha", "runId", "attempt", "deadline", "runnerUid", "runnerGid",
-         "source", "taskRoot", "library", "packages", "compilerRecords"} | ({"installed"} if "installed" in value else set()),
+    need(type(value) is dict and not ("installed" in value and "shell" in value)
+         and set(value) == {"sourceSha", "runId", "attempt", "deadline", "runnerUid", "runnerGid",
+         "source", "taskRoot", "library", "packages", "compilerRecords"}
+         | ({"installed"} if "installed" in value else {"shell"} if "shell" in value else set()),
          "Fixed handoff fields differ")
     need(re.fullmatch(r"[0-9a-f]{40}", value["sourceSha"]) is not None and value["sourceSha"] != "0" * 40,
          "Missing source binding")
@@ -307,7 +311,44 @@ def handoff(path, digest):
              and re.fullmatch(r"[0-9a-f]{40}", accepted["sourceSha"]) is not None
              and all(type(accepted[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", accepted[key]) is not None
                      for key in ("runId", "attempt", "artifactId")), "Original accepted U provenance was relabelled or omitted")
+    if "shell" in value:
+        shell_handoff(value, paths)
     return value
+
+
+def shell_handoff(value, original_paths):
+    """The fixed connection is neither J's libtest nor a new package source."""
+    shell = value["shell"]
+    need(type(shell) is dict and set(shell) == {"binaries", "compiler", "rosterSha256", "producerAttempt",
+         "artifactId", "acceptedU", "loaderPolicy"}, "Fixed shell handoff fields differ")
+    need(all(type(shell[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", shell[key]) is not None
+             for key in ("producerAttempt", "artifactId")) and int(shell["producerAttempt"]) <= int(value["attempt"])
+         and type(shell["rosterSha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", shell["rosterSha256"]) is not None,
+         "Original shell producer/roster binding differs")
+    binaries, compiler, accepted = shell["binaries"], shell["compiler"], shell["acceptedU"]
+    need(type(binaries) is dict and set(binaries) == {"normal", "observer"}, "Normal/observer shell pair missing")
+    paths = list(original_paths)
+    for role, row in binaries.items():
+        need(type(row) is dict and set(row) == {"path", "size", "sha256"} and type(row["size"]) is int
+             and 0 < row["size"] <= FILE_LIMIT and type(row["sha256"]) is str
+             and re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) is not None
+             and absolute(row["path"]).is_relative_to(absolute(value["taskRoot"])) and row["path"] not in paths,
+             "Original shell artifact differs: " + role)
+        paths.append(row["path"])
+    need(type(compiler) is dict and compiler.get("sourceSha") == value["sourceSha"]
+         and compiler.get("features") == SHELL_FEATURES
+         and (compiler.get("runId"), compiler.get("attempt")) == (value["runId"], shell["producerAttempt"])
+         and compiler.get("manifestSha256") == M and compiler.get("protocolSha256") == Q
+         and type(compiler.get("exportedArtifacts")) is dict
+         and set(compiler["exportedArtifacts"]) == set(binaries)
+         and all(compiler["exportedArtifacts"][role][key] == row[key]
+                 for role, row in binaries.items() for key in ("size", "sha256")),
+         "Original normal/observer source, features or output bytes differ")
+    need(type(accepted) is dict and set(accepted) == {"sourceSha", "runId", "attempt", "artifactId"}
+         and accepted["sourceSha"] == value["compilerRecords"]["sourceSha"]
+         and re.fullmatch(r"[0-9a-f]{40}", accepted["sourceSha"]) is not None
+         and all(type(accepted[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", accepted[key]) is not None
+                 for key in ("runId", "attempt", "artifactId")), "Shell reused U provenance was relabelled")
 
 
 def root_path(value):
@@ -463,6 +504,8 @@ def _context(*, copying=False):
         copy_pinned(source / relative, root / "source" / relative,
                     {"path": str(source / relative), "size": DATA_PIN[0], "sha256": DATA_PIN[1]})
         candidates = [("candidate", value["installed"]["candidate"], root / "installed-tests", 0o555)] if "installed" in value else []
+        if "shell" in value:
+            candidates = [(role, row, root / ("shell-" + role), 0o555) for role, row in value["shell"]["binaries"].items()]
         for label, row, target, mode in [("library", value["library"], root / "platform-tests", 0o555), *candidates,
              *((key, row, root / "private" / (key + ".deb"), 0o400) for key, row in value["packages"].items())]:
             before = absolute(row["path"]).lstat()
@@ -487,6 +530,7 @@ def _capacity(value):
              and all(type(n) is int and 0 < n <= maximum for n in rows.values()), "Package capacity DATA differs")
     required = (sum(row["size"] for row in value["packages"].values()) + value["library"]["size"]
                 + (value["installed"]["candidate"]["size"] if "installed" in value else 0)
+                + (sum(row["size"] for row in value["shell"]["binaries"].values()) if "shell" in value else 0)
                 + 2 * capacity["runtimeBytes"] + 1 + 2 * max(capacity["installedBytes"].values()) + TOTAL_LIMIT + JSON_LIMIT)
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + 128
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
@@ -1051,6 +1095,9 @@ ROOT_PHASES = ("start-unit-show", "native-root", "native-user", "state-initial",
 
 
 def root_phases(value):
+    if "shell" in value:
+        return (ROOT_PHASES[0], "loader-diagnostics", "loader-cache", *ROOT_PHASES[1:11],
+                *("shell-" + case for case in SHELL_CASES), "state-shell-finished")
     if "installed" not in value:
         return ROOT_PHASES
     case = value["installed"]["case"]
@@ -1062,6 +1109,8 @@ def root_phases(value):
 
 
 def result_state(value):
+    if "shell" in value:
+        return "normal-shell-installed-runtime-connection-observed"
     if "installed" not in value:
         return "p0-f1-lifecycle-observed"
     return "installed-passive-positive-and-lifecycle-observed" if value["installed"]["case"] == "positive" else "installed-passive-refusal-observed"
@@ -1070,6 +1119,10 @@ def result_state(value):
 def public_files(value):
     fixed = {phase + "." + suffix for phase in (*root_phases(value), "stop-unit-show") for suffix in ("stdout", "stderr")}
     fixed |= {"unit-start.json", "unit-result.json", "unit-stop.json", "inputs.json", "dpkg-policy.json", "scripts-unpacked.json", "binaries-unpacked.json"}
+    if "shell" in value:
+        return fixed | {"loader-entry.json", "loader-final.json", "loader-runtime.json", "shell-cases.json",
+                        "shell-normal-control.json", "published-before-upgrade.txt", "mutation-denials.txt"} \
+            | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
     installed = value.get("installed")
     if installed is not None:
         fixed |= {"loader-entry.json", "loader-final.json", "installed-cases.json"}
@@ -1084,7 +1137,9 @@ def public_files(value):
 
 def lifecycle_states(value):
     rows = [("initial", "absent", None), ("unpacked", "install ok unpacked", "P0")]
-    if "installed" in value and value["installed"]["case"] != "positive":
+    if "shell" in value:
+        rows += [("p0", "install ok installed", "P0"), ("shell-finished", "install ok installed", "P0")]
+    elif "installed" in value and value["installed"]["case"] != "positive":
         rows.append(("refusal", "install ok unpacked", "P0"))
     else:
         rows += [("p0", "install ok installed", "P0"), ("upgrade", "install ok installed", "F1"),
@@ -1146,7 +1201,13 @@ def loader_diagnostics(raw):
             "checkedTiers": list(HWCAPS), "policy": "Conservatively check all three tiers, including inactive tiers."}
 
 
-def loader_cache(raw, version):
+def loader_cache(raw, version, *, shell_names=None):
+    relevant = OS_SONAMES | PRIVATE_SONAMES
+    if shell_names is not None:
+        need(type(shell_names) is list and shell_names == sorted(set(shell_names)) and 1 <= len(shell_names) <= 256
+             and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,255}", name) is not None
+                     for name in shell_names), "Bounded explicit shell cache roster differs")
+        relevant = set(shell_names) | PRIVATE_SONAMES
     need(type(raw) is bytes and 0 < len(raw) <= LIMIT and raw.endswith(b"\n"), "Loader cache listing bound differs")
     lines = raw.decode("ascii").splitlines()
     header = re.fullmatch(r"([0-9]{1,5}) libs found in cache `/etc/ld\.so\.cache'", lines[0])
@@ -1162,7 +1223,7 @@ def loader_cache(raw, version):
         name, flags, path = found.groups()
         absolute(path)
         eligible = False
-        if name in OS_SONAMES | PRIVATE_SONAMES:
+        if name in relevant:
             # Relevant foreign ABI rows are explicit, never mistaken for this
             # x86-64 ABI. Unknown flag/hwcap semantics refuse rather than guess.
             need(flags == "libc6" or re.fullmatch(r'libc6,x86-64(?:, hwcap: "x86-64-v[234]")?', flags) is not None,
@@ -1185,6 +1246,36 @@ def loader_selected(row, admitted):
     need(row.get("absent") is True or row["path"] == admitted["path"] and row["identity"] == admitted["identity"]
          and all(row[key] == admitted[key] for key in ("size", "sha256")),
          "Eligible cache/default/hwcaps dependency is an alternative object")
+
+
+def shell_loader_candidates(names, rows, tiers):
+    """An absent tier directory excludes every child, without thousands of duplicate proofs."""
+    need(type(names) is list and names == sorted(set(names)) and 1 <= len(names) <= 256
+         and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+\-]{0,255}", name) for name in names),
+         "Bounded shell global provider roster differs")
+    fixed = {directory + "/glibc-hwcaps/" + tier for directory in DEFAULT_LIBRARY_DIRS for tier in HWCAPS}
+    need(type(tiers) is dict and set(tiers) == fixed and all(type(present) is bool for present in tiers.values()),
+         "Complete original shell hwcaps directory presence missing")
+    choices = {(row["soname"], row["path"]) for row in rows if row["soname"] in names and row["eligibleX86_64"]}
+    choices |= {(name, directory + "/" + name) for name in names for directory in DEFAULT_LIBRARY_DIRS}
+    choices |= {(name, directory + "/" + name) for directory, present in tiers.items() if present for name in names}
+    return sorted(choices)
+
+
+def shell_global_names(libraries):
+    # A global SONAME selector may canonically resolve through alternatives.
+    # Only these two fixed RUNPATH selectors are outside the global search;
+    # canonical subdirectories never confer that exemption.
+    private = {"libpxbackend-1.0.so": "/usr/lib/x86_64-linux-gnu/libproxy/libpxbackend-1.0.so",
+               "libpulsecommon-16.1.so": "/usr/lib/x86_64-linux-gnu/pulseaudio/libpulsecommon-16.1.so"}
+    names = []
+    for name, row in libraries.items():
+        selected = row["file"]["selectedPath"]
+        if selected == "/usr/lib/x86_64-linux-gnu/" + name:
+            names.append(name)
+        else:
+            need(name in private and selected == private[name], "Unadmitted nonglobal shell provider selector")
+    return sorted(names)
 
 
 def mount_scope(raw, initial, device):
@@ -1375,12 +1466,340 @@ def _installed_loader_check(proof):
     need(time.monotonic() < _END, "Original loader interval closed late")
 
 
+SHELL_DATA_ROOTS = (
+    ("/etc/gtk-3.0", "directory"), ("/etc/fonts", "directory"),
+    ("/usr/share/fontconfig", "directory"), ("/usr/share/fonts", "directory"),
+    ("/usr/local/share/fonts", "directory"), ("/var/cache/fontconfig", "directory"),
+    ("/usr/share/glib-2.0/schemas", "directory"),
+    ("/usr/share/glvnd/egl_vendor.d", "directory"), ("/etc/glvnd/egl_vendor.d", "directory"),
+    ("/usr/share/drirc.d", "directory"), ("/etc/drirc", "file"),
+    ("/usr/share/X11/xkb", "directory"), ("/usr/share/X11/locale", "directory"),
+    ("/usr/share/icons/Adwaita", "directory"), ("/usr/share/icons/hicolor", "directory"),
+    ("/usr/share/themes/Adwaita", "directory"), ("/usr/share/mime/mime.cache", "file"),
+    ("/usr/share/hunspell", "directory"), ("/usr/share/hyphen", "directory"),
+    ("/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache", "file"),
+    ("/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache", "file"),
+    ("/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache", "file"),
+)
+SHELL_MODULE_CACHES = {
+    "/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache": "/usr/lib/x86_64-linux-gnu/gio/modules",
+    "/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache": "/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders",
+    "/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache": "/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules",
+}
+
+
+def shell_generated_data(path):
+    return (path in SHELL_MODULE_CACHES or path.startswith("/var/cache/fontconfig/")
+            or path == "/var/cache/fontconfig" or path == "/usr/share/glib-2.0/schemas/gschemas.compiled"
+            or path == "/usr/share/mime/mime.cache"
+            or path.startswith("/usr/share/icons/") and Path(path).name == "icon-theme.cache"
+            or path.startswith(("/usr/share/fonts/", "/usr/local/share/fonts/")) and Path(path).name == ".uuid")
+
+
+def shell_module_cache(path, raw):
+    """Only the module selectors in the three fixed generated DATA formats."""
+    need(path in SHELL_MODULE_CACHES and type(raw) is bytes and len(raw) <= 1 << 20 and b"\0" not in raw,
+         "Fixed shell module catalogue bound differs")
+    rows, root = [], SHELL_MODULE_CACHES[path]
+    if path.endswith("/giomodule.cache"):
+        for line in raw.decode("ascii").splitlines():
+            found = re.fullmatch(r"([A-Za-z0-9_+.-]+\.so): ([A-Za-z0-9_,; +.-]+)", line)
+            need(found is not None, "GIO module catalogue grammar differs")
+            rows.append(root + "/" + found[1])
+    else:
+        for block in re.split(r"\n[ \t]*\n", raw.decode("ascii")):
+            lines = [line.strip() for line in block.splitlines() if line.strip() and not line.startswith("#")]
+            if not lines:
+                continue
+            found = re.fullmatch(r'"(/[^"\\\x00-\x20]+\.so)"', lines[0])
+            need(found is not None and len(lines) >= 2 and len(lines) <= 512,
+                 "GTK/pixbuf module catalogue stanza differs")
+            selected = str(absolute(found[1]))
+            need(Path(selected).parent == Path(root), "Module catalogue selects another directory")
+            rows.append(selected)
+    need(len(rows) <= 512 and len(rows) == len(set(rows)), "Duplicate/oversized module catalogue selection")
+    return sorted(rows)
+
+
+def shell_data_snapshot(bind_path):
+    """Finite protected OS DATA only; no invocation, extraction or new owner.
+
+    bind_path accepts the existing directory_only/absent/limit flags. Compiler
+    and root use their own protected bindings; root additionally proves mounts
+    and ACLs. Supplier summaries are portable. Generated caches are separate
+    current-VM receipts, never purported package/compiler inputs. Full detail
+    is split only by these fixed roots, each within the old 2 MiB file bound.
+    """
+    details, suppliers, caches, selections, egl = {}, {}, {}, {}, {}
+    count, total, retained, unique = 0, 0, 0, {}
+    for root_name, kind in SHELL_DATA_ROOTS:
+        root = Path(root_name)
+        detail = {"entries": [], "files": {}, "links": {}, "ancestry": {}, "directories": {}, "absences": {}}
+        rows, generated, pending = [], [], [(root, kind)]
+
+        def merge(binding):
+            for name, value in binding["ancestry"].items():
+                need(name not in detail["ancestry"] or detail["ancestry"][name] == value, "Shell DATA ancestry drift")
+                detail["ancestry"][name] = value
+            for name, state, target in binding["links"]:
+                value = [state, target]
+                need(name not in detail["links"] or detail["links"][name] == value, "Shell DATA link drift")
+                detail["links"][name] = value
+
+        while pending:
+            path, selected_kind = pending.pop()
+            count += 1
+            need(count <= 32768 and len(path.parts) - len(root.parts) <= 16, "Shell DATA entry/depth bound")
+            binding = bind_path(path, directory_only=selected_kind == "directory", absent=True, limit=64 << 20)
+            merge(binding)
+            relative = str(path.relative_to(root))
+            row = {"path": relative, "kind": selected_kind, "present": not binding.get("absent", False)}
+            is_cache = shell_generated_data(str(path))
+            if not row["present"]:
+                need(path == root, "Shell DATA member disappeared during inventory")
+                detail["absences"][str(path)] = {key: binding[key] for key in ("path", "absentAt")}
+            elif selected_kind == "directory":
+                need(not path.is_symlink(), "Shell DATA directory alias is not a reviewed root")
+                before = identity(path.lstat())
+                children = sorted(child.name for child in path.iterdir())
+                need(len(children) <= 8192 and all(re.fullmatch(r"[A-Za-z0-9_.+@\-]+", name) for name in children),
+                     "Shell DATA directory membership bound/grammar")
+                row.update(canonical=binding["path"], mode=stat.S_IMODE(binding["directory"][2]),
+                           children=[name for name in children if not shell_generated_data(str(path / name))])
+                detail["directories"][str(path)] = {"path": binding["path"], "identity": binding["directory"], "children": children}
+                for name in reversed(children):
+                    child = path / name
+                    item = child.lstat()
+                    need(stat.S_ISREG(item.st_mode) or stat.S_ISDIR(item.st_mode) or stat.S_ISLNK(item.st_mode),
+                         "Nonordinary shell DATA child")
+                    pending.append((child, "directory" if stat.S_ISDIR(item.st_mode) else "file"))
+                need(identity(path.lstat()) == before, "Shell DATA directory changed while listing")
+            else:
+                need(not binding["identity"][2] & 0o111, "Executable input cannot enter the shell DATA-only profile")
+                file = {key: binding[key] for key in ("size", "sha256", "identity")}
+                canonical_path = binding["path"]
+                need(canonical_path not in detail["files"] or detail["files"][canonical_path] == file, "Shell DATA file drift")
+                detail["files"][canonical_path] = file
+                row.update(canonical=canonical_path, size=file["size"], sha256=file["sha256"],
+                           mode=stat.S_IMODE(file["identity"][2]), links=[[name, target] for name, _, target in binding["links"]])
+                if canonical_path not in unique:
+                    unique[canonical_path] = file
+                    total += file["size"]
+                else:
+                    need(unique[canonical_path] == file, "Shell DATA alias changed its original target")
+                need(total <= 512 << 20, "Shell DATA canonical byte bound")
+                if str(path) in SHELL_MODULE_CACHES:
+                    raw = read(Path(canonical_path), 1 << 20)
+                    need(len(raw) == file["size"] and hashlib.sha256(raw).hexdigest() == file["sha256"], "Module cache changed while parsing")
+                    selections[str(path)] = shell_module_cache(str(path), raw)
+                if str(path.parent) in {"/usr/share/glvnd/egl_vendor.d", "/etc/glvnd/egl_vendor.d"}:
+                    need(path.suffix == ".json", "Unexpected EGL vendor DATA member")
+                    raw = read(Path(canonical_path), 64 << 10)
+                    need(len(raw) == file["size"] and hashlib.sha256(raw).hexdigest() == file["sha256"], "EGL selector changed while parsing")
+                    value = decode(raw, 64 << 10)
+                    need(type(value) is dict and set(value) == {"file_format_version", "ICD"}
+                         and value["file_format_version"] == "1.0.0" and type(value["ICD"]) is dict
+                         and set(value["ICD"]) == {"library_path"}, "Fixed EGL ICD format differs")
+                    library = value["ICD"]["library_path"]
+                    need(type(library) is str and re.fullmatch(r"(?:/usr/lib/x86_64-linux-gnu/)?libEGL_[A-Za-z0-9_.+-]+\.so(?:\.[0-9]+)*", library),
+                         "EGL vendor selects an unreviewed provider path")
+                    egl[str(path)] = str(Path("/usr/lib/x86_64-linux-gnu") / library)
+            detail["entries"].append(row)
+            (generated if is_cache else rows).append(row)
+        for name, item in detail["directories"].items():
+            current = bind_path(Path(name), directory_only=True)
+            need(current["directory"] == item["identity"] and sorted(child.name for child in Path(name).iterdir()) == item["children"],
+                 "Shell DATA directory membership changed after inventory")
+        for target, entries in ((suppliers, rows), (caches, generated)):
+            ordered = sorted(entries, key=lambda row: row["path"])
+            target[root_name] = {"kind": kind, "present": ordered[0]["present"] if ordered else None, "entryCount": len(ordered),
+                "fileCount": sum(row["kind"] == "file" and row["present"] for row in ordered),
+                "byteCount": sum(row.get("size", 0) for row in ordered), "sha256": hashlib.sha256(canonical(ordered)).hexdigest()}
+        detail["entries"].sort(key=lambda row: row["path"])
+        size = len(canonical(detail))
+        retained += size
+        need(size <= LIMIT and retained <= 16 << 20, "Fixed per-root shell DATA detail/total bound")
+        details[root_name] = detail
+    for path in SHELL_MODULE_CACHES:
+        selections.setdefault(path, [])
+    return {"suppliers": {"roots": suppliers, "sha256": hashlib.sha256(canonical(suppliers)).hexdigest()},
+            "caches": {"roots": caches, "sha256": hashlib.sha256(canonical(caches)).hexdigest()},
+            "moduleSelections": selections, "eglLibraries": egl, "details": details}
+
+
+def _shell_loader_start(value, namespaces):
+    """Separate GTK/WebKit entry policy; never widens the feature-off J gate."""
+    shell, old = value["shell"], value["compilerRecords"]["nativeInputs"]
+    policy, compiler = shell["loaderPolicy"], shell["compiler"]
+    graph = policy["graph"]
+    raw = canonical(graph)
+    need(len(raw) == compiler["nativeRecord"]["size"]
+         and hashlib.sha256(raw).hexdigest() == compiler["nativeRecord"]["sha256"]
+         and graph["manifestSha256"] == M and graph["protocolSha256"] == Q
+         and set(graph["outputs"]) == set(shell["binaries"]), "Shell native graph lost its original compiler binding")
+    names = policy["osNames"]
+    need(type(names) is list and names == sorted(set(names)) and 1 <= len(names) <= 256
+         and set(names) == set(policy["libraries"]) == set(graph["sharedObjects"])
+         and set(old["outputs"]["libtest"]["objects"]) <= set(names), "Shell/U complete entry closure differs")
+    scope, bindings = _mount_scope(), {}
+    for name, row in policy["libraries"].items():
+        original = graph["sharedObjects"][name]
+        need(row["elf"] == original["elf"] and all(row["file"][key] == original["file"][key] for key in ("size", "sha256")),
+             "Shell current provider differs from its compiler")
+        if name in old["sharedObjects"]:
+            prior = old["sharedObjects"][name]
+            need(row["elf"] == prior["elf"] and all(row["file"][key] == prior["file"][key] for key in ("size", "sha256")),
+                 "Common shell/U provider differs from accepted U")
+    for row in [*policy["osFiles"].values(), policy["loader"], policy["ldconfig"], policy["cache"]]:
+        current = _loader_binding(Path(row["selectedPath"]), scope)
+        need(current == row, "Root shell helper/module/data input differs from this VM's admitted binding")
+        bindings[row["selectedPath"]] = current
+    for kind, originals in (("libraries", graph["sharedObjects"]), ("programs", graph["programs"]),
+                             ("modules", graph["modules"]), ("scripts", graph["scripts"])):
+        need(set(policy[kind]) == set(originals), "Shell executable/module roster differs from compiler")
+        for name, row in policy[kind].items():
+            bound = bindings[row["file"]["selectedPath"]]
+            portable = {key: bound[key] for key in ("path", "selectedPath", "size", "sha256")}
+            portable["mode"] = stat.S_IMODE(bound["identity"][2])
+            need(portable == originals[name]["file"] and row["file"] == {**portable, "identity": bound["identity"]},
+                 "Shell executable/module provider lost its protected current binding")
+    modules = policy["moduleRoots"]
+    for path, row in modules.items():
+        binding = _loader_binding(Path(path), scope, directory_only=True, absent=True)
+        need(binding == row["binding"] and (row["children"] == [] if binding.get("absent") else
+             sorted(child.name for child in Path(path).iterdir()) == row["children"]),
+             "Shell module directory or membership differs from original admission")
+        bindings[path] = binding
+    shell_module_proof(graph, modules, bindings)
+    for row in graph["privateSearch"]:
+        binding = _loader_binding(Path(row["path"]), scope, absent=True)
+        shell_private_selected(row, binding, policy["libraries"][row["name"]]["file"])
+        need(row["path"] not in bindings or bindings[row["path"]] == binding, "Shell private search path changed")
+        bindings[row["path"]] = binding
+    need(policy["loader"]["path"] == policy["libraries"]["ld-linux-x86-64.so.2"]["file"]["path"]
+         and policy["loader"]["selectedPath"] == "/lib64/ld-linux-x86-64.so.2"
+         and policy["ldconfig"]["selectedPath"] == "/usr/sbin/ldconfig.real"
+         and policy["cache"]["selectedPath"] == "/etc/ld.so.cache", "Fixed shell loader/cache names differ")
+    copies = [("platform-tests", value["library"]), *(("shell-" + role, row) for role, row in shell["binaries"].items())]
+    for leaf, expected in copies:
+        row = _loader_binding(_ROOT / leaf, scope)
+        need(all(row[key] == expected[key] for key in ("size", "sha256")), "Protected normal/observer/U platform copy differs")
+        bindings[str(_ROOT / leaf)] = row
+    bindings["/etc/ld.so.preload"] = _loader_binding(Path("/etc/ld.so.preload"), scope, absent=True)
+    need(bindings["/etc/ld.so.preload"].get("absent") is True, "Ambient loader preload is present")
+    diagnostics = command("loader-diagnostics", ["/lib64/ld-linux-x86-64.so.2", "--list-diagnostics"], maximum=15,
+                          env={"LANG": "C", "LC_ALL": "C"})
+    need(diagnostics.stderr == b"", "Shell loader diagnostic command failed")
+    profile = loader_diagnostics(diagnostics.stdout)
+    cache = command("loader-cache", ["/usr/sbin/ldconfig.real", "-p"], maximum=15, env={"LANG": "C", "LC_ALL": "C"})
+    need(cache.stderr == b"", "Shell static loader-cache command failed")
+    libc = next(row for row in policy["packages"].values() if row["binaryPackage"].split(":")[0] == "libc6")
+    cache_rows = loader_cache(cache.stdout, libc["version"], shell_names=names)
+    for name in DEFAULT_LIBRARY_DIRS:
+        bindings[name] = _loader_binding(Path(name), scope, directory_only=True)
+    # Only ordinary global providers use the cache/default search policy.
+    # Private RUNPATH providers keep their exact per-requester static graph;
+    # they must not be relabelled as globally selected cache libraries.
+    global_names = shell_global_names(policy["libraries"])
+    tiers = {}
+    for directory in DEFAULT_LIBRARY_DIRS:
+        for tier in HWCAPS:
+            path = directory + "/glibc-hwcaps/" + tier
+            row = _loader_binding(Path(path), scope, directory_only=True, absent=True)
+            bindings[path] = row
+            tiers[path] = row.get("absent") is not True
+    for name, path in shell_loader_candidates(sorted(global_names), cache_rows, tiers):
+        row = _loader_binding(Path(path), scope, absent=True)
+        loader_selected(row, policy["libraries"][name]["file"])
+        bindings[path] = row
+    snapshot = shell_data_snapshot(lambda path, **options: _loader_binding(path, scope, **options))
+    data = shell_data_projection(snapshot)
+    need(data == {key: policy["runtimeData"][key] for key in data}
+         and data["suppliers"] == graph["runtimeData"]["suppliers"]
+         and data["eglLibraries"] == graph["runtimeData"]["eglLibraries"]
+         and all(set(paths) <= set(graph["modules"]) for paths in data["moduleSelections"].values()),
+         "Root supplier DATA, current cache or module selector differs")
+    need(type(policy["runtimeData"]["records"]) is list and len(policy["runtimeData"]["records"]) == len(SHELL_DATA_ROOTS),
+         "Original current-VM shell DATA detail roster missing")
+    data["records"] = []
+    for index, (path, _) in enumerate(SHELL_DATA_ROOTS):
+        leaf, raw = "shell-root-data-" + str(index) + ".json", canonical(snapshot["details"][path])
+        need(policy["runtimeData"]["records"][index] == {"path": "shell-consumer-data-" + str(index) + ".json",
+             "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+             "Root shell DATA identity differs from the original current-VM admission")
+        _retain(leaf, raw)
+        data["records"].append({"path": leaf, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+    proof = {"scope": scope, "namespaces": namespaces, "bindings": bindings, "diagnostics": profile,
+             "cacheRows": [row for row in cache_rows if row["soname"] in set(names) | PRIVATE_SONAMES],
+             "entryObjects": names, "globalObjects": sorted(global_names), "hwcapsTiers": tiers,
+             "moduleRoots": modules, "privateSearch": graph["privateSearch"], "runtimeData": data, "runtimeDataRechecked": False,
+             "payloadAdmitted": False, "externalPrerequisites": policy["externalPrerequisites"]}
+    _installed_loader_check(proof)
+    _retain("loader-entry.json", canonical(proof))
+    return proof
+
+
+def shell_data_projection(snapshot):
+    return {key: snapshot[key] for key in ("suppliers", "caches", "moduleSelections", "eglLibraries")}
+
+
+def shell_module_proof(graph, roots, bindings):
+    """Finite module membership DATA, including absence; not a loader action."""
+    need(type(roots) is dict and set(roots) == set(graph["moduleRoots"]), "Original module-root roster differs")
+    selected = set()
+    for path, row in roots.items():
+        need(type(row) is dict and set(row) == {"binding", "children"} and bindings.get(path) == row["binding"]
+             and type(row["children"]) is list and row["children"] == sorted(set(row["children"]))
+             and len(row["children"]) <= 256, "Original module-directory proof is incomplete")
+        present = row["binding"].get("absent") is not True
+        need(present or not row["children"], "Absent module directory has children")
+        names = [name for name in row["children"] if path + "/" + name not in SHELL_MODULE_CACHES]
+        need(all(type(name) is str and re.fullmatch(r"[A-Za-z0-9_.+\-]+\.so", name) for name in names)
+             and graph["moduleRoots"][path] == {"present": present, "modules": names},
+             "Module membership differs from the original compiled profile")
+        selected.update(path + "/" + name for name in names)
+    need(selected == set(graph["modules"]), "An original module was added or omitted")
+
+
+def shell_private_selected(candidate, binding, provider):
+    """Every per-requester alternative is checked, not just private providers."""
+    need(type(candidate) is dict and set(candidate) == {"requester", "runpath", "name", "path", "selected"}
+         and type(candidate["selected"]) is bool
+         and candidate["selected"] == (candidate["path"] == provider["selectedPath"]),
+         "Original private requester/candidate selection differs")
+    if candidate["selected"]:
+        need(binding.get("absent") is not True, "Selected private shell provider is absent")
+        loader_selected(binding, provider)
+    else:
+        need(binding.get("absent") is True, "Private shell search can shadow an admitted dependency")
+
+
+def _shell_data_check(proof):
+    # One final rewalk, not a fresh copy of the same large DATA evidence.
+    # Initial complete details remain retained; final hashes include actual
+    # inode/link/cache bytes and directory membership as well as summaries.
+    for path, row in proof["moduleRoots"].items():
+        current = _loader_binding(Path(path), proof["scope"], directory_only=True, absent=True)
+        need(current == row["binding"] and (row["children"] == [] if current.get("absent") else
+             sorted(child.name for child in Path(path).iterdir()) == row["children"]), "Original module membership changed")
+    snapshot = shell_data_snapshot(lambda path, **options: _loader_binding(path, proof["scope"], **options))
+    need(shell_data_projection(snapshot) == shell_data_projection(proof["runtimeData"]),
+         "Original shell supplier/cache/selector interval changed")
+    for index, (path, _) in enumerate(SHELL_DATA_ROOTS):
+        raw = canonical(snapshot["details"][path])
+        need(proof["runtimeData"]["records"][index] == {"path": "shell-root-data-" + str(index) + ".json",
+             "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}, "Original complete shell DATA binding changed")
+    need(time.monotonic() < _END, "Original shell DATA interval closed late")
+    proof["runtimeDataRechecked"] = True
+
+
 def _installed_payload(value, proof, original):
     # NOT reached by either refusal. Their deliberately invalid M must reach
     # real Rust inspection, after only the libtest/platform OS-entry gate.
-    need(value["installed"]["case"] == "positive" and _tree(PREFIX / M, M, published=True) == original,
+    profile = value["shell"] if "shell" in value else value["installed"]
+    need(("shell" in value or profile["case"] == "positive") and _tree(PREFIX / M, M, published=True) == original,
          "Positive published A changed before payload admission")
-    graph = value["installed"]["loaderPolicy"]["graph"]
+    graph = profile["loaderPolicy"]["graph"]
     fixed = {"python/bin/python3": (None, "$ORIGIN/../lib"), "python/lib/libssl.so.3": ("libssl.so.3", "$ORIGIN"),
              "python/lib/libcrypto.so.3": ("libcrypto.so.3", "$ORIGIN")}
     need(set(graph["runtime"]) == set(fixed) and graph["runtimeObjects"] == sorted(PRIVATE_SONAMES | {"libc.so.6", "libm.so.6", "ld-linux-x86-64.so.2"}),
@@ -1397,14 +1816,14 @@ def _installed_payload(value, proof, original):
         role = soname or "python"
         expected[role] = {"paths": [str(path)], "deviceMajor": os.major(row["identity"][0]),
                           "deviceMinor": os.minor(row["identity"][0]), "inode": row["identity"][1]}
-    for relative in ("python/lib/glibc-hwcaps", *("python/lib/" + name for name in proof["entryObjects"]),
+    for relative in ("python/lib/glibc-hwcaps", *("python/lib/" + name for name in proof["entryObjects"] if name not in PRIVATE_SONAMES),
                      *(prefix + name for prefix in ("", "python/", "python/bin/") for name in ("pyvenv.cfg", "python3._pth", "pybuilddir.txt"))):
         path = PREFIX / M / relative
         binding = _loader_binding(path, proof["scope"], absent=True)
         need(binding.get("absent") is True, "Private A startup/hwcaps/OS override exists")
         proof["bindings"][str(path)] = binding
     for name in ("ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"):
-        admitted = value["installed"]["loaderPolicy"]["libraries"][name]["file"]
+        admitted = profile["loaderPolicy"]["libraries"][name]["file"]
         paths = [prefix + name for prefix in ("/lib/x86_64-linux-gnu/", "/usr/lib/x86_64-linux-gnu/")]
         if name == "ld-linux-x86-64.so.2":
             paths.append("/lib64/" + name)
@@ -1716,6 +2135,221 @@ def _installed_overlap(value, policy, proof, expected):
     return observed, configure_trace
 
 
+def shell_environment(value, case):
+    need(case in SHELL_CASES, "Unknown fixed shell case")
+    home = root_path(value) / ("gui-" + case)
+    return {"PATH": HOST_PATH, "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+            "HOME": str(home / "home"), "TMPDIR": str(home / "tmp"), "XDG_RUNTIME_DIR": str(home / "runtime"),
+            "XDG_CONFIG_HOME": str(home / "config"), "XDG_CACHE_HOME": str(home / "cache"), "XDG_DATA_HOME": str(home / "data"),
+            "XDG_CONFIG_DIRS": str(home / "empty-config"), "XDG_DATA_DIRS": "/usr/share",
+            "GDK_BACKEND": "x11", "GSETTINGS_BACKEND": "memory", "GIO_USE_VFS": "local", "GTK_THEME": "Adwaita",
+            "DISPLAY": ":99", "XAUTHORITY": str(home / "Xauthority"),
+            "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=" + str(home / "runtime/absent-system-bus"),
+            "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "GITHUB_SHA": value["sourceSha"],
+            **({"MRK_DESKTOP_HOSTED_CHECKS": "installed-shell-connection-v1"} if case != "normal" else {})}
+
+
+def shell_argv(value, case):
+    environment = shell_environment(value, case)
+    command = [str(root_path(value) / ("shell-normal" if case == "normal" else "shell-observer"))]
+    if case != "normal":
+        command.append(case)
+    return _drop(value, ["/usr/bin/dbus-run-session", "--dbus-daemon=/usr/bin/dbus-daemon",
+        "--config-file=" + str(root_path(value) / ("shell-" + case + "-bus.conf")), "--",
+        "/usr/bin/xvfb-run", "--server-num=99", "--auth-file=" + environment["XAUTHORITY"],
+        "--error-file=/dev/stderr", "--server-args=-screen 0 1280x1024x24 -noreset", *command])
+
+
+def _shell_prepare(value, case):
+    base, environment = _ROOT / ("gui-" + case), shell_environment(value, case)
+    for path in (base, *(base / name for name in ("home", "tmp", "runtime", "config", "cache", "data", "empty-config"))):
+        path.mkdir(mode=0o700)
+        os.chown(path, value["runnerUid"], value["runnerGid"])
+    auth = Path(environment["XAUTHORITY"])
+    _D.write(auth, b"", 0o600)
+    os.chown(auth, value["runnerUid"], value["runnerGid"])
+    bus = base / "runtime/session-bus"
+    need(len(str(bus).encode("ascii")) < 108, "Private D-Bus socket exceeds native path bound")
+    # Deliberately no include, service directory/helper, systemd activation,
+    # pidfile, fork or syslog. The config's protected parent is not app-writable.
+    config = ("<busconfig><type>session</type><listen>unix:path=" + str(bus)
+        + "</listen><auth>EXTERNAL</auth><policy context=\"default\">"
+        + "<allow own=\"*\"/><allow send_destination=\"*\"/><allow receive_sender=\"*\"/>"
+        + "</policy></busconfig>\n").encode("ascii")
+    _D.write(_ROOT / ("shell-" + case + "-bus.conf"), config, 0o444)
+    for path in (Path("/tmp/.X99-lock"), Path("/tmp/.X11-unix/X99"), bus, base / "runtime/absent-system-bus"):
+        _absent(path)  # Conflict is failure, never permission to repair/remove.
+    return environment
+
+
+def shell_result(stdout, stderr, case, code, expected):
+    """Original bounded captures, not wrapper zero or an observation delay."""
+    need(case in SHELL_CASES and type(code) is int and code == 0
+         and type(stdout) is bytes and type(stderr) is bytes and len(stdout) + len(stderr) <= LIMIT,
+         "Original shell capture failed/incomplete")
+    lines = [line for line in stdout.splitlines() + stderr.splitlines() if line.startswith(b"MRK_")]
+    marker = b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified"
+    contracts = b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified"
+    if case in {"normal", "positive"}:
+        wanted = [b"MRK_DESKTOP_CAPABILITIES=available", b"MRK_DESKTOP_CATALOGUE=returned"]
+        if case == "positive":
+            wanted += [contracts, marker]
+        need(sorted(lines) == sorted(wanted), "Actual normal capabilities/catalogue or observer completion missing")
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": case == "positive", "maps": []}
+    # The outstanding case cannot advertise success. Its IPC caller may retire
+    # before the fixed unavailable diagnostic; only the held original's later
+    # genuine settlement/map report plus completed GUI observation is required.
+    maps = [line for line in lines if line.startswith(CHILD_MARKER.encode("ascii"))]
+    remaining = [line for line in lines if line not in maps]
+    need(sorted(remaining) in (sorted([contracts, marker]), sorted([contracts, marker, b"MRK_DESKTOP_CAPABILITIES=unavailable"]))
+         and len(maps) == 1 and len(maps[0]) <= 8192 + len(CHILD_MARKER)
+         and type(expected) is dict and len(expected) == 6, "Outstanding original/GUI completion differs")
+    rows = decode(maps[0][len(CHILD_MARKER):], 8192)
+    need(type(rows) is list and len(rows) == 6 and all(type(row) is dict for row in rows)
+         and [row.get("role") for row in rows] == sorted(expected), "Outstanding original child roles differ")
+    for row in rows:
+        need(set(row) == {"role", "path", "deviceMajor", "deviceMinor", "inode"}
+             and row["path"] in expected[row["role"]]["paths"]
+             and all(type(row[key]) is int and row[key] == expected[row["role"]][key]
+                     for key in ("deviceMajor", "deviceMinor", "inode")), "Outstanding original child mapping differs")
+    return {"case": case, "exitCode": 0, "bootstrapReturned": False, "domAndGtkObserved": True, "maps": [rows]}
+
+
+def shell_window_ids(raw):
+    need(type(raw) is bytes and len(raw) <= 128, "Private display window response exceeds bound")
+    rows = raw.splitlines()
+    need(len(rows) <= 2 and all(re.fullmatch(rb"[1-9][0-9]{0,9}", row) is not None for row in rows),
+         "Private display returned malformed/unbounded window IDs")
+    values = [int(row) for row in rows]
+    need(len(set(values)) == len(values) and all(value < 1 << 32 for value in values), "Duplicate/oversized XID")
+    return values
+
+
+def _shell_window_pid(value, pid):
+    # Selection DATA only. Never use this numeric ID to wait, signal, clean,
+    # claim process custody or reconstruct a lost original worker.
+    need(type(pid) is int and 0 < pid < 1 << 31, "Private shell window PID differs")
+    proc = Path("/proc") / str(pid)
+    status = dict(line.split(":", 1) for line in _kernel(proc / "status").splitlines() if ":" in line)
+    need(all(status[key].split() == [str(value[id_key])] * 4 for key, id_key in (("Uid", "runnerUid"), ("Gid", "runnerGid")))
+         and status["NoNewPrivs"].strip() == "1"
+         and _kernel(proc / "cgroup") == "0::/system.slice/" + _ROOT.name + ".service\n"
+         and os.readlink(proc / "exe") == str(_ROOT / "shell-normal"), "Window does not report this task's original normal executable")
+
+
+def _shell_normal(value, environment, expected):
+    global _FAILED, _PHASE
+    need(not _FAILED, "Prior shell/root failure")
+    _FAILED, _PHASE = True, "shell-normal"
+    started = time.monotonic()
+    end = min(started + 45, _END - CLIENT_RESERVATION - 1)
+    seconds = min(60, math.floor(_END - CLIENT_RESERVATION - started))
+    need(seconds > 45 and end > started + 35, "Insufficient original normal-window lifetime remains")
+    argv, holder, commands = shell_argv(value, "normal"), {}, []
+    worker = threading.Thread(target=_overlap_worker, args=(holder, argv, environment, seconds),
+                              name="mrk-installed-shell-normal", daemon=False)
+    failure, join_error, capture_error, joined, inputs = None, None, None, False, 0
+
+    def xdo(label, args, *, codes=(0,)):
+        need(time.monotonic() < end and worker.is_alive() and len(commands) < 96, "Normal window controller exhausted or original returned")
+        timeout = min(5, math.floor(end - time.monotonic()))
+        need(timeout > 0, "No original controller command budget remains")
+        command_argv = _drop(value, ["/usr/bin/xdotool", *args])
+        result = _OWNER.run_owned(command_argv, environ=environment, cwd=Path("/"), timeout=timeout,
+            capture=True, text=False, output_limit=4096, execution_scope=None, journal_binding=None, cleanup=False)
+        need(type(result) is subprocess.CompletedProcess and result.args == command_argv and type(result.returncode) is int
+             and type(result.stdout) is bytes and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= 4096,
+             "Original private-display controller result incomplete")
+        commands.append({"phase": label, "argv": command_argv, "exitCode": result.returncode,
+                         "stdout": result.stdout.decode("ascii"), "stderr": result.stderr.decode("ascii"), "timeoutSeconds": timeout})
+        need(result.returncode in codes and time.monotonic() < end, "Original private-display command failed/late")
+        return result
+
+    def search(title, pid=None):
+        args = ["search", "--onlyvisible", "--all", "--maxdepth", "1", "--limit", "2"]
+        if pid is not None:
+            args += ["--pid", str(pid)]
+        return xdo("search", [*args, "--name", title], codes=(0, 1))
+
+    def wait_window(title, pid=None):
+        for _ in range(64):
+            result = search(title, pid)
+            if result.returncode == 0:
+                need(result.stderr == b"", "Successful private window query emitted a diagnostic")
+                ids = shell_window_ids(result.stdout)
+                need(len(ids) == 1, "Private normal window is missing/ambiguous")
+                return ids[0]
+            need(result.stdout == b"", "Unsuccessful private window query returned an ID")
+            time.sleep(min(0.1, max(0.0, end - time.monotonic())))
+        raise Refused("Original private shell window did not become visible in the finite observation")
+
+    def input_key(window, title, pid, key):
+        nonlocal inputs
+        _shell_window_pid(value, pid)
+        result = search(title, pid)
+        need(result.returncode == 0 and result.stderr == b"" and shell_window_ids(result.stdout) == [window],
+             "Same private XID/title/PID no longer corresponds before input")
+        focused = xdo("focus", ["windowfocus", "--sync", str(window)])
+        need(focused.stdout == focused.stderr == b"", "Private focus command emitted a diagnostic")
+        observed = xdo("focus-readback", ["getwindowfocus", "-f"])
+        need(observed.stderr == b"" and shell_window_ids(observed.stdout) == [window], "Exact private focus was not read back")
+        _shell_window_pid(value, pid)
+        result = xdo("key", ["key", "--clearmodifiers", key])
+        need(result.stdout == result.stderr == b"", "Private XTEST key command emitted a diagnostic")
+        inputs += 1
+
+    try:
+        worker.start()
+        title = "^Mobile Release Kit$"
+        window = wait_window(title)
+        reported = xdo("window-pid", ["getwindowpid", str(window)])
+        need(reported.stderr == b"" and re.fullmatch(rb"[1-9][0-9]{0,9}\n", reported.stdout) is not None,
+             "Normal private window PID was not returned")
+        pid = int(reported.stdout)
+        _shell_window_pid(value, pid)
+        # Scheduling margin only, never a success receipt. Both genuine
+        # original core returns are still required from the bounded capture.
+        margin = min(time.monotonic() + 22, end - 8)
+        while time.monotonic() < margin:
+            need(worker.is_alive(), "Original normal shell returned before Quit")
+            time.sleep(min(0.25, max(0.0, margin - time.monotonic())))
+        input_key(window, title, pid, "ctrl+q")
+        title = r"^Quit and discard unsaved drafts\?$"
+        dialog = wait_window(title, pid)
+        need(dialog != window, "GTK Quit did not create its own real dialog")
+        input_key(dialog, title, pid, "alt+o")
+    except BaseException as error:
+        failure = error
+    finally:
+        try:
+            # A failed start return does not prove that no thread was created.
+            # Attempt the same original join even then; an unstarted join error
+            # remains a failure, never a guessed no-worker receipt.
+            worker.join(max(0.0, min(_END, started + seconds + 20) - time.monotonic()))
+            joined = not worker.is_alive()
+        except BaseException as error:
+            join_error = error
+        if joined and "result" in holder:
+            try:
+                _command_capture("shell-normal", argv, holder["result"], seconds)
+            except BaseException as error:
+                capture_error = error
+    _retain("shell-normal-control.json", canonical({"joined": joined, "inputs": inputs, "commands": commands,
+        "workerGuardState": holder.get("guardState") if joined else None,
+        "workerErrorCount": len(holder.get("errors", [])) if joined else None,
+        "startMonotonic": started, "controllerEndpoint": end, "carrierTimeoutSeconds": seconds,
+        "originalDeadline": _END, "errorType": type(failure).__name__ if failure is not None else None}))
+    for error in (failure, join_error, capture_error, *(holder.get("errors", []) if joined else [])):
+        if error is not None:
+            raise error
+    need(joined and inputs == 2 and holder.get("guardState") == "RESTORED" and "result" in holder
+         and time.monotonic() < _END, "Original normal shell/controller did not settle")
+    result = holder["result"]
+    observed = shell_result(result.stdout, result.stderr, "normal", result.returncode, expected)
+    _FAILED = False
+    return observed
+
+
 def _finish_body(value, request_sha, start, states, observations, traces, cases, loader):
     need(tuple(row["phase"] for row in _COMMANDS) == root_phases(value) and states == lifecycle_states(value)
          and not _FAILED and time.monotonic() < _END, "Original fixed root command/state roster incomplete or late")
@@ -1732,6 +2366,16 @@ def _finish_body(value, request_sha, start, states, observations, traces, cases,
                  "candidateProducerAttempt": installed["candidateProducerAttempt"], "candidateArtifactId": installed["candidateArtifactId"],
                  "consumerAttempt": value["attempt"], "acceptedU": installed["acceptedU"],
                  "lifecycleComplete": installed["case"] == "positive", "fixturePublished": installed["case"] == "positive"}
+    elif "shell" in value:
+        shell = value["shell"]
+        need(set(cases) == set(SHELL_CASES), "Original fixed shell case roster incomplete")
+        _shell_data_check(loader)
+        _installed_loader_check(loader)
+        _retain("loader-final.json", canonical(loader))
+        _retain("shell-cases.json", canonical(cases))
+        extra = {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+                 "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+                 "packageLifecycleQualified": False, "shellPackageBuilt": False}
     if "installed" not in value or value["installed"]["case"] == "positive":
         _retain("mutation-denials.txt", canonical({phase: row["denials"] for phase, row in observations.items()}))
     _retain("unit-result.json", canonical({"sourceSha": value["sourceSha"], "handoffSha256": request_sha,
@@ -1754,7 +2398,8 @@ def unit_start():
     _retain("unit-start.json", canonical(start))
     _retain("inputs.json", canonical(value))
     _retain("dpkg-policy.json", canonical(policy))
-    loader = _installed_loader_start(value, namespaces) if "installed" in value else None
+    loader = (_installed_loader_start(value, namespaces) if "installed" in value
+              else _shell_loader_start(value, namespaces) if "shell" in value else None)
     env = {**_environment(), "MRK_UBUNTU_PUBLICATION_NATIVE": "1", "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
     for label, test in (("native-root", ROOT_TEST), ("native-user", USER_TEST)):
         argv = [str(_ROOT / "platform-tests"), test, "--exact", "--ignored", "--test-threads=1"]
@@ -1824,6 +2469,20 @@ def unit_start():
     mutate("configure", "--configure", PACKAGE, [("postinst", ("configure",))], published=True)
     state("p0", "install ok installed", "P0")
     observation("p0")
+    if "shell" in value:
+        original = observations["p0"]["published"]["P0"]
+        expected = _installed_payload(value, loader, original)
+        for case in SHELL_CASES:
+            environment = _shell_prepare(value, case)
+            if case == "normal":
+                cases[case] = _shell_normal(value, environment, expected)
+            else:
+                result = command("shell-" + case, shell_argv(value, case), maximum=60, env=environment)
+                cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected)
+        need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during shell observations")
+        state("shell-finished", "install ok installed", "P0")
+        _finish_body(value, request_sha, start, states, observations, traces, cases, loader)
+        return
     if "installed" in value:
         original = observations["p0"]["published"]["P0"]
         expected = _installed_payload(value, loader, original)
@@ -1989,6 +2648,117 @@ def installed_closed_result(value, outcome, raw_files):
             "lifecycleComplete": positive, "fixturePublished": positive}
 
 
+def shell_closed_loader(value, raw_files):
+    """Reconcile retained originals; never query a possibly live GUI process."""
+    policy = value["shell"]["loaderPolicy"]
+    entry, final = (decode(raw_files["loader-" + phase + ".json"], LIMIT) for phase in ("entry", "final"))
+    for key in ("scope", "namespaces", "diagnostics", "cacheRows", "entryObjects", "globalObjects", "hwcapsTiers",
+                "moduleRoots", "privateSearch", "runtimeData", "externalPrerequisites"):
+        need(entry[key] == final[key], "Closed original shell loader/DATA interval differs: " + key)
+    need(entry["payloadAdmitted"] is False and final["payloadAdmitted"] is True
+         and entry["runtimeDataRechecked"] is False and final["runtimeDataRechecked"] is True
+         and all(final["bindings"].get(path) == row for path, row in entry["bindings"].items()),
+         "Original shell entry/DATA bindings changed or final recheck is missing")
+    need(loader_diagnostics(raw_files["loader-diagnostics.stdout"]) == entry["diagnostics"]
+         and raw_files["loader-diagnostics.stderr"] == raw_files["loader-cache.stderr"] == b"",
+         "Original shell loader command capture differs")
+    names = policy["osNames"]
+    libc = next(row for row in policy["packages"].values() if row["binaryPackage"].split(":")[0] == "libc6")
+    rows = loader_cache(raw_files["loader-cache.stdout"], libc["version"], shell_names=names)
+    global_names = shell_global_names(policy["libraries"])
+    need(entry["entryObjects"] == names and entry["globalObjects"] == global_names
+         and entry["cacheRows"] == [row for row in rows if row["soname"] in set(names) | PRIVATE_SONAMES],
+         "Closed all-SONAME shell cache roster differs")
+    for path, present in entry["hwcapsTiers"].items():
+        bound = entry["bindings"].get(path, {})
+        need("directory" in bound if present else bound.get("absent") is True,
+             "Original shell hwcaps directory presence has no binding")
+    for name, path in shell_loader_candidates(global_names, rows, entry["hwcapsTiers"]):
+        need(path in entry["bindings"], "Closed original shell cache/default/hwcaps candidate omitted")
+        loader_selected(entry["bindings"][path], policy["libraries"][name]["file"])
+    need(entry["moduleRoots"] == policy["moduleRoots"] and entry["privateSearch"] == policy["graph"]["privateSearch"],
+         "Closed original shell module/private-search roster differs")
+    shell_module_proof(policy["graph"], entry["moduleRoots"], entry["bindings"])
+    for row in entry["privateSearch"]:
+        need(row["path"] in entry["bindings"], "Closed original per-requester candidate omitted")
+        shell_private_selected(row, entry["bindings"][row["path"]], policy["libraries"][row["name"]]["file"])
+    data = entry["runtimeData"]
+    need(shell_data_projection(data) == shell_data_projection(policy["runtimeData"])
+         and len(data["records"]) == len(policy["runtimeData"]["records"]) == len(SHELL_DATA_ROOTS),
+         "Closed original runtime DATA/cache summary differs")
+    for index, pin in enumerate(data["records"]):
+        leaf = "shell-root-data-" + str(index) + ".json"
+        raw = raw_files[leaf]
+        need(pin == {"path": leaf, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+             "Closed complete original shell DATA bytes differ")
+        need(policy["runtimeData"]["records"][index] == {**pin, "path": "shell-consumer-data-" + str(index) + ".json"},
+             "Closed shell DATA is not the originally admitted current-VM identity")
+    runtime = decode(raw_files["loader-runtime.json"])
+    expected = runtime["expectedMaps"]
+    need(set(expected) == {"python", "libssl.so.3", "libcrypto.so.3", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"}
+         and runtime["manifestSha256"] == M and runtime["protocolSha256"] == Q
+         and runtime["privateObjects"] == sorted(PRIVATE_SONAMES)
+         and runtime["shadowedCacheRows"] == [row for row in entry["cacheRows"] if row["soname"] in PRIVATE_SONAMES]
+         and runtime["shadowedDefaultNames"] == [directory + "/" + tier + name for directory in DEFAULT_LIBRARY_DIRS
+             for tier in ("", *("glibc-hwcaps/" + tier + "/" for tier in HWCAPS)) for name in sorted(PRIVATE_SONAMES)],
+         "Closed private A/OS shell namespace correspondence differs")
+    for role, row in expected.items():
+        if role == "python" or role in PRIVATE_SONAMES:
+            relative = "python/bin/python3" if role == "python" else "python/lib/" + role
+            paths = [str(PREFIX / M / relative)]
+            provider = policy["graph"]["runtime"][relative]["file"]
+        else:
+            paths = sorted([directory + "/" + role for directory in DEFAULT_LIBRARY_DIRS[:2]]
+                           + (["/lib64/" + role] if role == "ld-linux-x86-64.so.2" else []))
+            provider = policy["libraries"][role]["file"]
+        need(type(row) is dict and set(row) == {"paths", "deviceMajor", "deviceMinor", "inode"} and row["paths"] == paths
+             and all(type(row[key]) is int for key in ("deviceMajor", "deviceMinor", "inode")),
+             "Closed original A mapping role or aliases differ")
+        for path in paths:
+            binding = final["bindings"].get(path)
+            need(type(binding) is dict and "identity" in binding
+                 and all(binding[key] == provider[key] for key in ("size", "sha256"))
+                 and (row["deviceMajor"], row["deviceMinor"], row["inode"])
+                     == (os.major(binding["identity"][0]), os.minor(binding["identity"][0]), binding["identity"][1]),
+                 "Closed original child-map alias lacks its independently bound inode/bytes")
+    return expected
+
+
+def shell_closed_result(value, outcome, raw_files):
+    """Correspondence only, after the same original-client/StopPost gate."""
+    shell = value["shell"]
+    for key, field in (("shellRosterSha256", "rosterSha256"), ("shellProducerAttempt", "producerAttempt"),
+                       ("shellArtifactId", "artifactId"), ("acceptedU", "acceptedU")):
+        need(outcome.get(key) == shell[field], "Closed shell original provenance differs")
+    need(outcome.get("consumerAttempt") == value["attempt"] and outcome.get("packageLifecycleQualified") is False
+         and outcome.get("shellPackageBuilt") is False, "Connection was relabelled as a shell package qualification")
+    expected = shell_closed_loader(value, raw_files)
+    cases = decode(raw_files["shell-cases.json"])
+    need(type(cases) is dict and set(cases) == set(SHELL_CASES), "Closed original shell case roster differs")
+    commands = {row["phase"]: row for row in outcome["commands"]}
+    for case in SHELL_CASES:
+        phase = "shell-" + case
+        need(commands[phase]["argv"] == shell_argv(value, case), "Closed original shell argv differs")
+        result = shell_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected)
+        need(result == cases[case], "Closed original shell capture differs")
+    control = decode(raw_files["shell-normal-control.json"])
+    need(control.get("joined") is True and control.get("inputs") == 2 and control.get("workerGuardState") == "RESTORED"
+         and control.get("workerErrorCount") == 0 and control.get("errorType") is None
+         and control.get("originalDeadline") == value["deadline"] and type(control.get("commands")) is list
+         and 11 <= len(control["commands"]) <= 96, "Original normal controller/worker finality differs")
+    keys = [row for row in control["commands"] if row["phase"] == "key"]
+    need(len(keys) == 2 and all(row["exitCode"] == 0 and row["stdout"] == row["stderr"] == "" for row in keys)
+         and [row["argv"] for row in keys] == [_drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key]) for key in ("ctrl+q", "alt+o")],
+         "Normal window did not use the two fixed original XTEST commands")
+    p0 = decode(raw_files["observe-p0.stdout"], LIMIT)
+    need(set(p0["published"]) == {"P0"}
+         and decode(raw_files["published-before-upgrade.txt"], LIMIT) == p0["published"],
+         "Original unchanged P0 publication observation differs")
+    return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
+            "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
+            "cases": cases, "packageLifecycleQualified": False, "shellPackageBuilt": False}
+
+
 def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_result, public_destination):
     # This gate precedes every read of R. An exception/partial/nonzero original
     # client result authorizes neither possible-live DATA access nor cleanup.
@@ -2055,10 +2825,11 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
         raw_files[row["path"]] = raw
     states = lifecycle_states(value)
     need(outcome["states"] == states, "Original lifecycle package-state assertions differ")
-    extra = installed_closed_result(value, outcome, raw_files) if "installed" in value else {}
+    extra = (installed_closed_result(value, outcome, raw_files) if "installed" in value
+             else shell_closed_result(value, outcome, raw_files) if "shell" in value else {})
     unpacked = decode(raw_files["observe-unpacked.stdout"], LIMIT)
     need(unpacked["published"] == {}, "Original unpack did not preserve publication absence")
-    if "installed" not in value or value["installed"]["case"] == "positive":
+    if "shell" not in value and ("installed" not in value or value["installed"]["case"] == "positive"):
         snapshots = {phase: decode(raw_files["observe-" + phase + ".stdout"], LIMIT) for phase in ("p0", "upgrade", "duplicate", "remove", "purge")}
         need(set(snapshots["p0"]["published"]) == {"P0"} and set(snapshots["upgrade"]["published"]) == {"P0", "F1"}
              and snapshots["p0"]["published"]["P0"] == snapshots["upgrade"]["published"]["P0"]

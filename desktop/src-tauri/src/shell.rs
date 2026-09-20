@@ -17,6 +17,9 @@ use crate::{
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[path = "session_gtk_qualification.rs"]
 pub(crate) mod qualification;
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "installed_shell_observation.rs"]
+pub(crate) mod installed_observation;
 macro_rules! fixture_command {
     ($state:expr, $kind:ident, $observed:ident, $error:expr) => {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -40,6 +43,7 @@ macro_rules! gtk_fixture {
 }
 
 const MAIN_WINDOW: &str = "main";
+const QUIT_MENU_ID: &str = "mrk-file-quit";
 const EDIT_EVENT: &str = "config-edit-state";
 const WORKFLOW_EDIT_EVENT: &str = "github-workflow-edit-status";
 const ASSET_EVENT: &str = "asset-session-state";
@@ -47,6 +51,8 @@ const ASSET_EVENT: &str = "asset-session-state";
 struct ShellState {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fixture: Option<Arc<qualification::Qualification>>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    observation: Option<Arc<installed_observation::Observation>>,
     bridge: Arc<DesktopBridge>, document: DocumentBinding,
     #[cfg(not(target_os = "linux"))] picker: Arc<AtomicBool>,
     #[cfg(not(target_os = "linux"))] closing: AtomicBool,
@@ -57,10 +63,23 @@ struct ShellState {
 }
 struct RelayBook { handle: Option<tauri::async_runtime::JoinHandle<()>>, settled: bool }
 
+fn diagnostic(line: &'static [u8]) {
+    use std::io::Write;
+    // Fixed status only. A closed diagnostic channel must not panic, change
+    // admission, or substitute for the original query/cleanup result.
+    let _ = std::io::stderr().write_all(line);
+}
+
 #[tauri::command]
 async fn app_info(state: State<'_, ShellState>) -> Result<AppInfo, BridgeError> {
     fixture_command!(state, AppInfo, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
-    let result = Ok(state.bridge.app_info(&state.document).await);
+    let info = state.bridge.app_info(&state.document).await;
+    diagnostic(if info.runtime.state == "available" && info.capabilities.is_some() {
+        b"MRK_DESKTOP_CAPABILITIES=available\n"
+    } else { b"MRK_DESKTOP_CAPABILITIES=unavailable\n" });
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.app_info(&info); }
+    let result = Ok(info);
     fixture_result!(observed, info, &result);
     result
 }
@@ -68,6 +87,9 @@ async fn app_info(state: State<'_, ShellState>) -> Result<AppInfo, BridgeError> 
 async fn catalog(state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Catalog, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let result = state.bridge.catalog(&state.document).await;
+    diagnostic(if result.is_ok() { b"MRK_DESKTOP_CATALOGUE=returned\n" } else { b"MRK_DESKTOP_CATALOGUE=refused\n" });
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.catalog(&result); }
     fixture_result!(observed, value, &result);
     result
 }
@@ -587,6 +609,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut android_build_relay_failed = false;
         loop {
             if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; return; }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.tick(&app); }
             // status() releases its native locks before any renderer callback.
             // Events are best effort: the UI subscribes then fetches status and
             // orders both by native revision, never by arrival time.
@@ -662,6 +686,8 @@ async fn settle_relay(app: &tauri::AppHandle) -> bool {
     // not change the independently established native/core result.
     let Some(handle) = book.handle.as_mut() else { return false; };
     let joined = handle.await;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.relay_joined(joined.is_ok()); }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let Some(context) = &state.fixture { context.relay_joined(joined.is_ok()); }
     #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
@@ -769,6 +795,8 @@ mod owned_gtk {
     struct NativeDialog {
         id: u32, object: Object, filter: Option<gtk::FileFilter>,
         response: Option<gtk::glib::SignalHandlerId>, destroy: Option<gtk::glib::SignalHandlerId>,
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        observation: Option<(Weak<installed_observation::Observation>, Weak<GuiCall>)>,
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         topology: Option<topology::DialogMetadata>,
     }
@@ -803,6 +831,8 @@ mod owned_gtk {
 
     fn construct(app: tauri::AppHandle, call: Arc<GuiCall>, choice: DialogChoice) {
         if !gtk::is_initialized_main_thread() { not_created(&call, Reason::Unqualified); return; }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let observation = app.try_state::<Arc<installed_observation::Observation>>().map(|q| Arc::downgrade(q.inner()));
         gtk_fixture!(call, ConstructEnter, match choice { DialogChoice::Project => 1,
             DialogChoice::File(FileKind::AndroidKeystore) => 2, DialogChoice::Quit => 3, _ => 4 });
         let Some(owner) = call.owner() else { not_created(&call, Reason::CleanupUnknown); return; };
@@ -834,10 +864,14 @@ mod owned_gtk {
         // A cancellation during its constructor cannot lose its destruction
         // obligation. No callback captures a strong dialog or application cycle.
         DIALOG.with(|book| *book.borrow_mut() = Some(NativeDialog { id: owner.id, object, filter: None, response: None, destroy: None,
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            observation: observation.as_ref().map(|q| (q.clone(), Arc::downgrade(&call))),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             topology: None,
         }));
         if let Some(mut facts) = call.facts() { facts.created = true; facts.constructing = false; }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = observation.as_ref().and_then(Weak::upgrade) { q.native_created(owner.id, matches!(choice, DialogChoice::Quit)); }
         gtk_fixture!(call, Adopted, 1);
         DIALOG.with(|book| {
             let mut book = book.borrow_mut();
@@ -880,8 +914,12 @@ mod owned_gtk {
                 }
                 Object::Message(dialog) => {
                     dialog.set_title("Quit and discard unsaved drafts?"); dialog.set_destroy_with_parent(true);
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    let (response_observation, destroy_observation, observed_id) = (observation.clone(), observation.clone(), owner.id);
                     entry.response = Some(dialog.connect_response(move |_, response| {
                         if let Some(call) = response_call.upgrade() {
+                            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                            let (observed_ok, observed_delete) = (response == gtk::ResponseType::Ok, response == gtk::ResponseType::DeleteEvent);
                             gtk_fixture!(call, ResponseEnter, match response { gtk::ResponseType::Ok => 1,
                                 gtk::ResponseType::Cancel => 2, gtk::ResponseType::DeleteEvent => 3, _ => 4 });
                             let response = match response {
@@ -889,11 +927,30 @@ mod owned_gtk {
                                 gtk::ResponseType::Cancel | gtk::ResponseType::DeleteEvent => NativeResponse::Decline,
                                 _ => NativeResponse::Other,
                             };
-                            let _ = call.begin_response(response, true);
+                            let _read_one_path = call.begin_response(response, true);
+                            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                            if let Some(q) = response_observation.as_ref().and_then(Weak::upgrade) {
+                                // begin_response returns filename-read permission,
+                                // NOT consent. A first Quit decision returns false;
+                                // acceptance is in the original call's facts.
+                                let (accepted, disposal) = call.facts().map_or((false, false), |facts| {
+                                    let accepted = facts.response && facts.accepted && !facts.declined && !facts.destroyed && !facts.released;
+                                    (observed_ok && _read_one_path == Some(false) && accepted && !facts.close_ack,
+                                     observed_delete && _read_one_path.is_none() && accepted && facts.close_ack)
+                                });
+                                q.native_response(observed_id, accepted, disposal);
+                            }
                             gtk_fixture!(call, ResponseLeave, 1);
                         }
                     }));
-                    entry.destroy = Some(dialog.connect_destroy(move |_| destroyed(&destroy_call)));
+                    entry.destroy = Some(dialog.connect_destroy(move |_| {
+                        destroyed(&destroy_call);
+                        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                        if let Some(q) = destroy_observation.as_ref().and_then(Weak::upgrade) {
+                            let seen = destroy_call.upgrade().is_some_and(|call| call.facts().is_some_and(|facts| facts.destroyed && facts.response && facts.accepted));
+                            q.native_destroyed(observed_id, seen);
+                        }
+                    }));
                 }
             }
         });
@@ -932,6 +989,8 @@ mod owned_gtk {
             if book.as_ref().is_some_and(|entry| entry.id == id) { book.take() } else { None }
         });
         let Some(mut original) = original else { call.failed(Reason::CleanupUnknown); return; };
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let observation = original.observation.as_ref().and_then(|(q, _)| q.upgrade());
         if let Some(handler) = original.response.take() { original.object.disconnect(handler); }
         if let Some(handler) = original.destroy.take() { original.object.disconnect(handler); }
         gtk_fixture!(call, HandlersDetached, 1);
@@ -941,9 +1000,50 @@ mod owned_gtk {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         topology::retire(&call, id, had_topology);
         if let Some(mut facts) = call.facts() { facts.released = true; }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(q) = observation {
+            let seen = call.facts().is_some_and(|facts| facts.destroyed && facts.close_ack && facts.released)
+                && DIALOG.with(|book| book.borrow().is_none());
+            q.native_released(id, seen);
+        }
         gtk_fixture!(call, Released, u32::from(DIALOG.with(|book| book.borrow().is_none())));
         gtk_fixture!(call, ReleaseLeave, 1);
         call.changed();
+    }
+
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn activate_observed_quit(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>) -> Result<bool, ()> {
+        if !gtk::is_initialized_main_thread() { return Err(()); }
+        let original = DIALOG.with(|book| {
+            let book = book.try_borrow().map_err(|_| ())?;
+            let Some(entry) = book.as_ref() else { return Ok(None); };
+            let Object::Message(dialog) = &entry.object else { return Err(()); };
+            let (context, call) = entry.observation.as_ref().ok_or(())?;
+            // Local refs to the already-owned original only. No GTK getter,
+            // action, callback or observation lock under the object-book borrow.
+            Ok(Some((entry.id, dialog.clone(), context.clone(), call.clone())))
+        })?;
+        let Some((id, dialog, context, call)) = original else { return Ok(false); };
+        if !context.upgrade().is_some_and(|actual| Arc::ptr_eq(&actual, q)) { return Err(()); }
+        let call = call.upgrade().ok_or(())?;
+        let owner = call.owner().ok_or(())?;
+        if owner.id != id || !Arc::ptr_eq(&owner.gui, &call) || owner.interrupted()
+            || !call.facts().is_some_and(|facts| facts.created && facts.showing && !facts.constructing
+                && !facts.not_created && !facts.response && !facts.destroyed && !facts.released && facts.refusal.is_none()) { return Err(()); }
+        let main = app.get_webview_window(MAIN_WINDOW).ok_or(())?;
+        let parent: gtk::Window = main.gtk_window().map_err(|_| ())?.upcast();
+        if dialog.title().as_deref() != Some("Quit and discard unsaved drafts?")
+            || !dialog.is_visible() || !dialog.is_modal()
+            || dialog.transient_for().as_ref() != Some(&parent) { return Err(()); }
+        let button = dialog.widget_for_response(gtk::ResponseType::Ok).ok_or(())?.downcast::<gtk::Button>().map_err(|_| ())?;
+        if !button.is_visible() || !button.is_sensitive() || dialog.response_for_widget(&button) != gtk::ResponseType::Ok { return Err(()); }
+        q.native_activation(id)?;
+        // Activate the actual OK action widget. GtkDialog's original clicked
+        // handler emits the response; never call response/begin_response here.
+        button.emit_clicked();
+        // These temporary GTK refs leave before the queued native close/release
+        // continuation can run on this thread. Nothing is stored in the test.
+        Ok(true)
     }
 
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1198,7 +1298,10 @@ mod owned_gtk {
     }
 }
 
-pub fn run() { run_builder(builder()); }
+#[derive(Debug)]
+pub struct InitializationFailed;
+
+pub fn run() -> Result<(), InitializationFailed> { run_builder(builder()).map(|_| ()) }
 
 fn builder() -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default();
@@ -1209,9 +1312,27 @@ fn builder() -> tauri::Builder<tauri::Wry> {
         }
     });
     builder
+        .menu(|app| {
+            use tauri::menu::{Menu, MenuItem, Submenu};
+            // A custom action, never the predefined Quit item: the existing
+            // main-window CloseRequested path alone owns confirmation/cleanup.
+            let quit = MenuItem::with_id(app, QUIT_MENU_ID, "Quit", true, Some("CmdOrCtrl+Q"))?;
+            let file = Submenu::with_items(app, "File", true, &[&quit])?;
+            Menu::with_items(app, &[&file])
+        })
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() != QUIT_MENU_ID { return; }
+            if let Some(main) = app.get_webview_window(MAIN_WINDOW) {
+                if main.label() == MAIN_WINDOW { let _ = main.close(); }
+            }
+        })
         .setup(|app| {
             let resources = app.path().resource_dir()?;
             let bridge = Arc::new(DesktopBridge::new(resources));
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let observation = app.try_state::<Arc<installed_observation::Observation>>().map(|q| q.inner().clone());
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(q) = &observation { q.attach(&bridge.supervisor)?; }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             let fixture = app.try_state::<Arc<qualification::Qualification>>().map(|q| q.inner().clone());
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1227,6 +1348,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             app.manage(ShellState {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 fixture: fixture.clone(),
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                observation: observation.clone(),
                 bridge: bridge.clone(), document: document.clone(),
                 #[cfg(not(target_os = "linux"))] picker: Arc::new(AtomicBool::new(false)),
                 #[cfg(not(target_os = "linux"))] closing: AtomicBool::new(false),
@@ -1237,6 +1360,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             let navigation_fixture = fixture.clone();
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             let page_fixture = fixture.clone();
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            let page_observation = observation.clone();
             let navigation = document.clone();
             let page = document.clone();
             let window = WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
@@ -1260,6 +1385,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                         tauri::webview::PageLoadEvent::Started => lifetime.started(trusted),
                         tauri::webview::PageLoadEvent::Finished => lifetime.finished(trusted),
                     });
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    if let Some(q) = &page_observation { q.page_load(trusted, matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)); }
                     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                     if let Some(q) = &page_fixture { q.lifecycle(match payload.event() {
                         tauri::webview::PageLoadEvent::Started => qualification::EventKind::LoadStarted,
@@ -1343,6 +1470,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                 let state = window.state::<ShellState>();
                 if state.exit_ready.load(Ordering::SeqCst) { return; }
                 api.prevent_close();
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(q) = &state.observation { q.close_prevented(); }
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 if let Some(q) = &state.fixture { if !q.close_prevented() { return; } }
                 request_shutdown(window.app_handle());
@@ -1350,13 +1479,23 @@ fn builder() -> tauri::Builder<tauri::Wry> {
         })
 }
 
-fn run_builder(builder: tauri::Builder<tauri::Wry>) {
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+type LoopReturn = i32;
+#[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+type LoopReturn = ();
+
+fn run_builder(builder: tauri::Builder<tauri::Wry>) -> Result<LoopReturn, InitializationFailed> {
     let application = builder.build(tauri::generate_context!());
     let application = match application {
         Ok(application) => application,
-        Err(_) => { eprintln!("The native desktop application could not initialize."); return; }
+        Err(_) => { diagnostic(b"The native desktop application could not initialize.\n"); return Err(InitializationFailed); }
     };
-    application.run(|app, event| {
+    let callback = |app: &tauri::AppHandle, event: tauri::RunEvent| {
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if matches!(event, tauri::RunEvent::Exit) {
+            let state = app.state::<ShellState>();
+            if let Some(q) = &state.observation { q.actual_exit(state.exit_ready.load(Ordering::SeqCst)); }
+        }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if matches!(event, tauri::RunEvent::Exit) {
             let state = app.state::<ShellState>();
@@ -1370,5 +1509,12 @@ fn run_builder(builder: tauri::Builder<tauri::Wry>) {
             if let Some(q) = &state.fixture { q.refuse(); return; }
             request_shutdown(app);
         }
-    });
+    };
+    // Same event callback and original shutdown owner in either case. App::run
+    // exits the process itself; only this test needs control after the actual
+    // loop cleanup to join/inspect its retained original and report evidence.
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { Ok(application.run_return(callback)) }
+    #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { application.run(callback); Ok(()) }
 }

@@ -38,6 +38,53 @@ C = local("ci_foundation")
 REF = "refs/heads/verify/desktop-ubuntu-publication"
 INSTALLED_REF = "refs/heads/verify/desktop-installed-passive"
 INSTALLED_CASES = {"positive", "refuse-writable", "refuse-pth"}
+SHELL_REF = "refs/heads/verify/desktop-installed-shell"
+SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
+SHELL_FEATURE_ARG = "desktop-shell,custom-protocol"
+SHELL_GENERATED = ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/gen")
+SHELL_EXPORTS = {"normal": "mobile-release-kit-desktop", "observer": "installed-shell-observation"}
+SHELL_METADATA_LIMIT = 8 << 20
+SHELL_COMPILE_LIMIT = 8 << 20
+SHELL_ROSTER_LIMIT = 512 << 10
+SHELL_WEBKIT_PROGRAMS = (
+    "/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitWebProcess",
+    "/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitNetworkProcess",
+    "/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/WebKitGPUProcess",
+    "/usr/bin/bwrap", "/usr/bin/xdg-dbus-proxy",
+)
+SHELL_LIBRARY_ROOT = "/usr/lib/x86_64-linux-gnu"
+# These are per-requester RUNPATH exceptions, not additional global loader
+# directories. The selected link and its canonical package member are both
+# independently protected/bound before any bytes can enter this profile.
+SHELL_RUNPATHS = {
+    SHELL_LIBRARY_ROOT + "/libproxy.so.1": ("libproxy.so.1", SHELL_LIBRARY_ROOT + "/libproxy"),
+    SHELL_LIBRARY_ROOT + "/libproxy/libpxbackend-1.0.so":
+        ("libpxbackend-1.0.so", SHELL_LIBRARY_ROOT + "/libproxy"),
+    SHELL_LIBRARY_ROOT + "/libpulse.so.0": ("libpulse.so.0", SHELL_LIBRARY_ROOT + "/pulseaudio"),
+    SHELL_LIBRARY_ROOT + "/libpulse-simple.so.0": ("libpulse-simple.so.0", SHELL_LIBRARY_ROOT + "/pulseaudio"),
+}
+SHELL_PRIVATE_PROVIDERS = {
+    "libpxbackend-1.0.so": SHELL_LIBRARY_ROOT + "/libproxy",
+    "libpulsecommon-16.1.so": SHELL_LIBRARY_ROOT + "/pulseaudio",
+}
+SHELL_RUNPATHS[SHELL_LIBRARY_ROOT + "/libLLVM.so.20.1"] = ("libLLVM.so.20.1", "$ORIGIN/../lib")
+SHELL_RUNPATH_DIRECTORIES = {path: [runpath] for path, (_, runpath) in SHELL_RUNPATHS.items()
+                             if not runpath.startswith("$ORIGIN")}
+# The retained LLVM provider is directly in the multiarch directory. Also
+# account for the loader's /lib usr-merge spelling, without admitting either
+# directory as a source of a new provider.
+SHELL_RUNPATH_DIRECTORIES[SHELL_LIBRARY_ROOT + "/libLLVM.so.20.1"] = ["/usr/lib/lib", "/lib/lib"]
+SHELL_PROGRAMS = (*SHELL_WEBKIT_PROGRAMS, "/usr/bin/Xvfb", "/usr/bin/xdotool", "/usr/bin/xauth",
+    "/usr/bin/xkbcomp", "/usr/bin/dbus-daemon", "/usr/bin/dbus-run-session", "/bin/sh",
+    *("/usr/bin/" + name for name in ("stty", "awk", "getopt", "mcookie", "fmt", "cat", "rm", "mktemp", "touch")),
+    SHELL_LIBRARY_ROOT + "/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner")
+SHELL_SCRIPTS = ("/usr/bin/xvfb-run",)
+SHELL_MODULE_ROOTS = tuple(SHELL_LIBRARY_ROOT + suffix for suffix in (
+    "/gio/modules", "/gdk-pixbuf-2.0/2.10.0/loaders", "/dri", "/gbm", "/gstreamer-1.0", "/enchant-2",
+    "/webkit2gtk-4.1/injected-bundle",
+    *("/gtk-3.0/" + prefix + leaf for prefix in ("3.0.0/linux/", "3.0.0/", "linux/", "")
+      for leaf in ("immodules", "modules"))))
+SHELL_MAX_LIBRARIES = 256  # Historical DATA already requires >214 names; fail closed beyond this fixed cap.
 # Independently accepted U35533243674/1: original lifecycle and finality.
 # Complete producer-bound roster; every downloaded member is checked before use.
 # This evidence qualifies neither the new installed candidate nor the product.
@@ -355,8 +402,12 @@ RUNTIME_ELF = {"python/bin/python3": (None, "$ORIGIN/../lib"),
 
 def route(env):
     installed = env.get("MRK_INSTALLED_CASE")
-    fixed = (env.get("GITHUB_REF") == INSTALLED_REF and installed in INSTALLED_CASES | {"compile"}
-             if installed is not None else env.get("GITHUB_REF") == REF)
+    shell = env.get("MRK_INSTALLED_SHELL_CASE")
+    if shell is not None:
+        fixed = (installed is None and env.get("GITHUB_REF") == SHELL_REF and shell in {"compile", "observe"})
+    else:
+        fixed = (env.get("GITHUB_REF") == INSTALLED_REF and installed in INSTALLED_CASES | {"compile"}
+                 if installed is not None else env.get("GITHUB_REF") == REF)
     D.need(env.get("GITHUB_ACTIONS") == "true" and env.get("RUNNER_ENVIRONMENT") == "github-hosted"
            and env.get("RUNNER_OS") == "Linux" and env.get("RUNNER_ARCH") == "X64"
            and env.get("GITHUB_EVENT_NAME") == "push" and fixed
@@ -412,6 +463,73 @@ def compiled_artifact(raw, source, target_root, *, library, candidate=False):
     return executable
 
 
+def shell_compile_argv(cargo, source, target):
+    """One build, two selected executables, shared dependencies; never cargo test."""
+    return [cargo, "build", "--locked", "--offline", "--jobs", "1", "--no-default-features",
+            "--features", SHELL_FEATURE_ARG, "--target", TARGET,
+            "--manifest-path", str(source / "desktop/src-tauri/Cargo.toml"),
+            "--target-dir", str(target), "--profile", "dev", "--bin", SHELL_EXPORTS["normal"],
+            "--test", SHELL_EXPORTS["observer"], "--message-format=json"]
+
+
+def shell_compiled_artifacts(raw, source, target_root):
+    """Select the normal main and separate harness-free observer, never libtest.
+
+    Cargo's profile.test field is not the target's manifest harness setting.
+    The observer is selected by its explicit test target/command/source, with
+    harness=false independently admitted from Cargo.toml. Retain the original
+    boolean rather than guessing its value for cargo build --test.
+    """
+    D.need(type(raw) is bytes and 0 < len(raw) <= SHELL_COMPILE_LIMIT, "Shell compiler message bound")
+    artifacts, units, finished = {}, [], False
+    expected = {"normal": (["bin"], SHELL_EXPORTS["normal"], "src/main.rs"),
+                "observer": (["test"], SHELL_EXPORTS["observer"], "tests/installed_shell_observation.rs")}
+    for line in raw.splitlines():
+        D.need(not finished, "Shell compiler data follows its final result")
+        row = C.bounded_json(line, 2 << 20)
+        D.need(type(row) is dict and row.get("reason") in {
+            "compiler-artifact", "build-script-executed", "compiler-message", "build-finished"},
+            "Unknown original shell compiler message")
+        if row["reason"] == "build-finished":
+            D.need(row.get("success") is True, "Original shell compiler failed")
+            finished = True
+        elif row["reason"] == "compiler-artifact":
+            D.need(type(row.get("package_id")) is str and type(row.get("features")) is list
+                   and all(type(value) is str for value in row["features"])
+                   and type(row.get("fresh")) is bool and type(row.get("target")) is dict
+                   and type(row.get("profile")) is dict, "Shell compiler unit metadata differs")
+            units.append({key: row[key] for key in ("package_id", "features", "fresh", "target", "profile")})
+            D.need(len(units) <= 2048, "Shell compiler unit count bound")
+            if row.get("executable") is None:
+                continue
+            target, profile = row.get("target"), row.get("profile")
+            D.need(type(target) is dict and type(profile) is dict, "Shell executable target/profile missing")
+            matches = [role for role, (kind, name, relative) in expected.items()
+                       if target.get("kind") == kind and target.get("name") == name
+                       and target.get("src_path") == str(source / "desktop/src-tauri" / relative)]
+            D.need(len(matches) == 1, "Unselected shell executable in original compiler output")
+            role = matches[0]
+            D.need(role not in artifacts and row.get("manifest_path") == str(source / "desktop/src-tauri/Cargo.toml")
+                   and row["features"] == SHELL_FEATURES and row["fresh"] is False
+                   and profile.get("opt_level") == "0" and profile.get("debug_assertions") is True
+                   and type(profile.get("test")) is bool and (role != "normal" or profile["test"] is False),
+                   "Different/freshness-lost shell compiler profile")
+            value = row["executable"]
+            D.need(type(value) is str and type(row.get("filenames")) is list and value in row["filenames"],
+                   "Shell executable is absent from its original output roster")
+            path = Path(value)
+            if role == "normal":
+                D.need(path == target_root / TARGET / "debug" / SHELL_EXPORTS[role], "Normal shell output path differs")
+            else:
+                D.need(path.parent == target_root / TARGET / "debug/deps"
+                       and re.fullmatch(r"installed_shell_observation-[0-9a-f]{16}", path.name) is not None,
+                       "Harness-free shell observer output path differs")
+            artifacts[role] = {"path": value, "packageId": row["package_id"], "target": target,
+                               "profile": profile, "features": row["features"]}
+    D.need(finished and set(artifacts) == set(SHELL_EXPORTS), "Shell compiler did not yield both fresh selected outputs")
+    return artifacts, units
+
+
 def test_result(stdout, stderr):
     D.need(type(stdout) is bytes and type(stderr) is bytes and len(stdout) <= 2 << 20
            and stderr == b"", "Publisher test capture differs")
@@ -435,7 +553,7 @@ def exact_test_result(stdout, stderr, name):
            "Exact singleton test did not pass once")
 
 
-def elf_dependencies(raw, *, runtime_path=None):
+def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None):
     """Bounded ELF DATA, including required/exported symbol-version labels.
 
     No binary, loader, ldd or readelf execution. The caller binds the actual
@@ -443,6 +561,9 @@ def elf_dependencies(raw, *, runtime_path=None):
     """
     D.need(type(raw) is bytes and 64 <= len(raw) <= MAX_BINARY, "ELF byte bound")
     D.need(runtime_path is None or runtime_path in RUNTIME_ELF, "Only the fixed A ELF profile has a private RUNPATH")
+    D.need(type(shell) is bool and not (shell and runtime_path is not None), "Separate shell/A ELF profiles required")
+    D.need(shell_path is None or shell and type(shell_path) is str and Path(shell_path).is_absolute()
+           and ".." not in Path(shell_path).parts, "Only the isolated shell profile has a requester path")
 
     def unpack(fmt, offset):
         size = struct.calcsize(fmt)
@@ -483,7 +604,7 @@ def elf_dependencies(raw, *, runtime_path=None):
             finished = True
             break
         D.need(tag not in {15, 0x6FFFFEFB, 0x6FFFFEFC, 0x7FFFFFFD, 0x7FFFFFFF}
-               and (tag != 29 or runtime_path is not None),
+               and (tag != 29 or runtime_path is not None or shell_path in SHELL_RUNPATHS),
                "ELF search/audit/filter override refused")
         tags.setdefault(tag, []).append(value)
     D.need(finished, "Unterminated ELF dynamic table")
@@ -494,7 +615,7 @@ def elf_dependencies(raw, *, runtime_path=None):
         return values[0] if values else None
 
     size = single(10)
-    D.need(0 < size <= 2 << 20, "ELF string table bound")
+    D.need(0 < size <= (16 << 20 if shell else 2 << 20), "ELF string table bound")
     offset = address(single(5), size)
     strings = raw[offset:offset + size]
 
@@ -506,13 +627,14 @@ def elf_dependencies(raw, *, runtime_path=None):
 
     needed = [string(value) for value in tags.get(1, [])]
     allowed = set(SONAME_PACKAGES) | ({"libssl.so.3", "libcrypto.so.3"} if runtime_path is not None else set())
-    D.need(len(needed) <= 32 and len(set(needed)) == len(needed)
-           and all(name in allowed for name in needed), "Unreviewed/duplicate native ELF dependency")
+    D.need(len(needed) <= (128 if shell else 32) and len(set(needed)) == len(needed)
+           and all((re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_+.-]{0,191}", name) is not None and ".so" in name)
+                   if shell else name in allowed for name in needed), "Unreviewed/duplicate native ELF dependency")
     requirements, definitions = {}, []
     pointer, count = single(0x6FFFFFFE, True), single(0x6FFFFFFF, True)
     D.need((pointer is None) == (count is None), "Incomplete ELF version-needs")
     if pointer is not None:
-        D.need(0 < count <= 32, "ELF version-need count")
+        D.need(0 < count <= (128 if shell else 32), "ELF version-need count")
         seen = set()
         for i in range(count):
             D.need(pointer not in seen, "ELF version-need cycle")
@@ -561,7 +683,36 @@ def elf_dependencies(raw, *, runtime_path=None):
                and (interpreter == "/lib64/ld-linux-x86-64.so.2" if runtime_path == "python/bin/python3"
                     else interpreter is None), "Actual A interpreter/SONAME/private RUNPATH differs")
         result["runpath"] = string(runpath)
+    elif shell_path in SHELL_RUNPATHS:
+        runpath = single(29)
+        D.need((result["soname"], string(runpath)) == SHELL_RUNPATHS[shell_path]
+               and interpreter is None, "Fixed shell requester/SONAME/private RUNPATH differs")
+        result["runpath"] = string(runpath)
     return result
+
+
+def shell_provider_path(requester, runpath, name):
+    """Resolve one actual shell edge, never make a private directory global."""
+    D.need(type(name) is str and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_+.-]{0,191}", name) is not None
+           and ".so" in name, "Shell provider name differs")
+    D.need(runpath is None or requester in SHELL_RUNPATHS and SHELL_RUNPATHS[requester][1] == runpath,
+           "Shell dependency has an unadmitted requester search path")
+    private = SHELL_PRIVATE_PROVIDERS.get(name)
+    D.need(private is None or runpath == private, "Private shell provider is not authorized by this requester")
+    return str(Path(private or SHELL_LIBRARY_ROOT) / name)
+
+
+def shell_elf_record(raw, *, role, selected=None):
+    """Bounded diagnosis names only a fixed public OS input or output role."""
+    D.need(role in {"program", "module", "provider", "normal", "observer"}
+           and (selected is None or type(selected) is str and len(selected) <= 240
+                and selected.startswith((SHELL_LIBRARY_ROOT + "/", "/usr/bin/", "/bin/"))),
+           "Shell ELF diagnostic input is not a fixed public role/path")
+    try:
+        return elf_dependencies(raw, shell=True, shell_path=selected)
+    except Exception as error:
+        label = role + (" " + selected if selected is not None else "")
+        raise D.Refused(("Shell ELF " + label + ": " + failure_reason(error))[:500]) from error
 
 
 def deb_readback(path, data_rows, control_rows):
@@ -881,6 +1032,83 @@ def protected_host_file(path, limit=MAX_BINARY):
            "Native OS input binding changed")
     return {**row, "path": str(resolved), "selectedPath": str(path), "identity": list(D.state(st)),
             "links": links, "ancestry": ancestry}
+
+
+def shell_host_binding(path, *, directory_only=False, absent=False, limit=MAX_BINARY):
+    """Shell-only directory/absence companion to the unchanged OS file reader."""
+    path = Path(path)
+    if not directory_only and not absent:
+        return protected_host_file(path, limit)
+    D.need(path.is_absolute() and ".." not in path.parts, "Absolute shell host path required")
+    resolved, pending, links, ancestry = Path("/"), list(path.parts[1:]), [], {}
+
+    def directory(name, item):
+        D.need(stat.S_ISDIR(item.st_mode) and item.st_uid == item.st_gid == 0 and not item.st_mode & 0o7022,
+               "Unprotected shell directory ancestry")
+        ancestry[str(name)] = [item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid]
+
+    directory(resolved, resolved.lstat())
+    steps, missing = 0, None
+    while pending:
+        steps += 1
+        D.need(steps <= 256, "Shell directory link/ancestry bound")
+        part = pending.pop(0)
+        if part == ".":
+            continue
+        if part == "..":
+            resolved = resolved.parent
+            continue
+        candidate = resolved / part
+        try:
+            item = candidate.lstat()
+        except FileNotFoundError:
+            D.need(absent, "Required shell host path is absent")
+            missing, resolved = str(candidate), candidate.joinpath(*pending)
+            break
+        D.need(item.st_uid == item.st_gid == 0, "Shell host path has a nonroot owner")
+        if stat.S_ISLNK(item.st_mode):
+            target = os.readlink(candidate)
+            D.need(item.st_nlink == 1 and len(links) < 40 and 0 < len(target) <= 4096
+                   and re.fullmatch(r"[A-Za-z0-9_./+\-]+", target) is not None
+                   and D.state(candidate.lstat()) == D.state(item), "Shell host link differs")
+            links.append([str(candidate), list(D.state(item)), target])
+            target = Path(target)
+            if target.is_absolute():
+                resolved, parts = Path("/"), target.parts[1:]
+            else:
+                parts = target.parts
+            pending = [*parts, *pending]
+        else:
+            D.need(not item.st_mode & 0o7022, "Writable/special shell host input")
+            resolved = candidate
+            if pending or directory_only:
+                directory(resolved, item)
+            else:
+                D.need(stat.S_ISREG(item.st_mode) and item.st_nlink == 1, "Nonordinary shell host file")
+    row = {"path": str(resolved), "selectedPath": str(path), "links": links, "ancestry": ancestry}
+    if missing is not None:
+        row.update(absent=True, absentAt=missing)
+    elif directory_only:
+        row["directory"] = ancestry[str(resolved)]
+    else:
+        return protected_host_file(path, limit)
+    for name, expected in ancestry.items():
+        item = Path(name).lstat()
+        D.need([item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid] == expected,
+               "Shell host directory changed while reading")
+    for name, expected, target in links:
+        D.need(list(D.state(Path(name).lstat())) == expected and os.readlink(name) == target,
+               "Shell host link changed while reading")
+    if missing is None:
+        D.need(path.resolve(strict=True) == resolved, "Shell host resolved directory changed")
+    else:
+        D.need(not Path(missing).exists() and not Path(missing).is_symlink(), "Shell host absence changed")
+    return row
+
+
+def shell_file_projection(row):
+    """Portable original bytes/path/mode, not a claim to another VM's inode."""
+    return {key: row[key] for key in ("path", "selectedPath", "size", "sha256")} | {"mode": stat.S_IMODE(row["identity"][2])}
 
 
 def ubuntu_package_notice(admitted, rows, notices, actual, owned_files):
@@ -1266,6 +1494,120 @@ def installed_candidate(work, sha):
     return {**rows["candidate"], "path": str(artifact / "candidate")}, compiler, graph, digest, producer_attempt, artifact_id
 
 
+def installed_shell_candidate(work, sha):
+    """Admit both exact original shell outputs, including failed-job-only reuse."""
+    artifact = work / "admitted-shell"
+    raw = D.read(artifact / "shell-roster.json", SHELL_ROSTER_LIMIT)
+    digest = D.sha(os.environ.get("MRK_INSTALLED_SHELL_ROSTER_SHA256"))
+    D.need(hashlib.sha256(raw).hexdigest() == digest, "Original shell artifact roster digest differs")
+    roster = D.decode(raw, SHELL_ROSTER_LIMIT)
+    producer_attempt = os.environ.get("MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT", "")
+    artifact_id = os.environ.get("MRK_INSTALLED_SHELL_ARTIFACT_ID", "")
+    D.need(re.fullmatch(r"[1-9][0-9]{0,19}", producer_attempt) is not None
+           and re.fullmatch(r"[1-9][0-9]{0,19}", artifact_id) is not None
+           and int(producer_attempt) <= int(os.environ["GITHUB_RUN_ATTEMPT"]),
+           "Original shell producer attempt/artifact identity differs")
+    D.need(type(roster) is dict and set(roster) == {"sourceSha", "sourceTree", "runId", "attempt", "files"}
+           and (roster["sourceSha"], roster["runId"], roster["attempt"])
+               == (sha, os.environ["GITHUB_RUN_ID"], producer_attempt)
+           and re.fullmatch(r"[0-9a-f]{40}", roster["sourceTree"]) is not None,
+           "Shell candidate is not the exact source/tree/run/original producer")
+    rows = D.records(roster["files"])
+    required = {"compiler.json", "source.json", "result.json", "shell-native.json", "frontend.json",
+                "shell-host-bindings.json", "shell-compile.stdout", "shell-compile.stderr", "shell-locked-inputs.stdout", *SHELL_EXPORTS.values()}
+    D.need(required <= set(rows) and len(rows) <= 1536 and sum(row["size"] for row in rows.values()) <= 1536 << 20,
+           "Original complete shell artifact roster is missing/oversized")
+    C.conventional_files(D, artifact, sorted([*rows.values(), {"path": "shell-roster.json", "size": len(raw), "sha256": digest}],
+                                           key=lambda row: row["path"]))
+    compiler = D.decode(D.read(artifact / "compiler.json", SHELL_METADATA_LIMIT), SHELL_METADATA_LIMIT)
+    source_record = D.decode(D.read(artifact / "source.json", 1 << 20), 1 << 20)
+    result = D.decode(D.read(artifact / "result.json", 1 << 20), 1 << 20)
+    identity = (sha, roster["sourceTree"], os.environ["GITHUB_RUN_ID"], producer_attempt)
+    D.need(all(tuple(row[key] for key in ("sourceSha", "sourceTree", "runId", "attempt")) == identity
+               and row["features"] == SHELL_FEATURES for row in (compiler, source_record, result))
+           and compiler["manifestSha256"] == C.CONVENTIONAL_SMOKE_INPUTS["manifestSha256"]
+           and compiler["protocolSha256"] == C.CONVENTIONAL_SMOKE_INPUTS["protocolSha256"]
+           and compiler["sourceInputs"] == source_record["sourceInputs"] == shell_source_manifest(SOURCE)
+           and result["compilations"] == ["normal", "observer"]
+           and type(result["cargoBuilds"]) is int and result["cargoBuilds"] == 1
+           and type(result["frontendBuilds"]) is int and result["frontendBuilds"] == 1
+           and all(result[key] is False for key in ("shellExecuted", "observerExecuted", "supplierRebuilt",
+                                                    "packageBuilt", "helper11Rerun", "qualified")),
+           "Original shell source/anchors/features/compile-only result differs")
+    source, target = Path(compiler["source"]), Path(compiler["target"])
+    D.need(source.is_absolute() and target.is_absolute() and ".." not in (*source.parts, *target.parts),
+           "Original shell compiler source/target path differs")
+    selections, units = shell_compiled_artifacts(D.read(artifact / "shell-compile.stdout", SHELL_COMPILE_LIMIT), source, target)
+    D.need(D.same(selections, compiler["selections"]) and D.same(units, compiler["compilerUnits"]),
+           "Original shell Cargo unit/selected-output records differ")
+    commands = [row for row in result["commands"] if row["phase"] == "shell-compile"]
+    D.need(len(commands) == 1 and type(commands[0]["exitCode"]) is int and commands[0]["exitCode"] == 0
+           and commands[0]["ordinaryOwnerReturned"] is True
+           and commands[0]["argv"] == shell_compile_argv(compiler["cargo"], source, target),
+           "Original single shell build command/result differs")
+    metadata_raw = D.read(artifact / "shell-locked-inputs.stdout", SHELL_METADATA_LIMIT)
+    _, packages, nodes = shell_cargo_metadata(metadata_raw, source, target)
+    D.need(hashlib.sha256(metadata_raw).hexdigest() == compiler["compilerInputs"]["metadataSha256"]
+           and all(row["package_id"] in packages for row in units), "Transported full shell metadata/compiler units differ")
+    shell_compiler_units(units, packages, nodes)
+    root_id = next(key for key, value in packages.items() if value["manifest_path"] == str(source / "desktop/src-tauri/Cargo.toml"))
+    D.need(all(row["packageId"] == root_id for row in selections.values()), "Shell output package differs from Cargo root")
+    native = D.decode(D.read(artifact / "shell-native.json", SHELL_METADATA_LIMIT), SHELL_METADATA_LIMIT)
+    frontend = D.decode(D.read(artifact / "frontend.json", 1 << 20), 1 << 20)
+    D.bound(artifact / "shell-native.json", compiler["nativeRecord"])
+    D.bound(artifact / "frontend.json", compiler["frontendRecord"])
+    D.need(D.same(native, compiler["nativeInputs"]) and frontend["sourceInputs"] == compiler["sourceInputs"]
+           and frontend["embeddedBy"] == "tauri/custom-protocol" and frontend["devServer"] is False
+           and frontend["node"] == C.NODE and not frontend["dist"]["links"]
+           and "index.html" in D.records(frontend["dist"]["files"]),
+           "Shell native/embedded frontend transport correspondence differs")
+    D.need(native["manifestSha256"] == compiler["manifestSha256"] and native["protocolSha256"] == compiler["protocolSha256"]
+           and set(native["runtime"]) == set(RUNTIME_ELF)
+           and native["runtimeObjects"] == sorted({"libssl.so.3", "libcrypto.so.3", "libc.so.6", "libm.so.6", "ld-linux-x86-64.so.2"})
+           and native["privateRunpaths"] == {name: value[1] for name, value in RUNTIME_ELF.items()},
+           "Original A graph namespace/anchors differ from the shell transport")
+    D.bound(artifact / "shell-host-bindings.json", native["hostBindingsRecord"])
+    bindings = D.decode(D.read(artifact / "shell-host-bindings.json", SHELL_METADATA_LIMIT), SHELL_METADATA_LIMIT)
+    D.need({path: shell_file_projection(row) for path, row in bindings["files"].items()} == native["osFiles"],
+           "Complete original shell host bindings differ from the portable native graph")
+    lifecycle = local("ubuntu_publication_lifecycle")
+    data = native["runtimeData"]
+    D.need(len(data["records"]) == len(lifecycle.SHELL_DATA_ROOTS)
+           and set(data["suppliers"]["roots"]) == set(data["caches"]["roots"]) == {path for path, _ in lifecycle.SHELL_DATA_ROOTS},
+           "Original complete fixed shell DATA roster differs")
+    for index, ((root_name, kind), record) in enumerate(zip(lifecycle.SHELL_DATA_ROOTS, data["records"])):
+        leaf = "shell-data-" + str(index) + ".json"
+        D.need(record["path"] == leaf and leaf in rows and all(record[key] == rows[leaf][key] for key in ("size", "sha256")),
+               "Original per-root shell DATA member is missing or relabelled")
+        D.bound(artifact / leaf, record)
+        detail = D.decode(D.read(artifact / leaf, 2 << 20), 2 << 20)
+        entries = detail["entries"]
+        D.need(type(entries) is list and len(entries) <= 32768
+               and entries == sorted(entries, key=lambda row: row["path"])
+               and len({row["path"] for row in entries}) == len(entries), "Original shell DATA member order/uniqueness differs")
+        for label, generated in (("suppliers", False), ("caches", True)):
+            selected = [row for row in entries if lifecycle.shell_generated_data(str(Path(root_name) / row["path"])) is generated]
+            summary = {"kind": kind, "present": selected[0]["present"] if selected else None, "entryCount": len(selected),
+                       "fileCount": sum(row["kind"] == "file" and row["present"] for row in selected),
+                       "byteCount": sum(row.get("size", 0) for row in selected), "sha256": hashlib.sha256(D.canonical(selected)).hexdigest()}
+            D.need(summary == data[label]["roots"][root_name], "Original shell DATA summary is not derived from its full detail")
+    D.need(all(hashlib.sha256(D.canonical(data[label]["roots"])).hexdigest() == data[label]["sha256"]
+               for label in ("suppliers", "caches")), "Original shell DATA summary digest differs")
+    D.need(set(compiler["originalArtifacts"]) == set(compiler["exportedArtifacts"]) == set(native["outputs"]) == set(SHELL_EXPORTS),
+           "Original shell output roles differ")
+    binaries = {}
+    for role, leaf in SHELL_EXPORTS.items():
+        original, exported = compiler["originalArtifacts"][role], compiler["exportedArtifacts"][role]
+        native_file = native["outputs"][role]["file"]
+        D.need(original["path"] == selections[role]["path"] and Path(exported["path"]).name == leaf
+               and original["identity"][:2] != exported["identity"][:2]
+               and all(original[key] == exported[key] == rows[leaf][key] == native_file[key] for key in ("size", "sha256"))
+               and elf_dependencies(D.read(artifact / leaf, MAX_BINARY), shell=True) == native["outputs"][role]["elf"],
+               "Original fresh shell/native/export correspondence differs")
+        binaries[role] = {**rows[leaf], "path": str(artifact / leaf)}
+    return binaries, compiler, native, digest, producer_attempt, artifact_id
+
+
 def installed_u_inputs(work):
     accepted = INSTALLED_U_INPUTS
     D.need(type(accepted) is dict and set(accepted) == {"sourceSha", "runId", "attempt", "artifactId", "files"},
@@ -1365,6 +1707,107 @@ def installed_os_inputs(check, work, graph, candidate_compiler, u_compiler):
                 "These DATA records and later maps do not create that trust."}
 
 
+def installed_shell_os_inputs(check, work, native, compiler, u_compiler):
+    """Bind this VM to the shell compiler; accepted U compares only shared inputs."""
+    D.need(D.same(native, compiler["nativeInputs"]) and set(native["outputs"]) == set(SHELL_EXPORTS)
+           and set(native["programs"]) == set(SHELL_PROGRAMS) and set(native["scripts"]) == set(SHELL_SCRIPTS)
+           and 1 <= len(native["sharedObjects"]) <= SHELL_MAX_LIBRARIES and 1 <= len(native["osFiles"]) <= 512,
+           "Original shell native profile/closure differs")
+    old = u_compiler["nativeInputs"]
+    D.need(set(old["outputs"]["libtest"]["objects"]) <= set(native["sharedObjects"]),
+           "Accepted U platform closure is absent from the shell host policy")
+    current_files, libraries, programs, modules, scripts = {}, {}, {}, {}, {}
+    for selected, row in native["osFiles"].items():
+        check.phase = "shell-native-input:" + selected
+        current = protected_host_file(Path(selected))
+        D.need(shell_file_projection(current) == row, "Actual VM native input differs from original shell compiler")
+        current_files[selected] = current
+
+    def executable(row, role):
+        selected = row["file"]["selectedPath"]
+        check.phase = "shell-native-" + role + ":" + selected
+        current = current_files[selected]
+        elf = shell_elf_record(D.read(Path(current["path"]), MAX_BINARY), role=role, selected=selected)
+        D.need(elf == row["elf"] and shell_file_projection(current) == row["file"],
+               "Actual VM fixed shell ELF input differs")
+        for name in elf["needed"]:
+            provider = native["sharedObjects"].get(name)
+            D.need(provider is not None and provider["file"]["selectedPath"] == shell_provider_path(selected, elf.get("runpath"), name)
+                   and set(elf["versionNeeds"].get(name, [])) <= set(provider["elf"]["versionDefinitions"]),
+                   "Actual VM shell dependency edge/provider context differs")
+        # Complete current ancestry/link proofs are held once in osFiles.
+        return {"file": {**shell_file_projection(current), "identity": current["identity"]},
+                "elf": elf, "package": row["package"]}
+
+    for name, row in native["sharedObjects"].items():
+        current = executable(row, "provider")
+        D.need(current["elf"]["soname"] == name, "Actual VM shell provider SONAME differs")
+        if name in old["sharedObjects"]:
+            accepted = old["sharedObjects"][name]
+            D.need(all(current["file"][key] == accepted["file"][key] for key in ("size", "sha256"))
+                   and current["elf"] == accepted["elf"], "Common shell/U native provider differs from accepted U")
+            current_package = native["osPackages"][row["package"]]
+            old_package = old["osPackages"][accepted["package"]]
+            D.need(all(current_package[key] == old_package[key]
+                       for key in ("version", "architecture", "sourcePackage", "sourceVersion")),
+                   "Common shell/U package source/version differs")
+        libraries[name] = current
+    for source_rows, destination, role in ((native["programs"], programs, "program"), (native["modules"], modules, "module")):
+        for name, row in source_rows.items():
+            destination[name] = executable(row, role)
+    for name, row in native["scripts"].items():
+        D.need(shell_file_projection(current_files[name]) == row["file"] and row["interpreter"] == "/bin/sh",
+               "Actual VM wrapper/interpreter bytes differ")
+        scripts[name] = {**row, "file": {**row["file"], "identity": current_files[name]["identity"]}}
+    roots, root_bindings, module_paths = shell_module_inventory()
+    D.need(D.same(roots, native["moduleRoots"]) and set(module_paths) == set(modules),
+           "Actual VM finite module directory roster differs")
+    private_search = shell_private_search([*native["sharedObjects"].values(), *native["programs"].values(),
+                                           *native["modules"].values()], native["sharedObjects"])
+    D.need(D.same(private_search, native["privateSearch"]), "Original shell private search graph differs")
+    for row in private_search:
+        current = shell_host_binding(Path(row["path"]), absent=True)
+        D.need(shell_file_projection(current) == native["sharedObjects"][row["name"]]["file"] if row["selected"]
+               else current.get("absent") is True, "Actual VM private shell search alternative differs")
+    lifecycle = local("ubuntu_publication_lifecycle")
+    snapshot = lifecycle.shell_data_snapshot(shell_host_binding)
+    D.need(D.same(snapshot["suppliers"], native["runtimeData"]["suppliers"])
+           and D.same(snapshot["eglLibraries"], native["runtimeData"]["eglLibraries"])
+           and all(set(paths) <= set(modules) for paths in snapshot["moduleSelections"].values()),
+           "Actual VM supplier DATA or generated module selection differs from the admitted profile")
+    runtime_data = shell_data_records(snapshot, check.root / "public", "shell-consumer-data")
+    fields = "${binary:Package}\t${db:Status-Status}\t${Version}\t${Architecture}\t${source:Package}\t${source:Version}\n"
+    environment = {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"}
+    packages = {}
+    D.need(0 < len(native["osPackages"]) <= 256, "Shell consumer package count bound")
+    for index, (name, expected) in enumerate(sorted(native["osPackages"].items())):
+        D.need(re.fullmatch(r"[a-z0-9][a-z0-9+.-]+(?::amd64)?", name) is not None, "Shell consumer package name differs")
+        result = check.command("installed-shell-package-" + str(index), ["/usr/bin/dpkg-query", "-W", "-f=" + fields, name],
+                               environment, work, timeout=15, limit=64 << 10)
+        row = result.stdout.decode("ascii").rstrip("\n").split("\t")
+        D.need(result.stderr == b"" and result.stdout.count(b"\n") == 1 and len(row) == 6 and row[1] == "installed"
+               and [row[i] for i in (0, 2, 3, 4, 5)] == [expected[key] for key in
+                    ("binaryPackage", "version", "architecture", "sourcePackage", "sourceVersion")],
+               "Actual VM shell package/source/version differs from original compiler")
+        listing = check.command("installed-shell-package-files-" + str(index), ["/usr/bin/dpkg-query", "-L", name],
+                                environment, work, timeout=15, limit=1 << 20)
+        D.need(listing.stderr == b"" and hashlib.sha256(listing.stdout).hexdigest() == expected["memberQuerySha256"],
+               "Actual VM shell package membership differs from original compiler")
+        packages[name] = expected
+    loader = current_files["/lib64/ld-linux-x86-64.so.2"]
+    D.need(loader["path"] == libraries["ld-linux-x86-64.so.2"]["file"]["path"], "Actual shell loader alias differs")
+    tool = protected_host_file(Path("/usr/sbin/ldconfig.real"), 4 << 20)
+    static_ldconfig(D.read(Path(tool["path"]), 4 << 20))
+    cache = protected_host_file(Path("/etc/ld.so.cache"), 16 << 20)
+    D.need(not Path("/etc/ld.so.preload").exists() and not Path("/etc/ld.so.preload").is_symlink(),
+           "Ambient loader preload is present")
+    return {"libraries": libraries, "programs": programs, "modules": modules, "scripts": scripts,
+            "osFiles": current_files, "packages": packages, "moduleRoots": root_bindings, "runtimeData": runtime_data,
+            "loader": loader, "ldconfig": tool, "cache": cache, "osNames": sorted(libraries), "graph": native,
+            "externalPrerequisites": "Accepted hosted OS/bootstrap and initial mounts; administrator prevents concurrent "
+                "native input/cache replacement. This finite GTK/WebKit profile does not qualify arbitrary media, user modules or distribution notices."}
+
+
 def package_rows(stager, binary_rows, runtime_rows, kit_rows, notice_rows, manifest, version, depends):
     mapping = {}
 
@@ -1434,6 +1877,517 @@ def package_inputs(source, work, *, fixtures=True):
     return stager, artifact, original, p0, runtime_rows, f1, f1_rows, kit
 
 
+def shell_source_manifest(source):
+    manifest = tomllib.loads(D.read(source / "desktop/src-tauri/Cargo.toml", 64 << 10).decode("utf-8"))
+    features = manifest.get("features", {})
+    D.need(features.get("default") == [] and features.get("custom-protocol") == ["tauri/custom-protocol"]
+           and features.get("development-runtime") == [], "Shell production feature forwarding differs")
+    D.need(manifest.get("profile", {}).get("dev", {}).get("package", {}).get("sha2") == {
+        "opt-level": 3, "debug-assertions": True, "overflow-checks": True},
+        "Shell dev profile must preserve complete bounded runtime hashing")
+    normal = [row for row in manifest.get("bin", []) if row.get("name") == SHELL_EXPORTS["normal"]]
+    observer = [row for row in manifest.get("test", []) if row.get("name") == SHELL_EXPORTS["observer"]]
+    D.need(len(normal) == len(observer) == 1 and normal[0].get("path") == "src/main.rs"
+           and normal[0].get("required-features") == ["desktop-shell"]
+           and observer[0].get("path") == "tests/installed_shell_observation.rs"
+           and observer[0].get("harness") is False
+           and sorted(observer[0].get("required-features", [])) == SHELL_FEATURES,
+           "Normal shell/harness-free observer manifest differs")
+    config = D.decode(D.read(source / "desktop/src-tauri/tauri.conf.json", 64 << 10), 64 << 10)
+    D.need(config["build"] == {"frontendDist": "../dist"} and config["bundle"]["active"] is False,
+           "Shell must embed the fixed frontend, without a dev server or bundle build")
+    paths = ("desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
+             "desktop/src-tauri/src/main.rs", "desktop/src-tauri/tests/installed_shell_observation.rs",
+             "desktop/src-tauri/tauri.conf.json", "desktop/package.json", "desktop/package-lock.json",
+             "desktop/vite.config.mjs", "desktop/tsconfig.json", "desktop/src/App.tsx",
+             "desktop/tools/ci_ubuntu_publication.py", "desktop/tools/ubuntu_publication_lifecycle.py")
+    return [{**D.file_record(source / path, 2 << 20), "path": path} for path in sorted(paths)]
+
+
+def shell_source_status(raw, allowed):
+    """Only this job's initially absent generated roots may dirty git status."""
+    D.need(type(raw) is bytes and len(raw) <= LOG_LIMIT and set(allowed) <= set(SHELL_GENERATED),
+           "Shell generated-source status bound")
+    if not raw:
+        return
+    D.need(raw.endswith(b"\0"), "Incomplete shell source status")
+    for item in raw[:-1].split(b"\0"):
+        D.need(item.startswith(b"!! "), "Tracked/untracked shell source changed")
+        name = item[3:].decode("utf-8").rstrip("/")
+        D.relative(name)
+        D.need(any(name == root or name.startswith(root + "/") for root in allowed),
+               "Unowned ignored shell source addition")
+
+
+def shell_generated_tree(path, *, links=False):
+    """Inert, bounded generated input/output inventory; no compiler execution."""
+    D.directory(path)
+    files, aliases, directories, total = [], [], [], 0
+    for base, dirs, names in os.walk(path, followlinks=False):
+        directory = Path(base)
+        for leaf in sorted([*dirs, *names]):
+            selected = directory / leaf
+            relative = selected.relative_to(path).as_posix()
+            D.relative(relative)
+            value = selected.lstat()
+            D.need(value.st_uid == os.getuid() and (stat.S_ISLNK(value.st_mode) or not value.st_mode & 0o7022),
+                   "Generated shell member owner/mode differs")
+            if stat.S_ISLNK(value.st_mode):
+                # npm's .bin links stay inside this newly generated tree.
+                D.need(links and selected.resolve(strict=True).is_relative_to(path)
+                       and selected.resolve(strict=True).is_file(), "Generated shell link escapes its input tree")
+                target = os.readlink(selected)
+                D.need(len(target) <= 4096 and D.state(selected.lstat()) == D.state(value), "Generated shell link changed")
+                aliases.append({"path": relative, "target": target})
+            elif stat.S_ISDIR(value.st_mode):
+                directories.append(relative)
+            else:
+                D.need(stat.S_ISREG(value.st_mode), "Special generated shell member")
+                row = {**D.file_record(selected, 32 << 20), "path": relative}
+                files.append(row)
+                total += row["size"]
+            D.need(len(files) + len(aliases) + len(directories) <= 32768 and total <= 512 << 20,
+                   "Generated shell tree bound")
+    body = {"files": sorted(files, key=lambda row: row["path"]),
+            "links": sorted(aliases, key=lambda row: row["path"]), "directories": sorted(directories)}
+    return {"treeSha256": hashlib.sha256(D.canonical(body)).hexdigest(), "files": body["files"],
+            "links": body["links"], "directories": body["directories"], "bytes": total}
+
+
+def shell_cargo_metadata(raw, source, target):
+    """Validate the actual full Cargo graph, not a remembered Tauri subset."""
+    metadata = C.bounded_json(raw, SHELL_METADATA_LIMIT)
+    packages, resolve = metadata.get("packages"), metadata.get("resolve")
+    D.need(type(packages) is list and 36 <= len(packages) <= 512 and type(resolve) is dict
+           and metadata.get("workspace_root") == str(source / "desktop/src-tauri")
+           and metadata.get("target_directory") == str(target), "Shell Cargo metadata root/count differs")
+    by_id = {row["id"]: row for row in packages}
+    nodes = {row["id"]: row for row in resolve["nodes"]}
+    D.need(len(by_id) == len(packages) and len(nodes) == len(resolve["nodes"])
+           and set(nodes) <= set(by_id), "Shell Cargo metadata IDs differ/duplicate")
+    roots = [row for row in packages if row.get("manifest_path") == str(source / "desktop/src-tauri/Cargo.toml")]
+    D.need(len(roots) == 1 and roots[0]["name"] == "mobile-release-kit-desktop" and roots[0]["version"] == "0.1.0"
+           and resolve.get("root") == roots[0]["id"] and nodes[roots[0]["id"]]["features"] == SHELL_FEATURES,
+           "Shell root feature graph is not the fixed production graph")
+    for row in nodes.values():
+        D.need(type(row.get("features")) is list and all(type(name) is str for name in row["features"])
+               and type(row.get("deps")) is list and all(dep.get("pkg") in nodes for dep in row["deps"]),
+               "Shell resolved Cargo edge/features differ")
+    local_paths = {"mobile-release-kit-desktop": source / "desktop/src-tauri/Cargo.toml",
+                   "mrk-linux-mount-observation": source / "desktop/native/linux-mount-observation/Cargo.toml"}
+    local = [row for row in packages if row.get("source") is None]
+    D.need(len(local) == 2 and {row["name"] for row in local} == set(local_paths)
+           and all(row["version"] == "0.1.0" and row["manifest_path"] == str(local_paths[row["name"]]) for row in local),
+           "Shell Cargo local source roster differs")
+    registry = [row for row in packages if row.get("source") is not None]
+    keys = {(row["name"], row["version"]) for row in registry}
+    D.need(len(keys) == len(registry) and all(row["source"] == "registry+https://github.com/rust-lang/crates.io-index"
+           and re.fullmatch(r"[A-Za-z0-9_-]+", row["name"]) is not None
+           and re.fullmatch(r"[0-9][A-Za-z0-9.+_-]+", row["version"]) is not None for row in registry),
+           "Shell Cargo registry/source identity differs")
+    D.need({("tauri", "2.11.5"), ("tauri-build", "2.6.3"), ("gtk", "0.18.2"),
+            ("webkit2gtk", "2.0.2"), ("wry", "0.55.1"), ("rfd", "0.15.4")} <= keys,
+           "Actual shell backend is missing from Cargo metadata")
+    tauri = [row for row in registry if row["name"] == "tauri"]
+    D.need(len(tauri) == 1 and {"custom-protocol", "wry", "compression"} <= set(nodes[tauri[0]["id"]]["features"]),
+           "Tauri is not the embedded production WebKit backend")
+    return metadata, by_id, nodes
+
+
+def shell_compiler_units(units, packages, nodes):
+    D.need(all(row["package_id"] in packages and row["package_id"] in nodes
+               and set(row["features"]) <= set(nodes[row["package_id"]]["features"]) for row in units),
+           "Compiler used a package/feature outside original full shell metadata")
+    hashing = [row for row in units if (packages[row["package_id"]]["name"], packages[row["package_id"]]["version"])
+               == ("sha2", "0.10.9") and row["target"].get("kind") == ["lib"]]
+    D.need(hashing and all(row["profile"].get("opt_level") == "3"
+                          and row["profile"].get("debug_assertions") is True
+                          and row["profile"].get("overflow_checks") is True for row in hashing),
+           "Original shell sha2 unit lost its reviewed optimized full-hashing profile")
+
+
+def shell_compiler_inputs(source, work, cargo, rustc, metadata_raw):
+    metadata, by_id, nodes = shell_cargo_metadata(metadata_raw, source, work / "target")
+    lock = tomllib.loads(D.read(source / "desktop/src-tauri/Cargo.lock", 256 << 10).decode("utf-8"))
+    locked = {(row["name"], row["version"]): row for row in lock["package"] if "source" in row}
+    crates, inputs = [], []
+    for package in sorted(metadata["packages"], key=lambda row: (row["name"], row["version"])):
+        if package["source"] is None:
+            continue
+        key = package["name"], package["version"]
+        D.need(key in locked and locked[key]["source"] == package["source"], "Actual shell crate is absent from lockfile")
+        candidates = list((work / "cargo/registry/cache").glob("*/" + key[0] + "-" + key[1] + ".crate"))
+        D.need(len(candidates) == 1, "Actual shell crate archive is missing/ambiguous")
+        record = {**D.file_record(candidates[0], 16 << 20), "path": str(candidates[0])}
+        D.need(record["sha256"] == D.sha(locked[key]["checksum"]), "Actual shell crate differs from locked original")
+        inputs.append(record)
+        crates.append({"name": key[0], "version": key[1], "packageId": package["id"],
+                       "archive": record, "features": nodes.get(package["id"], {}).get("features", []),
+                       "licenseMetadata": package.get("license")})
+    toolchain = Path(rustc).parent.parent
+    D.need(Path(cargo).parent.parent == toolchain and toolchain.is_relative_to(work / "rustup/toolchains"),
+           "Shell private compiler component root differs")
+    manifest = toolchain / "lib/rustlib/multirust-channel-manifest.toml"
+    channel = tomllib.loads(D.read(manifest, 2 << 20).decode("utf-8"))
+    pinned = {"rustc": "0e37cb339f447fc44d6d781073bacacebfdc5612f2600e4c7e84c266f5f3aced",
+              "rust-std": "f5022e6c95a5ad23cca2513dc8281200f585fa188de6370aa37b128a43f876a3"}
+    for component, digest in pinned.items():
+        D.need(channel["pkg"][component]["version"] == "1.98.0 (88d9e12ae 2026-08-18)"
+               and channel["pkg"][component]["target"][TARGET]["xz_hash"] == digest,
+               "Shell original Rust component identity differs")
+    manifests, members = [manifest], {}
+    for component in ("rustc", "rust-std", "cargo"):
+        path = toolchain / "lib/rustlib" / ("manifest-" + component + "-" + TARGET)
+        lines = D.read(path, 128 << 10).decode("ascii").splitlines()
+        D.need(0 < len(lines) <= 512 and all(line.startswith("file:") for line in lines),
+               "Shell Rust component manifest differs")
+        names = [D.relative(line.removeprefix("file:")) for line in lines]
+        D.need(len(names) == len(set(names)), "Duplicate shell Rust component member")
+        members[component] = set(names)
+        manifests.append(path)
+    prefix = "lib/rustlib/" + TARGET + "/lib/"
+    std = members["rust-std"]
+    D.need(all(name.startswith(prefix) and Path(name).suffix in (".rlib", ".rmeta", ".a", ".o", ".so") for name in std)
+           and any(Path(name).name.startswith("libstd-") and name.endswith(".rlib") for name in std)
+           and any(Path(name).name.startswith("libcompiler_builtins-") and name.endswith(".rlib") for name in std)
+           and {str(path.relative_to(toolchain)) for path in (toolchain / prefix).iterdir() if not path.is_dir()} == std,
+           "Shell Rust standard/static support roster differs")
+    compiler = {"bin/rustc", "lib/rustlib/" + TARGET + "/bin/rust-lld", "lib/rustlib/" + TARGET + "/bin/gcc-ld/ld.lld"}
+    compiler |= {name for name in members["rustc"] if name.startswith("lib/libLLVM") or name.startswith("lib/librustc_driver-")}
+    D.need(len(compiler) >= 5 and compiler <= members["rustc"] and "bin/cargo" in members["cargo"],
+           "Shell Rust compiler/linker component missing")
+    for path in [*manifests, *(toolchain / name for name in sorted(compiler | std | {"bin/cargo"}))]:
+        inputs.append({**D.file_record(path, MAX_BINARY), "path": str(path)})
+    D.need(sum(row["size"] for row in inputs) <= 1536 << 20, "Shell compiler/component input bound")
+    return {"scope": "Actual compile inputs; not a distribution notice union or licensing completeness claim.",
+            "crates": crates, "files": inputs, "metadataSha256": hashlib.sha256(metadata_raw).hexdigest(),
+            "rust": {"version": C.RUST, "commit": "88d9e12ae178fab0fb5cc050a94da85685d449ea",
+                     "components": pinned, "cargoArchiveSha256": D.sha(channel["pkg"]["cargo"]["target"][TARGET]["xz_hash"])}}, by_id
+
+
+def shell_module_inventory():
+    roots, bindings, selected = {}, {}, []
+    for name in SHELL_MODULE_ROOTS:
+        path = Path(name)
+        binding = shell_host_binding(path, directory_only=True, absent=True)
+        children = [] if binding.get("absent") else sorted(child.name for child in path.iterdir())
+        D.need(len(children) <= 256 and all(re.fullmatch(r"[A-Za-z0-9_.+\-]+", child) for child in children),
+               "Fixed shell module directory bound/grammar")
+        cache = [child for child in children if name == SHELL_LIBRARY_ROOT + "/gio/modules" and child == "giomodule.cache"]
+        modules = [child for child in children if child not in cache]
+        D.need(all(child.endswith(".so") for child in modules), "Unreviewed shell module directory member")
+        roots[name] = {"present": not binding.get("absent", False), "modules": modules}
+        bindings[name] = {"binding": binding, "children": children}
+        selected.extend(str(path / child) for child in modules)
+        D.need(D.same(shell_host_binding(path, directory_only=True, absent=True), binding)
+               and (binding.get("absent") or sorted(child.name for child in path.iterdir()) == children),
+               "Fixed shell module directory changed while listing")
+    D.need(1 <= len(selected) <= 256, "Actual shell module roster bound")
+    return roots, bindings, sorted(selected)
+
+
+def shell_data_records(snapshot, public, prefix):
+    records = []
+    for index, (_, detail) in enumerate(snapshot["details"].items()):
+        leaf = prefix + "-" + str(index) + ".json"
+        raw = D.canonical(detail)
+        D.need(len(raw) <= 2 << 20, "Fixed shell DATA root detail bound")
+        records.append({**D.write(public / leaf, raw), "path": leaf})
+    return {key: snapshot[key] for key in ("suppliers", "caches", "moduleSelections", "eglLibraries")} | {"records": records}
+
+
+def shell_private_search(records, libraries):
+    """Portable per-requester search candidates, including private hwcaps."""
+    result = []
+    for row in records:
+        path, elf = row["file"]["selectedPath"], row["elf"]
+        if "runpath" not in elf:
+            continue
+        D.need(path in SHELL_RUNPATHS and (elf["soname"], elf["runpath"]) == SHELL_RUNPATHS[path],
+               "Unadmitted shell requester RUNPATH")
+        if path.endswith("/libLLVM.so.20.1"):
+            D.need(row["file"]["path"] == path, "LLVM ORIGIN provider is not its fixed direct package member")
+        for directory in SHELL_RUNPATH_DIRECTORIES[path]:
+            for name in elf["needed"]:
+                selected = shell_provider_path(path, elf["runpath"], name)
+                D.need(selected == libraries[name]["file"]["selectedPath"], "Shell edge resolves to another provider")
+                for prefix in ("", *("glibc-hwcaps/" + tier + "/" for tier in ("x86-64-v4", "x86-64-v3", "x86-64-v2"))):
+                    candidate = str(Path(directory) / (prefix + name))
+                    result.append({"requester": path, "runpath": elf["runpath"], "name": name,
+                                   "path": candidate, "selected": candidate == selected})
+    return sorted(result, key=lambda row: (row["requester"], row["path"]))
+
+
+def shell_native_inputs(check, work, environment):
+    """Fresh shell-only static provider closure; never a widened J/U allowlist.
+
+    Provider names come from actual ELF edges of the fixed GTK/WebKit seeds,
+    subprocesses, finite module roots and protected EGL selectors. This is a
+    bounded current-job profile, not a distribution notice/licensing union.
+    """
+    files, packages, package_files, libraries, programs, modules, scripts = {}, {}, {}, {}, {}, {}, {}
+    counter = 0
+
+    def host(path, limit=MAX_BINARY):
+        check.phase = "shell-native-file:" + str(path)
+        row = protected_host_file(Path(path), limit)
+        files[row["selectedPath"]] = row
+        D.need(len(files) <= 512 and sum({item["path"]: item["size"] for item in files.values()}.values()) <= 2 << 30,
+               "Shell native input file/byte bound")
+        return row
+
+    def package(name):
+        nonlocal counter
+        D.need(re.fullmatch(r"[a-z0-9][a-z0-9+.-]+(?::amd64)?", name) is not None, "Shell native package name differs")
+        if name in packages:
+            return
+        D.need(len(packages) < 256, "Shell package closure bound")
+        counter += 1
+        fields = "${binary:Package}\t${db:Status-Status}\t${Version}\t${Architecture}\t${source:Package}\t${source:Version}\n"
+        argv = ["/usr/bin/dpkg-query", "-W", "-f=" + fields, name]
+        result = check.command("shell-package-" + str(counter), argv, environment, work, timeout=15, limit=64 << 10)
+        values = result.stdout.decode("ascii").rstrip("\n").split("\t")
+        D.need(result.stderr == b"" and result.stdout.count(b"\n") == 1 and len(values) == 6
+               and values[0].split(":")[0] == name.split(":")[0] and values[1] == "installed"
+               and values[3] in {"amd64", "all"} and re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", values[4]) is not None
+               and all(re.fullmatch(r"[0-9][A-Za-z0-9.+:~\-]*", values[i]) for i in (2, 5)),
+               "Actual shell native package tuple differs")
+        listing = check.command("shell-package-files-" + str(counter), ["/usr/bin/dpkg-query", "-L", name],
+                                environment, work, timeout=15, limit=1 << 20)
+        paths = listing.stdout.decode("utf-8").splitlines()
+        D.need(listing.stderr == b"" and 0 < len(paths) <= 32768
+               and all(path.startswith("/") and ".." not in Path(path).parts for path in paths),
+               "Shell native package member roster differs")
+        packages[name] = {"binaryPackage": values[0], "version": values[2], "architecture": values[3],
+                          "sourcePackage": values[4], "sourceVersion": values[5], "queryArgv": argv,
+                          "querySha256": hashlib.sha256(result.stdout).hexdigest(),
+                          "memberQuerySha256": hashlib.sha256(listing.stdout).hexdigest()}
+        package_files[name] = set(paths)
+
+    def owner(row):
+        nonlocal counter
+        counter += 1
+        aliases = {row["path"], row["selectedPath"]}
+        for path in list(aliases):
+            if path.startswith("/usr/lib/"):
+                aliases.add(path.removeprefix("/usr"))
+            elif path.startswith("/lib/"):
+                aliases.add("/usr" + path)
+        # Each already-queried package has a complete original member roster.
+        # Reuse exact membership, not guessed basename/package correspondence
+        # or a fresh dpkg launch for every one of a supplier's module files.
+        known = {name for name, members in package_files.items() if aliases & members}
+        D.need(len(known) <= 1, "Shell native member has ambiguous admitted suppliers")
+        if known:
+            return next(iter(known))
+        # Query canonical/usr-merge aliases once, not a retry/fallback launch.
+        result = check.command("shell-file-owner-" + str(counter), ["/usr/bin/dpkg-query", "-S", *sorted(aliases)],
+                               environment, work, timeout=15, codes=(0, 1), limit=64 << 10)
+        owners = set()
+        for line in result.stdout.decode("ascii").splitlines():
+            name, separator, path = line.rpartition(": ")
+            D.need(separator and path in aliases and re.fullmatch(r"[a-z0-9][a-z0-9+.-]+(?::amd64)?", name),
+                   "Shell native ownership query contains an unrelated member")
+            owners.add(name)
+        D.need(len(owners) == 1, "Shell native file ownership is missing/ambiguous")
+        for line in result.stderr.decode("ascii").splitlines():
+            D.need(any(line == "dpkg-query: no path found matching pattern " + path for path in aliases),
+                   "Unexpected shell ownership query diagnostic")
+        name = next(iter(owners))
+        package(name)
+        D.need(bool(aliases & package_files[name]), "Shell native file is absent from its package roster")
+        return name
+
+    tools = {name: host(path) for name, path in (("cc", "/usr/bin/cc"), ("pkgConfig", "/usr/bin/pkg-config"),
+                                              ("ldconfig", "/usr/sbin/ldconfig.real"))}
+    static_ldconfig(D.read(Path(tools["ldconfig"]["path"]), 4 << 20))
+    for row in tools.values():
+        owner(row)
+    gcc = check.command("shell-gcc-version", ["/usr/bin/cc", "-dumpfullversion"], environment, work, timeout=15, limit=4096)
+    D.need(gcc.stderr == b"" and re.fullmatch(rb"[0-9]+(?:\.[0-9]+){1,2}\n", gcc.stdout), "Shell GNU compiler version differs")
+    for kind, names in (("program", ("collect2", "ld")),
+                        ("support", ("Scrt1.o", "crti.o", "crtn.o", "crtbeginS.o", "crtendS.o", "libgcc.a",
+                                     "libgcc_eh.a", "libgcc_s.so", "libc.so", "libc_nonshared.a", "libutil.a",
+                                     "librt.a", "libpthread.a", "libm.so", "libdl.a"))):
+        for index, name in enumerate(names):
+            option = "-print-prog-name=" if kind == "program" else "-print-file-name="
+            result = check.command("shell-gcc-" + kind + "-" + str(index), ["/usr/bin/cc", option + name],
+                                   environment, work, timeout=15, limit=4096)
+            D.need(result.stderr == b"" and result.stdout.count(b"\n") == 1, "Shell GNU standard component query differs")
+            path = result.stdout.decode("ascii").rstrip("\n")
+            if not path.startswith("/") and kind == "program":
+                path = shutil.which(path, path="/usr/bin:/bin")
+            D.need(path is not None and path.startswith("/"), "Shell GNU standard component did not resolve")
+            owner(host(os.path.abspath(path)))
+    pkg_config = {}
+    for label, argv in (
+        ("versions", ["/usr/bin/pkg-config", "--modversion", "gtk+-3.0", "webkit2gtk-4.1"]),
+        ("flags", ["/usr/bin/pkg-config", "--cflags", "--libs", "gtk+-3.0", "webkit2gtk-4.1"]),
+    ):
+        result = check.command("shell-pkg-config-" + label, argv, environment, work, timeout=15, limit=64 << 10)
+        D.need(result.stderr == b"" and 0 < len(result.stdout) <= 64 << 10, "Shell GTK/WebKit package-config result differs")
+        pkg_config[label] = result.stdout.decode("utf-8")
+    D.need(len(pkg_config["versions"].splitlines()) == 2
+           and all(re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", row) for row in pkg_config["versions"].splitlines()),
+           "Shell GTK/WebKit package-config versions differ")
+    lifecycle = local("ubuntu_publication_lifecycle")
+    snapshot = lifecycle.shell_data_snapshot(shell_host_binding)
+    runtime_data = shell_data_records(snapshot, check.root / "public", "shell-data")
+    roots, root_bindings, module_paths = shell_module_inventory()
+    D.need(all(set(names) <= set(module_paths) for names in snapshot["moduleSelections"].values()),
+           "Current module catalogue selects an unadmitted module")
+    seeds = set(SONAME_PACKAGES) | {"libgtk-3.so.0", "libwebkit2gtk-4.1.so.0",
+        "libjavascriptcoregtk-4.1.so.0", "libsoup-3.0.so.0", "libGLX_mesa.so.0", "libgbm.so.1"}
+    seeds.update(Path(path).name for path in snapshot["eglLibraries"].values())
+    pending = {(None, None, name) for name in seeds}
+
+    def edges(path, elf):
+        pending.update((path, elf.get("runpath"), name) for name in elf["needed"])
+
+    for path in SHELL_PROGRAMS:
+        row = host(path)
+        check.phase = "shell-native-program:" + path
+        D.need(Path(row["path"]).lstat().st_mode & stat.S_IXUSR, "Shell subprocess is not an executable")
+        elf = shell_elf_record(D.read(Path(row["path"]), MAX_BINARY), role="program", selected=path)
+        D.need(elf["interpreter"] == "/lib64/ld-linux-x86-64.so.2" and elf["soname"] is None,
+               "Shell subprocess ELF kind differs")
+        programs[path] = {"file": shell_file_projection(row), "elf": elf, "package": owner(row)}
+        edges(path, elf)
+    for path in SHELL_SCRIPTS:
+        row = host(path, 64 << 10)
+        raw = D.read(Path(row["path"]), 64 << 10)
+        D.need(raw.startswith(b"#!/bin/sh\n") and row["identity"][2] & stat.S_IXUSR,
+               "Fixed Xvfb wrapper script/shebang differs")
+        scripts[path] = {"file": shell_file_projection(row), "package": owner(row), "interpreter": "/bin/sh"}
+    for path in module_paths:
+        row = host(path)
+        check.phase = "shell-native-module:" + path
+        elf = shell_elf_record(D.read(Path(row["path"]), MAX_BINARY), role="module", selected=path)
+        D.need(elf["interpreter"] is None and (elf["soname"] is None or re.fullmatch(r"[A-Za-z0-9_+.-]+\.so(?:\.[A-Za-z0-9_.+-]+)?", elf["soname"])),
+               "Fixed shell module ELF kind/SONAME differs")
+        modules[path] = {"file": shell_file_projection(row), "elf": elf, "package": owner(row)}
+        edges(path, elf)
+    while pending:
+        requester, runpath, name = min(pending, key=lambda edge: (edge[2], edge[0] or "", edge[1] or ""))
+        pending.remove((requester, runpath, name))
+        check.phase = "shell-native-provider:" + name
+        path = shell_provider_path(requester, runpath, name)
+        if name in libraries:
+            D.need(libraries[name]["file"]["selectedPath"] == path, "Shell SONAME has two different provider contexts")
+            continue
+        D.need(len(libraries) < SHELL_MAX_LIBRARIES, "Shell static shared-object closure bound")
+        row = host(path)
+        check.phase = "shell-native-provider:" + path
+        elf = shell_elf_record(D.read(Path(row["path"]), MAX_BINARY), role="provider", selected=path)
+        D.need(elf["soname"] == name and (elf["interpreter"] is None or name in {"ld-linux-x86-64.so.2", "libc.so.6"}),
+               "Shell provider SONAME/interpreter differs")
+        libraries[name] = {"file": shell_file_projection(row), "elf": elf, "package": owner(row)}
+        edges(path, elf)
+    loader = host("/lib64/ld-linux-x86-64.so.2")
+    D.need(loader["path"] == libraries["ld-linux-x86-64.so.2"]["file"]["path"], "Shell interpreter provider differs")
+    for record in [*libraries.values(), *programs.values(), *modules.values()]:
+        for name, required in record["elf"]["versionNeeds"].items():
+            check.phase = "shell-native-version:" + record["file"]["selectedPath"] + "->" + name
+            D.need(set(required) <= set(libraries[name]["elf"]["versionDefinitions"]),
+                   "Shell native provider lacks a required symbol-version label")
+    private_search = shell_private_search([*libraries.values(), *programs.values(), *modules.values()], libraries)
+    search_bindings = {}
+    for row in private_search:
+        current = shell_host_binding(Path(row["path"]), absent=True)
+        if row["selected"]:
+            D.need(not current.get("absent") and shell_file_projection(current) == libraries[row["name"]]["file"],
+                   "Private shell RUNPATH selected another provider")
+        else:
+            D.need(current.get("absent") is True, "Private shell RUNPATH has an unadmitted search alternative")
+        search_bindings[row["path"]] = current
+    bindings = {"files": files, "moduleRoots": root_bindings, "privateSearch": search_bindings}
+    native = {"scope": "Fixed current-job GTK/WebKit/helper/module/DATA inputs; not general media or distribution qualification.",
+              "osFiles": {path: shell_file_projection(row) for path, row in files.items()}, "osPackages": packages,
+              "sharedObjects": libraries, "programs": programs, "scripts": scripts, "modules": modules,
+              "moduleRoots": roots, "privateSearch": private_search, "runtimeData": runtime_data,
+              "loader": shell_file_projection(loader), "gccVersion": gcc.stdout.decode("ascii").strip(), "pkgConfig": pkg_config}
+    return native, bindings
+
+
+def finish_shell_native_inputs(native, outputs, bindings):
+    D.need(set(outputs) == set(SHELL_EXPORTS), "Fixed shell output roles differ")
+    libraries, records = native["sharedObjects"], {}
+    for role, path in outputs.items():
+        file = {**D.file_record(path, MAX_BINARY), "path": str(path)}
+        elf = shell_elf_record(D.read(path, MAX_BINARY), role=role)
+        D.need(elf["interpreter"] == "/lib64/ld-linux-x86-64.so.2" and elf["soname"] is None,
+               "Original shell " + role + " output is not the expected dynamically linked executable")
+        for name in elf["needed"]:
+            D.need(name in libraries and shell_provider_path(None, None, name) == libraries[name]["file"]["selectedPath"],
+                   "Actual shell " + role + " has a nonglobal direct dependency: " + name)
+        pending, names = set(elf["needed"]) | {"ld-linux-x86-64.so.2"}, set()
+        for name, required in elf["versionNeeds"].items():
+            D.need(name in libraries and set(required) <= set(libraries[name]["elf"]["versionDefinitions"]),
+                   "Actual shell " + role + " requires a different native symbol-version provider: " + name)
+        while pending:
+            name = pending.pop()
+            D.need(name in libraries, "Actual shell " + role + " has an unbound provider: " + name)
+            if name not in names:
+                names.add(name)
+                pending.update(set(libraries[name]["elf"]["needed"]) - names)
+        records[role] = {"file": file, "elf": elf, "objects": sorted(names)}
+    for path, row in bindings["files"].items():
+        D.need(D.same(protected_host_file(Path(path)), row), "Original shell native input changed during compilation")
+    roots, current, _ = shell_module_inventory()
+    D.need(D.same(roots, native["moduleRoots"]) and D.same(current, bindings["moduleRoots"]),
+           "Original shell module directory changed during compilation")
+    for path, row in bindings["privateSearch"].items():
+        D.need(D.same(shell_host_binding(Path(path), absent=True), row), "Original private shell search candidate changed")
+    snapshot = local("ubuntu_publication_lifecycle").shell_data_snapshot(shell_host_binding)
+    D.need(all(D.same(snapshot[key], native["runtimeData"][key]) for key in
+               ("suppliers", "caches", "moduleSelections", "eglLibraries"))
+           and len(snapshot["details"]) == len(native["runtimeData"]["records"]),
+           "Original protected shell DATA profile changed during compilation")
+    for detail, expected in zip(snapshot["details"].values(), native["runtimeData"]["records"]):
+        raw = D.canonical(detail)
+        D.need(len(raw) == expected["size"] and hashlib.sha256(raw).hexdigest() == expected["sha256"],
+               "Original protected shell DATA identity/membership changed during compilation")
+    return {**native, "outputs": records}
+
+
+def shell_runtime_graph(runtime, rows, shared_objects):
+    """A's already-admitted three ELF objects, separate from the shell graph."""
+    objects = {}
+    for name in RUNTIME_ELF:
+        expected = rows[name]
+        raw = D.read(runtime / name, 64 << 20)
+        D.need(len(raw) == expected["size"] and hashlib.sha256(raw).hexdigest() == expected["sha256"],
+               "Original A ELF bytes differ from the complete admitted runtime")
+        objects[name] = {"file": expected, "elf": elf_dependencies(raw, runtime_path=name)}
+    libraries = {name: row for name, row in shared_objects.items() if name in SONAME_PACKAGES}
+    libraries.update({row["elf"]["soname"]: row for name, row in objects.items() if name != "python/bin/python3"})
+    names, pending = {"ld-linux-x86-64.so.2"}, [objects["python/bin/python3"]["elf"],
+                                             libraries["ld-linux-x86-64.so.2"]["elf"]]
+    while pending:
+        elf = pending.pop()
+        for name in elf["needed"]:
+            D.need(name in libraries, "Unbound original A dependency")
+            provider = libraries[name]["elf"]
+            D.need(set(elf["versionNeeds"].get(name, [])) <= set(provider["versionDefinitions"]),
+                   "Original A dependency lacks its required version label")
+            if name not in names:
+                names.add(name)
+                pending.append(provider)
+    D.need(names == {"ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6", "libssl.so.3", "libcrypto.so.3"},
+           "Original A private/system native graph differs")
+    startup = {prefix + name for prefix in ("", "python/", "python/bin/")
+               for name in ("pyvenv.cfg", "python3._pth", "pybuilddir.txt")}
+    D.need(not startup & set(rows) and not any(name.startswith("python/lib/glibc-hwcaps/") for name in rows)
+           and all("python/lib/" + name not in rows for name in names - {"libssl.so.3", "libcrypto.so.3"})
+           and {name for name in rows if re.search(r"\.so(?:\.[0-9]+)*$", name)}
+               == {"python/lib/libssl.so.3", "python/lib/libcrypto.so.3"},
+           "Original A startup/native search alternatives differ")
+    return {"manifestSha256": C.CONVENTIONAL_SMOKE_INPUTS["manifestSha256"],
+            "protocolSha256": C.CONVENTIONAL_SMOKE_INPUTS["protocolSha256"],
+            "runtime": objects, "runtimeObjects": sorted(names),
+            "privateRunpaths": {name: row[1] for name, row in RUNTIME_ELF.items()}}
+
+
 def prepare_packages(check, source, work, public, environment, binaries, native_notices, depends, prepared):
     stager, artifact, original, p0, runtime_rows, f1, f1_rows, kit = prepared
     admission = C.CONVENTIONAL_SMOKE_INPUTS
@@ -1489,7 +2443,208 @@ def prepare_packages(check, source, work, public, environment, binaries, native_
     return packages, capacity
 
 
+def verify_installed_shell_compile():
+    D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "compile" and "MRK_INSTALLED_CASE" not in os.environ,
+           "Fixed production shell compiler route differs")
+    sha, source, temporary, root, deadline = resumed_preparation()
+    os.umask(0o077)
+    work, public = root / "work", root / "public"
+    identities = {str(path): directory_identity(path) for path in (root, work, public, root / "cases")}
+    sys.path.insert(0, str(source / "src"))
+    from mobile_release.owned_process import run_owned
+    check = Check(root, run_owned, deadline=deadline)
+    environment = C.clean_environment(work)
+    environment.update(CARGO_TARGET_DIR=str(work / "target"), CC="/usr/bin/cc", CXX="/usr/bin/c++",
+                       PKG_CONFIG="/usr/bin/pkg-config", CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER="/usr/bin/cc")
+    git = shutil.which("git", path=environment["PATH"])
+    rustup = shutil.which("rustup", path=environment["PATH"])
+    node = shutil.which("node", path=environment["PATH"])
+    generated, source_inputs = {}, None
+
+    def source_check(label):
+        check.phase = label + "-shell-source-admission"
+        C.conventional_host(D)
+        D.need(all(directory_identity(Path(path)) == identity for path, identity in identities.items()),
+               "Original shell task root changed")
+        C.no_cargo_configuration((work, root, *root.parents, temporary, *temporary.parents,
+                                  source / "desktop/src-tauri", source / "desktop", source, *source.parents,
+                                  work / "cargo", work / "home"))
+        for name in ("config", "config.toml"):
+            D.need(not (work / "cargo" / name).exists() and not (work / "cargo" / name).is_symlink(),
+                   "Unexpected private shell Cargo configuration")
+        for path in (source / "desktop/.npmrc", source / ".npmrc", work / "home/.npmrc"):
+            D.need(not path.exists() and not path.is_symlink(), "Unexpected shell npm project configuration")
+        for relative in SHELL_GENERATED:
+            path = source / relative
+            if relative in generated:
+                value = path.lstat()
+                D.directory(path)
+                D.need((value.st_dev, value.st_ino, value.st_uid) == generated[relative],
+                       "Original generated shell directory changed")
+            else:
+                D.need(not path.exists() and not path.is_symlink(), "Preexisting/unowned shell compiler output")
+        head = check.command(label + "-head", [git, "rev-parse", "HEAD"], environment, source, timeout=15)
+        status = check.command(label + "-status", [git, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored"],
+                               environment, source, timeout=15)
+        D.need(head.stdout == sha.encode("ascii") + b"\n" and head.stderr == status.stderr == b"",
+               "Original shell source commit/capture changed")
+        shell_source_status(status.stdout, generated)
+        if source_inputs is not None:
+            D.need(shell_source_manifest(source) == source_inputs, "Original shell/frontend source anchors changed")
+
+    def own_generated(relative):
+        D.need(relative in SHELL_GENERATED and relative not in generated, "Different/repeated shell generated root")
+        path = source / relative
+        D.directory(path)
+        value = path.lstat()
+        D.need(value.st_uid == os.getuid() and not value.st_mode & 0o7022, "Generated shell root owner/mode differs")
+        generated[relative] = value.st_dev, value.st_ino, value.st_uid
+
+    try:
+        D.need(all(value is not None and Path(value).is_absolute() for value in (git, rustup, node)),
+               "Selected shell compiler/frontend/source tools missing")
+        source_check("before")
+        source_inputs = shell_source_manifest(source)
+        tree_result = check.command("source-tree", [git, "rev-parse", "HEAD^{tree}"], environment, source, timeout=15)
+        tree = tree_result.stdout.strip().decode("ascii")
+        D.need(tree_result.stderr == b"" and re.fullmatch(r"[0-9a-f]{40}", tree) is not None, "Shell source tree differs")
+        entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
+        D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
+               "Workflow reviewed shell lifecycle entry differs")
+        source_record = {"sourceSha": sha, "sourceTree": tree, "sourceInputs": source_inputs,
+                         "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                         "workflow": D.file_record(source / WORKFLOW, 128 << 10), "features": SHELL_FEATURES,
+                         "imageOS": os.environ["ImageOS"], "imageVersion": os.environ["ImageVersion"],
+                         "kernel": {key: getattr(os.uname(), key) for key in ("sysname", "machine", "release", "version")},
+                         "lifecycleEntrySha256": entry_sha, "originalDeadline": repr(deadline),
+                         "nativeQualification": False, "scope": "Fresh normal shell and distinct observer compile only; no new package."}
+        D.write(public / "source.json", D.canonical(source_record))
+        check.phase = "original-shell-a-data"
+        prepared = package_inputs(source, work, fixtures=False)
+        D.write(public / "runtime-inputs.json", D.canonical({"admission": C.CONVENTIONAL_SMOKE_INPUTS,
+                "runtimeFiles": len(prepared[4]), "supplierRebuilt": False, "fixtureMaterialized": False}))
+        for name in ("npmrc-user", "npmrc-global"):
+            D.write(work / name, b"")
+        (work / "npm-cache").mkdir(mode=0o700)
+        npm_cache_identity = directory_identity(work / "npm-cache")
+        check.command("rust-acquire", [rustup, "toolchain", "install", C.RUST, "--profile", "minimal", "--no-self-update"],
+                      environment, work)
+        selected = {}
+        for name in ("cargo", "rustc"):
+            result = check.command(name + "-selection", [rustup, "which", "--toolchain", C.RUST, name],
+                                   environment, work, timeout=15)
+            D.need(result.stderr == b"" and result.stdout.count(b"\n") == 1, "Original shell compiler selection differs")
+            value = Path(result.stdout.decode("utf-8").rstrip("\n"))
+            D.need(value.is_absolute() and value.resolve(strict=True) == value
+                   and value.is_relative_to(work / "rustup/toolchains") and value.is_file(),
+                   "Selected shell private compiler differs")
+            selected[name] = str(value)
+        cargo, rustc = selected["cargo"], selected["rustc"]
+        version = check.command("rust-version", [rustc, "-vV"], environment, work, timeout=15)
+        D.need(version.stderr == b"" and f"release: {C.RUST}\n".encode() in version.stdout
+               and f"host: {TARGET}\n".encode() in version.stdout
+               and b"commit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\n" in version.stdout,
+               "Selected shell Rust version/commit/target differs")
+        environment.update(RUSTC=rustc, PATH=str(Path(cargo).parent) + os.pathsep + environment["PATH"], GITHUB_SHA=sha,
+                           MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=C.CONVENTIONAL_SMOKE_INPUTS["manifestSha256"],
+                           MRK_BUNDLED_PROTOCOL_SHA256=C.CONVENTIONAL_SMOKE_INPUTS["protocolSha256"])
+        metadata_raw = check.command("shell-locked-inputs", [cargo, "metadata", "--locked", "--format-version", "1",
+            "--no-default-features", "--features", SHELL_FEATURE_ARG, "--filter-platform", TARGET,
+            "--manifest-path", str(source / "desktop/src-tauri/Cargo.toml")], environment, work,
+            limit=SHELL_METADATA_LIMIT).stdout
+        compiler_inputs, packages_by_id = shell_compiler_inputs(source, work, cargo, rustc, metadata_raw)
+        _, _, nodes_by_id = shell_cargo_metadata(metadata_raw, source, work / "target")
+        observed_node = check.command("node-version", [node, "--version"], environment, work, timeout=15)
+        D.need(observed_node.stdout == C.NODE.encode("ascii") + b"\n" and observed_node.stderr == b"",
+               "Selected shell Node version differs")
+        node = str(Path(node).resolve(strict=True))
+        npm = Path(node).parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
+        node_inputs = [{**D.file_record(path, MAX_BINARY), "path": str(path)} for path in (Path(node), npm)]
+        check.command("npm-locked-no-scripts", [node, "--max-old-space-size=768", str(npm), "ci", "--ignore-scripts",
+            "--no-audit", "--no-fund", "--userconfig", str(work / "npmrc-user"), "--globalconfig", str(work / "npmrc-global"),
+            "--cache", str(work / "npm-cache"), "--registry", "https://registry.npmjs.org/"],
+            environment, source / "desktop", timeout=300)
+        own_generated("desktop/node_modules")
+        npm_tree = shell_generated_tree(source / "desktop/node_modules", links=True)
+        source_check("acquired")
+        native, native_bindings = shell_native_inputs(check, work, environment)
+        desktop = source / "desktop"
+        check.command("typescript-no-emit", [node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"],
+                      environment, desktop, timeout=60)
+        check.command("vite-assets", [node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
+                      str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
+                      environment, desktop, timeout=90)
+        own_generated("desktop/dist")
+        frontend = shell_generated_tree(desktop / "dist")
+        D.need(1 <= len(frontend["files"]) <= 64 and not frontend["links"]
+               and any(row["path"] == "index.html" for row in frontend["files"]), "Embedded frontend output roster differs")
+        frontend_record = {"node": C.NODE, "compilerTools": node_inputs, "sourceInputs": source_inputs,
+                           "npmTreeSha256": npm_tree["treeSha256"], "npmFiles": len(npm_tree["files"]),
+                           "dist": frontend, "embeddedBy": "tauri/custom-protocol", "devServer": False}
+        frontend_pin = D.write(public / "frontend.json", D.canonical(frontend_record))
+        raw = check.command("shell-compile", shell_compile_argv(cargo, source, work / "target"),
+                            environment, work, timeout=900, limit=SHELL_COMPILE_LIMIT).stdout
+        selections, units = shell_compiled_artifacts(raw, source, work / "target")
+        shell_compiler_units(units, packages_by_id, nodes_by_id)
+        root_id = next(key for key, value in packages_by_id.items()
+                       if value["manifest_path"] == str(source / "desktop/src-tauri/Cargo.toml"))
+        D.need(all(row["packageId"] == root_id for row in selections.values()), "Shell output package ID differs from source metadata")
+        own_generated("desktop/src-tauri/gen")
+        originals, exports = {}, {}
+        for role, selection in selections.items():
+            destination = public / SHELL_EXPORTS[role]
+            originals[role] = artifact_record(Path(selection["path"]), copy_to=destination)
+            exports[role] = artifact_record(destination)
+            D.need(originals[role]["identity"][:2] != exports[role]["identity"][:2]
+                   and all(originals[role][key] == exports[role][key] for key in ("size", "sha256")),
+                   "Shell original/fresh export differ or alias")
+        native = finish_shell_native_inputs(native, {role: Path(row["path"]) for role, row in exports.items()}, native_bindings)
+        native["hostBindingsRecord"] = D.write(public / "shell-host-bindings.json", D.canonical(native_bindings))
+        native.update(shell_runtime_graph(prepared[3], prepared[4], native["sharedObjects"]))
+        native_pin = D.write(public / "shell-native.json", D.canonical(native))
+        source_check("compiled")
+        D.need(shell_generated_tree(desktop / "node_modules", links=True) == npm_tree
+               and shell_generated_tree(desktop / "dist") == frontend
+               and directory_identity(work / "npm-cache") == npm_cache_identity,
+               "Original shell frontend inputs/embedded assets changed during compilation")
+        for row in [*compiler_inputs["files"], *node_inputs]:
+            D.bound(Path(row["path"]), row)
+        for role in SHELL_EXPORTS:
+            D.need(D.same(artifact_record(Path(originals[role]["path"])), originals[role])
+                   and D.same(artifact_record(Path(exports[role]["path"])), exports[role]), "Original shell output/export changed")
+        compiler = {"sourceSha": sha, "sourceTree": tree, "sourceInputs": source_inputs, "features": SHELL_FEATURES,
+                    "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                    "source": str(source), "target": str(work / "target"), "cargo": cargo,
+                    "manifestSha256": C.CONVENTIONAL_SMOKE_INPUTS["manifestSha256"],
+                    "protocolSha256": C.CONVENTIONAL_SMOKE_INPUTS["protocolSha256"],
+                    "compilerInputs": compiler_inputs, "nativeInputs": native,
+                    "nativeRecord": native_pin, "frontendRecord": frontend_pin,
+                    "originalArtifacts": originals, "exportedArtifacts": exports, "selections": selections,
+                    "compilerUnits": units, "generatedRoots": list(SHELL_GENERATED)}
+        D.write(public / "compiler.json", D.canonical(compiler))
+        source_check("after")
+        D.write(public / "result.json", D.canonical({"sourceSha": sha, "sourceTree": tree,
+            "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+            "features": SHELL_FEATURES, "compilations": ["normal", "observer"], "cargoBuilds": 1,
+            "frontendBuilds": 1, "shellExecuted": False, "observerExecuted": False, "supplierRebuilt": False,
+            "packageBuilt": False, "helper11Rerun": False, "commands": check.commands, "qualified": False,
+            "scope": "installed-shell-production-compiler-and-separate-harness-free-observer-only"}))
+        files = [{**D.file_record(path, MAX_BINARY), "path": path.name} for path in sorted(public.iterdir())]
+        D.need(len(files) <= 1536 and sum(row["size"] for row in files) <= 1536 << 20 and time.monotonic() < deadline,
+               "Original shell artifact roster/endpoint bound")
+        pin = D.write(public / "shell-roster.json", D.canonical({"sourceSha": sha, "sourceTree": tree,
+            "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "files": files}))
+        with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+            output.write("shell_roster_sha256=" + pin["sha256"] + "\nshell_producer_attempt=" + os.environ["GITHUB_RUN_ATTEMPT"] + "\n")
+        D.need(time.monotonic() < deadline, "Original shell compiler closed late")
+        print("Both fresh shell outputs and embedded frontend retained; no shell, observer or installed runtime executed.", flush=True)
+    except BaseException as error:
+        retain_failure(root, check.phase, check.commands, error)
+        raise
+
+
 def verify(*, installed_compile=False):
+    D.need("MRK_INSTALLED_SHELL_CASE" not in os.environ, "Shell route cannot enter publisher/headless compilation")
     D.need(os.environ.get("MRK_INSTALLED_CASE") == ("compile" if installed_compile else None),
            "Fixed compiler route differs")
     sha, source, temporary, root, deadline = resumed_preparation()
@@ -1789,6 +2944,77 @@ def verify_installed():
         raise
 
 
+def verify_installed_shell():
+    """One installed connection gate; reuse U, not its entire lifecycle again."""
+    D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe", "Only the fixed shell observation job is accepted")
+    sha, source, _, root, deadline = resumed_preparation()
+    work, public = root / "work", root / "public"
+    check, phase = None, "accepted-shell-data"
+    try:
+        entry_sha = D.sha(os.environ.get("MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256"))
+        D.need(D.file_record(source / "desktop/tools/ubuntu_publication_lifecycle.py", 1 << 20)["sha256"] == entry_sha,
+               "Workflow reviewed shell lifecycle entry differs")
+        library, packages, old_compiler, accepted = installed_u_inputs(work)
+        binaries, compiler, native, roster_sha, producer_attempt, artifact_id = installed_shell_candidate(work, sha)
+        D.need(elf_dependencies(D.read(Path(library["path"]), MAX_BINARY)) == old_compiler["nativeInputs"]["outputs"]["libtest"]["elf"],
+               "Accepted U platform executable closure differs")
+        sys.path.insert(0, str(source / "src"))
+        from mobile_release.owned_process import run_owned
+        check = Check(root, run_owned, deadline=deadline)
+        environment = C.clean_environment(work)
+        original = {str(path): directory_identity(path) for path in (root, work, public, root / "cases")}
+
+        def source_check(label):
+            C.conventional_host(D)
+            D.need(all(directory_identity(Path(path)) == item for path, item in original.items()), "Shell task root changed")
+            head = check.command(label + "-head", ["/usr/bin/git", "rev-parse", "HEAD"], environment, source, timeout=15)
+            status = check.command(label + "-status", ["/usr/bin/git", "status", "--porcelain=v1", "--untracked-files=all", "--ignored"],
+                                   environment, source, timeout=15)
+            D.need(head.stdout == sha.encode("ascii") + b"\n" and head.stderr == status.stdout == status.stderr == b"",
+                   "Shell source is not the exact original clean checkout")
+
+        source_check("before")
+        policy = installed_shell_os_inputs(check, work, native, compiler, old_compiler)
+        # Compile-only dependency/unit evidence stays in its already admitted
+        # original artifact. The root service receives only the relevant typed
+        # projection, plus the full original record's content binding.
+        projection = {key: compiler[key] for key in ("sourceSha", "sourceTree", "runId", "attempt", "features",
+            "manifestSha256", "protocolSha256", "exportedArtifacts", "nativeRecord", "frontendRecord")}
+        projection["originalRecord"] = D.file_record(work / "admitted-shell/compiler.json", SHELL_METADATA_LIMIT)
+        shell = {"binaries": binaries, "compiler": projection, "rosterSha256": roster_sha,
+                 "producerAttempt": producer_attempt, "artifactId": artifact_id, "acceptedU": accepted, "loaderPolicy": policy}
+        source_record = {"sourceSha": sha, "sourceTree": compiler["sourceTree"], "runId": os.environ["GITHUB_RUN_ID"],
+            "attempt": os.environ["GITHUB_RUN_ATTEMPT"], "features": SHELL_FEATURES, "acceptedU": accepted,
+            "shellRosterSha256": roster_sha, "shellProducerAttempt": producer_attempt, "shellArtifactId": artifact_id,
+            "platformLibrarySourceSha": old_compiler["sourceSha"], "imageOS": os.environ["ImageOS"],
+            "imageVersion": os.environ["ImageVersion"], "originalDeadline": repr(deadline), "qualified": False}
+        D.write(public / "source.json", D.canonical(source_record))
+        request = {"sourceSha": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+            "deadline": deadline, "runnerUid": os.getuid(), "runnerGid": os.getgid(), "source": str(source), "taskRoot": str(root),
+            "library": library, "packages": packages, "compilerRecords": old_compiler, "shell": shell}
+        raw = D.canonical(request)
+        D.need(len(raw) <= 1 << 20 and time.monotonic() < deadline, "Shell handoff exceeds original bound/endpoint")
+        path = work / "lifecycle-handoff.json"
+        pin = D.write(path, raw)
+        lifecycle = local("ubuntu_publication_lifecycle")
+        argv = lifecycle.service_argv(path, pin["sha256"], entry_sha)
+        client = check.command("root-shell-connection", argv,
+            {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "HOME": str(work / "home")},
+            work, timeout=1200, limit=2 << 20)
+        observed = lifecycle.verify_service_result(path, pin["sha256"], entry_sha, client, public)
+        source_check("after")
+        D.need(time.monotonic() < deadline, "Original shell result endpoint expired")
+        D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
+            "commands": check.commands, "cases": ["normal", "positive", "quit-outstanding"], "compilerRerun": False,
+            "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
+            "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}))
+        D.need(time.monotonic() < deadline, "Original shell result close/readback was late")
+        print("Normal window and two original observer cases retained with service finality; no product/package qualification.", flush=True)
+    except BaseException as error:
+        retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error)
+        raise
+
+
 if __name__ == "__main__":
     try:
         if sys.argv[1:] == ["prepare"]:
@@ -1797,8 +3023,12 @@ if __name__ == "__main__":
             verify(installed_compile=True)
         elif sys.argv[1:] == ["installed"]:
             verify_installed()
+        elif sys.argv[1:] == ["installed-shell-compile"]:
+            verify_installed_shell_compile()
+        elif sys.argv[1:] == ["installed-shell"]:
+            verify_installed_shell()
         else:
-            D.need(len(sys.argv) == 1, "Expected prepare, installed-compile, installed or the no-argument lifecycle entry")
+            D.need(len(sys.argv) == 1, "Expected a fixed preparation/compiler/installed entry or no-argument lifecycle entry")
             verify()
     except Exception as error:
         print("Publisher check refused: " + failure_reason(error) + ". Preserve original evidence; no qualification.", file=sys.stderr)

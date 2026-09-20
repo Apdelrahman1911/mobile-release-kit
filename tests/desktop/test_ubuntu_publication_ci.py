@@ -287,12 +287,14 @@ class PublisherCI(unittest.TestCase):
         workflow = (SOURCE / S.WORKFLOW).read_text()
         native = workflow.split("\n  native:\n", 1)[1]
         guard = native.split("      - name: Check out exact reviewed source", 1)[0]
-        for name in ("MRK_INSTALLED_CANDIDATE_ARTIFACT_ID", "MRK_INSTALLED_CANDIDATE_ROSTER_SHA256", "MRK_INSTALLED_CANDIDATE_PRODUCER_ATTEMPT"):
+        # The successor workflow transports the shell pair. Historical J's
+        # feature-off helper contract above remains independently covered.
+        for name in ("MRK_INSTALLED_SHELL_ARTIFACT_ID", "MRK_INSTALLED_SHELL_ROSTER_SHA256", "MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT"):
             self.assertIn(name, guard)
         self.assertIn("int(values[1]) > int(values[2])", guard)
         self.assertIn("[1-9][0-9]{0,19}", guard)
-        self.assertIn("artifact-ids: ${{ needs.compile.outputs.candidate_artifact_id }}", native)
-        self.assertIn("candidate_producer_attempt: ${{ steps.compile.outputs.candidate_producer_attempt }}", workflow)
+        self.assertIn("artifact-ids: ${{ needs.compile.outputs.shell_artifact_id }}", native)
+        self.assertIn("shell_producer_attempt: ${{ steps.compile.outputs.shell_producer_attempt }}", workflow)
         self.assertNotIn("admitted-a", native)
 
     def test_installed_candidate_rejects_relabelled_profiles_copied_identity_and_executed_results(self):

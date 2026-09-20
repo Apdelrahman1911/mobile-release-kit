@@ -1,8 +1,8 @@
-name: Installed passive runtime verification
+name: Installed production shell verification
 
 on:
   push:
-    branches: [verify/desktop-installed-passive]
+    branches: [verify/desktop-installed-shell]
     paths:
       - desktop/**
       - src/mobile_release/**
@@ -14,7 +14,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: desktop-installed-passive-${{ github.ref }}
+  group: desktop-installed-shell-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -22,13 +22,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      MRK_INSTALLED_CASE: compile
+      MRK_INSTALLED_SHELL_CASE: compile
       MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
       MRK_UBUNTU_PUBLICATION_VERIFY: '1'
     outputs:
-      candidate_roster_sha256: ${{ steps.compile.outputs.candidate_roster_sha256 }}
-      candidate_artifact_id: ${{ steps.upload.outputs.artifact-id }}
-      candidate_producer_attempt: ${{ steps.compile.outputs.candidate_producer_attempt }}
+      shell_roster_sha256: ${{ steps.compile.outputs.shell_roster_sha256 }}
+      shell_producer_attempt: ${{ steps.compile.outputs.shell_producer_attempt }}
+      shell_artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - name: Require the fixed disposable compile route
         shell: bash
@@ -37,13 +37,80 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$HOSTING" == github-hosted && "$GITHUB_EVENT_NAME" == push ]]
-          [[ "$GITHUB_REF" == refs/heads/verify/desktop-installed-passive ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-installed-shell ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
+          [[ "$MRK_INSTALLED_SHELL_CASE" == compile ]]
       - name: Check out exact reviewed source without credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Select the fixed frontend compiler
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - name: Prepare shared Ubuntu shell inputs only on this disposable runner
+        timeout-minutes: 8
+        shell: bash
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
+          dpkg-query -W -f='${Package} ${Version}\n' libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
+      - name: Admit only the exact disposable Ubuntu share-directory mode
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo /usr/bin/python3.12 -I -S -B - <<'PY'
+          import json, os, stat
+          def need(ok):
+              if not ok: raise SystemExit(70)
+          def identity(s):
+              return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
+          def protected(s):
+              need(stat.S_ISDIR(s.st_mode) and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022)
+          def record(s):
+              return {'dev': s.st_dev, 'ino': s.st_ino, 'uid': s.st_uid, 'gid': s.st_gid,
+                      'mode': format(stat.S_IMODE(s.st_mode), '04o')}
+          need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0))
+          flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+          root = os.open('/', flags)
+          usr = share = None
+          try:
+              root_before = os.fstat(root)
+              protected(root_before)
+              need(identity(root_before) == identity(os.stat('/', follow_symlinks=False)))
+              usr = os.open('usr', flags, dir_fd=root)
+              usr_before = os.fstat(usr)
+              protected(usr_before)
+              need(identity(usr_before) == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)))
+              share = os.open('share', flags, dir_fd=usr)
+              before = os.fstat(share)
+              need(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+                   and stat.S_IMODE(before.st_mode) in (0o755, 0o775))
+              need(identity(before) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)))
+              # No recursive repair: this sole known directory may lose only group-write.
+              if stat.S_IMODE(before.st_mode) == 0o775:
+                  os.fchmod(share, 0o755)
+              after = os.fstat(share)
+              need(identity(after) == (before.st_dev, before.st_ino, before.st_mode & ~0o020,
+                                       before.st_uid, before.st_gid))
+              need(identity(after) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)))
+              need(identity(root_before) == identity(os.fstat(root)) == identity(os.stat('/', follow_symlinks=False)))
+              need(identity(usr_before) == identity(os.fstat(usr))
+                   == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)))
+              receipt = json.dumps({'scope': 'exact-/usr/share-mode', 'before': record(before), 'after': record(after)},
+                                   sort_keys=True, separators=(',', ':'))
+              need(len(receipt.encode('ascii')) <= 512)
+              print(receipt, flush=True)
+          finally:
+              for fd in (share, usr, root):
+                  if fd is not None: os.close(fd)
+          PY
       - name: Prepare a fresh bounded compiler owner
         id: prepare
         shell: bash
@@ -59,7 +126,7 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ steps.prepare.outputs.root }}/work/admitted-a
           merge-multiple: true
-      - name: Compile the feature-off candidate once without executing it
+      - name: Compile the normal shell and separate observer once without executing either
         id: compile
         shell: bash
         env:
@@ -67,15 +134,15 @@ jobs:
           MRK_UBUNTU_PUBLICATION_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
-          # Exact independently reviewed installed lifecycle entry.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a0de723ceeda7eb34084e52d5aa34dced8f2b1cd57a0cbdc116b133b2ac0e3f4'
-        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-compile
-      - name: Retain original compiler evidence and candidate
+          # Exact independently reviewed shell lifecycle; not product qualification.
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '5e2bd807c2a892e37a1527a9f394c3d3fbb7b1aacbf2ed810923ecec2ce3e879'
+        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
+      - name: Retain original compiler evidence and shell outputs
         id: upload
         if: always() && steps.prepare.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: desktop-installed-compile-${{ github.run_id }}-${{ github.run_attempt }}
+          name: desktop-installed-shell-compile-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.prepare.outputs.root }}/public
           if-no-files-found: error
           retention-days: 14
@@ -83,15 +150,11 @@ jobs:
 
   native:
     needs: compile
-    name: installed-${{ matrix.case }}
+    name: installed-shell
     runs-on: ubuntu-24.04
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        case: [positive, refuse-writable, refuse-pth]
     env:
-      MRK_INSTALLED_CASE: ${{ matrix.case }}
+      MRK_INSTALLED_SHELL_CASE: observe
       MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
       MRK_UBUNTU_PUBLICATION_VERIFY: '1'
     steps:
@@ -99,22 +162,22 @@ jobs:
         shell: bash
         env:
           HOSTING: ${{ runner.environment }}
-          MRK_INSTALLED_CANDIDATE_ARTIFACT_ID: ${{ needs.compile.outputs.candidate_artifact_id }}
-          MRK_INSTALLED_CANDIDATE_ROSTER_SHA256: ${{ needs.compile.outputs.candidate_roster_sha256 }}
-          MRK_INSTALLED_CANDIDATE_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.candidate_producer_attempt }}
+          MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ needs.compile.outputs.shell_artifact_id }}
+          MRK_INSTALLED_SHELL_ROSTER_SHA256: ${{ needs.compile.outputs.shell_roster_sha256 }}
+          MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.shell_producer_attempt }}
         run: |
           set -euo pipefail
           [[ "$HOSTING" == github-hosted && "$GITHUB_EVENT_NAME" == push ]]
-          [[ "$GITHUB_REF" == refs/heads/verify/desktop-installed-passive ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-installed-shell ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
-          case "$MRK_INSTALLED_CASE" in positive|refuse-writable|refuse-pth) ;; *) exit 1 ;; esac
+          [[ "$MRK_INSTALLED_SHELL_CASE" == observe ]]
           /usr/bin/python3.12 -I -S -B - <<'PY'
           import os, re
           values = [os.environ.get(name, '') for name in (
-              'MRK_INSTALLED_CANDIDATE_ARTIFACT_ID', 'MRK_INSTALLED_CANDIDATE_PRODUCER_ATTEMPT', 'GITHUB_RUN_ATTEMPT')]
+              'MRK_INSTALLED_SHELL_ARTIFACT_ID', 'MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT', 'GITHUB_RUN_ATTEMPT')]
           if not all(re.fullmatch(r'[1-9][0-9]{0,19}', value) for value in values):
               raise SystemExit('Missing or malformed original compiler artifact/attempt output')
-          if int(values[1]) > int(values[2]) or not re.fullmatch(r'[0-9a-f]{64}', os.environ.get('MRK_INSTALLED_CANDIDATE_ROSTER_SHA256', '')):
+          if int(values[1]) > int(values[2]) or not re.fullmatch(r'[0-9a-f]{64}', os.environ.get('MRK_INSTALLED_SHELL_ROSTER_SHA256', '')):
               raise SystemExit('Original compiler roster/producer attempt differs')
           PY
       - name: Check out exact reviewed source without credentials
@@ -122,20 +185,81 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Prepare shared Ubuntu shell inputs only on this disposable runner
+        timeout-minutes: 8
+        shell: bash
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
+          dpkg-query -W -f='${Package} ${Version}\n' libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
+      - name: Admit only the exact disposable Ubuntu share-directory mode
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo /usr/bin/python3.12 -I -S -B - <<'PY'
+          import json, os, stat
+          def need(ok):
+              if not ok: raise SystemExit(70)
+          def identity(s):
+              return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
+          def protected(s):
+              need(stat.S_ISDIR(s.st_mode) and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022)
+          def record(s):
+              return {'dev': s.st_dev, 'ino': s.st_ino, 'uid': s.st_uid, 'gid': s.st_gid,
+                      'mode': format(stat.S_IMODE(s.st_mode), '04o')}
+          need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0))
+          flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+          root = os.open('/', flags)
+          usr = share = None
+          try:
+              root_before = os.fstat(root)
+              protected(root_before)
+              need(identity(root_before) == identity(os.stat('/', follow_symlinks=False)))
+              usr = os.open('usr', flags, dir_fd=root)
+              usr_before = os.fstat(usr)
+              protected(usr_before)
+              need(identity(usr_before) == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)))
+              share = os.open('share', flags, dir_fd=usr)
+              before = os.fstat(share)
+              need(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+                   and stat.S_IMODE(before.st_mode) in (0o755, 0o775))
+              need(identity(before) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)))
+              # No recursive repair: this sole known directory may lose only group-write.
+              if stat.S_IMODE(before.st_mode) == 0o775:
+                  os.fchmod(share, 0o755)
+              after = os.fstat(share)
+              need(identity(after) == (before.st_dev, before.st_ino, before.st_mode & ~0o020,
+                                       before.st_uid, before.st_gid))
+              need(identity(after) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)))
+              need(identity(root_before) == identity(os.fstat(root)) == identity(os.stat('/', follow_symlinks=False)))
+              need(identity(usr_before) == identity(os.fstat(usr))
+                   == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)))
+              receipt = json.dumps({'scope': 'exact-/usr/share-mode', 'before': record(before), 'after': record(after)},
+                                   sort_keys=True, separators=(',', ':'))
+              need(len(receipt.encode('ascii')) <= 512)
+              print(receipt, flush=True)
+          finally:
+              for fd in (share, usr, root):
+                  if fd is not None: os.close(fd)
+          PY
       - name: Prepare a fresh bounded native owner
         id: prepare
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py prepare
-      - name: Download this run's exact original compiled candidate
+      - name: Download this run's exact original compiled shell outputs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
           run-id: ${{ github.run_id }}
-          artifact-ids: ${{ needs.compile.outputs.candidate_artifact_id }}
+          artifact-ids: ${{ needs.compile.outputs.shell_artifact_id }}
           github-token: ${{ github.token }}
-          path: ${{ steps.prepare.outputs.root }}/work/admitted-candidate
+          path: ${{ steps.prepare.outputs.root }}/work/admitted-shell
           merge-multiple: true
       - name: Download independently accepted U packages and original evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -147,18 +271,18 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ steps.prepare.outputs.root }}/work/admitted-u
           merge-multiple: true
-      - name: Verify only the fixed installed case with original finality
+      - name: Observe only the fixed installed shell route with original finality
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_UBUNTU_PUBLICATION_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
-          MRK_INSTALLED_CANDIDATE_ROSTER_SHA256: ${{ needs.compile.outputs.candidate_roster_sha256 }}
-          MRK_INSTALLED_CANDIDATE_ARTIFACT_ID: ${{ needs.compile.outputs.candidate_artifact_id }}
-          MRK_INSTALLED_CANDIDATE_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.candidate_producer_attempt }}
-          # Same independently reviewed installed lifecycle entry.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a0de723ceeda7eb34084e52d5aa34dced8f2b1cd57a0cbdc116b133b2ac0e3f4'
+          MRK_INSTALLED_SHELL_ROSTER_SHA256: ${{ needs.compile.outputs.shell_roster_sha256 }}
+          MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ needs.compile.outputs.shell_artifact_id }}
+          MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.shell_producer_attempt }}
+          # Exact independently reviewed shell lifecycle; not product qualification.
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '5e2bd807c2a892e37a1527a9f394c3d3fbb7b1aacbf2ed810923ecec2ce3e879'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path
@@ -200,12 +324,12 @@ jobs:
             write(r/'entry.py',raw); write(r/'private/handoff.json',control)
             write(r/'private/bootstrap-pins.txt',(entry_sha+'\n'+request_sha+'\n').encode('ascii'))
             os.execv('/usr/bin/python3.12',['/usr/bin/python3.12','-I','-S','-B',str(r/'entry.py'),'unit-start'])
-        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed
-      - name: Retain only original public evidence for this case
+        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell
+      - name: Retain only original public evidence for this shell observation
         if: always() && steps.prepare.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: desktop-installed-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: desktop-installed-shell-native-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.prepare.outputs.root }}/public
           if-no-files-found: error
           retention-days: 14

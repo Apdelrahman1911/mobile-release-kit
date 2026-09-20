@@ -86,7 +86,215 @@ def inert_stat(ino, mode, *, size=0, uid=0, gid=0, stamp=0):
                            st_nlink=2 if stat.S_ISDIR(mode) else 1, st_size=size, st_mtime_ns=stamp, st_ctime_ns=stamp)
 
 
+def shell_loader_data():
+    """Inert closed-observation DATA, not native execution or host receipts."""
+    value = installed_handoff()
+    value.pop("installed")
+    libraries, bindings = {}, {}
+    names = sorted({"libc.so.6", "libm.so.6", "ld-linux-x86-64.so.2", *L.PRIVATE_SONAMES, "libpxbackend-1.0.so"})
+    for index, name in enumerate(names):
+        path = "/usr/lib/x86_64-linux-gnu/" + ("libproxy/" if name == "libpxbackend-1.0.so" else "") + name
+        row = {"path": path, "selectedPath": path, "size": 4, "sha256": "a" * 64,
+               "identity": [os.makedev(8, 2), index + 1, stat.S_IFREG | 0o644, 1, 4, 0, 0]}
+        libraries[name] = {"file": row}
+        bindings[path] = row
+    tiers = {directory + "/glibc-hwcaps/" + tier: False for directory in L.DEFAULT_LIBRARY_DIRS for tier in L.HWCAPS}
+    for path in tiers:
+        bindings[path] = {"absent": True}
+    globals_ = sorted(name for name in names if name != "libpxbackend-1.0.so")
+    for name in globals_:
+        for directory in L.DEFAULT_LIBRARY_DIRS:
+            path = directory + "/" + name
+            bindings[path] = ({**libraries[name]["file"], "selectedPath": path}
+                              if directory in L.DEFAULT_LIBRARY_DIRS[:2] else {"absent": True})
+    alias = "/lib64/ld-linux-x86-64.so.2"
+    bindings[alias] = {**libraries["ld-linux-x86-64.so.2"]["file"], "selectedPath": alias}
+    module_root = "/usr/lib/x86_64-linux-gnu/gio/modules"
+    bindings[module_root] = {"directory": [1, 2, stat.S_IFDIR | 0o755, 0, 0]}
+    roots = {module_root: {"binding": bindings[module_root], "children": ["giomodule.cache", "libinert.so"]}}
+    search = [{"requester": "/usr/lib/x86_64-linux-gnu/libproxy.so.1", "runpath": "/usr/lib/x86_64-linux-gnu/libproxy",
+               "name": name, "path": "/usr/lib/x86_64-linux-gnu/libproxy/" + name, "selected": name == "libpxbackend-1.0.so"}
+              for name in ("libc.so.6", "libpxbackend-1.0.so")]
+    bindings[search[0]["path"]] = {"absent": True}
+    summary = {"suppliers": {"sha256": "b" * 64}, "caches": {"sha256": "c" * 64},
+               "moduleSelections": {}, "eglLibraries": {}}
+    files, records = {}, []
+    for index in range(len(L.SHELL_DATA_ROOTS)):
+        leaf, raw = "shell-root-data-" + str(index) + ".json", L.canonical({"inert": index})
+        files[leaf] = raw
+        records.append({"path": leaf, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+    graph = {"moduleRoots": {module_root: {"present": True, "modules": ["libinert.so"]}},
+             "modules": {module_root + "/libinert.so": {}}, "privateSearch": search, "runtime": {}}
+    policy = {"osNames": names, "libraries": libraries, "packages": {"libc6": {"binaryPackage": "libc6:amd64", "version": "2.39-0ubuntu8.8"}},
+              "moduleRoots": roots, "runtimeData": {**summary, "records": [
+                  {**row, "path": "shell-consumer-data-" + str(index) + ".json"} for index, row in enumerate(records)]}, "graph": graph}
+    value["shell"] = {"loaderPolicy": policy}
+    entry = {"scope": {}, "namespaces": {}, "bindings": deepcopy(bindings), "diagnostics": L.loader_diagnostics(diagnostic_data()),
+             "cacheRows": [], "entryObjects": names, "globalObjects": globals_, "hwcapsTiers": tiers,
+             "moduleRoots": roots, "privateSearch": search, "runtimeData": {**summary, "records": records},
+             "runtimeDataRechecked": False, "payloadAdmitted": False, "externalPrerequisites": "inert DATA fixture"}
+    final = deepcopy(entry)
+    final.update(runtimeDataRechecked=True, payloadAdmitted=True)
+    expected = {}
+    for index, role in enumerate(sorted({"python", "ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6", *L.PRIVATE_SONAMES})):
+        if role == "python" or role in L.PRIVATE_SONAMES:
+            relative = "python/bin/python3" if role == "python" else "python/lib/" + role
+            path = str(L.PREFIX / L.M / relative)
+            row = {"path": path, "size": 5, "sha256": "d" * 64,
+                   "identity": [os.makedev(8, 2), 20 + index, stat.S_IFREG | 0o444, 1, 5, 0, 0]}
+            final["bindings"][path] = row
+            graph["runtime"][relative] = {"file": row}
+            paths = [path]
+        else:
+            row = libraries[role]["file"]
+            paths = sorted([directory + "/" + role for directory in L.DEFAULT_LIBRARY_DIRS[:2]]
+                           + (["/lib64/" + role] if role == "ld-linux-x86-64.so.2" else []))
+        expected[role] = {"paths": paths, "deviceMajor": 8, "deviceMinor": 2, "inode": row["identity"][1]}
+    files.update({"loader-entry.json": L.canonical(entry), "loader-final.json": L.canonical(final),
+        "loader-diagnostics.stdout": diagnostic_data(), "loader-diagnostics.stderr": b"", "loader-cache.stderr": b"",
+        "loader-cache.stdout": b"1 libs found in cache `/etc/ld.so.cache'\n\tlibunrelated.so (libc6,x86-64) => /usr/lib/libunrelated.so\n",
+        "loader-runtime.json": L.canonical({"expectedMaps": expected, "manifestSha256": L.M, "protocolSha256": L.Q,
+            "privateObjects": sorted(L.PRIVATE_SONAMES), "shadowedCacheRows": [],
+            "shadowedDefaultNames": [directory + "/" + tier + name for directory in L.DEFAULT_LIBRARY_DIRS
+                for tier in ("", *("glibc-hwcaps/" + tier + "/" for tier in L.HWCAPS)) for name in sorted(L.PRIVATE_SONAMES)]})})
+    return value, files, expected
+
+
 class LifecycleData(unittest.TestCase):
+    def test_shell_closed_loader_reconciles_interval_search_data_and_actual_aliases(self):
+        value, files, expected = shell_loader_data()
+        self.assertEqual(L.shell_closed_loader(value, files), expected)
+        for case in ("late-data", "changed-binding", "missing-hwcaps", "private-shadow", "wrong-map", "wrong-private-bytes", "changed-data", "changed-consumer"):
+            current = deepcopy(value)
+            changed = dict(files)
+            entry, final = (L.decode(changed["loader-" + phase + ".json"]) for phase in ("entry", "final"))
+            runtime = L.decode(changed["loader-runtime.json"])
+            if case == "late-data":
+                final["runtimeDataRechecked"] = False
+            elif case == "changed-binding":
+                final["bindings"]["/lib/libc.so.6"] = {"absent": False}
+            elif case == "missing-hwcaps":
+                for proof in (entry, final):
+                    proof["bindings"].pop("/lib/glibc-hwcaps/x86-64-v2")
+            elif case == "private-shadow":
+                for proof in (entry, final):
+                    proof["bindings"]["/usr/lib/x86_64-linux-gnu/libproxy/libc.so.6"] = {"absent": False}
+            elif case == "wrong-map":
+                runtime["expectedMaps"]["libssl.so.3"]["inode"] += 1
+            elif case == "wrong-private-bytes":
+                final["bindings"][str(L.PREFIX / L.M / "python/lib/libssl.so.3")]["sha256"] = "e" * 64
+            elif case == "changed-consumer":
+                current["shell"]["loaderPolicy"]["runtimeData"]["records"][0]["sha256"] = "f" * 64
+            else:
+                changed["shell-root-data-0.json"] = b"not the original complete DATA\n"
+            changed.update({"loader-entry.json": L.canonical(entry), "loader-final.json": L.canonical(final),
+                            "loader-runtime.json": L.canonical(runtime)})
+            with self.subTest(case=case), self.assertRaises((ValueError, KeyError)):
+                L.shell_closed_loader(current, changed)
+
+    def test_shell_cache_is_graph_bound_and_does_not_widen_the_headless_profile(self):
+        # A protected global selector through an alternatives subdirectory
+        # must still have every eligible cache/default candidate checked.
+        providers = {"libinert.so": {"file": {"selectedPath": "/usr/lib/x86_64-linux-gnu/libinert.so",
+                     "path": "/usr/lib/x86_64-linux-gnu/inert/libinert.so"}},
+                     "libpxbackend-1.0.so": {"file": {"selectedPath": "/usr/lib/x86_64-linux-gnu/libproxy/libpxbackend-1.0.so"}}}
+        self.assertEqual(L.shell_global_names(providers), ["libinert.so"])
+        with self.assertRaises(ValueError):
+            L.shell_global_names({"libinert.so": {"file": {"selectedPath": "/unselected/libinert.so"}}})
+        raw = b"1 libs found in cache `/etc/ld.so.cache'\n\tlibgtk-3.so.0 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libgtk-3.so.0\n"
+        self.assertFalse(L.loader_cache(raw, "2.39-0ubuntu8.8")[0]["eligibleX86_64"])
+        rows = L.loader_cache(raw, "2.39-0ubuntu8.8", shell_names=["libgtk-3.so.0"])
+        self.assertTrue(rows[0]["eligibleX86_64"])
+        tiers = {directory + "/glibc-hwcaps/" + tier: False for directory in L.DEFAULT_LIBRARY_DIRS for tier in L.HWCAPS}
+        self.assertEqual(len(L.shell_loader_candidates(["libgtk-3.so.0"], rows, tiers)), 4)
+        tiers["/lib/glibc-hwcaps/x86-64-v2"] = True
+        self.assertIn(("libgtk-3.so.0", "/lib/glibc-hwcaps/x86-64-v2/libgtk-3.so.0"),
+                      L.shell_loader_candidates(["libgtk-3.so.0"], rows, tiers))
+        with self.assertRaises(ValueError):
+            L.loader_candidates(["libgtk-3.so.0"], rows)
+        with self.assertRaises(ValueError):
+            L.shell_loader_candidates(["libgtk-3.so.0"], rows, {})
+
+    def test_shell_observation_requires_real_bootstrap_and_explicit_pure_contract_completion(self):
+        expected = map_data()
+        bootstrap = b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+        contracts = b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+        maps = [{"role": role, "path": row["paths"][0], **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
+                for role, row in sorted(expected.items())]
+        captures = {"normal": bootstrap,
+                    "positive": bootstrap + contracts + b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n",
+                    "quit-outstanding": contracts + L.CHILD_MARKER.encode() + L.canonical(maps)
+                        + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n"}
+        for case, raw in captures.items():
+            with self.subTest(case=case):
+                self.assertEqual(L.shell_result(raw, b"", case, 0, expected)["case"], case)
+                self.assertEqual(L.shell_result(b"", raw, case, 0, expected)["case"], case)
+                for changed in (b"", raw + contracts, raw.replace(b"=available", b"=unavailable"),
+                                raw.replace(contracts, b""), raw.replace(b'"inode":1', b'"inode":999')):
+                    if changed != raw:
+                        with self.assertRaises(ValueError):
+                            L.shell_result(changed, b"", case, 0, expected)
+                with self.assertRaises(ValueError):
+                    L.shell_result(raw, b"", case, True, expected)
+
+    def test_normal_controller_joins_the_original_even_when_start_or_input_fails(self):
+        value, expected = installed_handoff(), map_data()
+        value.pop("installed")
+        value["shell"] = {}
+        for case in ("complete", "start-return-error", "input-error", "unjoined"):
+            events, originals, retained, now, focused = [], [], {}, [100.0], [31]
+            class Original:
+                def __init__(self, **options):
+                    originals.append(self)
+                    self.joined = False
+                    holder, argv, _, _ = options["args"]
+                    holder.update(guardState="RESTORED", errors=[], result=subprocess.CompletedProcess(argv, 0,
+                        b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n", b""))
+                def start(self):
+                    events.append("start")
+                    if case == "start-return-error":
+                        raise RuntimeError("inert start-return loss")
+                def join(self, timeout):
+                    events.append("join")
+                    self.joined = case != "unjoined"
+                def is_alive(self):
+                    return not self.joined
+            def clock():
+                now[0] += 0.05
+                return now[0]
+            def owned(argv, **options):
+                args = argv[argv.index("/usr/bin/xdotool") + 1:]
+                events.append(args[0])
+                if case == "input-error":
+                    raise RuntimeError("inert controller failure")
+                output = b""
+                if args[0] == "search":
+                    output = b"32\n" if args[-1].startswith("^Quit") else b"31\n"
+                elif args[0] == "getwindowpid":
+                    output = b"123\n"
+                elif args[0] == "windowfocus":
+                    focused[0] = int(args[-1])
+                elif args[0] == "getwindowfocus":
+                    output = str(focused[0]).encode() + b"\n"
+                return subprocess.CompletedProcess(argv, 0, output, b"")
+            with self.subTest(case=case), patch.multiple(L, _ROOT=L.root_path(value), _END=value["deadline"],
+                    _FAILED=False, _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=owned)), \
+                 patch.object(L.threading, "Thread", Original), patch.object(L.time, "monotonic", side_effect=clock), \
+                 patch.object(L.time, "sleep"), patch.object(L, "_shell_window_pid"), \
+                 patch.object(L, "_retain", side_effect=lambda name, raw: retained.update({name: raw})):
+                if case == "complete":
+                    result = L._shell_normal(value, L.shell_environment(value, "normal"), expected)
+                    self.assertTrue(result["bootstrapReturned"])
+                    control = L.decode(retained["shell-normal-control.json"])
+                    self.assertEqual([row["argv"][-1] for row in control["commands"] if row["phase"] == "key"], ["ctrl+q", "alt+o"])
+                    self.assertFalse(L._FAILED)
+                else:
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        L._shell_normal(value, L.shell_environment(value, "normal"), expected)
+                    self.assertTrue(L._FAILED)
+                self.assertEqual(len(originals), 1)
+                self.assertEqual(events.count("join"), 1)
+
     def test_version_store_prefixes_bind_exact_application_children(self):
         app = Path("/var/lib/mobile-release-kit")
         self.assertEqual(L.PREFIX, app / "versions" / L.TARGET)

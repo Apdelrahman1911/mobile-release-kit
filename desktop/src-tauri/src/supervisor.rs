@@ -9,14 +9,14 @@
 //! retained; late positive settlement cannot restore successful admission.
 use std::{collections::BTreeMap, future::pending, process::ExitStatus, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
 #[cfg(any(all(feature = "development-runtime", debug_assertions),
-    all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
-        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"))))]
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
 use std::process::Stdio;
 use serde_json::Value;
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::Child, sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore}, task::JoinHandle};
 #[cfg(any(all(feature = "development-runtime", debug_assertions),
-    all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
-        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"))))]
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
 use tokio::process::Command;
 use crate::{error::BridgeError, github_connection_protocol::{self as github_protocol, GitHubReadOutcome},
     protocol::{self, Method}, runtime::{RuntimeConfig, VerifiedRuntime}};
@@ -41,6 +41,13 @@ pub(crate) use hosted_tests::metadata_fixture_probe;
 #[cfg(test)]
 #[path = "passive_management_tests.rs"]
 mod management_tests;
+#[cfg(all(test, feature = "desktop-shell", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+#[path = "installed_shell_shutdown_observation.rs"]
+mod shell_shutdown_observation;
+#[cfg(all(test, feature = "desktop-shell", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) use shell_shutdown_observation::HeldAppInfo;
 
 fn lock<T>(value: &Mutex<T>) -> MutexGuard<'_, T> {
     // No user callback/serialization runs while these small bookkeeping locks
@@ -57,7 +64,7 @@ struct Inner {
     #[cfg(all(test, feature = "development-runtime"))]
     test: hosted_tests::Hooks,
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
-        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
     native_test: installed_native_fixture::Hooks,
 }
 struct Owner {
@@ -206,13 +213,13 @@ struct Resources {
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     github_environment: Option<JoinHandle<Result<Option<bool>, ()>>>,
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
-        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
     native_observation: Option<JoinHandle<Result<Vec<installed_native_fixture::ChildObservation>, ()>>>,
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
-        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
     native_observation_return: Option<ManagementJoin>,
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
-        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
     native_snapshots: Vec<installed_native_fixture::ChildObservation>,
     acquisition: Option<JoinHandle<std::io::Result<Child>>>, child: Option<Child>,
     acquisition_return: Option<ManagementJoin>, acquisition_error: Option<tokio::task::JoinError>,
@@ -365,11 +372,12 @@ impl Supervisor {
             #[cfg(all(test, feature = "development-runtime"))]
             test: hosted_tests::Hooks::default(),
             #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
-                not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
             native_test: installed_native_fixture::Hooks::default(),
         }) }
     }
     pub fn runtime_mode(&self) -> &'static str { self.inner.runtime.mode() }
+    pub(crate) fn passive_method_available(&self, name: &str) -> bool { self.inner.runtime.passive_method_available(name) }
     pub fn disabled(&self) -> bool { self.inner.disabled.load(Ordering::SeqCst) }
     pub fn stopping(&self) -> bool { self.inner.stopping.load(Ordering::SeqCst) }
     pub fn can_exit(&self) -> bool { lock(&self.inner.owners).is_empty() }
@@ -754,7 +762,7 @@ fn transfer_passive(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) ->
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 struct PreparedPassiveSpawn<'a> {
     runtime: &'a mut PassiveInstalledRuntime,
-    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
     command: Command,
 }
 
@@ -765,7 +773,7 @@ impl<'a> PreparedPassiveSpawn<'a> {
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::Unsupported, "passive installed preparation refused"))?;
         // All native checks and fixed argument/environment allocations precede
         // the serialized final owner claim. No pathname/Command-taking adapter.
-        #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+        #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
         let command = {
             let mut command = Command::new(&selected.python);
             command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
@@ -773,26 +781,26 @@ impl<'a> PreparedPassiveSpawn<'a> {
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
             command
         };
-        #[cfg(not(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"))))]
+        #[cfg(not(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
         let _ = selected;
         Ok(Self { runtime,
-            #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+            #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
             command,
         })
     }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
-    not(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))))]
+    not(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))))]
 fn spawn_passive_original(prepared: PreparedPassiveSpawn<'_>) -> std::io::Result<Child> {
-    // Shipping remains unconditional. Only this no-effect stub has a receipt;
-    // that method is not even compiled into the feature-off candidate.
+    // Unsupported profiles remain unconditional. Only this no-effect stub has
+    // a receipt; it is absent from the fixed installed-shell/native profile.
     prepared.runtime.record_closed_spawn_gate();
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "packaged runtime execution is not qualified"))
 }
 
-#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
-    not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
 fn spawn_passive_original(mut prepared: PreparedPassiveSpawn<'_>) -> std::io::Result<Child> {
     // Opaque creation errors provide NO no-child/pipe-close proof. The claimed
     // original stays registered; the existing owner therefore retains Unknown.
@@ -834,7 +842,7 @@ async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Ow
     { let _ = (resources, inner, owner); true }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     {
-        #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+        #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
         if resources.native_observation.is_some() { owner.unknown(inner); return false; }
         let Some(native) = resources.passive.clone() else {
             if passive_selected(owner.profile) { owner.unknown(inner); return false; }
@@ -1044,8 +1052,8 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     #[cfg(all(test, feature = "development-runtime"))]
     { lock(&owner.observation).spawned = true; }
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
-        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
-    if passive_selected(profile) && inner.native_test.observes_child() {
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    if let Some(observed_case) = if passive_selected(profile) { inner.native_test.child_case(&owner) } else { None } {
         // Same original Child, retained before the reader starts, and not yet
         // offered to any wait/reaper. A lost read/close/join retains this slot.
         let Some(id) = resources.child.as_ref().and_then(Child::id) else {
@@ -1057,7 +1065,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         resources.native_observation_return = Some(ManagementJoin::Pending);
         resources.native_observation = Some(tokio::task::spawn_blocking(move || {
             enter.blocking_recv().map_err(|_| ())?;
-            installed_native_fixture::observe_original_child(id, endpoint, observing_stop, &observing_inner)
+            installed_native_fixture::observe_original_child(id, endpoint, observing_stop, &observing_inner, observed_case)
         }));
         let _ = release.send(());
         let result = join_slot(&mut resources.native_observation).await;
@@ -1223,7 +1231,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
 // Finite hosted fixtures only. Nothing in this module selects a runtime, grants
 // custody, changes the command, or substitutes for an original join/close.
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
-    not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
 mod installed_native_fixture {
     use super::*;
     use std::{fs, io::{Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt}, path::{Path, PathBuf}};
@@ -1241,10 +1249,25 @@ mod installed_native_fixture {
         pub case: Mutex<Case>, pub prepared: AtomicBool, pub deadline_crossed: AtomicBool,
         pub held: AtomicBool, pub creation: Mutex<Option<(bool, Option<i32>)>>,
         pub limit: Mutex<LimitObservation>,
+        #[cfg(feature = "desktop-shell")]
+        pub shell_owner: Mutex<Option<u64>>,
+        #[cfg(feature = "desktop-shell")]
+        pub shell_token_issued: AtomicBool,
     }
     impl Hooks {
         fn case(&self) -> Case { *lock(&self.case) }
-        pub(super) fn observes_child(&self) -> bool { matches!(self.case(), Case::Observe | Case::Shutdown | Case::Overlap) }
+        pub(super) fn child_case(&self, _owner: &Arc<Owner>) -> Option<Case> {
+            let case = self.case();
+            if !matches!(case, Case::Observe | Case::Shutdown | Case::Overlap) { return None; }
+            #[cfg(feature = "desktop-shell")]
+            {
+                if case != Case::Shutdown || !matches!(_owner.profile, Profile::Passive(Method::Capabilities)) { return None; }
+                let mut original = lock(&self.shell_owner);
+                if original.is_some() { return None; }
+                *original = Some(_owner.key); // Consume this fixed observation once, before the original reader.
+            }
+            Some(case)
+        }
     }
     fn need(value: bool) -> Result<(), ()> { if value { Ok(()) } else { Err(()) } }
     fn live(end: Instant, stop: &watch::Receiver<bool>) -> bool {
@@ -1290,6 +1313,10 @@ mod installed_native_fixture {
     pub(super) struct Mapping { role: String, path: String, device_major: u64, device_minor: u64, inode: u64 }
     #[derive(Debug, Eq, PartialEq)]
     pub(super) struct ChildObservation { maps: Vec<Mapping>, environment_clear: bool }
+    impl ChildObservation {
+        #[cfg(feature = "desktop-shell")]
+        pub(super) fn environment_clear(&self) -> bool { self.environment_clear }
+    }
     fn flags() -> i32 {
         (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC).bits() as i32
     }
@@ -1421,12 +1448,12 @@ mod installed_native_fixture {
         written?;
         Ok(root.join("passive-release"))
     }
-    pub(super) fn observe_original_child(id: u32, end: Instant, stop: watch::Receiver<bool>, inner: &Inner)
+    pub(super) fn observe_original_child(id: u32, end: Instant, stop: watch::Receiver<bool>, inner: &Inner, case: Case)
         -> Result<Vec<ChildObservation>, ()> {
         let mut snapshots = Vec::new();
         let Some(first) = child_snapshot(id, end, &stop)? else { return Ok(snapshots); };
         snapshots.push(first);
-        match inner.native_test.case() {
+        match case {
             Case::Shutdown => {
                 inner.native_test.held.store(true, Ordering::SeqCst);
                 inner.changed.notify_waiters();
@@ -1459,6 +1486,7 @@ mod installed_native_fixture {
             output.flush().expect("original stdout flush");
         }
     }
+    #[cfg(not(feature = "desktop-shell"))]
     pub(super) fn routed_supervisor(case: Case) -> Supervisor {
         assert_eq!(std::env::var("GITHUB_ACTIONS").ok().as_deref(), Some("true"));
         assert_eq!(std::env::var("RUNNER_ENVIRONMENT").ok().as_deref(), Some("github-hosted"));

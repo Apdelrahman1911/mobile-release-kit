@@ -3,7 +3,8 @@
 //! This is NOT executable runtime qualification. In particular, a compiled
 //! manifest, equal hashes, and retained descriptors cannot prove the external
 //! fresh-inode installer / immutable published-version / interpreter-loader
-//! contracts. Every production qualification gate remains closed.
+//! contracts. The fixed passive selector still requires those independently
+//! established contracts; other production execution profiles remain closed.
 //!
 //! The Android retained path keeps the SAME originals until its saved-command
 //! owner's actual inspection/acquisition/child/IO/native-settlement joins. Legacy
@@ -625,9 +626,9 @@ impl PassiveInstalledRuntime {
         self.claimed = true;
         Ok(())
     }
-    /// Called ONLY by the unconditional production spawn refusal, not an OS
+    /// Called ONLY by the unconditional unsupported-profile spawn refusal, not an OS
     /// spawn-error mapper. This records no creation effect, never pipe closes.
-    #[cfg(not(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"))))]
+    #[cfg(not(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
     pub(crate) fn record_closed_spawn_gate(&mut self) {
         self.refused_before_effect = true;
     }
@@ -713,7 +714,7 @@ impl PassiveRuntimeSlots {
         }
     }
     /// Read-only test observation, not a capability or a substitute join/close.
-    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
     pub(crate) fn claimed_observation(&self) -> Option<CustodyObservation> {
         match (&self.inspection, &self.acquisition) {
             (None, Some(runtime)) if runtime.original.transferred && runtime.claimed && !runtime.refused_before_effect =>
@@ -723,7 +724,7 @@ impl PassiveRuntimeSlots {
     }
     /// Read-only native-fixture DATA for normal refusal/unchosen-claim closure.
     /// This neither moves originals nor creates a receipt/capability.
-    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
     pub(crate) fn fixture_observation(&self) -> Option<CustodyObservation> {
         match (&self.inspection, &self.acquisition) {
             (Some(original), None) => Some(original.observation()),

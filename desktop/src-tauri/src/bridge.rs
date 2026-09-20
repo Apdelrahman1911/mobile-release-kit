@@ -18,6 +18,21 @@ pub struct AppInfo {
     pub runtime: RuntimeStatus, pub capabilities: Option<Value>,
 }
 
+fn native_capabilities(mut value: Value, available: impl Fn(&str) -> bool) -> Value {
+    if let Some(methods) = value.get_mut("methods").and_then(Value::as_array_mut) {
+        for method in methods {
+            let admitted = method.get("method").and_then(Value::as_str).is_some_and(&available);
+            if method.get("available").and_then(Value::as_bool) == Some(true) && !admitted {
+                if let Some(row) = method.as_object_mut() {
+                    row.insert("available".into(), Value::Bool(false));
+                    row.insert("reason".into(), Value::String("This function is not available in the current desktop runtime profile.".into()));
+                }
+            }
+        }
+    }
+    value
+}
+
 struct RegisteredProject { view: Project, root: PathBuf, identity: Option<crate::asset_source::DirectoryIdentity> }
 pub(crate) struct ProjectRoster { pub(crate) generation: u32, pub(crate) roots: Vec<crate::asset_source::RegisteredRoot> }
 
@@ -52,7 +67,8 @@ impl DesktopBridge {
             Ok(query) => query.wait().await, Err(error) => Err(error),
         };
         let (runtime, capabilities) = match result {
-            Ok(value) => (RuntimeStatus { state: "available", reason: None, mode: self.supervisor.runtime_mode() }, Some(value)),
+            Ok(value) => (RuntimeStatus { state: "available", reason: None, mode: self.supervisor.runtime_mode() },
+                Some(native_capabilities(value, |name| self.supervisor.passive_method_available(name)))),
             Err(error) => (RuntimeStatus {
                 state: if self.supervisor.disabled() { "disabled" } else { "unavailable" },
                 reason: Some(error.message), mode: self.supervisor.runtime_mode(),
@@ -305,5 +321,35 @@ impl DesktopBridge {
         projects.insert(project.id.clone(), RegisteredProject { view: project.clone(), root: path, identity: None });
         self.project_generation.store(generation, Ordering::SeqCst);
         Ok(project)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_native_capability_intersection_contract() {
+    let input = json!({"coreVersion": "0.3.0", "actions": [{"action": "release", "available": false}],
+        "methods": [
+            {"method": "capabilities", "available": true, "reason": "implemented"},
+            {"method": "catalog", "available": false, "reason": "core refusal"},
+            {"method": "config.validate", "available": true, "reason": "implemented"},
+            {"method": "future.method", "available": true, "reason": "implemented"}
+        ]});
+    let result = native_capabilities(input.clone(), |name| matches!(name, "capabilities" | "catalog"));
+    assert_eq!(result["coreVersion"], input["coreVersion"]);
+    assert_eq!(result["actions"], input["actions"]);
+    assert_eq!(result["methods"][0], input["methods"][0]);
+    assert_eq!(result["methods"][1], input["methods"][1]);
+    for index in [2, 3] {
+        assert_eq!(result["methods"][index]["available"], false);
+        assert_eq!(result["methods"][index]["method"], input["methods"][index]["method"]);
+        assert_eq!(result["methods"][index]["reason"], "This function is not available in the current desktop runtime profile.");
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    #[test]
+    fn core_availability_is_intersected_without_enabling_actions_or_rewriting_core_failures() {
+        assert_native_capability_intersection_contract();
     }
 }

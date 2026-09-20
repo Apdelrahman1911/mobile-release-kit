@@ -28,9 +28,16 @@ path = "tests/session_gtk_qualification.rs"
 harness = false
 required-features = ["desktop-shell", "development-runtime"]
 
+[[test]]
+name = "installed-shell-observation"
+path = "tests/installed_shell_observation.rs"
+harness = false
+required-features = ["desktop-shell", "custom-protocol"]
+
 [features]
 default = []
 desktop-shell = ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk", "dep:gtk"]
+custom-protocol = ["tauri/custom-protocol"]
 development-runtime = []
 # Selects the standalone privileged publisher, not any execution qualification.
 ubuntu-runtime-publisher = []
@@ -64,6 +71,13 @@ tauri-build = { version = "=2.6.3", optional = true, features = [] }
 # Keep complete runtime byte hashing inside the original test admission clocks:
 # optimize the existing hash implementation, never omit checks or widen deadlines.
 [profile.test.package.sha2]
+opt-level = 3
+debug-assertions = true
+overflow-checks = true
+
+# The shared normal/observer connection build uses the dev profile. Preserve
+# complete byte hashing under the same original runtime admission deadlines.
+[profile.dev.package.sha2]
 opt-level = 3
 debug-assertions = true
 overflow-checks = true

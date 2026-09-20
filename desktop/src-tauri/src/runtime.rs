@@ -50,19 +50,18 @@ pub struct RuntimeConfig { bundle_root: PathBuf,
 #[derive(Debug)]
 pub struct VerifiedRuntime { pub python: PathBuf, pub bootstrap: PathBuf, pub core: PathBuf, pub cwd: PathBuf }
 
-// Selection DATA only, never a qualification flag or executable capability.
-// Even test binaries start Closed through the normal packaged constructor.
+// Selection DATA only, never executable custody. Only the fixed Linux shell
+// and its feature-off native tests can select the independently admitted A.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[derive(Clone, Copy)]
 enum PassiveInstalledSelection {
     Closed,
-    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
     CandidateA,
 }
 
-// Shipping cannot obtain this private-field, non-cloneable profile. The fixed
-// test-only candidate selects A DATA, not fake custody or loader qualification;
-// it still owes every original native inspection, transfer and owner claim.
+// The fixed selector supplies A DATA, not custody or loader qualification.
+// Every request still owes original inspection, transfer and the final claim.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) struct PassiveInstalledProfile { _private: () }
 
@@ -103,6 +102,7 @@ struct Manifest {
 struct PayloadFile { path: String, sha256: String, size: u64 }
 
 fn unavailable() -> BridgeError { BridgeError::unavailable("The packaged runtime is absent, incompatible, or fails its trusted inventory.") }
+fn installed_passive_method(name: &str) -> bool { matches!(name, "capabilities" | "catalog") }
 fn deadline(end: Instant) -> Result<(), BridgeError> { if Instant::now() >= end { Err(BridgeError::timeout()) } else { Ok(()) } }
 fn digest(bytes: &[u8]) -> String { hex(&Sha256::digest(bytes)) }
 fn hex(bytes: &[u8]) -> String {
@@ -259,13 +259,18 @@ fn exact_inventory(root: &Path, expected: &BTreeSet<String>, end: Instant) -> Re
 impl RuntimeConfig {
     pub fn packaged(resource_dir: PathBuf) -> Self { Self { bundle_root: resource_dir.join("runtime"),
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        passive_installed: PassiveInstalledSelection::Closed,
+        passive_installed: {
+            #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+            { PassiveInstalledSelection::CandidateA }
+            #[cfg(not(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
+            { PassiveInstalledSelection::Closed }
+        },
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
             any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         environment_fixture_core: None,
     } }
     /// Fixed no-argument candidate DATA. No environment/path/permit can select
-    /// it, and normal packaged/shipping configurations remain Closed.
+    /// it. Feature-off packaged configurations remain Closed.
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
         not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
     pub(crate) fn installed_passive_candidate_a() -> Self {
@@ -284,6 +289,16 @@ impl RuntimeConfig {
         #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
         { "bundled" }
     }
+    /// Availability DATA for the UI, using the same installed method allowlist
+    /// as admission. This is not permission to skip per-request inspection.
+    pub(crate) fn passive_method_available(&self, name: &str) -> bool {
+        #[cfg(all(feature = "development-runtime", debug_assertions))]
+        { let _ = name; true }
+        #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { installed_passive_method(name) && self.passive_installed_profile().is_ok() }
+        #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))))]
+        { let _ = name; false }
+    }
     pub fn resolve(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
         #[cfg(all(feature = "development-runtime", debug_assertions))]
         { self.development(end) }
@@ -295,13 +310,13 @@ impl RuntimeConfig {
     }
     /// The sole passive installed inspection seam. The caller already owns the
     /// registered original slots and blocking worker; this never returns custody.
-    /// Normal packaged/shipping selection refuses before descriptor inspection.
+    /// All other packaged profiles refuse before descriptor inspection.
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn resolve_passive_installed(&self, method: crate::protocol::Method, originals: &mut crate::installed_runtime::PassiveRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         let profile = self.passive_installed_profile()?;
-        if !matches!(method, crate::protocol::Method::Capabilities | crate::protocol::Method::Catalog) {
-            return Err(BridgeError::unavailable("The installed passive candidate selects only capabilities and catalog."));
+        if !installed_passive_method(method.name()) {
+            return Err(BridgeError::unavailable("This installed desktop profile supports only capabilities and catalog."));
         }
         originals.inspect_once(profile, end, stop)
     }
@@ -309,7 +324,7 @@ impl RuntimeConfig {
     fn passive_installed_profile(&self) -> Result<PassiveInstalledProfile, BridgeError> {
         match self.passive_installed {
             PassiveInstalledSelection::Closed => Err(BridgeError::unavailable("The passive installed-runtime release and custody profile are not qualified.")),
-            #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+            #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
             PassiveInstalledSelection::CandidateA => {
                 if !PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
                 Ok(PassiveInstalledProfile { _private: () })
@@ -618,6 +633,24 @@ impl RuntimeConfig {
     }
 }
 
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) fn assert_packaged_shell_allowlist_contract() {
+    let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-shell-path-must-not-be-opened"));
+    assert!(matches!(runtime.passive_installed, PassiveInstalledSelection::CandidateA));
+    let bindings = PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+    for name in ["capabilities", "catalog"] { assert_eq!(runtime.passive_method_available(name), bindings); }
+    for name in ["config.validate", "project.snapshot", "github.setup.propose", "release.version.observe", "unknown"] {
+        assert!(!runtime.passive_method_available(name));
+    }
+    let mut originals = crate::installed_runtime::PassiveRuntimeSlots::new();
+    let (_sender, stop) = tokio::sync::watch::channel(false);
+    assert!(runtime.resolve_passive_installed(crate::protocol::Method::ProjectSnapshot, &mut originals, Instant::now(), &stop).is_err());
+    assert!(originals.never_started());
+    assert!(runtime.resolve(Instant::now()).is_err());
+    assert!(runtime.resolve_edit(Instant::now()).is_err());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,7 +679,8 @@ mod tests {
         assert_eq!(error.code, "runtime_unavailable");
         assert_eq!(error.message, "The GitHub read-only runtime and TLS profile are not qualified.");
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))))]
     #[test]
     fn passive_installed_profile_refuses_an_inert_bundle_before_inspection() {
         // A pathname is DATA only: no channel, task, descriptor or profile.
@@ -667,6 +701,12 @@ mod tests {
             (target, None, Some(protocol)), (target, Some(manifest), None),
             (target, Some(different.as_str()), Some(protocol)), (target, Some(manifest), Some(different.as_str())),
         ] { assert!(!PassiveInstalledProfile::bindings_match(target, manifest, protocol)); }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn packaged_shell_selects_only_fixed_passive_data_without_opening_other_methods() {
+        assert_packaged_shell_allowlist_contract();
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
         not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]

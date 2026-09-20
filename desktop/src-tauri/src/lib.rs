@@ -2,6 +2,8 @@
 //! have separate original-resource owners; neither is a generic release runner.
 #[cfg(all(feature = "development-runtime", not(debug_assertions)))]
 compile_error!("development-runtime is forbidden when debug assertions are disabled");
+#[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "custom-protocol")))]
+compile_error!("normal desktop-shell builds require custom-protocol for the embedded production frontend");
 
 pub mod error;
 pub mod protocol;
