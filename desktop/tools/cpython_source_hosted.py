@@ -19,6 +19,7 @@ import fcntl
 import grp
 import hashlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -35,9 +36,11 @@ import urllib.request
 import ssl
 
 
-APPROVED_HOSTED_INPUTS_SHA256: str | None = "4306cdbed89da192648c8ac9ce088ecedab0040bfa52baf865ce2833444c8a45"
+APPROVED_HOSTED_INPUTS_SHA256: str | None = "2da462f7472ec13331d624514d0d60c5123da77d1fb934ff26a823031f7d0cb1"
 PROFILE = "cpython-3.14.7-linux-x86_64-source-v1"
 PREP = Path("/var/tmp/mrk-cpython-source-preparation-v1")
+BWRAP_PATH = PREP / "controller/bwrap"
+BWRAP_RECEIPT = PREP / "preparation-results/controller-bubblewrap.json"
 CONTROL = Path("/var/tmp/mrk-cpython-source-controller-v1")
 WORK = Path("/var/tmp/mrk-cpython-source-work-v1")
 PUBLIC = Path("/var/tmp/mrk-cpython-source-public-v1")
@@ -86,8 +89,19 @@ SHOW = ("Id", "InvocationID", "ControlGroup", "Type", "ExitType", "Restart", "Ki
     "RestrictNamespaces", "Delegate", "Result")
 NS_NAMES = ("user", "mnt", "pid", "net", "ipc", "uts")
 HOST_TOOLS = ("/usr/bin/python3.12", "/usr/bin/systemd-run", "/usr/bin/systemctl",
-    "/usr/bin/bwrap", "/usr/bin/mount", "/usr/bin/gzip",
-    "/usr/bin/dpkg-deb", "/usr/sbin/useradd", "/usr/sbin/userdel")
+    "/usr/bin/mount", "/usr/bin/gzip", "/usr/bin/dpkg-deb", "/usr/sbin/useradd", "/usr/sbin/userdel")
+# One authenticated controller-only package, outside the L/source/root roster.
+# No installation: in particular its sysctl.d member is never materialized.
+CONTROLLER_BWRAP = {
+    "id": "controller-bubblewrap", "package": "bubblewrap", "version": "0.9.0-1ubuntu0.1", "architecture": "amd64",
+    "transport": {
+        "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/b/bubblewrap/bubblewrap_0.9.0-1ubuntu0.1_amd64.deb",
+        "format": "deb", "bytes": 50178,
+        "sha256": "1b506492bd9c7fd0cdb4f02ac822f1d3e336b0aead5113c1239baf8db5db562a"},
+    "decoded": {"bytes": 133120, "memberCount": 30,
+        "sha256": "b2561ecbedb734301c7bd7cb254476d042be5da011e0e57ffc3ebc1077d5332e"},
+    "member": {"path": "./usr/bin/bwrap", "size": 72160, "mode": 0o755,
+        "sha256": "52231e1caf55bcbc667b269f49c63599a6f7db4767ae6a039580d0ff853db712"}}
 _OWNER = None
 _STAGE = "admission"
 
@@ -430,11 +444,13 @@ class PublicRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def download_inputs(data: dict, deadline: float) -> None:
+    stage("transport-trust")
     context = ssl.create_default_context(cafile="/etc/ssl/certs/ca-certificates.crt")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), PublicRedirect(),
                                         urllib.request.HTTPSHandler(context=context))
     # Fixed anonymous public-pull token, never a repository/runner credential.
     # Do not retain its response, headers or value in evidence or diagnostics.
+    stage("transport-token")
     token_url = "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/ubuntu:pull"
     with opener.open(token_url, timeout=remaining(deadline, 30)) as response:
         raw = response.read((16 << 10) + 1)
@@ -443,8 +459,9 @@ def download_inputs(data: dict, deadline: float) -> None:
     need(type(token) is str and 0 < len(token) <= 12 << 10 and all(33 <= ord(c) <= 126 for c in token),
          "Anonymous pull token format differs")
     objects = [*data["transport"]["rootArchiveTransports"],
-        *data["transport"]["directSourceArchiveTransports"], *data["transport"]["baseIdentityMetadata"]]
+        *data["transport"]["directSourceArchiveTransports"], *data["transport"]["baseIdentityMetadata"], CONTROLLER_BWRAP]
     for row in objects:
+        stage("transport-" + row["id"])
         item = row["transport"]
         headers = {"Accept": "application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"}
         if urllib.parse.urlsplit(item["url"]).hostname == "registry-1.docker.io":
@@ -467,6 +484,73 @@ def download_inputs(data: dict, deadline: float) -> None:
             os.close(fd)
         need(record(path) == {"path": str(path), "size": item["bytes"], "sha256": item["sha256"]},
              "Input transport readback differs")
+
+
+def controller_bwrap_member(raw: bytes) -> bytes:
+    # The complete decoded pin closes the package roster. Inspect bounded DATA
+    # only; no tar extraction API applies names, links or metadata to the host.
+    decoded, wanted = CONTROLLER_BWRAP["decoded"], CONTROLLER_BWRAP["member"]
+    need((len(raw), digest(raw)) == (decoded["bytes"], decoded["sha256"]) and len(raw) <= MiB,
+         "Controller bubblewrap decoded stream differs")
+    seen, selected = set(), None
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+        for member in archive:
+            need(member.name not in seen and len(seen) < decoded["memberCount"],
+                 "Controller bubblewrap member roster differs")
+            seen.add(member.name)
+            if member.name != wanted["path"]:
+                continue
+            need(member.type == tarfile.REGTYPE and not member.sparse and not member.linkname,
+                 "Controller bubblewrap member is not ordinary")
+            need(member.size == wanted["size"] and member.mode == wanted["mode"]
+                 and not member.mode & 0o7000, "Controller bubblewrap member extent/mode differs")
+            body = archive.extractfile(member)
+            need(body is not None, "Controller bubblewrap member body missing")
+            with body:
+                selected = body.read(wanted["size"] + 1)
+            need((len(selected), digest(selected)) == (wanted["size"], wanted["sha256"]),
+                 "Controller bubblewrap member bytes differ")
+    need(len(seen) == decoded["memberCount"] and selected is not None,
+         "Controller bubblewrap member roster differs")
+    return selected
+
+
+def controller_bwrap_record() -> dict:
+    directory(BWRAP_PATH.parent, root_owned=True)
+    before = BWRAP_PATH.lstat()
+    need(stat.S_ISREG(before.st_mode) and before.st_uid == 0 and before.st_nlink == 1
+         and stat.S_IMODE(before.st_mode) == 0o555, "Prepared controller bubblewrap ownership/mode differs")
+    wanted = CONTROLLER_BWRAP["member"]
+    actual = record(BWRAP_PATH, wanted["size"])
+    need(actual == {"path": str(BWRAP_PATH), "size": wanted["size"], "sha256": wanted["sha256"]}
+         and state(BWRAP_PATH.lstat()) == state(before), "Prepared controller bubblewrap bytes changed")
+    return {**actual, "mode": stat.S_IMODE(before.st_mode), "uid": before.st_uid, "links": before.st_nlink}
+
+
+def prepare_controller_bwrap(deadline: float) -> dict:
+    stage("controller-bubblewrap-decoder")
+    item = CONTROLLER_BWRAP["transport"]
+    source = PREP / "objects" / item["sha256"]
+    original = record(source)
+    need(original == {"path": str(source), "size": item["bytes"], "sha256": item["sha256"]},
+         "Controller bubblewrap archive differs")
+    seconds = remaining(deadline, 30)
+    result = run(["/usr/bin/dpkg-deb", "--fsys-tarfile", str(source)], seconds, require_zero=False)
+    stdout = write(BWRAP_RECEIPT.with_suffix(".stdout"), result.stdout)
+    stderr = write(BWRAP_RECEIPT.with_suffix(".stderr"), result.stderr)
+    # Preserve the actual original result/capture before judging exit or member
+    # acceptance. An owner exception produces no invented command receipt.
+    write(BWRAP_RECEIPT, canonical({"schema": "mrk-cpython-source-controller-decoder-1",
+        "id": CONTROLLER_BWRAP["id"], "archive": original, "argv": result.args,
+        "originalExitCode": result.returncode, "originalOwnerReturned": True, "captureComplete": True,
+        "timeoutSeconds": seconds, "outputLimitBytes": MiB, "stdout": stdout, "stderr": stderr}))
+    need(result.returncode == 0, "Original controller bubblewrap decoder failed; no retry")
+    stage("controller-bubblewrap-member")
+    selected = controller_bwrap_member(result.stdout)
+    remaining(deadline, PREP_SECONDS)
+    stage("controller-bubblewrap-seal")
+    write(BWRAP_PATH, selected, 0o555)
+    return controller_bwrap_record()
 
 
 def decode_root(identifier: str) -> None:
@@ -598,14 +682,18 @@ def platform_tools() -> list[dict]:
     tools = []
     for name in HOST_TOOLS:
         path = Path(name)
-        item = path.lstat()
-        # Ubuntu's fixed controller mount may be root-owned04755. The already
-        # root controller gains no privilege; no native-tool/drop rule changes.
-        mount_suid = name == "/usr/bin/mount" and stat.S_IMODE(item.st_mode) == 0o4755
-        need(stat.S_ISREG(item.st_mode) and item.st_uid == 0 and not item.st_mode & 0o2022
-             and (not item.st_mode & stat.S_ISUID or mount_suid),
-             "Required preinstalled root-owned platform tool unavailable; no repair")
-        tools.append(record(path))
+        stage("host-tool-" + path.name)  # Closed public roles, never an OS error's path/text.
+        try:
+            item = path.lstat()
+            # Ubuntu's fixed controller mount may be root-owned04755. The already
+            # root controller gains no privilege; no native-tool/drop rule changes.
+            mount_suid = name == "/usr/bin/mount" and stat.S_IMODE(item.st_mode) == 0o4755
+            need(stat.S_ISREG(item.st_mode) and item.st_uid == 0 and not item.st_mode & 0o2022
+                 and (not item.st_mode & stat.S_ISUID or mount_suid),
+                 "Required preinstalled root-owned platform tool unavailable; no repair")
+            tools.append(record(path))
+        except FileNotFoundError:
+            raise Refused("Required preinstalled platform tool missing; no repair") from None
     return tools
 
 
@@ -615,36 +703,44 @@ def prepare() -> None:
          and sys.flags.dont_write_bytecode, "Use fixed privileged isolated preparation entry")
     checkout = Path(__file__).absolute().parents[2]
     data = admission(checkout / "desktop/cpython-source-inputs", checkout / "desktop/tools")
+    stage("context")
     context = context_from_environment()
     deadline = started + PREP_SECONDS
-    stage("input-copy")
-    # All missing prerequisites have refused before any effect. Source/control
-    # files are copied once, not staged by a second packaging framework.
+    tools = platform_tools()
+    stage("input-directories")
+    # The fixed preinstalled tools have refused before preparation effects.
+    # Source/control files are copied once, not by another packaging framework.
     PREP.mkdir(mode=0o700)
-    for name in ("controls", "objects", "decoded", "inputs", "inputs/recipe", "inputs/archives",
+    for name in ("controls", "controller", "objects", "decoded", "inputs", "inputs/recipe", "inputs/archives",
                  "inputs/sources", "inputs/core-source", "preparation-results"):
         (PREP / name).mkdir(mode=0o700)
     write(PREP / "INCOMPLETE", b"Input preparation has no successful result.\n")
     for leaf, raw in data["blobs"].items():
+        stage("input-control-" + leaf)
         write(PREP / "controls" / leaf, raw)
         if leaf != "rootfs.json":
             write(PREP / "inputs" / leaf, raw)
+    stage("input-index")
     index = read(checkout / "desktop/cpython-source-inputs" / INDEX_NAME, 64 << 10)
     write(PREP / "controls" / INDEX_NAME, index)
     write(PREP / "inputs" / INDEX_NAME, index)
     for leaf, raw in data["helpers"].items():
+        stage("input-helper-" + leaf)
         write(PREP / "inputs/recipe" / leaf, raw)
+    stage("input-entry")
     entry = read(Path(__file__).absolute(), MiB)
     write(PREP / "inputs/recipe" / ENTRY_NAME, entry)
-    for row in data["core"]:
+    for number, row in enumerate(data["core"], 1):
+        stage(f"input-core-{number:04d}")  # Position in the admitted, bounded roster.
         name = Path(row["path"]).relative_to(INPUTS / "core-source")
         source = (checkout / "desktop/cpython-source-inputs/github-ca.pem" if str(name) == "desktop/github-ca.pem"
                   else checkout / name)
         copy(source, PREP / "inputs/core-source" / name, {**row, "path": str(source)})
+    stage("owner-import")
     owner_modules(PREP / "inputs/core-source", data["core"])
-    tools = platform_tools()
     stage("transport")
     download_inputs(data, deadline)
+    controller_bwrap = prepare_controller_bwrap(deadline)
     for row in data["transport"]["rootArchiveTransports"]:
         stage("root-decoder-" + row["id"])
         result = run(["/usr/bin/python3.12", "-I", "-S", "-B", str(PREP / "inputs/recipe" / ENTRY_NAME),
@@ -677,6 +773,7 @@ def prepare() -> None:
     os.chmod(PREP, 0o700)
     write(PREP / "prepared.json", canonical({"schema": "mrk-cpython-source-preparation-1", **context,
         "state": "input-correspondence-only", "entrySha256": digest(entry), "hostTools": tools,
+        "controllerBwrap": controller_bwrap,
         "footprint": space, "elapsedSeconds": time.monotonic() - started,
         "networkPreparationComplete": True, "nativeQualification": "not-established"}))
     (PREP / "INCOMPLETE").unlink()
@@ -691,6 +788,7 @@ def prepared() -> tuple[dict, dict]:
          and saved["state"] == "input-correspondence-only" and not (PREP / "INCOMPLETE").exists()
          and digest(read(PREP / "inputs/recipe" / ENTRY_NAME, MiB)) == saved["entrySha256"],
          "Original input preparation did not complete")
+    need(saved["controllerBwrap"] == controller_bwrap_record(), "Prepared controller bubblewrap record differs")
     owner_modules(PREP / "inputs/core-source", data["core"])
     return data, saved
 
@@ -856,7 +954,7 @@ def bwrap_argv(context: dict) -> list[str]:
     # RestrictNamespaces=~user is the inherited systemd syscall restriction.
     # bwrap's sysctl-specific --assert-userns-disabled is not used as a proxy for
     # that effective restriction. In particular, NO --unshare-user/--unshare-all.
-    command = ["/usr/bin/bwrap", "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts",
+    command = [str(BWRAP_PATH), "--unshare-pid", "--unshare-net", "--unshare-ipc", "--unshare-uts",
         "--die-with-parent", "--new-session", "--cap-drop", "ALL",
         "--cap-add", "CAP_SETUID", "--cap-add", "CAP_SETGID", "--cap-add", "CAP_SETPCAP",
         "--ro-bind", str(PREP / "root"), "/", "--bind", str(WORK), "/work",
@@ -1126,6 +1224,12 @@ def retain(data: dict, projection: dict) -> dict:
                  "client.json", "client.stdout", "client.stderr"):
         add(CONTROL / name, "controller/" + name)
     add(PREP / "prepared.json", "preparation/prepared.json")
+    item = CONTROLLER_BWRAP["transport"]
+    add(PREP / "objects" / item["sha256"], "preparation/controller-bubblewrap.deb",
+        {"size": item["bytes"], "sha256": item["sha256"]})
+    for suffix in (".json", ".stdout", ".stderr"):
+        path = BWRAP_RECEIPT.with_suffix(suffix)
+        add(path, "preparation/" + path.name)
     for row in data["transport"]["rootArchiveTransports"]:
         add(PREP / "preparation-results" / (row["id"] + ".json"), "preparation/" + row["id"] + ".json")
     inventory = []
@@ -1300,6 +1404,9 @@ def main() -> None:
                 source = PREP / "preparation-results" / (_STAGE.removeprefix("root-decoder-") + ".json")
                 if source.exists():
                     write(PUBLIC / "diagnostic-preparation.json", read(source, MiB))
+            elif _STAGE in {"controller-bubblewrap-decoder", "controller-bubblewrap-member", "controller-bubblewrap-seal"}:
+                if BWRAP_RECEIPT.exists():
+                    write(PUBLIC / "diagnostic-preparation.json", read(BWRAP_RECEIPT, MiB))
         raise SystemExit("Conventional hosted " + mode + "/" + _STAGE + ": " + condition
                          + "; retain original evidence; no retry") from None
 

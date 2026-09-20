@@ -93,7 +93,8 @@ class HostedSourceTests(unittest.TestCase):
 
     def test_fixed_namespace_uid_drop_and_writable_mount_roster(self):
         argv = H.bwrap_argv({"uid": 999, "gid": 998})
-        self.assertEqual(argv[0], "/usr/bin/bwrap")
+        self.assertEqual(argv[0], "/var/tmp/mrk-cpython-source-preparation-v1/controller/bwrap")
+        self.assertNotIn("/usr/bin/bwrap", H.HOST_TOOLS)
         self.assertLess(argv.index("--ro-bind"), argv.index("/usr/bin/setpriv"))
         self.assertLess(argv.index("/usr/bin/setpriv"), argv.index("/usr/bin/python3.12"))
         self.assertEqual(argv[-1], "inside")
@@ -132,6 +133,197 @@ class HostedSourceTests(unittest.TestCase):
                                  for mode in (0o4711, 0o4775, 0o4757, 0o2755, 0o6755))):
             with self.subTest(path=path, uid=uid, mode=mode), self.assertRaises(H.Refused):
                 check(path, uid, mode)
+
+    def test_missing_host_tool_refuses_before_preparation_effects(self):
+        fake_sys = SimpleNamespace(flags=SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1))
+        with mock.patch.object(H, "sys", fake_sys), mock.patch.object(H.os, "getresuid", return_value=(0, 0, 0)), \
+             mock.patch.object(H, "admission", return_value={}), mock.patch.object(H, "context_from_environment", return_value={}), \
+             mock.patch.object(H, "HOST_TOOLS", ("/usr/bin/dpkg-deb",)), mock.patch.object(H, "_STAGE", "admission"), \
+             mock.patch.object(H.Path, "lstat", side_effect=FileNotFoundError("private-path-and-os-message")), \
+             mock.patch.object(H.Path, "mkdir") as mkdir, mock.patch.object(H, "read") as read, \
+             mock.patch.object(H, "write") as write, mock.patch.object(H, "copy") as copied, \
+             mock.patch.object(H, "owner_modules") as owner, mock.patch.object(H, "download_inputs") as download:
+            with self.assertRaisesRegex(H.Refused, "Required preinstalled platform tool missing; no repair") as failure:
+                H.prepare()
+            self.assertEqual(H._STAGE, "host-tool-dpkg-deb")
+            self.assertNotIn("private-path-and-os-message", str(failure.exception))
+        for effect in (mkdir, read, write, copied, owner, download):
+            effect.assert_not_called()
+
+    def test_preparation_copy_and_owner_failures_have_distinct_safe_stages(self):
+        fake_sys = SimpleNamespace(flags=SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1))
+        data = {"blobs": {"github-ca.pem": b"fixture-ca"},
+                "helpers": {"cpython_source_admission.py": b"fixture-helper"},
+                "core": [{"path": str(H.INPUTS / "core-source/src/mobile_release" / leaf), "size": 0,
+                          "sha256": H.digest(b"")} for leaf in ("errors.py", "owned_process.py")]}
+        for failed_stage in ("input-control-github-ca.pem", "input-index", "input-helper-cpython_source_admission.py",
+                             "input-entry", "input-core-0002", "owner-import"):
+            def fail_here(*args, **kwargs):
+                if H._STAGE == failed_stage:
+                    raise FileNotFoundError("private-path-and-os-message")
+                return b"fixture-only"
+
+            with self.subTest(stage=failed_stage), mock.patch.object(H, "sys", fake_sys), \
+                 mock.patch.object(H.os, "getresuid", return_value=(0, 0, 0)), \
+                 mock.patch.object(H, "admission", return_value=data), \
+                 mock.patch.object(H, "context_from_environment", return_value={}), \
+                 mock.patch.object(H, "platform_tools", return_value=[]), mock.patch.object(H, "_STAGE", "admission"), \
+                 mock.patch.object(H.Path, "mkdir"), mock.patch.object(H, "read", side_effect=fail_here), \
+                 mock.patch.object(H, "write", side_effect=fail_here), mock.patch.object(H, "copy", side_effect=fail_here), \
+                 mock.patch.object(H, "owner_modules", side_effect=fail_here), \
+                 mock.patch.object(H, "download_inputs") as download:
+                with self.assertRaises(FileNotFoundError):
+                    H.prepare()
+                self.assertEqual(H._STAGE, failed_stage)
+            download.assert_not_called()
+
+    def test_controller_bubblewrap_member_admission_is_pinned_and_closed(self):
+        payload = b"fixture-member-not-native-code\n"
+        name = H.CONTROLLER_BWRAP["member"]["path"]
+        root = (".", H.tarfile.DIRTYPE, 0o755, b"")
+        tool = (name, H.tarfile.REGTYPE, 0o755, payload)
+
+        def select(rows, member_changes=None, decoded_changes=None):
+            output = io.BytesIO()
+            with H.tarfile.open(fileobj=output, mode="w", format=H.tarfile.USTAR_FORMAT) as archive:
+                for path, kind, mode, body in rows:
+                    header = H.tarfile.TarInfo(path)
+                    header.type, header.mode, header.size = kind, mode, len(body)
+                    if kind in {H.tarfile.SYMTYPE, H.tarfile.LNKTYPE}:
+                        header.linkname = "fixture-link-target"
+                    archive.addfile(header, io.BytesIO(body) if kind == H.tarfile.REGTYPE else None)
+            raw = output.getvalue()
+            spec = copy.deepcopy(H.CONTROLLER_BWRAP)
+            spec["member"] = {"path": name, "size": len(payload), "sha256": H.digest(payload), "mode": 0o755,
+                              **(member_changes or {})}
+            # Rebind the synthetic full stream so inner failures exercise the
+            # member/roster predicates, not merely a deliberately stale digest.
+            spec["decoded"] = {"bytes": len(raw), "sha256": H.digest(raw), "memberCount": 2,
+                               **(decoded_changes or {})}
+            with mock.patch.object(H, "CONTROLLER_BWRAP", spec):
+                return H.controller_bwrap_member(raw)
+
+        with mock.patch.object(H, "write") as write, mock.patch.object(H, "run") as command, \
+             mock.patch.object(H.os, "execve") as execute, \
+             mock.patch.object(H.tarfile.TarFile, "extractall") as extract:
+            self.assertEqual(select([root, tool]), payload)
+            cases = (
+                ("decoded-hash", [root, tool], {}, {"sha256": "0" * 64}, "decoded stream"),
+                ("member-hash", [root, tool], {"sha256": "0" * 64}, {}, "member bytes"),
+                ("member-size", [root, tool], {"size": len(payload) + 1}, {}, "extent/mode"),
+                ("member-mode", [root, (name, H.tarfile.REGTYPE, 0o4755, payload)], {}, {}, "extent/mode"),
+                ("symlink", [root, (name, H.tarfile.SYMTYPE, 0o755, b"")], {}, {}, "not ordinary"),
+                ("hardlink", [root, (name, H.tarfile.LNKTYPE, 0o755, b"")], {}, {}, "not ordinary"),
+                ("missing", [root, ("./usr/bin/other", H.tarfile.REGTYPE, 0o755, payload)], {}, {}, "roster"),
+                ("duplicate", [root, tool, tool], {}, {"memberCount": 3}, "roster"),
+                ("extra", [root, tool, ("./usr/extra", H.tarfile.DIRTYPE, 0o755, b"")], {}, {}, "roster"))
+            for label, rows, member_changes, decoded_changes, condition in cases:
+                with self.subTest(case=label), self.assertRaisesRegex(H.Refused, condition):
+                    select(rows, member_changes, decoded_changes)
+        for effect in (write, command, execute, extract):
+            effect.assert_not_called()
+
+    def test_controller_decoder_preserves_original_capture_before_acceptance_and_failure_export(self):
+        item = H.CONTROLLER_BWRAP["transport"]
+        path = H.PREP / "objects" / item["sha256"]
+        original = {"path": str(path), "size": item["bytes"], "sha256": item["sha256"]}
+        argv = ["/usr/bin/dpkg-deb", "--fsys-tarfile", str(path)]
+        for returncode, member_ok in ((7, False), (0, False), (0, True)):
+            result = SimpleNamespace(args=argv, returncode=returncode,
+                stdout=b"fixture-decoder-output\x00", stderr=b"fixture-private-diagnostic-text")
+            written = {}
+
+            def save(target, raw, mode=0o444):
+                written[target] = (raw, mode)
+                return {"path": str(target), "size": len(raw), "sha256": H.digest(raw)}
+
+            with self.subTest(returncode=returncode, member_ok=member_ok), \
+                 mock.patch.object(H, "_STAGE", "fixture"), mock.patch.object(H, "record", return_value=original), \
+                 mock.patch.object(H, "remaining", return_value=30), mock.patch.object(H, "run", return_value=result) as command, \
+                 mock.patch.object(H, "write", side_effect=save), \
+                 mock.patch.object(H, "controller_bwrap_member", return_value=b"fixture-member",
+                    side_effect=None if member_ok else H.Refused("Controller bubblewrap decoded stream differs")) as member, \
+                 mock.patch.object(H, "controller_bwrap_record", return_value={"fixture": "verified"}) as verified, \
+                 mock.patch.object(H.os, "execve") as execute:
+                if member_ok:
+                    self.assertEqual(H.prepare_controller_bwrap(123.0), {"fixture": "verified"})
+                    self.assertEqual(written[H.BWRAP_PATH], (b"fixture-member", 0o555))
+                    verified.assert_called_once_with()
+                else:
+                    with self.assertRaises(H.Refused) as failure:
+                        H.prepare_controller_bwrap(123.0)
+                    failed_stage, error = H._STAGE, failure.exception
+                    self.assertNotIn(H.BWRAP_PATH, written)
+                    verified.assert_not_called()
+                command.assert_called_once_with(argv, 30, require_zero=False)
+                if returncode:
+                    member.assert_not_called()
+                else:
+                    member.assert_called_once_with(result.stdout)
+                execute.assert_not_called()
+            self.assertEqual(written[H.BWRAP_RECEIPT.with_suffix(".stdout")], (result.stdout, 0o444))
+            self.assertEqual(written[H.BWRAP_RECEIPT.with_suffix(".stderr")], (result.stderr, 0o444))
+            receipt_raw = written[H.BWRAP_RECEIPT][0]
+            receipt = H.decode(receipt_raw)
+            self.assertEqual(receipt["originalExitCode"], returncode)
+            self.assertEqual(receipt["argv"], argv)
+            self.assertEqual(receipt["archive"], original)
+            self.assertTrue(receipt["originalOwnerReturned"] and receipt["captureComplete"])
+            self.assertEqual((receipt["timeoutSeconds"], receipt["outputLimitBytes"]), (30, H.MiB))
+            for stream in ("stdout", "stderr"):
+                raw = getattr(result, stream)
+                self.assertEqual(receipt[stream], {"path": str(H.BWRAP_RECEIPT.with_suffix("." + stream)),
+                                                 "size": len(raw), "sha256": H.digest(raw)})
+                self.assertNotIn(raw, receipt_raw)
+            if not member_ok:
+                public = {}
+                fake_sys = SimpleNamespace(argv=["entry", "prepare"],
+                    flags=SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1))
+                with mock.patch.object(H, "sys", fake_sys), mock.patch.object(H.os, "umask"), \
+                     mock.patch.object(H.os, "getuid", return_value=0), mock.patch.object(H, "_STAGE", failed_stage), \
+                     mock.patch.object(H, "prepare", side_effect=error), mock.patch.object(H.Path, "exists", return_value=True), \
+                     mock.patch.object(H, "directory"), mock.patch.object(H, "read", return_value=receipt_raw) as read, \
+                     mock.patch.object(H, "write", side_effect=lambda target, raw: public.update({target: raw})), \
+                     self.assertRaises(SystemExit) as diagnostic:
+                    H.main()
+                read.assert_called_once_with(H.BWRAP_RECEIPT, H.MiB)
+                self.assertEqual(set(public), {H.PUBLIC / "hosted-failure.json", H.PUBLIC / "diagnostic-preparation.json"})
+                self.assertEqual(public[H.PUBLIC / "diagnostic-preparation.json"], receipt_raw)
+                self.assertIn("prepare/" + failed_stage, str(diagnostic.exception))
+                self.assertNotIn("fixture-private-diagnostic-text", str(diagnostic.exception))
+
+    def test_prepared_controller_identity_is_fixed_and_rechecked_before_owner_import(self):
+        wanted = H.CONTROLLER_BWRAP["member"]
+        actual = {"path": str(H.BWRAP_PATH), "size": wanted["size"], "sha256": wanted["sha256"]}
+        fields = {"st_dev": 1, "st_ino": 2, "st_mode": H.stat.S_IFREG | 0o555, "st_uid": 0,
+                  "st_gid": 0, "st_nlink": 1, "st_size": wanted["size"], "st_mtime_ns": 0, "st_ctime_ns": 0}
+
+        def check(changes=None, recorded=None):
+            with mock.patch.object(H, "directory"), \
+                 mock.patch.object(H.Path, "lstat", return_value=SimpleNamespace(**{**fields, **(changes or {})})), \
+                 mock.patch.object(H, "record", return_value=actual if recorded is None else recorded):
+                return H.controller_bwrap_record()
+
+        identity = {**actual, "mode": 0o555, "uid": 0, "links": 1}
+        self.assertEqual(check(), identity)
+        for changes in ({"st_uid": 1}, {"st_nlink": 2}, {"st_mode": H.stat.S_IFLNK | 0o555},
+                        {"st_mode": H.stat.S_IFREG | 0o755}, {"st_mode": H.stat.S_IFREG | 0o4555}):
+            with self.subTest(changes=changes), self.assertRaises(H.Refused):
+                check(changes)
+        with self.assertRaisesRegex(H.Refused, "bytes changed"):
+            check(recorded={**actual, "sha256": "0" * 64})
+        entry = b"fixture-entry"
+        saved = {"schema": "mrk-cpython-source-preparation-1", "state": "input-correspondence-only",
+                 "networkPreparationComplete": True, "entrySha256": H.digest(entry), "controllerBwrap": identity}
+        with mock.patch.object(H, "directory"), mock.patch.object(H, "admission", return_value={"core": []}), \
+             mock.patch.object(H, "read", side_effect=[H.canonical(saved), entry]), \
+             mock.patch.object(H.Path, "exists", return_value=False), \
+             mock.patch.object(H, "controller_bwrap_record", side_effect=H.Refused("Prepared controller bubblewrap bytes changed")) as checked, \
+             mock.patch.object(H, "owner_modules") as owner:
+            with self.assertRaisesRegex(H.Refused, "bytes changed"):
+                H.prepared()
+        checked.assert_called_once_with()
+        owner.assert_not_called()
 
     def test_host_thread_supplementary_gid_also_blocks_account(self):
         ordinary = {"Uid": "1000 1000 1000 1000", "Gid": "1000 1000 1000 1000", "Groups": "4 27 1000"}
