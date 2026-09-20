@@ -328,6 +328,10 @@ def offline_case_value(context: dict, case: str) -> dict:
         "result": None if case == "PF07" else report}
     native = original_resources(case)
     native["disabled"] = case == "PF07"
+    if case == "PF07":
+        native["observer"]["retained"] = True
+        native["watchdog"] = {"receipt": "ok-false", "retained": True}
+        native.update(resourceUnknown=True, activeRetained=True, canExit=False)
     hold = {"observerHeldNs": 4_000_000_000, "firstStopNs": 5_000_000_000, "unknownObservedNs": 15_000_000_000,
             "completeBeforeHold": True, "originalWatchdogOnly": True} if case == "PF07" else None
     reciprocal = {"sameOwnerRecovered": True, "replayRejected": True, "foreignCancelRejected": True,
@@ -1082,6 +1086,7 @@ class OfflineNativeCIContracts(unittest.TestCase):
             (("cases", 1, "classification"), "real-fixed-bootstrap"), (("cases", 1, "aggregateBytes"), 65536),
             (("cases", 2, "unfinishedEofPending"), False),
             (("cases", index["PF01"], "script", "marker"), ""),
+            (("cases", index["PF01"], "native"), original["cases"][index["PF07"]]["native"]),
             (("cases", index["PF01"], "core", "lifetime", "commands"), 0),
             (("cases", index["PF01"], "core", "result", "usedConfig", "sha256"), "f" * 64),
             (("cases", index["PF01"], "core", "result", "findings", 0, "message"), "/private/check.py raw output"),
@@ -1102,7 +1107,13 @@ class OfflineNativeCIContracts(unittest.TestCase):
             (("cases", index["PF06"], "native", "stdout", "end", "eof"), False),
             (("cases", index["PF06"], "native", "error", "close"), "unknown"),
             (("cases", index["PF07"], "native", "observer", "receipt"), "not-joined"),
-            (("cases", index["PF07"], "native", "watchdog", "retained"), True),
+            (("cases", index["PF07"], "native", "observer", "retained"), False),
+            (("cases", index["PF07"], "native", "watchdog", "receipt"), "ok-true"),
+            (("cases", index["PF07"], "native", "watchdog", "receipt"), "not-joined"),
+            (("cases", index["PF07"], "native", "watchdog", "retained"), False),
+            (("cases", index["PF07"], "native", "resourceUnknown"), False),
+            (("cases", index["PF07"], "native", "activeRetained"), False),
+            (("cases", index["PF07"], "native", "canExit"), True),
             (("cases", index["PF07"], "native", "disabled"), False),
             (("cases", index["PF07"], "projection", "phase"), "terminal"),
             (("cases", index["PF07"], "projection", "result"), original["cases"][index["PF07"]]["core"]["result"]),

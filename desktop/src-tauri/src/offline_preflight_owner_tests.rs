@@ -19,9 +19,11 @@ fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"
 fn active() -> (OfflinePreflightOwner, Arc<Session>) {
     let owner = owner(); let p = projection();
     let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending); let (frames, receiver) = mpsc::channel(2);
+    let clocks = Clocks::new(SavedCommandDomain::OfflinePreflight, Instant::now());
+    let (native_audit_cutoff, _) = watch::channel(clocks.work);
     let session = Arc::new(Session { domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
-        profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks: Clocks::new(SavedCommandDomain::OfflinePreflight, Instant::now()), registration: 1, project: project(), request: AsyncMutex::new(None),
-        stop, pipes, frames, wake: Notify::new(), output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
+        profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), request: AsyncMutex::new(None),
+        stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
         driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
         watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false),
         startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(receiver), ..Resources::default() }),
@@ -432,7 +434,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             // The same original permit is deliberately presented to Android's
             // otherwise empty registry. It must grant no qualification, intent
             // or resource, and must not consume the Offline one-use claim.
-            let android = crate::android_build_owner::AndroidBuildOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-android-runtime")));
+            let android = crate::android_build_owner::AndroidBuildOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-android-runtime")), None);
             let android_inner = &android.original_for_test().inner;
             *android_inner.fixture.lock().map_err(|_| "fixture_android_permit_slot")? = Some(Arc::downgrade(&permit));
             require(!permit.permits(android_inner) && !android_inner.qualified()
@@ -489,8 +491,22 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             let s = self.original()?; let mut changes = self.bridge.preflight.subscribe();
             loop {
                 let status = self.document.offline_preflight_status().map_err(|_| "fixture_status_lost")?;
-                let absent = self.bridge.preflight.original_for_test().inner.lock().active.is_none();
-                if absent { if let Some(p) = status.operation { if p.operation_id == s.id && p.owner_generation == s.generation { return Ok(p); } } }
+                let settled = { let r = self.bridge.preflight.original_for_test().inner.lock();
+                    if self.permit.case == Case::PF07 { r.disabled && r.active.as_ref().is_some_and(|a|
+                        Arc::ptr_eq(&a.owner, s) && a.unknown && a.final_join_seen) } else { r.active.is_none() } };
+                if settled { if let Some(p) = status.operation { if p.operation_id == s.id && p.owner_generation == s.generation {
+                    if self.permit.case == Case::PF07 {
+                        // Visible Unknown alone is not an actual final Ready observation.
+                        require(p.phase == Phase::Unknown
+                            && join_kind(&s.observer_return, |value| if *value { "ok-true" } else { "ok-false" })? == "ok-true"
+                            && join_kind(&s.watchdog_return, |value| if *value { "ok-true" } else { "ok-false" })? == "ok-false"
+                            && s.observer.try_lock().map_err(|_| "fixture_observer_busy")?.is_some()
+                            && s.watchdog.lock().map_err(|_| "fixture_watchdog_busy")?.is_some()
+                            && s.watchdog_joined.load(Ordering::SeqCst) && !s.watchdog_failed.load(Ordering::SeqCst),
+                            "fixture_unknown_original_ready")?;
+                    }
+                    return Ok(p);
+                } } }
                 tokio::time::timeout_at(tokio::time::Instant::from_std(self.permit.end), changes.changed()).await
                     .map_err(|_| "fixture_originals_not_settled")?.map_err(|_| "fixture_original_watch_lost")?;
             }
@@ -512,7 +528,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
         })
     }
     fn receipt(run: &Run) -> Check<Value> {
-        let owner = run.original()?;
+        let owner = run.original()?; let finality_unknown = run.permit.case == Case::PF07;
         // Called only after reconcile observed actual final Ready. try_lock
         // refuses a missing physical predicate instead of introducing a new wait.
         let book = owner.resources.try_lock().map_err(|_| "fixture_book_busy")?;
@@ -528,8 +544,10 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
         let manager_retained = owner.manager.try_lock().map_err(|_| "fixture_manager_busy")?.is_some();
         let observer_retained = owner.observer.try_lock().map_err(|_| "fixture_observer_busy")?.is_some();
         let watchdog_retained = owner.watchdog.lock().map_err(|_| "fixture_watchdog_busy")?.is_some();
-        require(driver == "ok-unit" && manager == "ok-unit" && observer == "ok-true" && watchdog == "ok-true"
-            && !driver_retained && !manager_retained && !observer_retained && !watchdog_retained, "fixture_original_task_finality")?;
+        require(driver == "ok-unit" && manager == "ok-unit" && observer == "ok-true"
+            && watchdog == (if finality_unknown { "ok-false" } else { "ok-true" })
+            && !driver_retained && !manager_retained && observer_retained == finality_unknown
+            && watchdog_retained == finality_unknown, "fixture_original_task_finality")?;
         require(startup.attempted && startup.returned && !startup.failed && startup.child.is_none()
             && book.inspection.is_none() && book.inspection_joined && !book.inspection_failed
             && book.acquisition.is_none() && book.acquisition_joined && !book.acquisition_failed
@@ -543,10 +561,12 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             && input.io.is_none() && output.io.is_none() && error.io.is_none()
             && owner.driver_joined.load(Ordering::SeqCst) && owner.watchdog_joined.load(Ordering::SeqCst)
             && !owner.driver_failed.load(Ordering::SeqCst) && !owner.manager_failed.load(Ordering::SeqCst)
-            && !owner.watchdog_failed.load(Ordering::SeqCst) && !owner.resource_unknown.load(Ordering::SeqCst), "fixture_original_physical_finality")?;
+            && !owner.watchdog_failed.load(Ordering::SeqCst)
+            && owner.resource_unknown.load(Ordering::SeqCst) == finality_unknown, "fixture_original_physical_finality")?;
         let active_retained = run.bridge.preflight.original_for_test().inner.lock().active.is_some();
         let disabled = run.bridge.preflight.disabled(); let can_exit = run.bridge.preflight.can_exit();
-        require(!active_retained && can_exit, "fixture_original_exit_gate")?;
+        require(active_retained == finality_unknown && disabled == finality_unknown && can_exit == !finality_unknown,
+            "fixture_original_exit_gate")?;
         let terminal = run.terminal()?; require(terminal.lifetime.settled(), "fixture_core_original_finality")?;
         Ok(json!({"startup":{"attempted":startup.attempted,"returned":startup.returned,"failed":startup.failed},
             "inspection":{"joined":book.inspection_joined,"failed":book.inspection_failed,"retained":book.inspection.is_some()},
@@ -717,8 +737,11 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
                 && projection.reason == Reason::CleanupUnknown && projection.result.is_none() && run.bridge.preflight.disabled(), "fixture_unknown_sticky")?;
             require(run.document.prepare_offline_preflight(run.prepare_input()).is_err()
                 && run.document.start_offline_preflight(run.start_input()?).is_err(), "fixture_unknown_no_reopen")?;
-            let r = run.bridge.preflight.original_for_test().inner.lock();
-            require(r.active.is_none() && r.prepared.is_none(), "fixture_unknown_retained_admission")?;
+            let s = run.original()?; let r = run.bridge.preflight.original_for_test().inner.lock();
+            require(first.is_some() && r.active.as_ref().is_some_and(|a| Arc::ptr_eq(&a.owner, s)
+                && a.unknown && a.final_join_seen && a.first_stop == first) && r.prepared.is_none()
+                && held["firstStopNs"].as_u64() == first.map(|at| at.saturating_duration_since(s.clocks.admitted).as_nanos() as u64),
+                "fixture_unknown_retained_admission")?;
         } else { require(projection.phase == Phase::Terminal && projection.outcome == Some(outcome) && projection.reason == reason
             && !run.bridge.preflight.disabled(), "fixture_native_projection")?; }
         let encoded = serde_json::to_string(&json!({"core":core,"projection":projection})).map_err(|_| "fixture_redaction_encode")?;
@@ -884,6 +907,9 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
         }
         // PF07 is lane-last. Only already-owned bounded result DATA and original
         // closes follow; there is no post-tail source/tool probe or cleanup.
+        // Its original Active/observer/watchdog stay retained through output
+        // closes; neither those closes nor process disposal proves application
+        // canExit or authorizes fixture-tree deletion/reuse.
         require(rows.len() == ORDER.len() && rows.iter().zip(ORDER).all(|(row, id)| row["id"] == id), "fixture_complete_roster")?;
         end_check(end)?; outputs.progress(&inputs, rows.len(), "result", None)?;
         let d = &inputs.data;

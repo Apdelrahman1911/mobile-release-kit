@@ -22,9 +22,12 @@ import type { MetadataTextCommand } from './metadataTextProtocol.ts';
 import { OFFLINE_PREFLIGHT_EVENT, encodeOfflinePreflightRequest, offlinePreflightError, parseOfflinePreflightStatus } from './offlinePreflightProtocol.ts';
 import type { OfflinePreflightCommand } from './offlinePreflightProtocol.ts';
 import type { OfflinePreflightStatus } from './offlinePreflightTypes.ts';
+import { ANDROID_BUILD_EVENT, encodeAndroidBuildRequest, androidBuildError, parseAndroidBuildStatus } from './androidBuildProtocol.ts';
+import type { AndroidBuildCommand } from './androidBuildProtocol.ts';
+import type { AndroidBuildStatus } from './androidBuildTypes.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -48,6 +51,17 @@ export function apiError(error: unknown): ApiError {
 }
 
 export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: NativeInvoke, listen?: NativeEditListen): DesktopApi {
+  const androidCall = async (command: AndroidBuildCommand, value: unknown): Promise<AndroidBuildStatus> => {
+    try {
+      if (mode !== 'native') throw { code: 'android_build_unavailable' };
+      const body = encodeAndroidBuildRequest(command, value);
+      if (!body) throw { code: 'android_build_invalid' };
+      // Raw IPC keeps duplicate-aware admission in the native command parser.
+      const status = parseAndroidBuildStatus(await invoke<unknown>(command, body));
+      if (!status) throw { code: 'android_build_protocol' };
+      return status;
+    } catch (error) { throw androidBuildError(error); }
+  };
   const offlineCall = async (command: OfflinePreflightCommand, value: unknown): Promise<OfflinePreflightStatus> => {
     try {
       if (mode !== 'native') throw { code: 'offline_preflight_unavailable' };
@@ -169,6 +183,16 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (!result) throw { code: 'protocol_error' };
         return result;
       } catch (error) { throw environmentError(error); }
+    },
+    prepareAndroidBuild: (request) => androidCall('prepare_android_build', request),
+    startAndroidBuild: (request) => androidCall('start_android_build', request),
+    androidBuildStatus: () => androidCall('android_build_status', {}),
+    cancelAndroidBuild: (operationId, ownerGeneration) => androidCall('cancel_android_build', { operationId, ownerGeneration }),
+    subscribeAndroidBuild: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'android_build_unavailable' };
+        return await listen(ANDROID_BUILD_EVENT, (value) => onStatus(parseAndroidBuildStatus(value)));
+      } catch (error) { throw androidBuildError(error); }
     },
     prepareOfflinePreflight: (request) => offlineCall('prepare_offline_preflight', request),
     startOfflinePreflight: (request) => offlineCall('start_offline_preflight', request),

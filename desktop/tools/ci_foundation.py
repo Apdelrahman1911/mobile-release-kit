@@ -185,6 +185,9 @@ GTK_COMPILE_SOURCES = (
     "desktop/android_build_bootstrap.py",
     "desktop/src-tauri/src/android_build_owner.rs",
     "desktop/src-tauri/src/android_build_protocol.rs",
+    "desktop/src-tauri/src/android_build_shell_tests.rs",
+    "desktop/src-tauri/src/android_build_wiring_tests.rs",
+    "desktop/src-tauri/src/android_toolchain.rs",
     "desktop/src-tauri/src/saved_command_owner.rs",
     "desktop/src-tauri/src/saved_command_owner_tests.rs",
     "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock",
@@ -7199,11 +7202,14 @@ def validate_offline_resources(value: object, case: str) -> dict:
         require(same_compile_json(value[name], {"joined": True, "failed": False,
             "end": {"frames": 2 if name == "stdout" else 0, "eof": True, "closed": True, "failed": False}}),
             "Offline original reader frame/EOF/close/join evidence differs")
+    finality_unknown = case == "PF07"
     for name in ("driver", "manager", "observer", "watchdog"):
-        require(same_compile_json(value[name], {"receipt": "ok-true" if name in {"observer", "watchdog"} else "ok-unit", "retained": False}),
+        receipt = "ok-false" if finality_unknown and name == "watchdog" else (
+            "ok-true" if name in {"observer", "watchdog"} else "ok-unit")
+        require(same_compile_json(value[name], {"receipt": receipt, "retained": finality_unknown and name in {"observer", "watchdog"}}),
                 "Offline original task return/join evidence differs")
-    require(integer_between(value["outputBytes"], 1, 64 * 1024) and value["resourceUnknown"] is False
-            and value["activeRetained"] is False and value["canExit"] is True and value["disabled"] is (case == "PF07"),
+    require(integer_between(value["outputBytes"], 1, 64 * 1024) and value["resourceUnknown"] is finality_unknown
+            and value["activeRetained"] is finality_unknown and value["canExit"] is (not finality_unknown) and value["disabled"] is finality_unknown,
             "Offline physical finality or sticky management Unknown differs")
     return value
 

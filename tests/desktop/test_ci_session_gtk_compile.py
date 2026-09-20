@@ -80,7 +80,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         rust_paths = re.findall(r'^    source!\("([^\"]+)"\),$', rust_block, re.MULTILINE)
         self.assertEqual(python_paths, rust_paths)
         self.assertEqual(python_paths, sorted(set(python_paths)))
-        self.assertEqual(len(python_paths), 263)
+        self.assertEqual(len(python_paths), 268)
         # Exercise the real bounded DATA parser without importing the native
         # driver or its process/IO definitions. Roster growth must fit the DATA
         # map while preserving the smaller native-protocol collection limit.
@@ -95,7 +95,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         source_map = {path: "a" * 64 for path in python_paths}
         raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
         self.assertEqual(parser(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
-        for native, limit in ((False, 263), (True, 128)):
+        for native, limit in ((False, 268), (True, 128)):
             value = {f"k{i}": 0 for i in range(limit)}
             suffix = b"\n" if native else b""
             raw = json.dumps(value, separators=(",", ":")).encode("ascii") + suffix
@@ -112,8 +112,8 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         self.assertNotIn("len(SOURCES) == 217", driver)
         self.assertNotIn("len(SOURCES) == 223", driver)
         self.assertNotIn("len(SOURCES) == 228", driver)
-        self.assertEqual(driver.count("len(SOURCES) == 263"), 2)
-        self.assertEqual(len(helper.GTK_COMPILE_SOURCES), 61)
+        self.assertEqual(driver.count("len(SOURCES) == 268"), 2)
+        self.assertEqual(len(helper.GTK_COMPILE_SOURCES), 64)
         for relative in (
                 "desktop/offline_preflight_bootstrap.py",
                 "desktop/src-tauri/src/offline_preflight_owner.rs",
@@ -145,13 +145,18 @@ class SessionGtkCompileContractTests(unittest.TestCase):
                 "desktop/android_build_bootstrap.py",
                 "desktop/src-tauri/src/android_build_owner.rs",
                 "desktop/src-tauri/src/android_build_protocol.rs",
+                "desktop/src-tauri/src/android_build_shell_tests.rs",
+                "desktop/src-tauri/src/android_build_wiring_tests.rs",
+                "desktop/src-tauri/src/android_toolchain.rs",
                 "desktop/src-tauri/src/saved_command_owner.rs",
                 "desktop/src-tauri/src/saved_command_owner_tests.rs",
+                "desktop/src/androidBuild.ts",
+                "desktop/src/components/AndroidBuild.tsx",
                 "desktop/src/androidBuildProtocol.ts",
                 "desktop/src/androidBuildTypes.ts",
         ):
             self.assertIn(relative, python_paths)
-        for name in ("android_build_owner", "android_build_protocol", "saved_command_owner", "saved_command_owner_tests"):
+        for name in ("android_build_owner", "android_build_protocol", "android_build_shell_tests", "android_build_wiring_tests", "android_toolchain", "saved_command_owner", "saved_command_owner_tests"):
             self.assertIn(f"desktop/src-tauri/src/{name}.rs", helper.GTK_COMPILE_SOURCES)
         self.assertIn("desktop/android_build_bootstrap.py", helper.GTK_COMPILE_SOURCES)
         # Current saved-offline runtime/compiler/UI members, not a new SG1 qualification.

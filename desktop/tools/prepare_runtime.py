@@ -31,7 +31,11 @@ MAX_PATH_PARTS = 16
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_CORE_BYTES = 32 * 1024 * 1024
-BOOTSTRAPS = ("engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py")
+MAX_BOOTSTRAP_BYTES = 64 * 1024
+BOOTSTRAPS = (
+    "engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
+    "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py",
+)
 GITHUB_CA_NAME = "github-ca.pem"
 MAX_GITHUB_CA_BYTES = 512 * 1024
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
@@ -173,11 +177,11 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
     if version is None:
         raise PreparationError("Core version must be an explicit package version")
     desktop = _root(source / "desktop")
-    # Admit every fixed source before creating output. In particular an absent
-    # GitHub bootstrap/CA must not leave a deceptively complete passive bundle.
+    # Admit all six fixed entry points and the CA before creating output;
+    # an absent source must not leave a deceptively complete passive bundle.
     # CA bytes are opaque publisher input, not an acquired trust store or proof
     # of certificate correctness. Never synthesize a placeholder or use the OS.
-    bootstraps = [(name, read_checked(desktop / name, limit=64 * 1024)) for name in BOOTSTRAPS]
+    bootstraps = [(name, read_checked(desktop / name, limit=MAX_BOOTSTRAP_BYTES)) for name in BOOTSTRAPS]
     github_ca = read_checked(desktop / GITHUB_CA_NAME, limit=MAX_GITHUB_CA_BYTES)
     if not github_ca:
         raise PreparationError("The fixed GitHub CA payload is empty")

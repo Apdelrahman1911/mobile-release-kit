@@ -469,15 +469,32 @@ class CPythonStaticPublisherTests(unittest.TestCase):
     def test_limits_reserve_both_bootstraps_core_and_manifest_without_loosening(self):
         for name in ("MAX_FILES", "MAX_ENTRIES", "MAX_PATH_PARTS", "MAX_FILE_BYTES", "MAX_TOTAL_BYTES"):
             self.assertEqual(getattr(payload, name), getattr(preparation, name))
-        self.assertEqual(set(payload.RESERVED_PAYLOAD_FILES), {"core.zip", *preparation.BOOTSTRAPS})
-        self.assertEqual(payload.RESERVED_ENTRIES, 4)
-        self.assertGreaterEqual(payload.RESOURCE_BYTE_HEADROOM, 64 * 1024 * 1024)
+        self.assertEqual(set(payload.RESERVED_PAYLOAD_FILES),
+                         {"core.zip", preparation.GITHUB_CA_NAME, *preparation.BOOTSTRAPS})
+        self.assertEqual(len(payload.RESERVED_PAYLOAD_FILES), 8)
+        self.assertEqual(payload.RESERVED_ENTRIES, 9)
+        self.assertEqual(payload.RESOURCE_BYTE_HEADROOM, 64 * 1024 * 1024)
+        self.assertGreater(payload.RESOURCE_BYTE_HEADROOM,
+                           preparation.MAX_CORE_BYTES + len(preparation.BOOTSTRAPS) * preparation.MAX_BOOTSTRAP_BYTES
+                           + preparation.MAX_GITHUB_CA_BYTES + payload.MAX_MANIFEST_BYTES)
         item = payload._Item("python/fixture.py", b"# inert\n", {})
-        for key, value in (("MAX_FILES", 3), ("MAX_ENTRIES", 5),
-                           ("MAX_TOTAL_BYTES", payload.RESOURCE_BYTE_HEADROOM + len(item.content) - 1),
-                           ("MAX_MANIFEST_BYTES", 1)):
-            with patch.object(payload, key, value), self.assertRaises(payload.PayloadError):
-                payload._preflight_items([item])
+        inventory = payload._inventory([item]) + [
+            {"path": name, "size": payload.RESOURCE_BYTE_HEADROOM, "sha256": "0" * 64}
+            for name in payload.RESERVED_PAYLOAD_FILES]
+        limits = {
+            "MAX_FILES": 1 + len(payload.RESERVED_PAYLOAD_FILES),
+            "MAX_ENTRIES": 2 + payload.RESERVED_ENTRIES,
+            "MAX_TOTAL_BYTES": payload.RESOURCE_BYTE_HEADROOM + len(item.content),
+            "MAX_FILE_BYTES": len(item.content),
+            "MAX_MANIFEST_BYTES": len(payload._canonical(inventory)) + payload.MANIFEST_METADATA_HEADROOM,
+            "MAX_MANIFEST_NODES": 7 * len(inventory) + 32,
+        }
+        for key, exact in limits.items():
+            with self.subTest(bound=key):
+                with patch.object(payload, key, exact):
+                    self.assertEqual(payload._preflight_items([item]), {"python"})
+                with patch.object(payload, key, exact - 1), self.assertRaises(payload.PayloadError):
+                    payload._preflight_items([item])
         with self.assertRaises(payload.PayloadError):
             payload._preflight_items([item, payload._Item("python/FIXTURE.py", b"inert", {})])
 

@@ -7,10 +7,14 @@ use std::{future::{pending, Future}, pin::Pin, process::ExitStatus,
     task::{Context as TaskContext, Poll, Wake, Waker}, time::{Duration, Instant}};
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, ChildStdin, ChildStdout, ChildStderr},
     sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot, watch}, task::JoinHandle};
-#[cfg(all(unix, debug_assertions, feature = "development-runtime"))]
+#[cfg(any(all(unix, debug_assertions, feature = "development-runtime"),
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
 use {std::process::Stdio, tokio::process::Command};
 use crate::{asset_source::RegisteredRoot, offline_preflight_protocol as wire, android_build_protocol as android_wire,
-    error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}};
+    error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}, android_toolchain::AndroidToolchainProfile};
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+use crate::{android_toolchain::AndroidToolchainCustody,
+    installed_runtime::{AdmissionFailure, AndroidDescriptorBudget, CloseOutcome, InstalledRuntimeCustody}};
 
 // Qualification is domain-local. No environment/GitHub/offline permit, parsed
 // tool binding, hash, mode or host profile can qualify Android build custody.
@@ -238,7 +242,7 @@ impl Clocks {
 #[derive(Clone)]
 pub(crate) struct SavedCommandOwner { inner: Arc<Inner> }
 struct Inner {
-    domain: SavedCommandDomain, runtime: RuntimeConfig, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify, poisoned: AtomicBool,
+    domain: SavedCommandDomain, runtime: RuntimeConfig, toolchain: Option<AndroidToolchainProfile>, registry: Mutex<Registry>, changes: watch::Sender<u32>, changed: Notify, poisoned: AtomicBool,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     fixture: Mutex<Option<std::sync::Weak<offline_tests::hosted::Permit>>>,
@@ -304,6 +308,7 @@ struct Session {
     domain: SavedCommandDomain, id: String, generation: String, context: Context, profile: Profile, clocks: Clocks,
     registration: u32, project: RegisteredRoot, request: AsyncMutex<Option<Vec<u8>>>,
     stop: watch::Sender<bool>, pipes: watch::Sender<Pipes>, frames: mpsc::Sender<Frame>, wake: Notify,
+    native_audit_cutoff: watch::Sender<Instant>,
     output_bytes: AtomicUsize, resource_unknown: AtomicBool,
     driver_done: AtomicBool, driver_joined: AtomicBool, driver_failed: AtomicBool,
     watchdog_joined: AtomicBool, watchdog_failed: AtomicBool, manager_failed: AtomicBool,
@@ -328,12 +333,122 @@ impl<T> Default for Pipe<T> { fn default() -> Self { Self { io: None, close: Clo
 #[derive(Default)]
 struct Resources {
     inspection: Option<JoinHandle<Result<VerifiedRuntime, BridgeError>>>, inspection_joined: bool, inspection_failed: bool,
+    inspection_error: Option<tokio::task::JoinError>,
     acquisition: Option<JoinHandle<()>>, acquisition_joined: bool, acquisition_failed: bool,
+    acquisition_error: Option<tokio::task::JoinError>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    native: Option<Arc<Mutex<AndroidNativeBooks>>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    native_settlement: Option<JoinHandle<NativeSettlement>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    native_return: Option<Result<NativeSettlement, tokio::task::JoinError>>,
+    native_started: bool, native_joined: bool, native_failed: bool,
     child: Option<Child>, waited: Option<ExitStatus>, wait_failed: bool,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     write_end: Option<WriteEnd>, out_end: Option<ReadEnd>, err_end: Option<ReadEnd>,
     write_failed: bool, out_failed: bool, err_failed: bool, frames: Option<mpsc::Receiver<Frame>>,
 }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativePhase { New, Inspecting, Ready, Claimed, Refused, Settling, Settled, Unknown }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+struct AndroidNativeBooks {
+    runtime: InstalledRuntimeCustody, tools: AndroidToolchainCustody,
+    phase: NativePhase, failure: Option<AdmissionFailure>, settlement_started: bool,
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone, Copy, Debug)]
+struct NativeSettlement { originals_closed: bool, integrity: bool }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl AndroidNativeBooks {
+    fn new(profile: AndroidToolchainProfile, audit_cutoff: watch::Receiver<Instant>) -> Self {
+        let budget = Arc::new(AndroidDescriptorBudget::new(audit_cutoff));
+        Self { runtime: InstalledRuntimeCustody::new_android(budget.clone()), tools: AndroidToolchainCustody::new(profile, budget),
+            phase: NativePhase::New, failure: None, settlement_started: false }
+    }
+    fn inspect_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if self.phase != NativePhase::New { return Err(BridgeError::cleanup_unknown()); }
+        self.phase = NativePhase::Inspecting;
+        let result = self.runtime.retain_android_once(end, stop).and_then(|_| self.tools.inspect_once(end, stop))
+            .and_then(|_| self.runtime.android_data());
+        match result {
+            Ok(data) => { self.phase = NativePhase::Ready; Ok(data) },
+            Err(failure) => { self.failure.get_or_insert(failure); self.phase = NativePhase::Refused;
+                Err(SavedCommandDomain::AndroidBuild.unavailable()) },
+        }
+    }
+    fn request_binding(&self, runtime: &VerifiedRuntime) -> Result<android_wire::ToolchainBinding, AdmissionFailure> {
+        if self.phase != NativePhase::Ready || self.failure.is_some() || self.settlement_started { return Err(AdmissionFailure::TransferUnavailable); }
+        let actual = self.runtime.android_data()?;
+        if (actual.python, actual.bootstrap, actual.core, actual.cwd)
+            != (runtime.python.clone(), runtime.bootstrap.clone(), runtime.core.clone(), runtime.cwd.clone()) {
+            return Err(AdmissionFailure::IdentityChanged);
+        }
+        self.tools.binding_data()
+    }
+    fn check_before_spawn(&mut self, runtime: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<(), AdmissionFailure> {
+        let _ = self.request_binding(runtime)?;
+        let result = self.runtime.check_before_spawn(end, stop).and_then(|_| self.tools.check_before_spawn(end, stop));
+        if let Err(failure) = result { self.failure.get_or_insert(failure); self.phase = NativePhase::Refused; }
+        result
+    }
+    fn interrupted(&mut self) {
+        self.phase = NativePhase::Unknown; self.failure.get_or_insert(AdmissionFailure::Interrupted);
+        self.runtime.mark_interrupted(); self.tools.mark_interrupted();
+    }
+    fn settle(&mut self, used: bool, end: Instant) -> NativeSettlement {
+        if self.settlement_started || self.phase == NativePhase::Claimed && !used {
+            return NativeSettlement { originals_closed: false, integrity: false };
+        }
+        self.settlement_started = true; self.phase = NativePhase::Settling;
+        let mut integrity = !used || self.failure.is_none();
+        if used {
+            // Both independent final passes are owed even after the first error.
+            for result in [self.runtime.check_after_use(end), self.tools.check_after_use(end)] {
+                if let Err(failure) = result { self.failure.get_or_insert(failure); integrity = false; }
+            }
+        }
+        // Reverse acquisition order, independent one-attempt consuming closes.
+        let tools = self.tools.settle_originals(); let runtime = self.runtime.settle_originals();
+        let originals_closed = tools == CloseOutcome::Settled && runtime == CloseOutcome::Settled
+            && self.tools.settled() && self.runtime.settled();
+        self.phase = if originals_closed { NativePhase::Settled } else { NativePhase::Unknown };
+        NativeSettlement { originals_closed, integrity }
+    }
+    fn settled(&self) -> bool { self.phase == NativePhase::Settled && self.runtime.settled() && self.tools.settled() }
+}
+fn original_session(r: &Registry, owner: &Session) -> bool {
+    r.active.as_ref().is_some_and(|a| std::ptr::eq(Arc::as_ptr(&a.owner), owner)
+        && a.owner.domain == owner.domain && a.owner.id == owner.id && a.owner.generation == owner.generation
+        && a.owner.context == owner.context && a.owner.registration == owner.registration && a.owner.project == owner.project)
+}
+// Clock/identity veto only, never a substitute for original resource joins.
+// In particular, a previously positive final task result cannot retire a now
+// Unknown owner or release its exclusion after H/earlier F+10.
+fn final_clock_clear(r: &Registry, owner: &Session, now: Instant) -> bool {
+    original_session(r, owner) && !r.disabled && !r.exhausted && !owner.resource_unknown.load(Ordering::SeqCst)
+        && r.active.as_ref().is_some_and(|a| !a.unknown && now < owner.clocks.settlement(a.first_stop))
+}
+fn native_worker_lost(book: &Resources, owner: &Session) {
+    if owner.domain != SavedCommandDomain::AndroidBuild { return; }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(native) = &book.native {
+        // Called ONLY after the actual original worker's failed Ready return.
+        match native.lock() { Ok(mut native) => native.interrupted(), Err(error) => error.into_inner().interrupted() }
+    }
+}
+fn native_final(book: &Resources, domain: SavedCommandDomain) -> bool {
+    if domain == SavedCommandDomain::OfflinePreflight { return true; }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        book.native_started && book.native_joined && !book.native_failed && book.native_settlement.is_none()
+            && matches!(book.native_return.as_ref(), Some(Ok(NativeSettlement { originals_closed: true, integrity: true })))
+            && book.native.as_ref().is_some_and(|native| native.lock().is_ok_and(|native| native.settled()))
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { let _ = book; false }
+}
+
 struct WriteEnd { sent: bool, closed: bool, failed: bool }
 struct ReadEnd { frames: usize, eof: bool, closed: bool, failed: bool, decoder_settled: bool }
 struct Admitted { status: Status, release: Option<oneshot::Sender<()>> }
@@ -364,7 +479,9 @@ fn retire(mut projection: RunProjection, reason: Reason) -> RunProjection {
 
 impl SavedCommandOwner {
     pub(crate) fn offline_preflight(runtime: RuntimeConfig) -> Self { Self::new(runtime, SavedCommandDomain::OfflinePreflight) }
-    pub(crate) fn android_build(runtime: RuntimeConfig) -> Self { Self::new(runtime, SavedCommandDomain::AndroidBuild) }
+    pub(crate) fn android_build(runtime: RuntimeConfig, toolchain: Option<AndroidToolchainProfile>) -> Self {
+        Self::new_selected(runtime, SavedCommandDomain::AndroidBuild, toolchain)
+    }
     fn require_domain(&self, domain: SavedCommandDomain) -> Result<(), BridgeError> {
         if self.inner.domain == domain { Ok(()) } else { Err(self.inner.domain.invalid_owner()) }
     }
@@ -411,9 +528,10 @@ impl SavedCommandOwner {
 }
 
 impl SavedCommandOwner {
-    fn new(runtime: RuntimeConfig, domain: SavedCommandDomain) -> Self {
+    fn new(runtime: RuntimeConfig, domain: SavedCommandDomain) -> Self { Self::new_selected(runtime, domain, None) }
+    fn new_selected(runtime: RuntimeConfig, domain: SavedCommandDomain, toolchain: Option<AndroidToolchainProfile>) -> Self {
         let (changes, _) = watch::channel(0);
-        Self { inner: Arc::new(Inner { domain, runtime, registry: Mutex::new(Registry { revision: 0, exhausted: false,
+        Self { inner: Arc::new(Inner { domain, runtime, toolchain, registry: Mutex::new(Registry { revision: 0, exhausted: false,
             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified,
             prepared: None, active: None, last: None }), changes, changed: Notify::new(), poisoned: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
@@ -484,16 +602,22 @@ impl SavedCommandOwner {
         let executor = executor.ok_or_else(|| self.inner.domain.unavailable())?;
         let profile = profile.ok_or_else(|| self.inner.domain.unavailable())?;
         let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
+        let (native_audit_cutoff, audit_cutoff) = watch::channel(clocks.work);
         let (frames, receiver) = mpsc::channel(2);
         let context = prepared.projection.context;
         let projection = RunProjection { operation_id: input.operation_id.clone(), owner_generation: input.owner_generation.clone(),
             context: context.clone(), phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
         let owner = Arc::new(Session { domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
-            registration: prepared.registration, project: prepared.project, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(),
+            registration: prepared.registration, project: prepared.project, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff,
             output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false), driver_done: AtomicBool::new(false),
             driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false), watchdog_joined: AtomicBool::new(false),
             watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false), startup: Mutex::new(Startup::default()),
-            resources: AsyncMutex::new(Resources { frames: Some(receiver), ..Resources::default() }),
+            resources: AsyncMutex::new(Resources { frames: Some(receiver),
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                native: if self.inner.domain == SavedCommandDomain::AndroidBuild {
+                    self.inner.toolchain.clone().map(|profile| Arc::new(Mutex::new(AndroidNativeBooks::new(profile, audit_cutoff))))
+                } else { None },
+                ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())), error: Arc::new(AsyncMutex::new(Pipe::default())),
             driver: AsyncMutex::new(None), watchdog: Mutex::new(None), manager: AsyncMutex::new(None), observer: AsyncMutex::new(None),
             driver_return: Mutex::new(None), manager_return: Mutex::new(None), observer_return: Mutex::new(None), watchdog_return: Mutex::new(None),
@@ -592,7 +716,13 @@ impl SavedCommandOwner {
         owner.watchdog_joined.store(joined && recorded, Ordering::SeqCst);
         owner.watchdog_failed.store(!joined || !recorded, Ordering::SeqCst);
         if positive && recorded {
-            watchdog_slot.take(); self.inner.advance_locked(&mut r, &owner, Instant::now());
+            self.inner.advance_locked(&mut r, &owner, Instant::now());
+            if !final_clock_clear(&r, &owner, Instant::now()) {
+                // Keep both the actual Ready result and the same original
+                // handle/owner. final_join_seen prevents re-polling that handle.
+                owner.resource_unknown.store(true, Ordering::SeqCst); self.inner.unknown_locked(&mut r, &owner); return;
+            }
+            watchdog_slot.take();
             if let Some(mut active) = r.active.take() {
                 if !Arc::ptr_eq(&active.owner, &owner) { r.active = Some(active); return; }
                 active.projection.phase = if active.unknown { Phase::Unknown } else { Phase::Terminal };
@@ -639,7 +769,7 @@ impl Inner {
             .is_some_and(|permit| permit.permits(self)) { return true; }
         match self.domain {
             SavedCommandDomain::OfflinePreflight => OFFLINE_NATIVE_QUALIFIED && OFFLINE_RUNTIME_QUALIFIED,
-            SavedCommandDomain::AndroidBuild => ANDROID_NATIVE_QUALIFIED && ANDROID_RUNTIME_QUALIFIED && ANDROID_TOOLCHAIN_QUALIFIED,
+            SavedCommandDomain::AndroidBuild => ANDROID_NATIVE_QUALIFIED && ANDROID_RUNTIME_QUALIFIED && ANDROID_TOOLCHAIN_QUALIFIED && self.toolchain.is_some(),
         }
     }
     fn lock(&self) -> MutexGuard<'_, Registry> {
@@ -709,6 +839,12 @@ impl Inner {
         let Some(active) = r.active.as_mut().filter(|a| a.owner.id == owner.id) else { return; };
         let at = at.min(owner.clocks.work).max(owner.clocks.admitted); let mut changed = false;
         if active.first_stop.is_none() { active.first_stop = Some(at); changed = true; }
+        if owner.domain == SavedCommandDomain::AndroidBuild {
+            let end = owner.clocks.work.min(owner.clocks.settlement(active.first_stop));
+            owner.native_audit_cutoff.send_if_modified(|current| {
+                if end < *current { *current = end; true } else { false }
+            });
+        }
         if active.projection.reason == Reason::None && reason != Reason::None { active.projection.reason = reason; changed = true; }
         if !active.unknown && active.projection.phase != Phase::Stopping { active.projection.phase = Phase::Stopping; changed = true; }
         if active.projection.reason != Reason::None { set_failure_outcome(&mut active.projection); }
@@ -971,18 +1107,20 @@ async fn watchdog(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard) -> b
     // Acyclic: watchdog -> final observer -> manager -> driver/original book.
     // Direct Ready waiting keeps both W/H and the original JoinHandle waker
     // alive even while the final observer itself is held before return.
-    let positive = {
-        let mut observer = owner.observer.lock().await;
-        if observer.is_none() { false } else {
-            let result = join_with_clock(&mut observer, &inner, &owner).await;
-            let positive = matches!(&result, Ok(true));
-            let recorded = record_join(&owner.observer_return, result);
-            if positive && recorded { observer.take(); }
-            positive && recorded
-        }
+    let mut observer = owner.observer.lock().await;
+    let observed = if observer.is_none() { false } else {
+        let result = join_with_clock(&mut observer, &inner, &owner).await;
+        let positive = matches!(&result, Ok(true));
+        let recorded = record_join(&owner.observer_return, result);
+        positive && recorded
     };
+    // Preserve the actual observer Ready result even when finality has since
+    // become Unknown. Do not consume its original handle before this veto.
+    let in_time = inner.endpoint(&owner).is_some();
+    let positive = observed && in_time;
+    if positive { observer.take(); }
+    drop(observer);
     if !positive { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner); }
-    inner.endpoint(&owner); // Last synchronous clock veto, no new await/effect.
     guard.complete = true; positive
 }
 async fn join_slot<T>(slot: &mut Option<JoinHandle<T>>) -> Result<T, tokio::task::JoinError> {
@@ -1038,52 +1176,168 @@ fn spawn_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime) {
         }
     }
 }
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn spawn_android_original(inner: &Inner, owner: &Session, runtime: VerifiedRuntime, native: Option<Arc<Mutex<AndroidNativeBooks>>>) {
+    if owner.domain != SavedCommandDomain::AndroidBuild || inner.domain != owner.domain || !inner.qualified()
+        || Profile::current(owner.domain) != Some(owner.profile) { inner.stop(owner, Reason::ToolchainUnavailable); return; }
+    let Some(native) = native else { inner.stop(owner, Reason::ToolchainUnavailable); return; };
+    let mut native = match native.lock() { Ok(native) => native, Err(_) => { inner.unknown(owner); return; } };
+    // All command DATA construction precedes native checks and the final claim.
+    let mut command = Command::new(&runtime.python);
+    command.args(["-I", "-S", "-B"]).arg(&runtime.bootstrap).arg(&runtime.core);
+    command.current_dir(&runtime.cwd).env_clear().env("LANG", "C").env("LC_ALL", "C")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+    if native.check_before_spawn(&runtime, owner.clocks.work, &owner.stop.subscribe()).is_err() {
+        inner.stop(owner, Reason::ToolchainMismatch); return;
+    }
+    let mut startup = match owner.startup.lock() { Ok(startup) => startup, Err(_) => { inner.unknown(owner); return; } };
+    let mut registry = inner.lock(); inner.advance_locked(&mut registry, owner, Instant::now());
+    if !original_session(&registry, owner) || registry.disabled || registry.exhausted || registry.stopping || registry.document_lost
+        || *owner.stop.borrow() || Instant::now() >= owner.clocks.work || startup.attempted || startup.returned || startup.failed
+        || startup.child.is_some() || native.phase != NativePhase::Ready || native.failure.is_some() || native.settlement_started { return; }
+    native.phase = NativePhase::Claimed;
+    startup.attempted = true; // One final active-Session/STOP/W claim, before effect.
+    drop(registry);
+    match command.spawn() { // No await, IO, recheck, callback or other work after claim.
+        Ok(child) => { startup.child = Some(child); startup.returned = true; },
+        Err(_) => { startup.failed = true; owner.resource_unknown.store(true, Ordering::SeqCst); drop(startup);
+            inner.stop(owner, Reason::RuntimeUnavailable); inner.unknown(owner); },
+    }
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn native_consumers_returned(book: &Resources, startup: &Startup, inner: &Inner, owner: &Session) -> bool {
+    // Failed flags alone are not a returned borrower: keep the actual failed
+    // original handle AND its Ready JoinError. Never infer return from timeout.
+    let inspection_returned = if book.inspection_failed {
+        !book.inspection_joined && book.inspection.is_some() && book.inspection_error.is_some()
+    } else { book.inspection.is_none() && book.inspection_error.is_none() };
+    let acquisition_returned = if book.acquisition_failed {
+        !book.acquisition_joined && book.acquisition.is_some() && book.acquisition_error.is_some()
+    } else { book.acquisition.is_none() && book.acquisition_error.is_none() };
+    if !inspection_returned || !acquisition_returned { return false; }
+    if !startup.attempted { return !startup.returned && !startup.failed && startup.child.is_none() && book.child.is_none(); }
+    if !startup.returned || startup.failed || !book.inspection_joined || book.inspection_failed
+        || !book.acquisition_joined || book.acquisition_failed || book.wait_failed
+        || book.waited.as_ref().is_none_or(|s| !s.success()) || startup.child.is_some() || book.writer.is_some()
+        || book.stdout.is_some() || book.stderr.is_some() || book.write_failed || book.out_failed || book.err_failed { return false; }
+    let io = book.write_end.as_ref().is_some_and(|e| e.sent && e.closed && !e.failed)
+        && book.out_end.as_ref().is_some_and(|e| e.eof && e.closed && !e.failed && e.decoder_settled && (2..=8).contains(&e.frames))
+        && book.err_end.as_ref().is_some_and(|e| e.eof && e.closed && !e.failed && e.frames == 0);
+    let registry = inner.lock();
+    io && original_session(&registry, owner) && registry.active.as_ref().is_some_and(|a| a.accepted && a.terminal
+        && matches!(&a.projection.result, Some(Terminal::AndroidBuild(t)) if t.settled()))
+}
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+async fn settle_native(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Session>) {
+    if !book.native_started {
+        let used = {
+            let startup = match owner.startup.lock() { Ok(startup) => startup, Err(_) => { inner.unknown(owner); return; } };
+            if !native_consumers_returned(book, &startup, inner, owner) { inner.unknown(owner); return; }
+            startup.attempted
+        };
+        let Some(native) = book.native.clone() else { inner.unknown(owner); return; };
+        // Each book operation ALSO reads this same original Session cutoff, so
+        // an earlier F during the audit tightens the running borrow immediately.
+        let end = *owner.native_audit_cutoff.borrow();
+        let (release, enter) = oneshot::channel();
+        book.native_started = true; // Pre-rostered slot claimed before worker creation/effects.
+        book.native_settlement = Some(tokio::task::spawn_blocking(move || {
+            if enter.blocking_recv().is_err() { return NativeSettlement { originals_closed: false, integrity: false }; }
+            match native.lock() {
+                Ok(mut native) => native.settle(used, end),
+                Err(error) => { let mut native = error.into_inner(); native.interrupted(); native.settle(used, end) },
+            }
+        }));
+        let _ = release.send(());
+    }
+    if !book.native_joined && !book.native_failed {
+        let result = join_with_clock(&mut book.native_settlement, inner, owner).await;
+        let positive = matches!(&result, Ok(NativeSettlement { originals_closed: true, integrity: true }));
+        let joined = result.is_ok();
+        if book.native_return.is_some() { book.native_failed = true; }
+        else { book.native_return = Some(result); book.native_joined = joined; book.native_failed = !joined; }
+        if joined { book.native_settlement.take(); }
+        else { native_worker_lost(book, owner); }
+        if !positive || book.native_failed { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); }
+    }
+}
+
 async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
-    // This extraction has no Android tool/runtime custody acquisition. Refuse
-    // before inspection or launch even if qualification constants were changed;
-    // an offline fixture permit must never bridge this missing authority.
-    if owner.domain == SavedCommandDomain::AndroidBuild {
+    if owner.domain == SavedCommandDomain::AndroidBuild && (!inner.qualified() || inner.toolchain.is_none()) {
         inner.stop(owner, Reason::ToolchainUnavailable); return;
     }
     let mut book = owner.resources.lock().await;
     inner.endpoint(owner);
     if *owner.stop.borrow() || Instant::now() >= owner.clocks.work { return; }
     let runtime = inner.runtime.clone(); let end = owner.clocks.work; let domain = owner.domain;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let native = book.native.clone();
+    let stop = owner.stop.subscribe();
     let (inspect_start, inspect_enter) = oneshot::channel();
     book.inspection = Some(tokio::task::spawn_blocking(move || {
         inspect_enter.blocking_recv().map_err(|_| domain.unavailable())?;
-        let result = match domain { SavedCommandDomain::OfflinePreflight => runtime.resolve_offline_preflight(end),
-            SavedCommandDomain::AndroidBuild => runtime.resolve_android_build(end) };
-        result
+        match domain {
+            SavedCommandDomain::OfflinePreflight => runtime.resolve_offline_preflight(end),
+            SavedCommandDomain::AndroidBuild => {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                {
+                    let native = native.ok_or_else(|| domain.unavailable())?;
+                    let mut native = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                    native.inspect_once(end, &stop)
+                }
+                #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+                { let _ = stop; Err(domain.unavailable()) }
+            }
+        }
     }));
-    let _ = inspect_start.send(()); // Original handle recorded BEFORE inspection effects.
+    let _ = inspect_start.send(()); // Original handle AND books registered before the first effect.
     let runtime = match join_with_clock(&mut book.inspection, inner, owner).await {
         Ok(result) => { book.inspection_joined = true; book.inspection.take(); match result {
-            Ok(runtime) => runtime, Err(_) => { inner.stop(owner, Reason::RuntimeUnavailable); return; }
+            Ok(runtime) => runtime, Err(_) => { inner.stop(owner, if owner.domain == SavedCommandDomain::AndroidBuild {
+                Reason::ToolchainUnavailable } else { Reason::RuntimeUnavailable }); return; }
         } },
-        Err(_) => { book.inspection_failed = true; owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return; },
+        Err(error) => {
+            book.inspection_failed = true; book.inspection_error = Some(error);
+            native_worker_lost(&book, owner); owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); return;
+        },
     };
     inner.endpoint(owner);
-    if *owner.stop.borrow() || Instant::now() >= owner.clocks.work { return; }
+    if *owner.stop.borrow() || Instant::now() >= owner.clocks.work || !original_session(&inner.lock(), owner) { return; }
     let bytes = match (&owner.context, owner.profile) {
         (Context::OfflinePreflight(context), Profile::OfflinePreflight(profile)) =>
             wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd),
-        // No ToolchainBinding is invented or accepted as custody. A later,
-        // independently reviewed native tool owner must supply original records
-        // before an Android request/launch branch can exist here.
-        (Context::AndroidBuild(_), Profile::AndroidBuild(_)) => {
-            inner.stop(owner, Reason::ToolchainUnavailable); return;
+        (Context::AndroidBuild(context), Profile::AndroidBuild(profile)) => {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            {
+                let binding = book.native.as_ref().and_then(|native| native.lock().ok())
+                    .and_then(|native| native.request_binding(&runtime).ok());
+                match binding { Some(binding) => android_wire::request(&owner.id, &owner.generation, context, profile, &owner.project, &runtime.cwd, &binding),
+                    None => Err(owner.domain.unavailable()) }
+            }
+            #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+            { let _ = (context, profile); Err(owner.domain.unavailable()) }
         }
         _ => Err(BridgeError::protocol()),
     };
     match bytes { Ok(bytes) => *owner.request.lock().await = Some(bytes), Err(_) => { inner.stop(owner, Reason::ProtocolError); return; } }
     let acquisition_owner = owner.clone(); let acquisition_inner = inner.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let acquisition_native = book.native.clone();
     let (acquire_start, acquire_enter) = oneshot::channel();
     book.acquisition = Some(tokio::task::spawn_blocking(move || {
-        if acquire_enter.blocking_recv().is_ok() { spawn_original(&acquisition_inner, &acquisition_owner, runtime); }
-        else { acquisition_inner.stop(&acquisition_owner, Reason::Cancelled); }
+        if acquire_enter.blocking_recv().is_ok() {
+            match acquisition_owner.domain {
+                SavedCommandDomain::OfflinePreflight => spawn_original(&acquisition_inner, &acquisition_owner, runtime),
+                SavedCommandDomain::AndroidBuild => {
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    spawn_android_original(&acquisition_inner, &acquisition_owner, runtime, acquisition_native);
+                    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+                    acquisition_inner.stop(&acquisition_owner, Reason::ToolchainUnavailable);
+                }
+            }
+        } else { acquisition_inner.stop(&acquisition_owner, Reason::Cancelled); }
     }));
-    let _ = acquire_start.send(()); // The original blocking acquisition cannot precede custody.
+    let _ = acquire_start.send(());
 }
 async fn drive(inner: Arc<Inner>, owner: Arc<Session>, enter: oneshot::Receiver<()>, mut guard: Guard) {
     if enter.await.is_err() { inner.stop(&owner, Reason::Cancelled); }
@@ -1122,13 +1376,15 @@ async fn continue_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     if book.inspection.is_some() && !book.inspection_joined && !book.inspection_failed {
         match join_with_clock(&mut book.inspection, inner, owner).await {
             Ok(_) => { book.inspection_joined = true; book.inspection.take(); }, // Late runtime DATA never launches.
-            Err(_) => { book.inspection_failed = true; owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); },
+            Err(error) => { book.inspection_failed = true; book.inspection_error = Some(error); native_worker_lost(&book, owner);
+                owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); },
         }
     }
     if book.acquisition.is_some() && !book.acquisition_joined && !book.acquisition_failed {
         match join_with_clock(&mut book.acquisition, inner, owner).await {
             Ok(()) => { book.acquisition_joined = true; book.acquisition.take(); },
-            Err(_) => { book.acquisition_failed = true; owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); },
+            Err(error) => { book.acquisition_failed = true; book.acquisition_error = Some(error); native_worker_lost(&book, owner);
+                owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(owner); },
         }
     }
     let expected = {
@@ -1190,6 +1446,8 @@ async fn continue_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         }
     }
     if expected { require_terminal(inner, owner); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if owner.domain == SavedCommandDomain::AndroidBuild { settle_native(&mut book, inner, owner).await; }
     // No broad signal or PID discovery. EOF is cooperative STOP; an unreturned
     // original child stays retained at H, even if its terminal was once positive.
 }
@@ -1267,7 +1525,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>, mut guard: Guard)
                 && book.err_end.as_ref().is_some_and(|r| r.frames == 0 && !r.failed)
                 && book.write_end.as_ref().is_some_and(|r| r.sent && !r.failed)
         } else { true };
-        manager_joined && startup_settled && io_joined && io && protocol && owner.driver_joined.load(Ordering::SeqCst)
+        manager_joined && startup_settled && io_joined && io && protocol && native_final(&book, owner.domain)
+            && owner.driver_joined.load(Ordering::SeqCst)
             && !owner.resource_unknown.load(Ordering::SeqCst)
     };
     if !settled { inner.unknown(&owner); }

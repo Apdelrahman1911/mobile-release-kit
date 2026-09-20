@@ -1,13 +1,13 @@
 # Saved Android build and inspection
 
-**Implementation status:** the core service is under development. This is not
-an enabled Desktop action, a qualified tool installation, or a production-ready
-release feature. Native application integration and platform verification are
-separate requirements. No current availability flag is enabled by this document.
+**Implementation status:** the core service and guided Desktop controls are
+implemented in preparation source, but execution remains disabled pending
+runtime/toolchain custody and native platform qualification. This is not a
+production-ready release feature. No availability flag is enabled by this document.
 
 ## What this action is for
 
-The planned **Build saved Android project and inspect output** action builds one
+The **Build Android app** flow in Releases is designed to build one
 explicit Android application module and variant, then inspects one captured AAB
 (Android App Bundle). It uses the existing Mobile Release Kit core rather than
 running the CLI or parsing console output.
@@ -66,5 +66,8 @@ to settle. Until then, the application must keep showing the original status.
 - A complete local result intentionally retains its captured artifact. An
   incomplete retained artifact is not promoted into a successful result.
 
-Native UI progress, contextual help, recovery presentation and actual toolchain
-qualification must enforce these same distinctions before the action is enabled.
+The UI keeps the original build's Status and Cancel controls available when
+navigating elsewhere. Its result also appears in Artifacts without being promoted
+to authenticated candidate evidence. A lost acknowledgement never automatically
+repeats Start; unknown cleanup remains blocking. These controls and contextual
+help do not replace actual runtime/toolchain and native platform qualification.

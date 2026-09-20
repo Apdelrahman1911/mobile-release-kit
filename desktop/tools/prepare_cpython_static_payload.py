@@ -25,15 +25,20 @@ APPROVED_NOTICE_INVENTORY_SHA256: str | None = None
 LICENSE_BYTES = 13804
 LICENSE_SHA256 = "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231"
 
-# The existing generic preparer alone adds these three payloads and manifest.
+# The generic preparer alone adds core.zip, six bootstraps, the CA and manifest.
 MAX_FILES = 2048
 MAX_ENTRIES = 8192
 MAX_PATH_PARTS = 16
 MAX_PATH_BYTES = 512
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
-RESERVED_PAYLOAD_FILES = ("core.zip", "engine_bootstrap.py", "config_edit_bootstrap.py")
+RESERVED_PAYLOAD_FILES = (
+    "core.zip", "engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
+    "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py", "github-ca.pem",
+)
 RESERVED_ENTRIES = len(RESERVED_PAYLOAD_FILES) + 1
+# Unchanged aggregate reserve: core plus ZIP overhead, six bounded bootstraps,
+# the fixed CA and final manifest. This is not a larger supplier byte budget.
 RESOURCE_BYTE_HEADROOM = 64 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_MANIFEST_NODES = 20_000

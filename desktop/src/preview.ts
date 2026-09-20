@@ -1,4 +1,5 @@
 import { offlinePreflightError } from './offlinePreflightProtocol.ts';
+import { androidBuildError } from './androidBuildProtocol.ts';
 import fieldHelp from '../../src/mobile_release/api/data/field-help.json' with { type: 'json' };
 import projectSchema from '../../src/mobile_release/api/data/project.schema.json' with { type: 'json' };
 import githubSetupResource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
@@ -72,6 +73,7 @@ const workflowUnavailable = async (): Promise<never> => { throw workflowEditErro
 const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
 const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
 const offlineUnavailable = (): Promise<never> => Promise.reject(offlinePreflightError({ code: 'offline_preflight_unavailable' }));
+const androidUnavailable = (): Promise<never> => Promise.reject(androidBuildError({ code: 'android_build_unavailable' }));
 const diagnosticsUnavailable = (): Promise<never> => Promise.reject(environmentDiagnosticsError({ code: 'environment_diagnostics_unavailable' }));
 
 // Deliberate design fixture, not a core assessment or a source of version policy.
@@ -148,6 +150,11 @@ export const previewApi: DesktopApi = {
   },
   // Browser requirements are explicit design examples. There is no successful
   // diagnostics fixture, native status, owner or fallback after a bridge error.
+  prepareAndroidBuild: androidUnavailable,
+  startAndroidBuild: androidUnavailable,
+  androidBuildStatus: androidUnavailable,
+  cancelAndroidBuild: androidUnavailable,
+  subscribeAndroidBuild: androidUnavailable,
   prepareOfflinePreflight: offlineUnavailable,
   startOfflinePreflight: offlineUnavailable,
   offlinePreflightStatus: offlineUnavailable,

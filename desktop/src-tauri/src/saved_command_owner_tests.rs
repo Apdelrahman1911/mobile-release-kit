@@ -19,14 +19,21 @@ fn projection(domain: SavedCommandDomain) -> RunProjection { RunProjection {
     phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None,
 } }
 fn active(domain: SavedCommandDomain) -> (SavedCommandOwner, Arc<Session>) {
-    let application = application(domain); let mut p = projection(domain);
+    active_in(application(domain))
+}
+// Only cfg(test) DATA. A clone keeps the existing bridge owner's Arc; no
+// replacement registry/permit, native handle or positive receipt is installed.
+fn active_in(application: SavedCommandOwner) -> (SavedCommandOwner, Arc<Session>) {
+    let domain = application.inner.domain; let mut p = projection(domain);
     let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending);
     let (frames, receiver) = mpsc::channel(2);
+    let clocks = Clocks::new(domain, Instant::now());
+    let (native_audit_cutoff, _) = watch::channel(clocks.work);
     let profile = match domain { SavedCommandDomain::OfflinePreflight => Profile::OfflinePreflight(wire::Profile::LinuxX64),
         SavedCommandDomain::AndroidBuild => Profile::AndroidBuild(android_wire::Profile::LinuxX64) };
     let owner = Arc::new(Session { domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
-        profile, clocks: Clocks::new(domain, Instant::now()), registration: 1, project: project(), request: AsyncMutex::new(None),
-        stop, pipes, frames, wake: Notify::new(), output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
+        profile, clocks, registration: 1, project: project(), request: AsyncMutex::new(None),
+        stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
         driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
         watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false),
         startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(receiver), ..Resources::default() }),
@@ -42,6 +49,125 @@ fn active(domain: SavedCommandDomain) -> (SavedCommandOwner, Arc<Session>) {
         accepted: false, terminal: false, unknown: false, final_join_seen: false });
     (application, owner)
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn bound_document_model() -> (Arc<crate::bridge::DesktopBridge>, crate::asset_session::DocumentBinding) {
+    // The normal bridge constructor creates an EditOwner nonce, not a runtime
+    // or task. These invented lifecycle inputs do not qualify a native hook.
+    let bridge = Arc::new(crate::bridge::DesktopBridge::new("/unopened-document-model-runtime".into()));
+    assert!(!bridge.edits.disabled());
+    let document = crate::asset_session::DocumentBinding::new(bridge.clone());
+    document.hook_installed();
+    document.observe(|lifetime| lifetime.started(true));
+    document.observe(|lifetime| lifetime.finished(true));
+    (bridge, document)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration_callback() {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+        let (bridge, document) = bound_document_model();
+        let original = match domain {
+            SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
+            SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
+        };
+        original.inner.lock().prepared = Some(Prepared { projection: projection(domain),
+            expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project() });
+        assert!(!original.inner.qualified());
+        assert_eq!(document.offline_preflight_status().unwrap().availability, wire::Availability::Busy);
+        assert_eq!(document.android_build_status().unwrap().availability, android_wire::Availability::Busy);
+        assert_eq!(document.environment_diagnostics_status().unwrap().capability.reason,
+            crate::environment_diagnostics_protocol::Availability::Busy);
+        assert!(document.open_session().err().unwrap().reason == crate::asset_commands::Reason::Busy);
+        assert_eq!(document.passive_query(&bridge, crate::protocol::Method::Catalog, json!({})).err().unwrap().code, domain.busy().code);
+        assert_eq!(bridge.open_config_edit("main", "unregistered-model".into()).err().unwrap().code, domain.busy().code);
+        // Only the document's actual admission callback runs; this callback
+        // writes no file, creates no EditOwner session and cannot launch work.
+        let entered = std::cell::Cell::new(false);
+        document.configuration_edit_admit(|_| { entered.set(true); Ok(()) }).unwrap();
+        assert!(entered.get() && original.can_exit());
+        let r = original.inner.lock();
+        assert!(r.prepared.is_none() && r.active.is_none());
+        let retired = r.last.as_ref().unwrap();
+        assert_eq!(retired.reason, Reason::ContextChanged);
+        assert!(!retired.intent_usable && retired.result.is_none());
+        drop(r);
+        // Removing the redundant shell idle check does not bypass shutdown or
+        // document loss: the same admission method must still refuse callback.
+        entered.set(false); original.request_shutdown();
+        assert_eq!(document.configuration_edit_admit(|_| { entered.set(true); Ok(()) }).err().unwrap().code, "shutting_down");
+        document.lost();
+        assert!(document.configuration_edit_admit(|_| { entered.set(true); Ok(()) }).is_err());
+        assert!(!entered.get());
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[test]
+fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_and_cancel() {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+        let (bridge, document) = bound_document_model();
+        let original = match domain {
+            SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
+            SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
+        };
+        let (application, owner) = active_in(original.clone());
+        assert!(Arc::ptr_eq(&application.inner, &original.inner) && !application.inner.qualified());
+        // Real mutex contention keeps reconciliation observation-only while
+        // exercising Active. There is NO synthetic JoinHandle/return receipt.
+        // Once released, the real missing-original path must become Unknown.
+        let watchdog = owner.watchdog.lock().unwrap();
+        assert!(watchdog.is_none());
+        assert_eq!(document.offline_preflight_status().unwrap().availability, wire::Availability::Busy);
+        assert_eq!(document.android_build_status().unwrap().availability, android_wire::Availability::Busy);
+        assert_eq!(document.environment_diagnostics_status().unwrap().capability.reason,
+            crate::environment_diagnostics_protocol::Availability::Busy);
+        assert!(document.open_session().err().unwrap().reason == crate::asset_commands::Reason::Busy);
+        assert_eq!(document.passive_query(&bridge, crate::protocol::Method::Catalog, json!({})).err().unwrap().code, domain.busy().code);
+        let entered = std::cell::Cell::new(false);
+        assert_eq!(document.configuration_edit_admit(|_| { entered.set(true); Ok(()) }).err().unwrap().code, domain.busy().code);
+        assert!(!entered.get() && *owner.stop.borrow());
+        let lookup = std::cell::Cell::new(false);
+        assert!(document.workflow_edit_admit(|_| { lookup.set(true); Ok("unregistered-model".into()) }, |_, _| Ok(())).is_err());
+        assert!(!lookup.get());
+        let first_stop = {
+            let r = application.inner.lock(); let a = r.active.as_ref().unwrap();
+            assert!(Arc::ptr_eq(&a.owner, &owner) && !a.unknown && !a.final_join_seen && r.last.is_none());
+            assert_eq!(a.projection.reason, Reason::ContextChanged); a.first_stop.unwrap()
+        };
+        drop(watchdog);
+        assert!(!application.can_exit() && application.disabled());
+        assert_eq!(document.offline_preflight_status().unwrap().availability, wire::Availability::CleanupUnknown);
+        assert_eq!(document.android_build_status().unwrap().availability, android_wire::Availability::CleanupUnknown);
+        assert_eq!(document.passive_query(&bridge, crate::protocol::Method::Catalog, json!({})).err().unwrap().code, "cleanup_unknown");
+        assert!(document.configuration_edit_admit(|_| { entered.set(true); Ok(()) }).is_err());
+        assert!(!entered.get());
+        document.lost(); application.request_shutdown();
+        match domain {
+            SavedCommandDomain::OfflinePreflight => {
+                let status = document.cancel_offline_preflight(wire::Cancel { operation_id: owner.id.clone(), owner_generation: owner.generation.clone() }).unwrap();
+                assert_eq!(status.operation.unwrap().phase, wire::Phase::Unknown);
+            },
+            SavedCommandDomain::AndroidBuild => {
+                let status = document.cancel_android_build(android_wire::Cancel { operation_id: owner.id.clone(), owner_generation: owner.generation.clone() }).unwrap();
+                assert_eq!(status.operation.unwrap().phase, android_wire::Phase::Unknown);
+            },
+        }
+        let r = application.inner.lock(); let a = r.active.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&a.owner, &owner) && a.unknown && !a.final_join_seen && r.last.is_none());
+        assert_eq!(a.first_stop, Some(first_stop)); assert!(a.projection.public().result.is_none());
+        let resources = owner.resources.try_lock().unwrap();
+        assert!(resources.inspection.is_none() && resources.acquisition.is_none() && resources.child.is_none());
+        assert!(resources.writer.is_none() && resources.stdout.is_none() && resources.stderr.is_none());
+        assert!(!owner.startup.lock().unwrap().attempted && owner.driver_return.lock().unwrap().is_none()
+            && owner.manager_return.lock().unwrap().is_none() && owner.observer_return.lock().unwrap().is_none()
+            && owner.watchdog_return.lock().unwrap().is_none());
+        // This model proves gate/STOP behavior only. Acquired active custody,
+        // native dialog quit, positive joins and actual disposal remain hosted.
+    }
+}
+
 fn android_terminal(value: &Value) -> android_wire::Terminal {
     android_wire::terminal(value, &android_wire::tests::context()).unwrap()
 }
@@ -131,16 +257,123 @@ fn unsupported_android_without_originals_never_claims_document_loss() {
 #[tokio::test]
 async fn missing_android_tool_custody_refuses_before_inspection_or_acquisition() {
     let (application, owner) = active(SavedCommandDomain::AndroidBuild);
-    // The typed Android branch has no custody acquisition implementation. Even
-    // a directly exercised inert Session cannot turn its DTO into authority.
+    // Missing fixed selection/qualification refuses before the implemented
+    // custody path. An inert Session cannot turn its DTO into authority.
     start_original(&application.inner, &owner).await;
     let book = owner.resources.lock().await;
     assert!(book.inspection.is_none() && book.acquisition.is_none() && book.child.is_none());
     assert!(book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none());
+    assert!(!native_final(&book, SavedCommandDomain::AndroidBuild));
+    assert!(native_final(&book, SavedCommandDomain::OfflinePreflight)); // Added conjunct never borrows Offline tools.
     assert!(!owner.startup.lock().unwrap().attempted && owner.request.lock().await.is_none());
     let r = application.inner.lock(); let a = r.active.as_ref().unwrap();
     assert_eq!((a.projection.reason, a.projection.outcome), (Reason::ToolchainUnavailable, Some(Outcome::Refused)));
     assert!(a.first_stop.is_some() && !a.terminal && !a.final_join_seen && r.last.is_none());
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[tokio::test]
+async fn failed_original_startup_tasks_keep_ready_errors_and_are_not_repolled() {
+    let (application, owner) = active(SavedCommandDomain::AndroidBuild);
+    {
+        let mut book = owner.resources.lock().await;
+        // Real memory-task handles, not native inspection/acquisition success.
+        book.inspection = Some(tokio::spawn(pending::<Result<VerifiedRuntime, BridgeError>>()));
+        book.acquisition = Some(tokio::spawn(pending::<()>()));
+        assert!(!native_consumers_returned(&book, &owner.startup.lock().unwrap(), &application.inner, &owner));
+        book.inspection_failed = true; book.acquisition_failed = true;
+        assert!(!native_consumers_returned(&book, &owner.startup.lock().unwrap(), &application.inner, &owner));
+        book.inspection_failed = false; book.acquisition_failed = false;
+        book.inspection.as_ref().unwrap().abort(); book.acquisition.as_ref().unwrap().abort();
+    }
+    continue_original(&application.inner, &owner).await;
+    {
+        let book = owner.resources.lock().await;
+        assert!(book.inspection_failed && !book.inspection_joined && book.inspection.is_some());
+        assert!(book.acquisition_failed && !book.acquisition_joined && book.acquisition.is_some());
+        assert!(book.inspection_error.as_ref().is_some_and(|e| e.is_cancelled()));
+        assert!(book.acquisition_error.as_ref().is_some_and(|e| e.is_cancelled()));
+        // Actual failed Ready joins prove only that these no-launch borrowers
+        // returned. Missing books/native finality still cannot become Complete.
+        assert!(native_consumers_returned(&book, &owner.startup.lock().unwrap(), &application.inner, &owner));
+        assert!(book.native.is_none() && !book.native_started && !native_final(&book, owner.domain));
+    }
+    continue_original(&application.inner, &owner).await; // Re-polling either completed handle would panic.
+    let book = owner.resources.lock().await;
+    assert!(book.inspection_error.is_some() && book.acquisition_error.is_some());
+    assert!(!owner.startup.lock().unwrap().attempted && book.child.is_none());
+    assert!(owner.resource_unknown.load(Ordering::SeqCst) && !application.can_exit());
+}
+
+#[tokio::test]
+async fn late_inspection_data_is_cleanup_only_and_cannot_rearm_acquisition() {
+    let (application, owner) = active(SavedCommandDomain::AndroidBuild);
+    let (release, enter) = oneshot::channel();
+    owner.resources.lock().await.inspection = Some(tokio::spawn(async move {
+        enter.await.unwrap();
+        // Unopened path DATA is deliberately not a native custody fixture.
+        Ok(VerifiedRuntime { python: "/unopened/python".into(), bootstrap: "/unopened/bootstrap".into(),
+            core: "/unopened/core".into(), cwd: "/unopened".into() })
+    }));
+    application.inner.advance_locked(&mut application.inner.lock(), &owner, owner.clocks.finality);
+    release.send(()).unwrap();
+    continue_original(&application.inner, &owner).await;
+    start_original(&application.inner, &owner).await;
+    let book = owner.resources.lock().await;
+    assert!(book.inspection_joined && !book.inspection_failed && book.inspection.is_none());
+    assert!(book.acquisition.is_none() && !book.acquisition_joined && book.child.is_none());
+    assert!(!book.native_started && !owner.startup.lock().unwrap().attempted);
+    assert!(owner.request.lock().await.is_none());
+    let r = application.inner.lock(); let active = r.active.as_ref().unwrap();
+    assert!(Arc::ptr_eq(&active.owner, &owner) && active.unknown && r.last.is_none());
+    assert_eq!(active.first_stop, Some(owner.clocks.work));
+    assert!(active.projection.public().result.is_none());
+}
+
+#[tokio::test]
+async fn late_positive_memory_returns_cannot_retire_unknown_and_original_cutoff_never_renews() {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild] {
+        let (application, owner) = active(domain);
+        assert!(!application.inner.qualified());
+        let cutoff = owner.native_audit_cutoff.subscribe();
+        assert_eq!(*cutoff.borrow(), owner.clocks.work);
+        {
+            let mut r = application.inner.lock();
+            application.inner.stop_locked(&mut r, &owner, Reason::Cancelled, owner.clocks.admitted);
+            application.inner.stop_locked(&mut r, &owner, Reason::Shutdown, owner.clocks.admitted + Duration::from_secs(5));
+            assert_eq!(r.active.as_ref().unwrap().first_stop, Some(owner.clocks.admitted));
+            let expected = if domain == SavedCommandDomain::AndroidBuild { owner.clocks.admitted + SETTLEMENT } else { owner.clocks.work };
+            assert_eq!(*cutoff.borrow(), expected);
+            application.inner.advance_locked(&mut r, &owner, owner.clocks.admitted + SETTLEMENT);
+            assert!(!final_clock_clear(&r, &owner, owner.clocks.admitted + SETTLEMENT));
+        }
+        // These true payloads are arbitrary memory DATA to attack the final
+        // join envelope, NOT invented positive native/resource receipts. There
+        // is no native book, child, runtime, permit or successful final owner.
+        *owner.observer.lock().await = Some(tokio::spawn(async { true }));
+        assert!(!watchdog(application.inner.clone(), owner.clone(), Guard::new(&application.inner, &owner)).await);
+        assert!(matches!(&*owner.observer_return.lock().unwrap(), Some(Ok(true))));
+        assert!(owner.observer.lock().await.is_some()); // Veto precedes observer.take().
+        assert!(application.inner.lock().active.as_ref().unwrap().unknown);
+
+        // Separately attack the last synchronous reconciliation boundary with
+        // an actual Ready memory task: its old positive DATA must be retained,
+        // never repolled and never allowed to remove the now Unknown Active.
+        let (application, owner) = active(domain);
+        let (release, enter) = oneshot::channel(); let (sent, ready) = oneshot::channel();
+        *owner.watchdog.lock().unwrap() = Some(tokio::spawn(async move {
+            enter.await.unwrap(); sent.send(()).unwrap(); true
+        }));
+        release.send(()).unwrap(); ready.await.unwrap();
+        application.inner.advance_locked(&mut application.inner.lock(), &owner, owner.clocks.finality);
+        application.reconcile(); application.reconcile();
+        assert!(matches!(&*owner.watchdog_return.lock().unwrap(), Some(Ok(true))));
+        assert!(owner.watchdog.lock().unwrap().is_some());
+        let r = application.inner.lock(); let active = r.active.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&active.owner, &owner) && active.unknown && active.final_join_seen && r.disabled && r.last.is_none());
+        assert!(active.projection.public().result.is_none()); drop(r);
+        assert!(!application.can_exit());
+    }
 }
 
 #[test]

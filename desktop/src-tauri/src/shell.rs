@@ -131,6 +131,35 @@ async fn cancel_offline_preflight(webview: Webview, request: tauri::ipc::Request
     state.document.cancel_offline_preflight(crate::offline_preflight_protocol::cancel(&value)?)
 }
 #[tauri::command]
+async fn prepare_android_build(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_build_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_build_protocol::invalid())?;
+    let value = android_build_request_body(request.body())?;
+    state.document.prepare_android_build(crate::android_build_protocol::prepare(&value)?)
+}
+#[tauri::command]
+async fn start_android_build(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_build_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_build_protocol::invalid())?;
+    let value = android_build_request_body(request.body())?;
+    state.document.start_android_build(crate::android_build_protocol::start(&value)?)
+}
+#[tauri::command]
+async fn android_build_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_build_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_build_protocol::invalid())?;
+    let value = android_build_request_body(request.body())?;
+    crate::android_build_protocol::status_request(&value)?;
+    state.document.android_build_status()
+}
+#[tauri::command]
+async fn cancel_android_build(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::android_build_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::android_build_protocol::invalid())?;
+    let value = android_build_request_body(request.body())?;
+    state.document.cancel_android_build(crate::android_build_protocol::cancel(&value)?)
+}
+#[tauri::command]
 async fn artifact_evidence_choose(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::candidate_evidence_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?; crate::candidate_evidence_protocol::empty_request(request_body(&request)?)?;
@@ -193,9 +222,20 @@ fn preflight_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, Bridge
         tauri::ipc::InvokeBody::Json(_) => Err(crate::offline_preflight_protocol::invalid()),
     }
 }
+fn android_build_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, BridgeError> {
+    match body {
+        // Preserve the original IPC byte limit and duplicate keys; a Tauri
+        // Json value has already lost that evidence and is not admitted here.
+        tauri::ipc::InvokeBody::Raw(bytes) => crate::android_build_protocol::raw_request(bytes),
+        tauri::ipc::InvokeBody::Json(_) => Err(crate::android_build_protocol::invalid()),
+    }
+}
 #[cfg(test)]
 #[path = "offline_preflight_shell_tests.rs"]
 mod offline_preflight_shell_tests;
+#[cfg(test)]
+#[path = "android_build_shell_tests.rs"]
+mod android_build_shell_tests;
 fn not_closing(state: &ShellState) -> Result<(), BridgeError> {
     #[cfg(target_os = "linux")]
     { return state.document.not_quitting(); }
@@ -205,6 +245,7 @@ fn not_closing(state: &ShellState) -> Result<(), BridgeError> {
         return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action."));
     }
     state.bridge.preflight.ensure_idle()?;
+    state.bridge.android_build.ensure_idle()?;
     Ok(())
     }
 }
@@ -217,7 +258,8 @@ async fn open_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, st
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::open(request_body(&request)?)?;
-    not_closing(&state)?;
+    // The same real document gate checks quit and retires saved consent/STOP
+    // before checking idle. An outer idle-only gate would skip retirement.
     state.document.configuration_edit_admit(|bridge| bridge.open_config_edit(window, args.project_id))
 }
 #[tauri::command]
@@ -225,7 +267,6 @@ async fn prepare_config_edit(webview: Webview, request: tauri::ipc::Request<'_>,
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::prepare(request_body(&request)?)?;
-    not_closing(&state)?;
     state.document.configuration_edit_admit(|bridge| bridge.edits.prepare(window, args))
 }
 #[tauri::command]
@@ -233,7 +274,6 @@ async fn apply_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, s
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::apply(request_body(&request)?)?;
-    not_closing(&state)?;
     state.document.configuration_edit_admit(|bridge| bridge.edits.apply(window, &args.session_id, &args.plan_token))
 }
 #[tauri::command]
@@ -524,12 +564,18 @@ struct PreflightRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for PreflightRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.offline_preflight_relay_lost(); } }
 }
+struct AndroidBuildRelayGuard { document: DocumentBinding, closed: bool }
+impl Drop for AndroidBuildRelayGuard {
+    fn drop(&mut self) { if !self.closed { self.document.android_build_relay_lost(); } }
+}
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
     let mut revisions = edits.subscribe();
     let mut assets = document.subscribe();
     let mut diagnostics = document.environment_diagnostics_subscribe();
     let mut preflight = document.offline_preflight_subscribe();
     let mut preflight_guard = PreflightRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
+    let mut android_build = document.android_build_subscribe();
+    let mut android_build_guard = AndroidBuildRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
     let (start, enter) = oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
         if enter.await.is_err() { return; }
@@ -537,8 +583,10 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut diagnostics_revision = None;
         let mut preflight_revision = None;
         let mut preflight_relay_failed = false;
+        let mut android_build_revision = None;
+        let mut android_build_relay_failed = false;
         loop {
-            if *stop.borrow() { preflight_guard.closed = true; return; }
+            if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; return; }
             // status() releases its native locks before any renderer callback.
             // Events are best effort: the UI subscribes then fetches status and
             // orders both by native revision, never by arrival time.
@@ -575,13 +623,27 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                     }
                 }
             }
+            if !android_build_relay_failed {
+                match document.android_build_status() {
+                    Ok(status) => {
+                        if android_build_revision != Some(status.status_revision) {
+                            android_build_revision = Some(status.status_revision);
+                            if app.emit_to(MAIN_WINDOW, crate::android_build_protocol::EVENT, &status).is_err() {
+                                android_build_relay_failed = true; document.android_build_relay_lost();
+                            }
+                        }
+                    },
+                    Err(_) => { android_build_relay_failed = true; document.android_build_relay_lost(); },
+                }
+            }
             tokio::select! {
                 biased;
-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; return; } },
+                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; return; } },
                 result = revisions.changed() => { if result.is_err() { return; } },
                 result = assets.changed() => { if result.is_err() { return; } },
                 result = diagnostics.changed() => { if result.is_err() { return; } },
                 result = preflight.changed() => { if result.is_err() { return; } },
+                result = android_build.changed() => { if result.is_err() { return; } },
                 // Observation only: status checks fixed original endpoints and
                 // already-ended joins. It launches no operation or new clock.
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {},
@@ -666,9 +728,11 @@ fn request_shutdown(app: &tauri::AppHandle) {
         }
         app.state::<ShellState>().document.compatibility_quit_result(true);
         // No short circuit can skip another original owner's shutdown.
-        let (passive, edit, diagnostics, preflight) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown(), bridge.diagnostics.shutdown(), bridge.preflight.shutdown());
-        if passive.is_ok() && edit.is_ok() && diagnostics.is_ok() && preflight.is_ok() && bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() {
+        let (passive, edit, diagnostics, preflight, android_build) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown(), bridge.diagnostics.shutdown(), bridge.preflight.shutdown(), bridge.android_build.shutdown());
+        if passive.is_ok() && edit.is_ok() && diagnostics.is_ok() && preflight.is_ok() && android_build.is_ok()
+            && bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit() {
             if !settle_relay(&app).await { return; }
+            if !(bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit()) { return; }
             app.state::<ShellState>().exit_ready.store(true, Ordering::SeqCst);
             app.exit(0);
         } else {
@@ -1254,6 +1318,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             artifact_evidence_choose, artifact_evidence_status, artifact_evidence_observe, artifact_evidence_cancel,
             start_environment_diagnostics, environment_diagnostics_status, cancel_environment_diagnostics,
             prepare_offline_preflight, start_offline_preflight, offline_preflight_status, cancel_offline_preflight,
+            prepare_android_build, start_android_build, android_build_status, cancel_android_build,
             validate_config, suggest_config, preview_config,
             propose_github_setup,
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,

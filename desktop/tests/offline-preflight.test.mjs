@@ -486,9 +486,11 @@ test('passive/evidence admission uses reciprocal callback, while source integrat
   const retire = app.indexOf('offlinePreflightControllerRef.current?.beforeWorkspaceAction(action)');
   assert.ok(retire >= 0 && retire < app.indexOf('workspaceReducer(previous, action)') && retire < app.indexOf('if (next === previous) return'));
   assert.match(app, /new OfflinePreflightController/); assert.match(app, /useSyncExternalStore\(offlinePreflight.subscribe/);
+  assert.match(app, /savedCommandBusy = useCallback\(\(\) => preflightBusy\(\) \?\? androidBusy\(\)/);
+  assert.match(app, /otherOperationReason: \(\) => androidBusy\(\) \?\? savedCommandPrerequisiteReason\(\)/);
   assert.match(app, /page !== 'releases'.*OfflinePreflight/); assert.match(app, /onApply=.*config-save-intent/);
-  assert.match(app, /new GitHubConnectionController\(preflightBusy\)/); assert.match(app, /new CandidateEvidenceController\(preflightBusy\)/);
-  assert.match(app, /otherOperationReason: preflightBusy/); assert.match(app, /preflightBusy\(\).*diagnosticsOwnerReason/);
+  assert.match(app, /new GitHubConnectionController\(savedCommandBusy\)/); assert.match(app, /new CandidateEvidenceController\(savedCommandBusy\)/);
+  assert.match(app, /otherOperationReason: savedCommandBusy/); assert.match(app, /savedCommandBusy\(\).*diagnosticsOwnerReason/);
   assert.match(app, /passivePending\.current > 0/); assert.match(app, /environment\.passiveBusyReason\(\)/);
   assert.match(app, /\(connection\.status \?\? connection\.retained\)\?\.session/);
   assert.match(bridge, /invoke<unknown>\(command, body\)/); assert.match(bridge, /encodeOfflinePreflightRequest\(command, value\)/);

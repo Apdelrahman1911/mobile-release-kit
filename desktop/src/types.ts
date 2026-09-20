@@ -7,6 +7,7 @@ import type { EnvironmentDiagnosticsApi } from './environmentDiagnosticsTypes.ts
 import type { ReleaseVersionApi } from './releaseVersion.ts';
 import type { CandidateEvidenceApi } from './candidateEvidence.ts';
 import type { OfflinePreflightApi, SavedConfigContent } from './offlinePreflightTypes.ts';
+import type { AndroidBuildApi } from './androidBuildTypes.ts';
 
 // Closed passive service contracts. Python owns field policy and assurance.
 export type JsonPrimitive = string | number | boolean | null;
@@ -367,7 +368,7 @@ export interface PrepareConfigEditRequest {
   baselineGeneration: number;
 }
 
-export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, MetadataTextApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, OfflinePreflightApi {
+export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, MetadataTextApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, OfflinePreflightApi, AndroidBuildApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   chooseProject(): Promise<ProjectReference | null>;

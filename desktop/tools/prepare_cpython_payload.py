@@ -37,15 +37,20 @@ APPROVED_NOTICE_INVENTORY_SHA256: str | None = None
 APPROVED_STATIC_LINK_PROVENANCE_SHA256: str | None = None
 
 # Intersection with prepare_runtime.py / the runtime inspector. The existing
-# preparer alone writes core.zip, BOTH bootstraps, and manifest.json.
+# preparer alone writes core.zip, all six bootstraps, github-ca.pem and manifest.json.
 MAX_FILES = 2048
 MAX_ENTRIES = 8192
 MAX_PATH_PARTS = 16
 MAX_PATH_BYTES = 512
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
-RESERVED_PAYLOAD_FILES = ("core.zip", "engine_bootstrap.py", "config_edit_bootstrap.py")
+RESERVED_PAYLOAD_FILES = (
+    "core.zip", "engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
+    "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py", "github-ca.pem",
+)
 RESERVED_ENTRIES = len(RESERVED_PAYLOAD_FILES) + 1
+# Unchanged aggregate reserve: core plus ZIP overhead, six bounded bootstraps,
+# the fixed CA and final manifest. This is not a larger supplier byte budget.
 RESOURCE_BYTE_HEADROOM = 64 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 MAX_MANIFEST_NODES = 20_000

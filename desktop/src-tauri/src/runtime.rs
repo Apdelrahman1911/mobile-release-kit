@@ -10,7 +10,7 @@ pub const COMPILED_TARGET: &str = env!("MRK_COMPILED_TARGET");
 const MANIFEST_ANCHOR: Option<&str> = option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256");
 const PROTOCOL_ANCHOR: Option<&str> = option_env!("MRK_BUNDLED_PROTOCOL_SHA256");
 const MANIFEST_LIMIT: u64 = 1024 * 1024;
-const GITHUB_CA_LIMIT: u64 = 512 * 1024;
+pub(crate) const GITHUB_CA_LIMIT: u64 = 512 * 1024;
 // Separate from the session gate and the passive development feature. A CA
 // inventory hash is not native socket/TLS, runtime-custody or host qualification.
 pub(crate) const GITHUB_TLS_PROFILE_QUALIFIED: bool = false;
@@ -25,6 +25,14 @@ const TREE_DEPTH: usize = 16;
 const PYTHON_RESOURCE: &str = "python/python.exe";
 #[cfg(not(windows))]
 const PYTHON_RESOURCE: &str = "python/bin/python3";
+
+// Canonical fixed inventory shared by packaging and installed-data validation.
+// Presence is not runtime, TLS, XML, or native-custody qualification.
+pub(crate) const REQUIRED_RUNTIME_RESOURCES: [&str; 9] = [
+    "android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
+    "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
+    "github_connection_bootstrap.py", "offline_preflight_bootstrap.py", PYTHON_RESOURCE,
+];
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -505,8 +513,7 @@ impl RuntimeConfig {
             previous = Some(&item.path);
             if item.path == "core.zip" && item.sha256 != manifest.core_sha256 { return Err(unavailable()); }
         }
-        for required in [PYTHON_RESOURCE, "engine_bootstrap.py", "config_edit_bootstrap.py",
-            "github_connection_bootstrap.py", "github-ca.pem", "core.zip"] {
+        for required in REQUIRED_RUNTIME_RESOURCES {
             if !files.contains(required) { return Err(unavailable()); }
         }
         exact_inventory(&self.bundle_root, &files, end)?;
@@ -544,8 +551,13 @@ mod tests {
     use super::*;
     #[test]
     fn payload_names_are_portable_and_unambiguous() {
-        for name in ["core.zip", "engine_bootstrap.py", "github_connection_bootstrap.py", "github-ca.pem",
-            "python/bin/python3", "python/lib/libstdc++.so.6"] { assert!(safe_payload_path(name)); }
+        assert_eq!(REQUIRED_RUNTIME_RESOURCES, [
+            "android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
+            "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
+            "github_connection_bootstrap.py", "offline_preflight_bootstrap.py", PYTHON_RESOURCE,
+        ]);
+        for name in REQUIRED_RUNTIME_RESOURCES { assert!(safe_payload_path(name)); }
+        assert!(safe_payload_path("python/lib/libstdc++.so.6"));
         for name in ["", "/core.zip", "../core.zip", "a/./b", "a//b", "a\\b", "a:b", "NUL.txt", "com1", "LPT9.log", "trailing.", "x ", "é.py"] { assert!(!safe_payload_path(name)); }
     }
     #[cfg(not(all(feature = "development-runtime", debug_assertions)))]

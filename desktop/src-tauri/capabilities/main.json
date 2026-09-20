@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Fixed passive queries, finite configuration, local workflow or selected public metadata-text editing, saved Android offline-check consent/status/cancellation, and closed session-only credential commands with native owner qualification. Offline checks remain qualification-gated, disable core builds, and can execute trusted saved project code. Listen/unlisten for owner status only; no event emission, general filesystem, shell, opener, or remote authority.",
+  "description": "Fixed passive queries, finite configuration, local workflow or selected public metadata-text editing, saved offline-check and Android-build consent/status/cancellation, and closed session-only credential commands with native owner qualification. Offline checks disable core builds; saved Android builds remain unavailable without qualified native runtime and tool custody. Both can execute trusted saved project code. Listen/unlisten for owner status only; no event emission, general filesystem, shell, opener, or remote authority.",
   "windows": ["main"],
   "local": true,
   "permissions": [
@@ -10,6 +10,7 @@
     "allow-artifact-evidence-choose", "allow-artifact-evidence-status", "allow-artifact-evidence-observe", "allow-artifact-evidence-cancel",
     "allow-start-environment-diagnostics", "allow-environment-diagnostics-status", "allow-cancel-environment-diagnostics",
     "allow-prepare-offline-preflight", "allow-start-offline-preflight", "allow-offline-preflight-status", "allow-cancel-offline-preflight",
+    "allow-prepare-android-build", "allow-start-android-build", "allow-android-build-status", "allow-cancel-android-build",
     "allow-validate-config", "allow-suggest-config", "allow-preview-config", "allow-propose-github-setup",
     "allow-open-config-edit", "allow-prepare-config-edit", "allow-apply-config-edit",
     "allow-close-config-edit", "allow-config-edit-status",

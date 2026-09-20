@@ -3,13 +3,11 @@
 //! This is NOT executable runtime qualification. In particular, a compiled
 //! manifest, equal hashes, and retained descriptors cannot prove the external
 //! fresh-inode installer / immutable published-version / interpreter-loader
-//! contracts. Both existing production launch refusals remain necessary.
+//! contracts. Every production qualification gate remains closed.
 //!
-//! Future integration must register this actual book in the original owner's
-//! Resources BEFORE retained blocking inspection starts. It must observe that
-//! original worker's join and serialize the existing STOP/deadline admission
-//! race before transferring the book. Neither a receipt nor two Option slots
-//! prove that registration. Worker replies carry bounded observations only.
+//! The Android retained path keeps the SAME originals until its saved-command
+//! owner's actual inspection/acquisition/child/IO/native-settlement joins. Legacy
+//! inspection-only transfer remains DATA, never executable runtime authority.
 #![cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #![forbid(unsafe_code)]
 
@@ -18,13 +16,15 @@ use std::{
     mem::{ManuallyDrop, MaybeUninit},
     os::fd::{AsFd, BorrowedFd, OwnedFd},
     time::Instant,
+    sync::{Arc, atomic::{AtomicUsize, Ordering}},
 };
 use mrk_linux_mount_observation as mount;
 use rustix::{fs::{self, FileType, Mode, OFlags, RawDir, ResolveFlags, Stat}, io::Errno};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
-use crate::{protocol::{strict_json, PROTOCOL}, runtime::{safe_payload_path, COMPILED_TARGET, CORE_VERSION}};
+use crate::{protocol::{strict_json, PROTOCOL},
+    runtime::{safe_payload_path, COMPILED_TARGET, CORE_VERSION, GITHUB_CA_LIMIT, REQUIRED_RUNTIME_RESOURCES}};
 
 const TARGET: &str = "x86_64-unknown-linux-gnu";
 const MANIFEST_ANCHOR: Option<&str> = option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256");
@@ -62,7 +62,7 @@ pub(crate) enum AdmissionFailure {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Phase { New, Inspecting, InspectedOnly, Refused, Settling, Settled, Unknown }
+enum Phase { New, Inspecting, InspectedOnly, Retained, Auditing, Refused, Settling, Settled, Unknown }
 
 #[must_use]
 #[derive(Debug)]
@@ -92,7 +92,7 @@ impl CustodyObservation {
     pub(crate) fn phase(&self) -> &'static str {
         match self.phase {
             Phase::New => "new", Phase::Inspecting => "inspecting",
-            Phase::InspectedOnly => "inspectedOnly", Phase::Refused => "refused",
+            Phase::InspectedOnly => "inspectedOnly", Phase::Retained => "retained", Phase::Auditing => "auditing", Phase::Refused => "refused",
             Phase::Settling => "settling", Phase::Settled => "settled", Phase::Unknown => "unknown",
         }
     }
@@ -109,12 +109,12 @@ impl CustodyObservation {
 pub(crate) struct TransferReceipt { original_records: usize, retained_originals: usize }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct SlotId(usize);
+pub(crate) struct SlotId(usize);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Purpose {
     ProtectedAncestor(u8), ProcRoot, ProcDirectory, ProcControl,
-    InitialUserNamespace, InitialPidNamespace, OsDirectory, OsIdentity,
+    InitialUserNamespace, InitialPidNamespace, MountNamespace, OsDirectory, OsIdentity, Alias,
     Manifest, InventoryDirectory, Payload,
 }
 
@@ -132,8 +132,8 @@ enum Operation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Identity {
-    device: u64, inode: u64, mode: u32, uid: u32, gid: u32, links: u64,
+pub(crate) struct Identity {
+    pub(crate) device: u64, pub(crate) inode: u64, pub(crate) mode: u32, pub(crate) uid: u32, pub(crate) gid: u32, links: u64,
     size: i64, mtime: i64, mtime_nsec: u64, ctime: i64, ctime_nsec: u64,
 }
 
@@ -159,6 +159,9 @@ struct FdRecord {
     original: Option<ManuallyDrop<OwnedFd>>,
     identity: Option<Identity>,
     close: CloseReceipt,
+    parent: Option<(SlotId, String)>,
+    digest: Option<String>,
+    charged: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +206,9 @@ struct Work {
     read_eof: bool,
     last_digest: Option<[u8; 32]>,
     directory: Option<SlotId>,
+}
+
+struct RuntimeWork {
     walk: Vec<DirectoryFrame>,
     inventory: Option<Inventory>,
     actual_names: BTreeSet<String>,
@@ -220,7 +226,7 @@ struct Work {
 /// unobserved or repeated close on unwind. Accidentally dropping an unsettled
 /// book leaks originals and is an integration bug, NEVER a completion path.
 #[must_use]
-pub(crate) struct InstalledRuntimeCustody {
+pub(crate) struct OriginalDescriptorBook {
     phase: Phase,
     operation: Operation,
     interrupted_at: Option<Operation>,
@@ -228,9 +234,17 @@ pub(crate) struct InstalledRuntimeCustody {
     settlement_started: bool,
     interrupted: bool,
     unknown: bool,
-    transferred: bool,
     records: Vec<FdRecord>,
-    ancestors: [Option<SlotId>; PREFIX_COUNT],
+    budget: Option<Arc<AndroidDescriptorBudget>>,
+    control_slots: usize,
+    control_rounds: usize,
+    entry_observations: usize,
+    root: Option<SlotId>,
+    mount_namespace: Option<SlotId>,
+    hash_left: [u64; 2],
+    audit_started: bool,
+    checkpoints: usize,
+    original_stop: Option<watch::Receiver<bool>>,
     namespaces: [Option<SlotId>; 2],
     root_mount: Option<mount::MountObservation>,
     proc_mount: Option<mount::MountObservation>,
@@ -238,41 +252,34 @@ pub(crate) struct InstalledRuntimeCustody {
     work: Work,
 }
 
-impl InstalledRuntimeCustody {
+/// Runtime-specific inventory/selection; the reusable book owns only original
+/// descriptors and protected native checks, never a caller-selected policy.
+#[must_use]
+pub(crate) struct InstalledRuntimeCustody {
+    book: OriginalDescriptorBook,
+    ancestors: [Option<SlotId>; PREFIX_COUNT],
+    transferred: bool,
+    retain_android: bool,
+    work: RuntimeWork,
+}
+
+impl OriginalDescriptorBook {
     /// Pure allocation/initialization only; acquires no OS resource.
     pub(crate) fn new() -> Self {
         Self {
             phase: Phase::New, operation: Operation::Idle, interrupted_at: None,
             failure: None, settlement_started: false, interrupted: false,
-            unknown: false, transferred: false,
-            records: Vec::with_capacity(RECORD_COUNT), ancestors: [None; PREFIX_COUNT],
+            unknown: false,
+            records: Vec::with_capacity(RECORD_COUNT), budget: None, control_slots: 0, control_rounds: 0, entry_observations: 0,
+            root: None, mount_namespace: None, hash_left: [TOTAL_LIMIT + MANIFEST_LIMIT as u64; 2],
+            audit_started: false, checkpoints: 0, original_stop: None,
             namespaces: [None; 2], root_mount: None, proc_mount: None, credentials: None,
             work: Work {
                 block: vec![0; BLOCK_SIZE], directory_buffer: vec![MaybeUninit::uninit(); BLOCK_SIZE],
                 data: Vec::with_capacity(MANIFEST_LIMIT.max(MOUNTINFO_LIMIT)), attribute_buffer: [0],
                 hash: Sha256::new(), reader: None, read_bytes: 0, read_eof: false, last_digest: None,
-                directory: None, walk: Vec::with_capacity(TREE_DEPTH + 1), inventory: None,
-                actual_names: BTreeSet::new(), actual_folded: BTreeSet::new(), tree_entries: 0,
-                files_verified: 0, directories_verified: 0, saw_manifest: false,
+                directory: None,
             },
-        }
-    }
-
-    /// Synchronous work for the existing sole retained blocking inspection.
-    /// No replacement clock, watcher, task, controller or restart is created.
-    pub(crate) fn inspect_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> InspectionOutcome {
-        if self.phase != Phase::New || self.settlement_started || self.interrupted || self.transferred {
-            if self.phase == Phase::Inspecting { self.mark_interrupted(); }
-            return self.refuse_and_settle(AdmissionFailure::AlreadyUsed);
-        }
-        self.phase = Phase::Inspecting;
-        match self.inspect_inner(end, stop) {
-            Ok(()) => {
-                self.operation = Operation::Idle;
-                self.phase = Phase::InspectedOnly;
-                InspectionOutcome::InspectedOnly
-            }
-            Err(failure) => self.refuse_and_settle(failure),
         }
     }
 
@@ -340,23 +347,39 @@ impl InstalledRuntimeCustody {
     }
 
     fn begin(&mut self, operation: Operation, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
-        if self.phase != Phase::Inspecting || self.unknown || self.interrupted || self.settlement_started {
+        if !matches!(self.phase, Phase::Inspecting | Phase::Retained | Phase::Auditing) || self.unknown || self.interrupted || self.settlement_started {
             return Err(AdmissionFailure::LedgerInvariant);
         }
-        checkpoint(end, stop)?;
+        if self.phase == Phase::Auditing {
+            // Narrow original cleanup borrow ignores cooperative STOP, not W/F.
+            let end = self.budget.as_ref().ok_or(AdmissionFailure::LedgerInvariant)?.audit_end(end)?;
+            if Instant::now() >= end { return Err(AdmissionFailure::Deadline); }
+        } else { checkpoint(end, stop)?; }
+        if self.budget.is_some() {
+            self.checkpoints = self.checkpoints.checked_add(1).ok_or(AdmissionFailure::Bounds)?;
+            if self.checkpoints > 2_000_000 { return Err(AdmissionFailure::Bounds); }
+        }
         self.operation = operation;
         Ok(())
     }
 
     fn arm(&mut self, purpose: Purpose) -> AdmissionResult<SlotId> {
         if self.records.len() >= RECORD_COUNT
-            || self.records.iter().filter(|r| r.original.is_some()).count() >= LIVE_COUNT {
+            || self.budget.is_none() && self.records.iter().filter(|r| r.original.is_some()).count() >= LIVE_COUNT {
             return Err(AdmissionFailure::Bounds);
         }
+        let control = matches!(purpose, Purpose::ProcRoot | Purpose::ProcDirectory | Purpose::ProcControl
+            | Purpose::InitialUserNamespace | Purpose::InitialPidNamespace | Purpose::MountNamespace);
+        let charged = if let Some(budget) = &self.budget {
+            if control {
+                if self.control_slots >= ANDROID_CONTROL_SLOTS { return Err(AdmissionFailure::Bounds); }
+                self.control_slots += 1; false // Reserved before either book can open.
+            } else { budget.claim()?; true }
+        } else { false };
         let sequence = SlotId(self.records.len());
         // Capacity for ALL records was allocated before the first acquisition.
         self.records.push(FdRecord { sequence, purpose, acquisition: Acquisition::Attempted,
-            original: None, identity: None, close: CloseReceipt::Unattempted });
+            original: None, identity: None, close: CloseReceipt::Unattempted, parent: None, digest: None, charged });
         self.operation = Operation::Acquire(sequence);
         Ok(sequence)
     }
@@ -373,6 +396,10 @@ impl InstalledRuntimeCustody {
             }
             Err(error) => {
                 self.records[slot.0].acquisition = Acquisition::NoHandle;
+                if self.records[slot.0].charged {
+                    if let Some(budget) = &self.budget { budget.release(); }
+                    self.records[slot.0].charged = false;
+                }
                 self.operation = Operation::Idle;
                 Err(native_error(error))
             }
@@ -413,6 +440,10 @@ impl InstalledRuntimeCustody {
         match result {
             Ok(()) => {
                 record.close = CloseReceipt::Positive;
+                if record.charged {
+                    if let Some(budget) = &self.budget { budget.release(); }
+                    record.charged = false;
+                }
                 self.operation = Operation::Idle;
                 CloseOutcome::Settled
             }
@@ -440,19 +471,52 @@ impl InstalledRuntimeCustody {
             && r.identity.is_some() && r.close == CloseReceipt::Unattempted)
     }
 
+}
+
+impl InstalledRuntimeCustody {
+    /// Pure book allocation; legacy inspection still retains only its original eight witnesses.
+    pub(crate) fn new() -> Self {
+        Self { book: OriginalDescriptorBook::new(), ancestors: [None; PREFIX_COUNT], transferred: false,
+            retain_android: false, work: RuntimeWork {
+                walk: Vec::with_capacity(TREE_DEPTH + 1), inventory: None,
+                actual_names: BTreeSet::new(), actual_folded: BTreeSet::new(), tree_entries: 0,
+                files_verified: 0, directories_verified: 0, saw_manifest: false,
+            } }
+    }
+    pub(crate) fn observation(&self) -> CustodyObservation { self.book.observation() }
+    pub(crate) fn mark_interrupted(&mut self) { self.book.mark_interrupted(); }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome { self.book.settle_originals() }
+    /// Synchronous work for the existing sole retained blocking inspection.
+    /// No replacement clock, watcher, task, controller or restart is created.
+    pub(crate) fn inspect_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> InspectionOutcome {
+        if self.retain_android || self.book.phase != Phase::New || self.book.settlement_started || self.book.interrupted || self.transferred {
+            if self.book.phase == Phase::Inspecting { self.mark_interrupted(); }
+            return self.book.refuse_and_settle(AdmissionFailure::AlreadyUsed);
+        }
+        self.book.phase = Phase::Inspecting;
+        match self.inspect_inner(end, stop) {
+            Ok(()) => {
+                self.book.operation = Operation::Idle;
+                self.book.phase = Phase::InspectedOnly;
+                InspectionOutcome::InspectedOnly
+            }
+            Err(failure) => self.book.refuse_and_settle(failure),
+        }
+    }
+
     fn retained_bindings_present(&self) -> bool {
         self.ancestors.iter().enumerate().all(|(index, slot)| {
-            slot.is_some_and(|id| self.live_binding(id, Purpose::ProtectedAncestor(index as u8)))
-        }) && self.namespaces[0].is_some_and(|id| self.live_binding(id, Purpose::InitialUserNamespace))
-            && self.namespaces[1].is_some_and(|id| self.live_binding(id, Purpose::InitialPidNamespace))
+            slot.is_some_and(|id| self.book.live_binding(id, Purpose::ProtectedAncestor(index as u8)))
+        }) && self.book.namespaces[0].is_some_and(|id| self.book.live_binding(id, Purpose::InitialUserNamespace))
+            && self.book.namespaces[1].is_some_and(|id| self.book.live_binding(id, Purpose::InitialPidNamespace))
     }
 
     fn transfer_ready(&self) -> bool {
-        self.phase == Phase::InspectedOnly && !self.settlement_started && !self.interrupted
-            && !self.unknown && !self.transferred && self.operation == Operation::Idle
+        self.book.phase == Phase::InspectedOnly && !self.book.settlement_started && !self.book.interrupted
+            && !self.book.unknown && !self.transferred && self.book.operation == Operation::Idle
             && self.retained_bindings_present()
-            && self.records.iter().filter(|r| r.original.is_some()).count() == RETAINED_COUNT
-            && self.records.iter().all(|r| r.acquisition == Acquisition::Original
+            && self.book.records.iter().filter(|r| r.original.is_some()).count() == RETAINED_COUNT
+            && self.book.records.iter().all(|r| r.acquisition == Acquisition::Original
                 && match r.close {
                     CloseReceipt::Unattempted => r.original.is_some(),
                     CloseReceipt::Positive => r.original.is_none(),
@@ -471,7 +535,7 @@ pub(crate) fn transfer_original(
     if destination.is_some() { return Err(AdmissionFailure::DestinationOccupied); }
     let Some(book) = source.as_ref() else { return Err(AdmissionFailure::TransferUnavailable); };
     if !book.transfer_ready() { return Err(AdmissionFailure::TransferUnavailable); }
-    let receipt = TransferReceipt { original_records: book.records.len(), retained_originals: RETAINED_COUNT };
+    let receipt = TransferReceipt { original_records: book.book.records.len(), retained_originals: RETAINED_COUNT };
     let Some(mut original) = source.take() else { return Err(AdmissionFailure::TransferUnavailable); };
     original.transferred = true;
     *destination = Some(original);
@@ -544,12 +608,14 @@ fn protected_mount(observation: mount::MountObservation) -> bool {
         && known_mount_attributes(observation.attributes()) && observation.attributes() & mount::NO_EXEC == 0
 }
 
-impl InstalledRuntimeCustody {
+impl OriginalDescriptorBook {
     fn acquire_root(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<SlotId> {
         self.begin(Operation::Idle, end, stop)?;
         let slot = self.arm(Purpose::ProtectedAncestor(0))?;
         let result = fs::open("/", ordinary_flags(true), Mode::empty());
-        self.receive_open(slot, result)
+        let slot = self.receive_open(slot, result)?;
+        self.root = Some(slot);
+        Ok(slot)
     }
 
     fn acquire_child(&mut self, parent: SlotId, component: &str, directory: bool, purpose: Purpose,
@@ -560,9 +626,10 @@ impl InstalledRuntimeCustody {
     fn acquire_relative(&mut self, parent: SlotId, component: &str, flags: OFlags, resolve: ResolveFlags,
         purpose: Purpose, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<SlotId> {
         self.begin(Operation::Idle, end, stop)?;
-        if !single_component(component) { return Err(AdmissionFailure::Inventory); }
+        if !(if self.budget.is_some() { tool_component(component) } else { single_component(component) }) { return Err(AdmissionFailure::Inventory); }
         let _ = fd_at(&self.records, parent)?;
         let slot = self.arm(purpose)?;
+        self.records[slot.0].parent = Some((parent, component.to_owned()));
         let result = fs::openat2(fd_at(&self.records, parent)?, component, flags, Mode::empty(), resolve);
         self.receive_open(slot, result)
     }
@@ -674,6 +741,11 @@ impl InstalledRuntimeCustody {
             || (capture && limit > self.work.data.capacity() as u64) {
             return Err(AdmissionFailure::Bounds);
         }
+        if self.budget.is_some() && matches!(self.records[slot.0].purpose, Purpose::Manifest | Purpose::Payload) {
+            let bytes = expected_size.ok_or(AdmissionFailure::Bounds)?;
+            let pass = usize::from(self.phase == Phase::Auditing);
+            self.hash_left[pass] = self.hash_left[pass].checked_sub(bytes).ok_or(AdmissionFailure::Bounds)?;
+        }
         self.work.reader = Some(slot);
         self.work.read_bytes = 0;
         self.work.read_eof = false;
@@ -682,7 +754,10 @@ impl InstalledRuntimeCustody {
         self.work.data.clear();
         loop {
             self.begin(Operation::Read(slot), end, stop)?;
-            let result = rustix::io::read(fd_at(&self.records, slot)?, &mut self.work.block[..]);
+            let result = if self.budget.is_some() && expected_size.is_some() {
+                // Two precharged passes on this SAME original; no reopen/seek adoption.
+                rustix::io::pread(fd_at(&self.records, slot)?, &mut self.work.block[..], self.work.read_bytes)
+            } else { rustix::io::read(fd_at(&self.records, slot)?, &mut self.work.block[..]) };
             let length = result.map_err(native_error)?;
             if length == 0 { self.work.read_eof = true; break; }
             self.work.read_bytes = self.work.read_bytes.checked_add(length as u64).ok_or(AdmissionFailure::Bounds)?;
@@ -739,6 +814,8 @@ impl InstalledRuntimeCustody {
 
     fn inspect_kernel(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
         self.begin(Operation::Kernel, end, stop)?;
+        if self.budget.is_some() && rustix::process::getrlimit(rustix::process::Resource::Nofile)
+            .current.is_some_and(|limit| limit < 8192) { return Err(AdmissionFailure::Bounds); }
         let actual = rustix::system::uname();
         self.operation = Operation::Idle;
         if !supported_kernel(actual.sysname().to_bytes(), actual.machine().to_bytes(), actual.release().to_bytes()) {
@@ -749,6 +826,11 @@ impl InstalledRuntimeCustody {
 
     fn inspect_namespace_controls(&mut self, root: SlotId, credentials: Credentials,
         end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
+        if self.budget.is_some() {
+            if self.control_rounds >= 3 { return Err(AdmissionFailure::Bounds); }
+            self.control_rounds += 1;
+        }
+        let retaining = self.namespaces[0].is_none();
         // The ONLY ordinary mount crossing: fixed '/' -> fixed genuine '/proc'.
         let proc_root = self.acquire_relative(root, "proc", ordinary_flags(true),
             ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS,
@@ -765,18 +847,18 @@ impl InstalledRuntimeCustody {
         let ns = self.acquire_child(thread, "ns", true, Purpose::ProcDirectory, end, stop)?;
         self.inspect_proc_object(ns, FileType::Directory, end, stop)?;
 
-        // These two fixed kernel endpoints are the ONLY followed magic links.
-        // The parent is the pinned genuine numeric current-thread proc ns dir.
-        // No payload path is permitted this exception or selected by an input.
+        // Only these fixed user/pid endpoints and the Android mnt endpoint
+        // below follow kernel magic links, under this pinned genuine numeric
+        // current-thread proc ns directory. No payload gets this exception.
         let namespace_flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;
         let user_ns = self.acquire_relative(ns, "user", namespace_flags, ResolveFlags::empty(),
             Purpose::InitialUserNamespace, end, stop)?;
         self.inspect_namespace(user_ns, INITIAL_USER_INODE, end, stop)?;
-        self.namespaces[0] = Some(user_ns);
+        if retaining { self.namespaces[0] = Some(user_ns); }
         let pid_ns = self.acquire_relative(ns, "pid", namespace_flags, ResolveFlags::empty(),
             Purpose::InitialPidNamespace, end, stop)?;
         self.inspect_namespace(pid_ns, INITIAL_PID_INODE, end, stop)?;
-        self.namespaces[1] = Some(pid_ns);
+        if retaining { self.namespaces[1] = Some(pid_ns); }
 
         self.read_proc_control(thread, "uid_map", MAP_LIMIT, end, stop)?;
         initial_id_map(&self.work.data)?;
@@ -798,6 +880,22 @@ impl InstalledRuntimeCustody {
         let original_root = RootMount { old_id: root_mount.old_id(), device: root_mount.device(), magic: root_mount.filesystem_magic() };
         if current_root != initial_root || current_root != original_root { return Err(AdmissionFailure::Namespace); }
 
+        if self.budget.is_some() {
+            // Bind the actual numeric current-thread mount namespace, retaining
+            // the first original through launch and final audit. PID1 ns/mnt is
+            // ptrace-gated and is NOT an accessible ordinary-user witness.
+            // Continuity and equal root mounts do not authenticate an initial/
+            // host mount namespace; that remains external OS qualification.
+            let current = self.acquire_relative(ns, "mnt", namespace_flags, ResolveFlags::empty(), Purpose::MountNamespace, end, stop)?;
+            let identity = self.snapshot(current, end, stop)?;
+            self.inspect_namespace(current, identity.inode, end, stop)?;
+            if let Some(original) = self.mount_namespace {
+                if self.snapshot(original, end, stop)? != identity { return Err(AdmissionFailure::Namespace); }
+                self.inspect_namespace(original, identity.inode, end, stop)?;
+                self.close_finished(current)?; // Never substitute for the retained original.
+            } else { self.mount_namespace = Some(current); }
+        }
+        if !retaining { self.close_finished(pid_ns)?; self.close_finished(user_ns)?; }
         for slot in [initial, ns, thread, task, process, proc_root] {
             self.inspect_proc_object(slot, FileType::Directory, end, stop)?;
             self.close_finished(slot)?;
@@ -828,55 +926,59 @@ impl InstalledRuntimeCustody {
         self.close_finished(usr)
     }
 
+}
+
+impl InstalledRuntimeCustody {
     fn inspect_inner(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
-        self.begin(Operation::Inventory, end, stop)?;
+        self.book.begin(Operation::Inventory, end, stop)?;
         if COMPILED_TARGET != TARGET { return Err(AdmissionFailure::UnsupportedPlatform); }
         let manifest_anchor = MANIFEST_ANCHOR.filter(|value| sha(value)).ok_or(AdmissionFailure::MissingCompileAnchor)?;
         let protocol_anchor = PROTOCOL_ANCHOR.filter(|value| sha(value)).ok_or(AdmissionFailure::MissingCompileAnchor)?;
-        self.inspect_kernel(end, stop)?;
-        let credentials = self.current_credentials(end, stop)?;
-        self.credentials = Some(credentials);
-        let root = self.acquire_root(end, stop)?;
-        self.root_mount = Some(self.inspect_protected(root, FileType::Directory, None, end, stop)?);
+        self.book.inspect_kernel(end, stop)?;
+        let credentials = self.book.current_credentials(end, stop)?;
+        self.book.credentials = Some(credentials);
+        let root = self.book.acquire_root(end, stop)?;
+        self.book.root_mount = Some(self.book.inspect_protected(root, FileType::Directory, None, end, stop)?);
         self.ancestors[0] = Some(root);
-        self.inspect_namespace_controls(root, credentials, end, stop)?;
-        self.inspect_os_release(root, end, stop)?;
+        self.book.inspect_namespace_controls(root, credentials, end, stop)?;
+        self.book.inspect_os_release(root, end, stop)?;
 
         let mut parent = root;
         for (index, component) in ["opt", "mobile-release-kit", "versions", TARGET, manifest_anchor].into_iter().enumerate() {
-            let slot = self.acquire_child(parent, component, true, Purpose::ProtectedAncestor((index + 1) as u8), end, stop)?;
-            self.inspect_protected(slot, FileType::Directory, None, end, stop)?;
+            let slot = self.book.acquire_child(parent, component, true, Purpose::ProtectedAncestor((index + 1) as u8), end, stop)?;
+            self.book.inspect_protected(slot, FileType::Directory, None, end, stop)?;
             self.ancestors[index + 1] = Some(slot);
             parent = slot;
         }
         let version = parent;
-        let manifest_slot = self.acquire_child(version, "manifest.json", false, Purpose::Manifest, end, stop)?;
-        self.inspect_protected(manifest_slot, FileType::RegularFile, None, end, stop)?;
-        let manifest_size = self.records[manifest_slot.0].identity.ok_or(AdmissionFailure::LedgerInvariant)?.size;
+        let manifest_slot = self.book.acquire_child(version, "manifest.json", false, Purpose::Manifest, end, stop)?;
+        self.book.inspect_protected(manifest_slot, FileType::RegularFile, None, end, stop)?;
+        let manifest_size = self.book.records[manifest_slot.0].identity.ok_or(AdmissionFailure::LedgerInvariant)?.size;
         let manifest_size = u64::try_from(manifest_size).map_err(|_| AdmissionFailure::Bounds)?;
-        let digest = self.read_original(manifest_slot, Some(manifest_size), MANIFEST_LIMIT as u64, true, end, stop)?;
-        self.begin(Operation::Inventory, end, stop)?;
+        let digest = self.book.read_original(manifest_slot, Some(manifest_size), MANIFEST_LIMIT as u64, true, end, stop)?;
+        self.book.begin(Operation::Inventory, end, stop)?;
         if hex(&digest) != manifest_anchor { return Err(AdmissionFailure::Manifest); }
-        self.work.inventory = Some(parse_inventory(&self.work.data, protocol_anchor)?);
-        self.inspect_protected(manifest_slot, FileType::RegularFile, Some(manifest_size), end, stop)?;
+        self.work.inventory = Some(parse_inventory(&self.book.work.data, protocol_anchor)?);
+        self.book.inspect_protected(manifest_slot, FileType::RegularFile, Some(manifest_size), end, stop)?;
         self.walk_inventory(version, manifest_slot, end, stop)?;
-        self.inspect_protected(manifest_slot, FileType::RegularFile, Some(manifest_size), end, stop)?;
-        self.close_finished(manifest_slot)?;
+        self.book.inspect_protected(manifest_slot, FileType::RegularFile, Some(manifest_size), end, stop)?;
+        if self.retain_android { self.book.records[manifest_slot.0].digest = Some(manifest_anchor.to_owned()); }
+        else { self.book.close_finished(manifest_slot)?; }
 
         for index in 0..PREFIX_COUNT {
             let slot = self.ancestors[index].ok_or(AdmissionFailure::LedgerInvariant)?;
-            self.inspect_protected(slot, FileType::Directory, None, end, stop)?;
+            self.book.inspect_protected(slot, FileType::Directory, None, end, stop)?;
         }
         for (index, inode) in [INITIAL_USER_INODE, INITIAL_PID_INODE].into_iter().enumerate() {
-            self.inspect_namespace(self.namespaces[index].ok_or(AdmissionFailure::LedgerInvariant)?, inode, end, stop)?;
+            self.book.inspect_namespace(self.book.namespaces[index].ok_or(AdmissionFailure::LedgerInvariant)?, inode, end, stop)?;
         }
-        if self.current_credentials(end, stop)? != credentials || !self.retained_bindings_present()
-            || self.records.iter().filter(|r| r.original.is_some()).count() != RETAINED_COUNT
-            || self.records.iter().any(|r| r.acquisition != Acquisition::Original
+        if self.book.current_credentials(end, stop)? != credentials || !self.retained_bindings_present()
+            || !self.retain_android && self.book.records.iter().filter(|r| r.original.is_some()).count() != RETAINED_COUNT
+            || self.book.records.iter().any(|r| r.acquisition != Acquisition::Original
                 || matches!(r.close, CloseReceipt::Attempted | CloseReceipt::Unknown)) {
             return Err(AdmissionFailure::LedgerInvariant);
         }
-        self.begin(Operation::Idle, end, stop)?;
+        self.book.begin(Operation::Idle, end, stop)?;
         Ok(())
     }
 }
@@ -885,20 +987,20 @@ impl InstalledRuntimeCustody {
     fn enumerate_directory(&mut self, frame_index: usize, manifest: SlotId,
         end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
         let slot = self.work.walk.get(frame_index).ok_or(AdmissionFailure::LedgerInvariant)?.original;
-        self.begin(Operation::Directory(slot), end, stop)?;
-        let directory_identity = self.records[slot.0].identity.ok_or(AdmissionFailure::LedgerInvariant)?;
-        let manifest_identity = self.records[manifest.0].identity.ok_or(AdmissionFailure::LedgerInvariant)?;
-        self.work.directory = Some(slot);
+        self.book.begin(Operation::Directory(slot), end, stop)?;
+        let directory_identity = self.book.records[slot.0].identity.ok_or(AdmissionFailure::LedgerInvariant)?;
+        let manifest_identity = self.book.records[manifest.0].identity.ok_or(AdmissionFailure::LedgerInvariant)?;
+        self.book.work.directory = Some(slot);
         {
-            let original = fd_at(&self.records, slot)?;
+            let original = fd_at(&self.book.records, slot)?;
             // RawDir owns ONLY this BorrowedFd and borrows the original book's
             // buffer. No dup/Dir/fdopendir/owned iterator/implicit-close owner.
             // The cursor itself is local: if lost, the book can ONLY settle,
             // never resume from a discarded getdents buffer and claim success.
-            let mut entries = RawDir::new(original, &mut self.work.directory_buffer[..]);
+            let mut entries = RawDir::new(original, &mut self.book.work.directory_buffer[..]);
             loop {
                 checkpoint(end, stop)?;
-                self.operation = Operation::Directory(slot);
+                self.book.operation = Operation::Directory(slot);
                 let Some(entry) = entries.next() else { break; };
                 let entry = entry.map_err(native_error)?;
                 let component = entry.file_name().to_str().map_err(|_| AdmissionFailure::Inventory)?;
@@ -949,9 +1051,9 @@ impl InstalledRuntimeCustody {
         let frame = &mut self.work.walk[frame_index];
         if !frame.dot_seen || !frame.dotdot_seen { return Err(AdmissionFailure::Inventory); }
         frame.enumerated = true;
-        self.work.directory = None;
-        self.snapshot(slot, end, stop)?;
-        self.operation = Operation::Idle;
+        self.book.work.directory = None;
+        self.book.snapshot(slot, end, stop)?;
+        self.book.operation = Operation::Idle;
         Ok(())
     }
 
@@ -960,14 +1062,14 @@ impl InstalledRuntimeCustody {
         self.work.walk.push(DirectoryFrame { original: version, relative: String::new(), depth: 0,
             entries: Vec::new(), next: 0, enumerated: false, dot_seen: false, dotdot_seen: false });
         while !self.work.walk.is_empty() {
-            self.begin(Operation::Inventory, end, stop)?;
+            self.book.begin(Operation::Inventory, end, stop)?;
             let index = self.work.walk.len() - 1;
             if !self.work.walk[index].enumerated { self.enumerate_directory(index, manifest, end, stop)?; }
             let frame = &mut self.work.walk[index];
             if frame.next == frame.entries.len() {
                 let slot = frame.original;
-                self.inspect_protected(slot, FileType::Directory, None, end, stop)?;
-                if slot != version { self.close_finished(slot)?; }
+                self.book.inspect_protected(slot, FileType::Directory, None, end, stop)?;
+                if slot != version && !self.retain_android { self.book.close_finished(slot)?; }
                 self.work.directories_verified += 1;
                 self.work.walk.pop();
                 continue;
@@ -986,9 +1088,9 @@ impl InstalledRuntimeCustody {
             if depth > TREE_DEPTH { return Err(AdmissionFailure::Bounds); }
             if relative == "manifest.json" { continue; } // Only the already-open ROOT manifest.
             if kind == FileType::Directory {
-                let slot = self.acquire_child(parent, &component, true, Purpose::InventoryDirectory, end, stop)?;
-                self.inspect_protected(slot, FileType::Directory, None, end, stop)?;
-                if self.records[slot.0].identity.is_none_or(|identity| identity.inode != inode) {
+                let slot = self.book.acquire_child(parent, &component, true, Purpose::InventoryDirectory, end, stop)?;
+                self.book.inspect_protected(slot, FileType::Directory, None, end, stop)?;
+                if self.book.records[slot.0].identity.is_none_or(|identity| identity.inode != inode) {
                     return Err(AdmissionFailure::IdentityChanged);
                 }
                 if self.work.walk.len() >= TREE_DEPTH + 1 { return Err(AdmissionFailure::Bounds); }
@@ -1000,15 +1102,24 @@ impl InstalledRuntimeCustody {
                     .map_err(|_| AdmissionFailure::Inventory)?;
                 let expected_size = inventory.files[file_index].size;
                 let expected_hash = inventory.files[file_index].sha256.clone();
-                let slot = self.acquire_child(parent, &component, false, Purpose::Payload, end, stop)?;
-                self.inspect_protected(slot, FileType::RegularFile, Some(expected_size), end, stop)?;
-                if self.records[slot.0].identity.is_none_or(|identity| identity.inode != inode) {
+                let slot = self.book.acquire_child(parent, &component, false, Purpose::Payload, end, stop)?;
+                self.book.inspect_protected(slot, FileType::RegularFile, Some(expected_size), end, stop)?;
+                if self.book.records[slot.0].identity.is_none_or(|identity| identity.inode != inode) {
                     return Err(AdmissionFailure::IdentityChanged);
                 }
-                let digest = self.read_original(slot, Some(expected_size), FILE_LIMIT, false, end, stop)?;
-                if hex(&digest) != expected_hash { return Err(AdmissionFailure::Manifest); }
-                self.inspect_protected(slot, FileType::RegularFile, Some(expected_size), end, stop)?;
-                self.close_finished(slot)?;
+                let android_bootstrap = self.retain_android && relative == "android_build_bootstrap.py";
+                let digest = self.book.read_original(slot, Some(expected_size), if android_bootstrap { 64 * 1024 } else { FILE_LIMIT }, android_bootstrap, end, stop)?;
+                if hex(&digest) != expected_hash || android_bootstrap
+                    && self.book.work.data.as_slice() != include_bytes!("../../android_build_bootstrap.py") {
+                    return Err(AdmissionFailure::Manifest);
+                }
+                if self.retain_android && relative == "python/bin/python3"
+                    && self.book.records[slot.0].identity.is_none_or(|identity| identity.mode & 0o111 == 0) {
+                    return Err(AdmissionFailure::Manifest);
+                }
+                self.book.inspect_protected(slot, FileType::RegularFile, Some(expected_size), end, stop)?;
+                if self.retain_android { self.book.records[slot.0].digest = Some(expected_hash); }
+                else { self.book.close_finished(slot)?; }
                 self.work.files_verified += 1;
             }
         }
@@ -1020,9 +1131,248 @@ impl InstalledRuntimeCustody {
             || !inventory.directories.iter().all(|directory| self.work.actual_names.contains(directory)) {
             return Err(AdmissionFailure::Inventory);
         }
-        self.operation = Operation::Idle;
+        self.book.operation = Operation::Idle;
         Ok(())
     }
+}
+
+
+// The only second consumer of these private primitives is the fixed Android
+// tool book. Two books precharge 64 kernel-control slots EACH; every other live
+// original (including ancestry and aliases) competes below the SAME 4096 cap.
+const ANDROID_CONTROL_SLOTS: usize = 64;
+pub(crate) struct AndroidDescriptorBudget {
+    live: AtomicUsize,
+    // Original Session-owned cutoff, initialized at W and only tightened by
+    // its serialized first F. No replacement clock, watcher or timer task.
+    audit_cutoff: watch::Receiver<Instant>,
+}
+impl AndroidDescriptorBudget {
+    pub(crate) fn new(audit_cutoff: watch::Receiver<Instant>) -> Self {
+        Self { live: AtomicUsize::new(2 * ANDROID_CONTROL_SLOTS), audit_cutoff }
+    }
+    fn audit_end(&self, end: Instant) -> AdmissionResult<Instant> {
+        if self.audit_cutoff.has_changed().is_err() { return Err(AdmissionFailure::Interrupted); }
+        Ok(end.min(*self.audit_cutoff.borrow()))
+    }
+    fn claim(&self) -> AdmissionResult<()> {
+        self.live.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < 4096).then_some(n + 1))
+            .map(|_| ()).map_err(|_| AdmissionFailure::Bounds)
+    }
+    fn release(&self) { self.live.fetch_sub(1, Ordering::SeqCst); }
+}
+pub(crate) struct ProtectedEntry { pub(crate) name: String, pub(crate) inode: u64, pub(crate) kind: FileType }
+impl OriginalDescriptorBook {
+    pub(crate) fn new_android(budget: Arc<AndroidDescriptorBudget>) -> Self {
+        let mut book = Self::new(); book.budget = Some(budget); book
+    }
+    pub(crate) fn identity(&self, slot: SlotId) -> AdmissionResult<Identity> {
+        let _ = fd_at(&self.records, slot)?;
+        self.records[slot.0].identity.ok_or(AdmissionFailure::LedgerInvariant)
+    }
+    pub(crate) fn ready(&self) -> bool {
+        self.phase == Phase::Retained && !self.unknown && !self.interrupted && !self.settlement_started
+            && !self.audit_started && self.failure.is_none() && self.operation == Operation::Idle
+    }
+    pub(crate) fn settled(&self) -> bool { self.phase == Phase::Settled && !self.unknown && !self.interrupted }
+    pub(crate) fn remember(&mut self, failure: AdmissionFailure) { self.failure.get_or_insert(failure); }
+    pub(crate) fn refuse(&mut self, failure: AdmissionFailure) {
+        self.remember(failure);
+        if !self.unknown { self.phase = Phase::Refused; self.operation = Operation::Idle; }
+    }
+    pub(crate) fn start_android(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<SlotId> {
+        if self.phase != Phase::New || self.budget.is_none() { return Err(AdmissionFailure::AlreadyUsed); }
+        self.phase = Phase::Inspecting; self.original_stop = Some(stop.clone());
+        self.inspect_kernel(end, stop)?;
+        let credentials = self.current_credentials(end, stop)?; self.credentials = Some(credentials);
+        let root = self.acquire_root(end, stop)?;
+        self.root_mount = Some(self.inspect_protected(root, FileType::Directory, None, end, stop)?);
+        self.inspect_namespace_controls(root, credentials, end, stop)?;
+        self.inspect_os_release(root, end, stop)?;
+        Ok(root)
+    }
+    pub(crate) fn finish_retained(&mut self) -> AdmissionResult<()> {
+        if self.phase != Phase::Inspecting || self.budget.is_none() || self.failure.is_some() || self.unknown
+            || self.settlement_started || self.records.iter().any(|r| r.acquisition == Acquisition::Attempted
+                || matches!(r.close, CloseReceipt::Attempted | CloseReceipt::Unknown)
+                || r.original.is_some() && r.identity.is_none()) { return Err(AdmissionFailure::LedgerInvariant); }
+        self.phase = Phase::Retained; self.operation = Operation::Idle; Ok(())
+    }
+    pub(crate) fn directory(&mut self, parent: SlotId, name: &str, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<SlotId> {
+        let slot = self.acquire_child(parent, name, true, Purpose::InventoryDirectory, end, stop)?;
+        self.inspect_protected(slot, FileType::Directory, None, end, stop)?; Ok(slot)
+    }
+    pub(crate) fn manifest(&mut self, parent: SlotId, name: &str, expected: &str, end: Instant,
+        stop: &watch::Receiver<bool>) -> AdmissionResult<(SlotId, Vec<u8>)> {
+        let slot = self.acquire_child(parent, name, false, Purpose::Manifest, end, stop)?;
+        self.inspect_protected(slot, FileType::RegularFile, None, end, stop)?;
+        let size = u64::try_from(self.identity(slot)?.size).map_err(|_| AdmissionFailure::Bounds)?;
+        if size == 0 { return Err(AdmissionFailure::Manifest); }
+        if hex(&self.read_original(slot, Some(size), MANIFEST_LIMIT as u64, true, end, stop)?) != expected {
+            return Err(AdmissionFailure::Manifest);
+        }
+        self.records[slot.0].digest = Some(expected.to_owned());
+        self.inspect_protected(slot, FileType::RegularFile, Some(size), end, stop)?;
+        Ok((slot, self.work.data.clone()))
+    }
+    pub(crate) fn payload(&mut self, parent: SlotId, name: &str, size: u64, mode: u32, expected: &str,
+        end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<SlotId> {
+        let slot = self.acquire_child(parent, name, false, Purpose::Payload, end, stop)?;
+        self.inspect_protected(slot, FileType::RegularFile, Some(size), end, stop)?;
+        if self.identity(slot)?.mode & 0o7777 != mode
+            || hex(&self.read_original(slot, Some(size), FILE_LIMIT, false, end, stop)?) != expected {
+            return Err(AdmissionFailure::Manifest);
+        }
+        self.records[slot.0].digest = Some(expected.to_owned());
+        self.inspect_protected(slot, FileType::RegularFile, Some(size), end, stop)?; Ok(slot)
+    }
+    pub(crate) fn entries(&mut self, slot: SlotId, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<Vec<ProtectedEntry>> {
+        self.begin(Operation::Directory(slot), end, stop)?;
+        let identity = self.identity(slot)?;
+        let mut result = Vec::new(); let (mut dot, mut dotdot) = (false, false);
+        {
+            let mut entries = RawDir::new(fd_at(&self.records, slot)?, &mut self.work.directory_buffer[..]);
+            loop {
+                checkpoint(end, stop)?;
+                let Some(entry) = entries.next() else { break; };
+                let entry = entry.map_err(native_error)?;
+                let name = entry.file_name().to_str().map_err(|_| AdmissionFailure::Inventory)?;
+                let kind = entry.file_type(); let inode = entry.ino();
+                if name == "." {
+                    if dot || kind != FileType::Directory || inode != identity.inode { return Err(AdmissionFailure::Inventory); }
+                    dot = true; continue;
+                }
+                if name == ".." {
+                    if dotdot || kind != FileType::Directory || inode == 0 { return Err(AdmissionFailure::Inventory); }
+                    dotdot = true; continue;
+                }
+                if self.entry_observations >= ENTRY_COUNT { return Err(AdmissionFailure::Bounds); }
+                self.entry_observations += 1;
+                if inode == 0 || !tool_component(name)
+                    || !matches!(kind, FileType::Directory | FileType::RegularFile) { return Err(AdmissionFailure::Inventory); }
+                result.push(ProtectedEntry { name: name.to_owned(), inode, kind });
+            }
+        }
+        if !dot || !dotdot { return Err(AdmissionFailure::Inventory); }
+        self.inspect_protected(slot, FileType::Directory, None, end, stop)?;
+        self.operation = Operation::Idle; Ok(result)
+    }
+    fn named_original(&mut self, slot: SlotId, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
+        let parent = self.records[slot.0].parent.clone();
+        if let Some((parent, name)) = parent {
+            self.begin(Operation::Metadata(slot), end, stop)?;
+            let actual = fs::statat(fd_at(&self.records, parent)?, name.as_str(), fs::AtFlags::SYMLINK_NOFOLLOW).map_err(native_error)?;
+            if Some(Identity::of(&actual)) != self.records[slot.0].identity { return Err(AdmissionFailure::IdentityChanged); }
+        }
+        self.operation = Operation::Idle; Ok(())
+    }
+    pub(crate) fn check_names(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
+        for index in 0..self.records.len() {
+            if self.records[index].original.is_none() { continue; }
+            let slot = SlotId(index);
+            match self.records[index].purpose {
+                Purpose::InitialUserNamespace => { self.inspect_namespace(slot, INITIAL_USER_INODE, end, stop)?; continue; }
+                Purpose::InitialPidNamespace => { self.inspect_namespace(slot, INITIAL_PID_INODE, end, stop)?; continue; }
+                Purpose::MountNamespace => { let inode = self.identity(slot)?.inode; self.inspect_namespace(slot, inode, end, stop)?; continue; }
+                Purpose::Alias => { self.alias_snapshot(slot, end, stop)?; }
+                _ => {
+                    let identity = self.identity(slot)?;
+                    let kind = FileType::from_raw_mode(identity.mode);
+                    let size = if kind == FileType::RegularFile { Some(u64::try_from(identity.size).map_err(|_| AdmissionFailure::Bounds)?) } else { None };
+                    self.inspect_protected(slot, kind, size, end, stop)?;
+                }
+            }
+            self.named_original(slot, end, stop)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn check_launch_thread(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
+        self.inspect_kernel(end, stop)?;
+        let original = self.credentials.ok_or(AdmissionFailure::LedgerInvariant)?;
+        let current = self.current_credentials(end, stop)?;
+        if (current.uid, current.gid, current.pid) != (original.uid, original.gid, original.pid) {
+            return Err(AdmissionFailure::Namespace);
+        }
+        self.inspect_namespace_controls(self.root.ok_or(AdmissionFailure::LedgerInvariant)?, current, end, stop)?;
+        if self.current_credentials(end, stop)? != current { return Err(AdmissionFailure::Namespace); }
+        Ok(())
+    }
+    pub(crate) fn audit_once(&mut self, end: Instant) -> AdmissionResult<()> {
+        if !self.ready() || self.audit_started { return Err(AdmissionFailure::AlreadyUsed); }
+        self.audit_started = true; self.phase = Phase::Auditing;
+        let stop = self.original_stop.clone().ok_or(AdmissionFailure::LedgerInvariant)?;
+        self.check_launch_thread(end, &stop)?;
+        self.check_names(end, &stop)?;
+        for index in 0..self.records.len() {
+            let Some(expected) = self.records[index].digest.clone() else { continue; };
+            let slot = SlotId(index);
+            let size = u64::try_from(self.identity(slot)?.size).map_err(|_| AdmissionFailure::Bounds)?;
+            if hex(&self.read_original(slot, Some(size), FILE_LIMIT, false, end, &stop)?) != expected {
+                return Err(AdmissionFailure::IdentityChanged);
+            }
+        }
+        self.check_names(end, &stop)
+    }
+    fn alias_snapshot(&mut self, slot: SlotId, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
+        let identity = self.snapshot(slot, end, stop)?;
+        if FileType::from_raw_mode(identity.mode) != FileType::Symlink || identity.uid != 0 || identity.gid != 0
+            || identity.links != 1 || identity.size <= 0 || identity.size > 512 { return Err(AdmissionFailure::Ownership); }
+        // Linux symlink mode/ACLs do not confer target access. Never execute or
+        // follow this descriptor; the exact canonical target is checked separately.
+        let mounted = self.mounted_original(slot, identity, end, stop)?;
+        if Some(mounted) != self.root_mount || !protected_mount(mounted) { return Err(AdmissionFailure::Mount); }
+        Ok(())
+    }
+    pub(crate) fn alias(&mut self, parent: SlotId, name: &str, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<SlotId> {
+        let slot = self.acquire_relative(parent, name, OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            beneath_same_mount(), Purpose::Alias, end, stop)?;
+        self.alias_snapshot(slot, end, stop)?; Ok(slot)
+    }
+    pub(crate) fn check_alias(&mut self, slot: SlotId, target: &str, canonical: SlotId,
+        end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
+        self.alias_snapshot(slot, end, stop)?;
+        let destination = self.identity(canonical)?;
+        if !matches!(FileType::from_raw_mode(destination.mode), FileType::Directory | FileType::RegularFile) {
+            return Err(AdmissionFailure::Inventory);
+        }
+        self.begin(Operation::Read(slot), end, stop)?;
+        let mut bytes = [0u8; 513];
+        let length = fs::readlinkat_raw(fd_at(&self.records, slot)?, "", &mut bytes[..]).map_err(native_error)?;
+        if length != target.len() || &bytes[..length] != target.as_bytes() { return Err(AdmissionFailure::IdentityChanged); }
+        self.alias_snapshot(slot, end, stop)?;
+        self.named_original(slot, end, stop)
+    }
+}
+// Android distribution names have a wider, still closed ASCII alphabet than
+// the portable runtime publisher. Only the Android book may use that alphabet.
+fn tool_component(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 255 && name != "." && name != ".." && !name.ends_with('.')
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_+@.,=-".contains(&b))
+}
+impl InstalledRuntimeCustody {
+    pub(crate) fn new_android(budget: Arc<AndroidDescriptorBudget>) -> Self {
+        let mut runtime = Self::new(); runtime.book = OriginalDescriptorBook::new_android(budget); runtime.retain_android = true; runtime
+    }
+    pub(crate) fn retain_android_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
+        if !self.retain_android || self.book.phase != Phase::New || self.transferred { return Err(AdmissionFailure::AlreadyUsed); }
+        self.book.phase = Phase::Inspecting; self.book.original_stop = Some(stop.clone());
+        let result = self.inspect_inner(end, stop).and_then(|_| self.book.finish_retained());
+        if let Err(failure) = result { self.book.refuse(failure); }
+        result // Partials remain in this registered book until its original settlement worker.
+    }
+    pub(crate) fn android_data(&self) -> AdmissionResult<crate::runtime::VerifiedRuntime> {
+        if !self.retain_android || !self.book.ready() || !self.retained_bindings_present() { return Err(AdmissionFailure::TransferUnavailable); }
+        let anchor = MANIFEST_ANCHOR.filter(|value| sha(value)).ok_or(AdmissionFailure::MissingCompileAnchor)?;
+        let cwd = std::path::PathBuf::from("/opt/mobile-release-kit/versions").join(TARGET).join(anchor);
+        Ok(crate::runtime::VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("android_build_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn check_before_spawn(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
+        let _ = self.android_data()?;
+        self.book.check_names(end, stop)?; self.book.check_launch_thread(end, stop)
+    }
+    pub(crate) fn check_after_use(&mut self, end: Instant) -> AdmissionResult<()> { self.book.audit_once(end) }
+    pub(crate) fn settled(&self) -> bool { self.book.settled() }
 }
 
 // All helpers below are pure bounded data validation, NOT alternate admission,
@@ -1067,7 +1417,9 @@ fn validate_inventory(manifest: Manifest, protocol_anchor: &str) -> AdmissionRes
     let mut total = 0u64;
     for file in &manifest.files {
         if !safe_payload_path(&file.path) || file.path == "manifest.json" || !sha(&file.sha256)
-            || file.size > FILE_LIMIT || previous.is_some_and(|name| name >= file.path.as_str())
+            || file.size > FILE_LIMIT
+            || file.path == "github-ca.pem" && (file.size == 0 || file.size > GITHUB_CA_LIMIT)
+            || previous.is_some_and(|name| name >= file.path.as_str())
             || !names.insert(file.path.clone()) {
             return Err(AdmissionFailure::Manifest);
         }
@@ -1082,7 +1434,7 @@ fn validate_inventory(manifest: Manifest, protocol_anchor: &str) -> AdmissionRes
             relative = parent;
         }
     }
-    for required in ["python/bin/python3", "core.zip", "engine_bootstrap.py", "config_edit_bootstrap.py"] {
+    for required in REQUIRED_RUNTIME_RESOURCES {
         if !names.contains(required) { return Err(AdmissionFailure::Manifest); }
     }
     let mut folded = BTreeSet::new();
@@ -1288,9 +1640,10 @@ fn ubuntu_2404(bytes: &[u8]) -> AdmissionResult<()> {
 mod pure_tests {
     use super::*;
 
-    // This entire roster is data-only. No inspect_once/settle_originals,
-    // native adapter, descriptor, proc path, system clock, runtime, process,
-    // fixture installer or executable capability is used or fabricated.
+    // This entire roster is DATA/memory-only. No installed-object observation,
+    // native descriptor, proc read, runtime, process, fixture installer or
+    // executable capability is used or fabricated. Empty/pending books below
+    // cannot make a syscall even when testing original-settlement refusal.
     #[test]
     fn digest_and_component_policy_are_exact() {
         assert!(sha(&"a".repeat(64)));
@@ -1399,7 +1752,7 @@ mod pure_tests {
     }
 
     fn inventory_fixture() -> Manifest {
-        let files = ["config_edit_bootstrap.py", "core.zip", "engine_bootstrap.py", "python/bin/python3"]
+        let files = REQUIRED_RUNTIME_RESOURCES
             .into_iter().map(|path| PayloadFile { path: path.to_owned(), sha256: "a".repeat(64), size: 1 }).collect();
         let mut result = Manifest { schema_version: 1, protocol: PROTOCOL, core_version: CORE_VERSION.to_owned(),
             target: TARGET.to_owned(), core_sha256: "a".repeat(64), protocol_sha256: "b".repeat(64),
@@ -1419,10 +1772,21 @@ mod pure_tests {
     fn inventory_requires_roster_order_digest_and_no_case_or_tree_aliases() {
         let protocol = "b".repeat(64);
         assert!(validate_inventory(inventory_fixture(), &protocol).is_ok());
-        let mut missing = inventory_fixture();
-        missing.files.remove(0);
-        rehash_inventory(&mut missing);
-        assert!(validate_inventory(missing, &protocol).is_err());
+        for required in REQUIRED_RUNTIME_RESOURCES {
+            let mut missing = inventory_fixture();
+            missing.files.retain(|file| file.path != required);
+            rehash_inventory(&mut missing);
+            assert!(validate_inventory(missing, &protocol).is_err(), "{required}");
+        }
+        for (size, accepted) in [(0, false), (GITHUB_CA_LIMIT, true), (GITHUB_CA_LIMIT + 1, false)] {
+            let mut ca_bound = inventory_fixture();
+            let Some(ca) = ca_bound.files.iter_mut().find(|file| file.path == "github-ca.pem") else {
+                panic!("pure inventory fixture omitted the fixed CA");
+            };
+            ca.size = size;
+            rehash_inventory(&mut ca_bound);
+            assert_eq!(validate_inventory(ca_bound, &protocol).is_ok(), accepted);
+        }
         let mut reordered = inventory_fixture();
         reordered.files.swap(0, 1);
         rehash_inventory(&mut reordered);
@@ -1447,6 +1811,58 @@ mod pure_tests {
     }
 
     #[test]
+    fn android_budget_precharges_controls_and_tracks_original_cutoff() {
+        let start = Instant::now(); let work = start + std::time::Duration::from_secs(3000);
+        let (cutoff, receiver) = watch::channel(work);
+        let budget = AndroidDescriptorBudget::new(receiver);
+        assert_eq!(budget.live.load(Ordering::SeqCst), 128);
+        for _ in 128..4096 { assert_eq!(budget.claim(), Ok(())); }
+        assert_eq!(budget.claim(), Err(AdmissionFailure::Bounds));
+        assert_eq!(budget.live.load(Ordering::SeqCst), 4096);
+        budget.release(); assert_eq!(budget.claim(), Ok(()));
+        assert_eq!(budget.audit_end(work), Ok(work));
+        let earlier = start + std::time::Duration::from_secs(11);
+        cutoff.send_replace(earlier); // The SAME receiver sees a newly earlier F+10.
+        assert_eq!(budget.audit_end(work), Ok(earlier));
+        assert_eq!(budget.audit_end(start), Ok(start)); // Never renew a supplied earlier bound.
+        drop(cutoff); assert_eq!(budget.audit_end(work), Err(AdmissionFailure::Interrupted));
+    }
+
+    #[test]
+    fn empty_android_book_is_not_runtime_authority_and_refusal_preserves_unknown() {
+        let (_cutoff, receiver) = watch::channel(Instant::now());
+        let mut runtime = InstalledRuntimeCustody::new_android(Arc::new(AndroidDescriptorBudget::new(receiver)));
+        assert!(runtime.android_data().is_err() && InstalledRuntimeCustody::new().android_data().is_err());
+        assert!(!runtime.book.ready() && !runtime.settled());
+        assert_eq!(runtime.observation().records(), 0);
+        runtime.mark_interrupted(); runtime.book.refuse(AdmissionFailure::Manifest);
+        assert_eq!(runtime.observation().phase(), "unknown");
+        assert_eq!(runtime.observation().failure(), Some(AdmissionFailure::Interrupted));
+        assert!(runtime.android_data().is_err() && !runtime.transfer_ready());
+        assert_eq!(runtime.observation().live_originals(), 0);
+    }
+
+    #[test]
+    fn unreturned_android_acquisition_remains_unknown_charged_and_not_retried() {
+        let (_cutoff, receiver) = watch::channel(Instant::now());
+        let budget = Arc::new(AndroidDescriptorBudget::new(receiver));
+        let mut book = OriginalDescriptorBook::new_android(budget.clone());
+        // Actual pre-effect registration only: intentionally NO open/receive,
+        // no fake FD, no positive close and no OS effect to retry.
+        let slot = book.arm(Purpose::Payload).unwrap();
+        assert_eq!(book.observation().pending_acquisitions(), 1);
+        assert_eq!(budget.live.load(Ordering::SeqCst), 129);
+        for _ in 0..2 {
+            assert_eq!(book.settle_originals(), CloseOutcome::Unknown);
+            assert_eq!(book.records[slot.0].acquisition, Acquisition::Attempted);
+            assert_eq!(book.records[slot.0].close, CloseReceipt::Unattempted);
+            assert!(book.records[slot.0].charged && book.records[slot.0].original.is_none());
+            assert_eq!(budget.live.load(Ordering::SeqCst), 129);
+        }
+        assert!(!book.ready() && !book.settled());
+    }
+
+    #[test]
     fn uninspected_or_occupied_transfer_keeps_original_slots() {
         // Pure new() allocates a book with ZERO native acquisitions. These are
         // rejection tests only; no fake FD or synthetic inspected capability.
@@ -1461,7 +1877,7 @@ mod pure_tests {
             original.mark_interrupted();
             assert_eq!(original.observation().phase(), "unknown");
             assert_eq!(original.observation().live_originals(), 0);
-            assert!(original.settlement_started && original.interrupted && !original.transfer_ready());
+            assert!(original.book.settlement_started && original.book.interrupted && !original.transfer_ready());
         } else { panic!("rejected transfer consumed its original source"); }
     }
 }

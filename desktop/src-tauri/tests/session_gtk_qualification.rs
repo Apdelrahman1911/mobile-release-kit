@@ -14,6 +14,7 @@ compile_error!("SG1 requires debug test + desktop-shell + development-runtime, L
 #[path = "../src/offline_preflight_owner.rs"] mod offline_preflight_owner;
 #[path = "../src/android_build_protocol.rs"] mod android_build_protocol;
 #[path = "../src/android_build_owner.rs"] mod android_build_owner;
+#[path = "../src/android_toolchain.rs"] mod android_toolchain;
 #[path = "../src/saved_command_owner.rs"] mod saved_command_owner;
 #[path = "../src/runtime.rs"] mod runtime;
 #[path = "../src/installed_runtime.rs"] mod installed_runtime;

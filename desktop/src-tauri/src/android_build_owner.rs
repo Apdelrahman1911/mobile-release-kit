@@ -15,7 +15,9 @@ impl Admitted {
     pub(crate) fn release(self) -> Status { if let Some(release) = self.release { let _ = release.send(()); } self.status }
 }
 impl AndroidBuildOwner {
-    pub(crate) fn new(runtime: RuntimeConfig) -> Self { Self { saved: SavedCommandOwner::android_build(runtime) } }
+    pub(crate) fn new(runtime: RuntimeConfig, toolchain: Option<crate::android_toolchain::AndroidToolchainProfile>) -> Self {
+        Self { saved: SavedCommandOwner::android_build(runtime, toolchain) }
+    }
     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
     pub(crate) fn disabled(&self) -> bool { self.saved.disabled() }

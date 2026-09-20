@@ -14,10 +14,11 @@ mod offline_preflight_protocol;
 mod offline_preflight_owner;
 mod android_build_protocol;
 mod android_build_owner;
+mod android_toolchain;
 mod saved_command_owner;
 pub mod runtime;
-// First protected-runtime inspection backend only. It is not connected to a
-// launch path and cannot construct an executable qualified-runtime capability.
+// Protected original books. The retained Android launch path is wired but
+// qualification-disabled; legacy inspection-only DATA remains separate.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod installed_runtime;
 pub mod supervisor;

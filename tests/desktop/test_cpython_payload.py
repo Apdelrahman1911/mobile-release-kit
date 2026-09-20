@@ -165,10 +165,14 @@ class CPythonPayloadTests(unittest.TestCase):
     def test_limits_and_both_bootstrap_reservations_match_existing_preparer(self):
         for name in ("MAX_FILES", "MAX_ENTRIES", "MAX_PATH_PARTS", "MAX_FILE_BYTES", "MAX_TOTAL_BYTES"):
             self.assertEqual(getattr(payload, name), getattr(preparation, name), name)
-        self.assertEqual(set(payload.RESERVED_PAYLOAD_FILES), {"core.zip", *preparation.BOOTSTRAPS})
-        self.assertEqual(len(payload.RESERVED_PAYLOAD_FILES), 3)
-        self.assertEqual(payload.RESERVED_ENTRIES, 4)
-        self.assertGreaterEqual(payload.RESOURCE_BYTE_HEADROOM, 64 * 1024 * 1024)
+        self.assertEqual(set(payload.RESERVED_PAYLOAD_FILES),
+                         {"core.zip", preparation.GITHUB_CA_NAME, *preparation.BOOTSTRAPS})
+        self.assertEqual(len(payload.RESERVED_PAYLOAD_FILES), 8)
+        self.assertEqual(payload.RESERVED_ENTRIES, 9)
+        self.assertEqual(payload.RESOURCE_BYTE_HEADROOM, 64 * 1024 * 1024)
+        self.assertGreater(payload.RESOURCE_BYTE_HEADROOM,
+                           preparation.MAX_CORE_BYTES + len(preparation.BOOTSTRAPS) * preparation.MAX_BOOTSTRAP_BYTES
+                           + preparation.MAX_GITHUB_CA_BYTES + payload.MAX_MANIFEST_BYTES)
         self.assertEqual(payload.MAX_MANIFEST_BYTES, 1024 * 1024)
         self.assertEqual(payload.MAX_MANIFEST_NODES, 20_000)
         for name in ("libpython3.14.so.1.0", "a+b.py", "engine_bootstrap.py", "A-1"):
@@ -455,8 +459,8 @@ class CPythonPayloadTests(unittest.TestCase):
                 {"path": name, "size": payload.RESOURCE_BYTE_HEADROOM, "sha256": "0" * 64}
                 for name in payload.RESERVED_PAYLOAD_FILES]
             limits = {
-                "MAX_FILES": len(items) + 3,
-                "MAX_ENTRIES": len(items) + len(directories) + 4,
+                "MAX_FILES": len(items) + len(payload.RESERVED_PAYLOAD_FILES),
+                "MAX_ENTRIES": len(items) + len(directories) + payload.RESERVED_ENTRIES,
                 "MAX_TOTAL_BYTES": sum(len(item.content) for item in items) + payload.RESOURCE_BYTE_HEADROOM,
                 "MAX_FILE_BYTES": max(len(item.content) for item in items),
                 "MAX_MANIFEST_BYTES": len(payload._canonical(inventory)) + payload.MANIFEST_METADATA_HEADROOM,
@@ -469,7 +473,7 @@ class CPythonPayloadTests(unittest.TestCase):
                     with patch.object(payload, name, exact - 1):
                         with self.assertRaises(payload.PayloadError):
                             payload._preflight_items(items)
-            with patch.object(payload, "MAX_FILES", len(items) + 2), \
+            with patch.object(payload, "MAX_FILES", len(items) + len(payload.RESERVED_PAYLOAD_FILES) - 1), \
                     patch.object(payload, "_write_payload") as write:
                 self.assert_refused_before_output(fixture)
                 write.assert_not_called()
@@ -686,6 +690,8 @@ class CPythonPayloadTests(unittest.TestCase):
             (source / "desktop").mkdir()
             for bootstrap in preparation.BOOTSTRAPS:
                 (source / "desktop" / bootstrap).write_bytes(b"# inert bootstrap, never executed\n")
+            # Opaque inventory data only: not a certificate or trust-store fixture.
+            (source / "desktop" / preparation.GITHUB_CA_NAME).write_bytes(b"INERT CA INVENTORY DATA ONLY\n")
             self.assertEqual({path.name for path in fixture.output.iterdir()}, {"python"})
             result = preparation.prepare(source, fixture.output, payload.TARGET)
             manifest = json.loads((fixture.output / "manifest.json").read_bytes())
@@ -695,7 +701,8 @@ class CPythonPayloadTests(unittest.TestCase):
             self.assertTrue({entry[0] for entry in payload._GENERATED} <= paths)
             self.assertIn(payload._EXEC_DESTINATION, paths)
             self.assertNotIn(payload._EXEC_SOURCE, paths)
-            self.assertEqual(len(paths), len(_BASE) + len(_NOTICES) + len(payload._GENERATED) + 3)
+            self.assertEqual(len(paths), len(_BASE) + len(_NOTICES) + len(payload._GENERATED)
+                             + len(payload.RESERVED_PAYLOAD_FILES))
             self.assertEqual(result["qualification"], "prepared-not-native-verified")
             self.assertIsNone(payload.APPROVED_NOTICE_INVENTORY_SHA256)
             self.assertIsNone(payload.APPROVED_STATIC_LINK_PROVENANCE_SHA256)

@@ -26,6 +26,7 @@ pub struct DesktopBridge {
     pub edits: EditOwner,
     pub(crate) diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner,
     pub(crate) preflight: crate::offline_preflight_owner::OfflinePreflightOwner,
+    pub(crate) android_build: crate::android_build_owner::AndroidBuildOwner,
     projects: Mutex<BTreeMap<String, RegisteredProject>>,
     project_generation: AtomicU32,
     #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
@@ -37,7 +38,10 @@ impl DesktopBridge {
         Self {
             supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime.clone()),
             diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime.clone()),
-            preflight: crate::offline_preflight_owner::OfflinePreflightOwner::new(runtime),
+            preflight: crate::offline_preflight_owner::OfflinePreflightOwner::new(runtime.clone()),
+            // Retain the owner and compiled profile DATA only; neither is tool
+            // custody or qualification. The renderer cannot select this profile.
+            android_build: crate::android_build_owner::AndroidBuildOwner::new(runtime, crate::android_toolchain::AndroidToolchainProfile::compiled()),
             projects: Mutex::new(BTreeMap::new()), project_generation: AtomicU32::new(1),
             #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
             sequence: AtomicU64::new(1),
@@ -167,6 +171,7 @@ impl DesktopBridge {
     }
     pub fn open_config_edit(&self, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
         self.preflight.ensure_idle()?;
+        self.android_build.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
@@ -278,6 +283,7 @@ impl DesktopBridge {
     #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
     pub(crate) fn register_picked_project(&self, path: PathBuf) -> Result<Project, BridgeError> {
         self.preflight.ensure_idle()?;
+        self.android_build.ensure_idle()?;
         self.diagnostics.ensure_idle()?;
         if self.supervisor.stopping() || self.edits.stopping() { return Err(BridgeError::shutdown()); }
         if self.supervisor.disabled() || self.edits.disabled() { return Err(BridgeError::cleanup_unknown()); }
