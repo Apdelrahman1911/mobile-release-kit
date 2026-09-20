@@ -2,24 +2,25 @@
 //! The separately ignored hosted submodule has its own closed source-bound
 //! scope. The inert identity below is never sent to that submodule's runtime.
 use super::*;
+use crate::offline_preflight_owner::{OfflinePreflightOwner, unavailable};
 use std::path::PathBuf;
 use serde_json::json;
 
 fn owner() -> OfflinePreflightOwner { OfflinePreflightOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-runtime"))) }
 fn project() -> RegisteredRoot { RegisteredRoot { path: PathBuf::from("/unopened-preflight-project"),
     identity: crate::asset_source::DirectoryIdentity::synthetic_evidence_identity() } }
-fn projection() -> wire::Projection { wire::Projection { operation_id: "a".repeat(32), owner_generation: "b".repeat(32),
-    context: wire::tests::context(), phase: Phase::AwaitingConsent, intent_usable: true,
-    outcome: None, reason: Reason::None, result: None } }
+fn projection() -> RunProjection { RunProjection { operation_id: "a".repeat(32), owner_generation: "b".repeat(32),
+    context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
+    outcome: None, reason: Reason::None, result: None, stage: None } }
 fn prepared(owner: &OfflinePreflightOwner, expires: Instant) {
-    owner.inner.lock().prepared = Some(Prepared { projection: projection(), expires, registration: 1, project: project() });
+    owner.original_for_test().inner.lock().prepared = Some(Prepared { projection: projection(), expires, registration: 1, project: project() });
 }
-fn start_input(id: &str) -> Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
+fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
 fn active() -> (OfflinePreflightOwner, Arc<Session>) {
     let owner = owner(); let p = projection();
     let (stop, _) = watch::channel(false); let (pipes, _) = watch::channel(Pipes::Pending); let (frames, receiver) = mpsc::channel(2);
-    let session = Arc::new(Session { id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
-        profile: Profile::LinuxX64, clocks: Clocks::new(Instant::now()), registration: 1, project: project(), request: AsyncMutex::new(None),
+    let session = Arc::new(Session { domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
+        profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks: Clocks::new(SavedCommandDomain::OfflinePreflight, Instant::now()), registration: 1, project: project(), request: AsyncMutex::new(None),
         stop, pipes, frames, wake: Notify::new(), output_bytes: AtomicUsize::new(0), resource_unknown: AtomicBool::new(false),
         driver_done: AtomicBool::new(false), driver_joined: AtomicBool::new(false), driver_failed: AtomicBool::new(false),
         watchdog_joined: AtomicBool::new(false), watchdog_failed: AtomicBool::new(false), manager_failed: AtomicBool::new(false),
@@ -32,125 +33,121 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
         fixture: None,
     });
     let p = RunProjection { operation_id: p.operation_id, owner_generation: p.owner_generation, context: p.context,
-        phase: Phase::Starting, outcome: None, reason: Reason::None, result: None };
-    owner.inner.lock().active = Some(Active { owner: session.clone(), projection: p, first_stop: None, work_expired: false,
+        phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
+    owner.original_for_test().inner.lock().active = Some(Active { owner: session.clone(), projection: p, first_stop: None, work_expired: false,
         accepted: false, terminal: false, unknown: false, final_join_seen: false });
     (owner, session)
 }
 
-#[test]
-fn qualification_is_closed_without_a_runtime_or_another_owners_permit() {
-    let owner = owner(); assert!(!owner.inner.qualified());
-    let status = owner.status(Availability::Available).unwrap();
-    assert!(matches!(status.availability, Availability::RuntimeUnqualified | Availability::UnsupportedPlatform));
+fn offline_context(owner: &Session) -> &wire::Context {
+    match &owner.context { Context::OfflinePreflight(context) => context, Context::AndroidBuild(_) => panic!("offline test context") }
+}
+
+pub(crate) fn qualification_is_closed_without_a_runtime_or_another_owners_permit() {
+    let owner = owner(); assert!(!owner.original_for_test().inner.qualified());
+    let status = owner.status(wire::Availability::Available).unwrap();
+    assert!(matches!(status.availability, wire::Availability::RuntimeUnqualified | wire::Availability::UnsupportedPlatform));
     assert!(status.operation.is_none()); assert!(owner.can_exit());
     let input = wire::prepare(&json!({"projectId":"inert-project","draftRevision":2,"baselineGeneration":3,
         "savedConfig":{"bytes":123,"sha256":"c".repeat(64)}})).unwrap();
-    assert!(owner.prepare(input, 1, project(), Availability::Available).is_err());
-    assert!(owner.inner.lock().prepared.is_none()); assert!(owner.inner.lock().active.is_none());
+    assert!(owner.prepare(input, 1, project(), wire::Availability::Available).is_err());
+    assert!(owner.original_for_test().inner.lock().prepared.is_none()); assert!(owner.original_for_test().inner.lock().active.is_none());
 }
 
-#[test]
-fn no_owner_startup_and_unsupported_status_do_not_claim_document_loss() {
+pub(crate) fn no_owner_startup_and_unsupported_status_do_not_claim_document_loss() {
     let owner = owner();
-    let initial = owner.status(Availability::Busy).unwrap();
+    let initial = owner.status(wire::Availability::Busy).unwrap();
     assert!(initial.operation.is_none());
-    assert_eq!(initial.availability, if Profile::current().is_some() { Availability::Busy } else { Availability::UnsupportedPlatform });
-    let bound = owner.status(Availability::Available).unwrap();
-    assert_eq!(bound.availability, if Profile::current().is_some() { Availability::RuntimeUnqualified } else { Availability::UnsupportedPlatform });
+    assert_eq!(initial.availability, if wire::Profile::current().is_some() { wire::Availability::Busy } else { wire::Availability::UnsupportedPlatform });
+    let bound = owner.status(wire::Availability::Available).unwrap();
+    assert_eq!(bound.availability, if wire::Profile::current().is_some() { wire::Availability::RuntimeUnqualified } else { wire::Availability::UnsupportedPlatform });
     assert!(bound.operation.is_none());
     if initial.availability != bound.availability { assert!(bound.status_revision > initial.status_revision); }
     owner.document_lost();
-    let lost = owner.status(Availability::DocumentLost).unwrap();
-    assert_eq!(lost.availability, if Profile::current().is_some() { Availability::DocumentLost } else { Availability::UnsupportedPlatform });
+    let lost = owner.status(wire::Availability::DocumentLost).unwrap();
+    assert_eq!(lost.availability, if wire::Profile::current().is_some() { wire::Availability::DocumentLost } else { wire::Availability::UnsupportedPlatform });
     assert!(lost.operation.is_none());
     // Supplied unsupported capability DATA only, never a host or runtime permit.
-    let unsupported = owner.status(Availability::UnsupportedPlatform).unwrap();
-    assert_eq!(unsupported.availability, Availability::UnsupportedPlatform);
+    let unsupported = owner.status(wire::Availability::UnsupportedPlatform).unwrap();
+    assert_eq!(unsupported.availability, wire::Availability::UnsupportedPlatform);
     assert!(unsupported.operation.is_none()); assert!(owner.can_exit());
     if lost.availability != unsupported.availability { assert!(unsupported.status_revision > lost.status_revision); }
 }
 
-#[test]
-fn intent_expires_with_a_new_revision_and_cancel_never_creates_an_owner() {
+pub(crate) fn intent_expires_with_a_new_revision_and_cancel_never_creates_an_owner() {
     let owner = owner(); prepared(&owner, Instant::now() + INTENT);
-    let before = owner.status(Availability::Available).unwrap();
+    let before = owner.status(wire::Availability::Available).unwrap();
     assert!(before.operation.as_ref().unwrap().intent_usable);
-    let expiry = Instant::now(); owner.inner.lock().prepared.as_mut().unwrap().expires = expiry;
-    owner.inner.expire_prepared(&mut owner.inner.lock(), expiry);
-    let after = owner.status(Availability::Available).unwrap();
+    let expiry = Instant::now(); owner.original_for_test().inner.lock().prepared.as_mut().unwrap().expires = expiry;
+    owner.original_for_test().inner.expire_prepared(&mut owner.original_for_test().inner.lock(), expiry);
+    let after = owner.status(wire::Availability::Available).unwrap();
     assert!(after.status_revision > before.status_revision);
     let operation = after.operation.unwrap(); assert!(!operation.intent_usable);
-    assert_eq!((operation.phase, operation.outcome, operation.reason), (Phase::Terminal, Some(Outcome::Refused), Reason::IntentExpired));
-    assert!(owner.inner.lock().active.is_none());
+    assert_eq!((operation.phase, operation.outcome, operation.reason), (wire::Phase::Terminal, Some(wire::Outcome::Refused), wire::Reason::IntentExpired));
+    assert!(owner.original_for_test().inner.lock().active.is_none());
     prepared(&owner, Instant::now() + INTENT);
-    let status = owner.cancel(&"a".repeat(32), &"b".repeat(32), Availability::Available).unwrap();
-    assert_eq!(status.operation.unwrap().outcome, Some(Outcome::Cancelled));
-    assert!(owner.inner.lock().prepared.is_none()); assert!(owner.inner.lock().active.is_none());
+    let status = owner.cancel(&"a".repeat(32), &"b".repeat(32), wire::Availability::Available).unwrap();
+    assert_eq!(status.operation.unwrap().outcome, Some(wire::Outcome::Cancelled));
+    assert!(owner.original_for_test().inner.lock().prepared.is_none()); assert!(owner.original_for_test().inner.lock().active.is_none());
 }
 
-#[test]
-fn start_burns_before_unavailability_and_foreign_start_grants_nothing() {
+pub(crate) fn start_burns_before_unavailability_and_foreign_start_grants_nothing() {
     let owner = owner(); prepared(&owner, Instant::now() + INTENT);
-    assert!(owner.start(start_input(&"f".repeat(32)), Instant::now(), Some((1, project())), Availability::Available).is_err());
-    assert!(owner.inner.lock().prepared.is_some());
-    let status = owner.start(start_input(&"a".repeat(32)), Instant::now(), Some((1, project())), Availability::Available).unwrap().release();
-    assert!(owner.inner.lock().prepared.is_none()); assert!(owner.inner.lock().active.is_none());
-    assert_eq!(status.operation.unwrap().outcome, Some(Outcome::Refused));
-    assert!(owner.start(start_input(&"a".repeat(32)), Instant::now(), Some((1, project())), Availability::Available).is_err());
+    assert!(owner.start(start_input(&"f".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
+    assert!(owner.original_for_test().inner.lock().prepared.is_some());
+    let status = owner.start(start_input(&"a".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::Available).unwrap().release();
+    assert!(owner.original_for_test().inner.lock().prepared.is_none()); assert!(owner.original_for_test().inner.lock().active.is_none());
+    assert_eq!(status.operation.unwrap().outcome, Some(wire::Outcome::Refused));
+    assert!(owner.start(start_input(&"a".repeat(32)), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
 }
 
-#[test]
-fn whole_run_endpoints_and_first_stop_never_renew() {
+pub(crate) fn whole_run_endpoints_and_first_stop_never_renew() {
     let (owner, session) = active(); let t = session.clocks.admitted;
-    assert_eq!(session.clocks.work, t + WORK); assert_eq!(session.clocks.finality, t + HARD);
+    assert_eq!(session.clocks.work, t + OFFLINE_WORK); assert_eq!(session.clocks.finality, t + OFFLINE_HARD);
     let first = t + Duration::from_secs(5);
-    let mut r = owner.inner.lock();
-    owner.inner.stop_locked(&mut r, &session, Reason::Cancelled, first);
-    owner.inner.stop_locked(&mut r, &session, Reason::ProtocolError, first + Duration::from_secs(9));
+    let mut r = owner.original_for_test().inner.lock();
+    owner.original_for_test().inner.stop_locked(&mut r, &session, Reason::Cancelled, first);
+    owner.original_for_test().inner.stop_locked(&mut r, &session, Reason::ProtocolError, first + Duration::from_secs(9));
     let a = r.active.as_ref().unwrap(); assert_eq!(a.first_stop, Some(first));
     assert_eq!(session.clocks.settlement(a.first_stop), first + SETTLEMENT);
-    owner.inner.advance_locked(&mut r, &session, first + SETTLEMENT);
+    owner.original_for_test().inner.advance_locked(&mut r, &session, first + SETTLEMENT);
     let a = r.active.as_ref().unwrap(); assert!(a.unknown && r.disabled); assert_eq!(a.first_stop, Some(first));
     let p = a.projection.public(); assert_eq!((p.phase, p.outcome, p.reason), (Phase::Unknown, Some(Outcome::Unknown), Reason::CleanupUnknown));
     assert!(p.result.is_none());
 }
 
-#[test]
-fn complete_negative_is_provisional_and_not_first_failure() {
+pub(crate) fn complete_negative_is_provisional_and_not_first_failure() {
     let (owner, session) = active(); let t = session.clocks.admitted;
-    owner.inner.accept_at(&session, Frame::Accepted, t);
-    owner.inner.accept_at(&session, wire::tests::terminal_frame(&session.context), t + Duration::from_secs(1));
-    let mut r = owner.inner.lock();
+    owner.original_for_test().inner.accept_at(&session, Frame::OfflinePreflight(wire::Frame::Accepted), t);
+    owner.original_for_test().inner.accept_at(&session, Frame::OfflinePreflight(wire::tests::terminal_frame(offline_context(&session))), t + Duration::from_secs(1));
+    let mut r = owner.original_for_test().inner.lock();
     let a = r.active.as_ref().unwrap(); assert!(a.first_stop.is_none() && a.projection.result.is_some());
     let p = a.projection.public(); assert_eq!(p.phase, Phase::Stopping); assert!(p.outcome.is_none() && p.result.is_none());
     // An unjoined native result cannot win over a later original Cancel.
-    owner.inner.stop_locked(&mut r, &session, Reason::Cancelled, t + Duration::from_secs(2));
+    owner.original_for_test().inner.stop_locked(&mut r, &session, Reason::Cancelled, t + Duration::from_secs(2));
     assert_eq!(r.active.as_ref().unwrap().projection.outcome, Some(Outcome::Cancelled));
 }
 
-#[test]
-fn late_terminal_never_reverses_timeout_or_unknown_in_either_delivery_order() {
-    for due in [WORK, HARD] { for clock_first in [false, true] {
+pub(crate) fn late_terminal_never_reverses_timeout_or_unknown_in_either_delivery_order() {
+    for due in [OFFLINE_WORK, OFFLINE_HARD] { for clock_first in [false, true] {
         let (owner, session) = active(); let now = session.clocks.admitted + due;
-        owner.inner.accept_at(&session, Frame::Accepted, session.clocks.admitted);
-        if clock_first { owner.inner.advance_locked(&mut owner.inner.lock(), &session, now); }
-        owner.inner.accept_at(&session, wire::tests::terminal_frame(&session.context), now);
-        owner.inner.advance_locked(&mut owner.inner.lock(), &session, now);
-        let r = owner.inner.lock(); let a = r.active.as_ref().unwrap();
+        owner.original_for_test().inner.accept_at(&session, Frame::OfflinePreflight(wire::Frame::Accepted), session.clocks.admitted);
+        if clock_first { owner.original_for_test().inner.advance_locked(&mut owner.original_for_test().inner.lock(), &session, now); }
+        owner.original_for_test().inner.accept_at(&session, Frame::OfflinePreflight(wire::tests::terminal_frame(offline_context(&session))), now);
+        owner.original_for_test().inner.advance_locked(&mut owner.original_for_test().inner.lock(), &session, now);
+        let r = owner.original_for_test().inner.lock(); let a = r.active.as_ref().unwrap();
         assert_eq!(a.projection.reason, Reason::TimedOut); assert_eq!(a.projection.outcome, Some(Outcome::TimedOut));
-        assert_eq!(a.unknown, due == HARD); assert!(a.projection.public().result.is_none()); assert!(r.last.is_none());
+        assert_eq!(a.unknown, due == OFFLINE_HARD); assert!(a.projection.public().result.is_none()); assert!(r.last.is_none());
     } }
 }
 
-#[test]
-fn repeated_unknown_polling_does_not_publish_new_results_or_extend_clocks() {
+pub(crate) fn repeated_unknown_polling_does_not_publish_new_results_or_extend_clocks() {
     let (owner, session) = active();
-    owner.inner.advance_locked(&mut owner.inner.lock(), &session, session.clocks.finality);
-    let before = { let r = owner.inner.lock(); (r.revision, r.active.as_ref().unwrap().first_stop) };
+    owner.original_for_test().inner.advance_locked(&mut owner.original_for_test().inner.lock(), &session, session.clocks.finality);
+    let before = { let r = owner.original_for_test().inner.lock(); (r.revision, r.active.as_ref().unwrap().first_stop) };
     for _ in 0..8 {
-        assert!(owner.inner.endpoint(&session).is_none());
-        let r = owner.inner.lock(); let a = r.active.as_ref().unwrap();
+        assert!(owner.original_for_test().inner.endpoint(&session).is_none());
+        let r = owner.original_for_test().inner.lock(); let a = r.active.as_ref().unwrap();
         assert_eq!((r.revision, a.first_stop), before); assert!(a.unknown && r.disabled && r.last.is_none());
     }
 }
@@ -160,8 +157,10 @@ fn repeated_unknown_polling_does_not_publish_new_results_or_extend_clocks() {
 // another owner's qualification or a substitute launcher.
 #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
     any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
-pub(super) mod hosted {
+pub(crate) mod hosted {
     use super::*;
+    use wire::{Context, Terminal, Phase, Outcome, Reason, Profile};
+    use super::super::{Context as SavedContext, Terminal as SavedTerminal};
     use crate::{asset_session::DocumentBinding, bridge::DesktopBridge,
         environment_diagnostics_owner::hosted_tests::{BoundInputs, Check, anchored, bound_file, close_file,
             create_directory, create_private, end_check, hash, original_json, require}};
@@ -218,27 +217,33 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
     pub(crate) struct RegistrationPermit { owner: Weak<Inner>, id: String, root: RegisteredRoot, generation: u32, case: Case }
     impl RegistrationPermit {
         pub(crate) fn validate(&self, owner: &OfflinePreflightOwner) -> Result<(&str, &RegisteredRoot, u32), BridgeError> {
-            if self.owner.upgrade().is_some_and(|inner| Arc::ptr_eq(&inner, &owner.inner)) {
+            if owner.original_for_test().inner.domain == SavedCommandDomain::OfflinePreflight
+                && self.owner.upgrade().is_some_and(|inner| inner.domain == SavedCommandDomain::OfflinePreflight
+                    && Arc::ptr_eq(&inner, &owner.original_for_test().inner)) {
                 Ok((&self.id, &self.root, self.generation))
             } else { Err(unavailable()) }
         }
         pub(crate) fn gate_evidence(&self) -> bool { self.case == Case::PG01
-            && self.owner.upgrade().is_some_and(|inner| inner.lock().active.is_none()) }
+            && self.owner.upgrade().is_some_and(|inner| inner.domain == SavedCommandDomain::OfflinePreflight && inner.lock().active.is_none()) }
     }
     struct ObserverData { settled: bool, terminal: Option<Terminal>, first_stop: Option<Instant> }
-    pub(in crate::offline_preflight_owner) struct Permit {
+    pub(in crate::saved_command_owner) struct Permit {
         inputs: Arc<BoundInputs>, owner: Weak<Inner>, session: Mutex<Option<Weak<Session>>>,
         admitted: Mutex<Option<Arc<Session>>>, claimed: AtomicBool, case: Case,
         registration: RegistrationPermit, context: Context, end: Instant, gate: Gate,
         observed: Mutex<Option<ObserverData>>, files: Mutex<CaseFiles>,
     }
     impl Permit {
-        pub(in crate::offline_preflight_owner) fn permits(&self, inner: &Inner) -> bool {
-            self.inputs.data.scope == SCOPE && self.owner.upgrade().is_some_and(|owner| std::ptr::eq(owner.as_ref(), inner))
-                && Profile::current().is_some_and(|p| matches!(p, Profile::LinuxX64 | Profile::MacosArm64))
+        pub(in crate::saved_command_owner) fn permits(&self, inner: &Inner) -> bool {
+            inner.domain == SavedCommandDomain::OfflinePreflight && self.inputs.data.scope == SCOPE
+                && self.owner.upgrade().is_some_and(|owner| owner.domain == SavedCommandDomain::OfflinePreflight && std::ptr::eq(owner.as_ref(), inner))
+                && wire::Profile::current().is_some_and(|p| matches!(p, Profile::LinuxX64 | Profile::MacosArm64))
         }
-        pub(in crate::offline_preflight_owner) fn bind(&self, owner: &Arc<Session>) -> Result<(), BridgeError> {
-            if self.case == Case::PG01 || owner.context != self.context || owner.project != self.registration.root
+        pub(in crate::saved_command_owner) fn bind(&self, owner: &Arc<Session>) -> Result<(), BridgeError> {
+            if owner.domain != SavedCommandDomain::OfflinePreflight
+                || !matches!(&owner.context, SavedContext::OfflinePreflight(context) if context == &self.context)
+                || !matches!(owner.profile, super::super::Profile::OfflinePreflight(_))
+                || self.case == Case::PG01 || owner.project != self.registration.root
                 || owner.registration != self.registration.generation || Instant::now() >= self.end
                 || self.claimed.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() { return Err(unavailable()); }
             let mut session = self.session.lock().map_err(|_| unavailable())?;
@@ -250,27 +255,31 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             *admitted = Some(owner.clone()); Ok(())
         }
         fn original(&self, owner: &Session) -> bool {
-            self.session.lock().ok().and_then(|slot| slot.as_ref().and_then(Weak::upgrade))
-                .is_some_and(|session| std::ptr::eq(session.as_ref(), owner))
+            owner.domain == SavedCommandDomain::OfflinePreflight
+                && self.session.lock().ok().and_then(|slot| slot.as_ref().and_then(Weak::upgrade))
+                    .is_some_and(|session| session.domain == SavedCommandDomain::OfflinePreflight && std::ptr::eq(session.as_ref(), owner))
         }
-        pub(in crate::offline_preflight_owner) fn prepare_spawn(&self, owner: &Session, runtime: &VerifiedRuntime) -> Check<()> {
+        pub(in crate::saved_command_owner) fn prepare_spawn(&self, owner: &Session, runtime: &VerifiedRuntime) -> Check<()> {
             require(self.original(owner) && self.claimed.load(Ordering::SeqCst), "fixture_offline_original")?;
             self.inputs.recheck(self.end)?;
             let d = &self.inputs.data;
             require(runtime.python == d.python && runtime.core == d.source.join("src") && runtime.cwd == d.cwd
                 && runtime.bootstrap == d.cwd.join("offline_preflight_bootstrap.py")
-                && owner.context == self.context && owner.project == self.registration.root
+                && matches!(&owner.context, SavedContext::OfflinePreflight(context) if context == &self.context)
+                && owner.project == self.registration.root
                 && owner.registration == self.registration.generation, "fixture_offline_fixed_tuple")?;
             self.files.lock().map_err(|_| "fixture_file_record")?.before_start()?;
             end_check(self.end)
         }
-        pub(in crate::offline_preflight_owner) async fn observer_return(&self, owner: &Session, settled: bool) {
+        pub(in crate::saved_command_owner) async fn observer_return(&self, owner: &Session, settled: bool) {
             if !self.original(owner) { return; }
-            if let Some(inner) = self.owner.upgrade() {
+            if let Some(inner) = self.owner.upgrade().filter(|inner| inner.domain == SavedCommandDomain::OfflinePreflight) {
                 let r = inner.lock();
                 if let Some(active) = r.active.as_ref().filter(|a| std::ptr::eq(a.owner.as_ref(), owner)) {
                     if let Ok(mut slot) = self.observed.lock() {
-                        if slot.is_none() { *slot = Some(ObserverData { settled, terminal: active.projection.result.clone(), first_stop: active.first_stop }); }
+                        if slot.is_none() { *slot = Some(ObserverData { settled, terminal: match &active.projection.result {
+                            Some(SavedTerminal::OfflinePreflight(terminal)) => Some(terminal.clone()), _ => None,
+                        }, first_stop: active.first_stop }); }
                     }
                 }
             }
@@ -280,7 +289,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             // repeated-Cancel/writer-gate assertions, avoiding a fast-join race.
             // It releases immediately; only PF07 observes a timed hold.
             if matches!(self.case, Case::PF06 | Case::PF07) { self.gate.hold().await; }
-            if let Some(inner) = self.owner.upgrade() {
+            if let Some(inner) = self.owner.upgrade().filter(|inner| inner.domain == SavedCommandDomain::OfflinePreflight) {
                 let r = inner.lock();
                 if let Some(active) = r.active.as_ref().filter(|a| std::ptr::eq(a.owner.as_ref(), owner)) {
                     if let Ok(mut slot) = self.observed.lock() { if let Some(data) = slot.as_mut() { data.first_stop = active.first_stop; } }
@@ -415,11 +424,22 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             let context = Context { project_id: id.clone(), draft_revision: 0, baseline_generation: 2,
                 saved_config: wire::Content { bytes: saved.size as u32, sha256: saved.sha256.clone() },
                 platform: wire::Platform::Android, operation: wire::Operation::OfflinePreflight };
-            let permit = Arc::new(Permit { inputs, owner: Arc::downgrade(&bridge.preflight.inner), session: Mutex::new(None),
+            let permit = Arc::new(Permit { inputs, owner: Arc::downgrade(&bridge.preflight.original_for_test().inner), session: Mutex::new(None),
                 admitted: Mutex::new(None), claimed: AtomicBool::new(false), case,
-                registration: RegistrationPermit { owner: Arc::downgrade(&bridge.preflight.inner), id, root: project, generation: 2, case },
+                registration: RegistrationPermit { owner: Arc::downgrade(&bridge.preflight.original_for_test().inner), id, root: project, generation: 2, case },
                 context, end, gate: Gate::new(), observed: Mutex::new(None), files: Mutex::new(files) });
-            *bridge.preflight.inner.fixture.lock().map_err(|_| "fixture_offline_permit_slot")? = Some(Arc::downgrade(&permit));
+            *bridge.preflight.original_for_test().inner.fixture.lock().map_err(|_| "fixture_offline_permit_slot")? = Some(Arc::downgrade(&permit));
+            // The same original permit is deliberately presented to Android's
+            // otherwise empty registry. It must grant no qualification, intent
+            // or resource, and must not consume the Offline one-use claim.
+            let android = crate::android_build_owner::AndroidBuildOwner::new(RuntimeConfig::packaged(PathBuf::from("/unopened-android-runtime")));
+            let android_inner = &android.original_for_test().inner;
+            *android_inner.fixture.lock().map_err(|_| "fixture_android_permit_slot")? = Some(Arc::downgrade(&permit));
+            require(!permit.permits(android_inner) && !android_inner.qualified()
+                && !permit.claimed.load(Ordering::SeqCst)
+                && permit.admitted.lock().map_err(|_| "fixture_admission_slot")?.is_none()
+                && android_inner.lock().prepared.is_none() && android_inner.lock().active.is_none(), "fixture_offline_permit_is_not_android")?;
+
             let document = DocumentBinding::new(bridge.clone());
             require(document.navigation(true), "fixture_document_navigation")?;
             document.observe(|life| life.started(true)); document.hook_installed(); document.observe(|life| life.finished(true));
@@ -449,7 +469,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             self.document.cancel_offline_preflight(wire::Cancel { operation_id: s.id.clone(), owner_generation: s.generation.clone() })
                 .map_err(|_| "fixture_matching_cancel")?; Ok(()) }
         fn stop(&self) -> Check<Option<Instant>> {
-            let s = self.original()?; let r = self.bridge.preflight.inner.lock();
+            let s = self.original()?; let r = self.bridge.preflight.original_for_test().inner.lock();
             Ok(r.active.as_ref().filter(|a| Arc::ptr_eq(&a.owner, s)).and_then(|a| a.first_stop))
         }
         async fn entered(&self) -> Check<()> {
@@ -469,7 +489,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             let s = self.original()?; let mut changes = self.bridge.preflight.subscribe();
             loop {
                 let status = self.document.offline_preflight_status().map_err(|_| "fixture_status_lost")?;
-                let absent = self.bridge.preflight.inner.lock().active.is_none();
+                let absent = self.bridge.preflight.original_for_test().inner.lock().active.is_none();
                 if absent { if let Some(p) = status.operation { if p.operation_id == s.id && p.owner_generation == s.generation { return Ok(p); } } }
                 tokio::time::timeout_at(tokio::time::Instant::from_std(self.permit.end), changes.changed()).await
                     .map_err(|_| "fixture_originals_not_settled")?.map_err(|_| "fixture_original_watch_lost")?;
@@ -517,14 +537,14 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             && book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none()
             && !book.write_failed && !book.out_failed && !book.err_failed
             && book.write_end.as_ref().is_some_and(|r| r.sent && r.closed && !r.failed)
-            && book.out_end.as_ref().is_some_and(|r| r.frames == 2 && r.eof && r.closed && !r.failed)
+            && book.out_end.as_ref().is_some_and(|r| r.frames == 2 && r.decoder_settled && r.eof && r.closed && !r.failed)
             && book.err_end.as_ref().is_some_and(|r| r.frames == 0 && r.eof && r.closed && !r.failed)
             && input.close == Close::Settled && output.close == Close::Settled && error.close == Close::Settled
             && input.io.is_none() && output.io.is_none() && error.io.is_none()
             && owner.driver_joined.load(Ordering::SeqCst) && owner.watchdog_joined.load(Ordering::SeqCst)
             && !owner.driver_failed.load(Ordering::SeqCst) && !owner.manager_failed.load(Ordering::SeqCst)
             && !owner.watchdog_failed.load(Ordering::SeqCst) && !owner.resource_unknown.load(Ordering::SeqCst), "fixture_original_physical_finality")?;
-        let active_retained = run.bridge.preflight.inner.lock().active.is_some();
+        let active_retained = run.bridge.preflight.original_for_test().inner.lock().active.is_some();
         let disabled = run.bridge.preflight.disabled(); let can_exit = run.bridge.preflight.can_exit();
         require(!active_retained && can_exit, "fixture_original_exit_gate")?;
         let terminal = run.terminal()?; require(terminal.lifetime.settled(), "fixture_core_original_finality")?;
@@ -547,7 +567,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             "activeRetained":active_retained,"disabled":disabled,"canExit":can_exit}))
     }
     fn no_original(run: &Run) -> Check<()> {
-        let r = run.bridge.preflight.inner.lock();
+        let r = run.bridge.preflight.original_for_test().inner.lock();
         require(r.active.is_none() && !run.permit.claimed.load(Ordering::SeqCst)
             && run.permit.admitted.lock().map_err(|_| "fixture_admission_slot")?.is_none(), "fixture_gate_allocated_original")
     }
@@ -557,14 +577,14 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             run.document.offline_fixture_gate(&run.permit.registration, gate, true).map_err(|_| "fixture_gate_install")?;
             let refusal = run.document.prepare_offline_preflight(run.prepare_input());
             require(refusal.is_err_and(|error| error.code == "offline_preflight_busy"), "fixture_gate_prepare")?; no_original(run)?;
-            require(run.bridge.preflight.inner.lock().prepared.is_none(), "fixture_gate_prepared_anyway")?;
+            require(run.bridge.preflight.original_for_test().inner.lock().prepared.is_none(), "fixture_gate_prepared_anyway")?;
             run.document.offline_fixture_gate(&run.permit.registration, gate, false).map_err(|_| "fixture_gate_clear")?;
             run.consent()?;
             run.document.offline_fixture_gate(&run.permit.registration, gate, true).map_err(|_| "fixture_gate_reinstall")?;
             let refusal = run.document.start_offline_preflight(run.start_input()?).map_err(|_| "fixture_gate_start_reply")?;
             let p = refusal.operation.ok_or("fixture_gate_start_projection")?;
             require(p.outcome == Some(Outcome::Refused) && p.reason == Reason::StaleIntent && !p.intent_usable
-                && p.result.is_none() && run.bridge.preflight.inner.lock().prepared.is_none(), "fixture_gate_burned_intent")?;
+                && p.result.is_none() && run.bridge.preflight.original_for_test().inner.lock().prepared.is_none(), "fixture_gate_burned_intent")?;
             no_original(run)?;
             require(run.document.start_offline_preflight(run.start_input()?).is_err(), "fixture_gate_replay")?;
             run.document.offline_fixture_gate(&run.permit.registration, gate, false).map_err(|_| "fixture_gate_final_clear")?;
@@ -598,7 +618,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             && run.document.github_connection_status().session.is_none(), "fixture_reverse_private")?;
         require(run.bridge.preflight.busy() && run.bridge.supervisor.can_exit() && !run.bridge.diagnostics.busy() && run.bridge.diagnostics.can_exit()
             && run.stop()?.is_none(), "fixture_reverse_no_acquisition")?;
-        { let r = run.bridge.preflight.inner.lock(); require(r.active.as_ref().is_some_and(|a| Arc::ptr_eq(&a.owner, s)), "fixture_reverse_same_owner")?; }
+        { let r = run.bridge.preflight.original_for_test().inner.lock(); require(r.active.as_ref().is_some_and(|a| Arc::ptr_eq(&a.owner, s)), "fixture_reverse_same_owner")?; }
         run.cancel()?; let first = run.stop()?.ok_or("fixture_cancel_missing_f")?;
         let reached_writer = AtomicBool::new(false);
         let writer: Result<(), BridgeError> = run.document.configuration_edit_admit(|_| { reached_writer.store(true, Ordering::SeqCst); Ok(()) });
@@ -626,7 +646,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             // Deliberately RAW observation: no status/endpoint/advance call.
             // Only the original watchdog drives F+10 while its child JoinHandle
             // remains held. This observation ceiling grants no application clock.
-            let unknown = { let r = run.bridge.preflight.inner.lock();
+            let unknown = { let r = run.bridge.preflight.original_for_test().inner.lock();
                 r.disabled && r.active.as_ref().is_some_and(|a| Arc::ptr_eq(&a.owner, s) && a.unknown && a.first_stop == Some(first)) };
             if unknown { break Instant::now(); }
             tokio::time::timeout_at(tokio::time::Instant::from_std(end), changes.changed()).await
@@ -697,7 +717,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
                 && projection.reason == Reason::CleanupUnknown && projection.result.is_none() && run.bridge.preflight.disabled(), "fixture_unknown_sticky")?;
             require(run.document.prepare_offline_preflight(run.prepare_input()).is_err()
                 && run.document.start_offline_preflight(run.start_input()?).is_err(), "fixture_unknown_no_reopen")?;
-            let r = run.bridge.preflight.inner.lock();
+            let r = run.bridge.preflight.original_for_test().inner.lock();
             require(r.active.is_none() && r.prepared.is_none(), "fixture_unknown_retained_admission")?;
         } else { require(projection.phase == Phase::Terminal && projection.outcome == Some(outcome) && projection.reason == reason
             && !run.bridge.preflight.disabled(), "fixture_native_projection")?; }
@@ -710,7 +730,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
             "script":{"marker":std::str::from_utf8(&marker).map_err(|_| "fixture_marker_text")?,"secondExecuted":false,
                 "expectedExit":if case == Case::PF02 { Some(7) } else if matches!(case, Case::PF01 | Case::PF07) { Some(0) } else { None::<i32> },
                 "pendingPreserved":pending_preserved,"redacted":true},
-            "timing":{"workMs":WORK.as_millis() as u64,"hardMs":HARD.as_millis() as u64,"settlementMs":SETTLEMENT.as_millis() as u64,
+            "timing":{"workMs":OFFLINE_WORK.as_millis() as u64,"hardMs":OFFLINE_HARD.as_millis() as u64,"settlementMs":SETTLEMENT.as_millis() as u64,
                 "firstStopNs":first.map(|at| at.saturating_duration_since(s.clocks.admitted).as_nanos() as u64),"hold":held},"reciprocal":reciprocal}))
     }
 
@@ -736,9 +756,10 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
         (Arc::new(AsyncMutex::new(Pipe { io: Some(MemoryReader { bytes, at: 0, control: control.clone() }), close: Close::New })), control)
     }
     fn memory_frames(owner: &Session, total: Option<usize>) -> Check<Vec<u8>> {
-        let Frame::Terminal(terminal) = wire::tests::terminal_frame(&owner.context) else { return Err("fixture_memory_terminal"); };
+        let SavedContext::OfflinePreflight(context) = &owner.context else { return Err("fixture_memory_domain"); };
+        let wire::Frame::Terminal(terminal) = wire::tests::terminal_frame(context) else { return Err("fixture_memory_terminal"); };
         let mut first = serde_json::to_vec(&json!({"protocol":wire::PROTOCOL,"operationId":owner.id,"ownerGeneration":owner.generation,
-            "sequence":0,"kind":"accepted","payload":{"schemaVersion":1,"context":owner.context}})).map_err(|_| "fixture_memory_encode")?;
+            "sequence":0,"kind":"accepted","payload":{"schemaVersion":1,"context":context}})).map_err(|_| "fixture_memory_encode")?;
         let mut last = serde_json::to_vec(&json!({"protocol":wire::PROTOCOL,"operationId":owner.id,"ownerGeneration":owner.generation,
             "sequence":1,"kind":"terminal","payload":terminal})).map_err(|_| "fixture_memory_encode")?;
         if let Some(total) = total {
@@ -750,15 +771,15 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
     async fn cap_vector() -> Check<Value> {
         let (application, owner) = super::active(); owner.pipes.send_replace(Pipes::Available);
         let (error, error_count) = memory(vec![b'x'; 33000], true);
-        let early = read_output(application.inner.clone(), owner.clone(), error, true, Guard::new(&application.inner, &owner)).await;
+        let early = read_output(application.original_for_test().inner.clone(), owner.clone(), error, true, Guard::new(&application.original_for_test().inner, &owner)).await;
         let bytes = memory_frames(&owner, Some(33000))?; require(bytes.len() == 33000, "fixture_memory_pad_exact")?;
         let (output, output_count) = memory(bytes, true);
-        let end = read_output(application.inner.clone(), owner.clone(), output, false, Guard::new(&application.inner, &owner)).await;
+        let end = read_output(application.original_for_test().inner.clone(), owner.clone(), output, false, Guard::new(&application.original_for_test().inner, &owner)).await;
         let bytes = owner.output_bytes.load(Ordering::SeqCst);
         require(early.failed && early.closed && early.eof && end.failed && end.closed && end.eof && end.frames < 2
             && bytes == 66000 && output_count.read.load(Ordering::SeqCst) == 33000 && error_count.read.load(Ordering::SeqCst) == 33000
             && output_count.closes.load(Ordering::SeqCst) == 1 && error_count.closes.load(Ordering::SeqCst) == 1, "fixture_shared_64k_cap")?;
-        let r = application.inner.lock();
+        let r = application.original_for_test().inner.lock();
         require(r.disabled && r.active.as_ref().is_some_and(|a| a.unknown && a.projection.public().result.is_none()), "fixture_cap_not_success")?;
         Ok(json!({"id":"PV01","classification":"synthetic-reader-vectors","assertion":"passed","aggregateBytes":bytes,
             "stdoutBytes":33000,"stderrBytes":33000,"stdoutFailed":end.failed,"stderrFailed":early.failed,
@@ -767,20 +788,20 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
     async fn terminal_vectors() -> Check<Value> {
         let (application, owner) = super::active(); owner.pipes.send_replace(Pipes::Available);
         let (output, output_count) = memory(memory_frames(&owner, None)?, true);
-        let early = read_output(application.inner.clone(), owner.clone(), output, false, Guard::new(&application.inner, &owner)).await;
-        drain(&mut *owner.resources.lock().await, &application.inner, &owner);
+        let early = read_output(application.original_for_test().inner.clone(), owner.clone(), output, false, Guard::new(&application.original_for_test().inner, &owner)).await;
+        drain(&mut *owner.resources.lock().await, &application.original_for_test().inner, &owner);
         require(early.frames == 2 && !early.failed && early.eof && early.closed
-            && application.inner.lock().active.as_ref().is_some_and(|a| a.terminal && !a.unknown), "fixture_vector_terminal_first")?;
+            && application.original_for_test().inner.lock().active.as_ref().is_some_and(|a| a.terminal && !a.unknown), "fixture_vector_terminal_first")?;
         let (error, error_count) = memory(vec![b'x'], true);
-        let late = read_output(application.inner.clone(), owner.clone(), error, true, Guard::new(&application.inner, &owner)).await;
-        require(late.failed && late.eof && late.closed && application.inner.lock().active.as_ref()
+        let late = read_output(application.original_for_test().inner.clone(), owner.clone(), error, true, Guard::new(&application.original_for_test().inner, &owner)).await;
+        require(late.failed && late.eof && late.closed && application.original_for_test().inner.lock().active.as_ref()
             .is_some_and(|a| a.unknown && a.projection.public().result.is_none()), "fixture_vector_late_stderr")?;
         let (unfinished, pending_owner) = super::active(); pending_owner.pipes.send_replace(Pipes::Available);
         let (pending_output, count) = memory(memory_frames(&pending_owner, None)?, false);
-        let mut original = Box::pin(read_output(unfinished.inner.clone(), pending_owner.clone(), pending_output, false, Guard::new(&unfinished.inner, &pending_owner)));
+        let mut original = Box::pin(read_output(unfinished.original_for_test().inner.clone(), pending_owner.clone(), pending_output, false, Guard::new(&unfinished.original_for_test().inner, &pending_owner)));
         let was_pending = std::future::poll_fn(|cx| Poll::Ready(matches!(original.as_mut().poll(cx), Poll::Pending))).await;
-        drain(&mut *pending_owner.resources.lock().await, &unfinished.inner, &pending_owner);
-        let provisional = unfinished.inner.lock().active.as_ref().is_some_and(|a| a.terminal && !a.unknown && a.projection.public().result.is_none());
+        drain(&mut *pending_owner.resources.lock().await, &unfinished.original_for_test().inner, &pending_owner);
+        let provisional = unfinished.original_for_test().inner.lock().active.as_ref().is_some_and(|a| a.terminal && !a.unknown && a.projection.public().result.is_none());
         let not_closed = count.closes.load(Ordering::SeqCst) == 0;
         // Always release/join the sole original memory reader before returning
         // an assertion failure. It is a synthetic EOF vector, not an OS fault.
@@ -875,9 +896,7 @@ raise SystemExit(7 if mode == 'nonzero' else 0)
         Ok(CompletedFixture { value, _originals: originals })
     }
 
-    #[test]
-    #[ignore = "source-bound offline Linux/macOS native fixture; not local or production qualification"]
-    fn hosted_offline_preflight_original_resources() {
+    pub(crate) fn hosted_offline_preflight_original_resources() {
         let started = Instant::now(); // Original finite-roster infrastructure clock, never W/H/F.
         let result = (|| -> Check<()> {
             let inputs = Arc::new(BoundInputs::load_offline()?);

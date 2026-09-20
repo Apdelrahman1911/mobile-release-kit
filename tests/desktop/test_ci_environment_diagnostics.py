@@ -1211,16 +1211,22 @@ class OfflineNativeCIContracts(unittest.TestCase):
         self.assertEqual(cli.count("os.execve("), 1)
         for forbidden in ("subprocess.", "shutil.rmtree", 'run([', "time.monotonic_ns() +"):
             self.assertNotIn(forbidden, cli)
-        owner = (SOURCE / "desktop/src-tauri/src/offline_preflight_owner.rs").read_text(encoding="utf-8")
+        adapter = (SOURCE / "desktop/src-tauri/src/offline_preflight_owner.rs").read_text(encoding="utf-8")
+        owner = (SOURCE / "desktop/src-tauri/src/saved_command_owner.rs").read_text(encoding="utf-8")
         fixture = (SOURCE / "desktop/src-tauri/src/offline_preflight_owner_tests.rs").read_text(encoding="utf-8")
-        for text in ("const NATIVE_QUALIFIED: bool = false;", "const RUNTIME_QUALIFIED: bool = false;",
-                     "const WORK: Duration = Duration::from_secs(1800);", "const HARD: Duration = Duration::from_secs(1810);",
+        self.assertIn("SavedCommandOwner::offline_preflight(runtime)", adapter)
+        self.assertIn("self.saved.start_offline(", adapter)
+        for text in ("const OFFLINE_NATIVE_QUALIFIED: bool = false;", "const OFFLINE_RUNTIME_QUALIFIED: bool = false;",
+                     "const ANDROID_NATIVE_QUALIFIED: bool = false;", "const ANDROID_RUNTIME_QUALIFIED: bool = false;",
+                     "const ANDROID_TOOLCHAIN_QUALIFIED: bool = false;",
+                     "const OFFLINE_WORK: Duration = Duration::from_secs(1800);", "const OFFLINE_HARD: Duration = Duration::from_secs(1810);",
+                     "const ANDROID_WORK: Duration = Duration::from_secs(3000);", "const ANDROID_HARD: Duration = Duration::from_secs(3010);",
                      "const SETTLEMENT: Duration = Duration::from_secs(10);"):
             self.assertIn(text, owner)
         self.assertIn('feature = "development-runtime", not(feature = "desktop-shell")', fixture)
         self.assertIn('target_os = "linux", target_arch = "x86_64", target_env = "gnu"', fixture)
         self.assertIn('target_os = "macos", target_arch = "aarch64"', fixture)
-        self.assertIn("pub(in crate::offline_preflight_owner) struct Permit", fixture)
+        self.assertIn("pub(in crate::saved_command_owner) struct Permit", fixture)
         self.assertIn('runtime.bootstrap == d.cwd.join("offline_preflight_bootstrap.py")', fixture)
         self.assertIn('"PF05a", "PF05b", "PF06", "PF07"];', fixture)
         self.assertIn("const ROSTER: Duration = Duration::from_secs(180);", fixture)

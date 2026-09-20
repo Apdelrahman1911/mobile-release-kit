@@ -303,6 +303,28 @@ impl RuntimeConfig {
             Err(BridgeError::unavailable("Saved offline checks remain disabled until their original native owner, runtime custody and neutral cwd are qualified."))
         }
     }
+    /// Android has its own fixed entry and owner qualification; an offline
+    /// permit or successful path/hash inspection cannot authorize this domain.
+    /// VerifiedRuntime is selection DATA, not immutable tool/runtime custody.
+    pub(crate) fn resolve_android_build(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
+        #[cfg(all(feature = "development-runtime", debug_assertions,
+            target_os = "linux", target_env = "gnu", target_arch = "x86_64"))]
+        {
+            let mut runtime = self.development(end)?;
+            let bootstrap = runtime.cwd.join("android_build_bootstrap.py");
+            const BOOTSTRAP: &[u8] = include_bytes!("../../android_build_bootstrap.py");
+            if read_checked(&bootstrap, BOOTSTRAP.len() as u64, end)?.as_slice() != BOOTSTRAP { return Err(unavailable()); }
+            deadline(end)?;
+            runtime.bootstrap = bootstrap;
+            Ok(runtime)
+        }
+        #[cfg(not(all(feature = "development-runtime", debug_assertions,
+            target_os = "linux", target_env = "gnu", target_arch = "x86_64")))]
+        {
+            let _ = end;
+            Err(BridgeError::unavailable("Android builds remain disabled until their original native owner, protected toolchain and runtime custody are qualified for this platform."))
+        }
+    }
     /// Private profile, not another ambient development entry. The closed gate
     /// precedes even inspection. The latent branch additionally binds every
     /// selected path/CA byte to the existing explicit compiled manifest anchor;

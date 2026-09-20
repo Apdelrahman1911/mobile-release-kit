@@ -48,6 +48,7 @@ SOURCES = (
     '.github/workflows/desktop-environment-diagnostics-native.yml',
     '.github/workflows/desktop-github-connection-tls.yml',
     '.github/workflows/desktop-github-workflow-apply-native.yml',
+    'desktop/android_build_bootstrap.py',
     'desktop/config_edit_bootstrap.py',
     'desktop/engine_bootstrap.py',
     'desktop/environment_bootstrap.py',
@@ -67,6 +68,8 @@ SOURCES = (
     'desktop/src-tauri/icons/icon.ico',
     'desktop/src-tauri/icons/icon.png',
     'desktop/src-tauri/icons/icon.svg',
+    'desktop/src-tauri/src/android_build_owner.rs',
+    'desktop/src-tauri/src/android_build_protocol.rs',
     'desktop/src-tauri/src/asset_commands.rs',
     'desktop/src-tauri/src/asset_session.rs',
     'desktop/src-tauri/src/asset_source.rs',
@@ -103,6 +106,8 @@ SOURCES = (
     'desktop/src-tauri/src/protocol.rs',
     'desktop/src-tauri/src/release_version_protocol.rs',
     'desktop/src-tauri/src/runtime.rs',
+    'desktop/src-tauri/src/saved_command_owner.rs',
+    'desktop/src-tauri/src/saved_command_owner_tests.rs',
     'desktop/src-tauri/src/session_gtk_qualification.rs',
     'desktop/src-tauri/src/session_gtk_qualification/native_contract.rs',
     'desktop/src-tauri/src/shell.rs',
@@ -122,6 +127,8 @@ SOURCES = (
     'desktop/src-tauri/tests/session_gtk_qualification.rs',
     'desktop/src-tauri/tests/session_gtk_recipe.js',
     'desktop/src/App.tsx',
+    'desktop/src/androidBuildProtocol.ts',
+    'desktop/src/androidBuildTypes.ts',
     'desktop/src/api.ts',
     'desktop/src/assetSessionController.ts',
     'desktop/src/assetSessionHelp.ts',
@@ -373,7 +380,7 @@ class FiniteJson:
 
     Only an already bounded string token is passed to json.loads. Native DTOs
     require canonical declaration order and one LF. DATA has a larger key/map
-    budget for all173 source names; final/prefix additionally require their
+    budget for all263 source names; final/prefix additionally require their
     producer's sorted compact encoding with no LF. Freeze DATA may be spaced.
     """
     def __init__(self, data: bytes, *, native: bool, large: bool = False):
@@ -385,7 +392,7 @@ class FiniteJson:
         self.limit = (2048 if large else 768) if native else 16000
         self.depth = 12
         self.array = 128 if native else 512
-        self.mapping = 128 if native else 256
+        self.mapping = 128 if native else 263
         self.key_limit = 64 if native else 128
         self.integer_max = 2**32 - 1 if native else 2**64 - 1
 
@@ -1624,7 +1631,7 @@ class Freeze:
         require(Path(__file__).resolve(strict=True) == launcher and os.getcwd() == str(repository / "desktop/src-tauri"), "fixed actual launcher source/cwd")
         require(type(v["display"]) is str and re.fullmatch(r":[1-9][0-9]{0,3}", v["display"]) is not None
                 and os.environ.get("DISPLAY") == v["display"], "fixed inherited display number")
-        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 256, "complete frozen256 source roster")
+        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 263, "complete frozen263 source roster")
         for path in SOURCES:
             h(v["sourceHashes"][path])
             actual, st = book.hash_file(exact_path(repository / path), 2 * 1024 * 1024)
@@ -2689,7 +2696,7 @@ def inert_source_tests() -> None:
     raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
     fixed(FiniteJson(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
     longest = max(SOURCES, key=len)
-    assert len(SOURCES) == 256 and 64 < len(longest) <= 128 and len(WITNESS) == 18
+    assert len(SOURCES) == 263 and 64 < len(longest) <= 128 and len(WITNESS) == 18
     raw = (json.dumps({longest: "a" * 64}, separators=(",", ":")) + "\n").encode("ascii")
     rejects(lambda data: FiniteJson(data, native=True).parse(lf=True), raw)
     base = {"response-decision": 1, "response-leave": 3, "close-dispatch": 2, "close-enter": 4, "close-ack": 5, "close-leave": 6,
