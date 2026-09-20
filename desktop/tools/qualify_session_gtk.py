@@ -193,6 +193,11 @@ SOURCES = (
     'src/mobile_release/__init__.py',
     'src/mobile_release/__main__.py',
     'src/mobile_release/_command_process.py',
+    'src/mobile_release/_desktop_android_build_control.py',
+    'src/mobile_release/_desktop_android_build_engine.py',
+    'src/mobile_release/_desktop_android_build_files.py',
+    'src/mobile_release/_desktop_android_build_protocol.py',
+    'src/mobile_release/_desktop_android_build_selection.py',
     'src/mobile_release/_desktop_edit_control.py',
     'src/mobile_release/_desktop_edit_engine.py',
     'src/mobile_release/_desktop_edit_protocol.py',
@@ -205,6 +210,8 @@ SOURCES = (
     'src/mobile_release/_desktop_preflight_control.py',
     'src/mobile_release/_desktop_preflight_engine.py',
     'src/mobile_release/_desktop_preflight_protocol.py',
+    'src/mobile_release/_desktop_saved_command_control.py',
+    'src/mobile_release/_desktop_saved_command_engine.py',
     'src/mobile_release/_github_connection_transport.py',
     'src/mobile_release/_lifetime_evidence.py',
     'src/mobile_release/_native_process.py',
@@ -214,8 +221,12 @@ SOURCES = (
     'src/mobile_release/_store_lane_evidence.py',
     'src/mobile_release/_store_lane_files.py',
     'src/mobile_release/android.py',
+    'src/mobile_release/android_build_operation.py',
+    'src/mobile_release/android_build_tools.py',
     'src/mobile_release/android_manifest.py',
     'src/mobile_release/android_upload_validation.py',
+    'src/mobile_release/android_zip.py',
+    'src/mobile_release/android_zip_integrity.py',
     'src/mobile_release/api/__init__.py',
     'src/mobile_release/api/_candidate_evidence.py',
     'src/mobile_release/api/_catalog.py',
@@ -249,6 +260,7 @@ SOURCES = (
     'src/mobile_release/credential_requirements.py',
     'src/mobile_release/credentials.py',
     'src/mobile_release/data/apple-profile-roots.pem',
+    'src/mobile_release/desktop_android_build.py',
     'src/mobile_release/desktop_preflight.py',
     'src/mobile_release/discovery.py',
     'src/mobile_release/environment_diagnostics.py',
@@ -1612,7 +1624,7 @@ class Freeze:
         require(Path(__file__).resolve(strict=True) == launcher and os.getcwd() == str(repository / "desktop/src-tauri"), "fixed actual launcher source/cwd")
         require(type(v["display"]) is str and re.fullmatch(r":[1-9][0-9]{0,3}", v["display"]) is not None
                 and os.environ.get("DISPLAY") == v["display"], "fixed inherited display number")
-        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 244, "complete frozen244 source roster")
+        require(type(v["sourceHashes"]) is dict and set(v["sourceHashes"]) == set(SOURCES) and len(SOURCES) == 256, "complete frozen256 source roster")
         for path in SOURCES:
             h(v["sourceHashes"][path])
             actual, st = book.hash_file(exact_path(repository / path), 2 * 1024 * 1024)
@@ -2677,7 +2689,7 @@ def inert_source_tests() -> None:
     raw = json.dumps({"sourceHashes": source_map}, separators=(",", ":")).encode("ascii")
     fixed(FiniteJson(raw, native=False).parse(lf=False), {"sourceHashes": source_map})
     longest = max(SOURCES, key=len)
-    assert len(SOURCES) == 244 and 64 < len(longest) <= 128 and len(WITNESS) == 18
+    assert len(SOURCES) == 256 and 64 < len(longest) <= 128 and len(WITNESS) == 18
     raw = (json.dumps({longest: "a" * 64}, separators=(",", ":")) + "\n").encode("ascii")
     rejects(lambda data: FiniteJson(data, native=True).parse(lf=True), raw)
     base = {"response-decision": 1, "response-leave": 3, "close-dispatch": 2, "close-enter": 4, "close-ack": 5, "close-leave": 6,

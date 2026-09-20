@@ -116,11 +116,11 @@ class DefaultCancellation:
         self._environment_source: Any = None
         self._environment_source_installed = False
         self._environment_source_removed = False
-        # One separately typed saved-project execution domain, never diagnostics
-        # or a caller cancellation callback. The bindings are mutually exclusive.
-        self._preflight_source: Any = None
-        self._preflight_source_installed = False
-        self._preflight_source_removed = False
+        # One slot for two exact saved-command input types, never diagnostics
+        # or a caller cancellation callback. No domain can replace a past one.
+        self._saved_command_source: Any = None
+        self._saved_command_source_installed = False
+        self._saved_command_source_removed = False
         self._ledger = LifetimeLedger(self)
         self._diagnostic_error: BaseException | None = None
         # Compatibility/diagnostics only: modifying this mapping grants nothing.
@@ -174,8 +174,9 @@ class DefaultCancellation:
         self._check_owner()
         try:
             try:
-                if self._preflight_source is not None:
-                    self._preflight_source.failure_observed()
+                source = self._saved_command_input()
+                if source is not None:
+                    source.failure_observed()
             finally:
                 self._ledger._abort(error)
         except BaseException as diagnostic:
@@ -262,7 +263,7 @@ class DefaultCancellation:
         self._check_owner()
         if (type(source) is not EditInput or self.owner_thread is not threading.main_thread()
                 or self._edit_source_installed or self._edit_source_removed
-                or self._environment_source_installed or self._preflight_source_installed):
+                or self._environment_source_installed or self._saved_command_source_installed):
             raise self.restore_error("invalid edit cancellation source ownership")
         source.bind(self)
         self._edit_source_installed = True
@@ -275,8 +276,9 @@ class DefaultCancellation:
             self._edit_source.poll(self)
         if self._environment_source is not None:
             self._environment_source.poll(self)
-        if self._preflight_source is not None:
-            self._preflight_source.poll(self)
+        source = self._saved_command_input()
+        if source is not None:
+            source.poll(self)
 
     def _remove_edit_source(self, source: Any) -> None:
         self._check_owner()
@@ -290,7 +292,7 @@ class DefaultCancellation:
         self._check_owner()
         if (type(source) is not EnvironmentInput or self.owner_thread is not threading.main_thread()
                 or self._environment_source_installed or self._environment_source_removed
-                or self._edit_source_installed or self._preflight_source_installed):
+                or self._edit_source_installed or self._saved_command_source_installed):
             raise self.restore_error("invalid environment cancellation source ownership")
         source.bind(self)
         self._environment_source_installed = True
@@ -303,23 +305,81 @@ class DefaultCancellation:
         self._environment_source_removed = True
         self._environment_source = None
 
+    def _saved_command_input(self) -> Any:
+        """No imports for CLI/edit/environment callers without this fixed slot."""
+        source = self._saved_command_source
+        if source is None:
+            return None
+        from ._desktop_saved_command_control import source_domain
+        self._check_owner()
+        source_domain(source)
+        if (not self._saved_command_source_installed or self._saved_command_source_removed
+                or source.guard is not self):
+            raise self.restore_error("saved-command cancellation source binding differs")
+        return source
+
+    @property
+    def _preflight_source(self) -> Any:
+        # The unchanged offline budget/service sees only its original exact
+        # type. An Android operation never authorizes offline budgeted builds.
+        source = self._saved_command_input()
+        if source is None:
+            return None
+        from ._desktop_saved_command_control import SavedCommandDomain
+        return source if source.domain is SavedCommandDomain.OfflinePreflight else None
+
+    @property
+    def _android_build_source(self) -> Any:
+        source = self._saved_command_input()
+        if source is None:
+            return None
+        from ._desktop_saved_command_control import SavedCommandDomain
+        return source if source.domain is SavedCommandDomain.AndroidBuild else None
+
+    def _install_saved_command_source(self, source: Any) -> None:
+        from ._desktop_saved_command_control import source_domain
+        self._check_owner()
+        source_domain(source)
+        if (self.owner_thread is not threading.main_thread()
+                or self._saved_command_source_installed or self._saved_command_source_removed
+                or self._edit_source_installed or self._environment_source_installed):
+            raise self.restore_error("invalid saved-command cancellation source ownership")
+        source.bind(self)
+        self._saved_command_source_installed = True
+        self._saved_command_source = source
+
+    def _remove_saved_command_source(self, source: Any) -> None:
+        from ._desktop_saved_command_control import source_domain
+        self._check_owner()
+        source_domain(source)
+        if self._saved_command_input() is not source or self._saved_command_source_removed or not source.closed:
+            raise self.restore_error("saved-command cancellation source did not settle")
+        self._saved_command_source_removed = True
+        self._saved_command_source = None
+
     def _install_preflight_source(self, source: Any) -> None:
         from ._desktop_preflight_control import PreflightInput
-        self._check_owner()
-        if (type(source) is not PreflightInput or self.owner_thread is not threading.main_thread()
-                or self._preflight_source_installed or self._preflight_source_removed
-                or self._edit_source_installed or self._environment_source_installed):
+        if type(source) is not PreflightInput:
             raise self.restore_error("invalid offline preflight cancellation source ownership")
-        source.bind(self)
-        self._preflight_source_installed = True
-        self._preflight_source = source
+        self._install_saved_command_source(source)
 
     def _remove_preflight_source(self, source: Any) -> None:
-        self._check_owner()
-        if self._preflight_source is not source or self._preflight_source_removed or not source.closed:
+        from ._desktop_preflight_control import PreflightInput
+        if type(source) is not PreflightInput:
             raise self.restore_error("offline preflight cancellation source did not settle")
-        self._preflight_source_removed = True
-        self._preflight_source = None
+        self._remove_saved_command_source(source)
+
+    def _install_android_build_source(self, source: Any) -> None:
+        from ._desktop_android_build_control import AndroidBuildInput
+        if type(source) is not AndroidBuildInput:
+            raise self.restore_error("invalid Android build cancellation source ownership")
+        self._install_saved_command_source(source)
+
+    def _remove_android_build_source(self, source: Any) -> None:
+        from ._desktop_android_build_control import AndroidBuildInput
+        if type(source) is not AndroidBuildInput:
+            raise self.restore_error("Android build cancellation source did not settle")
+        self._remove_saved_command_source(source)
 
     @contextmanager
     def deferred(self, *, check_on_exit: bool = True):
@@ -503,10 +563,11 @@ class CleanupScope:
             try:
                 if error is not None:
                     try:
-                        if self.cancellation._preflight_source is not None:
-                            # Concrete saved-preflight F, before the original
+                        source = self.cancellation._saved_command_input()
+                        if source is not None:
+                            # Concrete saved-command F, before the original
                             # cleanup call; no deadline/owner change elsewhere.
-                            self.cancellation._preflight_source.failure_observed()
+                            source.failure_observed()
                         self.cancellation.lifetime_ledger._remember(error)
                     except BaseException as diagnostic:
                         self._record_failure(diagnostic)

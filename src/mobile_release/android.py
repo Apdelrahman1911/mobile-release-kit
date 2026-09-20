@@ -4,11 +4,10 @@ import hashlib
 import os
 import re
 import shutil
-import stat
 import subprocess
 import zipfile
-from pathlib import Path, PurePosixPath
-from typing import Any
+from pathlib import Path
+from typing import Any, TYPE_CHECKING
 
 from .config import ReleaseConfig, ReleaseVersion
 from .cancellation import DefaultCancellation
@@ -16,16 +15,42 @@ from .build_inputs import BuildInputs, finite_scratch
 from .checked_files import BUNDLETOOL_MAX_BYTES, copy_bundletool, read_external_bytes
 from .credentials import artifact_validation_environment
 from .discovery import discover_project, selected_android_module
-from .owned_process import ProcessError, run_owned
+from .owned_process import ProcessError, fatal_lifetime_error, run_owned
 from .errors import ValidationError
 from .reporting import Finding, Status
 from .tooling import private_build_directory
 from .toolchain_policy import BUNDLETOOL_SHA256, BUNDLETOOL_VERSION
+from .android_zip import (AndroidZipError, MAX_ENTRY_SIZE, MAX_TOTAL_SIZE, MAX_ENTRY_COUNT,
+                          require_aab_content_names, validate_zip_entry_policy)
 
-MAX_ENTRY_SIZE = 512 * 1024 * 1024
-MAX_TOTAL_SIZE = 2 * 1024 * 1024 * 1024
-MAX_ENTRY_COUNT = 100_000
 ALLOWED_ARTIFACT_NAMES = {"android-aab", "android-mapping", "android-native-symbols"}
+
+if TYPE_CHECKING:
+    from .android_build_operation import AndroidBuildOperation
+    from .android_build_tools import AndroidValidationTools
+    from ._desktop_android_build_files import OriginalAndroidArtifact
+
+
+class _OwnedAabStructureError(ValidationError):
+    """Parsed artifact DATA failed policy, not an original-owner failure."""
+
+
+class _OwnedAabManifestError(ValidationError):
+    """The settled bundletool invocation rejected the captured AAB DATA."""
+
+
+def _owned_artifact(path: Path, artifact: OriginalAndroidArtifact) -> AndroidBuildOperation:
+    from ._desktop_android_build_files import OriginalAndroidArtifact
+    from .android_build_operation import AndroidBuildOperation
+    from ._desktop_android_build_protocol import require
+    require(type(artifact) is OriginalAndroidArtifact)
+    operation = artifact.files.operation
+    require(type(operation) is AndroidBuildOperation and operation._artifact is artifact
+            and operation.files is artifact.files and operation.inputs is not None)
+    operation.require(operation.inputs.config, operation.guard)
+    artifact.check()
+    require(path == artifact.path)
+    return operation
 
 
 def _validation_environment() -> dict[str, str]:
@@ -44,25 +69,18 @@ def _validate_zip(path: Path) -> list[str]:
             seen: set[str] = set()
             for entry in archive.infolist():
                 raw_name = entry.filename
-                pure = PurePosixPath(raw_name)
-                parts = raw_name.split("/")
-                path_parts = parts[:-1] if raw_name.endswith("/") else parts
-                mode = (entry.external_attr >> 16) & 0o170000
-                if (
-                    not raw_name
-                    or raw_name.startswith("/")
-                    or "\\" in raw_name
-                    or pure.is_absolute()
-                    or any(part in {"", ".", ".."} for part in path_parts)
-                    or (mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)))
-                    or entry.flag_bits & 0x1
-                ):
-                    raise ValidationError(f"unsafe AAB entry path: {entry.filename}")
+                # A ZipInfo can truncate a NUL-containing original filename.
+                # Never validate its sanitized display in place of the source.
+                if entry.orig_filename != raw_name:
+                    raise ValidationError("AAB contains an ambiguous ZIP entry name")
+                try:
+                    validate_zip_entry_policy(raw_name, flag_bits=entry.flag_bits,
+                                              external_attr=entry.external_attr, file_size=entry.file_size)
+                except AndroidZipError as error:
+                    raise ValidationError(str(error)) from None
                 if entry.filename in seen:
                     raise ValidationError(f"duplicate AAB entry: {entry.filename}")
                 seen.add(entry.filename)
-                if entry.file_size > MAX_ENTRY_SIZE:
-                    raise ValidationError(f"oversized AAB entry: {entry.filename}")
                 total += entry.file_size
                 if total > MAX_TOTAL_SIZE:
                     raise ValidationError("AAB uncompressed content exceeds safety limit")
@@ -74,7 +92,29 @@ def _validate_zip(path: Path) -> list[str]:
         raise ValidationError(f"AAB is not a valid ZIP bundle: {path}") from error
 
 
-def _bundletool_manifest(path: Path, *, cancellation: DefaultCancellation | None = None) -> str | None:
+def _bundletool_manifest(path: Path, *, cancellation: DefaultCancellation | None = None,
+                         tools: AndroidValidationTools | None = None) -> str | None:
+    if tools is not None:
+        from .android_build_tools import AndroidValidationTools
+        from ._desktop_android_build_protocol import require
+        require(type(tools) is AndroidValidationTools)
+        operation = tools.operation
+        require(operation.tools is tools and cancellation is operation.guard)
+        # The tools/operation require the active original AAB native-input
+        # borrow. A matching diagnostic path alone grants no read authority.
+        argv = operation.bundletool_command(path, tools)
+        try:
+            result = run_owned(argv, cwd=operation.root, environ=operation.command_environment(),
+                               timeout=60, capture=True, output_limit=2 * 1024 * 1024,
+                               cancellation=cancellation)
+            operation.returned("bundletool", result.returncode)
+        except BaseException as error:
+            operation.command_error("bundletool", error)
+            raise
+        tools.check()
+        if result.returncode:
+            raise _OwnedAabManifestError("bundletool could not inspect the captured AAB manifest")
+        return result.stdout
     jar_value = os.environ.get("MOBILE_RELEASE_BUNDLETOOL_JAR")
     if not jar_value:
         return None
@@ -304,18 +344,35 @@ def _canonicalize_aab_signature(path: Path, *, project_root: Path, execution_sou
             scratch.require(snapshot)
 
 
-def validate_aab_structure(path: Path) -> list[str]:
+def validate_aab_structure(path: Path, *, artifact: OriginalAndroidArtifact | None = None) -> list[str]:
     """Validate the bounded bundle layout without imposing current upload policy.
 
     Historical reuse additionally requires authenticated original validation and
     exact intent-bound bytes; this structure check alone is never upload authority.
     """
-    names = _validate_zip(path)
-    for prefix in ("base/manifest/", "base/dex/"):
-        if not any(name.startswith(prefix) for name in names):
-            raise ValidationError(f"AAB is missing required {prefix} content")
-    if "BundleConfig.pb" not in names:
-        raise ValidationError("AAB is missing BundleConfig.pb")
+    if artifact is None:
+        names = _validate_zip(path)
+    else:
+        from .android_zip_integrity import inspect_zip_integrity
+        operation = _owned_artifact(path, artifact)
+        try:
+            with artifact.reader() as reader:
+                integrity = inspect_zip_integrity(reader, archive_bytes=artifact.size, checkpoint=artifact.check)
+            operation.zip_metadata = integrity.metadata
+            names = []
+            for entry in integrity.metadata.entries:
+                operation.charge("zip-name-references", 1, MAX_ENTRY_COUNT)
+                names.append(entry.name)
+        except AndroidZipError as error:
+            # Only an actual ZIP DATA rejection is an inspection finding.
+            # Ownership, cancellation, read and close errors propagate.
+            raise _OwnedAabStructureError(str(error)) from None
+    try:
+        require_aab_content_names(names)
+    except AndroidZipError as error:
+        if artifact is not None:
+            raise _OwnedAabStructureError(str(error)) from None
+        raise ValidationError(str(error)) from None
     return names
 
 
@@ -328,10 +385,21 @@ def validate_aab(
     require_tools: bool = False,
     check_signer: bool = True,
     cancellation: DefaultCancellation | None = None,
+    artifact: OriginalAndroidArtifact | None = None,
+    tools: AndroidValidationTools | None = None,
 ) -> list[Finding]:
+    if artifact is not None:
+        from ._desktop_android_build_protocol import require
+        operation = _owned_artifact(path, artifact)
+        require(tools is operation.tools and tools is not None and cancellation is operation.guard
+                and require_tools is True and check_signer is False and expected_fingerprint is None
+                and expected_application_id == operation.inputs.saved.configuration.application_id
+                and release is operation.inputs.release)
+    elif tools is not None:
+        raise ValidationError("Android tools require their original captured artifact")
     findings: list[Finding] = []
     try:
-        names = validate_aab_structure(path)
+        names = validate_aab_structure(path) if artifact is None else validate_aab_structure(path, artifact=artifact)
         findings.append(
             Finding(
                 "android.aab.structure",
@@ -341,12 +409,22 @@ def validate_aab(
             )
         )
     except ValidationError as error:
+        fatal = fatal_lifetime_error(error, "Android artifact structure custody did not settle")
+        if fatal is not None:
+            raise fatal from None
+        if artifact is not None and not isinstance(error, _OwnedAabStructureError):
+            raise
         return [Finding("android.aab.structure", Status.FAIL, str(error), category="android-artifact")]
 
     try:
-        manifest = _bundletool_manifest(path, cancellation=cancellation)
+        if artifact is None:
+            manifest = _bundletool_manifest(path, cancellation=cancellation)
+        else:
+            with artifact.native_input() as original_path:
+                manifest = _bundletool_manifest(original_path, cancellation=cancellation, tools=tools)
     except ValidationError as error:
-        if isinstance(error, ProcessError) and error.fatal:
+        if ((isinstance(error, ProcessError) and error.fatal)
+                or artifact is not None and not isinstance(error, _OwnedAabManifestError)):
             raise
         findings.append(
             Finding("android.aab.manifest", Status.FAIL, str(error), category="android-artifact")
@@ -372,11 +450,15 @@ def validate_aab(
         ))
 
     if not check_signer:
+        signer_message = "AAB signer inspection is not applicable to unsigned offline preflight."
+        if artifact is not None:
+            from ._desktop_android_build_protocol import SIGNER_MESSAGE
+            signer_message = SIGNER_MESSAGE
         findings.append(
             Finding(
                 "android.aab.signer",
                 Status.SKIP,
-                "AAB signer inspection is not applicable to unsigned offline preflight.",
+                signer_message,
                 category="android-artifact",
             )
         )
@@ -462,9 +544,39 @@ def _copy_unique(pattern: str, destination: Path, *, required: bool) -> Path | N
     return destination
 
 
+def _bundle_task(module: str, variant: str) -> str:
+    """The same existing core task policy for CLI and saved Desktop selection."""
+    task_variant = variant[:1].upper() + variant[1:]
+    return f"{module}:bundle{task_variant}" if module != ":" else f":bundle{task_variant}"
+
+
 def run_android_build(config: ReleaseConfig, *, signed: bool, execution_source=None,
                       cancellation: DefaultCancellation | None = None,
-                      build_inputs: BuildInputs | None = None) -> dict[str, Path]:
+                      build_inputs: BuildInputs | None = None,
+                      operation: AndroidBuildOperation | None = None) -> dict[str, Path]:
+    if operation is not None:
+        from .android_build_operation import AndroidBuildOperation
+        from ._desktop_android_build_protocol import require
+        require(type(operation) is AndroidBuildOperation and signed is False
+                and execution_source is None and build_inputs is None)
+        operation.require(config, cancellation)
+        argv = operation.gradle_command()
+        try:
+            result = run_owned(argv, cwd=config.root, environ=operation.command_environment(),
+                               capture=False, timeout=45 * 60, cancellation=cancellation)
+            operation.returned("gradle", result.returncode)
+        except BaseException as error:
+            operation.command_error("gradle", error)
+            raise
+        if result.returncode:
+            operation.fail("command-failed")
+        operation.tools.check()
+        operation.check_inputs()
+        operation.advance("capturing")
+        captured = operation.capture_after()
+        # Compatibility/diagnostic map only; Desktop consumes the original
+        # operation.artifact(), never reopens this returned path as authority.
+        return {"android-aab": captured.path}
     if build_inputs is not None:
         if type(build_inputs) is not BuildInputs:
             raise ValidationError("Android build requires its original build-input owner")
@@ -478,8 +590,7 @@ def run_android_build(config: ReleaseConfig, *, signed: bool, execution_source=N
     if not module:
         raise ValidationError("Android application module is ambiguous; configure android.module")
     variant = config.section("android").get("variant", "release")
-    task_variant = variant[:1].upper() + variant[1:]
-    task = f"{module}:bundle{task_variant}" if module != ":" else f":bundle{task_variant}"
+    task = _bundle_task(module, variant)
     wrapper = config.project_path("gradlew")
     if not wrapper.is_file():
         raise ValidationError("Gradle wrapper is missing")

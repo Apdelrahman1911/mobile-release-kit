@@ -1,0 +1,821 @@
+"""Inert SOURCE regressions; unexecuted and not custody/native qualification.
+
+Original owner types below are constructed with object.__new__ as predicate
+DATA only. No original constructor, descriptor, handler, project, process, ZIP
+reader or native parser is acquired. Every exercised effect boundary is patched
+before subject work. Real seam control flow and pure terminal/provenance policy
+remain under test; invented closure/command facts prove no actual settlement.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import stat
+import threading
+import unittest
+from contextlib import ExitStack, contextmanager
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, call, patch
+
+from mobile_release import android, android_manifest, android_zip_integrity
+from mobile_release import desktop_android_build as service
+from mobile_release import _desktop_android_build_protocol as wire
+from mobile_release._desktop_android_build_control import AndroidBuildInput
+from mobile_release._desktop_android_build_files import AndroidBuildFiles, AndroidFileError, OriginalAndroidArtifact
+from mobile_release._desktop_android_build_selection import SavedAndroidConfiguration, SavedAndroidSelection
+from mobile_release._desktop_preflight_control import PreflightInput
+from mobile_release._desktop_saved_command_control import SavedCommandDomain
+from mobile_release._lifetime_evidence import LifetimeLedger
+from mobile_release.android_build_operation import AndroidBuildError, AndroidBuildOperation, BoundAndroidInputs
+from mobile_release.android_zip import AndroidZipEntry, AndroidZipError, AndroidZipMetadata, ZipDirectoryPlan, ZipReadRange
+from mobile_release.android_zip_integrity import AndroidZipIntegrity
+from mobile_release.build_inputs import InvocationCustody, _StoreNamespace
+from mobile_release.cancellation import DefaultCancellation
+from mobile_release.config import ReleaseConfig, ReleaseVersion
+from mobile_release.errors import ValidationError
+from mobile_release.owned_process import ProcessCleanupError, ProcessError
+from mobile_release.reporting import Finding, Report, Status
+
+
+NAMES = ("BundleConfig.pb", "base/manifest/AndroidManifest.xml", "base/dex/classes.dex")
+
+
+def values():
+    data = {"schemaVersion": 1,
+            "version": {"source": "release/version.properties", "nameKey": "VERSION_NAME", "buildKey": "BUILD_NUMBER"},
+            "source": {"candidateBranch": "main", "productionBranch": "main"},
+            "android": {"enabled": True, "module": ":app", "variant": "release",
+                        "applicationId": "org.example.saved", "identityStatus": "unverified"},
+            "ios": {"enabled": False},
+            "metadata": {"root": "release/store", "androidLocales": ["en-US"], "iosLocales": []},
+            "services": {"androidFirebase": "disabled", "iosFirebase": "disabled"},
+            "projectChecks": {"preflight": [], "androidArtifact": [], "iosArtifact": []}}
+    raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+    version = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
+    release = ReleaseVersion("1.2.3", 7)
+    selected = SavedAndroidConfiguration(raw, "release/version.properties", "VERSION_NAME", "BUILD_NUMBER",
+                                         False, ":app", "release", "org.example.saved")
+    root = Path("/inert/project")
+    bound = BoundAndroidInputs(ReleaseConfig(root / "release/mobile-release.json", root, data),
+                               SavedAndroidSelection(selected, version, release), ":app:bundleRelease")
+    identity = {"device": "1", "inode": "2", "mode": stat.S_IFDIR | 0o700, "uid": 123, "gid": 123}
+    request = {"protocol": wire.PROTOCOL, "operationId": "a" * 32, "ownerGeneration": "b" * 32,
+               "context": {"projectId": "inert-android", "draftRevision": 2, "baselineGeneration": 3,
+                           "savedConfig": {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+                           "savedVersion": {"source": selected.source, "bytes": len(version),
+                                            "sha256": hashlib.sha256(version).hexdigest(), "name": release.name,
+                                            "build": release.build},
+                           "platform": "android", "operation": "android-build-inspect"},
+               "native": {"profile": "linux-gnu-x86_64", "projectRoot": str(root), "cwd": "/inert/cwd",
+                          "rootIdentity": identity, "toolchain": {"schemaVersion": 1,
+                          "profile": wire.TOOLCHAIN_PROFILE, "root": "/opt/mobile-release-kit/android/inert",
+                          "rootIdentity": {**identity, "mode": stat.S_IFDIR | 0o755, "uid": 0, "gid": 0},
+                          "inventorySha256": "c" * 64}}}
+    return wire.parse_request(json.dumps(request).encode("utf-8") + b"\n"), bound
+
+
+def metadata():
+    # Inspection's returned DATA is supplied at its seam, not generated by a
+    # second ZIP parse. These fields are not an integrity/custody receipt.
+    names = (*NAMES, "base/lib/arm64-v8a/libinert.so", "base/lib/PRIVATE_CPU/libprivate.so")
+    entries = tuple(AndroidZipEntry(name, name.encode("ascii"), 0, 0, 0, 1, 1, index * 64, 0, 0, 10)
+                    for index, name in enumerate(names))
+    return AndroidZipMetadata(ZipDirectoryPlan(1024, 1002, len(entries), ZipReadRange(512, 490)), entries, len(entries))
+
+
+def findings():
+    return [Finding(code, status, "PRIVATE_MESSAGE", category="PRIVATE_CATEGORY",
+                    remediation="PRIVATE_REMEDIATION", details={"stdout": "PRIVATE_OUTPUT", "path": "/PRIVATE_PATH"})
+            for code, status in (("android.aab.structure", Status.PASS), ("android.aab.manifest", Status.PASS),
+                                 ("android.aab.signer", Status.SKIP))]
+
+
+class _InertCase(unittest.TestCase):
+    def patched(self, target, name, **kwargs):
+        return self.stack.enter_context(patch.object(target, name, **kwargs))
+
+    def forbidden(self, target, name):
+        return self.patched(target, name, side_effect=AssertionError("unexpected effect: " + name))
+
+    def setUp(self):
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.patched(os, "getpid", return_value=1234)
+        self.patched(service.os, "getcwd", return_value="/inert/cwd")
+        self.patched(service.time, "monotonic", return_value=123.0)
+        self.patched(service.sys, "platform", new="linux")
+        # No ambient environment, credential material or tool selection is read.
+        self.patched(android.os, "environ", new={"INERT_AMBIENT": "kept", "MOBILE_RELEASE_VERSION_NAME": "9.9.9",
+                                                 "MOBILE_RELEASE_BUILD_NUMBER": "99"})
+        for target, names in (
+            (android, ("run_owned", "discover_project", "selected_android_module", "private_build_directory",
+                       "finite_scratch", "copy_bundletool", "read_external_bytes", "_validation_environment",
+                       "_canonicalize_aab_signature", "_verify_jar_signature", "_signer_fingerprint", "_validate_zip")),
+            (service, ("invocation_custody", "run_android_build", "validate_aab")),
+            (android.zipfile, ("ZipFile",)), (android.shutil, ("copy2",)),
+            (android_manifest, ("validate_android_manifest",)), (android_zip_integrity, ("inspect_zip_integrity",)),
+            (ReleaseConfig, ("project_path", "release_version")),
+            (Path, ("open", "stat", "lstat", "is_file", "is_symlink", "glob", "rglob", "mkdir", "resolve")),
+            (DefaultCancellation, ("install", "activate", "restore")),
+            (AndroidBuildInput, ("acquire", "request", "poll", "close", "progress")),
+        ):
+            for name in names:
+                self.forbidden(target, name)
+
+
+class _InertRun:
+    def __init__(self, case):
+        # Import the actual integration type; never counterfeit a production
+        # module, skip a missing dependency or run the tool-owner constructor.
+        from mobile_release.android_build_tools import AndroidValidationTools
+
+        self.case, self.events = case, []
+        self.request, self.bound = values()
+        self.metadata, self.findings = metadata(), findings()
+        self.flags = dict(invocation=False, artifacts=False, tools=False, namespace=False)
+        self.disposition = {"work": "not-created", "artifacts": "not-created"}
+        thread = threading.current_thread()
+        self.guard = guard = object.__new__(DefaultCancellation)
+        guard.__dict__.update(pid=1234, owner_thread=thread, depth=0, _cancelled=False,
+                              _installation="NOT_INSTALLED", _restoration="NOT_ATTEMPTED", _signals={},
+                              restore_error=ProcessCleanupError, restore_message="inert guard", _diagnostic_error=None,
+                              _edit_source=None, _environment_source=None, _saved_command_source_installed=True,
+                              _saved_command_source_removed=False)
+        self.ledger = ledger = object.__new__(LifetimeLedger)
+        ledger.__dict__.update(_owner=guard, _pid=1234, _thread=thread, _fatal=False, _profile=None, _command=None,
+                               _profile_dispatched=False, _command_dispatched=False, _profile_contained=True,
+                               _command_contained=True, _profile_published=False, _command_published=False,
+                               _profile_calls=0, _commands=0, _primary=None, _secondary=[])
+        guard._ledger = ledger
+        self.source = source = object.__new__(AndroidBuildInput)
+        source.__dict__.update(_domain=SavedCommandDomain.AndroidBuild, pid=1234, thread=thread, guard=guard,
+                               work_end=4000.0, fd=None, identity=None, acquired=True, active=True,
+                               request_returned=True, close_claimed=False, closed=False, stop_reason="none",
+                               first_failure=None, custody_unknown=False, buffer=bytearray(), _engine=None)
+        guard._saved_command_source = source
+        case.patched(guard, "check", return_value=None)
+        case.patched(source, "poll", return_value=None)
+        case.patched(source, "progress", side_effect=lambda stage: self.events.append("stage:" + stage))
+        self.operation = op = object.__new__(AndroidBuildOperation)
+        op.__dict__.update(request=self.request, guard=guard, source=source, root=self.bound.config.root,
+                           operation_id=self.request.operation_id, pid=1234, thread=thread, inputs=self.bound,
+                           invocation_attempted=False, counters={}, failure=None, prepared=True, close_claimed=False,
+                           resources_closed=False, work_finish_attempted=False, cleanup_errors=[], _pending=None,
+                           _roles={"gradle": "new", "bundletool": "new"}, _command_before={}, _returned={},
+                           zip_metadata=None, stage="accepted")
+        source.operation = op
+        self.invocation = invocation = object.__new__(InvocationCustody)
+        invocation.root, invocation.cancellation, invocation.signing_lease = op.root, guard, None
+        op.invocation = invocation
+        case.patched(invocation, "project", side_effect=self.project)
+        case.patched(invocation, "_android_build_closed", side_effect=lambda owner: self.flags["invocation"])
+        self.namespace = namespace = object.__new__(_StoreNamespace)
+        namespace.root, namespace.components = op.root, (".mobile-release", "desktop-android-build", op.operation_id)
+        case.patched(namespace, "closed", side_effect=lambda: self.flags["namespace"])
+        self.files = files = object.__new__(AndroidBuildFiles)
+        files.operation, files.namespace = op, namespace
+        op.files = files
+        case.patched(files, "closed", side_effect=lambda: self.flags["artifacts"])
+        case.patched(files, "disposition", side_effect=lambda: dict(self.disposition))
+        case.patched(files, "finish_work", side_effect=self.finish_work)
+        self.tools = tools = object.__new__(AndroidValidationTools)
+        tools.operation, op.tools = op, tools
+        case.patched(tools, "closed", side_effect=lambda: self.flags["tools"])
+        case.patched(tools, "check", side_effect=lambda: self.events.append("tools-check"))
+        case.forbidden(tools, "gradle_command")
+        case.patched(tools, "bundletool_command", side_effect=self.bundletool_command)
+        self.artifact = artifact = object.__new__(OriginalAndroidArtifact)
+        artifact.files, artifact.size, artifact.sha256 = files, 1024, "d" * 64
+        artifact._native = False
+        files.artifact = files._original_artifact = op._artifact = artifact
+        case.patched(artifact, "check", return_value=None)
+        case.patched(artifact, "verify_bytes", side_effect=lambda: self.events.append("artifact-verify"))
+        self.reader_token = object()
+        self.reader_exit_error = None
+        case.patched(artifact, "reader", side_effect=self.reader)
+        case.patched(artifact, "native_input", side_effect=self.native_input)
+        case.patched(op, "checkpoint", return_value=None)
+        case.patched(op, "bind_inputs", return_value=self.bound)
+        case.patched(op, "prepare", return_value=None)
+        case.patched(op, "check_inputs", side_effect=lambda: self.events.append("inputs-check"))
+        case.forbidden(op, "gradle_command")
+        case.patched(op, "command_environment", return_value={"INERT_FIXED": "environment"})
+        case.patched(op, "capture_after", side_effect=self.capture)
+        case.patched(op, "close", side_effect=self.close)
+        original_returned = op.returned
+
+        def returned(role, code):
+            self.events.append("returned:" + role)
+            original_returned(role, code)
+
+        case.patched(op, "returned", side_effect=returned)
+        self.run = run = object.__new__(service.AndroidBuildRun)
+        run.__dict__.update(request=self.request, guard=guard, source=source, operation=op, primary=None,
+                            report=None, _candidate=None, _run_claimed=False, _close_claimed=False)
+        self.custody_call = case.patched(service, "invocation_custody", side_effect=self.custody)
+        self.build_call = case.patched(service, "run_android_build", side_effect=self.build)
+        self.inspect_call = case.patched(service, "validate_aab", side_effect=self.inspect)
+
+    @contextmanager
+    def custody(self, root, *, mode, cancellation):
+        self.case.assertEqual((root, mode), (self.operation.root, "build"))
+        self.case.assertIs(cancellation, self.guard)
+        self.events.append("invocation-enter")
+        try:
+            yield self.invocation
+        finally:
+            self.events.append("invocation-exit")
+            self.flags["invocation"] = True
+
+    @contextmanager
+    def project(self, *, signing_lease):
+        self.case.assertIsNone(signing_lease)
+        self.events.append("project-enter")
+        try:
+            yield None
+        finally:
+            self.events.append("project-exit")
+
+    @contextmanager
+    def reader(self):
+        self.events.append("reader-enter")
+        try:
+            yield self.reader_token
+        finally:
+            self.events.append("reader-exit")
+            if self.reader_exit_error is not None:
+                raise self.reader_exit_error
+
+    @contextmanager
+    def native_input(self):
+        self.case.assertFalse(self.artifact._native)
+        self.events.append("native-enter")
+        self.artifact._native = True
+        try:
+            yield self.artifact.path
+        finally:
+            self.artifact._native = False
+            self.events.append("native-exit")
+
+    def bundletool_command(self, path):
+        self.case.assertTrue(self.artifact._native)
+        self.case.assertEqual(path, self.artifact.path)
+        return ("/inert/java", "-jar", "/inert/bundletool.jar", "dump", "manifest", "--bundle=" + str(path))
+
+    def capture(self):
+        self.events.append("capture")
+        self.operation._artifact = self.artifact
+        self.disposition["artifacts"] = "retained-incomplete"
+        return self.artifact
+
+    def build(self, *_args, **_kwargs):
+        self.events.append("build")
+        self.operation._returned["gradle"] = 0
+        self.ledger._commands, self.ledger._command_dispatched = 1, True
+        self.disposition.update(work="retained-work", artifacts="retained-incomplete")
+        self.operation.advance("capturing")
+        return {"android-aab": Path("/PRIVATE_DIAGNOSTIC/not-the-original.aab"),
+                "android-mapping": Path("/PRIVATE_DIAGNOSTIC/mapping.txt")}
+
+    def inspect(self, *_args, **_kwargs):
+        self.events.append("inspect")
+        self.operation.zip_metadata = self.metadata
+        self.ledger._commands = 2
+        return self.findings
+
+    def finish_work(self):
+        self.events.append("finish-work")
+        self.disposition["work"] = "removed"
+
+    def close(self):
+        self.events.append("operation-close")
+        self.flags.update(artifacts=True, tools=True, namespace=True)
+        self.operation.close_claimed = self.operation.resources_closed = True
+
+    def settle_outer(self):
+        # Simulated original input retirement removes the guard slot BEFORE
+        # terminal observation, just as real close must; no close is executed.
+        self.events.append("input-retired")
+        self.source.close_claimed = self.source.closed = True
+        self.guard._saved_command_source = None
+        self.guard._saved_command_source_removed = True
+        self.events.append("handlers-restored")
+        self.guard._restoration = "RESTORED"
+
+    def command(self, role, code=0):
+        if role == "gradle":
+            self.operation._artifact = None
+            self.operation.stage = "building"
+
+            def arm():
+                self.operation._arm("gradle")
+                return ("/inert/gradle", "--no-daemon", self.bound.task)
+
+            self.operation.gradle_command.side_effect = arm
+        else:
+            self.operation._returned["gradle"] = 0
+            self.ledger._commands, self.ledger._command_dispatched = 1, True
+
+        def dispatch(argv, **kwargs):
+            self.events.append("dispatch:" + role)
+            self.operation.command_limits(kwargs["timeout"], kwargs["capture"], kwargs.get("output_limit", 2 * 1024 * 1024))
+            self.ledger._commands += 1
+            self.ledger._command_dispatched = True
+            return SimpleNamespace(returncode=code, stdout="INERT_MANIFEST", stderr="PRIVATE_STDERR")
+
+        return self.case.patched(android, "run_owned", side_effect=dispatch)
+
+    def inspector(self):
+        return self.case.patched(android_zip_integrity, "inspect_zip_integrity",
+                                 return_value=AndroidZipIntegrity(self.metadata, len(self.metadata.entries)))
+
+    def validate(self, **changes):
+        args = dict(expected_application_id=self.bound.saved.configuration.application_id, release=self.bound.release,
+                    expected_fingerprint=None, require_tools=True, check_signer=False, cancellation=self.guard,
+                    artifact=self.artifact, tools=self.tools)
+        args.update(changes)
+        return android.validate_aab(self.artifact.path, **args)
+
+
+class AndroidCliCompatibilityTests(_InertCase):
+    def test_absent_operation_preserves_cli_task_environment_signing_and_all_outputs(self):
+        for signed in (False, True):
+            with self.subTest(signed=signed):
+                _, bound = values()
+                config, release = bound.config, bound.release
+                # Exercise the old variant default, without an operation/source.
+                del config.data["android"]["variant"]
+                private = object.__new__(_StoreNamespace)
+                private.root, private.components = config.root, (".mobile-release", "build", "android")
+                private.cancellation = object.__new__(DefaultCancellation)
+                private.check = Mock(return_value=None)
+
+                @contextmanager
+                def directory(*_args, **_kwargs):
+                    yield private
+
+                discovered = object()
+                discover = self.patched(android, "discover_project", return_value=discovered)
+                selected = self.patched(android, "selected_android_module", return_value=":app")
+                directory_call = self.patched(android, "private_build_directory", side_effect=directory)
+                # Real descriptors around inert mocks; do not autospec the
+                # already-fenced methods or execute their filesystem bodies.
+                self.patched(ReleaseConfig, "project_path", new=lambda owner, path: owner.root / path)
+                version_call = Mock(return_value=release)
+                self.patched(ReleaseConfig, "release_version", new=lambda owner: version_call(owner))
+                bundle = config.root / "app/build/outputs/bundle/release/app.aab"
+                native = config.root / "app/build/outputs/native/release/native.zip"
+                self.patched(Path, "is_file", return_value=True)
+                self.patched(Path, "is_symlink", return_value=False)
+                self.patched(Path, "glob", return_value=[bundle])
+                self.patched(Path, "rglob", return_value=[native])
+                copied = self.patched(android.shutil, "copy2", return_value=None)
+                canonicalize = self.patched(android, "_canonicalize_aab_signature", return_value=None)
+                command = self.patched(android, "run_owned", return_value=SimpleNamespace(returncode=0))
+                result = android.run_android_build(config, signed=signed)
+                output = private.path
+                self.assertEqual(result, {"android-aab": output / "app-release.aab", "android-mapping": output / "mapping.txt",
+                                          "android-native-symbols": output / "native-symbols.zip"})
+                discover.assert_called_once_with(config.root, include_git=False)
+                selected.assert_called_once_with(config, discovered)
+                directory_call.assert_called_once_with(config, "android", cancellation=None)
+                version_call.assert_called_once_with(config)
+                command.assert_called_once_with([str(config.root / "gradlew"), "--no-daemon", "--stacktrace", ":app:bundleRelease"],
+                    cwd=config.root, environ={"INERT_AMBIENT": "kept", "MOBILE_RELEASE_VERSION_NAME": "1.2.3",
+                    "MOBILE_RELEASE_BUILD_NUMBER": "7", "MOBILE_RELEASE_REQUIRE_SIGNING": "true" if signed else "false"},
+                    capture=False, timeout=2700, cancellation=private.cancellation, execution_scope=None)
+                self.assertEqual(copied.call_args_list, [call(bundle, output / "app-release.aab"),
+                    call(config.root / "app/build/outputs/mapping/release/mapping.txt", output / "mapping.txt"),
+                    call(native, output / "native-symbols.zip")])
+                if signed:
+                    canonicalize.assert_called_once_with(output / "app-release.aab", project_root=config.root,
+                        execution_source=None, cancellation=private.cancellation, build_inputs=None)
+                else:
+                    canonicalize.assert_not_called()
+
+    def test_absent_artifact_and_tools_preserve_optional_manifest_and_default_signer(self):
+        _, bound = values()
+        path = Path("/inert/cli.aab")
+        self.patched(android, "_validate_zip", return_value=list(NAMES))
+        structure = self.patched(android, "validate_aab_structure", wraps=android.validate_aab_structure)
+        manifest = self.patched(android, "_bundletool_manifest", return_value=None)
+        signature = self.patched(android, "_verify_jar_signature", return_value=True)
+        signer = self.patched(android, "_signer_fingerprint", return_value="e" * 64)
+        result = android.validate_aab(path, expected_application_id="org.example.saved", release=bound.release,
+                                      expected_fingerprint=None)
+        structure.assert_called_once_with(path)
+        manifest.assert_called_once_with(path, cancellation=None)
+        signature.assert_called_once_with(path, cancellation=None)
+        signer.assert_called_once_with(path, cancellation=None)
+        self.assertEqual([(row.code, row.status) for row in result], [("android.aab.structure", Status.PASS),
+            ("android.aab.manifest", Status.SKIP), ("android.aab.signature", Status.PASS), ("android.aab.signer", Status.PASS)])
+
+    def test_cli_unsigned_validation_does_not_import_desktop_signer_policy(self):
+        _, bound = values()
+        self.patched(android, "_validate_zip", return_value=list(NAMES))
+        self.patched(android, "_bundletool_manifest", return_value=None)
+        original_import = __import__
+
+        def cli_import(name, globals=None, locals=None, fromlist=(), level=0):
+            # Ordinary stdlib imports (including pathlib's ntpath import) are
+            # not Desktop policy. Refuse the coupling this regression targets.
+            names = (name, *(fromlist or ()))
+            if any(part.startswith(("_desktop_", "desktop_")) for item in names for part in item.split(".")):
+                raise AssertionError("CLI imported Desktop policy")
+            return original_import(name, globals, locals, fromlist, level)
+
+        with patch("builtins.__import__", side_effect=cli_import):
+            result = android.validate_aab(Path("/inert/cli.aab"), expected_application_id="org.example.saved",
+                release=bound.release, expected_fingerprint=None, check_signer=False)
+        self.assertEqual(result[-1].message, "AAB signer inspection is not applicable to unsigned offline preflight.")
+
+    def test_cli_structure_rejection_cannot_hide_direct_or_chained_fatal_lifetime(self):
+        _, bound = values()
+        fatal = ProcessCleanupError("PRIVATE cleanup", dispatched=True)
+        wrapped = ValidationError("PRIVATE structure")
+        wrapped.__context__ = fatal
+        for error in (fatal, wrapped):
+            with self.subTest(error=type(error).__name__):
+                self.patched(android, "validate_aab_structure", side_effect=error)
+                with self.assertRaises(ProcessError) as raised:
+                    android.validate_aab(Path("/inert/cli.aab"), expected_application_id="org.example.saved",
+                                        release=bound.release, expected_fingerprint=None)
+                self.assertTrue(raised.exception.fatal)
+                self.assertFalse(raised.exception.cleanup_complete)
+                self.assertTrue(raised.exception.dispatched)
+                if error is fatal:
+                    self.assertIs(raised.exception, fatal)
+
+
+class AndroidOwnedSeamTests(_InertCase):
+    def test_operation_cannot_authorize_signing_legacy_inputs_or_foreign_owners(self):
+        f = _InertRun(self)
+        for change in ({"signed": True}, {"signed": 0}, {"execution_source": object()}, {"build_inputs": object()},
+                       {"operation": SimpleNamespace(require=Mock())}):
+            with self.subTest(change=tuple(change)):
+                args = dict(signed=False, cancellation=f.guard, operation=f.operation)
+                args.update(change)
+                with self.assertRaises(wire.ProtocolError):
+                    android.run_android_build(f.bound.config, **args)
+        # Real operation.require (only its effectful checkpoint is patched).
+        for config, guard in ((values()[1].config, f.guard), (f.bound.config, object())):
+            with self.assertRaises(wire.ProtocolError):
+                android.run_android_build(config, signed=False, cancellation=guard, operation=f.operation)
+        offline = object.__new__(PreflightInput)
+        offline._domain, offline.guard = SavedCommandDomain.OfflinePreflight, f.guard
+        f.guard._saved_command_source = offline
+        with self.assertRaises(wire.ProtocolError):
+            android.run_android_build(f.bound.config, signed=False, cancellation=f.guard, operation=f.operation)
+        f.operation.gradle_command.assert_not_called()
+        f.operation.capture_after.assert_not_called()
+
+    def test_actual_nonzero_gradle_return_is_recorded_and_never_captured(self):
+        for code in (7, -9):
+            with self.subTest(code=code):
+                f = _InertRun(self)
+                command = f.command("gradle", code)
+                with self.assertRaises(AndroidBuildError) as failed:
+                    android.run_android_build(f.bound.config, signed=False, cancellation=f.guard, operation=f.operation)
+                self.assertEqual(failed.exception.reason, "command-failed")
+                self.assertEqual(f.operation.command_outcome(), {"outcome": "exited", "exitCode": code})
+                f.operation.capture_after.assert_not_called()
+                f.tools.check.assert_not_called()
+                f.operation.check_inputs.assert_not_called()
+                self.assertEqual(f.events, ["dispatch:gradle", "returned:gradle"])
+                command.assert_called_once_with(("/inert/gradle", "--no-daemon", f.bound.task), cwd=f.bound.config.root,
+                    environ={"INERT_FIXED": "environment"}, capture=False, timeout=2700, cancellation=f.guard)
+
+    def test_zero_gradle_return_survives_later_tool_or_input_failure(self):
+        for target in ("tools", "inputs"):
+            with self.subTest(target=target):
+                f = _InertRun(self)
+                f.command("gradle")
+                error = ProcessCleanupError("PRIVATE recheck") if target == "tools" else KeyboardInterrupt()
+
+                def reject():
+                    self.assertEqual(f.operation._returned["gradle"], 0)
+                    raise error
+
+                (f.tools.check if target == "tools" else f.operation.check_inputs).side_effect = reject
+                with self.assertRaises(type(error)) as raised:
+                    android.run_android_build(f.bound.config, signed=False, cancellation=f.guard, operation=f.operation)
+                self.assertIs(raised.exception, error)
+                self.assertEqual(f.operation.command_outcome(), {"outcome": "exited", "exitCode": 0})
+                f.operation.capture_after.assert_not_called()
+
+    def test_command_exception_has_no_return_code_or_substitute_artifact(self):
+        cases = ((False, ProcessError("PRIVATE dispatch", dispatched=True)),
+                 (None, ProcessError("PRIVATE unknown", dispatched=False)), (True, KeyboardInterrupt()))
+        for dispatched, error in cases:
+            with self.subTest(dispatched=dispatched):
+                f = _InertRun(self)
+                command = f.command("gradle")
+                observed_error = self.patched(f.operation, "command_error", wraps=f.operation.command_error)
+
+                def fail_dispatch(_argv, **kwargs):
+                    f.operation.command_limits(kwargs["timeout"], kwargs["capture"], 2 * 1024 * 1024)
+                    # Exception text/attributes are not an original ledger or a
+                    # returned command. Deliberately vary these predicate DATA.
+                    f.ledger._command_dispatched = dispatched
+                    f.ledger._commands = 1 if dispatched is True else 0
+                    f.ledger._fatal = dispatched is None
+                    raise error
+
+                command.side_effect = fail_dispatch
+                with self.assertRaises(type(error)) as raised:
+                    android.run_android_build(f.bound.config, signed=False, cancellation=f.guard, operation=f.operation)
+                self.assertIs(raised.exception, error)
+                observed_error.assert_called_once_with("gradle", error)
+                self.assertIs(f.ledger._primary, error)
+                self.assertEqual(f.operation._returned, {})
+                self.assertEqual(f.operation.command_outcome(),
+                    {"outcome": "not-dispatched" if dispatched is False else "unknown", "exitCode": None})
+                f.operation.returned.assert_not_called()
+                f.operation.capture_after.assert_not_called()
+                f.inspect_call.assert_not_called()
+                android._validate_zip.assert_not_called()
+
+    def test_owned_zip_uses_same_borrowed_reader_and_metadata_without_path_fallback(self):
+        f = _InertRun(self)
+        inspector = f.inspector()
+        names = android.validate_aab_structure(f.artifact.path, artifact=f.artifact)
+        inspector.assert_called_once_with(f.reader_token, archive_bytes=f.artifact.size, checkpoint=f.artifact.check)
+        self.assertEqual(names, [entry.name for entry in f.metadata.entries])
+        self.assertIs(f.operation.zip_metadata, f.metadata)
+        self.assertEqual(f.operation.counters["zip-name-references"], len(names))
+        self.assertEqual(f.events, ["reader-enter", "reader-exit"])
+        android._validate_zip.assert_not_called()
+        android.zipfile.ZipFile.assert_not_called()
+
+    def test_owned_zip_data_failure_is_a_finding_but_read_custody_and_close_failures_propagate(self):
+        f = _InertRun(self)
+        inspector = f.inspector()
+        inspector.side_effect = AndroidZipError("content")
+        result = f.validate()
+        self.assertEqual([(row.code, row.status) for row in result], [("android.aab.structure", Status.FAIL)])
+        f.artifact.native_input.assert_not_called()
+        for error in (OSError("PRIVATE read"), ValidationError("PRIVATE custody"), ProcessCleanupError("PRIVATE close")):
+            with self.subTest(error=type(error).__name__):
+                g = _InertRun(self)
+                inspect = g.inspector()
+                if isinstance(error, ProcessCleanupError):
+                    g.reader_exit_error = error
+                else:
+                    inspect.side_effect = error
+                with self.assertRaises(type(error)) as raised:
+                    g.validate()
+                self.assertIs(raised.exception, error)
+                self.assertIsNone(g.operation.zip_metadata)
+                g.artifact.native_input.assert_not_called()
+
+    def test_owned_validation_refuses_different_release_guard_tools_or_signer_policy(self):
+        f = _InertRun(self)
+        for change in ({"release": ReleaseVersion(f.bound.release.name, f.bound.release.build)},
+                       {"cancellation": object()}, {"tools": object()}, {"artifact": SimpleNamespace(files=f.files)},
+                       {"require_tools": False}, {"check_signer": True}, {"expected_fingerprint": "e" * 64},
+                       {"expected_application_id": "org.example.other"}):
+            with self.subTest(change=tuple(change)), self.assertRaises(wire.ProtocolError):
+                f.validate(**change)
+        with self.assertRaises(ValidationError):
+            f.validate(artifact=None)
+        with self.assertRaises(wire.ProtocolError):
+            android.validate_aab_structure(Path("/inert/substitute.aab"), artifact=f.artifact)
+        f.operation._artifact = object()
+        with self.assertRaises(wire.ProtocolError):
+            f.validate()
+        f.artifact.reader.assert_not_called()
+        f.artifact.native_input.assert_not_called()
+
+    def test_native_manifest_dispatch_stays_inside_original_borrow_and_never_signs(self):
+        f = _InertRun(self)
+        inspector = f.inspector()
+        command = f.command("bundletool")
+        manifest = self.patched(android_manifest, "validate_android_manifest", return_value=[findings()[1]])
+        result = f.validate()
+        inspector.assert_called_once_with(f.reader_token, archive_bytes=f.artifact.size, checkpoint=f.artifact.check)
+        manifest.assert_called_once_with("INERT_MANIFEST", expected_application_id="org.example.saved",
+                                         release=f.bound.release, cancellation=f.guard)
+        self.assertFalse(f.artifact._native)
+        self.assertLess(f.events.index("reader-exit"), f.events.index("native-enter"))
+        self.assertLess(f.events.index("native-enter"), f.events.index("dispatch:bundletool"))
+        self.assertLess(f.events.index("returned:bundletool"), f.events.index("native-exit"))
+        self.assertEqual(f.operation._returned, {"gradle": 0, "bundletool": 0})
+        self.assertEqual(result[-1].message, wire.SIGNER_MESSAGE)
+        self.assertEqual((result[-1].code, result[-1].status), ("android.aab.signer", Status.SKIP))
+        self.assertEqual(command.call_args.kwargs, {"cwd": f.operation.root, "environ": {"INERT_FIXED": "environment"},
+            "timeout": 60, "capture": True, "output_limit": 2 * 1024 * 1024, "cancellation": f.guard})
+        for name in ("_validation_environment", "finite_scratch", "copy_bundletool", "_verify_jar_signature", "_signer_fingerprint"):
+            getattr(android, name).assert_not_called()
+
+    def test_bundletool_return_is_retained_before_rejection_or_late_owner_failure(self):
+        for code, late in ((4, False), (0, True)):
+            with self.subTest(code=code, late=late):
+                f = _InertRun(self)
+                f.command("bundletool", code)
+                error = ProcessCleanupError("PRIVATE tools")
+                if late:
+                    f.tools.check.side_effect = [None, error]
+                with self.assertRaises(ProcessCleanupError if late else android._OwnedAabManifestError):
+                    with f.artifact.native_input() as path:
+                        android._bundletool_manifest(path, cancellation=f.guard, tools=f.tools)
+                self.assertEqual(f.operation._returned, {"gradle": 0, "bundletool": code})
+                self.assertFalse(f.artifact._native)
+
+
+class AndroidBuildServiceTests(_InertCase):
+    def test_service_uses_bound_originals_not_diagnostic_paths_and_closes_before_terminal(self):
+        f = _InertRun(self)
+        f.run.run()
+        f.build_call.assert_called_once_with(f.bound.config, signed=False, cancellation=f.guard, operation=f.operation)
+        f.inspect_call.assert_called_once_with(f.artifact.path, expected_application_id="org.example.saved",
+            release=f.bound.release, expected_fingerprint=None, require_tools=True, check_signer=False,
+            cancellation=f.guard, artifact=f.artifact, tools=f.tools)
+        self.assertEqual([event for event in f.events if event.startswith("stage:")],
+                         ["stage:" + stage for stage in wire.STAGES])
+        self.assertLess(f.events.index("finish-work"), f.events.index("operation-close"))
+        self.assertLess(f.events.index("operation-close"), f.events.index("project-exit"))
+        self.assertLess(f.events.index("project-exit"), f.events.index("invocation-exit"))
+        f.operation.close.assert_called_once_with()
+        self.assertEqual(f.artifact.verify_bytes.call_count, 2)
+        self.assertEqual(f.run.terminal()["outcome"], "unknown")  # Input and handlers are not retired DATA yet.
+        f.settle_outer()
+        terminal = f.run.terminal()
+        self.assertEqual((terminal["outcome"], terminal["reason"]), ("complete", "none"))
+        result = terminal["result"]
+        self.assertEqual(result["usedConfig"], f.request.context["savedConfig"])
+        self.assertEqual(result["usedVersion"], f.request.context["savedVersion"])
+        self.assertEqual(result["assurances"]["applicationVersion"], "native-checked")
+        self.assertEqual(result["assurances"]["sourceBinding"], "not-established")
+        self.assertEqual(result["artifacts"], [{"logicalName": "android-aab", "platform": "android", "kind": "aab",
+            "fileName": "app-release.aab", "size": 1024, "sha256": "d" * 64, "architectures": ["arm64-v8a"],
+            "unknownAbi": True, "freshness": "not-established"}])
+        self.assertNotIn("PRIVATE_", json.dumps(terminal))
+        with self.assertRaises(wire.ProtocolError):
+            f.run.run()
+        self.assertEqual(f.build_call.call_count, 1)
+
+    def test_invalid_aab_can_complete_negative_inspection_but_never_claim_native_check(self):
+        f = _InertRun(self)
+        inspector = f.inspector()
+        inspector.side_effect = AndroidZipError("end")
+        f.inspect_call.side_effect = android.validate_aab
+        f.run.run()
+        self.assertFalse(f.run.report.ok)
+        self.assertEqual(f.ledger.verdict().commands, 1)
+        f.artifact.native_input.assert_not_called()
+        self.assertEqual(f.run.terminal()["outcome"], "unknown")
+        f.settle_outer()
+        terminal = f.run.terminal()
+        self.assertEqual(terminal["outcome"], "complete")
+        self.assertEqual(terminal["result"]["assurances"]["structure"], "failed")
+        self.assertEqual(terminal["result"]["assurances"]["nativeManifest"], "not-checked")
+        self.assertEqual(terminal["result"]["assurances"]["applicationVersion"], "not-established")
+
+    def test_typed_tool_and_file_refusals_keep_fixed_reason_and_observed_command_state(self):
+        from mobile_release.android_build_tools import AndroidToolError
+
+        for phase, error, outcome in (("prepare", AndroidToolError("toolchain-unavailable"), "refused"),
+                                      ("inspect", AndroidFileError("artifact-changed"), "failed")):
+            with self.subTest(phase=phase):
+                f = _InertRun(self)
+                (f.operation.prepare if phase == "prepare" else f.inspect_call).side_effect = error
+                with self.assertRaises(type(error)):
+                    f.run.run()
+                self.assertIs(f.run.primary, error)
+                f.settle_outer()
+                terminal = f.run.terminal()
+                self.assertEqual((terminal["outcome"], terminal["reason"]), (outcome, error.reason))
+                self.assertIsNone(terminal["result"])
+                self.assertEqual(terminal["activity"]["command"],
+                    {"outcome": "not-dispatched", "exitCode": None} if phase == "prepare" else
+                    {"outcome": "exited", "exitCode": 0})
+                if phase == "prepare":
+                    f.build_call.assert_not_called()
+
+    def test_run_projection_limit_has_fixed_reason_and_never_relabels_fatal_lifetime(self):
+        f = _InertRun(self)
+        f.findings = [findings()[0]] * (wire.MAX_FINDINGS + 1)
+        with self.assertRaises(AndroidBuildError) as limited:
+            f.run.run()
+        self.assertEqual(limited.exception.reason, "result-limit")
+        self.assertIsNone(f.run._candidate)
+        f.settle_outer()
+        terminal = f.run.terminal()
+        self.assertEqual((terminal["outcome"], terminal["reason"]), ("failed", "result-limit"))
+        self.assertEqual(terminal["activity"]["findings"], [])
+        self.assertIsNone(terminal["result"])
+
+        fatal = ProcessCleanupError("PRIVATE projection custody")
+        wrapped = ValueError("PRIVATE projection")
+        wrapped.__context__ = fatal
+        for error in (fatal, wrapped):
+            with self.subTest(error=type(error).__name__):
+                g = _InertRun(self)
+                self.patched(service, "project_result", side_effect=error)
+                with self.assertRaises(type(error)) as raised:
+                    g.run.run()
+                self.assertIs(raised.exception, error)
+                self.assertIs(g.run.primary, error)
+                g.settle_outer()
+                terminal = g.run.terminal()
+                self.assertEqual((terminal["outcome"], terminal["reason"]), ("unknown", "cleanup-unknown"))
+                self.assertTrue(terminal["lifetime"]["fatal"])
+                self.assertIsNone(terminal["result"])
+
+    def test_every_original_close_predicate_independently_vetoes_prepared_candidate(self):
+        for field in ("inputClosed", "handlersRestored", "invocationClosed", "artifactsClosed", "toolsClosed", "namespaceClosed"):
+            with self.subTest(field=field):
+                f = _InertRun(self)
+                f.run.run()
+                f.settle_outer()
+                if field == "inputClosed":
+                    f.source.closed = False
+                elif field == "handlersRestored":
+                    f.guard._restoration = "UNKNOWN"
+                else:
+                    f.flags[field.removesuffix("Closed")] = False
+                terminal = f.run.terminal()
+                self.assertFalse(terminal["lifetime"][field])
+                self.assertEqual((terminal["outcome"], terminal["reason"]), ("unknown", "cleanup-unknown"))
+                self.assertIsNone(terminal["result"])
+                self.assertEqual(terminal["disposition"]["artifacts"], "retained-incomplete")
+
+    def test_stop_fatal_unknown_disposition_and_retained_work_never_publish_artifact_success(self):
+        cases = (("cancelled", "cancelled"), ("timed-out", "timed-out"), ("fatal", "unknown"),
+                 ("unknown-work", "unknown"), ("unknown-artifacts", "unknown"), ("retained", "failed"))
+        for kind, outcome in cases:
+            with self.subTest(kind=kind):
+                f = _InertRun(self)
+                f.run.run()
+                f.settle_outer()
+                if kind == "cancelled":
+                    f.guard.cancelled = True
+                elif kind == "timed-out":
+                    f.source.work_end = 123.0
+                elif kind == "fatal":
+                    f.guard._abort(ProcessCleanupError("PRIVATE lifetime"))
+                elif kind.startswith("unknown-"):
+                    f.disposition[kind.removeprefix("unknown-")] = "unknown"
+                else:
+                    f.disposition["work"] = "retained-work"
+                terminal = f.run.terminal()
+                self.assertEqual(terminal["outcome"], outcome)
+                self.assertIsNone(terminal["result"])
+                self.assertNotEqual(terminal["disposition"]["artifacts"], "retained-local-result")
+                if kind in {"cancelled", "timed-out"}:
+                    self.assertEqual(terminal["lifetime"]["stopObserved"], kind)
+                if kind == "retained":
+                    self.assertEqual(terminal["reason"], "work-retained")
+
+    def test_body_primary_precedes_failing_close_and_close_is_never_retried(self):
+        f = _InertRun(self)
+        primary = AndroidBuildError("artifact-changed")
+        cleanup = ProcessCleanupError("PRIVATE close", dispatched=True)
+        f.inspect_call.side_effect = primary
+
+        def fail_close():
+            self.assertIs(f.run.primary, primary)
+            self.assertIs(f.ledger._primary, primary)
+            self.assertEqual(f.source.first_failure, 123.0)
+            self.assertTrue(f.run._close_claimed)
+            raise cleanup
+
+        f.operation.close.side_effect = fail_close
+        with self.assertRaises(ProcessCleanupError) as raised:
+            f.run.run()
+        self.assertIs(raised.exception, cleanup)
+        self.assertIs(f.run.primary, primary)
+        self.assertIs(f.ledger._primary, primary)
+        f.run.close()
+        f.operation.close.assert_called_once_with()
+        f.settle_outer()
+        terminal = f.run.terminal()
+        self.assertEqual((terminal["outcome"], terminal["reason"]), ("unknown", "cleanup-unknown"))
+        self.assertTrue(terminal["lifetime"]["fatal"])
+        self.assertEqual(terminal["activity"]["command"], {"outcome": "exited", "exitCode": 0})
+        self.assertIsNone(terminal["result"])
+
+    def test_terminal_projection_strips_private_report_data_and_bounds_late_invalid_rows(self):
+        f = _InertRun(self)
+        f.findings.append(Finding("PRIVATE_CODE", Status.PASS, "PRIVATE_" * 4096, details={"password": "PRIVATE_VALUE"}))
+        # Use real projections, never Report.as_dict or a mocked success result.
+        self.forbidden(Report, "as_dict")
+        self.forbidden(Finding, "as_dict")
+        f.run.run()
+        f.run.report.context = {"path": "/PRIVATE_CONTEXT", "secret": "PRIVATE_VALUE"}
+        f.settle_outer()
+        terminal = f.run.terminal()
+        self.assertNotIn("PRIVATE_", json.dumps(terminal))
+        self.assertEqual(terminal["result"]["findings"][-1]["check"], "other-core-finding")
+        self.assertEqual(terminal["result"]["assurances"]["applicationVersion"], "not-established")
+        # Inject malformed retained report DATA at terminal to ensure it vetoes
+        # even a previously prepared candidate instead of relaying/truncating it.
+        f.run.report.findings = [findings()[0]] * (wire.MAX_FINDINGS + 1)
+        terminal = f.run.terminal()
+        self.assertEqual((terminal["outcome"], terminal["reason"]), ("failed", "result-limit"))
+        self.assertIsNone(terminal["result"])
+        self.assertEqual(terminal["activity"]["findings"], [])
+        self.assertNotIn("PRIVATE_", json.dumps(terminal))
+        self.assertLessEqual(len(json.dumps(terminal).encode("utf-8")), wire.RESPONSE_LIMIT)

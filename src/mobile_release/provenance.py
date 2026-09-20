@@ -9,15 +9,19 @@ import shutil
 import tempfile
 import zipfile
 from base64 import b64decode
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
 from . import __version__
 from .config import ReleaseConfig, ReleaseVersion
 from .discovery import GitContext, valid_observed_source
 from .errors import ValidationError
 from .metadata import android_release_notes, validate_android_release_note
+
+if TYPE_CHECKING:
+    from .android_zip import AndroidZipMetadata
 
 HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SENSITIVE_KEY_RE = re.compile(r"(?i)(password|private.?key|secret|token|credential|keystore.?base64)")
@@ -2615,15 +2619,51 @@ ARTIFACT_TYPES = {
 }
 
 
+def _artifact_type(name: str) -> tuple[str, str]:
+    """One pure logical-name/platform/kind policy for path and DATA callers."""
+    if name not in ARTIFACT_TYPES:
+        raise ValidationError(f"unsupported artifact logical name: {name}")
+    return ARTIFACT_TYPES[name]
+
+
+def _artifact_record(
+    name: str, *, file_name: str, size: int, sha256: str, architectures: list[str],
+) -> dict[str, Any]:
+    """Construct the existing seven-field record, without observing any file.
+
+    This is not an evidence publisher or admission/custody receipt. The legacy
+    path caller deliberately keeps its existing checks/read order; the stricter
+    owned-DATA caller bounds its observations before using this same constructor.
+    """
+    platform, kind = _artifact_type(name)
+    return {
+        "logicalName": name,
+        "platform": platform,
+        "kind": kind,
+        "fileName": file_name,
+        "size": size,
+        "sha256": sha256,
+        "architectures": architectures,
+    }
+
+
+def _android_aab_abi(name: str) -> str | None:
+    # Preserve the existing base/lib prefix observation, including directory
+    # entries and nested suffixes. It is not ELF inspection or ABI completeness
+    # across dynamic-feature modules. Unknown labels remain DATA, not paths.
+    parts = name.split("/")
+    return parts[2] if parts[:2] == ["base", "lib"] and len(parts) > 3 else None
+
+
 def _artifact_architectures(name: str, path: Path) -> list[str]:
     if name == "android-aab":
         try:
             with zipfile.ZipFile(path) as archive:
                 return sorted(
                     {
-                        parts[2]
+                        abi
                         for item in archive.namelist()
-                        if (parts := item.split("/"))[:2] == ["base", "lib"] and len(parts) > 3
+                        if (abi := _android_aab_abi(item)) is not None
                     }
                 )
         except zipfile.BadZipFile:
@@ -2640,23 +2680,156 @@ def artifact_records(artifacts: Iterable[tuple[str, Path]]) -> list[dict[str, An
         seen.add(name)
         if path.is_symlink() or not path.is_file():
             raise ValidationError(f"artifact must be a regular non-symlink file: {name}")
-        if name not in ARTIFACT_TYPES:
-            raise ValidationError(f"unsupported artifact logical name: {name}")
+        _artifact_type(name)
         if path.stat().st_size < 1:
             raise ValidationError(f"artifact is empty: {name}")
-        platform, kind = ARTIFACT_TYPES[name]
         records.append(
-            {
-                "logicalName": name,
-                "platform": platform,
-                "kind": kind,
-                "fileName": path.name,
-                "size": path.stat().st_size,
-                "sha256": sha256_file(path),
-                "architectures": _artifact_architectures(name, path),
-            }
+            _artifact_record(name, file_name=path.name, size=path.stat().st_size,
+                             sha256=sha256_file(path), architectures=_artifact_architectures(name, path))
         )
     return sorted(records, key=lambda item: item["logicalName"])
+
+
+ANDROID_ABI_LABELS = ("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+_OBSERVATION_MESSAGES = {
+    "input": "Artifact observations require exact bounded DATA values.",
+    "scope": "This observation profile requires exactly one Android AAB.",
+    "name": "An observed artifact file name must be a bounded safe basename.",
+    "size": "The observed Android AAB size is outside the supported bounds.",
+    "digest": "The observed artifact digest must be a lowercase SHA-256 value.",
+    "architectures": "Observed artifact architectures must be unique recognized ABI labels.",
+    "metadata": "ABI observations require supported already-inspected ZIP entry DATA.",
+    "limit": "ABI observation DATA exceeds the supported inspection limits.",
+}
+
+
+class ArtifactObservationError(ValidationError):
+    """Ordinary DATA refusal only; no original-owner/checkpoint exception wrapping."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(_OBSERVATION_MESSAGES[reason])
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactObservation:
+    """Forgeable comparison DATA, never an original artifact or custody receipt."""
+
+    logical_name: str
+    file_name: str
+    size: int
+    sha256: str
+    architectures: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AndroidAbiObservation:
+    """Bounded base-module name observations, not ELF/native ABI verification."""
+
+    architectures: tuple[str, ...]
+    unknown_abi: bool
+
+
+def android_abis_from_zip_metadata(
+    metadata: AndroidZipMetadata, *, checkpoint: Callable[[], None],
+) -> AndroidAbiObservation:
+    """Observe the SAME inspected directory without ZipFile, paths or file reads.
+
+    The operation must supply its original integrity result's metadata and keep
+    the associated artifact custody/checks alive. These dataclass/type checks
+    bound DATA processing; they do not prove that a ZIP inspector ran. Only four
+    recognized labels and a boolean can escape; unrecognized entry/ABI strings
+    are neither retained in the result nor inserted into error messages.
+    """
+    from .android_zip import (
+        AndroidZipEntry, AndroidZipError, AndroidZipMetadata,
+        CENTRAL_HEADER_BYTES, MAX_CENTRAL_DIRECTORY_BYTES, MAX_ENTRY_COUNT,
+        MAX_ENTRY_NAME_BYTES, validate_zip_entry_policy,
+    )
+
+    def check() -> None:
+        if checkpoint() is not None:
+            raise ArtifactObservationError("input") from None
+
+    if not callable(checkpoint):
+        raise ArtifactObservationError("input")
+    check()
+    if type(metadata) is not AndroidZipMetadata or type(metadata.entries) is not tuple:
+        raise ArtifactObservationError("metadata")
+    if not 0 < len(metadata.entries) < 0xFFFF or len(metadata.entries) > MAX_ENTRY_COUNT:
+        raise ArtifactObservationError("limit")
+    found: set[str] = set()
+    unknown = False
+    name_work = 0
+    for entry in metadata.entries:
+        check()
+        if type(entry) is not AndroidZipEntry or type(entry.name) is not str:
+            raise ArtifactObservationError("metadata")
+        if len(entry.name) > MAX_ENTRY_NAME_BYTES:
+            raise ArtifactObservationError("limit")
+        name_work += CENTRAL_HEADER_BYTES + len(entry.name)
+        if name_work > MAX_CENTRAL_DIRECTORY_BYTES:
+            raise ArtifactObservationError("limit")
+        # Keep the shared raw-path/type/encryption predicate rather than grow a
+        # more permissive name policy for the owned observation path. No second
+        # decoding, normalization or central-directory interpretation occurs.
+        try:
+            validate_zip_entry_policy(entry.name, flag_bits=entry.flag_bits,
+                                      external_attr=entry.external_attr, file_size=entry.file_size)
+        except AndroidZipError:
+            raise ArtifactObservationError("metadata") from None
+        abi = _android_aab_abi(entry.name)
+        if abi is not None:
+            if abi in ANDROID_ABI_LABELS:
+                found.add(abi)
+            else:
+                unknown = True
+        check()
+    result = AndroidAbiObservation(tuple(sorted(found)), unknown)
+    check()
+    return result
+
+
+def artifact_records_from_observations(
+    observations: tuple[ArtifactObservation, ...],
+) -> list[dict[str, Any]]:
+    """Construct records from original already-inspected DATA, never from paths.
+
+    The first owned profile is one required Android AAB only. Its owner supplies
+    the recorded size/hash and the above same-directory ABI labels; this helper
+    cannot establish that relationship or create original custody from DATA.
+    Carry AndroidAbiObservation.unknown_abi separately in the local operation
+    result: the existing seven-field evidence record schema is not extended.
+    No freshness, source-binding, signature, candidate or Store claim is added.
+    """
+    from .android_zip import MAX_AAB_BYTES
+
+    if type(observations) is not tuple:
+        raise ArtifactObservationError("input")
+    if len(observations) != 1:
+        raise ArtifactObservationError("scope")
+    value = observations[0]
+    if type(value) is not ArtifactObservation:
+        raise ArtifactObservationError("input")
+    if type(value.logical_name) is not str or value.logical_name != "android-aab":
+        raise ArtifactObservationError("scope")
+    name = value.file_name
+    if (type(name) is not str or name in {"", ".", ".."} or len(name) > 255
+            or any(char in name for char in ("/", "\\", ":", "\0"))
+            or any(ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF for char in name)
+            or len(name.encode("utf-8")) > 255):
+        raise ArtifactObservationError("name")
+    if type(value.size) is not int or not 1 <= value.size <= MAX_AAB_BYTES:
+        raise ArtifactObservationError("size")
+    if type(value.sha256) is not str or len(value.sha256) != 64 or not HEX_SHA256_RE.fullmatch(value.sha256):
+        raise ArtifactObservationError("digest")
+    abis = value.architectures
+    if (type(abis) is not tuple or len(abis) > len(ANDROID_ABI_LABELS)
+            or any(type(abi) is not str or abi not in ANDROID_ABI_LABELS for abi in abis)
+            or len(abis) != len(set(abis))):
+        raise ArtifactObservationError("architectures")
+    return [_artifact_record(value.logical_name, file_name=name, size=value.size,
+                             sha256=value.sha256, architectures=sorted(abis))]
 
 
 def _workflow_run(stage: str) -> dict[str, Any]:

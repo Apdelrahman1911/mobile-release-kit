@@ -135,6 +135,11 @@ def _stat(fd: int, name: str) -> os.stat_result | None:
 
 
 def _names(fd: int, limit: int = 4096, *, cancellation=None) -> set[str]:
+    if cancellation is not None and getattr(cancellation, "_android_build_source", None) is not None:
+        # Only the original fixed Android operation can lend its bounded
+        # iterator owner. Ordinary callers retain their existing semantics.
+        operation = cancellation._android_build_source.require_operation()
+        return operation.files.names(fd, limit=limit)
     budget = None
     if cancellation is not None and getattr(cancellation, "_preflight_source", None) is not None:
         from ._desktop_preflight_budget import budget_for
@@ -162,9 +167,9 @@ def _names(fd: int, limit: int = 4096, *, cancellation=None) -> set[str]:
     return set(values)
 
 
-def _name_absent(fd: int, name: str, *, limit: int = 4096) -> None:
+def _name_absent(fd: int, name: str, *, limit: int = 4096, cancellation=None) -> None:
     key = _name_key(name)
-    _need(all(_name_key(value) != key for value in _names(fd, limit)),
+    _need(all(_name_key(value) != key for value in _names(fd, limit, cancellation=cancellation)),
           "reserved name is occupied or aliased")
 
 
@@ -1113,7 +1118,7 @@ class _StoreNamespace:
 
     def __init__(self, root: Path, guard: DefaultCancellation, *, include_store: bool = True,
                  _descendants: tuple[str, ...] = (), _exclusive_index: int | None = None,
-                 _create: bool = True) -> None:
+                 _create: bool = True, _android_operation=None) -> None:
         _need(type(include_store) is bool and type(_create) is bool
               and type(_descendants) is tuple and (not include_store or not _descendants),
               "invalid private namespace selection")
@@ -1133,6 +1138,15 @@ class _StoreNamespace:
               and 0 <= _exclusive_index < len(self.components), "invalid exclusive private role")
         self.exclusive_index, self.create = _exclusive_index, _create
         self.root, self.cancellation = root, guard
+        self.android_operation = _android_operation
+        if _android_operation is not None:
+            from .android_build_operation import AndroidBuildOperation
+            _need(type(_android_operation) is AndroidBuildOperation
+                  and _android_operation.guard is guard and _android_operation.root == root
+                  and not include_store and _create
+                  and self.components == (_PRIVATE, "desktop-android-build", _android_operation.operation_id)
+                  and _exclusive_index == 2,
+                  "Android namespace requires its fixed original operation")
         self.pid, self.thread = os.getpid(), threading.current_thread()
         self.parent = _Directory(root, guard)
         self.parent_acquired = False
@@ -1171,12 +1185,18 @@ class _StoreNamespace:
     def acquire(self) -> None:
         self._owner()
         _need(not self.claimed and not self.parent_acquired, "Store namespace acquisition cannot be repeated")
-        self.parent.acquire()
+        if self.android_operation is None:
+            self.parent.acquire()
+            parent = self.parent.fd
+        else:
+            # Borrow the already locked original project BEFORE the first
+            # publication. In this fixed domain the independent path-based
+            # _Directory remains unacquired and never substitutes a new root.
+            parent = self.android_operation._namespace_root(self, ensure_meta=True)
         self.parent_acquired = True
-        parent = self.parent.fd
         for index, name in enumerate(self.components):
             self.cancellation.check()
-            exists = name in _exact_reserved_names(parent, {name})
+            exists = name in _exact_reserved_names(parent, {name}, cancellation=self.cancellation)
             _need(not exists or index != self.exclusive_index,
                   "exclusive private output already exists; preserve it")
             if not exists:
@@ -1215,13 +1235,16 @@ class _StoreNamespace:
             _check_creation(creation, identity)
         if not self.parent_acquired:
             return
-        self.parent.check()
-        parent = self.parent.fd
+        if self.android_operation is None:
+            self.parent.check()
+            parent = self.parent.fd
+        else:
+            parent = self.android_operation._namespace_root(self, cleanup=self.claimed)
         for index, name in enumerate(self.components):
             identity, slot = self.identities[index], self.slots[index]
             if identity is None:
                 break
-            _exact_reserved_names(parent, {name})
+            _exact_reserved_names(parent, {name}, cancellation=self.cancellation)
             _need(slot.number is not None and _directory(os.fstat(slot.number)) == identity
                   and _directory(os.stat(name, dir_fd=parent, follow_symlinks=False)) == identity,
                   "original Store application-private namespace changed")
@@ -1612,6 +1635,10 @@ class InvocationCustody:
             # Bind before acquire/yield: failed admission must not lose this
             # original invocation's actual close/reservation record.
             budget.bind(self)
+        elif getattr(guard, "_android_build_source", None) is not None:
+            # As for offline admission, bind the original record before any
+            # environment acquisition can fail or lose its result.
+            guard._android_build_source.require_operation().bind_invocation(self)
 
     def _owner(self, *, cleanup: bool = False) -> None:
         _need(self.pid == os.getpid() and self.thread is threading.current_thread(),
@@ -1762,17 +1789,17 @@ class InvocationCustody:
                 and self.store_namespace is not None and self.store_namespace.closed()
                 and _ENV_OWNER is not self and not _ENV_TAINTED)
 
-    def _offline_preflight_root(self, guard: DefaultCancellation) -> tuple[int, dict[str, Any]]:
-        """Read-only borrowed original root; not a constructor or cleanup grant."""
+    def _unsigned_build_root(self, guard: DefaultCancellation) -> tuple[int, dict[str, Any]]:
+        """Fixed saved-command borrow; no new root or deletion authority."""
         self.require(root=self.root, cancellation=guard, signing_lease=None)
         _need(self.mode == "build" and self.project_owner is self._original_project
-              and self.project_owner is not None and self.child is None, "offline preflight root is not admitted")
+              and self.project_owner is not None and self.child is None, "saved-command root is not admitted")
         fd = self.project_owner.fd
         value = os.fstat(fd)
         return fd, {"device": str(value.st_dev), "inode": str(value.st_ino),
                     "mode": value.st_mode, "uid": value.st_uid, "gid": value.st_gid}
 
-    def _offline_preflight_closed(self, guard: DefaultCancellation) -> bool:
+    def _unsigned_build_closed(self, guard: DefaultCancellation) -> bool:
         self._owner(cleanup=True)
         project = self._original_project
         project_closed = ((not self.project_started and project is None) or project is not None
@@ -1784,6 +1811,64 @@ class InvocationCustody:
                 and self.store_namespace is None and self.reservation_state in {"NEW", "REFUSED", "RELEASED"}
                 and (self.lock_result is None or self.lock_result is False)
                 and _ENV_OWNER is not self and not _ENV_TAINTED)
+
+    def _offline_preflight_root(self, guard: DefaultCancellation) -> tuple[int, dict[str, Any]]:
+        """Compatibility borrow; Android cannot obtain an offline capability."""
+        _need(getattr(guard, "_android_build_source", None) is None,
+              "Android operation cannot borrow the offline root")
+        return self._unsigned_build_root(guard)
+
+    def _offline_preflight_closed(self, guard: DefaultCancellation) -> bool:
+        _need(getattr(guard, "_android_build_source", None) is None,
+              "Android operation cannot borrow offline closure")
+        return self._unsigned_build_closed(guard)
+
+    def _android_build_root(self, operation) -> tuple[int, dict[str, Any]]:
+        from .android_build_operation import AndroidBuildOperation
+        _need(type(operation) is AndroidBuildOperation and operation.invocation is self
+              and operation.guard is self.cancellation
+              and self.cancellation._android_build_source is operation.source
+              and operation.source.require_operation() is operation,
+              "Android root requires its original invocation")
+        return self._unsigned_build_root(operation.guard)
+
+    def _android_build_cleanup_root(self, operation) -> tuple[int, dict[str, Any]]:
+        """Check the same still-held project during original resource cleanup.
+
+        This cannot acquire a root, resume work or borrow after project retirement.
+        A recorded cancellation does not prevent independent original closes.
+        """
+        from .android_build_operation import AndroidBuildOperation
+        self._owner(cleanup=True)
+        _need(type(operation) is AndroidBuildOperation and operation.invocation is self
+              and operation.guard is self.cancellation and operation.source.operation is operation
+              and operation.close_claimed and self.cancellation.depth > 0
+              and operation.files is not None and operation.files.namespace is not None
+              and operation.files.namespace.android_operation is operation
+              and operation.files.namespace.claimed,
+              "Android cleanup root requires its claimed original namespace")
+        operation.cleanup_checkpoint()
+        _need(self.mode == "build" and self.signing_lease is None and self.child is None
+              and self.active and self.reserved and _ENV_OWNER is self and not _ENV_TAINTED
+              and self.project_owner is not None and self.project_owner is self._original_project
+              and not self.project_owner.claimed,
+              "Android cleanup cannot replace or reacquire its original project")
+        # _Project.check only inspects original ancestry; bounded Android names
+        # use cleanup_checkpoint rather than guard.check while deferred.
+        self.project_owner.check()
+        fd = self.project_owner.fd
+        value = os.fstat(fd)
+        return fd, {"device": str(value.st_dev), "inode": str(value.st_ino),
+                    "mode": value.st_mode, "uid": value.st_uid, "gid": value.st_gid}
+
+    def _android_build_closed(self, operation) -> bool:
+        from .android_build_operation import AndroidBuildOperation
+        # Source removal precedes terminal publication; bind the retained
+        # original operation rather than requiring an active input here.
+        _need(type(operation) is AndroidBuildOperation and operation.invocation is self
+              and operation.guard is self.cancellation and operation.source.operation is operation,
+              "Android closure requires its original invocation")
+        return self._unsigned_build_closed(operation.guard)
 
     def fork_close(self) -> None:
         self.active = False
@@ -1861,12 +1946,20 @@ class _Project:
 
     def ensure_meta(self) -> int:
         self.check()
-        ignore = _read_file(self.fd, ".gitignore", self.guard, _SMALL)
-        _need(ignore is not None, "project must explicitly ignore its private metadata")
-        _need(_private_is_ignored(ignore[1]),
+        source = getattr(self.guard, "_android_build_source", None)
+        if source is None:
+            ignore = _read_file(self.fd, ".gitignore", self.guard, _SMALL)
+            ignore_bytes = None if ignore is None else ignore[1]
+        else:
+            operation = source.require_operation()
+            _need(operation.invocation is not None and operation.invocation.project_owner is self,
+                  "Android ignore policy requires the original project")
+            ignore_bytes = operation._project_ignore_policy()
+        _need(ignore_bytes is not None, "project must explicitly ignore its private metadata")
+        _need(_private_is_ignored(ignore_bytes),
               "private metadata needs an unambiguous directory ignore rule")
         if self.meta.number is None:
-            _name_absent(self.fd, _PRIVATE)
+            _name_absent(self.fd, _PRIVATE, cancellation=self.guard)
             with self.guard.deferred(check_on_exit=False):
                 _mkdir_private(_PRIVATE, self.fd, self.guard, self.meta_creation)
                 self._open_meta()

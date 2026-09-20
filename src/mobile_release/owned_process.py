@@ -152,18 +152,17 @@ def run_owned(
     """
     from ._command_process import run_command
 
-    source = None if cancellation is None else getattr(cancellation, "_preflight_source", None)
+    source = None if cancellation is None else getattr(cancellation, "_saved_command_source", None)
     if source is not None:
-        from ._desktop_preflight_control import PreflightInput
-        from ._desktop_preflight_budget import budget_for
-        if type(source) is not PreflightInput or source.guard is not cancellation or cleanup:
-            raise ValueError("Offline preflight command has no original input binding")
-        timeout = source.remaining_timeout(timeout)
-        budget = budget_for(cancellation)
-        if budget is None:
-            raise ValueError("Offline preflight command has no original budget")
-        if capture:
-            output_limit = budget.capture(output_limit)
+        from ._desktop_saved_command_control import SavedCommandDomain, source_domain
+        domain = source_domain(source)
+        if (type(cancellation) is not DefaultCancellation or cancellation._saved_command_input() is not source
+                or source.guard is not cancellation or cleanup):
+            message = ("Offline preflight command has no original input binding"
+                       if domain is SavedCommandDomain.OfflinePreflight
+                       else "Android build command has no original input binding")
+            raise ValueError(message)
+        timeout, output_limit = source.command_limits(timeout, capture, output_limit)
         # Complete nonzero results remain ordinary policy DATA. This seam
         # changes neither the C/A/W owner nor its original cleanup allowance.
     return run_command(argv, environ=environ, cwd=cwd, timeout=timeout, capture=capture, text=text,
