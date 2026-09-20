@@ -17,6 +17,11 @@ name = "mobile-release-kit-desktop"
 path = "src/main.rs"
 required-features = ["desktop-shell"]
 
+[[bin]]
+name = "mrk-runtime-publish"
+path = "src/bin/runtime_publish.rs"
+required-features = ["ubuntu-runtime-publisher"]
+
 [[test]]
 name = "session-gtk-qualification"
 path = "tests/session_gtk_qualification.rs"
@@ -27,6 +32,8 @@ required-features = ["desktop-shell", "development-runtime"]
 default = []
 desktop-shell = ["dep:tauri", "dep:tauri-build", "dep:rfd", "dep:webkit2gtk", "dep:gtk"]
 development-runtime = []
+# Selects the standalone privileged publisher, not any execution qualification.
+ubuntu-runtime-publisher = []
 
 [dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }

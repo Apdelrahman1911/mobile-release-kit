@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Mobile Release Kit
+Comment=Configure, prepare and manage mobile releases
+Exec=/usr/bin/mobile-release-kit-desktop
+TryExec=/usr/bin/mobile-release-kit-desktop
+Terminal=false
+Categories=Development;
+Keywords=Android;iOS;Release;
+StartupNotify=true

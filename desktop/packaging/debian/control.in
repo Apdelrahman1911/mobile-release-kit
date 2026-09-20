@@ -1,0 +1,12 @@
+Package: mobile-release-kit-desktop
+Version: @VERSION@
+Architecture: amd64
+Section: devel
+Priority: optional
+Maintainer: Mobile Release Kit contributors <noreply@github.com>
+Depends: @DEPENDS@
+Installed-Size: @INSTALLED_SIZE@
+Homepage: https://github.com/Apdelrahman1911/mobile-release-kit
+Description: Guided desktop interface for Mobile Release Kit
+ Includes the private release engine; no user-installed Python is required.
+ This development package does not enable unqualified release operations.

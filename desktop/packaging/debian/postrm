@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+# Removal, purge and failed installation never reclaim immutable runtimes.
+case "${1-}" in
+  remove|purge|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear) exit 0 ;;
+  *) exit 1 ;;
+esac

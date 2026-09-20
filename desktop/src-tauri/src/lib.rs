@@ -21,6 +21,8 @@ pub mod runtime;
 // qualification-disabled; legacy inspection-only DATA remains separate.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod installed_runtime;
+#[cfg(all(feature = "ubuntu-runtime-publisher", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub mod runtime_publication;
 pub mod supervisor;
 pub mod bridge;
 mod document_lifetime;

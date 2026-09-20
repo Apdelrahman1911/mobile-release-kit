@@ -29,7 +29,7 @@ use crate::{protocol::{strict_json, PROTOCOL},
 const TARGET: &str = "x86_64-unknown-linux-gnu";
 const MANIFEST_ANCHOR: Option<&str> = option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256");
 const PROTOCOL_ANCHOR: Option<&str> = option_env!("MRK_BUNDLED_PROTOCOL_SHA256");
-const MANIFEST_LIMIT: usize = 1024 * 1024;
+pub(crate) const MANIFEST_LIMIT: usize = 1024 * 1024;
 const MOUNTINFO_LIMIT: usize = 1024 * 1024;
 const STATUS_LIMIT: usize = 64 * 1024;
 const MAP_LIMIT: usize = 4096;
@@ -37,8 +37,8 @@ const OS_RELEASE_LIMIT: usize = 64 * 1024;
 const FILE_LIMIT: u64 = 512 * 1024 * 1024;
 const TOTAL_LIMIT: u64 = 1024 * 1024 * 1024;
 const FILE_COUNT: usize = 2048;
-const ENTRY_COUNT: usize = 8192;
-const TREE_DEPTH: usize = 16;
+pub(crate) const ENTRY_COUNT: usize = 8192;
+pub(crate) const TREE_DEPTH: usize = 16;
 const RECORD_COUNT: usize = ENTRY_COUNT + 64;
 const LIVE_COUNT: usize = 48;
 const BLOCK_SIZE: usize = 64 * 1024;
@@ -46,8 +46,8 @@ const PREFIX_COUNT: usize = 6;
 const RETAINED_COUNT: usize = PREFIX_COUNT + 2;
 // Initial namespace inodes from include/linux/proc_ns.h at Linux v6.8.
 // These are deliberately version-bound, not portable namespace detection.
-const INITIAL_USER_INODE: u64 = 0xefff_fffd;
-const INITIAL_PID_INODE: u64 = 0xefff_fffc;
+pub(crate) const INITIAL_USER_INODE: u64 = 0xefff_fffd;
+pub(crate) const INITIAL_PID_INODE: u64 = 0xefff_fffc;
 
 type AdmissionResult<T> = Result<T, AdmissionFailure>;
 
@@ -138,7 +138,7 @@ pub(crate) struct Identity {
 }
 
 impl Identity {
-    fn of(stat: &Stat) -> Self {
+    pub(crate) fn of(stat: &Stat) -> Self {
         Self { device: stat.st_dev, inode: stat.st_ino, mode: stat.st_mode,
             uid: stat.st_uid, gid: stat.st_gid, links: stat.st_nlink, size: stat.st_size,
             mtime: stat.st_mtime, mtime_nsec: stat.st_mtime_nsec,
@@ -178,9 +178,9 @@ struct Manifest {
 // The publisher hashes compact, sorted-key JSON in this exact field order.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct PayloadFile { path: String, sha256: String, size: u64 }
+pub(crate) struct PayloadFile { pub(crate) path: String, pub(crate) sha256: String, pub(crate) size: u64 }
 
-struct Inventory { files: Vec<PayloadFile>, directories: BTreeSet<String> }
+pub(crate) struct Inventory { pub(crate) files: Vec<PayloadFile>, pub(crate) directories: BTreeSet<String> }
 
 struct TreeEntry { component: String, inode: u64, kind: FileType }
 
@@ -705,7 +705,7 @@ fn single_component(name: &str) -> bool {
     !name.contains('/') && safe_payload_path(name)
 }
 
-fn ordinary_identity(identity: Identity, kind: FileType) -> bool {
+pub(crate) fn ordinary_identity(identity: Identity, kind: FileType) -> bool {
     let forbidden = Mode::WGRP | Mode::WOTH | Mode::SUID | Mode::SGID | Mode::SVTX;
     FileType::from_raw_mode(identity.mode) == kind && identity.inode != 0
         && identity.links != 0 && identity.size >= 0
@@ -714,17 +714,17 @@ fn ordinary_identity(identity: Identity, kind: FileType) -> bool {
         && (kind != FileType::RegularFile || identity.links == 1)
 }
 
-fn protected_identity(identity: Identity, kind: FileType, size: Option<u64>) -> bool {
+pub(crate) fn protected_identity(identity: Identity, kind: FileType, size: Option<u64>) -> bool {
     ordinary_identity(identity, kind) && identity.uid == 0 && identity.gid == 0
         && size.is_none_or(|expected| u64::try_from(identity.size).ok() == Some(expected))
 }
 
-fn known_mount_attributes(attributes: u64) -> bool {
+pub(crate) fn known_mount_attributes(attributes: u64) -> bool {
     attributes & !mount::KNOWN_ATTRIBUTES == 0 && attributes & mount::ID_MAPPED == 0
         && attributes & (mount::NO_ATIME | mount::STRICT_ATIME) != (mount::NO_ATIME | mount::STRICT_ATIME)
 }
 
-fn protected_mount(observation: mount::MountObservation) -> bool {
+pub(crate) fn protected_mount(observation: mount::MountObservation) -> bool {
     matches!(observation.filesystem_magic(), mount::EXT4_MAGIC | mount::XFS_MAGIC)
         && known_mount_attributes(observation.attributes()) && observation.attributes() & mount::NO_EXEC == 0
 }
@@ -1498,11 +1498,11 @@ impl InstalledRuntimeCustody {
 
 // All helpers below are pure bounded data validation, NOT alternate admission,
 // resource constructors, close receipts, installed paths or native test hooks.
-fn sha(value: &str) -> bool {
+pub(crate) fn sha(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut result = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -1514,7 +1514,7 @@ fn hex(bytes: &[u8]) -> String {
 
 fn digest(bytes: &[u8]) -> String { hex(&Sha256::digest(bytes)) }
 
-fn parse_inventory(bytes: &[u8], protocol_anchor: &str) -> AdmissionResult<Inventory> {
+pub(crate) fn parse_inventory(bytes: &[u8], protocol_anchor: &str) -> AdmissionResult<Inventory> {
     if bytes.len() > MANIFEST_LIMIT || !sha(protocol_anchor) { return Err(AdmissionFailure::Manifest); }
     let manifest: Manifest = serde_json::from_value(strict_json(bytes).map_err(|_| AdmissionFailure::Manifest)?)
         .map_err(|_| AdmissionFailure::Manifest)?;
@@ -1568,7 +1568,7 @@ fn validate_inventory(manifest: Manifest, protocol_anchor: &str) -> AdmissionRes
     Ok(Inventory { files: manifest.files, directories })
 }
 
-fn supported_kernel(sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+pub(crate) fn supported_kernel(sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
     if sysname != b"Linux" || machine != b"x86_64" { return false; }
     // Ubuntu's GA 6.8 ABI naming, not a >=6.8 or HWE/custom-kernel fallback.
     // This name check is NOT a kernel provenance/qualification claim.
@@ -1588,7 +1588,7 @@ fn numeric<const N: usize>(value: &str) -> AdmissionResult<[u64; N]> {
     Ok(result)
 }
 
-fn initial_id_map(bytes: &[u8]) -> AdmissionResult<()> {
+pub(crate) fn initial_id_map(bytes: &[u8]) -> AdmissionResult<()> {
     if bytes.len() > MAP_LIMIT { return Err(AdmissionFailure::Bounds); }
     let text = std::str::from_utf8(bytes).map_err(|_| AdmissionFailure::Namespace)?;
     if numeric::<3>(text)? != [0, 0, 4_294_967_295] { return Err(AdmissionFailure::Namespace); }
@@ -1642,7 +1642,7 @@ fn inspect_status(bytes: &[u8], actual: Credentials) -> AdmissionResult<()> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RootMount { old_id: u32, device: (u32, u32), magic: u64 }
+pub(crate) struct RootMount { pub(crate) old_id: u32, pub(crate) device: (u32, u32), pub(crate) magic: u64 }
 
 fn mount_number(value: &str) -> AdmissionResult<u32> {
     let number = numeric::<1>(value)?[0];
@@ -1670,7 +1670,7 @@ fn mount_path(path: &str) -> bool {
     true
 }
 
-fn parse_root_mount(bytes: &[u8]) -> AdmissionResult<RootMount> {
+pub(crate) fn parse_root_mount(bytes: &[u8]) -> AdmissionResult<RootMount> {
     if bytes.len() > MOUNTINFO_LIMIT { return Err(AdmissionFailure::Bounds); }
     let text = std::str::from_utf8(bytes).map_err(|_| AdmissionFailure::Namespace)?;
     if text.contains('\0') || !text.ends_with('\n') { return Err(AdmissionFailure::Namespace); }
@@ -1734,7 +1734,7 @@ fn release_value(value: &str) -> AdmissionResult<&str> {
     } else { Ok(value) }
 }
 
-fn ubuntu_2404(bytes: &[u8]) -> AdmissionResult<()> {
+pub(crate) fn ubuntu_2404(bytes: &[u8]) -> AdmissionResult<()> {
     if bytes.len() > OS_RELEASE_LIMIT { return Err(AdmissionFailure::Bounds); }
     let text = std::str::from_utf8(bytes).map_err(|_| AdmissionFailure::UnsupportedPlatform)?;
     if text.contains('\0') { return Err(AdmissionFailure::UnsupportedPlatform); }

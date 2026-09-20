@@ -1,0 +1,55 @@
+name: Ubuntu publisher compiler and helper verification
+
+on:
+  push:
+    branches: [verify/desktop-ubuntu-publication]
+    paths:
+      - desktop/**
+      - src/mobile_release/**
+      - tests/desktop/**
+      - .github/workflows/desktop-ubuntu-publication.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-ubuntu-publication-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publisher-helpers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Require exact disposable verification route
+        shell: bash
+        env:
+          HOSTING: ${{ runner.environment }}
+          EVENT_AFTER: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          [[ "$HOSTING" == github-hosted && "$GITHUB_EVENT_NAME" == push ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-ubuntu-publication ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$EVENT_AFTER" == "$GITHUB_SHA" ]]
+      - name: Check out exact reviewed source without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Compile publisher and verify only its focused helper contracts
+        id: verify
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+          MRK_UBUNTU_PUBLICATION_VERIFY: '1'
+        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py
+      - name: Retain original public verification evidence and publisher bytes
+        if: always() && steps.verify.outputs.root != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-ubuntu-publisher-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.verify.outputs.root }}/public
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
