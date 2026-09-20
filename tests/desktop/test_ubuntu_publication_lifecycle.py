@@ -42,6 +42,83 @@ def needrestart_data(*names, present=True, stamp=0):
 
 
 class LifecycleData(unittest.TestCase):
+    def test_directory_refusal_reports_the_same_inspected_ancestor_without_weakening_policy(self):
+        path = Path("/inert/\u00e9\nleaf")
+        ancestors = [path, *path.parents]
+        for protected, selected, mode, uid, gid, reason in (
+            (True, path, stat.S_IFDIR | 0o755, 0, 0, None),
+            (False, path, stat.S_IFDIR | 0o777, 1001, 1002, None),
+            (True, path, stat.S_IFDIR | 0o1700, 0, 0, None),
+            (False, path, stat.S_IFREG | 0o644, 0, 0, "Nonordinary lifecycle ancestor"),
+            (False, path, stat.S_IFLNK | 0o777, 0, 0, "Nonordinary lifecycle ancestor"),
+            (True, path, stat.S_IFDIR | 0o755, 1001, 0, "Unprotected lifecycle ancestor"),
+            (True, path, stat.S_IFDIR | 0o755, 0, 1002, "Unprotected lifecycle ancestor"),
+            (True, path, stat.S_IFDIR | 0o757, 0, 0, "Unprotected lifecycle ancestor"),
+            (True, path.parent, stat.S_IFDIR | 0o775, 0, 0, "Unprotected lifecycle ancestor"),
+        ):
+            inspected = []
+            def lstat(parent):
+                inspected.append(parent)
+                return SimpleNamespace(st_mode=mode if parent == selected else stat.S_IFDIR | 0o755,
+                                       st_uid=uid if parent == selected else 0, st_gid=gid if parent == selected else 0)
+            with self.subTest(protected=protected, path=selected, mode=mode, uid=uid, gid=gid), \
+                 patch.object(Path, "lstat", autospec=True, side_effect=lstat), \
+                 patch.object(Path, "stat", side_effect=AssertionError("Unexpected link-following probe")):
+                if reason is None:
+                    L.directory(path, protected=protected)
+                else:
+                    with self.assertRaises(L.Refused) as refused:
+                        L.directory(path, protected=protected)
+                    self.assertEqual(str(refused.exception), reason + " path=" + ascii(str(selected))
+                                     + " mode=" + oct(mode) + " uid=" + str(uid) + " gid=" + str(gid))
+                    self.assertTrue(all(32 <= ord(character) < 127 for character in str(refused.exception)))
+                self.assertEqual(inspected, ancestors if reason is None else ancestors[:ancestors.index(selected) + 1])
+        with patch.object(Path, "lstat", side_effect=AssertionError("Relative path was inspected")), \
+             self.assertRaisesRegex(L.Refused, "Absolute directory required"):
+            L.directory(Path("relative"))
+
+    def test_dpkg_policy_uses_dynamic_default_or_explicit_empty_ordinary_home(self):
+        links = {Path("/bin"): "usr/bin", Path("/sbin"): "usr/sbin", Path("/usr/bin/sh"): "dash"}
+        fragments, environment, expected = Path("/etc/dpkg/dpkg.cfg.d"), dict(os.environ), None
+        for case in ("default-first", "default-later", "explicit", "default-nonempty", "explicit-nonempty", "default-link", "explicit-link"):
+            root = None if case.startswith("explicit") else Path("/inert/later" if case == "default-later" else "/inert/original")
+            home = Path("/runner/work/home") if root is None else root / "private/home"
+            home_reads = []
+            def lstat(path):
+                info = needrestart_stat(stat.S_IFLNK | 0o777 if path in links else stat.S_IFDIR | 0o755, nlink=1 if path in links else 2)
+                if path != Path("/") and path in (home, *home.parents):
+                    info.st_uid = info.st_gid = 1001
+                if case.endswith("link") and path == home.parent:
+                    info.st_mode = stat.S_IFLNK | 0o777
+                return info
+            def entries(path):
+                if path == fragments:
+                    return iter(())
+                self.assertEqual(path, home)
+                home_reads.append(path)
+                return iter([home / "occupied"] if case.endswith("nonempty") else [])
+            def record(path, limit=L.FILE_LIMIT):
+                return {"path": str(path), "size": 0, "sha256": hashlib.sha256(b"").hexdigest(),
+                        "identity": list(L.identity(needrestart_stat(stat.S_IFREG | 0o755)))}
+            with self.subTest(case=case), patch.object(L, "_ROOT", root), \
+                 patch.object(L, "protected_record", side_effect=record), patch.object(L, "read", return_value=b""), \
+                 patch.object(L, "needrestart_inputs", return_value={}), patch.object(L.os, "readlink", side_effect=links.__getitem__), \
+                 patch.object(Path, "lstat", autospec=True, side_effect=lstat), patch.object(Path, "stat", autospec=True, side_effect=lstat), \
+                 patch.object(Path, "iterdir", autospec=True, side_effect=entries), patch.object(L, "directory", wraps=L.directory) as directories:
+                options = {"home": home} if root is None else {}
+                if case.endswith(("nonempty", "link")):
+                    with self.assertRaisesRegex(L.Refused, "Nonordinary lifecycle ancestor" if case.endswith("link") else "Dpkg HOME is no longer empty"):
+                        L.dpkg_policy(**options)
+                else:
+                    observed = L.dpkg_policy(**options)
+                    if expected is None:
+                        expected = observed
+                    self.assertEqual(observed, expected)
+                directories.assert_any_call(home)
+                self.assertEqual(home_reads, [] if case.endswith("link") else [home])
+                self.assertEqual(L._ROOT, root)
+                self.assertTrue(dict(os.environ) == environment, "Policy mutated the process environment")
+
     def test_needrestart_config_requires_the_exact_path_and_complete_bytes(self):
         path = Path("/etc/dpkg/dpkg.cfg.d/needrestart")
         self.assertEqual((len(NEEDRESTART_CONFIG_DATA), hashlib.sha256(NEEDRESTART_CONFIG_DATA).hexdigest()), L.NEEDRESTART_CONFIG_PIN)

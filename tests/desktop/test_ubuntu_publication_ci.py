@@ -94,6 +94,75 @@ def package_data(data_files, control_files, *, mutate=None, trailing=False, tar_
 
 
 class PublisherCI(unittest.TestCase):
+    def test_prepare_preflight_precedes_success_and_preserves_the_original_deadline(self):
+        for case in ("complete", "policy", "markers", "var-lib", "expired-before", "expired-after", "diagnostic"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="mrk-preflight-data-") as name:
+                temporary = Path(name)
+                root, output = temporary / "root", temporary / "output"
+                output.write_text("")
+                events, writes, snapshot = [], [], {"inert": "marker DATA"}
+                def observe(stage):
+                    self.assertEqual(output.read_text(), "root=" + str(root) + "\n")
+                    self.assertTrue((root / "work/home").is_dir())
+                    self.assertEqual(list((root / "work/home").iterdir()), [])
+                    self.assertFalse((root / "preparation.json").exists())
+                    events.append(stage)
+                    if case == stage:
+                        raise S.D.Refused("Inert " + stage + " refusal")
+                def policy(*, home):
+                    self.assertEqual(home, root / "work/home")
+                    observe("policy")
+                    return {}
+                def state():
+                    observe("snapshot")
+                    return snapshot
+                def transition(before, after):
+                    self.assertIs(before, snapshot)
+                    self.assertIs(after, snapshot)
+                    observe("markers")
+                def directory(path, *, protected):
+                    self.assertEqual((path, protected), (Path("/var/lib"), True))
+                    observe("var-lib")
+                original_write = S.D.write
+                def write(path, raw, *args, **kwargs):
+                    writes.append(path)
+                    if path == root / "preparation.json":
+                        events.append("preparation")
+                    return original_write(path, raw, *args, **kwargs)
+                lifecycle = SimpleNamespace(dpkg_policy=policy, needrestart_state=state, needrestart_transition=transition, directory=directory)
+                clock = [100.0] if case == "diagnostic" else [100.0, 1300.0] if case == "expired-before" else (
+                    [100.0, 101.0, 1300.0 if case == "expired-after" else 102.0] if case in {"complete", "expired-after"} else [100.0, 101.0])
+                with patch.object(S, "hosted_paths", return_value=("a" * 40, Path("/inert/source"), temporary, root)), \
+                     patch.dict(S.os.environ, {"GITHUB_OUTPUT": str(output), "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "1"}), \
+                     patch.object(S.os, "umask"), patch.object(S.time, "monotonic", side_effect=clock) as monotonic, \
+                     patch.object(S, "local", return_value=lifecycle) as local, patch.object(S.D, "write", side_effect=write), \
+                     patch.object(S, "Check", side_effect=AssertionError("Command owner setup")), \
+                     patch.object(S.sys, "stdout", new=io.StringIO()) as stdout, patch.object(S.sys, "stderr", new=io.StringIO()):
+                    if case in {"complete", "diagnostic"}:
+                        self.assertEqual(S.prepare(**({"preflight": False} if case == "diagnostic" else {})), root)
+                        row = S.D.decode((root / "preparation.json").read_bytes())
+                        self.assertEqual(row["deadline"], "1300.0")
+                        self.assertIn("preparation_sha256=", output.read_text())
+                        self.assertIn("\ndeadline=1300.0\n", output.read_text())
+                        self.assertFalse((root / "public/failure.json").exists())
+                        self.assertEqual(events, (["policy", "snapshot", "markers", "var-lib"] if case == "complete" else []) + ["preparation"])
+                    else:
+                        with self.assertRaises(S.D.Refused):
+                            S.prepare()
+                        self.assertEqual(output.read_text(), "root=" + str(root) + "\n")
+                        self.assertFalse((root / "preparation.json").exists())
+                        failure = S.D.decode((root / "public/failure.json").read_bytes())
+                        self.assertEqual((failure["phase"], failure["commands"], failure["qualified"]), ("dpkg-input-preflight", [], False))
+                        expected = ["policy", "snapshot", "markers", "var-lib"]
+                        self.assertEqual(events, [] if case == "expired-before" else expected if case == "expired-after" else expected[:expected.index(case) + 1])
+                    self.assertEqual(writes, [root / "work/gitconfig-empty", root / ("preparation.json" if case in {"complete", "diagnostic"} else "public/failure.json")])
+                    self.assertEqual(monotonic.call_count, len(clock))
+                    if case in {"expired-before", "diagnostic"}:
+                        local.assert_not_called()
+                    else:
+                        local.assert_called_once_with("ubuntu_publication_lifecycle")
+                    self.assertEqual("Read-only dpkg input preflight passed;" in stdout.getvalue(), case == "complete")
+
     def test_ubuntu_supplier_notice_inventory_and_exact_packages(self):
         root = SOURCE / "desktop/packaging/debian/native-notices"
         raw = S.D.read(root / "inputs.json", 1 << 20)
@@ -217,7 +286,7 @@ class PublisherCI(unittest.TestCase):
                      patch.object(S, "Check", side_effect=AssertionError("Command owner setup")) as check:
                     with self.assertRaisesRegex(S.D.Refused, stop):
                         S.main()
-                    prepare.assert_called_once_with()
+                    prepare.assert_called_once_with(preflight=False)
                     verify.assert_not_called()
                     check.assert_not_called()
                 raw = (root / "public/dpkg-configuration-diagnostic.json").read_bytes()
@@ -334,7 +403,7 @@ class PublisherCI(unittest.TestCase):
                     with self.assertRaises(S.D.Refused) as stopped:
                         S.main()
                     self.assertEqual(str(stopped.exception), stop)
-                    prepare.assert_called_once_with()
+                    prepare.assert_called_once_with(preflight=False)
                     verify.assert_not_called()
                     check.assert_not_called()
                     local.assert_not_called()

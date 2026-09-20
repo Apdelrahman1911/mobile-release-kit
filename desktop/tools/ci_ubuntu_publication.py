@@ -476,12 +476,13 @@ def hosted_paths():
     return sha, source, temporary, root
 
 
-def prepare():
+def prepare(*, preflight=True):
     """Create the one private root/endpoint BEFORE the fixed A download action."""
     started = time.monotonic()
     sha, source, _, root = hosted_paths()
     os.umask(0o077)
     root.mkdir(mode=0o700)
+    phase = "prepare"
     try:
         (root / "public").mkdir(mode=0o700)
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
@@ -492,6 +493,17 @@ def prepare():
             (root / "work" / name).mkdir(mode=0o700)
         D.write(root / "work/gitconfig-empty", b"")
         deadline = repr(started + 1200)
+        if preflight:
+            phase = "dpkg-input-preflight"
+            D.need(time.monotonic() < started + 1200, "Original dpkg input preflight endpoint expired")
+            lifecycle = local("ubuntu_publication_lifecycle")
+            lifecycle.dpkg_policy(home=root / "work/home")
+            markers = lifecycle.needrestart_state()
+            lifecycle.needrestart_transition(markers, markers)
+            lifecycle.directory(Path("/var/lib"), protected=True)
+            D.need(time.monotonic() < started + 1200, "Original dpkg input preflight endpoint expired")
+            print("Read-only dpkg input preflight passed; root admission remains required.", flush=True)
+        phase = "prepare"
         row = {"sourceSha": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                "source": str(source), "root": str(root), "deadline": deadline,
                "runnerUid": os.getuid(), "runnerGid": os.getgid(),
@@ -501,7 +513,7 @@ def prepare():
             output.write("preparation_sha256=" + pin["sha256"] + "\ndeadline=" + deadline + "\n")
         return root
     except BaseException as error:
-        retain_failure(root, "prepare", [], error)
+        retain_failure(root, phase, [], error)
         raise
 
 
@@ -1295,9 +1307,9 @@ def verify():
 
 def main():
     if sys.argv[1:] == ["diagnose-native-notices"]:
-        diagnose_native_notices(prepare())
+        diagnose_native_notices(prepare(preflight=False))
     elif sys.argv[1:] == ["diagnose-dpkg-config"]:
-        diagnose_dpkg_config(prepare())
+        diagnose_dpkg_config(prepare(preflight=False))
     elif sys.argv[1:] == ["prepare"]:
         prepare()
     else:

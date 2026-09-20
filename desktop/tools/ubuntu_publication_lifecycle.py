@@ -175,9 +175,10 @@ def directory(path, protected=False):
     need(path.is_absolute(), "Absolute directory required")
     for parent in (path, *path.parents):
         item = parent.lstat()
-        need(stat.S_ISDIR(item.st_mode), "Nonordinary lifecycle ancestor")
+        detail = " path=" + ascii(str(parent)) + " mode=" + oct(item.st_mode) + " uid=" + str(item.st_uid) + " gid=" + str(item.st_gid)
+        need(stat.S_ISDIR(item.st_mode), "Nonordinary lifecycle ancestor" + detail)
         if protected:
-            need(item.st_uid == item.st_gid == 0 and not item.st_mode & 0o022, "Unprotected lifecycle ancestor")
+            need(item.st_uid == item.st_gid == 0 and not item.st_mode & 0o022, "Unprotected lifecycle ancestor" + detail)
 
 
 def record(path, limit=FILE_LIMIT, *, content=False):
@@ -700,7 +701,7 @@ def verify_package_observations(commands):
         previous = observed["after"]
 
 
-def dpkg_policy():
+def dpkg_policy(*, home=None):
     result = {"tools": [protected_record(Path(name)) for name in TOOLS], "configs": [], "shellLinks": [],
               "needrestartInputs": needrestart_inputs()}
     for name, targets in (("/bin", {"usr/bin", "/usr/bin"}), ("/sbin", {"usr/sbin", "/usr/sbin"}),
@@ -737,7 +738,9 @@ def dpkg_policy():
         need(stat.S_ISREG(item.st_mode) and item.st_nlink == 1 and item.st_uid == item.st_gid == 0
              and not item.st_mode & 0o7022, "Untrusted configured dpkg log")
         result["logBinding"] = list(identity(item)[:6])  # its content legitimately changes
-    need(not list((_ROOT / "private/home").iterdir()), "Dpkg HOME is no longer empty")
+    home = _ROOT / "private/home" if home is None else home
+    directory(home)
+    need(not list(home.iterdir()), "Dpkg HOME is no longer empty")
     return result
 
 
