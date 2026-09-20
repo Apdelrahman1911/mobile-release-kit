@@ -1,0 +1,257 @@
+Mobile Release Kit - source materials for the hosted verification artifact
+
+Scope: hosted-source-verification-only
+Profile: cpython-3.14.7-linux-x86_64-source-v1
+Source/relink route: LGPL-2.1 section 6(a)/(d)
+
+The completed hosted-evidence.tar carries the four direct native source
+archives below and the complete selected four-file glibc source-package set.
+recipient/notices/ contains these notices and REBUILD.md. The archive's
+controls/recipient-materials.json pins the text roster and glibc transports;
+controls/source-lock.json pins the native source/configuration inputs.
+retained-files.json beside the tar records the actual retained file bytes.
+A copy of this text alone does not establish a completed artifact or delivery.
+
+These are supplied-source materials, not a three-year written offer. The
+URLs identify their recorded upstream or Ubuntu snapshot origins; no claim
+about present URL availability follows from this static description. The
+GCC13/GCC14, Linux and libxcrypt source references are conservative identity
+references, not additional included archives or executable build inputs.
+
+The glibc source files remain archived DATA in H: they are not decoded,
+executed, mounted into the build domain or added as a fifth native source.
+REBUILD.md separately describes recipient-controlled extraction of the Ubuntu
+source package, personal modification and ordinary rebuilding/relinking.
+No production authentication, signing credential or product gate is changed.
+
+Selected direct sources
+-----------------------
+
+CPython 3.14.7
+Included archive: inputs/archives/cpython.archive
+Source revision: 823f0323ee6ec1402088b73bce1a38473cac36dc
+Source: https://www.python.org/ftp/python/3.14.7/Python-3.14.7.tar.xz
+Bytes: 24053924
+SHA256: 3b48dac8fb59f62eaa67ac83c1eb12bda1b7a08406dd286e252c11a66be27f81
+Notices: 01-CPython-3.14.7-LICENSE.txt, 02-CPython-3.14.7-THIRD-PARTY.rst, PYTHON-CHANGES.txt
+
+HACL/KaRaMeL exact CPython3.14.7 subtree
+Source: same CPython archive above; Modules/_hacl/ including its internal/include support
+Parent archive SHA256: 3b48dac8fb59f62eaa67ac83c1eb12bda1b7a08406dd286e252c11a66be27f81
+Notices: 03-HACL-MIT.txt, 04-HACL-KaRaMeL-copyrights.txt, 05-HACL-Apache-2.0.txt
+
+Expat 2.8.2
+Source: same CPython archive above; Modules/expat/; Modules/expat/pyexpatns.h; Modules/pyexpat.c; Include/pyexpat.h
+Parent archive SHA256: 3b48dac8fb59f62eaa67ac83c1eb12bda1b7a08406dd286e252c11a66be27f81
+Notices: 06-Expat-2.8.2-COPYING.txt
+
+libffi 3.4.8
+Included archive: inputs/archives/libffi.archive
+Source: https://github.com/libffi/libffi/releases/download/v3.4.8/libffi-3.4.8.tar.gz
+Bytes: 1397992
+SHA256: bc9842a18898bfacb0ed1252c4febcc7e78fa139fd27fdc7a3e30d9d9356119b
+Notices: 13-libffi-3.4.8.txt
+
+zlib 1.3.2
+Included archive: inputs/archives/zlib.archive
+Source: https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz
+Bytes: 1502830
+SHA256: bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
+Notices: 20-zlib-1.3.2.txt
+
+OpenSSL 3.5.8
+Included archive: inputs/archives/openssl.archive
+Source: https://www.openssl.org/source/openssl-3.5.8.tar.gz
+Bytes: 53213818
+SHA256: a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2
+Notices: 16-OpenSSL-3.5.8.txt
+
+certifi CA data 2026.7.22
+Included unchanged data: controls/github-ca.pem
+Source revision: f4bc676bc101fe2235846e37044e8c693d6cbaf4
+Source: https://raw.githubusercontent.com/certifi/python-certifi/f4bc676bc101fe2235846e37044e8c693d6cbaf4/certifi/cacert.pem
+Bytes: 240216
+SHA256: 9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f
+Notices: CA-PROVENANCE.txt, LICENSE.certifi, LICENSE.MPL-2.0.txt
+
+Conservative Ubuntu compiler/runtime/header source references
+-------------------------------------------------------------
+These are possible incorporated-code providers, not a declaration that all
+listed binary packages, compiler executables, utilities or kernel code ship.
+
+gcc-13@13.3.0-6ubuntu2~24.04.1
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/gcc-13/gcc-13_13.3.0-6ubuntu2~24.04.1.debian.tar.xz
+Bytes: 646156; SHA256: 5523658f272ad6d15a83b6e26d178fbd5cb7709ec7ce2ca52b0c843e19c228e3
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/gcc-13/gcc-13_13.3.0-6ubuntu2~24.04.1.dsc
+Bytes: 39540; SHA256: 86b4012c312ac13e3e092877719a62a5b5dbab082ae7e9680780a25c6a13ddc6
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/gcc-13/gcc-13_13.3.0.orig.tar.gz
+Bytes: 92761021; SHA256: 3b85d91bf38d1b858d9d01134f4046b3359731968ed4e6e912d29717a35d1a46
+Notices: 30-CANDIDATE-GCC-13-PACKAGE-COPYRIGHT.txt, 33-GPL-3.0.txt
+
+gcc-14@14.2.0-4ubuntu2~24.04.1
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/gcc-14/gcc-14_14.2.0-4ubuntu2~24.04.1.debian.tar.xz
+Bytes: 1950432; SHA256: cfece214c2fb790ef5f3baffb9a53e40618e7ae12d053610b251e94d77d08ade
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/gcc-14/gcc-14_14.2.0-4ubuntu2~24.04.1.dsc
+Bytes: 46930; SHA256: 50950080874a6ec6780dd60c243e21d9cda9d736bb32bca98d16095d27cc01b5
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/gcc-14/gcc-14_14.2.0.orig.tar.gz
+Bytes: 97158172; SHA256: 768c314c11eeab56ccebb91eb42ec4a41122fa94f0d83400126401942622197b
+Notices: 31-CANDIDATE-GCC-14-PACKAGE-COPYRIGHT.txt, 33-GPL-3.0.txt
+
+glibc@2.39-0ubuntu8.9
+Included source directory: recipient/sources/ (all four files below)
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/glibc/glibc_2.39-0ubuntu8.9.debian.tar.xz
+Bytes: 491440; SHA256: d6114f2302896a3c8612453e1bf1d0e61603e3029ba4a7c246fbb1ab4c48d2b0
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/glibc/glibc_2.39-0ubuntu8.9.dsc
+Bytes: 9387; SHA256: 1b73a89e0910eb3e5920cde639ac7eb606256d8ee809688ff9b5912b67002711
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/glibc/glibc_2.39.orig.tar.xz
+Bytes: 18520988; SHA256: f77bd47cf8170c57365ae7bf86696c118adb3b120d3259c64c502d3dc1e2d926
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/glibc/glibc_2.39.orig.tar.xz.asc
+Bytes: 833; SHA256: 2cce427ef7933c17379f5514e4f0ccf8dffae5bf8c72f0f7e0bf8b8401f34be5
+Notices: 32-CANDIDATE-GLIBC-PACKAGE-COPYRIGHT.txt, 34-LGPL-2.1.txt, 37-GPL-2.txt
+
+linux@6.8.0-139.139
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/l/linux/linux_6.8.0-139.139.diff.gz
+Bytes: 9025336; SHA256: c18cf1db6c7ed0ad5cf7d651de117b415f17e05baaeefb13a4a2306e94e9ae57
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/l/linux/linux_6.8.0-139.139.dsc
+Bytes: 9348; SHA256: 40fb1a41e084f8f923cbea43fe2ffc491e7bd3c247672018f0aa97ef3e352558
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/l/linux/linux_6.8.0.orig.tar.gz
+Bytes: 230060117; SHA256: 26512115972bdf017a4ac826cc7d3e9b0ba397d4f85cd330e4e4ff54c78061c8
+Notices: 35-Linux-UAPI-copyright.txt, 37-GPL-2.txt
+
+libxcrypt@1:4.4.36-4build1
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/libx/libxcrypt/libxcrypt_4.4.36-4build1.debian.tar.xz
+Bytes: 8356; SHA256: b75925e5d2c40abab99f8078c40f2a666125067b080466a38eb670730188ca4a
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/libx/libxcrypt/libxcrypt_4.4.36-4build1.dsc
+Bytes: 2300; SHA256: 68df46e1ca34983971acc5490a3eec493c6e88cdf4868acdcafba2831e910d78
+https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/libx/libxcrypt/libxcrypt_4.4.36.orig.tar.xz
+Bytes: 392732; SHA256: 7b7abbc89f13f5194211aa6861ed954e4fa3a210a4cb64f7e13dc8cf413e7f2a
+Notices: 36-libxcrypt-copyright.txt, 34-LGPL-2.1.txt
+
+Scoped glibc and Linux notice excerpts
+--------------------------------------
+The following eight adjacent files contain the exact selected source text,
+without an added heading or newline. Seven are leading source comments from
+the retained glibc upstream archive; the eighth is the complete Linux syscall
+exception file. Public source-member identities are recorded here so the
+unmodified notice bodies remain unambiguous.
+
+Each glibc exception covers the compiled version of its stated source file;
+it is not blanket permission for standalone glibc objects, other source/header
+files, Ubuntu patches or every member of a combined binary. These source
+identities do not establish actual object/source correspondence or reconcile
+the Ubuntu changes with all incorporated code. Linux-syscall-note likewise
+has the usage and scope stated in its exact text, not a blanket header claim.
+
+Notice: 38-GLIBC-debug-stack_chk_fail_local.c-NOTICE.txt
+Source archive: recipient/sources/glibc_2.39.orig.tar.xz
+Archive SHA256: f77bd47cf8170c57365ae7bf86696c118adb3b120d3259c64c502d3dc1e2d926
+Source member: glibc-2.39/debug/stack_chk_fail_local.c
+Source member bytes: 2022
+Source member SHA256: 3f4c56def8ba14f5d7edaaf41ecb0bf2fa5bf9b697ce670b30cbcc4307062ba7
+Notice bytes: 1696
+Notice SHA256: 3d464abe1ba808e8c3c95a79e2d519412cf2bf4b279239a3e6f2032338292ad7
+
+Notice: 39-GLIBC-stdlib-at_quick_exit.c-NOTICE.txt
+Source archive: recipient/sources/glibc_2.39.orig.tar.xz
+Archive SHA256: f77bd47cf8170c57365ae7bf86696c118adb3b120d3259c64c502d3dc1e2d926
+Source member: glibc-2.39/stdlib/at_quick_exit.c
+Source member bytes: 1947
+Source member SHA256: fa8a61e6e434fe038a653425a5818463fad46c59d1c86a02a7623bf9552917b5
+Notice bytes: 1696
+Notice SHA256: c60788b5b550bec7c45ad1d7ba41da43c0debad3f6f792b7fa6a63a0adc2cd3e
+
+Notice: 40-GLIBC-stdlib-atexit.c-NOTICE.txt
+Source archive: recipient/sources/glibc_2.39.orig.tar.xz
+Archive SHA256: f77bd47cf8170c57365ae7bf86696c118adb3b120d3259c64c502d3dc1e2d926
+Source member: glibc-2.39/stdlib/atexit.c
+Source member bytes: 1954
+Source member SHA256: a226f4c173ff3e41fc9003b71613c74461665da80f89ae0e7f093a4bfd524167
+Notice bytes: 1696
+Notice SHA256: c60788b5b550bec7c45ad1d7ba41da43c0debad3f6f792b7fa6a63a0adc2cd3e
+
+Notice: 41-GLIBC-sysdeps-pthread-pthread_atfork.c-NOTICE.txt
+Source archive: recipient/sources/glibc_2.39.orig.tar.xz
+Archive SHA256: f77bd47cf8170c57365ae7bf86696c118adb3b120d3259c64c502d3dc1e2d926
+Source member: glibc-2.39/sysdeps/pthread/pthread_atfork.c
+Source member bytes: 2375
+Source member SHA256: adc44d83a5e2c624e3af54f291786d57f0571c2d8c8fa521f2267a077ac5ea21
+Notice bytes: 1696
+Notice SHA256: 0ef79f3192348192423dcde60bc86d57f6a3e704a4aae7f38a15a81ad083c751
+
+Notice: 42-GLIBC-sysdeps-x86_64-crti.S-NOTICE.txt
+Source archive: recipient/sources/glibc_2.39.orig.tar.xz
+Archive SHA256: f77bd47cf8170c57365ae7bf86696c118adb3b120d3259c64c502d3dc1e2d926
+Source member: glibc-2.39/sysdeps/x86_64/crti.S
+Source member bytes: 2805
+Source member SHA256: 4c631e070152e1e31084c54a688cbf911a99057ba89a83e40860d8bd15af7e87
+Notice bytes: 2022
+Notice SHA256: d0de2f5b8680dc6d62f45fa0a11f2deabc9dfee4373809f2e231b49f9a6d9c2b
+
+Notice: 43-GLIBC-sysdeps-x86_64-crtn.S-NOTICE.txt
+Source archive: recipient/sources/glibc_2.39.orig.tar.xz
+Archive SHA256: f77bd47cf8170c57365ae7bf86696c118adb3b120d3259c64c502d3dc1e2d926
+Source member: glibc-2.39/sysdeps/x86_64/crtn.S
+Source member bytes: 1971
+Source member SHA256: 89c62a403ff48916a7a69c6e0a0a7d47ca87e1651a5977276f2d8a2311463afd
+Notice bytes: 1866
+Notice SHA256: ca4882841a32371f83d3ff731c2f1e56f01db29f2fecb8079d9f579f8e109326
+
+Notice: 44-GLIBC-sysdeps-x86_64-start.S-NOTICE.txt
+Source archive: recipient/sources/glibc_2.39.orig.tar.xz
+Archive SHA256: f77bd47cf8170c57365ae7bf86696c118adb3b120d3259c64c502d3dc1e2d926
+Source member: glibc-2.39/sysdeps/x86_64/start.S
+Source member bytes: 4431
+Source member SHA256: 740cdc597fa8ae1f9cba6b410afba1567a87798875dba03b568b28ee9d0b10a2
+Notice bytes: 2371
+Notice SHA256: a62faa7969eeaabdded074a024d3276f47a55cb891c9b75e8295346977eb266f
+
+Notice: 45-Linux-syscall-note.txt
+Source archive: linux_6.8.0.orig.tar.gz (reference above; not included)
+Archive SHA256: 26512115972bdf017a4ac826cc7d3e9b0ba397d4f85cd330e4e4ff54c78061c8
+Source member: linux-6.8/LICENSES/exceptions/Linux-syscall-note
+Source member bytes: 1258
+Source member SHA256: 8e378ab93586eb55135d3bc119cce787f7324f48394777d00c34fa3d0be3303f
+Notice bytes: 1258
+Notice SHA256: 8e378ab93586eb55135d3bc119cce787f7324f48394777d00c34fa3d0be3303f
+
+Source, configuration and relinking scope
+----------------------------------------
+For applicable incorporated glibc code the route remains LGPL-2.1 section
+6(a)/(d): supply corresponding library source including the selected Ubuntu
+packaging/patches, and the complete source alternative for the work using it,
+with the configuration, generated inputs and instructions needed to rebuild
+and relink the interpreter and both OpenSSL libraries with an interface-
+compatible modified glibc. Dynamic libc linkage alone is not invoked as proof
+of section 6(b), and loose .o/.a/.lo files alone are not called a relink kit.
+
+The four native source archives include bundled CPython HACL/KaRaMeL/Expat
+source and their build machinery. Their upstream patch lists in the native
+lock are empty. The selected Modules/Setup.local, configure/make arguments,
+original configuration outputs, generated sysconfig/build-details files,
+original objects/archives and exact projection records are separately retained.
+REBUILD.md maps these paths and gives ordinary personal reconstruction steps.
+inputs/core-source/ contains the pinned original toolkit/owner/bootstrap
+SOURCE, with MOBILE-RELEASE-KIT-LICENSE.txt; this is not a prepared application,
+core ZIP, product manifest, installer or a promise of their installation.
+
+Mobile Release Kit imposes no restriction on your modification for your own
+use or reverse engineering for debugging those modifications to this artifact.
+The component licenses govern their respective material. Personal rebuilding
+and use of these native components require no publisher credentials; they do
+not confer authority to change or bypass production authenticity checks.
+
+The exact package copyrights, GPL-2/GPL-3/LGPL-2.1 texts and upstream notices
+are not blanket permission for every listed package file. Generic legal text
+from base-files does not make that package a runtime component. The authentic
+glibc copyright preserves its old 2.23 heading. Actual selected startup/header
+and runtime coverage, remaining per-file terms (including Linux-UAPI and
+libxcrypt), Ubuntu patch effects and source/output correspondence still require
+reconciliation with the original archive. Controller bubblewrap is not a
+redistributed recipient component of this archive.
+
+No successful recipient modified rebuild/relink/use, legal clearance, native
+loader/TLS/XML qualification or Desktop/product readiness is asserted here.
+The original completed H result is needed to check the guide against actual
+inputs, generated configuration and output. Incomplete materials, inconsistent
+instructions or failed reconstruction are defects, not reasons to invent a
+pass or silently substitute a different source-delivery route.

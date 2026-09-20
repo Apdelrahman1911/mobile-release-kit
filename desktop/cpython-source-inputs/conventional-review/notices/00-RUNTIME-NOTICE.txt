@@ -1,0 +1,61 @@
+Mobile Release Kit - hosted source verification artifact notices
+
+Scope: hosted-source-verification-only
+Profile: cpython-3.14.7-linux-x86_64-source-v1
+
+These notices accompany the completed hosted-evidence.tar verification
+artifact, not an installer or a qualified Desktop release. A loose copy of
+these texts is not evidence of a successful build or recipient delivery.
+The original records in work/receipts/, the retained-files.json inventory
+beside the archive, and controls/ define the actual inputs and outputs.
+
+The profile constructs a CPython 3.14.7 interpreter using its HACL/KaRaMeL
+code and bundled Expat 2.8.2, static zlib 1.3.2 and libffi 3.4.8, and private
+shared OpenSSL 3.5.8 libraries. The exact upstream license/copyright texts
+are preserved alongside this description. The unmodified certifi 2026.7.22
+public CA data is retained at controls/github-ca.pem with CA-PROVENANCE.txt,
+LICENSE.certifi and LICENSE.MPL-2.0.txt; it is not an OS trust-store change.
+
+IMPORTANT GNU C LIBRARY NOTICE: applicable incorporated glibc code is covered
+by its file-specific terms, including the GNU Lesser General Public License
+version 2.1 or later where stated. Read 32-CANDIDATE-GLIBC-PACKAGE-COPYRIGHT.txt,
+34-LGPL-2.1.txt and the seven scoped glibc notices numbered 38 through 44.
+The chosen source/relink route remains LGPL-2.1 section 6(a)/(d), not a claim
+that dynamic linking alone satisfies section 6(b). Complete glibc 2.39 source,
+the selected Ubuntu 2.39-0ubuntu8.9 packaging/patch set, the four native source
+archives, configuration, objects and reconstruction instructions accompany
+the completed archive. SOURCE-AVAILABILITY.txt maps their identities and scope.
+
+For this artifact, Mobile Release Kit imposes no restriction on modification
+for your own use or on reverse engineering for debugging those modifications.
+Applicable upstream licenses govern their respective materials; the toolkit
+source and this documentation carry MOBILE-RELEASE-KIT-LICENSE.txt. REBUILD.md
+describes ordinary personal reconstruction and use without publisher signing
+credentials. It does not disable or change production authenticity checks.
+
+The GCC13, GCC14, glibc, Linux-UAPI and libxcrypt package notices are a
+conservative possible-incorporation superset, not a claim that every listed
+library, compiler, utility or kernel component ships. GCC runtime exceptions,
+the seven glibc linking exceptions and Linux-syscall-note cover only their
+stated files and conditions. The authentic glibc copyright's old 2.23 heading
+is preserved, not corrected into an exhaustive 2.39 notice. Ubuntu patches,
+other headers and actual object/source correspondence require reconciliation.
+Package notices and generic legal texts do not waive remaining per-file terms.
+
+Complete CPython third-party notices and HACL supplements include optional
+code beyond this fixed profile. The Expat notice is the exact bundled 2.8.2
+COPYING text. No Python Build Standalone binary, patch set, Expat 2.8.4 notice
+or compiler provenance is attributed to this source build.
+
+The native projection is under work/stage/python/. inputs/core-source/
+contains original toolkit and bootstrap SOURCE for reconstruction, not a
+prepared application, core ZIP, product manifest or installer. Build tools
+are not runtime components merely because they built the interpreter.
+The controller bubblewrap package and its decoded binary are not recipient
+materials. PYTHON-CHANGES.txt describes the fixed recipe and projection.
+
+These materials assert neither a successful modified rebuild/relink nor legal
+clearance, native TLS/XML/loader qualification, installed-runtime behavior or
+Desktop readiness. Actual retained source/configuration/output correspondence
+and the usability of the recipient materials must be checked against the
+original result; missing material or inconsistent instructions are defects.

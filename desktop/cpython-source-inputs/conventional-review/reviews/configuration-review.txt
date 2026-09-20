@@ -1,0 +1,49 @@
+Independent original H configuration review — 2026-09-20
+
+ACCEPTED for original mandatory source-build and material-configuration evidence
+only. This was a DATA/source review, not candidate execution or a build rerun.
+
+Original: Apdelrahman1911/mobile-release-kit, source
+37079ce7874bedc804f434f8f8851c3adf5333ac; workflow
+.github/workflows/desktop-cpython-source-build.yml; push ref
+verify/desktop-cpython-source-build; run 35505213499, attempt 1,
+job 106063749852, native artifact 10604035421. Original job/API/log report success.
+
+SHA-256 bindings (inner paths are relative to the retained H payload):
+4689597ff26f3235f82f56841101dcb1da8b1ea8b92f01cb759fe7627b0d24a4  artifact ZIP (274255947 bytes)
+c737daef0c898b26928818f5973eee9b8c0fdb7af170a9ca47185b919029e12b  source-kit/hosted-evidence.tar
+4535250bf73e858c776ff6c8edbe7c70c212fb160dd95fdabdd02dd77ab18868  source-kit/hosted-summary.json
+77561582878e846e6c4c21e3b493a073ee35fccfd8d5368c291a0d9ca7781c52  source-kit/retained-files.json
+ccc9b7f7bab328f73a8034b6f8b914015f5ff270872e2aa085f3b87eca46b4a8  controls/hosted-inputs.json
+11a88b367bb9cc91e5a2ffafe155b215e9860b80a0f2e711c8dcbc6891680f39  controls/source-lock.json
+3c91eb81dac9fff49a64f97e0d8a6fb2932f4df024d0f0e4c3167c332a77cdd6  controls/source-execution-review.json
+45979ebb3325dfa5564d82323e37888804efd8bbe3be14ed2af6dfc29ea5fed8  work/receipts/source-result.json
+e647aaa18464665a7912a3627a27351ce604cb4cb85a483daaffb919016108fa  work/receipts/source-output.json
+0e840c21ecc601db5d95e791e5213d05b839fcfba18a08f6b5105c59148cc90d  work/receipts/python-build-Makefile
+99a50037964cecf0af6adb42b359cd92f2b6c68d9ef010b5e24353e36ec31b9c  work/receipts/openssl-build-configdata.pm
+
+Verified all 3793 retained files (270311692 bytes) against the manifest. Retained
+recipe/helpers/controls match reviewed source; locked inputs, original phase
+records/captures, generated controls and projection join the above bindings.
+All 14 fixed serial phases completed: 12 native exits zero and two DATA phases.
+Actual commands/environments and ordered timings match the fixed recipe and
+2400-second common deadline; no fixed ignored-error markers were observed.
+Original client exit zero, complete capture, cgroup completion, invocation and
+account-finality receipts agree. Runner disposal is not used as phase finality.
+
+Actual CPython 3.14.7 controls establish the intended ABI/GIL/nondebug settings,
+60 configured builtins including the required modules, no shared extensions,
+static zlib/libffi/internal Expat and intended _ssl dependency links. Seven
+configuration captures are unchanged between configure/build. Original
+unterminated pybuilddir and all 564 projected files join original producer bytes.
+OpenSSL 3.5.8 controls establish module/dso/engine/autoload-config/legacy disabled,
+empty module-install targets and stable configdata/headers. Its install Makefile
+adds only the generated dependency tail; material controls are unchanged.
+
+Limits: nativeQualification and supplyAcceptance remain not-established.
+Configured builtin names are not installed-runtime observations. No installed or
+relocated runtime, loader/TLS/DNS, desktop/Android, COPY/A/B smoke or release
+qualification follows. Outer controller startup/interpreter/loader remain the
+accepted hosted-platform TCB (ubuntu-24.04 image 20260907.300.1), not a complete
+interpreter-closure attestation. Supplier build-only exceptions, source/notice
+obligations and release admissions are separate decisions. No gates are opened.

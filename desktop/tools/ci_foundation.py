@@ -43,13 +43,240 @@ NODE = "v24.20.0"
 # B: {preparedArtifact, manifestSha256, protocolSha256}.
 # Artifact: {repository, sourceSha, runId, attempt, artifactId, files}; files use
 # the existing {path,size,sha256} DATA records, including the approved source kit.
-CONVENTIONAL_PREPARE_INPUTS: dict | None = None
+CONVENTIONAL_PREPARE_INPUTS: dict | None = {
+    "outputInventorySha256": "e647aaa18464665a7912a3627a27351ce604cb4cb85a483daaffb919016108fa",
+    "reviewFiles": [
+        {
+            "path": "components.json",
+            "sha256": "5b760d254b8069dc28068cd86c6e580437396ee7f1450f24bde2793e77d3dacb",
+            "size": 144202
+        },
+        {
+            "path": "notice-inventory.json",
+            "sha256": "db4ae8be90761067fc4589df7cf0403db14f24253b5d2436795ca098f17eeec6",
+            "size": 4471
+        },
+        {
+            "path": "notices/00-RUNTIME-NOTICE.txt",
+            "sha256": "ee56098bf4b2ecb55c4826b2ed758df01408b358d5a0a2dfefbc5739cbb9b5e8",
+            "size": 3868
+        },
+        {
+            "path": "notices/01-CPython-3.14.7-LICENSE.txt",
+            "sha256": "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231",
+            "size": 13804
+        },
+        {
+            "path": "notices/02-CPython-3.14.7-THIRD-PARTY.rst",
+            "sha256": "cd6f471c0bfdb099efefc25ddff9b3df8bf62e10428987f1f05e6f2f9e35d563",
+            "size": 60039
+        },
+        {
+            "path": "notices/03-HACL-MIT.txt",
+            "sha256": "998ce04fb8ad9dedb0bc1b44938f8c3dcf1089780fa105ce1c8c30fb5554d78c",
+            "size": 1207
+        },
+        {
+            "path": "notices/04-HACL-KaRaMeL-copyrights.txt",
+            "sha256": "a3d1e6ff83a3f5304286ac5799c37c67ed7d81357cd8e833c3f1d1dc55460242",
+            "size": 797
+        },
+        {
+            "path": "notices/05-HACL-Apache-2.0.txt",
+            "sha256": "c5accbbd8546e94c34aed24afe689a617627d18eed5a6c48277e48db57c23851",
+            "size": 11356
+        },
+        {
+            "path": "notices/06-Expat-2.8.2-COPYING.txt",
+            "sha256": "31b15de82aa19a845156169a17a5488bf597e561b2c318d159ed583139b25e87",
+            "size": 1144
+        },
+        {
+            "path": "notices/13-libffi-3.4.8.txt",
+            "sha256": "67894089811f93fca47a76f85e017da6f8582d4ba0905963c6e0f1ad6df7a195",
+            "size": 1132
+        },
+        {
+            "path": "notices/16-OpenSSL-3.5.8.txt",
+            "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a",
+            "size": 10175
+        },
+        {
+            "path": "notices/20-zlib-1.3.2.txt",
+            "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2",
+            "size": 1002
+        },
+        {
+            "path": "notices/30-CANDIDATE-GCC-13-PACKAGE-COPYRIGHT.txt",
+            "sha256": "08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5",
+            "size": 69100
+        },
+        {
+            "path": "notices/31-CANDIDATE-GCC-14-PACKAGE-COPYRIGHT.txt",
+            "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79",
+            "size": 69004
+        },
+        {
+            "path": "notices/32-CANDIDATE-GLIBC-PACKAGE-COPYRIGHT.txt",
+            "sha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265",
+            "size": 26462
+        },
+        {
+            "path": "notices/33-GPL-3.0.txt",
+            "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+            "size": 35149
+        },
+        {
+            "path": "notices/34-LGPL-2.1.txt",
+            "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+            "size": 26530
+        },
+        {
+            "path": "notices/35-Linux-UAPI-copyright.txt",
+            "sha256": "4ab34baa23c94237ffef144c80348b982d2d8e814c46b3a6a3538a706ef26114",
+            "size": 1292
+        },
+        {
+            "path": "notices/36-libxcrypt-copyright.txt",
+            "sha256": "5a5e7ca0e9f3f9679977e3a3e9ede45ad92885a3297ea78e766979f9866c5a16",
+            "size": 6010
+        },
+        {
+            "path": "notices/37-GPL-2.txt",
+            "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+            "size": 18092
+        },
+        {
+            "path": "notices/38-GLIBC-debug-stack_chk_fail_local.c-NOTICE.txt",
+            "sha256": "3d464abe1ba808e8c3c95a79e2d519412cf2bf4b279239a3e6f2032338292ad7",
+            "size": 1696
+        },
+        {
+            "path": "notices/39-GLIBC-stdlib-at_quick_exit.c-NOTICE.txt",
+            "sha256": "c60788b5b550bec7c45ad1d7ba41da43c0debad3f6f792b7fa6a63a0adc2cd3e",
+            "size": 1696
+        },
+        {
+            "path": "notices/40-GLIBC-stdlib-atexit.c-NOTICE.txt",
+            "sha256": "c60788b5b550bec7c45ad1d7ba41da43c0debad3f6f792b7fa6a63a0adc2cd3e",
+            "size": 1696
+        },
+        {
+            "path": "notices/41-GLIBC-sysdeps-pthread-pthread_atfork.c-NOTICE.txt",
+            "sha256": "0ef79f3192348192423dcde60bc86d57f6a3e704a4aae7f38a15a81ad083c751",
+            "size": 1696
+        },
+        {
+            "path": "notices/42-GLIBC-sysdeps-x86_64-crti.S-NOTICE.txt",
+            "sha256": "d0de2f5b8680dc6d62f45fa0a11f2deabc9dfee4373809f2e231b49f9a6d9c2b",
+            "size": 2022
+        },
+        {
+            "path": "notices/43-GLIBC-sysdeps-x86_64-crtn.S-NOTICE.txt",
+            "sha256": "ca4882841a32371f83d3ff731c2f1e56f01db29f2fecb8079d9f579f8e109326",
+            "size": 1866
+        },
+        {
+            "path": "notices/44-GLIBC-sysdeps-x86_64-start.S-NOTICE.txt",
+            "sha256": "a62faa7969eeaabdded074a024d3276f47a55cb891c9b75e8295346977eb266f",
+            "size": 2371
+        },
+        {
+            "path": "notices/45-Linux-syscall-note.txt",
+            "sha256": "8e378ab93586eb55135d3bc119cce787f7324f48394777d00c34fa3d0be3303f",
+            "size": 1258
+        },
+        {
+            "path": "notices/CA-PROVENANCE.txt",
+            "sha256": "fdf9b47fcf3a7ac052b5db5d6687ce5a7cff6b20270afd8a62b0cd4b9d289fea",
+            "size": 1187
+        },
+        {
+            "path": "notices/LICENSE.MPL-2.0.txt",
+            "sha256": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5",
+            "size": 16725
+        },
+        {
+            "path": "notices/LICENSE.certifi",
+            "sha256": "e93716da6b9c0d5a4a1df60fe695b370f0695603d21f6f83f053e42cfc10caf7",
+            "size": 989
+        },
+        {
+            "path": "notices/MOBILE-RELEASE-KIT-LICENSE.txt",
+            "sha256": "7d381db63decbfe663092a8537c1a1c1a9121d60ffe5938f401ad1346bdf9148",
+            "size": 1088
+        },
+        {
+            "path": "notices/PYTHON-CHANGES.txt",
+            "sha256": "368fb89c0c157b75b7d6025113646c779ec866e672bca6765e2a47cd5c090c34",
+            "size": 5422
+        },
+        {
+            "path": "notices/REBUILD.md",
+            "sha256": "4301c9461437afaa6dd7442a38e92ddf2605c65cd9cc5c45b0b02d7bef6ede5d",
+            "size": 22884
+        },
+        {
+            "path": "notices/SOURCE-AVAILABILITY.txt",
+            "sha256": "b9b2c97af7e0cb80c65357e577b9897af147bd604bb167a58143fb51ccee0cb1",
+            "size": 14731
+        },
+        {
+            "path": "notices/SUCCESSOR-VERIFICATION-NOTE.txt",
+            "sha256": "8a15d71f76803a993f3c8ebe104502ee401f683821f1df88186ce6e1d82c8cfd",
+            "size": 1476
+        },
+        {
+            "path": "reviews/configuration-review.txt",
+            "sha256": "40c8e653e8000aad742d4f68c27184465627dd30a3f58a346177b6ce7f1409b8",
+            "size": 3498
+        },
+        {
+            "path": "reviews/obligation-review.txt",
+            "sha256": "89e78ffd6d55830c44475528a4e475fd9f32407e1350b2bf76ac483a76fa62bb",
+            "size": 4418
+        }
+    ],
+    "sourceArtifact": {
+        "artifactId": "10604035421",
+        "attempt": 1,
+        "files": [
+            {
+                "path": "hosted-evidence.tar",
+                "sha256": "c737daef0c898b26928818f5973eee9b8c0fdb7af170a9ca47185b919029e12b",
+                "size": 273213440
+            },
+            {
+                "path": "hosted-summary.json",
+                "sha256": "4535250bf73e858c776ff6c8edbe7c70c212fb160dd95fdabdd02dd77ab18868",
+                "size": 939
+            },
+            {
+                "path": "retained-files.json",
+                "sha256": "77561582878e846e6c4c21e3b493a073ee35fccfd8d5368c291a0d9ca7781c52",
+                "size": 1041156
+            }
+        ],
+        "repository": "Apdelrahman1911/mobile-release-kit",
+        "runId": "35505213499",
+        "sourceSha": "37079ce7874bedc804f434f8f8851c3adf5333ac"
+    }
+}
 CONVENTIONAL_SMOKE_INPUTS: dict | None = None
 # H's explicit trusted GitHub-hosted platform boundary, not a claimed complete
 # interpreter closure. {trustModel,imageOS,imageVersion,python:{path,size,sha256}}.
 # Startup/stdlib/cached bytecode/loader remain trusted platform TCB; -B prevents
 # writes, not cache reads. No H isolated-root/local Python or image fallback.
-CONVENTIONAL_HOSTED_PYTHON: dict | None = None
+CONVENTIONAL_HOSTED_PYTHON: dict | None = {
+    "imageOS": "ubuntu24",
+    "imageVersion": "20260907.300.1",
+    "python": {
+        "path": "/usr/bin/python3.12",
+        "sha256": "a92f0f95e883390c7256b2e441484aac06b1002dbe1d924141a77c8d82f96223",
+        "size": 8025024
+    },
+    "trustModel": "github-hosted-platform-tcb-v1"
+}
 CONVENTIONAL_PREPARE_SCOPE = "conventional-runtime-data-preparation-v1"
 CONVENTIONAL_SMOKE_SCOPE = "conventional-runtime-bootstrap-smoke-v1"
 CONVENTIONAL_SCOPES = frozenset({CONVENTIONAL_PREPARE_SCOPE, CONVENTIONAL_SMOKE_SCOPE})

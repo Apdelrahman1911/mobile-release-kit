@@ -90,21 +90,28 @@ def smoke_value():
 
 class AdmissionContracts(unittest.TestCase):
     def test_missing_admissions_refuse_before_helper_import_paths_or_output(self):
-        for scope in helper.CONVENTIONAL_SCOPES:
-            with self.subTest(scope=scope), patch.object(helper, "conventional_module") as modules, \
-                    patch.object(helper, "conventional_context") as context, self.assertRaises(helper.CheckFailure):
-                helper.conventional_phase("conventional-admit", scope)
-            modules.assert_not_called()
-            context.assert_not_called()
-        self.assertIsNone(helper.CONVENTIONAL_PREPARE_INPUTS)
-        self.assertIsNone(helper.CONVENTIONAL_SMOKE_INPUTS)
-        self.assertIsNone(helper.CONVENTIONAL_HOSTED_PYTHON)
+        for scope, gate in ((helper.CONVENTIONAL_PREPARE_SCOPE, "CONVENTIONAL_PREPARE_INPUTS"),
+                            (helper.CONVENTIONAL_SMOKE_SCOPE, "CONVENTIONAL_SMOKE_INPUTS")):
+            for missing in (gate, "CONVENTIONAL_HOSTED_PYTHON"):
+                literals = {"CONVENTIONAL_PREPARE_INPUTS": PREPARE, "CONVENTIONAL_SMOKE_INPUTS": SMOKE,
+                            "CONVENTIONAL_HOSTED_PYTHON": HOST, missing: None}
+                with self.subTest(scope=scope, missing=missing), patch.multiple(helper, **literals), \
+                        patch.object(helper, "conventional_module") as modules, \
+                        patch.object(helper, "conventional_context") as context, self.assertRaises(helper.CheckFailure):
+                    helper.conventional_phase("conventional-admit", scope)
+                modules.assert_not_called()
+                context.assert_not_called()
 
     def test_caller_environment_is_not_artifact_or_mq_authority(self):
-        with patch.dict(helper.os.environ, {"MRK_BUNDLED_RUNTIME_MANIFEST_SHA256": "c" * 64,
-                "MRK_BUNDLED_PROTOCOL_SHA256": "d" * 64, "MRK_DESKTOP_EXPECTED_SHA": "b" * 40,
-                "CONVENTIONAL_PREPARE_INPUTS": json.dumps(PREPARE)}, clear=True), self.assertRaises(helper.CheckFailure):
-            helper.conventional_admission(helper.CONVENTIONAL_SMOKE_SCOPE)
+        for scope in helper.CONVENTIONAL_SCOPES:
+            with self.subTest(scope=scope), patch.multiple(helper, CONVENTIONAL_PREPARE_INPUTS=None,
+                    CONVENTIONAL_SMOKE_INPUTS=None, CONVENTIONAL_HOSTED_PYTHON=None), \
+                    patch.dict(helper.os.environ, {"MRK_BUNDLED_RUNTIME_MANIFEST_SHA256": "c" * 64,
+                        "MRK_BUNDLED_PROTOCOL_SHA256": "d" * 64, "MRK_DESKTOP_EXPECTED_SHA": "b" * 40,
+                        "CONVENTIONAL_PREPARE_INPUTS": json.dumps(PREPARE),
+                        "CONVENTIONAL_SMOKE_INPUTS": json.dumps(SMOKE),
+                        "CONVENTIONAL_HOSTED_PYTHON": json.dumps(HOST)}, clear=True), self.assertRaises(helper.CheckFailure):
+                helper.conventional_admission(scope)
 
     def test_literal_contract_and_copier_or_probe_pins_are_separate(self):
         copier = SimpleNamespace(APPROVED_SOURCE_OUTPUT_SHA256="a" * 64, APPROVED_SOURCE_COMPONENTS_SHA256="a" * 64,

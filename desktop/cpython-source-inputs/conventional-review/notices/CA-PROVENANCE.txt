@@ -1,0 +1,21 @@
+Mobile Release Kit fixed GitHub public CA input
+
+Provider: certifi (Mozilla-derived public Certificate Authority bundle)
+Version: 2026.7.22
+Upstream repository: https://github.com/certifi/python-certifi
+Upstream tag: 2026.07.22
+Immutable upstream commit: f4bc676bc101fe2235846e37044e8c693d6cbaf4
+Bundle source: https://raw.githubusercontent.com/certifi/python-certifi/f4bc676bc101fe2235846e37044e8c693d6cbaf4/certifi/cacert.pem
+License source: https://raw.githubusercontent.com/certifi/python-certifi/f4bc676bc101fe2235846e37044e8c693d6cbaf4/LICENSE
+
+The selected cacert.pem is unmodified and named github-ca.pem in the runtime.
+Bundle bytes: 240216
+Bundle SHA256: 9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f
+License: MPL-2.0; the upstream notice is preserved in LICENSE.certifi.
+MPL-2.0 text: https://www.mozilla.org/MPL/2.0/
+
+This input does not add a certifi Python-package dependency. Updates for this
+packaging profile require a new reviewed source inventory and compiled-anchor
+change, not a runtime download or a user-supplied trust-store replacement.
+This origin notice does not establish native X.509, TLS, trust-chain, runtime
+or production qualification.

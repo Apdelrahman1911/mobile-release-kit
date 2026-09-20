@@ -1,0 +1,67 @@
+Independent obligation/DATA review - 2026-09-20
+Profile: cpython-3.14.7-linux-x86_64-source-v1
+
+Accepted only for the closed, nonproduction A/B verification scope under the
+bindings and conditions below. Original native finality/configuration review is
+separate. This text opens no admission and authorizes no execution or release.
+
+Original H: run 35505213499, attempt 1
+Source commit: 37079ce7874bedc804f434f8f8851c3adf5333ac
+SHA256 bindings:
+work/receipts/source-result.json: 45979ebb3325dfa5564d82323e37888804efd8bbe3be14ed2af6dfc29ea5fed8
+work/receipts/source-output.json: e647aaa18464665a7912a3627a27351ce604cb4cb85a483daaffb919016108fa
+hosted-evidence.tar: c737daef0c898b26928818f5973eee9b8c0fdb7af170a9ca47185b919029e12b
+retained-files.json: 77561582878e846e6c4c21e3b493a073ee35fccfd8d5368c291a0d9ca7781c52
+hosted-summary.json: 4535250bf73e858c776ff6c8edbe7c70c212fb160dd95fdabdd02dd77ab18868
+coverage-fragment.json: da428c127d516c03c5242813fcd91e9a179dc234d8046dd9bdd9025020a5f822
+notice-inventory.json: db4ae8be90761067fc4589df7cf0403db14f24253b5d2436795ca098f17eeec6
+
+Correspondence
+The 33 original H notice bodies match controls/recipient-materials.json and
+the accepted successor notice inventory exactly; its sole addition is the
+separately reviewed SUCCESSOR-VERIFICATION-NOTE.txt. Original content acceptance
+is reused, not inferred from new hashes. The four native archive/inventory sets
+match the original source lock, whose upstream patch lists are empty. The four
+glibc source/Ubuntu-packaging/DSC/signature bodies match the recipient manifest,
+the selected rootfs source row and the DSC companion checksums. The 111 original
+core/bootstrap source bodies and unchanged CA are retained with their controls.
+The rebuild guide's configuration, object/archive, original-file, recipe and
+projection namespaces are present in the authenticated original retention.
+
+The coverage fragment preserves 85 source families, 151 package IDs and 267
+source-artifact records, six native scopes, and the full conservative union on
+all three native outputs. Possible incorporation remains GCC13, GCC14, glibc,
+Linux UAPI and libxcrypt; this is not observed per-link membership. Coordinated
+targeted review of actual H configuration, links, generators and source inputs
+resolved the binutils collector, Make header, Perl CORE/embedding and rpcsvc
+header/generator exclusions without a material incorporation edge. Those four
+rows retain build-only for this H instance, not for arbitrary future inputs.
+That review is not an exhaustive transitive compiler-header trace. The other
+build-only rows retain their reviewed rootfs/selection/projection reasons; any
+contrary target-input evidence requires a specific row/notice correction.
+
+Conditions retained
+Preserve the native components' applicable copyright, permission, license,
+NOTICE and truthful change notices: CPython and its bundled third parties,
+scoped HACL/KaRaMeL, exact bundled Expat2.8.2, libffi3.4.8, zlib1.3.2 and
+OpenSSL3.5.8. A license copy alone does not discharge other file-specific terms.
+GCC Runtime Library Exception3.1 applies only to its covered files and applicable
+Independent Modules/Eligible Compilation conditions. The glibc source excerpts
+and Linux syscall note have only their stated file/exception scope; neither is
+a blanket waiver. Libxcrypt retains its own file-specific/source/relink terms.
+
+Preserve the LGPL-2.1 section6(a)/(d) source/rebuild-relink route and its complete
+corresponding-source, uses-work source, configuration and instruction conditions.
+The original native sources, selected glibc source package, toolkit sources and
+REBUILD.md provide the retained source alternative; loose objects or dynamic
+libc linkage alone are not treated as fulfillment or a section6(b) substitute.
+No successful modified reconstruction, equivalent recipient access or delivery
+fulfillment is established by this review.
+
+A must retain the exact original H triple under source-kit/, without repacking
+or rewriting H results. Original notice/guide paths refer inside that H archive,
+not python/licenses/. A is DATA preparation; separately admitted B executes a
+limited candidate smoke. Their actual results and later artifact/M/Q acceptance
+remain distinct. This review grants no legal, installed-runtime custody,
+TLS/loader, general native, production-authentication, Desktop/product or release
+clearance, and makes no new source offer.

@@ -5,8 +5,12 @@ PLAN01. Its input lock, prerequisite envelope policy, current core and
 root-preparation inputs now have independently reviewed literal pins. The
 controls are in `desktop/cpython-source-inputs/`. **Input admission is not a
 build result, supply acceptance, installed-runtime readiness or legal clearance.**
-The exact hosted command still needs separate admission and actual results.
-Output, component, notice and product execution gates remain closed.
+Hosted build H `35505213499/1` at `37079ce7874bedc804f434f8f8851c3adf5333ac`
+passed and its original configuration, projection, components and notices have
+independent bounded acceptance. The committed `conventional-review/` kit and
+literal pins admit that exact result to offline DATA preparation A only.
+A has not yet run; B, installed-runtime qualification and product gates remain
+closed. This acceptance does not establish legal or release clearance.
 Legacy/static semantics and selectors are unchanged. H/D4/D3 are not
 modified or reused as execution authority. No linker shim, maps, probe recorder,
 private-W adapter, new process owner or container/package installer is added.
@@ -152,14 +156,16 @@ are used. These schemas are distinct from legacy installed-file/link receipts:
   independent `configurationReview` and `obligationReview`, accepted notice hash,
   `SOURCE-AVAILABILITY.txt`, and `bundledExpatNotice` binding the exact1144-byte
   `Python-3.14.7/Modules/expat/COPYING` to its public notice size/hash. These review
-  files/notice artifacts are future deliverables, not generated approval.
+  files and notice artifacts are the independently accepted, committed A inputs,
+  not generated approval or product qualification.
 
 Potential incorporation explicitly covers GCC13, GCC14 runtime/startup/header
 components, glibc, Linux UAPI and libxcrypt as well as CPython/HACL/internal Expat,
 zlib/libffi/OpenSSL. Build-only tools are not claimed as shipped executables.
 File-scoped exceptions, other copyrights, exact upstream/Ubuntu patches and
-source-availability/LGPL relinking-or-suitable-dynamic-link obligations still
-need real acceptance. A runtime exception is never a blanket license bypass.
+source-availability/LGPL relinking-or-suitable-dynamic-link conditions remain
+required for distribution; current acceptance is limited to nonproduction A/B
+verification. A runtime exception is never a blanket license bypass.
 No source artifacts or public notices are fabricated by this implementation.
 
 ## Projection, copy and remaining gates
@@ -185,12 +191,9 @@ are added only here. Current generic prepare_runtime remains unchanged and adds
 six bootstraps +core.zip +CA and the manifest: reserve eight files/nine entries,
 64 MiB headroom, unchanged2048/8192/512 MiB-file/1 GiB-total/1 MiB-manifest limits.
 
-Remaining sequence: distinct actual-diff review -> one focused inert test batch
-(new20 cases plus existing static-publisher18) -> actual hard containment/tool
-runtime command admission -> one native build -> independent original result,
-full component/notice/projection acceptance -> offline copier/generic preparer ->
-actual installed custody/loader/TLS/XML/API/cancellation/close qualification.
-The focused tests import only these helpers and existing static test dependencies;
-they use small owned temp files, synthetic ELF DATA and mocked owner calls, no
-native build path. No source import, syntax/AST/type check or test was performed
-during this authoring step. No full-repository/native CI is proposed here.
+Remaining sequence: focused A literal/input DATA checks and independent diff
+acceptance -> original offline copier/generic preparation A -> independent A
+artifact acceptance -> separate B pin and bootstrap smoke -> actual installed
+custody/loader/TLS/XML/API/cancellation/close qualification. Reuse the unchanged
+source-bound publisher/route tests and successful H build; do not rerun them for
+this DATA admission. No full-repository/native matrix is proposed here.
