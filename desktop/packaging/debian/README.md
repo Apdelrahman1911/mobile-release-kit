@@ -13,13 +13,17 @@ All existing product execution gates remain closed.
   `/usr/lib/mobile-release-kit/runtime-input/x86_64-unknown-linux-gnu/`.
 - Desktop integration and the complete admitted runtime/app/publisher notices.
 
-It owns **no `/opt/mobile-release-kit` files**. On `configure`, the fixed helper
+It owns **no `/var/lib/mobile-release-kit` files**. On `configure`, the fixed helper
 copies the package input into fresh administrator-controlled objects and publishes
-an absent immutable version under `/opt/mobile-release-kit/versions/`. No Python,
+an absent immutable version under `/var/lib/mobile-release-kit/versions/`. No Python,
 app, project command, Store request or release workflow is executed by installation.
 No end-user Python or Rust installation is needed. The eventual package's actual
 OS/ELF dependencies must be admitted and supplied to its dependency field; this
 source does not guess them or claim that the present package is installable.
+
+The preexisting `/var` and `/var/lib` ancestors must pass the same protected
+ownership, permissions, ACL and filesystem checks; installation never repairs
+them. There is no fallback to or migration/deletion of legacy `/opt` versions.
 
 ## Retained versions and interrupted installation
 

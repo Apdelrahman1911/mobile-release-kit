@@ -1,1 +1,1496 @@
-{"crates":[{"archiveSha256":"3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06","license":"MIT OR Apache-2.0","name":"bitflags","version":"2.13.2"},{"archiveSha256":"3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71","license":"MIT OR Apache-2.0","name":"block-buffer","version":"0.10.4"},{"archiveSha256":"fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04","license":"MIT","name":"bytes","version":"1.12.1"},{"archiveSha256":"4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600","license":"MIT OR Apache-2.0","name":"cfg-if","version":"1.0.5"},{"archiveSha256":"f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527","license":"MIT","name":"cfg_aliases","version":"0.2.2"},{"archiveSha256":"59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280","license":"MIT OR Apache-2.0","name":"cpufeatures","version":"0.2.17"},{"archiveSha256":"78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a","license":"MIT OR Apache-2.0","name":"crypto-common","version":"0.1.7"},{"archiveSha256":"9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292","license":"MIT OR Apache-2.0","name":"digest","version":"0.10.7"},{"archiveSha256":"39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb","license":"MIT OR Apache-2.0","name":"errno","version":"0.3.14"},{"archiveSha256":"85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a","license":"MIT","name":"generic-array","version":"0.14.7"},{"archiveSha256":"899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd","license":"MIT OR Apache-2.0","name":"getrandom","version":"0.3.4"},{"archiveSha256":"8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682","license":"MIT OR Apache-2.0","name":"itoa","version":"1.0.18"},{"archiveSha256":"3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2","license":"MIT OR Apache-2.0","name":"libc","version":"0.2.189"},{"archiveSha256":"32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53","license":"Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT","name":"linux-raw-sys","version":"0.12.1"},{"archiveSha256":"cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98","license":"Unlicense OR MIT","name":"memchr","version":"2.8.3"},{"archiveSha256":"4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8","license":"MIT","name":"mio","version":"1.2.3"},{"archiveSha256":"74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6","license":"MIT","name":"nix","version":"0.30.1"},{"archiveSha256":"a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd","license":"Apache-2.0 OR MIT","name":"pin-project-lite","version":"0.2.17"},{"archiveSha256":"985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9","license":"MIT OR Apache-2.0","name":"proc-macro2","version":"1.0.107"},{"archiveSha256":"1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001","license":"MIT OR Apache-2.0","name":"quote","version":"1.0.47"},{"archiveSha256":"891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d","license":"Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT","name":"rustix","version":"1.1.5"},{"archiveSha256":"9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f","license":"Apache-2.0 OR BSL-1.0","name":"ryu","version":"1.0.23"},{"archiveSha256":"9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e","license":"MIT OR Apache-2.0","name":"serde","version":"1.0.228"},{"archiveSha256":"41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad","license":"MIT OR Apache-2.0","name":"serde_core","version":"1.0.228"},{"archiveSha256":"d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79","license":"MIT OR Apache-2.0","name":"serde_derive","version":"1.0.228"},{"archiveSha256":"402a6f66d8c709116cf22f558eab210f5a50187f702eb4d7e5ef38d9a7f1c79c","license":"MIT OR Apache-2.0","name":"serde_json","version":"1.0.145"},{"archiveSha256":"a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283","license":"MIT OR Apache-2.0","name":"sha2","version":"0.10.9"},{"archiveSha256":"c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b","license":"MIT OR Apache-2.0","name":"signal-hook-registry","version":"1.4.8"},{"archiveSha256":"872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297","license":"MIT OR Apache-2.0","name":"syn","version":"2.0.119"},{"archiveSha256":"ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408","license":"MIT","name":"tokio","version":"1.48.0"},{"archiveSha256":"5c55a2eff8b69ce66c84f85e1da1c233edc36ceb85a2058d11b0d6a3c7e7569c","license":"MIT","name":"tokio-macros","version":"2.6.1"},{"archiveSha256":"b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20","license":"MIT OR Apache-2.0","name":"typenum","version":"1.20.1"},{"archiveSha256":"ab72a15cf68d77cb0987d3684aa8a45c5ef827e8cb49ee2f30bfd7ba2feb519f","license":"(MIT OR Apache-2.0) AND Unicode-3.0","name":"unicode-ident","version":"1.0.25"},{"archiveSha256":"0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a","license":"MIT/Apache-2.0","name":"version_check","version":"0.9.5"}],"files":[{"path":"NOTICE.txt","sha256":"45504e71b35f2e78016b3d91545fad03375d37f948cb03d82a5674a2c9d8276f","size":4315},{"path":"notices/crates/bitflags-2.13.2/LICENSE-APACHE","sha256":"a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2","size":10847},{"path":"notices/crates/bitflags-2.13.2/LICENSE-MIT","sha256":"6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb","size":1071},{"path":"notices/crates/block-buffer-0.10.4/LICENSE-APACHE","sha256":"a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5","size":10849},{"path":"notices/crates/block-buffer-0.10.4/LICENSE-MIT","sha256":"d5c22aa3118d240e877ad41c5d9fa232f9c77d757d4aac0c2f943afc0a95e0ef","size":1082},{"path":"notices/crates/bytes-1.12.1/LICENSE","sha256":"45f522cacecb1023856e46df79ca625dfc550c94910078bd8aec6e02880b3d42","size":1055},{"path":"notices/crates/cfg-if-1.0.5/LICENSE-APACHE","sha256":"a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2","size":10847},{"path":"notices/crates/cfg-if-1.0.5/LICENSE-MIT","sha256":"378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397","size":1057},{"path":"notices/crates/cfg_aliases-0.2.2/LICENSE","sha256":"31b94860253d8ec7b4529f51901044d3b459d6292d996504a36b1bae3a36a812","size":1076},{"path":"notices/crates/cpufeatures-0.2.17/LICENSE-APACHE","sha256":"a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5","size":10849},{"path":"notices/crates/cpufeatures-0.2.17/LICENSE-MIT","sha256":"ae9baa7beea910273c2f384c2a6b721fb7bd02bda3436074a1072e4ee689f985","size":1082},{"path":"notices/crates/crypto-common-0.1.7/LICENSE-APACHE","sha256":"a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5","size":10849},{"path":"notices/crates/crypto-common-0.1.7/LICENSE-MIT","sha256":"3521672491a3479422d5fe1aca6645dd2984090f85da6e5205abfb18fb7a6897","size":1065},{"path":"notices/crates/digest-0.10.7/LICENSE-APACHE","sha256":"a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5","size":10849},{"path":"notices/crates/digest-0.10.7/LICENSE-MIT","sha256":"9e0dfd2dd4173a530e238cb6adb37aa78c34c6bc7444e0e10c1ab5d8881f63ba","size":1057},{"path":"notices/crates/errno-0.3.14/LICENSE-APACHE","sha256":"a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2","size":10847},{"path":"notices/crates/errno-0.3.14/LICENSE-MIT","sha256":"8764a597675778ddfd4e25f81b08a05dbcf089ac05662df7613fe67f150e3aa2","size":1054},{"path":"notices/crates/generic-array-0.14.7/LICENSE","sha256":"c09aae9d3c77b531f56351a9947bc7446511d6b025b3255312d3e3442a9a7583","size":1107},{"path":"notices/crates/getrandom-0.3.4/LICENSE-APACHE","sha256":"aaff376532ea30a0cd5330b9502ad4a4c8bf769c539c87ffe78819d188a18ebf","size":10849},{"path":"notices/crates/getrandom-0.3.4/LICENSE-MIT","sha256":"29e9fe5074bd27e0e5d5d110394fbbcd841baee2651a3c4b4560a632702cede4","size":1130},{"path":"notices/crates/itoa-1.0.18/LICENSE-APACHE","sha256":"62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a","size":9723},{"path":"notices/crates/itoa-1.0.18/LICENSE-MIT","sha256":"23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3","size":1023},{"path":"notices/crates/libc-0.2.189/LICENSE-APACHE","sha256":"62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a","size":9723},{"path":"notices/crates/libc-0.2.189/LICENSE-MIT","sha256":"123a331b5dbf04c30097fa43b8f858bc85df671fe776de498d01f3d6b7c1f69e","size":1066},{"path":"notices/crates/linux-raw-sys-0.12.1/COPYRIGHT","sha256":"3290ae0fbc9ddb77d2239121d710f0bb9d31b3b4744e6d97fe01e652b4c1870b","size":881},{"path":"notices/crates/linux-raw-sys-0.12.1/LICENSE-APACHE","sha256":"a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2","size":10847},{"path":"notices/crates/linux-raw-sys-0.12.1/LICENSE-Apache-2.0_WITH_LLVM-exception","sha256":"268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5","size":12243},{"path":"notices/crates/linux-raw-sys-0.12.1/LICENSE-MIT","sha256":"23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3","size":1023},{"path":"notices/crates/memchr-2.8.3/COPYING","sha256":"01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f","size":126},{"path":"notices/crates/memchr-2.8.3/LICENSE-MIT","sha256":"0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f","size":1081},{"path":"notices/crates/memchr-2.8.3/UNLICENSE","sha256":"7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c","size":1211},{"path":"notices/crates/mio-1.2.3/LICENSE","sha256":"07919255c7e04793d8ea760d6c2ce32d19f9ff02bdbdde3ce90b1e1880929a9b","size":1082},{"path":"notices/crates/nix-0.30.1/LICENSE","sha256":"66e3ee1fa7f909ad3c612d556f2a0cdabcd809ad6e66f3b0605015ac64841b70","size":1097},{"path":"notices/crates/pin-project-lite-0.2.17/LICENSE-APACHE","sha256":"0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594","size":10174},{"path":"notices/crates/pin-project-lite-0.2.17/LICENSE-MIT","sha256":"23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3","size":1023},{"path":"notices/crates/proc-macro2-1.0.107/LICENSE-APACHE","sha256":"62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a","size":9723},{"path":"notices/crates/proc-macro2-1.0.107/LICENSE-MIT","sha256":"23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3","size":1023},{"path":"notices/crates/quote-1.0.47/LICENSE-APACHE","sha256":"62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a","size":9723},{"path":"notices/crates/quote-1.0.47/LICENSE-MIT","sha256":"23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3","size":1023},{"path":"notices/crates/rustix-1.1.5/COPYRIGHT","sha256":"377c2e7c53250cc5905c0b0532d35973392af16ffb9596a41d99d202cf3617c9","size":853},{"path":"notices/crates/rustix-1.1.5/LICENSE-APACHE","sha256":"a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2","size":10847},{"path":"notices/crates/rustix-1.1.5/LICENSE-Apache-2.0_WITH_LLVM-exception","sha256":"268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5","size":12243},{"path":"notices/crates/rustix-1.1.5/LICENSE-MIT","sha256":"23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3","size":1023},{"path":"notices/crates/ryu-1.0.23/LICENSE-APACHE","sha256":"62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a","size":9723},{"path":"notices/crates/ryu-1.0.23/LICENSE-BOOST","sha256":"c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566","size":1338},{"path":"notices/crates/serde-1.0.228/LICENSE-APACHE","sha256":"62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a","size":9723},{"path":"notices/crates/serde-1.0.228/LICENSE-MIT","sha256":"23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3","size":1023},{"path":"notices/crates/serde_core-1.0.228/LICENSE-APACHE","sha256":"62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a","size":9723},{"path":"notices/crates/serde_core-1.0.228/LICENSE-MIT","sha256":"23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3","size":1023},{"path":"notices/crates/serde_derive-1.0.228/LICENSE-APACHE","sha256":"62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a","size":9723},{"path":"notices/crates/serde_derive-1.0.228/LICENSE-MIT","sha256":"23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3","size":1023},{"path":"notices/crates/serde_json-1.0.145/LICENSE-APACHE","sha256":"62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a","size":9723},{"path":"notices/crates/serde_json-1.0.145/LICENSE-MIT","sha256":"23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3","size":1023},{"path":"notices/crates/sha2-0.10.9/LICENSE-APACHE","sha256":"a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5","size":10849},{"path":"notices/crates/sha2-0.10.9/LICENSE-MIT","sha256":"b4eb00df6e2a4d22518fcaa6a2b4646f249b3a3c9814509b22bd2091f1392ff1","size":1138},{"path":"notices/crates/signal-hook-registry-1.4.8/LICENSE-APACHE","sha256":"a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2","size":10847},{"path":"notices/crates/signal-hook-registry-1.4.8/LICENSE-MIT","sha256":"503558bfefe66ca15e4e3f7955b3cb0ec87fd52f29bf24b336af7bd00e946d5c","size":1068},{"path":"notices/crates/syn-2.0.119/LICENSE-APACHE","sha256":"62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a","size":9723},{"path":"notices/crates/syn-2.0.119/LICENSE-MIT","sha256":"23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3","size":1023},{"path":"notices/crates/tokio-1.48.0/LICENSE","sha256":"253cd04c6714889df2d32f3f64d669179a1c95c76ac43c40882c52eb06bc3552","size":1070},{"path":"notices/crates/tokio-macros-2.6.1/LICENSE","sha256":"0b83dc40cba89b9922bb84b0a9c7d2768ce37c1d7e138b7424fd4549915778c9","size":1102},{"path":"notices/crates/typenum-1.20.1/LICENSE","sha256":"db11fec9946737df39ca3898d9cd8c10ec6f6c3a884a6802b0ad0b81b4e8f23a","size":17},{"path":"notices/crates/typenum-1.20.1/LICENSE-APACHE","sha256":"516b24e051bf5630880ebbd55c40a25ce9552ebaf8970a53e8976eb70e522406","size":10835},{"path":"notices/crates/typenum-1.20.1/LICENSE-MIT","sha256":"a825bd853ab71619a4923d7b4311221427848070ff44d990da39b0b274c1683f","size":1083},{"path":"notices/crates/unicode-ident-1.0.25/LICENSE-APACHE","sha256":"62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a","size":9723},{"path":"notices/crates/unicode-ident-1.0.25/LICENSE-MIT","sha256":"23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3","size":1023},{"path":"notices/crates/unicode-ident-1.0.25/LICENSE-UNICODE","sha256":"f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1","size":1995},{"path":"notices/crates/version_check-0.9.5/LICENSE-APACHE","sha256":"a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2","size":10847},{"path":"notices/crates/version_check-0.9.5/LICENSE-MIT","sha256":"b7e650f3fce5c53249d1cdc608b54df156a97edd636cf9d23498d0cfe7aec63e","size":1085},{"path":"notices/mobile-release-kit/LICENSE","sha256":"7d381db63decbfe663092a8537c1a1c1a9121d60ffe5938f401ad1346bdf9148","size":1088},{"path":"notices/rust-1.98.0/COPYRIGHT-library.html","sha256":"68129500b616d5838629e68f55ff3aed5e096dacf60ce9eb41bbe599a563afa6","size":1512520},{"path":"notices/rust-1.98.0/licenses/Apache-2.0.txt","sha256":"074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff","size":10280},{"path":"notices/rust-1.98.0/licenses/BSD-2-Clause.txt","sha256":"f32fb3b417a194167cfad068223fc975ba96c5960513a10f66a3c28720aec1df","size":1267},{"path":"notices/rust-1.98.0/licenses/CC-BY-SA-4.0.txt","sha256":"23ee78c8bae49cf08ea2f0c84945c66b987ebe4520881fb51b3dad4fb43d07c2","size":20137},{"path":"notices/rust-1.98.0/licenses/GCC-exception-3.1.txt","sha256":"a3966c9410ef94a1efbfa9ec04e9c1994026a70623fbf0885ce36737bfba3b54","size":3320},{"path":"notices/rust-1.98.0/licenses/GPL-2.0-only.txt","sha256":"54b212ba1f97f6948fa5486239ab505dd820b02e50cbfd296b4062c8609a70af","size":17642},{"path":"notices/rust-1.98.0/licenses/GPL-3.0-or-later.txt","sha256":"05315fce6c35f79b8a35454828995fa26336f235895ac64557abc028f4ffcea2","size":34795},{"path":"notices/rust-1.98.0/licenses/ISC.txt","sha256":"0ff61769b238634e042ab759dddfd104a8e69d091e3600ae3410e401a6164381","size":730},{"path":"notices/rust-1.98.0/licenses/LLVM-exception.txt","sha256":"e34c58338bd89d43e709e226610d8f32b3e3c47f4ad9a99a8dc1d4ac7842488e","size":919},{"path":"notices/rust-1.98.0/licenses/MIT.txt","sha256":"b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0","size":1078},{"path":"notices/rust-1.98.0/licenses/NCSA.txt","sha256":"39cb0234065c92b9e6cee3830cbb52b1aa289aa8fe9ba2e66730fec5cf05c630","size":1676},{"path":"notices/rust-1.98.0/licenses/OFL-1.1.txt","sha256":"8eea8287e5876b539670cadb82e99f9a7afddec6f6730811be1daf25d2e9bcfd","size":4016},{"path":"notices/rust-1.98.0/licenses/Unicode-3.0.txt","sha256":"f5062c9a188d81dfe66b56db4182dcf9e4b17c0d9b0d311a8e20b3a1b075c443","size":1995},{"path":"notices/rust-1.98.0/source-package/COPYRIGHT","sha256":"172020dbfd5b53a226dfde77616190a48dcff519b0bc0e6deb91a8450782c4af","size":1571},{"path":"notices/rust-1.98.0/source-package/LICENSE-APACHE","sha256":"62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a","size":9723},{"path":"notices/rust-1.98.0/source-package/LICENSE-MIT","sha256":"b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1","size":1068}],"rust":{"commit":"88d9e12ae178fab0fb5cc050a94da85685d449ea","rustcArchiveSha256":"0e37cb339f447fc44d6d781073bacacebfdc5612f2600e4c7e84c266f5f3aced","sourceArchiveSha256":"0e977492aed5ff137815bf9b4b796e8a85b80fb2367ed64e82d5c5839870f2bf","stdArchiveSha256":"f5022e6c95a5ad23cca2513dc8281200f585fa188de6370aa37b128a43f876a3","version":"1.98.0"},"schemaVersion":1,"scope":"Original notice inputs, not a final native package or linked-object census. Same-job component/dependency/version/copyright checks remain required."}
+{
+  "crates": [
+    {
+      "archiveSha256": "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06",
+      "license": "MIT OR Apache-2.0",
+      "name": "bitflags",
+      "version": "2.13.2"
+    },
+    {
+      "archiveSha256": "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71",
+      "license": "MIT OR Apache-2.0",
+      "name": "block-buffer",
+      "version": "0.10.4"
+    },
+    {
+      "archiveSha256": "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04",
+      "license": "MIT",
+      "name": "bytes",
+      "version": "1.12.1"
+    },
+    {
+      "archiveSha256": "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600",
+      "license": "MIT OR Apache-2.0",
+      "name": "cfg-if",
+      "version": "1.0.5"
+    },
+    {
+      "archiveSha256": "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527",
+      "license": "MIT",
+      "name": "cfg_aliases",
+      "version": "0.2.2"
+    },
+    {
+      "archiveSha256": "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280",
+      "license": "MIT OR Apache-2.0",
+      "name": "cpufeatures",
+      "version": "0.2.17"
+    },
+    {
+      "archiveSha256": "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a",
+      "license": "MIT OR Apache-2.0",
+      "name": "crypto-common",
+      "version": "0.1.7"
+    },
+    {
+      "archiveSha256": "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292",
+      "license": "MIT OR Apache-2.0",
+      "name": "digest",
+      "version": "0.10.7"
+    },
+    {
+      "archiveSha256": "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb",
+      "license": "MIT OR Apache-2.0",
+      "name": "errno",
+      "version": "0.3.14"
+    },
+    {
+      "archiveSha256": "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a",
+      "license": "MIT",
+      "name": "generic-array",
+      "version": "0.14.7"
+    },
+    {
+      "archiveSha256": "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd",
+      "license": "MIT OR Apache-2.0",
+      "name": "getrandom",
+      "version": "0.3.4"
+    },
+    {
+      "archiveSha256": "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682",
+      "license": "MIT OR Apache-2.0",
+      "name": "itoa",
+      "version": "1.0.18"
+    },
+    {
+      "archiveSha256": "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2",
+      "license": "MIT OR Apache-2.0",
+      "name": "libc",
+      "version": "0.2.189"
+    },
+    {
+      "archiveSha256": "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "name": "linux-raw-sys",
+      "version": "0.12.1"
+    },
+    {
+      "archiveSha256": "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98",
+      "license": "Unlicense OR MIT",
+      "name": "memchr",
+      "version": "2.8.3"
+    },
+    {
+      "archiveSha256": "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8",
+      "license": "MIT",
+      "name": "mio",
+      "version": "1.2.3"
+    },
+    {
+      "archiveSha256": "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6",
+      "license": "MIT",
+      "name": "nix",
+      "version": "0.30.1"
+    },
+    {
+      "archiveSha256": "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd",
+      "license": "Apache-2.0 OR MIT",
+      "name": "pin-project-lite",
+      "version": "0.2.17"
+    },
+    {
+      "archiveSha256": "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9",
+      "license": "MIT OR Apache-2.0",
+      "name": "proc-macro2",
+      "version": "1.0.107"
+    },
+    {
+      "archiveSha256": "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001",
+      "license": "MIT OR Apache-2.0",
+      "name": "quote",
+      "version": "1.0.47"
+    },
+    {
+      "archiveSha256": "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d",
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "name": "rustix",
+      "version": "1.1.5"
+    },
+    {
+      "archiveSha256": "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f",
+      "license": "Apache-2.0 OR BSL-1.0",
+      "name": "ryu",
+      "version": "1.0.23"
+    },
+    {
+      "archiveSha256": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e",
+      "license": "MIT OR Apache-2.0",
+      "name": "serde",
+      "version": "1.0.228"
+    },
+    {
+      "archiveSha256": "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad",
+      "license": "MIT OR Apache-2.0",
+      "name": "serde_core",
+      "version": "1.0.228"
+    },
+    {
+      "archiveSha256": "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79",
+      "license": "MIT OR Apache-2.0",
+      "name": "serde_derive",
+      "version": "1.0.228"
+    },
+    {
+      "archiveSha256": "402a6f66d8c709116cf22f558eab210f5a50187f702eb4d7e5ef38d9a7f1c79c",
+      "license": "MIT OR Apache-2.0",
+      "name": "serde_json",
+      "version": "1.0.145"
+    },
+    {
+      "archiveSha256": "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283",
+      "license": "MIT OR Apache-2.0",
+      "name": "sha2",
+      "version": "0.10.9"
+    },
+    {
+      "archiveSha256": "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b",
+      "license": "MIT OR Apache-2.0",
+      "name": "signal-hook-registry",
+      "version": "1.4.8"
+    },
+    {
+      "archiveSha256": "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297",
+      "license": "MIT OR Apache-2.0",
+      "name": "syn",
+      "version": "2.0.119"
+    },
+    {
+      "archiveSha256": "ff360e02eab121e0bc37a2d3b4d4dc622e6eda3a8e5253d5435ecf5bd4c68408",
+      "license": "MIT",
+      "name": "tokio",
+      "version": "1.48.0"
+    },
+    {
+      "archiveSha256": "5c55a2eff8b69ce66c84f85e1da1c233edc36ceb85a2058d11b0d6a3c7e7569c",
+      "license": "MIT",
+      "name": "tokio-macros",
+      "version": "2.6.1"
+    },
+    {
+      "archiveSha256": "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20",
+      "license": "MIT OR Apache-2.0",
+      "name": "typenum",
+      "version": "1.20.1"
+    },
+    {
+      "archiveSha256": "ab72a15cf68d77cb0987d3684aa8a45c5ef827e8cb49ee2f30bfd7ba2feb519f",
+      "license": "(MIT OR Apache-2.0) AND Unicode-3.0",
+      "name": "unicode-ident",
+      "version": "1.0.25"
+    },
+    {
+      "archiveSha256": "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a",
+      "license": "MIT/Apache-2.0",
+      "name": "version_check",
+      "version": "0.9.5"
+    }
+  ],
+  "files": [
+    {
+      "path": "NOTICE.txt",
+      "sha256": "2ab2b23bc02d0c0ccf8e1c8d0cac77218ef6cf8ddfc3f7874b7c2f096e770cff",
+      "size": 4679
+    },
+    {
+      "path": "notices/crates/bitflags-2.13.2/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "size": 10847
+    },
+    {
+      "path": "notices/crates/bitflags-2.13.2/LICENSE-MIT",
+      "sha256": "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb",
+      "size": 1071
+    },
+    {
+      "path": "notices/crates/block-buffer-0.10.4/LICENSE-APACHE",
+      "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+      "size": 10849
+    },
+    {
+      "path": "notices/crates/block-buffer-0.10.4/LICENSE-MIT",
+      "sha256": "d5c22aa3118d240e877ad41c5d9fa232f9c77d757d4aac0c2f943afc0a95e0ef",
+      "size": 1082
+    },
+    {
+      "path": "notices/crates/bytes-1.12.1/LICENSE",
+      "sha256": "45f522cacecb1023856e46df79ca625dfc550c94910078bd8aec6e02880b3d42",
+      "size": 1055
+    },
+    {
+      "path": "notices/crates/cfg-if-1.0.5/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "size": 10847
+    },
+    {
+      "path": "notices/crates/cfg-if-1.0.5/LICENSE-MIT",
+      "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
+      "size": 1057
+    },
+    {
+      "path": "notices/crates/cfg_aliases-0.2.2/LICENSE",
+      "sha256": "31b94860253d8ec7b4529f51901044d3b459d6292d996504a36b1bae3a36a812",
+      "size": 1076
+    },
+    {
+      "path": "notices/crates/cpufeatures-0.2.17/LICENSE-APACHE",
+      "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+      "size": 10849
+    },
+    {
+      "path": "notices/crates/cpufeatures-0.2.17/LICENSE-MIT",
+      "sha256": "ae9baa7beea910273c2f384c2a6b721fb7bd02bda3436074a1072e4ee689f985",
+      "size": 1082
+    },
+    {
+      "path": "notices/crates/crypto-common-0.1.7/LICENSE-APACHE",
+      "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+      "size": 10849
+    },
+    {
+      "path": "notices/crates/crypto-common-0.1.7/LICENSE-MIT",
+      "sha256": "3521672491a3479422d5fe1aca6645dd2984090f85da6e5205abfb18fb7a6897",
+      "size": 1065
+    },
+    {
+      "path": "notices/crates/digest-0.10.7/LICENSE-APACHE",
+      "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+      "size": 10849
+    },
+    {
+      "path": "notices/crates/digest-0.10.7/LICENSE-MIT",
+      "sha256": "9e0dfd2dd4173a530e238cb6adb37aa78c34c6bc7444e0e10c1ab5d8881f63ba",
+      "size": 1057
+    },
+    {
+      "path": "notices/crates/errno-0.3.14/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "size": 10847
+    },
+    {
+      "path": "notices/crates/errno-0.3.14/LICENSE-MIT",
+      "sha256": "8764a597675778ddfd4e25f81b08a05dbcf089ac05662df7613fe67f150e3aa2",
+      "size": 1054
+    },
+    {
+      "path": "notices/crates/generic-array-0.14.7/LICENSE",
+      "sha256": "c09aae9d3c77b531f56351a9947bc7446511d6b025b3255312d3e3442a9a7583",
+      "size": 1107
+    },
+    {
+      "path": "notices/crates/getrandom-0.3.4/LICENSE-APACHE",
+      "sha256": "aaff376532ea30a0cd5330b9502ad4a4c8bf769c539c87ffe78819d188a18ebf",
+      "size": 10849
+    },
+    {
+      "path": "notices/crates/getrandom-0.3.4/LICENSE-MIT",
+      "sha256": "29e9fe5074bd27e0e5d5d110394fbbcd841baee2651a3c4b4560a632702cede4",
+      "size": 1130
+    },
+    {
+      "path": "notices/crates/itoa-1.0.18/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723
+    },
+    {
+      "path": "notices/crates/itoa-1.0.18/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "notices/crates/libc-0.2.189/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723
+    },
+    {
+      "path": "notices/crates/libc-0.2.189/LICENSE-MIT",
+      "sha256": "123a331b5dbf04c30097fa43b8f858bc85df671fe776de498d01f3d6b7c1f69e",
+      "size": 1066
+    },
+    {
+      "path": "notices/crates/linux-raw-sys-0.12.1/COPYRIGHT",
+      "sha256": "3290ae0fbc9ddb77d2239121d710f0bb9d31b3b4744e6d97fe01e652b4c1870b",
+      "size": 881
+    },
+    {
+      "path": "notices/crates/linux-raw-sys-0.12.1/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "size": 10847
+    },
+    {
+      "path": "notices/crates/linux-raw-sys-0.12.1/LICENSE-Apache-2.0_WITH_LLVM-exception",
+      "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5",
+      "size": 12243
+    },
+    {
+      "path": "notices/crates/linux-raw-sys-0.12.1/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "notices/crates/memchr-2.8.3/COPYING",
+      "sha256": "01c266bced4a434da0051174d6bee16a4c82cf634e2679b6155d40d75012390f",
+      "size": 126
+    },
+    {
+      "path": "notices/crates/memchr-2.8.3/LICENSE-MIT",
+      "sha256": "0f96a83840e146e43c0ec96a22ec1f392e0680e6c1226e6f3ba87e0740af850f",
+      "size": 1081
+    },
+    {
+      "path": "notices/crates/memchr-2.8.3/UNLICENSE",
+      "sha256": "7e12e5df4bae12cb21581ba157ced20e1986a0508dd10d0e8a4ab9a4cf94e85c",
+      "size": 1211
+    },
+    {
+      "path": "notices/crates/mio-1.2.3/LICENSE",
+      "sha256": "07919255c7e04793d8ea760d6c2ce32d19f9ff02bdbdde3ce90b1e1880929a9b",
+      "size": 1082
+    },
+    {
+      "path": "notices/crates/nix-0.30.1/LICENSE",
+      "sha256": "66e3ee1fa7f909ad3c612d556f2a0cdabcd809ad6e66f3b0605015ac64841b70",
+      "size": 1097
+    },
+    {
+      "path": "notices/crates/pin-project-lite-0.2.17/LICENSE-APACHE",
+      "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+      "size": 10174
+    },
+    {
+      "path": "notices/crates/pin-project-lite-0.2.17/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "notices/crates/proc-macro2-1.0.107/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723
+    },
+    {
+      "path": "notices/crates/proc-macro2-1.0.107/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "notices/crates/quote-1.0.47/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723
+    },
+    {
+      "path": "notices/crates/quote-1.0.47/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "notices/crates/rustix-1.1.5/COPYRIGHT",
+      "sha256": "377c2e7c53250cc5905c0b0532d35973392af16ffb9596a41d99d202cf3617c9",
+      "size": 853
+    },
+    {
+      "path": "notices/crates/rustix-1.1.5/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "size": 10847
+    },
+    {
+      "path": "notices/crates/rustix-1.1.5/LICENSE-Apache-2.0_WITH_LLVM-exception",
+      "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5",
+      "size": 12243
+    },
+    {
+      "path": "notices/crates/rustix-1.1.5/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "notices/crates/ryu-1.0.23/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723
+    },
+    {
+      "path": "notices/crates/ryu-1.0.23/LICENSE-BOOST",
+      "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+      "size": 1338
+    },
+    {
+      "path": "notices/crates/serde-1.0.228/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723
+    },
+    {
+      "path": "notices/crates/serde-1.0.228/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "notices/crates/serde_core-1.0.228/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723
+    },
+    {
+      "path": "notices/crates/serde_core-1.0.228/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "notices/crates/serde_derive-1.0.228/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723
+    },
+    {
+      "path": "notices/crates/serde_derive-1.0.228/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "notices/crates/serde_json-1.0.145/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723
+    },
+    {
+      "path": "notices/crates/serde_json-1.0.145/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "notices/crates/sha2-0.10.9/LICENSE-APACHE",
+      "sha256": "a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5",
+      "size": 10849
+    },
+    {
+      "path": "notices/crates/sha2-0.10.9/LICENSE-MIT",
+      "sha256": "b4eb00df6e2a4d22518fcaa6a2b4646f249b3a3c9814509b22bd2091f1392ff1",
+      "size": 1138
+    },
+    {
+      "path": "notices/crates/signal-hook-registry-1.4.8/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "size": 10847
+    },
+    {
+      "path": "notices/crates/signal-hook-registry-1.4.8/LICENSE-MIT",
+      "sha256": "503558bfefe66ca15e4e3f7955b3cb0ec87fd52f29bf24b336af7bd00e946d5c",
+      "size": 1068
+    },
+    {
+      "path": "notices/crates/syn-2.0.119/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723
+    },
+    {
+      "path": "notices/crates/syn-2.0.119/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "notices/crates/tokio-1.48.0/LICENSE",
+      "sha256": "253cd04c6714889df2d32f3f64d669179a1c95c76ac43c40882c52eb06bc3552",
+      "size": 1070
+    },
+    {
+      "path": "notices/crates/tokio-macros-2.6.1/LICENSE",
+      "sha256": "0b83dc40cba89b9922bb84b0a9c7d2768ce37c1d7e138b7424fd4549915778c9",
+      "size": 1102
+    },
+    {
+      "path": "notices/crates/typenum-1.20.1/LICENSE",
+      "sha256": "db11fec9946737df39ca3898d9cd8c10ec6f6c3a884a6802b0ad0b81b4e8f23a",
+      "size": 17
+    },
+    {
+      "path": "notices/crates/typenum-1.20.1/LICENSE-APACHE",
+      "sha256": "516b24e051bf5630880ebbd55c40a25ce9552ebaf8970a53e8976eb70e522406",
+      "size": 10835
+    },
+    {
+      "path": "notices/crates/typenum-1.20.1/LICENSE-MIT",
+      "sha256": "a825bd853ab71619a4923d7b4311221427848070ff44d990da39b0b274c1683f",
+      "size": 1083
+    },
+    {
+      "path": "notices/crates/unicode-ident-1.0.25/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723
+    },
+    {
+      "path": "notices/crates/unicode-ident-1.0.25/LICENSE-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "size": 1023
+    },
+    {
+      "path": "notices/crates/unicode-ident-1.0.25/LICENSE-UNICODE",
+      "sha256": "f7db81051789b729fea528a63ec4c938fdcb93d9d61d97dc8cc2e9df6d47f2a1",
+      "size": 1995
+    },
+    {
+      "path": "notices/crates/version_check-0.9.5/LICENSE-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "size": 10847
+    },
+    {
+      "path": "notices/crates/version_check-0.9.5/LICENSE-MIT",
+      "sha256": "b7e650f3fce5c53249d1cdc608b54df156a97edd636cf9d23498d0cfe7aec63e",
+      "size": 1085
+    },
+    {
+      "path": "notices/mobile-release-kit/LICENSE",
+      "sha256": "7d381db63decbfe663092a8537c1a1c1a9121d60ffe5938f401ad1346bdf9148",
+      "size": 1088
+    },
+    {
+      "path": "notices/rust-1.98.0/COPYRIGHT-library.html",
+      "sha256": "68129500b616d5838629e68f55ff3aed5e096dacf60ce9eb41bbe599a563afa6",
+      "size": 1512520
+    },
+    {
+      "path": "notices/rust-1.98.0/licenses/Apache-2.0.txt",
+      "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+      "size": 10280
+    },
+    {
+      "path": "notices/rust-1.98.0/licenses/BSD-2-Clause.txt",
+      "sha256": "f32fb3b417a194167cfad068223fc975ba96c5960513a10f66a3c28720aec1df",
+      "size": 1267
+    },
+    {
+      "path": "notices/rust-1.98.0/licenses/CC-BY-SA-4.0.txt",
+      "sha256": "23ee78c8bae49cf08ea2f0c84945c66b987ebe4520881fb51b3dad4fb43d07c2",
+      "size": 20137
+    },
+    {
+      "path": "notices/rust-1.98.0/licenses/GCC-exception-3.1.txt",
+      "sha256": "a3966c9410ef94a1efbfa9ec04e9c1994026a70623fbf0885ce36737bfba3b54",
+      "size": 3320
+    },
+    {
+      "path": "notices/rust-1.98.0/licenses/GPL-2.0-only.txt",
+      "sha256": "54b212ba1f97f6948fa5486239ab505dd820b02e50cbfd296b4062c8609a70af",
+      "size": 17642
+    },
+    {
+      "path": "notices/rust-1.98.0/licenses/GPL-3.0-or-later.txt",
+      "sha256": "05315fce6c35f79b8a35454828995fa26336f235895ac64557abc028f4ffcea2",
+      "size": 34795
+    },
+    {
+      "path": "notices/rust-1.98.0/licenses/ISC.txt",
+      "sha256": "0ff61769b238634e042ab759dddfd104a8e69d091e3600ae3410e401a6164381",
+      "size": 730
+    },
+    {
+      "path": "notices/rust-1.98.0/licenses/LLVM-exception.txt",
+      "sha256": "e34c58338bd89d43e709e226610d8f32b3e3c47f4ad9a99a8dc1d4ac7842488e",
+      "size": 919
+    },
+    {
+      "path": "notices/rust-1.98.0/licenses/MIT.txt",
+      "sha256": "b85dcd3e453d05982552c52b5fc9e0bdd6d23c6f8e844b984a88af32570b0cc0",
+      "size": 1078
+    },
+    {
+      "path": "notices/rust-1.98.0/licenses/NCSA.txt",
+      "sha256": "39cb0234065c92b9e6cee3830cbb52b1aa289aa8fe9ba2e66730fec5cf05c630",
+      "size": 1676
+    },
+    {
+      "path": "notices/rust-1.98.0/licenses/OFL-1.1.txt",
+      "sha256": "8eea8287e5876b539670cadb82e99f9a7afddec6f6730811be1daf25d2e9bcfd",
+      "size": 4016
+    },
+    {
+      "path": "notices/rust-1.98.0/licenses/Unicode-3.0.txt",
+      "sha256": "f5062c9a188d81dfe66b56db4182dcf9e4b17c0d9b0d311a8e20b3a1b075c443",
+      "size": 1995
+    },
+    {
+      "path": "notices/rust-1.98.0/source-package/COPYRIGHT",
+      "sha256": "172020dbfd5b53a226dfde77616190a48dcff519b0bc0e6deb91a8450782c4af",
+      "size": 1571
+    },
+    {
+      "path": "notices/rust-1.98.0/source-package/LICENSE-APACHE",
+      "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+      "size": 9723
+    },
+    {
+      "path": "notices/rust-1.98.0/source-package/LICENSE-MIT",
+      "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1",
+      "size": 1068
+    },
+    {
+      "path": "notices/ubuntu/binutils-common-copyright.txt",
+      "sha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1",
+      "size": 1795
+    },
+    {
+      "path": "notices/ubuntu/common/Artistic.txt",
+      "sha256": "b7fd9b73ea99602016a326e0b62e6646060d18febdd065ceca8bb482208c3d88",
+      "size": 6111
+    },
+    {
+      "path": "notices/ubuntu/common/GFDL-1.2.txt",
+      "sha256": "d8e94ae5fdb5433fcae2961aeb1a8cf17174d6f4a0465d24bf37dd8a038bd439",
+      "size": 20432
+    },
+    {
+      "path": "notices/ubuntu/common/GFDL-1.3.txt",
+      "sha256": "110535522396708cea37c72a802c5e7e81391139f5f7985631c93ef242b206a4",
+      "size": 22955
+    },
+    {
+      "path": "notices/ubuntu/common/GPL-2.txt",
+      "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+      "size": 18092
+    },
+    {
+      "path": "notices/ubuntu/common/GPL-3.txt",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "size": 35149
+    },
+    {
+      "path": "notices/ubuntu/common/LGPL-2.1.txt",
+      "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+      "size": 26530
+    },
+    {
+      "path": "notices/ubuntu/common/LGPL-3.txt",
+      "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+      "size": 7652
+    },
+    {
+      "path": "notices/ubuntu/gcc-13-base-copyright.txt",
+      "sha256": "08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5",
+      "size": 69100
+    },
+    {
+      "path": "notices/ubuntu/gcc-14-base-copyright.txt",
+      "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79",
+      "size": 69004
+    },
+    {
+      "path": "notices/ubuntu/libc6-copyright.txt",
+      "sha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265",
+      "size": 26462
+    }
+  ],
+  "rust": {
+    "commit": "88d9e12ae178fab0fb5cc050a94da85685d449ea",
+    "rustcArchiveSha256": "0e37cb339f447fc44d6d781073bacacebfdc5612f2600e4c7e84c266f5f3aced",
+    "sourceArchiveSha256": "0e977492aed5ff137815bf9b4b796e8a85b80fb2367ed64e82d5c5839870f2bf",
+    "stdArchiveSha256": "f5022e6c95a5ad23cca2513dc8281200f585fa188de6370aa37b128a43f876a3",
+    "version": "1.98.0"
+  },
+  "schemaVersion": 1,
+  "scope": "Original notice inputs, not a final native package or linked-object census. Same-job component/dependency/version/copyright checks remain required.",
+  "ubuntu": {
+    "commonLicenseSource": {
+      "architecture": "amd64",
+      "archive": {
+        "sha256": "87e8c41e62f61625fb78a982d0bc0a70f40ef8375bc313b154914d1b3759c823",
+        "size": 73220,
+        "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/b/base-files/base-files_13ubuntu10.5_amd64.deb"
+      },
+      "controlIndexSha256": "ba080e60e97800724668b84dff6afab73757afae1b21563d95b5f78bdbee0b48",
+      "dataIndexSha256": "b349696370bdda61969cb1a85d0f8797aafdd5e391d4db64f6af9b32bd37f7ab",
+      "package": "base-files",
+      "sourcePackage": "base-files",
+      "sourceVersion": "13ubuntu10.5",
+      "version": "13ubuntu10.5"
+    },
+    "commonLicenses": {
+      "Artistic": {
+        "alias": null,
+        "member": {
+          "gid": 0,
+          "mode": 420,
+          "mtime": 1738229240,
+          "path": "usr/share/common-licenses/Artistic",
+          "sha256": "b7fd9b73ea99602016a326e0b62e6646060d18febdd065ceca8bb482208c3d88",
+          "size": 6111,
+          "target": null,
+          "type": "regular",
+          "uid": 0
+        },
+        "noticePath": "notices/ubuntu/common/Artistic.txt"
+      },
+      "GFDL": {
+        "alias": {
+          "gid": 0,
+          "mode": 511,
+          "mtime": 1788704983,
+          "path": "usr/share/common-licenses/GFDL",
+          "sha256": null,
+          "size": 0,
+          "target": "GFDL-1.3",
+          "type": "symlink",
+          "uid": 0
+        },
+        "member": {
+          "gid": 0,
+          "mode": 420,
+          "mtime": 1738229240,
+          "path": "usr/share/common-licenses/GFDL-1.3",
+          "sha256": "110535522396708cea37c72a802c5e7e81391139f5f7985631c93ef242b206a4",
+          "size": 22955,
+          "target": null,
+          "type": "regular",
+          "uid": 0
+        },
+        "noticePath": "notices/ubuntu/common/GFDL-1.3.txt"
+      },
+      "GFDL-1.2": {
+        "alias": null,
+        "member": {
+          "gid": 0,
+          "mode": 420,
+          "mtime": 1770362351,
+          "path": "usr/share/common-licenses/GFDL-1.2",
+          "sha256": "d8e94ae5fdb5433fcae2961aeb1a8cf17174d6f4a0465d24bf37dd8a038bd439",
+          "size": 20432,
+          "target": null,
+          "type": "regular",
+          "uid": 0
+        },
+        "noticePath": "notices/ubuntu/common/GFDL-1.2.txt"
+      },
+      "GFDL-1.3": {
+        "alias": null,
+        "member": {
+          "gid": 0,
+          "mode": 420,
+          "mtime": 1738229240,
+          "path": "usr/share/common-licenses/GFDL-1.3",
+          "sha256": "110535522396708cea37c72a802c5e7e81391139f5f7985631c93ef242b206a4",
+          "size": 22955,
+          "target": null,
+          "type": "regular",
+          "uid": 0
+        },
+        "noticePath": "notices/ubuntu/common/GFDL-1.3.txt"
+      },
+      "GPL": {
+        "alias": {
+          "gid": 0,
+          "mode": 511,
+          "mtime": 1788704983,
+          "path": "usr/share/common-licenses/GPL",
+          "sha256": null,
+          "size": 0,
+          "target": "GPL-3",
+          "type": "symlink",
+          "uid": 0
+        },
+        "member": {
+          "gid": 0,
+          "mode": 420,
+          "mtime": 1738229240,
+          "path": "usr/share/common-licenses/GPL-3",
+          "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+          "size": 35149,
+          "target": null,
+          "type": "regular",
+          "uid": 0
+        },
+        "noticePath": "notices/ubuntu/common/GPL-3.txt"
+      },
+      "GPL-2": {
+        "alias": null,
+        "member": {
+          "gid": 0,
+          "mode": 420,
+          "mtime": 1770362351,
+          "path": "usr/share/common-licenses/GPL-2",
+          "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+          "size": 18092,
+          "target": null,
+          "type": "regular",
+          "uid": 0
+        },
+        "noticePath": "notices/ubuntu/common/GPL-2.txt"
+      },
+      "GPL-3": {
+        "alias": null,
+        "member": {
+          "gid": 0,
+          "mode": 420,
+          "mtime": 1738229240,
+          "path": "usr/share/common-licenses/GPL-3",
+          "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+          "size": 35149,
+          "target": null,
+          "type": "regular",
+          "uid": 0
+        },
+        "noticePath": "notices/ubuntu/common/GPL-3.txt"
+      },
+      "LGPL": {
+        "alias": {
+          "gid": 0,
+          "mode": 511,
+          "mtime": 1788704983,
+          "path": "usr/share/common-licenses/LGPL",
+          "sha256": null,
+          "size": 0,
+          "target": "LGPL-3",
+          "type": "symlink",
+          "uid": 0
+        },
+        "member": {
+          "gid": 0,
+          "mode": 420,
+          "mtime": 1738229240,
+          "path": "usr/share/common-licenses/LGPL-3",
+          "sha256": "e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118",
+          "size": 7652,
+          "target": null,
+          "type": "regular",
+          "uid": 0
+        },
+        "noticePath": "notices/ubuntu/common/LGPL-3.txt"
+      },
+      "LGPL-2.1": {
+        "alias": null,
+        "member": {
+          "gid": 0,
+          "mode": 420,
+          "mtime": 1770362351,
+          "path": "usr/share/common-licenses/LGPL-2.1",
+          "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+          "size": 26530,
+          "target": null,
+          "type": "regular",
+          "uid": 0
+        },
+        "noticePath": "notices/ubuntu/common/LGPL-2.1.txt"
+      }
+    },
+    "packages": {
+      "binutils-common": {
+        "architecture": "amd64",
+        "archive": {
+          "sha256": "d136073f5e2153f3df11c1d08d66727b9466b28ff483f50085f14bbe3464b5ee",
+          "size": 240286,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/b/binutils/binutils-common_2.42-4ubuntu2.10_amd64.deb"
+        },
+        "controlIndexSha256": "f07ddffeb624cd1a189b1f261939707cabb0cd618c53c7b121a0f3c5c9139f72",
+        "copyright": {
+          "commonReferences": [
+            "GFDL",
+            "GPL",
+            "LGPL"
+          ],
+          "member": {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1770671008,
+            "path": "usr/share/doc/binutils-common/copyright",
+            "sha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1",
+            "size": 1795,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          },
+          "noticePath": "notices/ubuntu/binutils-common-copyright.txt",
+          "package": "binutils-common"
+        },
+        "dataIndexSha256": "cffc04ec9ce25341651996c65b21832b0ab11a8379078acf66b69b5ae2bb2968",
+        "documentationPackages": [],
+        "ownedDocumentation": [
+          {
+            "gid": 0,
+            "mode": 493,
+            "mtime": 1770671008,
+            "path": "usr/share/doc/binutils-common",
+            "sha256": null,
+            "size": 0,
+            "target": null,
+            "type": "directory",
+            "uid": 0
+          },
+          {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1770671008,
+            "path": "usr/share/doc/binutils-common/copyright",
+            "sha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1",
+            "size": 1795,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          }
+        ],
+        "sourcePackage": "binutils",
+        "sourceVersion": "2.42-4ubuntu2.10",
+        "version": "2.42-4ubuntu2.10"
+      },
+      "binutils-x86-64-linux-gnu": {
+        "architecture": "amd64",
+        "archive": {
+          "sha256": "1e510a15f30208d39edcd840e48f26a77bbca7c417805eeccb1e3f7de198ef29",
+          "size": 2462744,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/b/binutils/binutils-x86-64-linux-gnu_2.42-4ubuntu2.10_amd64.deb"
+        },
+        "controlIndexSha256": "44799c0e5e7b1fd803dbadec1b20f1ff4257372c82b4eafebf2cee1177546a49",
+        "copyright": {
+          "commonReferences": [
+            "GFDL",
+            "GPL",
+            "LGPL"
+          ],
+          "member": {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1770671008,
+            "path": "usr/share/doc/binutils-common/copyright",
+            "sha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1",
+            "size": 1795,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          },
+          "noticePath": "notices/ubuntu/binutils-common-copyright.txt",
+          "package": "binutils-common"
+        },
+        "dataIndexSha256": "b8475af8b76d7c479e8d251323eaead2f05d16ecdb4b36b85f5f46c6bf7f6edb",
+        "documentationPackages": [
+          "libbinutils",
+          "binutils-common"
+        ],
+        "ownedDocumentation": [
+          {
+            "gid": 0,
+            "mode": 511,
+            "mtime": 1770671008,
+            "path": "usr/share/doc/binutils-x86-64-linux-gnu",
+            "sha256": null,
+            "size": 0,
+            "target": "libbinutils",
+            "type": "symlink",
+            "uid": 0
+          }
+        ],
+        "sourcePackage": "binutils",
+        "sourceVersion": "2.42-4ubuntu2.10",
+        "version": "2.42-4ubuntu2.10"
+      },
+      "gcc-13-base": {
+        "architecture": "amd64",
+        "archive": {
+          "sha256": "e859aca26585bb91113a451f1e66bc0e5283cb08797d679aacc1d936ae6dff8e",
+          "size": 51616,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/gcc-13/gcc-13-base_13.3.0-6ubuntu2~24.04.1_amd64.deb"
+        },
+        "controlIndexSha256": "8c67f5d9fcc8f06d7d52be1d16339a96e2392cab9c5d95291088ffe9ea24c7fb",
+        "copyright": {
+          "commonReferences": [
+            "Artistic",
+            "GFDL-1.2",
+            "GPL",
+            "GPL-2",
+            "GPL-3",
+            "LGPL"
+          ],
+          "member": {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1766091591,
+            "path": "usr/share/doc/gcc-13-base/copyright",
+            "sha256": "08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5",
+            "size": 69100,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          },
+          "noticePath": "notices/ubuntu/gcc-13-base-copyright.txt",
+          "package": "gcc-13-base"
+        },
+        "dataIndexSha256": "112b9e0652d8942faaa01911a8ebf5d5dc17e755f4f60df5ba39840141775c0b",
+        "documentationPackages": [],
+        "ownedDocumentation": [
+          {
+            "gid": 0,
+            "mode": 493,
+            "mtime": 1766091591,
+            "path": "usr/share/doc/gcc-13-base",
+            "sha256": null,
+            "size": 0,
+            "target": null,
+            "type": "directory",
+            "uid": 0
+          },
+          {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1766091591,
+            "path": "usr/share/doc/gcc-13-base/copyright",
+            "sha256": "08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5",
+            "size": 69100,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          }
+        ],
+        "sourcePackage": "gcc-13",
+        "sourceVersion": "13.3.0-6ubuntu2~24.04.1",
+        "version": "13.3.0-6ubuntu2~24.04.1"
+      },
+      "gcc-13-x86-64-linux-gnu": {
+        "architecture": "amd64",
+        "archive": {
+          "sha256": "a134b0319a82d14581b3a14820d2832af4ec9778ed8b9b4ddaeecfb0555ec325",
+          "size": 21084546,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/gcc-13/gcc-13-x86-64-linux-gnu_13.3.0-6ubuntu2~24.04.1_amd64.deb"
+        },
+        "controlIndexSha256": "59cf49ed5b2b951b41b4a8ee2b3ce7b88fc11ca31147362f5fd163d3db3ccab9",
+        "copyright": {
+          "commonReferences": [
+            "Artistic",
+            "GFDL-1.2",
+            "GPL",
+            "GPL-2",
+            "GPL-3",
+            "LGPL"
+          ],
+          "member": {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1766091591,
+            "path": "usr/share/doc/gcc-13-base/copyright",
+            "sha256": "08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5",
+            "size": 69100,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          },
+          "noticePath": "notices/ubuntu/gcc-13-base-copyright.txt",
+          "package": "gcc-13-base"
+        },
+        "dataIndexSha256": "33f0bc65e9d8616e8930fbc06ce2f0336d757f2b6175fd702d8e6377aecc993a",
+        "documentationPackages": [
+          "gcc-13-base"
+        ],
+        "ownedDocumentation": [
+          {
+            "gid": 0,
+            "mode": 511,
+            "mtime": 1766091591,
+            "path": "usr/share/doc/gcc-13-x86-64-linux-gnu",
+            "sha256": null,
+            "size": 0,
+            "target": "gcc-13-base",
+            "type": "symlink",
+            "uid": 0
+          }
+        ],
+        "sourcePackage": "gcc-13",
+        "sourceVersion": "13.3.0-6ubuntu2~24.04.1",
+        "version": "13.3.0-6ubuntu2~24.04.1"
+      },
+      "gcc-14-base": {
+        "architecture": "amd64",
+        "archive": {
+          "sha256": "b95c172411a7fdae70307cf33a9f5320ba5e056b556454543dd5b679d5ce1c4f",
+          "size": 51014,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/gcc-14/gcc-14-base_14.2.0-4ubuntu2~24.04.1_amd64.deb"
+        },
+        "controlIndexSha256": "71b7855fce2268aa57fef884c5a35547eaae715854d4c5a430f017ae7479888e",
+        "copyright": {
+          "commonReferences": [
+            "Artistic",
+            "GFDL-1.2",
+            "GPL",
+            "GPL-3",
+            "LGPL"
+          ],
+          "member": {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1766093810,
+            "path": "usr/share/doc/gcc-14-base/copyright",
+            "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79",
+            "size": 69004,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          },
+          "noticePath": "notices/ubuntu/gcc-14-base-copyright.txt",
+          "package": "gcc-14-base"
+        },
+        "dataIndexSha256": "4241b15834c3bbfa7c93ec5521d542c98034dd00f70535261a29332b3ac5768d",
+        "documentationPackages": [],
+        "ownedDocumentation": [
+          {
+            "gid": 0,
+            "mode": 493,
+            "mtime": 1766093810,
+            "path": "usr/share/doc/gcc-14-base",
+            "sha256": null,
+            "size": 0,
+            "target": null,
+            "type": "directory",
+            "uid": 0
+          },
+          {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1766093810,
+            "path": "usr/share/doc/gcc-14-base/copyright",
+            "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79",
+            "size": 69004,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          }
+        ],
+        "sourcePackage": "gcc-14",
+        "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+        "version": "14.2.0-4ubuntu2~24.04.1"
+      },
+      "libbinutils": {
+        "architecture": "amd64",
+        "archive": {
+          "sha256": "064dce00ce94e1fc2d33779cb0071088f4c8aac79e85345f2e78a020f7d14699",
+          "size": 576834,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/b/binutils/libbinutils_2.42-4ubuntu2.10_amd64.deb"
+        },
+        "controlIndexSha256": "f58c6ba722ba82f8be625a035ba9da4285895e93d75ec2b5cd8190542cab67a2",
+        "copyright": {
+          "commonReferences": [
+            "GFDL",
+            "GPL",
+            "LGPL"
+          ],
+          "member": {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1770671008,
+            "path": "usr/share/doc/binutils-common/copyright",
+            "sha256": "a81bdd422c2c015deca84bf6ad249bf0d7d19885fc01d1894463291b0b7313e1",
+            "size": 1795,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          },
+          "noticePath": "notices/ubuntu/binutils-common-copyright.txt",
+          "package": "binutils-common"
+        },
+        "dataIndexSha256": "958655621a63b69f600cf179d36b505f826e78f37b1b02e26460f75192a8979c",
+        "documentationPackages": [
+          "binutils-common"
+        ],
+        "ownedDocumentation": [
+          {
+            "gid": 0,
+            "mode": 511,
+            "mtime": 1770671008,
+            "path": "usr/share/doc/libbinutils",
+            "sha256": null,
+            "size": 0,
+            "target": "binutils-common",
+            "type": "symlink",
+            "uid": 0
+          }
+        ],
+        "sourcePackage": "binutils",
+        "sourceVersion": "2.42-4ubuntu2.10",
+        "version": "2.42-4ubuntu2.10"
+      },
+      "libc-bin": {
+        "architecture": "amd64",
+        "archive": {
+          "sha256": "64625a2e1b51e736c71f4916268c496278bbc789b1b189d1621607a33f455473",
+          "size": 681710,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260901T000000Z/pool/main/g/glibc/libc-bin_2.39-0ubuntu8.8_amd64.deb"
+        },
+        "controlIndexSha256": "07b6559b7bfbe46482e62b3b4d9dac7ad36e5d5e66fc887f3c94642a45e5e8ab",
+        "copyright": {
+          "commonReferences": [
+            "GFDL-1.3",
+            "GPL-2",
+            "LGPL-2.1"
+          ],
+          "member": {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1721983946,
+            "path": "usr/share/doc/libc-bin/copyright",
+            "sha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265",
+            "size": 26462,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          },
+          "noticePath": "notices/ubuntu/libc6-copyright.txt",
+          "package": "libc-bin"
+        },
+        "dataIndexSha256": "5872994171f0135a1f303cbae5fac7c3ed007cdc95502ebfdd3129a91e0ce1ff",
+        "documentationPackages": [],
+        "ownedDocumentation": [
+          {
+            "gid": 0,
+            "mode": 493,
+            "mtime": 1784827093,
+            "path": "usr/share/doc/libc-bin",
+            "sha256": null,
+            "size": 0,
+            "target": null,
+            "type": "directory",
+            "uid": 0
+          },
+          {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1721983946,
+            "path": "usr/share/doc/libc-bin/copyright",
+            "sha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265",
+            "size": 26462,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          }
+        ],
+        "sourcePackage": "glibc",
+        "sourceVersion": "2.39-0ubuntu8.8",
+        "version": "2.39-0ubuntu8.8"
+      },
+      "libc6": {
+        "architecture": "amd64",
+        "archive": {
+          "sha256": "3b8d5391b6b484a4c81fd000b6064885ad967ec3cb966bc57603f3fb3ebf0ed5",
+          "size": 3262434,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260901T000000Z/pool/main/g/glibc/libc6_2.39-0ubuntu8.8_amd64.deb"
+        },
+        "controlIndexSha256": "d4fa859c73eecc58544d66bfa6901104bbd6332ef976ba06b8b602d4bec2738c",
+        "copyright": {
+          "commonReferences": [
+            "GFDL-1.3",
+            "GPL-2",
+            "LGPL-2.1"
+          ],
+          "member": {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1721983946,
+            "path": "usr/share/doc/libc6/copyright",
+            "sha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265",
+            "size": 26462,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          },
+          "noticePath": "notices/ubuntu/libc6-copyright.txt",
+          "package": "libc6"
+        },
+        "dataIndexSha256": "cfe529bbdb66476aea4c44145a5cf8a5ff8cb669ed518f41a1314bbfbca53496",
+        "documentationPackages": [],
+        "ownedDocumentation": [
+          {
+            "gid": 0,
+            "mode": 493,
+            "mtime": 1784827093,
+            "path": "usr/share/doc/libc6",
+            "sha256": null,
+            "size": 0,
+            "target": null,
+            "type": "directory",
+            "uid": 0
+          },
+          {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1721983946,
+            "path": "usr/share/doc/libc6/copyright",
+            "sha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265",
+            "size": 26462,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          }
+        ],
+        "sourcePackage": "glibc",
+        "sourceVersion": "2.39-0ubuntu8.8",
+        "version": "2.39-0ubuntu8.8"
+      },
+      "libc6-dev": {
+        "architecture": "amd64",
+        "archive": {
+          "sha256": "bb8741966e7c1d2e2c0b84bb311717a0908fb563d9b2247b7212710e3cd88b94",
+          "size": 2125374,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260901T000000Z/pool/main/g/glibc/libc6-dev_2.39-0ubuntu8.8_amd64.deb"
+        },
+        "controlIndexSha256": "9702dff95222e3b128cec00d91859cd51baad0a3847ee4c344caa44872c7c4c5",
+        "copyright": {
+          "commonReferences": [
+            "GFDL-1.3",
+            "GPL-2",
+            "LGPL-2.1"
+          ],
+          "member": {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1721983946,
+            "path": "usr/share/doc/libc6-dev/copyright",
+            "sha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265",
+            "size": 26462,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          },
+          "noticePath": "notices/ubuntu/libc6-copyright.txt",
+          "package": "libc6-dev"
+        },
+        "dataIndexSha256": "f28105360a806a00a26ccefd634e30316cc5cceb106e2b6b8f222712998fe322",
+        "documentationPackages": [],
+        "ownedDocumentation": [
+          {
+            "gid": 0,
+            "mode": 493,
+            "mtime": 1784827093,
+            "path": "usr/share/doc/libc6-dev",
+            "sha256": null,
+            "size": 0,
+            "target": null,
+            "type": "directory",
+            "uid": 0
+          },
+          {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1721983946,
+            "path": "usr/share/doc/libc6-dev/copyright",
+            "sha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265",
+            "size": 26462,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          }
+        ],
+        "sourcePackage": "glibc",
+        "sourceVersion": "2.39-0ubuntu8.8",
+        "version": "2.39-0ubuntu8.8"
+      },
+      "libgcc-13-dev": {
+        "architecture": "amd64",
+        "archive": {
+          "sha256": "cd689db2691edaa10f37329307292796bb599e722e0505c79e14caaa1fe9a93a",
+          "size": 2680642,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/gcc-13/libgcc-13-dev_13.3.0-6ubuntu2~24.04.1_amd64.deb"
+        },
+        "controlIndexSha256": "f6e443b7fb0afe150d9da4c70c1a05cb1e116b913a42763462d402ce20d09087",
+        "copyright": {
+          "commonReferences": [
+            "Artistic",
+            "GFDL-1.2",
+            "GPL",
+            "GPL-2",
+            "GPL-3",
+            "LGPL"
+          ],
+          "member": {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1766091591,
+            "path": "usr/share/doc/gcc-13-base/copyright",
+            "sha256": "08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5",
+            "size": 69100,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          },
+          "noticePath": "notices/ubuntu/gcc-13-base-copyright.txt",
+          "package": "gcc-13-base"
+        },
+        "dataIndexSha256": "3fc874665829fb97faeaeb25990f7440a861cba23ec83ffbc9a6ff37d095fcfe",
+        "documentationPackages": [
+          "gcc-13-base"
+        ],
+        "ownedDocumentation": [
+          {
+            "gid": 0,
+            "mode": 511,
+            "mtime": 1766091591,
+            "path": "usr/share/doc/libgcc-13-dev",
+            "sha256": null,
+            "size": 0,
+            "target": "gcc-13-base",
+            "type": "symlink",
+            "uid": 0
+          }
+        ],
+        "sourcePackage": "gcc-13",
+        "sourceVersion": "13.3.0-6ubuntu2~24.04.1",
+        "version": "13.3.0-6ubuntu2~24.04.1"
+      },
+      "libgcc-s1": {
+        "architecture": "amd64",
+        "archive": {
+          "sha256": "aa7fadbe33b78bcf99885318040601c550c208929565b179891d9a3cc2aa68cd",
+          "size": 78392,
+          "url": "https://snapshot.ubuntu.com/ubuntu/20260916T000000Z/pool/main/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_amd64.deb"
+        },
+        "controlIndexSha256": "df3184957727a12b860f789874b7cb0d636553e259d11d27431f3ac8b8b38fc8",
+        "copyright": {
+          "commonReferences": [
+            "Artistic",
+            "GFDL-1.2",
+            "GPL",
+            "GPL-3",
+            "LGPL"
+          ],
+          "member": {
+            "gid": 0,
+            "mode": 420,
+            "mtime": 1766093810,
+            "path": "usr/share/doc/gcc-14-base/copyright",
+            "sha256": "20390f8a6f3b1e4d7cb45dd8652dabb259bbef688cbad839bcdb0b9ba7252f79",
+            "size": 69004,
+            "target": null,
+            "type": "regular",
+            "uid": 0
+          },
+          "noticePath": "notices/ubuntu/gcc-14-base-copyright.txt",
+          "package": "gcc-14-base"
+        },
+        "dataIndexSha256": "fbc65988051824bc4d2d32397f5fefc7818478be695956493812c48f82646c33",
+        "documentationPackages": [
+          "gcc-14-base"
+        ],
+        "ownedDocumentation": [
+          {
+            "gid": 0,
+            "mode": 511,
+            "mtime": 1766093810,
+            "path": "usr/share/doc/libgcc-s1",
+            "sha256": null,
+            "size": 0,
+            "target": "gcc-14-base",
+            "type": "symlink",
+            "uid": 0
+          }
+        ],
+        "sourcePackage": "gcc-14",
+        "sourceVersion": "14.2.0-4ubuntu2~24.04.1",
+        "version": "14.2.0-4ubuntu2~24.04.1"
+      }
+    }
+  }
+}

@@ -1,8 +1,8 @@
-name: Ubuntu publisher and package lifecycle verification
+name: Installed passive runtime verification
 
 on:
   push:
-    branches: [verify/desktop-ubuntu-publication]
+    branches: [verify/desktop-installed-passive]
     paths:
       - desktop/**
       - src/mobile_release/**
@@ -14,40 +14,43 @@ permissions:
   actions: read
 
 concurrency:
-  group: desktop-ubuntu-publication-${{ github.ref }}
+  group: desktop-installed-passive-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publisher-helpers:
+  compile:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    env:
+      MRK_INSTALLED_CASE: compile
+      MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+      MRK_UBUNTU_PUBLICATION_VERIFY: '1'
+    outputs:
+      candidate_roster_sha256: ${{ steps.compile.outputs.candidate_roster_sha256 }}
+      candidate_artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      candidate_producer_attempt: ${{ steps.compile.outputs.candidate_producer_attempt }}
     steps:
-      - name: Require exact disposable verification route
+      - name: Require the fixed disposable compile route
         shell: bash
         env:
           HOSTING: ${{ runner.environment }}
-          EVENT_AFTER: ${{ github.event.after }}
         run: |
           set -euo pipefail
           [[ "$HOSTING" == github-hosted && "$GITHUB_EVENT_NAME" == push ]]
-          [[ "$GITHUB_REF" == refs/heads/verify/desktop-ubuntu-publication ]]
-          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$EVENT_AFTER" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-installed-passive ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
       - name: Check out exact reviewed source without credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Prepare one bounded package lifecycle check
+      - name: Prepare a fresh bounded compiler owner
         id: prepare
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
-          MRK_UBUNTU_PUBLICATION_VERIFY: '1'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py prepare
-      # The token is confined to this fixed, read-only artifact transport.
-      # The driver validates every admitted member before any compilation/use.
-      - name: Download the exact accepted runtime preparation as DATA
+      - name: Download the exact accepted A runtime as DATA
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
@@ -56,18 +59,106 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ steps.prepare.outputs.root }}/work/admitted-a
           merge-multiple: true
-      - name: Compile once and verify the fixed publisher package lifecycle
-        id: verify
+      - name: Compile the feature-off candidate once without executing it
+        id: compile
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
-          MRK_UBUNTU_PUBLICATION_VERIFY: '1'
           MRK_UBUNTU_PUBLICATION_ROOT: ${{ steps.prepare.outputs.root }}
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
-          # Independently reviewed entry bytes; verified before root imports.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'c865b205b91787a61ad9a81c22b9b946650bfc732a182ff33ebbaa1fee47e7fa'
+          # Exact independently reviewed installed lifecycle entry.
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a0de723ceeda7eb34084e52d5aa34dced8f2b1cd57a0cbdc116b133b2ac0e3f4'
+        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-compile
+      - name: Retain original compiler evidence and candidate
+        id: upload
+        if: always() && steps.prepare.outputs.root != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-installed-compile-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.prepare.outputs.root }}/public
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+
+  native:
+    needs: compile
+    name: installed-${{ matrix.case }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        case: [positive, refuse-writable, refuse-pth]
+    env:
+      MRK_INSTALLED_CASE: ${{ matrix.case }}
+      MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+      MRK_UBUNTU_PUBLICATION_VERIFY: '1'
+    steps:
+      - name: Require the fixed disposable native route
+        shell: bash
+        env:
+          HOSTING: ${{ runner.environment }}
+          MRK_INSTALLED_CANDIDATE_ARTIFACT_ID: ${{ needs.compile.outputs.candidate_artifact_id }}
+          MRK_INSTALLED_CANDIDATE_ROSTER_SHA256: ${{ needs.compile.outputs.candidate_roster_sha256 }}
+          MRK_INSTALLED_CANDIDATE_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.candidate_producer_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$HOSTING" == github-hosted && "$GITHUB_EVENT_NAME" == push ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-installed-passive ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
+          case "$MRK_INSTALLED_CASE" in positive|refuse-writable|refuse-pth) ;; *) exit 1 ;; esac
+          /usr/bin/python3.12 -I -S -B - <<'PY'
+          import os, re
+          values = [os.environ.get(name, '') for name in (
+              'MRK_INSTALLED_CANDIDATE_ARTIFACT_ID', 'MRK_INSTALLED_CANDIDATE_PRODUCER_ATTEMPT', 'GITHUB_RUN_ATTEMPT')]
+          if not all(re.fullmatch(r'[1-9][0-9]{0,19}', value) for value in values):
+              raise SystemExit('Missing or malformed original compiler artifact/attempt output')
+          if int(values[1]) > int(values[2]) or not re.fullmatch(r'[0-9a-f]{64}', os.environ.get('MRK_INSTALLED_CANDIDATE_ROSTER_SHA256', '')):
+              raise SystemExit('Original compiler roster/producer attempt differs')
+          PY
+      - name: Check out exact reviewed source without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prepare a fresh bounded native owner
+        id: prepare
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py prepare
+      - name: Download this run's exact original compiled candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          repository: Apdelrahman1911/mobile-release-kit
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ needs.compile.outputs.candidate_artifact_id }}
+          github-token: ${{ github.token }}
+          path: ${{ steps.prepare.outputs.root }}/work/admitted-candidate
+          merge-multiple: true
+      - name: Download independently accepted U packages and original evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          repository: Apdelrahman1911/mobile-release-kit
+          # Independently accepted U originals; full artifact membership is verified.
+          run-id: '35533243674'
+          artifact-ids: '10611313562'
+          github-token: ${{ github.token }}
+          path: ${{ steps.prepare.outputs.root }}/work/admitted-u
+          merge-multiple: true
+      - name: Verify only the fixed installed case with original finality
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_UBUNTU_PUBLICATION_ROOT: ${{ steps.prepare.outputs.root }}
+          MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
+          MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
+          MRK_INSTALLED_CANDIDATE_ROSTER_SHA256: ${{ needs.compile.outputs.candidate_roster_sha256 }}
+          MRK_INSTALLED_CANDIDATE_ARTIFACT_ID: ${{ needs.compile.outputs.candidate_artifact_id }}
+          MRK_INSTALLED_CANDIDATE_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.candidate_producer_attempt }}
+          # Same independently reviewed installed lifecycle entry.
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a0de723ceeda7eb34084e52d5aa34dced8f2b1cd57a0cbdc116b133b2ac0e3f4'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path
@@ -109,12 +200,12 @@ jobs:
             write(r/'entry.py',raw); write(r/'private/handoff.json',control)
             write(r/'private/bootstrap-pins.txt',(entry_sha+'\n'+request_sha+'\n').encode('ascii'))
             os.execv('/usr/bin/python3.12',['/usr/bin/python3.12','-I','-S','-B',str(r/'entry.py'),'unit-start'])
-        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py
-      - name: Retain original public package lifecycle evidence
+        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed
+      - name: Retain only original public evidence for this case
         if: always() && steps.prepare.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: desktop-ubuntu-publisher-${{ github.run_id }}-${{ github.run_attempt }}
+          name: desktop-installed-${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.prepare.outputs.root }}/public
           if-no-files-found: error
           retention-days: 14

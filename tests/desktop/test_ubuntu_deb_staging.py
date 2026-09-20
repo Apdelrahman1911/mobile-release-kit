@@ -84,6 +84,7 @@ class DebianStaging(unittest.TestCase):
         self.assertFalse(result["qualified"])
         root = self.args.output
         self.assertFalse((root / "opt").exists())
+        self.assertFalse((root / "var").exists())
         prefix = root / "usr/lib/mobile-release-kit/runtime-input" / S.TARGET / self.args.manifest_sha256
         for row in self.records(self.args.runtime):
             copied = prefix / row["path"]

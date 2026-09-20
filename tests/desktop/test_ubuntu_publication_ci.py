@@ -51,6 +51,66 @@ def elf_data(extra_tag=None, *, definitions=False):
     return bytes(raw)
 
 
+def runtime_elf_data(path, *, runpath=None):
+    """Structural RUNPATH fixture only; no executable body and never launched."""
+    raw = bytearray(elf_data())
+    strings = b"\0libc.so.6\0GLIBC_2.34\0"
+    soname, wanted = S.RUNTIME_ELF[path]
+    offset = len(strings)
+    strings += (wanted if runpath is None else runpath).encode("ascii") + b"\0"
+    dynamic = [(1, 1), (5, 1024), (10, 0), (0x6ffffffe, 1152), (0x6fffffff, 1), (29, offset)]
+    if soname is not None:
+        dynamic.append((14, len(strings)))
+        strings += soname.encode("ascii") + b"\0"
+        struct.pack_into("<I", raw, 64 + 56, 0)  # Private DSO has no interpreter.
+    dynamic[2] = (10, len(strings))
+    dynamic.append((0, 0))
+    struct.pack_into("<Q", raw, 64 + 112 + 32, len(dynamic) * 16)
+    struct.pack_into("<Q", raw, 64 + 112 + 40, len(dynamic) * 16)
+    raw[1024:1024 + len(strings)] = strings
+    for index, pair in enumerate(dynamic):
+        struct.pack_into("<qQ", raw, 640 + 16 * index, *pair)
+    return bytes(raw)
+
+
+def candidate_data(work, change=None):
+    """Transport/correspondence DATA, with ELF parsing mocked by its caller."""
+    artifact = work / "admitted-candidate"
+    artifact.mkdir()
+    source, target, sha = Path("/source"), Path("/target"), "a" * 40
+    executable = target / S.TARGET / "debug/deps/mobile_release_desktop-0123456789abcdef"
+    body = b"inert candidate transport DATA; not an ELF executable"
+    pin = {"size": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+    elf = {"interpreter": "/lib64/ld-linux-x86-64.so.2", "needed": ["libc.so.6"], "soname": None}
+    output = {"file": {"path": "/old/public/candidate", **pin}, "elf": elf, "objects": ["ld-linux-x86-64.so.2", "libc.so.6"]}
+    compiler = {"sourceSha": sha, "runId": "10", "attempt": "1", "features": [], "source": str(source), "target": str(target),
+                "manifestSha256": S.C.CONVENTIONAL_SMOKE_INPUTS["manifestSha256"], "protocolSha256": S.C.CONVENTIONAL_SMOKE_INPUTS["protocolSha256"],
+                "originalArtifacts": {"candidate": {"path": str(executable), **pin, "identity": [1, 1, 0o100555, 1, len(body), 0, 0, 1001, 1001]}},
+                "exportedArtifacts": {"candidate": {"path": "/old/public/candidate", **pin, "identity": [1, 2, 0o100555, 1, len(body), 0, 0, 1001, 1001]}},
+                "nativeInputs": {"outputs": {"candidate": output}}}
+    message = {"reason": "compiler-artifact", "executable": str(executable), "fresh": False, "features": [],
+               "manifest_path": str(source / "desktop/src-tauri/Cargo.toml"),
+               "target": {"kind": ["lib"], "name": "mobile_release_desktop", "src_path": str(source / "desktop/src-tauri/src/lib.rs")},
+               "profile": {"test": True, "debug_assertions": True, "opt_level": "0"}}
+    result = {"sourceSha": sha, "runId": "10", "attempt": "1", "features": [], "compilations": ["candidate"], "candidateExecuted": False,
+              "supplierRebuilt": False, "helper11Rerun": False, "qualified": False,
+              "commands": [{"phase": "candidate-compile", "exitCode": 0,
+                            "argv": S.compile_argv("/tools/cargo", source, target, library=True, candidate=True)}]}
+    graph = {"manifestSha256": compiler["manifestSha256"], "protocolSha256": compiler["protocolSha256"], "candidate": output}
+    if change is not None:
+        change(compiler, result, graph, message)
+    contents = {"candidate": body, "compiler.json": S.D.canonical(compiler), "candidate-native.json": S.D.canonical(graph),
+                "candidate-compile.stdout": S.D.canonical(message) + S.D.canonical({"reason": "build-finished", "success": True}),
+                "source.json": S.D.canonical({"sourceSha": sha}), "result.json": S.D.canonical(result)}
+    for name, raw in contents.items():
+        (artifact / name).write_bytes(raw)
+    rows = [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()} for name, raw in sorted(contents.items())]
+    raw = S.D.canonical({"sourceSha": sha, "runId": "10", "attempt": "1", "files": rows})
+    (artifact / "candidate-roster.json").write_bytes(raw)
+    return {"GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "2", "MRK_INSTALLED_CANDIDATE_PRODUCER_ATTEMPT": "1",
+            "MRK_INSTALLED_CANDIDATE_ARTIFACT_ID": "17", "MRK_INSTALLED_CANDIDATE_ROSTER_SHA256": hashlib.sha256(raw).hexdigest()}, elf
+
+
 def package_rows(files):
     rows = {".": {"type": "directory", "mode": 0o755}}
     for name, raw in files.items():
@@ -93,6 +153,70 @@ def package_data(data_files, control_files, *, mutate=None, trailing=False, tar_
 
 
 class PublisherCI(unittest.TestCase):
+    def test_ubuntu_supplier_notice_inventory_and_exact_packages(self):
+        root = SOURCE / "desktop/packaging/debian/native-notices"
+        raw = S.D.read(root / "inputs.json", 1 << 20)
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), S.NOTICE_INPUTS_SHA256)
+        admitted = S.D.decode(raw, 1 << 20)
+        rows = S.D.records(admitted["files"])
+        S.C.conventional_files(S.D, root, sorted(
+            [*rows.values(), S.D.file_record(root / "inputs.json")], key=lambda row: row["path"]))
+        real_open = S.D._open
+
+        def notice_only(path, limit):
+            self.assertTrue(path.is_relative_to(root), "Notice lookup touched live host files")
+            return real_open(path, limit)
+
+        observed = {}
+        with patch.object(S.D, "_open", side_effect=notice_only), \
+             patch.object(S, "protected_host_file", side_effect=AssertionError("Live OS notice lookup")):
+            for name, expected in admitted["ubuntu"]["packages"].items():
+                actual = {key: expected[key] for key in ("version", "architecture", "sourcePackage", "sourceVersion")}
+                actual["binaryPackage"] = name + ":amd64"
+                owned = {"/" + row["path"] for row in expected["ownedDocumentation"]}
+                observed[name] = S.ubuntu_package_notice(admitted, rows, root, actual, owned)
+                self.assertEqual(observed[name]["source"], "reviewed-ubuntu-package-member-data")
+                self.assertEqual(observed[name]["packageArchive"], expected["archive"])
+        self.assertEqual(len(observed), 11)
+        self.assertEqual(observed["gcc-13-x86-64-linux-gnu"]["documentationPackages"], ["gcc-13-base"])
+        self.assertEqual(observed["libgcc-s1"]["documentationPackages"], ["gcc-14-base"])
+        self.assertEqual(observed["binutils-x86-64-linux-gnu"]["documentationPackages"], ["libbinutils", "binutils-common"])
+        self.assertEqual(observed["libbinutils"]["documentationPackages"], ["binutils-common"])
+        self.assertEqual(observed["libc6"]["documentationPackages"], [])
+        for alias, target in (("GPL", "GPL-3"), ("LGPL", "LGPL-3"), ("GFDL", "GFDL-1.3")):
+            row = admitted["ubuntu"]["commonLicenses"][alias]
+            self.assertEqual(row["alias"]["target"], target)
+            self.assertEqual(row["member"]["path"], "usr/share/common-licenses/" + target)
+
+    def test_ubuntu_supplier_notices_refuse_tuple_roster_reference_and_byte_changes(self):
+        root = SOURCE / "desktop/packaging/debian/native-notices"
+        admitted = S.D.decode(S.D.read(root / "inputs.json", 1 << 20), 1 << 20)
+        rows = S.D.records(admitted["files"])
+        name = "gcc-13-x86-64-linux-gnu"
+        expected = admitted["ubuntu"]["packages"][name]
+        actual = {key: expected[key] for key in ("version", "architecture", "sourcePackage", "sourceVersion")}
+        actual["binaryPackage"] = name
+        owned = {"/" + row["path"] for row in expected["ownedDocumentation"]}
+        with patch.object(S, "protected_host_file", side_effect=AssertionError("Live OS notice lookup")):
+            for key in ("version", "architecture", "sourcePackage", "sourceVersion"):
+                with self.subTest(changed=key), self.assertRaisesRegex(S.D.Refused, "package tuple differs"):
+                    S.ubuntu_package_notice(admitted, rows, root, {**actual, key: "other"}, owned)
+            with self.assertRaisesRegex(S.D.Refused, "No reviewed Ubuntu notice mapping"):
+                S.ubuntu_package_notice(admitted, rows, root, {**actual, "binaryPackage": "other"}, owned)
+            with self.assertRaisesRegex(S.D.Refused, "documentation roster differs"):
+                S.ubuntu_package_notice(admitted, rows, root, actual, set())
+            missing = deepcopy(admitted)
+            del missing["ubuntu"]["commonLicenses"]["GPL"]
+            with self.assertRaisesRegex(S.D.Refused, "Missing reviewed Ubuntu common license GPL"):
+                S.ubuntu_package_notice(missing, rows, root, actual, owned)
+            with tempfile.TemporaryDirectory(prefix="mrk-supplier-notice-data-") as name:
+                temporary = Path(name)
+                target = temporary / expected["copyright"]["noticePath"]
+                target.parent.mkdir(parents=True)
+                target.write_bytes(b"Not the original Ubuntu copyright.\n")
+                with self.assertRaisesRegex(S.D.Refused, "original copyright bytes differ"):
+                    S.ubuntu_package_notice(admitted, rows, temporary, actual, owned)
+
     def test_fixed_route_and_compiler_profiles(self):
         env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
                "RUNNER_ARCH": "X64", "GITHUB_EVENT_NAME": "push", "GITHUB_REF": S.REF,
@@ -111,6 +235,86 @@ class PublisherCI(unittest.TestCase):
             self.assertEqual(argv[argv.index("--features") + 1], "ubuntu-runtime-publisher")
             self.assertNotIn("development-runtime", argv)
             self.assertEqual("--no-run" in argv, library)
+
+    def test_installed_compile_is_exact_feature_off_and_preserves_default_profile(self):
+        env = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux", "RUNNER_ARCH": "X64",
+               "GITHUB_EVENT_NAME": "push", "GITHUB_REF": S.INSTALLED_REF, "MRK_UBUNTU_PUBLICATION_VERIFY": "1",
+               "GITHUB_SHA": "a" * 40, "MRK_PUSH_EVENT_AFTER": "a" * 40, "GITHUB_RUN_ID": "10", "GITHUB_RUN_ATTEMPT": "1",
+               "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit"}
+        for case in ("compile", "positive", "refuse-writable", "refuse-pth"):
+            self.assertEqual(S.route({**env, "MRK_INSTALLED_CASE": case}), "a" * 40)
+        for changed in (env, {**env, "MRK_INSTALLED_CASE": "other"}, {**env, "GITHUB_REF": S.REF, "MRK_INSTALLED_CASE": "compile"}):
+            with self.assertRaises(ValueError):
+                S.route(changed)
+        argv = S.compile_argv("/tools/cargo", Path("/source"), Path("/target"), library=True, candidate=True)
+        self.assertNotIn("--features", argv)
+        self.assertEqual(argv[argv.index("--target") + 1], S.TARGET)
+        self.assertEqual(argv[argv.index("--jobs") + 1], "1")
+        self.assertTrue({"--locked", "--offline", "--no-default-features", "--lib", "--no-run"} <= set(argv))
+        with self.assertRaises(ValueError):
+            S.compile_argv("/tools/cargo", Path("/source"), Path("/target"), library=False, candidate=True)
+        with tempfile.TemporaryDirectory(prefix="mrk-candidate-profile-data-") as name:
+            env, _ = candidate_data(Path(name))
+            raw = (Path(name) / "admitted-candidate/candidate-compile.stdout").read_bytes()
+            self.assertEqual(S.compiled_artifact(raw, Path("/source"), Path("/target"), library=True, candidate=True).name,
+                             "mobile_release_desktop-0123456789abcdef")
+            with self.assertRaises(ValueError):
+                S.compiled_artifact(raw, Path("/source"), Path("/target"), library=True)
+            for old, new in ((b'"features":[]', b'"features":["ubuntu-runtime-publisher"]'), (b'"fresh":false', b'"fresh":true'),
+                             (b'/source/desktop/src-tauri/src/lib.rs', b'/different/src/lib.rs')):
+                with self.assertRaises(ValueError):
+                    S.compiled_artifact(raw.replace(old, new), Path("/source"), Path("/target"), library=True, candidate=True)
+
+    def test_installed_candidate_transport_preserves_original_producer_attempt_and_exact_outputs(self):
+        with tempfile.TemporaryDirectory(prefix="mrk-candidate-transport-data-") as name:
+            work = Path(name)
+            env, elf = candidate_data(work)
+            with patch.dict(S.os.environ, env, clear=True), patch.object(S, "elf_dependencies", return_value=elf):
+                row, compiler, _, _, producer, artifact_id = S.installed_candidate(work, "a" * 40)
+                self.assertEqual((producer, artifact_id, compiler["attempt"]), ("1", "17", "1"))
+                self.assertEqual(row["path"], str(work / "admitted-candidate/candidate"))
+                for key, value in (("MRK_INSTALLED_CANDIDATE_PRODUCER_ATTEMPT", "3"), ("MRK_INSTALLED_CANDIDATE_PRODUCER_ATTEMPT", "0"),
+                                   ("MRK_INSTALLED_CANDIDATE_PRODUCER_ATTEMPT", ""), ("MRK_INSTALLED_CANDIDATE_ARTIFACT_ID", ""),
+                                   ("MRK_INSTALLED_CANDIDATE_ARTIFACT_ID", "0"), ("GITHUB_RUN_ID", "11"),
+                                   ("MRK_INSTALLED_CANDIDATE_ROSTER_SHA256", "0" * 64)):
+                    with self.subTest(field=key, value=value), patch.dict(S.os.environ, {key: value}), self.assertRaises(ValueError):
+                        S.installed_candidate(work, "a" * 40)
+                with self.assertRaises(ValueError):
+                    S.installed_candidate(work, "b" * 40)
+                (work / "admitted-candidate/unlisted").write_bytes(b"extra inert DATA")
+                with self.assertRaises(ValueError):
+                    S.installed_candidate(work, "a" * 40)
+        workflow = (SOURCE / S.WORKFLOW).read_text()
+        native = workflow.split("\n  native:\n", 1)[1]
+        guard = native.split("      - name: Check out exact reviewed source", 1)[0]
+        for name in ("MRK_INSTALLED_CANDIDATE_ARTIFACT_ID", "MRK_INSTALLED_CANDIDATE_ROSTER_SHA256", "MRK_INSTALLED_CANDIDATE_PRODUCER_ATTEMPT"):
+            self.assertIn(name, guard)
+        self.assertIn("int(values[1]) > int(values[2])", guard)
+        self.assertIn("[1-9][0-9]{0,19}", guard)
+        self.assertIn("artifact-ids: ${{ needs.compile.outputs.candidate_artifact_id }}", native)
+        self.assertIn("candidate_producer_attempt: ${{ steps.compile.outputs.candidate_producer_attempt }}", workflow)
+        self.assertNotIn("admitted-a", native)
+
+    def test_installed_candidate_rejects_relabelled_profiles_copied_identity_and_executed_results(self):
+        changes = (lambda compiler, result, graph, message: compiler.update(features=S.FEATURES),
+                   lambda compiler, result, graph, message: compiler.update(attempt="2"),
+                   lambda compiler, result, graph, message: result.update(candidateExecuted=True),
+                   lambda compiler, result, graph, message: result.update(helper11Rerun=True),
+                   lambda compiler, result, graph, message: compiler["exportedArtifacts"]["candidate"].update(identity=compiler["originalArtifacts"]["candidate"]["identity"]),
+                   lambda compiler, result, graph, message: compiler["originalArtifacts"]["candidate"].update(path="/elsewhere/candidate"),
+                   lambda compiler, result, graph, message: message.update(fresh=True))
+        for index, change in enumerate(changes):
+            with self.subTest(change=index), tempfile.TemporaryDirectory(prefix="mrk-candidate-refusal-data-") as name:
+                env, elf = candidate_data(Path(name), change)
+                with patch.dict(S.os.environ, env, clear=True), patch.object(S, "elf_dependencies", return_value=elf), self.assertRaises(ValueError):
+                    S.installed_candidate(Path(name), "a" * 40)
+
+    def test_actual_u_gate_is_closed_before_any_artifact_access(self):
+        with patch.object(S, "INSTALLED_U_INPUTS", None), patch.object(S.C, "conventional_files") as files, patch.object(S.D, "read") as read:
+            with self.assertRaisesRegex(ValueError, "independently accepted U"):
+                S.installed_u_inputs(Path("/inert-work"))
+            files.assert_not_called()
+            read.assert_not_called()
 
     def test_only_exact_fresh_compiler_artifact_is_selected(self):
         source, root = Path("/source"), Path("/target")
@@ -146,7 +350,8 @@ class PublisherCI(unittest.TestCase):
             S.test_result(raw, b"unexpected diagnostic")
 
     def test_single_native_selection_requires_one_actual_exact_pass(self):
-        name = "installed_runtime::tests::kernel_scope_is_reviewed_ubuntu"
+        name = "installed_runtime::pure_tests::kernel_scope_is_reviewed_ubuntu"
+        self.assertEqual(S.KERNEL_SELECTOR, name)
         raw = ("running 1 test\n"
                f"test {name} ... ok\n"
                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
@@ -178,6 +383,78 @@ class PublisherCI(unittest.TestCase):
         struct.pack_into("<Q", outside, 640 + 16 + 8, 1 << 60)
         with self.assertRaises(ValueError):
             S.elf_dependencies(bytes(outside))
+
+    def test_private_runpath_is_allowed_only_for_three_exact_a_objects(self):
+        for path, (soname, runpath) in S.RUNTIME_ELF.items():
+            raw = runtime_elf_data(path)
+            parsed = S.elf_dependencies(raw, runtime_path=path)
+            self.assertEqual((parsed["soname"], parsed["runpath"]), (soname, runpath))
+            with self.assertRaises(ValueError):
+                S.elf_dependencies(raw)
+            for different in ("$ORIGIN:/tmp", "/usr/lib", "", "$ORIGIN/../../lib"):
+                with self.subTest(path=path, runpath=different), self.assertRaises(ValueError):
+                    S.elf_dependencies(runtime_elf_data(path, runpath=different), runtime_path=path)
+            with self.assertRaises(ValueError):
+                S.elf_dependencies(raw, runtime_path="python/lib/unreviewed.so")
+        with self.assertRaises(ValueError):
+            S.elf_dependencies(elf_data(), runtime_path="python/bin/python3")
+
+    def test_complete_a_candidate_graph_rejects_missing_versions_and_search_overrides(self):
+        def elf(needed, soname=None):
+            return {"needed": needed, "soname": soname, "versionNeeds": {}, "versionDefinitions": ["GLIBC_2.34"]}
+        os_objects = {"ld-linux-x86-64.so.2": elf([], "ld-linux-x86-64.so.2"),
+                      "libc.so.6": elf(["ld-linux-x86-64.so.2"], "libc.so.6"),
+                      "libm.so.6": elf(["libc.so.6"], "libm.so.6"),
+                      "libgcc_s.so.1": elf(["libc.so.6"], "libgcc_s.so.1")}
+        objects = {"python/bin/python3": elf(["libssl.so.3", "libcrypto.so.3", "libm.so.6", "libc.so.6"]),
+                   "python/lib/libssl.so.3": elf(["libcrypto.so.3", "libc.so.6"], "libssl.so.3"),
+                   "python/lib/libcrypto.so.3": elf(["libc.so.6"], "libcrypto.so.3")}
+        native = {"sharedObjects": {name: {"elf": row} for name, row in os_objects.items()},
+                  "outputs": {"candidate": {"elf": elf(["libgcc_s.so.1", "libc.so.6"]),
+                                               "objects": ["ld-linux-x86-64.so.2", "libc.so.6", "libgcc_s.so.1"]}}}
+        rows = {name: {"path": name, "size": 1, "sha256": "a" * 64} for name in S.RUNTIME_ELF}
+
+        def run(records, dependencies=native, selected=objects):
+            with patch.object(S.D, "bound"), patch.object(S.D, "read", return_value=b"inert ELF DATA"), \
+                 patch.object(S, "elf_dependencies", side_effect=lambda raw, runtime_path: selected[runtime_path]):
+                return S.installed_graph(Path("/inert-runtime"), records, dependencies)
+
+        graph = run(rows)
+        self.assertEqual(graph["osNames"], sorted(os_objects))
+        self.assertEqual(set(graph["runtimeObjects"]), {"ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6", "libssl.so.3", "libcrypto.so.3"})
+        for extra in ("python/pyvenv.cfg", "python/bin/python3._pth", "pybuilddir.txt", "python/lib/libgcc_s.so.1",
+                      "python/lib/glibc-hwcaps/x86-64-v3/libcrypto.so.3", "python/lib/extra.so"):
+            with self.subTest(extra=extra), self.assertRaises(ValueError):
+                run({**rows, extra: {"path": extra, "size": 0, "sha256": "b" * 64}})
+        missing = deepcopy(native)
+        del missing["sharedObjects"]["libgcc_s.so.1"]
+        with self.assertRaises(ValueError):
+            run(rows, missing)
+        changed = deepcopy(objects)
+        changed["python/lib/libssl.so.3"]["versionNeeds"] = {"libc.so.6": ["GLIBC_UNAVAILABLE"]}
+        with self.assertRaises(ValueError):
+            run(rows, selected=changed)
+        changed = deepcopy(native)
+        changed["outputs"]["candidate"]["objects"].remove("libgcc_s.so.1")
+        with self.assertRaises(ValueError):
+            run(rows, changed)
+
+    def test_ldconfig_tool_must_be_static_native_elf_without_loader_edges(self):
+        raw = bytearray(256)
+        raw[:16] = b"\x7fELF\x02\x01\x01" + b"\0" * 9
+        struct.pack_into("<HHIQQQIHHHHHH", raw, 16, 2, 62, 1, 0, 64, 0, 0, 64, 56, 1, 0, 0, 0)
+        struct.pack_into("<IIQQQQQQ", raw, 64, 1, 4, 0, 0, 0, len(raw), len(raw), 4096)
+        S.static_ldconfig(bytes(raw))
+        for data in (b"#!/bin/sh\n", elf_data()):
+            with self.assertRaises(ValueError):
+                S.static_ldconfig(data)
+        for tag in (1, 15, 29, 0x6ffffefb, 0x6ffffefc, 0x7ffffffd, 0x7fffffff):
+            changed = bytearray(raw)
+            struct.pack_into("<IIQQQQQQ", changed, 64, 2, 4, 128, 128, 128, 32, 32, 8)
+            struct.pack_into("<qQ", changed, 128, tag, 1)
+            struct.pack_into("<qQ", changed, 144, 0, 0)
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                S.static_ldconfig(bytes(changed))
 
     def test_complete_deb_readback_rejects_changed_unowned_or_hidden_members(self):
         files, controls = {"usr/share/inert": b"DATA"}, {"control": b"Package: inert-fixture\n"}
@@ -216,10 +493,11 @@ class PublisherCI(unittest.TestCase):
             path.write_bytes(package_data(extra, controls))
             with self.assertRaises(ValueError):
                 S.deb_readback(path, expected, expected_control)
-            forbidden = {**files, "opt/unexpected": b"never package published versions"}
-            path.write_bytes(package_data(forbidden, controls))
-            with self.assertRaises(ValueError):
-                S.deb_readback(path, package_rows(forbidden), expected_control)
+            for name in ("opt/unexpected", "var/lib/mobile-release-kit/versions/unexpected"):
+                forbidden = {**files, name: b"never package published versions"}
+                path.write_bytes(package_data(forbidden, controls))
+                with self.subTest(path=name), self.assertRaises(ValueError):
+                    S.deb_readback(path, package_rows(forbidden), expected_control)
             path.write_bytes(package_data(files, controls, trailing=True))
             with self.assertRaises(ValueError):
                 S.deb_readback(path, expected, expected_control)

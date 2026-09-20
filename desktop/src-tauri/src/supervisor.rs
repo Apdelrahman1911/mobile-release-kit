@@ -8,11 +8,15 @@
 //! After the one cleanup allowance, uncertainty is reported and ownership is
 //! retained; late positive settlement cannot restore successful admission.
 use std::{collections::BTreeMap, future::pending, process::ExitStatus, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
-#[cfg(all(feature = "development-runtime", debug_assertions))]
+#[cfg(any(all(feature = "development-runtime", debug_assertions),
+    all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"))))]
 use std::process::Stdio;
 use serde_json::Value;
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::Child, sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore}, task::JoinHandle};
-#[cfg(all(feature = "development-runtime", debug_assertions))]
+#[cfg(any(all(feature = "development-runtime", debug_assertions),
+    all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"))))]
 use tokio::process::Command;
 use crate::{error::BridgeError, github_connection_protocol::{self as github_protocol, GitHubReadOutcome},
     protocol::{self, Method}, runtime::{RuntimeConfig, VerifiedRuntime}};
@@ -52,6 +56,9 @@ struct Inner {
     owners: Mutex<BTreeMap<u64, Arc<Owner>>>, changed: Notify,
     #[cfg(all(test, feature = "development-runtime"))]
     test: hosted_tests::Hooks,
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    native_test: installed_native_fixture::Hooks,
 }
 struct Owner {
     key: u64, id: String, profile: Profile,
@@ -198,6 +205,15 @@ struct Resources {
     inspection_return: Option<ManagementJoin>, inspection_error: Option<tokio::task::JoinError>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     github_environment: Option<JoinHandle<Result<Option<bool>, ()>>>,
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    native_observation: Option<JoinHandle<Result<Vec<installed_native_fixture::ChildObservation>, ()>>>,
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    native_observation_return: Option<ManagementJoin>,
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    native_snapshots: Vec<installed_native_fixture::ChildObservation>,
     acquisition: Option<JoinHandle<std::io::Result<Child>>>, child: Option<Child>,
     acquisition_return: Option<ManagementJoin>, acquisition_error: Option<tokio::task::JoinError>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -348,6 +364,9 @@ impl Supervisor {
             owners: Mutex::new(BTreeMap::new()), changed: Notify::new(),
             #[cfg(all(test, feature = "development-runtime"))]
             test: hosted_tests::Hooks::default(),
+            #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+                not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+            native_test: installed_native_fixture::Hooks::default(),
         }) }
     }
     pub fn runtime_mode(&self) -> &'static str { self.inner.runtime.mode() }
@@ -733,11 +752,51 @@ fn transfer_passive(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) ->
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-fn spawn_passive_original(runtime: &mut PassiveInstalledRuntime) -> std::io::Result<Child> {
-    // STILL unconditional; only this no-effect stub can record this receipt.
-    // A future OS spawn error must never be interpreted as this no-child proof.
-    runtime.record_closed_spawn_gate();
+struct PreparedPassiveSpawn<'a> {
+    runtime: &'a mut PassiveInstalledRuntime,
+    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    command: Command,
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl<'a> PreparedPassiveSpawn<'a> {
+    fn prepare(runtime: &'a mut PassiveInstalledRuntime, end: Instant, stop: &watch::Receiver<bool>) -> std::io::Result<Self> {
+        let selected = runtime.prepare_once(end, stop)
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Unsupported, "passive installed preparation refused"))?;
+        // All native checks and fixed argument/environment allocations precede
+        // the serialized final owner claim. No pathname/Command-taking adapter.
+        #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+        let command = {
+            let mut command = Command::new(&selected.python);
+            command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
+                .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+            command
+        };
+        #[cfg(not(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"))))]
+        let _ = selected;
+        Ok(Self { runtime,
+            #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+            command,
+        })
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))))]
+fn spawn_passive_original(prepared: PreparedPassiveSpawn<'_>) -> std::io::Result<Child> {
+    // Shipping remains unconditional. Only this no-effect stub has a receipt;
+    // that method is not even compiled into the feature-off candidate.
+    prepared.runtime.record_closed_spawn_gate();
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "packaged runtime execution is not qualified"))
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+fn spawn_passive_original(mut prepared: PreparedPassiveSpawn<'_>) -> std::io::Result<Child> {
+    // Opaque creation errors provide NO no-child/pipe-close proof. The claimed
+    // original stays registered; the existing owner therefore retains Unknown.
+    prepared.command.spawn()
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -745,14 +804,29 @@ fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
     let refused = || std::io::Error::new(std::io::ErrorKind::Unsupported, "passive installed custody is unavailable");
     let mut slots = native.lock().map_err(|_| refused())?;
     let runtime = slots.capability().map_err(|_| refused())?;
-    let owners = lock(&inner.owners); let state = lock(&owner.state);
-    if !passive_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
-        &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
-        return Err(refused());
-    }
-    runtime.claim_once().map_err(|_| refused())?;
-    drop(state); drop(owners);
-    spawn_passive_original(runtime) // No await/callback/IO between final claim and the (closed) creation boundary.
+    let stop = owner.stop.subscribe();
+    let prepared = PreparedPassiveSpawn::prepare(runtime, owner.endpoint(), &stop)?;
+    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    let mut limit = installed_native_fixture::before_claim(inner, owner, &stop)?;
+    // All post-lowering ordinary returns, including a failed final claim, leave
+    // this body through the one checked restoration below. Its guard also
+    // attempts/checks restoration on unwinding, without retrying a failed attempt.
+    let result = (|| {
+        let owners = lock(&inner.owners); let state = lock(&owner.state);
+        if !passive_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+            &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+            return Err(refused());
+        }
+        prepared.runtime.claim_once().map_err(|_| refused())?;
+        drop(state); drop(owners);
+        let result = spawn_passive_original(prepared); // No await/callback/IO between final claim and creation.
+        #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+        { *lock(&inner.native_test.creation) = Some((result.is_ok(), result.as_ref().err().and_then(std::io::Error::raw_os_error))); }
+        result
+    })();
+    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    if let Some(limit) = &mut limit { limit.restore(); }
+    result // Never discard a returned original Child because restoration failed.
 }
 
 async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Owner>) -> bool {
@@ -760,6 +834,8 @@ async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Ow
     { let _ = (resources, inner, owner); true }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     {
+        #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+        if resources.native_observation.is_some() { owner.unknown(inner); return false; }
         let Some(native) = resources.passive.clone() else {
             if passive_selected(owner.profile) { owner.unknown(inner); return false; }
             return true; // Explicitly unselected domain/profile, never a missing required book.
@@ -845,12 +921,12 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         #[cfg(all(test, feature = "development-runtime"))]
         inspection_gate.wait();
         let runtime = match profile {
-            Profile::Passive(_) => {
+            Profile::Passive(_method) => {
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 if passive_selected(profile) {
                     let native = inspection_native.ok_or_else(BridgeError::cleanup_unknown)?;
                     let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-                    return config.resolve_passive_installed(&mut originals, endpoint, &inspection_stop);
+                    return config.resolve_passive_installed(_method, &mut originals, endpoint, &inspection_stop);
                 }
                 config.resolve(endpoint)?
             },
@@ -967,6 +1043,33 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     resources.child = child;
     #[cfg(all(test, feature = "development-runtime"))]
     { lock(&owner.observation).spawned = true; }
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    if passive_selected(profile) && inner.native_test.observes_child() {
+        // Same original Child, retained before the reader starts, and not yet
+        // offered to any wait/reaper. A lost read/close/join retains this slot.
+        let Some(id) = resources.child.as_ref().and_then(Child::id) else {
+            owner.unknown(&inner); return DriverEnd::RetainedUnknown;
+        };
+        let observing_inner = inner.clone();
+        let observing_stop = owner.stop.subscribe();
+        let (release, enter) = oneshot::channel();
+        resources.native_observation_return = Some(ManagementJoin::Pending);
+        resources.native_observation = Some(tokio::task::spawn_blocking(move || {
+            enter.blocking_recv().map_err(|_| ())?;
+            installed_native_fixture::observe_original_child(id, endpoint, observing_stop, &observing_inner)
+        }));
+        let _ = release.send(());
+        let result = join_slot(&mut resources.native_observation).await;
+        resources.native_observation_return = Some(match &result {
+            Ok(_) => ManagementJoin::Returned, Err(error) => ManagementJoin::error(error),
+        });
+        match result {
+            Ok(Ok(snapshots)) => { resources.native_observation.take(); resources.native_snapshots = snapshots; },
+            _ => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; },
+        }
+        if Instant::now() >= endpoint { owner.fail(BridgeError::timeout()); }
+    }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if matches!(profile, Profile::GitHubReadOnly) && inner.test.github_observe_environment.load(Ordering::SeqCst) {
         // Only T4-owner-clear requests this read-only observation. The actual
@@ -1117,11 +1220,266 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     DriverEnd::Ready(result)
 }
 
+// Finite hosted fixtures only. Nothing in this module selects a runtime, grants
+// custody, changes the command, or substitutes for an original join/close.
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+mod installed_native_fixture {
+    use super::*;
+    use std::{fs, io::{Read, Write}, os::unix::fs::{MetadataExt, OpenOptionsExt}, path::{Path, PathBuf}};
+    use rustix::process::{getrlimit, setrlimit, Resource, Rlimit};
+
+    const VERSION: &str = "/var/lib/mobile-release-kit/versions/x86_64-unknown-linux-gnu/e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801";
+    #[derive(Clone, Copy, Default, Eq, PartialEq)]
+    pub(super) enum Case { #[default] None, Observe, Deadline, Shutdown, Emfile, Overlap }
+    #[derive(Default)]
+    pub(super) struct LimitObservation {
+        pub before: Option<Rlimit>, pub lowered: bool, pub restore_attempted: bool, pub restored: bool,
+    }
+    #[derive(Default)]
+    pub(super) struct Hooks {
+        pub case: Mutex<Case>, pub prepared: AtomicBool, pub deadline_crossed: AtomicBool,
+        pub held: AtomicBool, pub creation: Mutex<Option<(bool, Option<i32>)>>,
+        pub limit: Mutex<LimitObservation>,
+    }
+    impl Hooks {
+        fn case(&self) -> Case { *lock(&self.case) }
+        pub(super) fn observes_child(&self) -> bool { matches!(self.case(), Case::Observe | Case::Shutdown | Case::Overlap) }
+    }
+    fn need(value: bool) -> Result<(), ()> { if value { Ok(()) } else { Err(()) } }
+    fn live(end: Instant, stop: &watch::Receiver<bool>) -> bool {
+        Instant::now() < end && !*stop.borrow() && stop.has_changed().is_ok()
+    }
+    fn same_limit(a: &Rlimit, b: &Rlimit) -> bool { a.current == b.current && a.maximum == b.maximum }
+
+    pub(super) struct NofileRestore<'a> { inner: &'a Inner, owner: &'a Arc<Owner>, original: Rlimit, attempted: bool }
+    impl NofileRestore<'_> {
+        pub(super) fn restore(&mut self) {
+            if self.attempted { return; }
+            self.attempted = true; // One explicit attempt, including unwinding; never a retry.
+            let returned = setrlimit(Resource::Nofile, Rlimit { current: self.original.current, maximum: self.original.maximum }).is_ok();
+            let checked = same_limit(&getrlimit(Resource::Nofile), &self.original);
+            { let mut observed = lock(&self.inner.native_test.limit); observed.restore_attempted = true; observed.restored = returned && checked; }
+            if !returned || !checked { self.owner.unknown(self.inner); }
+        }
+    }
+    impl Drop for NofileRestore<'_> { fn drop(&mut self) { self.restore(); } }
+    pub(super) fn before_claim<'a>(inner: &'a Inner, owner: &'a Arc<Owner>, stop: &watch::Receiver<bool>)
+        -> std::io::Result<Option<NofileRestore<'a>>> {
+        inner.native_test.prepared.store(true, Ordering::SeqCst);
+        if inner.native_test.case() == Case::Deadline {
+            // Scheduling in THIS real acquisition borrower, after all native
+            // preparation. The watchdog and original 10s/2s remain untouched.
+            while live(owner.endpoint(), stop) { std::thread::sleep(Duration::from_millis(1)); }
+            inner.native_test.deadline_crossed.store(Instant::now() >= owner.endpoint(), Ordering::SeqCst);
+        }
+        if inner.native_test.case() != Case::Emfile { return Ok(None); }
+        let original = getrlimit(Resource::Nofile);
+        if original.current == Some(0) { return Err(std::io::Error::other("unexpected original descriptor limit")); }
+        lock(&inner.native_test.limit).before = Some(Rlimit { current: original.current, maximum: original.maximum });
+        let mut guard = NofileRestore { inner, owner, original, attempted: false };
+        let lowered = setrlimit(Resource::Nofile, Rlimit { current: Some(0), maximum: guard.original.maximum }).is_ok()
+            && same_limit(&getrlimit(Resource::Nofile), &Rlimit { current: Some(0), maximum: guard.original.maximum });
+        lock(&inner.native_test.limit).lowered = lowered;
+        if !lowered { guard.restore(); return Err(std::io::Error::other("descriptor-limit fixture was not established")); }
+        Ok(Some(guard))
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub(super) struct Mapping { role: String, path: String, device_major: u64, device_minor: u64, inode: u64 }
+    #[derive(Debug, Eq, PartialEq)]
+    pub(super) struct ChildObservation { maps: Vec<Mapping>, environment_clear: bool }
+    fn flags() -> i32 {
+        (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK | rustix::fs::OFlags::CLOEXEC).bits() as i32
+    }
+    fn original_bytes(path: &Path, limit: usize, control: bool) -> Result<Vec<u8>, ()> {
+        let mut original = fs::OpenOptions::new().read(true).custom_flags(flags()).open(path).map_err(|_| ())?;
+        let read = (|| {
+            if control {
+                let st = original.metadata().map_err(|_| ())?;
+                // An old opened pending control inode may become unlinked at
+                // root's atomic release replacement. This is scheduling DATA,
+                // NEVER an exception for a payload or mapped library.
+                need(st.is_file() && st.uid() == 0 && st.gid() == 0 && st.mode() & 0o7777 == 0o444 && st.nlink() <= 1)?;
+            }
+            let mut bytes = Vec::new();
+            (&mut original).take((limit + 1) as u64).read_to_end(&mut bytes).map_err(|_| ())?;
+            need(bytes.len() <= limit)?;
+            Ok(bytes)
+        })();
+        let closed = nix::unistd::close(original).is_ok(); // Exact original, exactly one consuming close.
+        if closed { read } else { Err(()) }
+    }
+    fn hex(value: &str) -> Result<u64, ()> {
+        need(!value.is_empty() && value.len() <= 16 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
+        u64::from_str_radix(value, 16).map_err(|_| ())
+    }
+    fn role(path: &str) -> Option<&'static str> {
+        for (name, suffix) in [("python", "/python/bin/python3"), ("libssl.so.3", "/python/lib/libssl.so.3"),
+            ("libcrypto.so.3", "/python/lib/libcrypto.so.3")] {
+            if path.strip_prefix(VERSION) == Some(suffix) { return Some(name); }
+        }
+        for name in ["ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"] {
+            if path.strip_prefix("/usr/lib/x86_64-linux-gnu/") == Some(name)
+                || path.strip_prefix("/lib/x86_64-linux-gnu/") == Some(name)
+                || name == "ld-linux-x86-64.so.2" && path == "/lib64/ld-linux-x86-64.so.2" { return Some(name); }
+        }
+        None
+    }
+    fn mappings(raw: &[u8]) -> Result<Option<Vec<Mapping>>, ()> {
+        let text = std::str::from_utf8(raw).map_err(|_| ())?;
+        need(text.is_empty() || text.ends_with('\n'))?;
+        let mut found: BTreeMap<&str, (Mapping, bool)> = BTreeMap::new();
+        for (index, line) in text.split_terminator('\n').enumerate() {
+            need(index < 4096 && !line.is_empty())?;
+            let mut rest = line;
+            let mut columns = [""; 5];
+            for column in &mut columns {
+                rest = rest.trim_start_matches([' ', '\t']);
+                let end = rest.find([' ', '\t']).unwrap_or(rest.len());
+                need(end > 0)?; *column = &rest[..end]; rest = &rest[end..];
+            }
+            let (start, end) = columns[0].split_once('-').ok_or(())?;
+            need(hex(start)? < hex(end)?)?;
+            let permissions = columns[1].as_bytes();
+            need(permissions.len() == 4 && matches!(permissions[0], b'r' | b'-') && matches!(permissions[1], b'w' | b'-')
+                && matches!(permissions[2], b'x' | b'-') && matches!(permissions[3], b'p' | b's'))?;
+            let _ = hex(columns[2])?;
+            let (major, minor) = columns[3].split_once(':').ok_or(())?;
+            let (major, minor) = (hex(major)?, hex(minor)?);
+            need(!columns[4].is_empty() && columns[4].len() <= 20 && columns[4].bytes().all(|byte| byte.is_ascii_digit()))?;
+            let inode = columns[4].parse::<u64>().map_err(|_| ())?;
+            let path = rest.trim_start_matches([' ', '\t']); // Opaque pathname, not a sixth whitespace token.
+            let executable = permissions[2] == b'x';
+            if !path.starts_with('/') {
+                need(!executable || matches!(path, "[vdso]" | "[vsyscall]"))?;
+                continue;
+            }
+            let Some(role) = role(path) else { need(!executable)?; continue; };
+            let st = fs::metadata(path).map_err(|_| ())?;
+            need(st.is_file() && st.uid() == 0 && st.gid() == 0 && st.nlink() == 1 && st.mode() & 0o7022 == 0
+                && inode > 0 && inode == st.ino() && major == nix::sys::stat::major(st.dev()) && minor == nix::sys::stat::minor(st.dev()))?;
+            let row = Mapping { role: role.into(), path: path.into(), device_major: major, device_minor: minor, inode };
+            if let Some((previous, code)) = found.get_mut(role) { need(*previous == row)?; *code |= executable; }
+            else { found.insert(role, (row, executable)); }
+        }
+        Ok(if found.len() == 6 && found.values().all(|(_, code)| *code) { Some(found.into_values().map(|(row, _)| row).collect()) } else { None })
+    }
+    fn child_snapshot(id: u32, end: Instant, stop: &watch::Receiver<bool>) -> Result<Option<ChildObservation>, ()> {
+        need(id > 0)?;
+        while live(end, stop) {
+            let raw = original_bytes(Path::new(&format!("/proc/{id}/maps")), 1 << 20, false)?;
+            if let Some(maps) = mappings(&raw)? {
+                let mut environment = original_bytes(Path::new(&format!("/proc/{id}/environ")), 8192, false)?;
+                let clear = environment.last() == Some(&0) && {
+                    let entries = environment[..environment.len() - 1].split(|byte| *byte == 0).collect::<Vec<_>>();
+                    entries.len() == 2 && entries.contains(&b"LANG=C".as_slice()) && entries.contains(&b"LC_ALL=C".as_slice())
+                };
+                environment.fill(0); // No raw environment leaves this original reader.
+                need(clear)?;
+                return Ok(if live(end, stop) { Some(ChildObservation { maps, environment_clear: true }) } else { None });
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok(None)
+    }
+    fn run_number(name: &str) -> String {
+        let value = std::env::var(name).expect("original hosted run binding");
+        assert!(!value.is_empty() && value.len() <= 20 && !value.starts_with('0') && value.bytes().all(|byte| byte.is_ascii_digit()));
+        value
+    }
+    fn controls() -> PathBuf {
+        PathBuf::from(format!("/var/lib/mrk-ubuntu-native-{}-{}/control", run_number("GITHUB_RUN_ID"), run_number("GITHUB_RUN_ATTEMPT")))
+    }
+    fn ready(end: Instant) -> Result<PathBuf, ()> {
+        let root = controls();
+        for parent in root.ancestors() {
+            let st = fs::symlink_metadata(parent).map_err(|_| ())?;
+            need(st.is_dir() && st.uid() == 0 && st.gid() == 0 && st.mode() & 0o7022 == 0)?;
+        }
+        // CLOCK_MONOTONIC first, remaining Instant second: conservative DATA
+        // for root's scheduling budget, never a new deadline for this owner.
+        let clock = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC).map_err(|_| ())?;
+        let seconds = u64::try_from(clock.tv_sec()).map_err(|_| ())?;
+        let nanos = u64::try_from(clock.tv_nsec()).map_err(|_| ())?;
+        need(nanos < 1_000_000_000)?;
+        let remaining = u64::try_from(end.saturating_duration_since(Instant::now()).as_nanos()).map_err(|_| ())?;
+        need(remaining > 0)?;
+        let endpoint = seconds.checked_mul(1_000_000_000).and_then(|n| n.checked_add(nanos)).and_then(|n| n.checked_add(remaining)).ok_or(())?;
+        let bytes = format!("{endpoint}\n");
+        need(bytes.len() <= 32)?;
+        let mut original = fs::OpenOptions::new().write(true).custom_flags(flags()).open(root.join("passive-ready")).map_err(|_| ())?;
+        let written = (|| {
+            let st = original.metadata().map_err(|_| ())?;
+            need(st.is_file() && st.uid() == 0 && st.gid() == rustix::process::getgid().as_raw()
+                && st.mode() & 0o7777 == 0o620 && st.nlink() == 1 && st.len() == 0)?;
+            need(original.write(bytes.as_bytes()).map_err(|_| ())? == bytes.len())
+        })();
+        let closed = nix::unistd::close(original).is_ok();
+        if !closed { return Err(()); }
+        written?;
+        Ok(root.join("passive-release"))
+    }
+    pub(super) fn observe_original_child(id: u32, end: Instant, stop: watch::Receiver<bool>, inner: &Inner)
+        -> Result<Vec<ChildObservation>, ()> {
+        let mut snapshots = Vec::new();
+        let Some(first) = child_snapshot(id, end, &stop)? else { return Ok(snapshots); };
+        snapshots.push(first);
+        match inner.native_test.case() {
+            Case::Shutdown => {
+                inner.native_test.held.store(true, Ordering::SeqCst);
+                inner.changed.notify_waiters();
+                while live(end, &stop) { std::thread::sleep(Duration::from_millis(1)); }
+            },
+            Case::Overlap => {
+                let release = ready(end)?;
+                while live(end, &stop) {
+                    let value = original_bytes(&release, 32, true)?;
+                    if value.as_slice() == b"release\n" {
+                        if let Some(second) = child_snapshot(id, end, &stop)? { snapshots.push(second); }
+                        return Ok(snapshots);
+                    }
+                    need(value.as_slice() == b"pending\n")?;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            },
+            Case::Observe => {},
+            _ => return Err(()),
+        }
+        Ok(snapshots)
+    }
+    pub(super) fn report(snapshots: &[ChildObservation]) {
+        for snapshot in snapshots {
+            assert!(snapshot.environment_clear);
+            let json = serde_json::to_string(&snapshot.maps).expect("bounded child mapping DATA");
+            assert!(json.len() <= 8192);
+            let mut output = std::io::stdout().lock();
+            writeln!(output, "\nMRK_INSTALLED_NATIVE_CHILD={json}").expect("original bounded stdout");
+            output.flush().expect("original stdout flush");
+        }
+    }
+    pub(super) fn routed_supervisor(case: Case) -> Supervisor {
+        assert_eq!(std::env::var("GITHUB_ACTIONS").ok().as_deref(), Some("true"));
+        assert_eq!(std::env::var("RUNNER_ENVIRONMENT").ok().as_deref(), Some("github-hosted"));
+        let source = option_env!("GITHUB_SHA").expect("compiled original source binding");
+        assert!(source.len() == 40 && source.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert_eq!(std::env::var("GITHUB_SHA").ok().as_deref(), Some(source));
+        assert_eq!(option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"), Some("e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801"));
+        assert_eq!(option_env!("MRK_BUNDLED_PROTOCOL_SHA256"), Some("860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"));
+        assert_ne!(rustix::process::getuid().as_raw(), 0);
+        assert_eq!(rustix::process::getuid(), rustix::process::geteuid());
+        let _ = (run_number("GITHUB_RUN_ID"), run_number("GITHUB_RUN_ATTEMPT"));
+        let supervisor = Supervisor::new(RuntimeConfig::installed_passive_candidate_a());
+        *lock(&supervisor.inner.native_test.case) = case;
+        supervisor
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    // Default cases are pure bookkeeping. The one ignored feature-off case
-    // exercises real no-effect owner tasks, not a child or native close.
-    // Genuine child/IO/fault tests remain separately hosted.
+    // Default cases are pure bookkeeping. Ignored native cases require their
+    // separate hosted/installed prerequisites; selection is not qualification.
     use super::*;
     fn inert_owner() -> Owner {
         let (stop, receiver) = watch::channel(false);
@@ -1350,5 +1708,333 @@ mod tests {
         assert!(lock(&owner.permit).is_none());
         assert!(supervisor.can_exit() && !supervisor.disabled() && !supervisor.stopping());
         assert_eq!(supervisor.inner.permits.available_permits(), ACTIVE_LIMIT);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires separately reviewed disposable installed A and OS-loader qualification; source preparation only"]
+    async fn installed_candidate_a_capabilities_and_catalog_retire_originals() {
+        // These are routing/source guards, NOT external loader qualification.
+        // Execute only after that prerequisite and the immutable installation
+        // are separately accepted. No fixture path, permit or fake FD is used.
+        let supervisor = installed_native_fixture::routed_supervisor(installed_native_fixture::Case::Observe);
+        assert_eq!(supervisor.runtime_mode(), "bundled");
+        for method in [Method::Capabilities, Method::Catalog] {
+            let ticket = supervisor.start_passive(method, serde_json::json!({})).expect("original passive owner registration");
+            let owner = ticket.owner.clone();
+            let endpoint = owner.endpoint();
+            // Current-thread executor has not polled any management task yet.
+            let originals = {
+                let resources = owner.resources.try_lock().expect("fresh original resources");
+                let originals = resources.passive.as_ref().expect("original passive slots").clone();
+                assert!(lock(&originals).never_started());
+                assert!(resources.inspection_return.is_none() && resources.acquisition_return.is_none());
+                originals
+            };
+            assert!(lock(&supervisor.inner.owners).get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, &owner)));
+            assert!(lock(&owner.permit).is_some());
+            assert_eq!(supervisor.inner.permits.available_permits(), ACTIVE_LIMIT - 1);
+
+            let result = ticket.wait().await;
+            // Product code consumes driver/watchdog. Join only the SAME final
+            // observer's tail; never abort, retry or replace a failed original.
+            let observer = { owner.observer.lock().await.take() };
+            let Some(mut observer) = observer else {
+                eprintln!("installed passive verification retained: original observer missing");
+                return pending::<()>().await;
+            };
+            if (&mut observer).await.is_err() {
+                *owner.observer.lock().await = Some(observer);
+                eprintln!("installed passive verification retained: original observer failed");
+                return pending::<()>().await;
+            }
+            drop(observer);
+            let value = result.expect("the actual installed passive query must succeed");
+            match method {
+                Method::Capabilities => {
+                    assert_eq!(value["mode"], "read-only-foundation");
+                    let methods = value["methods"].as_array().expect("capabilities roster");
+                    for name in ["capabilities", "catalog", "project.snapshot", "config.validate"] {
+                        assert!(methods.iter().any(|entry| entry["method"] == name));
+                    }
+                }
+                Method::Catalog => assert!(value["schema"].is_object()
+                    && value["fields"].as_array().is_some_and(|fields| !fields.is_empty())),
+                _ => unreachable!(),
+            }
+            {
+                let resources = owner.resources.try_lock().expect("original borrowers returned");
+                assert!(resources.passive.as_ref().is_some_and(|actual| Arc::ptr_eq(actual, &originals)));
+                assert_eq!(resources.inspection_return, Some(ManagementJoin::Returned));
+                assert_eq!(resources.acquisition_return, Some(ManagementJoin::Returned));
+                assert!(resources.inspection.is_none() && resources.inspection_error.is_none()
+                    && resources.acquisition.is_none() && resources.acquisition_error.is_none());
+                assert!(resources.waited.as_ref().is_some_and(|status| status.success()));
+                assert!(resources.write_end.is_some_and(|end| end.complete));
+                assert!(resources.writer.is_none() && resources.stdout.is_none() && resources.stderr.is_none()
+                    && resources.failed_writer.is_none() && resources.failed_stdout.is_none() && resources.failed_stderr.is_none());
+                // Successful driver settlement checked BOTH real EOFs before
+                // taking their DTOs and the already-waited Child out of Resources.
+                assert!(resources.child.is_none() && resources.out_end.is_none() && resources.err_end.is_none() && !resources.kill_attempted);
+                assert!(resources.native_started && resources.native_settlement.is_none()
+                    && matches!(resources.native_return.as_ref(), Some(Ok(CloseOutcome::Settled))));
+                assert!(resources.native_observation.is_none());
+                assert_eq!(resources.native_observation_return, Some(ManagementJoin::Returned));
+                assert_eq!(resources.native_snapshots.len(), 1);
+                installed_native_fixture::report(&resources.native_snapshots);
+            }
+            {
+                let slots = lock(&originals);
+                assert!(slots.settled() && !slots.no_child_effect());
+                let observed = slots.claimed_observation().expect("same transferred and claimed original");
+                assert_eq!(observed.phase(), "settled");
+                assert_eq!(observed.failure(), None);
+                assert!(observed.records() > 8);
+                assert_eq!(observed.positive_closes(), observed.records());
+                assert_eq!((observed.live_originals(), observed.pending_acquisitions(), observed.uncertain_closes()), (0, 0, 0));
+            }
+            {
+                let state = lock(&owner.state);
+                assert_eq!(state.endpoint, endpoint);
+                assert_eq!(state.driver_join, ManagementJoin::Returned);
+                assert_eq!(state.watchdog_join, ManagementJoin::Returned);
+                assert!(matches!(state.watchdog_end, Some(WatchdogEnd::DriverObserved(ManagementJoin::Returned))));
+                assert!(state.terminal && !state.unknown && state.error.is_none() && state.cleanup_endpoint.is_none() && state.reply.is_none());
+            }
+            assert!(owner.driver.try_lock().unwrap().is_none() && owner.watchdog.try_lock().unwrap().is_none()
+                && owner.observer.try_lock().unwrap().is_none());
+            assert!(lock(&owner.permit).is_none());
+            assert!(supervisor.can_exit() && !supervisor.disabled() && !supervisor.stopping());
+            assert_eq!(supervisor.inner.permits.available_permits(), ACTIVE_LIMIT);
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    mod native {
+        use super::*;
+        pub(super) type Originals = Arc<Mutex<PassiveRuntimeSlots>>;
+        pub(super) fn registered(case: installed_native_fixture::Case) -> (Supervisor, PassiveQuery, Arc<Owner>, Originals, Instant) {
+            let supervisor = installed_native_fixture::routed_supervisor(case);
+            let ticket = supervisor.start_passive(Method::Capabilities, serde_json::json!({})).expect("real original owner");
+            let owner = ticket.owner.clone();
+            let end = owner.endpoint();
+            let originals = owner.resources.try_lock().expect("unpolled original resources").passive.as_ref().expect("original slots").clone();
+            assert!(lock(&originals).never_started());
+            assert!(lock(&supervisor.inner.owners).get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, &owner)));
+            assert!(lock(&owner.permit).is_some());
+            (supervisor, ticket, owner, originals, end)
+        }
+        pub(super) async fn completed(ticket: PassiveQuery, owner: &Arc<Owner>) -> Result<Value, BridgeError> {
+            let result = ticket.wait().await;
+            let original = { owner.observer.lock().await.take() };
+            let Some(mut original) = original else { return pending().await; };
+            if (&mut original).await.is_err() {
+                *owner.observer.lock().await = Some(original); // Retain a consumed failed original, never abort/repoll.
+                return pending().await;
+            }
+            result
+        }
+        pub(super) fn retired(supervisor: &Supervisor, owner: &Arc<Owner>, originals: &Originals, end: Instant) {
+            {
+                let resources = owner.resources.try_lock().expect("original driver returned");
+                assert!(resources.passive.as_ref().is_some_and(|actual| Arc::ptr_eq(actual, originals)));
+                assert_eq!(resources.inspection_return, Some(ManagementJoin::Returned));
+                assert!(resources.inspection.is_none() && resources.inspection_error.is_none()
+                    && resources.acquisition.is_none() && resources.acquisition_error.is_none());
+                assert!(resources.child.is_none() && resources.writer.is_none() && resources.stdout.is_none() && resources.stderr.is_none()
+                    && resources.failed_writer.is_none() && resources.failed_stdout.is_none() && resources.failed_stderr.is_none());
+                assert!(resources.native_started && resources.native_settlement.is_none()
+                    && matches!(resources.native_return.as_ref(), Some(Ok(CloseOutcome::Settled))) && resources.native_observation.is_none());
+            }
+            {
+                let slots = lock(originals);
+                assert!(slots.settled());
+                let observation = slots.fixture_observation().expect("same original book");
+                assert_eq!(observation.phase(), "settled");
+                assert!(observation.records() > 0);
+                assert_eq!(observation.positive_closes(), observation.records());
+                assert_eq!((observation.live_originals(), observation.pending_acquisitions(), observation.uncertain_closes()), (0, 0, 0));
+            }
+            {
+                let state = lock(&owner.state);
+                assert_eq!(state.endpoint, end);
+                assert!(state.terminal && !state.unknown && state.reply.is_none());
+                assert_eq!(state.driver_join, ManagementJoin::Returned);
+                assert_eq!(state.watchdog_join, ManagementJoin::Returned);
+                assert!(matches!(state.watchdog_end, Some(WatchdogEnd::DriverObserved(ManagementJoin::Returned))));
+            }
+            assert!(owner.driver.try_lock().unwrap().is_none() && owner.watchdog.try_lock().unwrap().is_none()
+                && owner.observer.try_lock().unwrap().is_none());
+            assert!(lock(&owner.permit).is_none() && supervisor.can_exit() && !supervisor.disabled());
+            assert_eq!(supervisor.inner.permits.available_permits(), ACTIVE_LIMIT);
+        }
+        pub(super) async fn refusal(failure: crate::installed_runtime::AdmissionFailure) {
+            let (supervisor, ticket, owner, originals, end) = registered(installed_native_fixture::Case::None);
+            let result = completed(ticket, &owner).await;
+            retired(&supervisor, &owner, &originals, end);
+            assert_eq!(result.expect_err("real installed inspection must refuse").code, "runtime_unavailable");
+            assert_eq!(lock(&originals).fixture_observation().unwrap().failure(), Some(failure));
+            { let slots = lock(&originals); assert!(slots.no_child_effect() && slots.claimed_observation().is_none()); }
+            let resources = owner.resources.try_lock().unwrap();
+            assert!(resources.acquisition_return.is_none() && resources.waited.is_none() && resources.write_end.is_none()
+                && resources.out_end.is_none() && resources.err_end.is_none() && !resources.kill_attempted
+                && resources.native_observation_return.is_none() && resources.native_snapshots.is_empty());
+            assert!(!supervisor.inner.native_test.prepared.load(Ordering::SeqCst) && lock(&supervisor.inner.native_test.creation).is_none());
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires independently reviewed pristine never-published writable-ancestor fixture"]
+    async fn installed_candidate_a_writable_ancestor_refuses_and_retires() {
+        native::refusal(crate::installed_runtime::AdmissionFailure::Ownership).await;
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires independently reviewed pristine never-published extra python3._pth fixture"]
+    async fn installed_candidate_a_extra_startup_refuses_and_retires() {
+        native::refusal(crate::installed_runtime::AdmissionFailure::Inventory).await;
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires reviewed installed A/native loader context; uses real 10s/2s clocks"]
+    async fn installed_candidate_a_deadline_before_claim_retires() {
+        let (supervisor, ticket, owner, originals, end) = native::registered(installed_native_fixture::Case::Deadline);
+        let result = native::completed(ticket, &owner).await;
+        native::retired(&supervisor, &owner, &originals, end);
+        assert_eq!(result.expect_err("original deadline forbids late creation").code, "query_timeout");
+        assert!(supervisor.inner.native_test.prepared.load(Ordering::SeqCst)
+            && supervisor.inner.native_test.deadline_crossed.load(Ordering::SeqCst));
+        assert!(lock(&supervisor.inner.native_test.creation).is_none());
+        { let slots = lock(&originals); assert!(slots.no_child_effect() && slots.claimed_observation().is_none()); }
+        let resources = owner.resources.try_lock().unwrap();
+        assert_eq!(resources.acquisition_return, Some(ManagementJoin::Returned));
+        assert!(resources.waited.is_none() && resources.write_end.is_none() && resources.out_end.is_none()
+            && resources.err_end.is_none() && !resources.kill_attempted && resources.native_observation_return.is_none());
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires reviewed installed A/native loader context and real original child pipes"]
+    async fn installed_candidate_a_shutdown_with_child_retires() {
+        let (supervisor, ticket, owner, originals, end) = native::registered(installed_native_fixture::Case::Shutdown);
+        loop {
+            let changed = supervisor.inner.changed.notified();
+            if supervisor.inner.native_test.held.load(Ordering::SeqCst) || Instant::now() >= end || owner.failed() { break; }
+            tokio::select! { _ = changed => {}, _ = tokio::time::sleep_until(tokio::time::Instant::from_std(end)) => {} }
+        }
+        // The real child is held in the original pre-writer reader, with all
+        // three original pipes. STOP releases scheduling, never destroys it.
+        let shutdown = supervisor.shutdown().await;
+        let result = native::completed(ticket, &owner).await;
+        native::retired(&supervisor, &owner, &originals, end);
+        assert!(supervisor.inner.native_test.held.load(Ordering::SeqCst) && supervisor.stopping());
+        shutdown.expect("actual shutdown retirement");
+        assert_eq!(result.expect_err("shutdown forbids success").code, "shutting_down");
+        { let slots = lock(&originals); assert!(slots.claimed_observation().is_some() && !slots.no_child_effect()); }
+        let resources = owner.resources.try_lock().unwrap();
+        assert_eq!(resources.acquisition_return, Some(ManagementJoin::Returned));
+        assert!(resources.waited.is_some() && resources.write_end.is_some() && resources.out_end.is_none()
+            && resources.err_end.is_none() && resources.kill_attempted);
+        assert_eq!(resources.native_observation_return, Some(ManagementJoin::Returned));
+        assert_eq!(resources.native_snapshots.len(), 1);
+        installed_native_fixture::report(&resources.native_snapshots);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires reviewed installed A and designated exit79 carrier ownership; never a normal libtest pass"]
+    async fn installed_candidate_a_creation_emfile_retains_unknown() {
+        use std::io::Write;
+        let (supervisor, ticket, owner, originals, end) = native::registered(installed_native_fixture::Case::Emfile);
+        assert_eq!(ticket.wait().await.expect_err("opaque actual creation error").code, "cleanup_unknown");
+        loop {
+            let changed = owner.changed.notified();
+            let returned = {
+                let state = lock(&owner.state);
+                state.driver_join == ManagementJoin::Returned && state.watchdog_join == ManagementJoin::Returned
+            };
+            if returned { break; }
+            if Instant::now() >= end { return pending::<()>().await; } // Keep Unknown and original handles for the outer owner.
+            tokio::select! { _ = changed => {}, _ = tokio::time::sleep_until(tokio::time::Instant::from_std(end)) => {} }
+        }
+        assert_eq!(*lock(&supervisor.inner.native_test.creation), Some((false, Some(rustix::io::Errno::MFILE.raw_os_error()))));
+        {
+            let limit = lock(&supervisor.inner.native_test.limit);
+            assert!(limit.lowered && limit.restore_attempted && limit.restored);
+            let original = limit.before.as_ref().expect("actual original limit");
+            let current = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+            assert_eq!((current.current, current.maximum), (original.current, original.maximum));
+        }
+        {
+            let resources = owner.resources.try_lock().expect("actual acquisition/driver returned");
+            assert!(resources.passive.as_ref().is_some_and(|actual| Arc::ptr_eq(actual, &originals)));
+            assert_eq!(resources.inspection_return, Some(ManagementJoin::Returned));
+            assert_eq!(resources.acquisition_return, Some(ManagementJoin::Returned));
+            assert!(resources.inspection.is_none() && resources.inspection_error.is_none()
+                && resources.acquisition.is_none() && resources.acquisition_error.is_none() && resources.child.is_none());
+            assert!(resources.writer.is_none() && resources.stdout.is_none() && resources.stderr.is_none()
+                && resources.failed_writer.is_none() && resources.failed_stdout.is_none() && resources.failed_stderr.is_none()
+                && resources.waited.is_none() && resources.write_end.is_none() && resources.out_end.is_none() && resources.err_end.is_none()
+                && !resources.kill_attempted && resources.native_observation.is_none() && resources.native_observation_return.is_none());
+            assert!(!resources.native_started && resources.native_settlement.is_none() && resources.native_return.is_none());
+        }
+        {
+            let slots = lock(&originals);
+            assert!(!slots.no_child_effect() && !slots.settled());
+            let observed = slots.claimed_observation().expect("actual claim without a no-effect receipt");
+            assert_eq!(observed.phase(), "passivePrepared");
+            assert_eq!(observed.failure(), None);
+            assert_eq!((observed.live_originals(), observed.pending_acquisitions(), observed.uncertain_closes()), (9, 0, 0));
+            assert_eq!(observed.positive_closes() + 9, observed.records());
+        }
+        {
+            let state = lock(&owner.state);
+            assert_eq!(state.endpoint, end);
+            assert!(state.unknown && !state.terminal && state.reply.is_none() && matches!(state.driver_end, Some(DriverEnd::RetainedUnknown)));
+            assert!(matches!(state.watchdog_end, Some(WatchdogEnd::DriverObserved(ManagementJoin::Returned))));
+        }
+        assert!(supervisor.disabled() && !supervisor.can_exit() && lock(&owner.permit).is_some());
+        assert!(lock(&supervisor.inner.owners).get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, &owner)));
+        assert_eq!(supervisor.inner.permits.available_permits(), ACTIVE_LIMIT - 1);
+        assert!(owner.observer.try_lock().unwrap().is_some()); // Still-pending original observer is NOT aborted/joined away.
+        assert_eq!(supervisor.start_passive(Method::Capabilities, serde_json::json!({})).err().expect("disabled admission").code, "cleanup_unknown");
+        let mut output = std::io::stdout().lock();
+        writeln!(output, "\nMRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN").expect("bounded carrier marker");
+        output.flush().expect("original marker flush");
+        // Deliberate carrier destruction while EVERY owner reference remains
+        // held. The outer original C/A/W owner must verify exit79/domain finality.
+        // This is neither native close/retirement nor a normal libtest success.
+        std::process::exit(79);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires reviewed P0/F1 publication and original root-worker/control-file ownership"]
+    async fn installed_candidate_a_child_spans_f1_publication() {
+        let (supervisor, ticket, owner, originals, end) = native::registered(installed_native_fixture::Case::Overlap);
+        let result = native::completed(ticket, &owner).await;
+        native::retired(&supervisor, &owner, &originals, end);
+        assert_eq!(result.expect("same old child must complete within its original deadline")["mode"], "read-only-foundation");
+        { let slots = lock(&originals); assert!(slots.claimed_observation().is_some() && !slots.no_child_effect()); }
+        assert!(Instant::now() < end);
+        let resources = owner.resources.try_lock().unwrap();
+        assert_eq!(resources.acquisition_return, Some(ManagementJoin::Returned));
+        assert!(resources.waited.as_ref().is_some_and(|status| status.success())
+            && resources.write_end.is_some_and(|write| write.complete) && !resources.kill_attempted);
+        assert_eq!(resources.native_observation_return, Some(ManagementJoin::Returned));
+        assert_eq!(resources.native_snapshots.len(), 2);
+        assert_eq!(resources.native_snapshots[0], resources.native_snapshots[1]);
+        installed_native_fixture::report(&resources.native_snapshots);
     }
 }

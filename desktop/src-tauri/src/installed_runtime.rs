@@ -42,7 +42,7 @@ pub(crate) const TREE_DEPTH: usize = 16;
 const RECORD_COUNT: usize = ENTRY_COUNT + 64;
 const LIVE_COUNT: usize = 48;
 const BLOCK_SIZE: usize = 64 * 1024;
-const PREFIX_COUNT: usize = 6;
+const PREFIX_COUNT: usize = 7;
 const RETAINED_COUNT: usize = PREFIX_COUNT + 2;
 // Initial namespace inodes from Linux v6.8 proc_ns.h and the exact reviewed
 // Ubuntu Azure 6.17.0-1022.22 nsfs.h. Not portable namespace detection.
@@ -62,7 +62,7 @@ pub(crate) enum AdmissionFailure {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Phase { New, Inspecting, InspectedOnly, Retained, Auditing, Refused, Settling, Settled, Unknown }
+enum Phase { New, Inspecting, InspectedOnly, PassivePreparing, PassivePrepared, Retained, Auditing, Refused, Settling, Settled, Unknown }
 
 #[must_use]
 #[derive(Debug)]
@@ -92,6 +92,7 @@ impl CustodyObservation {
     pub(crate) fn phase(&self) -> &'static str {
         match self.phase {
             Phase::New => "new", Phase::Inspecting => "inspecting",
+            Phase::PassivePreparing => "passivePreparing", Phase::PassivePrepared => "passivePrepared",
             Phase::InspectedOnly => "inspectedOnly", Phase::Retained => "retained", Phase::Auditing => "auditing", Phase::Refused => "refused",
             Phase::Settling => "settling", Phase::Settled => "settled", Phase::Unknown => "unknown",
         }
@@ -311,7 +312,7 @@ impl OriginalDescriptorBook {
     /// EINTR/EBADF and a missing close return are unknown, not retry permission.
     pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
         self.settlement_started = true; // Absorbing: even empty/positive settlement disables transfer.
-        if self.phase == Phase::Inspecting { self.mark_interrupted(); }
+        if matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing) { self.mark_interrupted(); }
         if !self.unknown { self.phase = Phase::Settling; }
         for index in (0..self.records.len()).rev() {
             let _ = self.close_one(SlotId(index)); // Continue every independent known original.
@@ -347,7 +348,8 @@ impl OriginalDescriptorBook {
     }
 
     fn begin(&mut self, operation: Operation, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
-        if !matches!(self.phase, Phase::Inspecting | Phase::Retained | Phase::Auditing) || self.unknown || self.interrupted || self.settlement_started {
+        if !matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::Retained | Phase::Auditing)
+            || self.unknown || self.interrupted || self.settlement_started {
             return Err(AdmissionFailure::LedgerInvariant);
         }
         if self.phase == Phase::Auditing {
@@ -474,7 +476,7 @@ impl OriginalDescriptorBook {
 }
 
 impl InstalledRuntimeCustody {
-    /// Pure book allocation; legacy inspection still retains only its original eight witnesses.
+    /// Pure book allocation; legacy inspection still retains only its original nine witnesses.
     pub(crate) fn new() -> Self {
         Self { book: OriginalDescriptorBook::new(), ancestors: [None; PREFIX_COUNT], transferred: false,
             retain_android: false, work: RuntimeWork {
@@ -489,12 +491,20 @@ impl InstalledRuntimeCustody {
     /// Synchronous work for the existing sole retained blocking inspection.
     /// No replacement clock, watcher, task, controller or restart is created.
     pub(crate) fn inspect_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> InspectionOutcome {
+        self.inspect_with_profile(None, end, stop)
+    }
+    fn inspect_with_profile(&mut self, profile: Option<&crate::runtime::PassiveInstalledProfile>,
+        end: Instant, stop: &watch::Receiver<bool>) -> InspectionOutcome {
         if self.retain_android || self.book.phase != Phase::New || self.book.settlement_started || self.book.interrupted || self.transferred {
-            if self.book.phase == Phase::Inspecting { self.mark_interrupted(); }
+            if matches!(self.book.phase, Phase::Inspecting | Phase::PassivePreparing) { self.mark_interrupted(); }
             return self.book.refuse_and_settle(AdmissionFailure::AlreadyUsed);
         }
         self.book.phase = Phase::Inspecting;
-        match self.inspect_inner(end, stop) {
+        let result = (|| {
+            if let Some(profile) = profile { self.book.inspect_passive_platform(profile, end, stop)?; }
+            self.inspect_inner(end, stop)
+        })();
+        match result {
             Ok(()) => {
                 self.book.operation = Operation::Idle;
                 self.book.phase = Phase::InspectedOnly;
@@ -511,9 +521,9 @@ impl InstalledRuntimeCustody {
             && self.book.namespaces[1].is_some_and(|id| self.book.live_binding(id, Purpose::InitialPidNamespace))
     }
 
-    fn inspected_originals_ready(&self) -> bool {
-        self.book.phase == Phase::InspectedOnly && !self.book.settlement_started && !self.book.interrupted
-            && !self.book.unknown && self.book.operation == Operation::Idle
+    fn retained_originals_ready(&self) -> bool {
+        !self.book.settlement_started && !self.book.interrupted && !self.book.unknown
+            && self.book.failure.is_none() && self.book.operation == Operation::Idle
             && self.retained_bindings_present()
             && self.book.records.iter().filter(|r| r.original.is_some()).count() == RETAINED_COUNT
             && self.book.records.iter().all(|r| r.acquisition == Acquisition::Original
@@ -523,7 +533,19 @@ impl InstalledRuntimeCustody {
                     CloseReceipt::Attempted | CloseReceipt::Unknown => false,
                 })
     }
+    fn inspected_originals_ready(&self) -> bool {
+        self.book.phase == Phase::InspectedOnly && self.retained_originals_ready()
+    }
     fn transfer_ready(&self) -> bool { !self.transferred && self.inspected_originals_ready() }
+    fn start_passive_preparation(&mut self) -> AdmissionResult<()> {
+        if !self.transferred || self.retain_android || self.book.budget.is_some() || !self.inspected_originals_ready() {
+            return Err(AdmissionFailure::TransferUnavailable);
+        }
+        // One-shot, passive-only native borrow. Neither Android's budget nor
+        // its Retained/audit state can substitute for this actual transition.
+        self.book.phase = Phase::PassivePreparing;
+        Ok(())
+    }
 }
 
 /// Move the whole original ledger, once. No syscall, await, allocation, callback
@@ -556,20 +578,47 @@ pub(crate) struct PassiveRuntimeSlots {
 }
 
 /// Domain-local capability, never cloned/serialized or returned by a worker.
-/// Construction requires the unavailable release profile AND the same inspected
-/// originals. InspectedOnly alone cannot construct this private-field type.
+/// Construction requires selected profile DATA AND the same inspected originals.
+/// The test candidate cannot construct this private-field type from DATA alone.
 pub(crate) struct PassiveInstalledRuntime {
     original: InstalledRuntimeCustody,
-    _profile: crate::runtime::PassiveInstalledProfile,
-    _selection: crate::runtime::VerifiedRuntime,
+    profile: crate::runtime::PassiveInstalledProfile,
+    selection: crate::runtime::VerifiedRuntime,
     claimed: bool,
     refused_before_effect: bool,
 }
 
 impl PassiveInstalledRuntime {
     fn ready(&self) -> bool {
-        self.original.transferred && self.original.inspected_originals_ready()
+        self.original.transferred && self.original.book.phase == Phase::PassivePrepared && self.original.retained_originals_ready()
             && !self.claimed && !self.refused_before_effect
+    }
+    /// The real acquisition worker borrows the transferred original ledger.
+    /// Returned paths remain DATA; only this SAME borrowed capability can claim.
+    pub(crate) fn prepare_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<&crate::runtime::VerifiedRuntime> {
+        if self.claimed || self.refused_before_effect { return Err(AdmissionFailure::TransferUnavailable); }
+        self.original.start_passive_preparation()?;
+        let result = (|| {
+            self.original.book.inspect_passive_platform(&self.profile, end, stop)?;
+            self.original.book.check_launch_thread(end, stop)?; // Actual current worker, not the inspector's TID.
+            self.original.book.check_names(end, stop)?;
+            self.original.book.begin(Operation::Idle, end, stop)?; // Original STOP/deadline after all native work.
+            if !self.original.retained_originals_ready() { return Err(AdmissionFailure::LedgerInvariant); }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                // Only the actual complete native body return can prepare a claim.
+                self.original.book.phase = Phase::PassivePrepared;
+                Ok(&self.selection)
+            }
+            Err(failure) => {
+                // Normal refusal is not interruption. Keep every partial in
+                // this registered ledger until the original worker has joined.
+                self.original.book.refuse(failure);
+                Err(failure)
+            }
+        }
     }
     pub(crate) fn claim_once(&mut self) -> AdmissionResult<()> {
         if !self.ready() { return Err(AdmissionFailure::TransferUnavailable); }
@@ -578,6 +627,7 @@ impl PassiveInstalledRuntime {
     }
     /// Called ONLY by the unconditional production spawn refusal, not an OS
     /// spawn-error mapper. This records no creation effect, never pipe closes.
+    #[cfg(not(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher"))))]
     pub(crate) fn record_closed_spawn_gate(&mut self) {
         self.refused_before_effect = true;
     }
@@ -601,8 +651,9 @@ impl PassiveRuntimeSlots {
         self.selection = Some(profile.selection()?);
         self.profile = Some(profile);
         self.inspection_started = true;
+        let Some(profile) = self.profile.as_ref() else { return Err(BridgeError::cleanup_unknown()); };
         let Some(original) = self.inspection.as_mut() else { return Err(BridgeError::cleanup_unknown()); };
-        match original.inspect_once(end, stop) {
+        match original.inspect_with_profile(Some(profile), end, stop) {
             InspectionOutcome::InspectedOnly => {
                 let Some(data) = self.selection.as_ref() else { return Err(BridgeError::cleanup_unknown()); };
                 Ok(crate::runtime::VerifiedRuntime { python: data.python.clone(), bootstrap: data.bootstrap.clone(),
@@ -627,7 +678,7 @@ impl PassiveRuntimeSlots {
             return Err(AdmissionFailure::LedgerInvariant);
         };
         original.transferred = true;
-        self.acquisition = Some(PassiveInstalledRuntime { original, _profile: profile, _selection: selection,
+        self.acquisition = Some(PassiveInstalledRuntime { original, profile, selection,
             claimed: false, refused_before_effect: false });
         Ok(()) // No syscall, allocation, await or fallible work after the actual take.
     }
@@ -659,6 +710,25 @@ impl PassiveRuntimeSlots {
             (Some(original), None) => original.settled(),
             (None, Some(runtime)) => runtime.original.settled(),
             _ => false,
+        }
+    }
+    /// Read-only test observation, not a capability or a substitute join/close.
+    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(crate) fn claimed_observation(&self) -> Option<CustodyObservation> {
+        match (&self.inspection, &self.acquisition) {
+            (None, Some(runtime)) if runtime.original.transferred && runtime.claimed && !runtime.refused_before_effect =>
+                Some(runtime.original.observation()),
+            _ => None,
+        }
+    }
+    /// Read-only native-fixture DATA for normal refusal/unchosen-claim closure.
+    /// This neither moves originals nor creates a receipt/capability.
+    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(crate) fn fixture_observation(&self) -> Option<CustodyObservation> {
+        match (&self.inspection, &self.acquisition) {
+            (Some(original), None) => Some(original.observation()),
+            (None, Some(runtime)) => Some(runtime.original.observation()),
+            _ => None,
         }
     }
 }
@@ -945,6 +1015,17 @@ impl OriginalDescriptorBook {
         Ok(())
     }
 
+    fn inspect_passive_platform(&mut self, profile: &crate::runtime::PassiveInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
+        self.begin(Operation::Kernel, end, stop)?;
+        let actual = rustix::system::uname();
+        self.operation = Operation::Idle;
+        if !profile.accepts_platform(actual.sysname().to_bytes(), actual.machine().to_bytes(), actual.release().to_bytes()) {
+            return Err(AdmissionFailure::UnsupportedPlatform);
+        }
+        Ok(()) // Narrow passive candidate only; the shared GA6.8/Azure ABI rule is unchanged.
+    }
+
     fn inspect_namespace_controls(&mut self, root: SlotId, credentials: Credentials,
         end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
         if self.budget.is_some() {
@@ -1021,7 +1102,7 @@ impl OriginalDescriptorBook {
             self.inspect_proc_object(slot, FileType::Directory, end, stop)?;
             self.close_finished(slot)?;
         }
-        // Keep BOTH actual initial-namespace handles along with the six
+        // Keep BOTH actual initial-namespace handles along with the seven
         // ancestor/version bindings; every temporary proc original is settled.
         Ok(())
     }
@@ -1065,7 +1146,7 @@ impl InstalledRuntimeCustody {
         self.book.inspect_os_release(root, end, stop)?;
 
         let mut parent = root;
-        for (index, component) in ["opt", "mobile-release-kit", "versions", TARGET, manifest_anchor].into_iter().enumerate() {
+        for (index, component) in ["var", "lib", "mobile-release-kit", "versions", TARGET, manifest_anchor].into_iter().enumerate() {
             let slot = self.book.acquire_child(parent, component, true, Purpose::ProtectedAncestor((index + 1) as u8), end, stop)?;
             self.book.inspect_protected(slot, FileType::Directory, None, end, stop)?;
             self.ancestors[index + 1] = Some(slot);
@@ -1484,7 +1565,7 @@ impl InstalledRuntimeCustody {
     pub(crate) fn android_data(&self) -> AdmissionResult<crate::runtime::VerifiedRuntime> {
         if !self.retain_android || !self.book.ready() || !self.retained_bindings_present() { return Err(AdmissionFailure::TransferUnavailable); }
         let anchor = MANIFEST_ANCHOR.filter(|value| sha(value)).ok_or(AdmissionFailure::MissingCompileAnchor)?;
-        let cwd = std::path::PathBuf::from("/opt/mobile-release-kit/versions").join(TARGET).join(anchor);
+        let cwd = std::path::PathBuf::from("/var/lib/mobile-release-kit/versions").join(TARGET).join(anchor);
         Ok(crate::runtime::VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("android_build_bootstrap.py"),
             core: cwd.join("core.zip"), cwd })
     }
@@ -2047,6 +2128,39 @@ mod pure_tests {
         assert_eq!(observed.positive_closes(), 0);
         assert!(slots.acquisition.is_none());
     }
+    #[test]
+    fn passive_preparation_refuses_uninspected_settled_and_interrupted_originals() {
+        // Actual empty storage only: no manufactured profile, transfer or FD.
+        let mut original = InstalledRuntimeCustody::new();
+        assert_eq!(original.start_passive_preparation(), Err(AdmissionFailure::TransferUnavailable));
+        assert_eq!(original.observation().phase(), "new");
+        assert_eq!(original.settle_originals(), CloseOutcome::Settled); // No close syscall.
+        assert_eq!(original.start_passive_preparation(), Err(AdmissionFailure::TransferUnavailable));
+        assert_eq!(original.observation().phase(), "settled");
+        let mut interrupted = InstalledRuntimeCustody::new();
+        interrupted.mark_interrupted();
+        assert_eq!(interrupted.start_passive_preparation(), Err(AdmissionFailure::TransferUnavailable));
+        assert_eq!(interrupted.settle_originals(), CloseOutcome::Unknown);
+        for original in [&original, &interrupted] {
+            assert_eq!(original.observation().records(), 0);
+            assert_eq!(original.observation().positive_closes(), 0);
+            assert!(!original.inspected_originals_ready());
+        }
+    }
+    #[test]
+    fn unreturned_passive_preparation_cannot_become_positive_settlement() {
+        let mut book = OriginalDescriptorBook::new();
+        // Negative pending bookkeeping ONLY, not a successful native return or
+        // executable capability. An unfinished preparation is absorbing Unknown.
+        book.phase = Phase::PassivePreparing;
+        assert_eq!(book.settle_originals(), CloseOutcome::Unknown);
+        book.refuse(AdmissionFailure::Stopped);
+        assert_eq!(book.observation().phase(), "unknown");
+        assert_eq!(book.observation().failure(), Some(AdmissionFailure::Interrupted));
+        assert!(book.interrupted && book.unknown && book.settlement_started);
+        assert_eq!(book.observation().records(), 0);
+        assert_eq!(book.observation().positive_closes(), 0);
+    }
 }
 
 // Read-only platform observations, not a qualified runtime or a test bypass of
@@ -2082,9 +2196,13 @@ mod platform_native_tests {
             book.inspect_namespace_controls(root, credentials, end, &stop)?;
             phase = "os-release";
             book.inspect_os_release(root, end, &stop)?;
-            phase = "protected-opt";
-            let opt = book.acquire_child(root, "opt", true, Purpose::OsDirectory, end, &stop)?;
-            book.inspect_protected(opt, FileType::Directory, None, end, &stop)?;
+            phase = "protected-var";
+            let var = book.acquire_child(root, "var", true, Purpose::OsDirectory, end, &stop)?;
+            book.inspect_protected(var, FileType::Directory, None, end, &stop)?;
+            phase = "protected-var-lib";
+            let lib = book.acquire_child(var, "lib", true, Purpose::OsDirectory, end, &stop)?;
+            book.inspect_protected(lib, FileType::Directory, None, end, &stop)?;
+            book.inspect_protected(var, FileType::Directory, None, end, &stop)?;
             book.inspect_protected(root, FileType::Directory, None, end, &stop)?;
             phase = "credential-recheck";
             if book.current_credentials(end, &stop)? != credentials { return Err(AdmissionFailure::Namespace); }
