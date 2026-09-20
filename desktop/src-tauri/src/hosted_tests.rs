@@ -12,6 +12,12 @@ type Query = Result<Value, BridgeError>;
 const FIXTURE: &str = include_str!("../tests/fixtures/passive_core/_desktop_engine.py");
 const PACKAGE: &str = include_str!("../tests/fixtures/passive_core/__init__.py");
 
+// Separate exact-two-case conventional preparation. Never changes the old23
+// entry/receipt, TLS profile, production gate or native owner implementation.
+#[cfg(all(debug_assertions, not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "conventional_smoke_tests.rs"]
+mod conventional_smoke;
+
 // Two fixed modes only. No arbitrary bootstrap path/callback or production opt-in.
 #[cfg(windows)]
 #[derive(Clone, Default)]
