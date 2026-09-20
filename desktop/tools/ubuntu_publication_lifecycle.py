@@ -3,7 +3,7 @@
 The system manager owns the root service before its first input copy. Inside it
 the protected current core owns ordinary commands. The nonroot systemd client
 wait is necessary evidence, not authority to clean up privileged descendants.
-No accounts, namespace/mount changes, general commands, retry or /opt cleanup.
+No accounts, namespace/mount changes, general commands, retry or published-runtime cleanup.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ Q = "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e"
 VERSIONS = {"P0": (M, "0.0.0+mrk.lifecycle.0"), "F1": (F1, "0.0.0+mrk.lifecycle.1")}
 ROOT_TEST = "runtime_publication::platform_native_tests::root_exact_ubuntu_platform"
 USER_TEST = "installed_runtime::platform_native_tests::nonroot_exact_ubuntu_platform"
-PREFIX = Path("/opt/mobile-release-kit/versions") / TARGET
+PREFIX = Path("/var/lib/mobile-release-kit/versions") / TARGET
 INPUT = Path("/usr/lib/mobile-release-kit/runtime-input") / TARGET
 HELPER = "/usr/lib/mobile-release-kit/mrk-runtime-publish"
 HOST_PATH = "/usr/bin:/bin"
@@ -442,7 +442,7 @@ def _capacity(value):
     required = (sum(row["size"] for row in value["packages"].values()) + value["library"]["size"]
                 + 2 * capacity["runtimeBytes"] + 1 + 2 * max(capacity["installedBytes"].values()) + TOTAL_LIMIT + JSON_LIMIT)
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + 128
-    need(len({Path(name).stat().st_dev for name in ("/", "/var/lib", "/usr", "/opt")}) == 1,
+    need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
     need(space.f_bavail * space.f_frsize >= required and space.f_favail >= inodes, "Insufficient original host capacity; do not clear caches")
@@ -858,8 +858,8 @@ def _denials(root, label):
 
 def _prefixes(labels):
     rows = {}
-    for path, children in ((Path("/opt/mobile-release-kit"), {"versions"}),
-                           (Path("/opt/mobile-release-kit/versions"), {TARGET}),
+    for path, children in ((Path("/var/lib/mobile-release-kit"), {"versions"}),
+                           (Path("/var/lib/mobile-release-kit/versions"), {TARGET}),
                            (PREFIX, {VERSIONS[label][0] for label in labels})):
         directory(path, protected=True)
         before = path.lstat()
@@ -891,7 +891,7 @@ def observe(phase):
     if phase in {"unpacked", "p0"}:
         _absent(PREFIX / F1)
     if phase == "unpacked":
-        _absent(Path("/opt/mobile-release-kit"))
+        _absent(Path("/var/lib/mobile-release-kit"))
     prefixes = _prefixes(labels) if labels else {}
     result = {"phase": phase, "published": {}, "inputs": {}, "denials": {}, "prefixes": prefixes}
     if phase == "unpacked":
@@ -1036,7 +1036,7 @@ def unit_start():
         native_result(result.stdout, result.stderr, test)
     _no_package_data()
     _no_admin_data()
-    _absent(Path("/opt/mobile-release-kit"))
+    _absent(Path("/var/lib/mobile-release-kit"))
     states, observations, traces = {}, {}, {}
 
     def state(phase, status, variant):
@@ -1081,7 +1081,7 @@ def unit_start():
     state("unpacked", "install ok unpacked", "P0")
     _scripts("unpacked", set(SCRIPT_PINS))
     _binaries(value, "unpacked", "P0")
-    _absent(Path("/opt/mobile-release-kit"))
+    _absent(Path("/var/lib/mobile-release-kit"))
     refused = command("nonroot-helper", _drop(value, [HELPER]), codes=(1,))
     need(refused.stdout == b"" and refused.stderr == REFUSAL.format("the fixed release or administrator platform is unsupported").encode("ascii"),
          "Installed helper did not give the exact nonroot Profile refusal")

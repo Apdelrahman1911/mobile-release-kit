@@ -60,7 +60,7 @@ impl PassiveInstalledProfile {
     pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
         if COMPILED_TARGET != "x86_64-unknown-linux-gnu" { return Err(unavailable()); }
         let anchor = MANIFEST_ANCHOR.filter(|value| sha(value)).ok_or_else(unavailable)?;
-        let cwd = PathBuf::from("/opt/mobile-release-kit/versions").join(COMPILED_TARGET).join(anchor);
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions").join(COMPILED_TARGET).join(anchor);
         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("engine_bootstrap.py"),
             core: cwd.join("core.zip"), cwd })
     }

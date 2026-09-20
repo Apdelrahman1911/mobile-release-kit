@@ -606,7 +606,8 @@ impl Publisher {
         // not fix permissions/ownership of an existing source or published inode.
         self.tick()?;
         rustix::process::umask(Mode::from_raw_mode(0o077));
-        let mut parent = self.keep_child(root, "opt")?;
+        let var = self.keep_child(root, "var")?;
+        let mut parent = self.keep_child(var, "lib")?;
         for name in ["mobile-release-kit", "versions", TARGET] { parent = self.prefix(parent, name)?; }
         let stage_name = format!(".publish-{}", release.manifest);
         self.absent(parent, release.manifest)?;
@@ -961,8 +962,10 @@ mod platform_native_tests {
         let mut phase = "root-context";
         let result = (|| -> Result<()> {
             let (root, _) = publisher.root_context()?;
-            phase = "protected-opt";
-            publisher.keep_child(root, "opt")?;
+            phase = "protected-var";
+            let var = publisher.keep_child(root, "var")?;
+            phase = "protected-var-lib";
+            publisher.keep_child(var, "lib")?;
             phase = "retained-recheck";
             publisher.check_retained()?;
             admin_ids()?;

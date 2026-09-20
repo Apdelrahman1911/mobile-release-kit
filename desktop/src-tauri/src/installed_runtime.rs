@@ -42,7 +42,7 @@ pub(crate) const TREE_DEPTH: usize = 16;
 const RECORD_COUNT: usize = ENTRY_COUNT + 64;
 const LIVE_COUNT: usize = 48;
 const BLOCK_SIZE: usize = 64 * 1024;
-const PREFIX_COUNT: usize = 6;
+const PREFIX_COUNT: usize = 7;
 const RETAINED_COUNT: usize = PREFIX_COUNT + 2;
 // Initial namespace inodes from Linux v6.8 proc_ns.h and the exact reviewed
 // Ubuntu Azure 6.17.0-1022.22 nsfs.h. Not portable namespace detection.
@@ -474,7 +474,7 @@ impl OriginalDescriptorBook {
 }
 
 impl InstalledRuntimeCustody {
-    /// Pure book allocation; legacy inspection still retains only its original eight witnesses.
+    /// Pure book allocation; legacy inspection still retains only its original nine witnesses.
     pub(crate) fn new() -> Self {
         Self { book: OriginalDescriptorBook::new(), ancestors: [None; PREFIX_COUNT], transferred: false,
             retain_android: false, work: RuntimeWork {
@@ -1021,7 +1021,7 @@ impl OriginalDescriptorBook {
             self.inspect_proc_object(slot, FileType::Directory, end, stop)?;
             self.close_finished(slot)?;
         }
-        // Keep BOTH actual initial-namespace handles along with the six
+        // Keep BOTH actual initial-namespace handles along with the seven
         // ancestor/version bindings; every temporary proc original is settled.
         Ok(())
     }
@@ -1065,7 +1065,7 @@ impl InstalledRuntimeCustody {
         self.book.inspect_os_release(root, end, stop)?;
 
         let mut parent = root;
-        for (index, component) in ["opt", "mobile-release-kit", "versions", TARGET, manifest_anchor].into_iter().enumerate() {
+        for (index, component) in ["var", "lib", "mobile-release-kit", "versions", TARGET, manifest_anchor].into_iter().enumerate() {
             let slot = self.book.acquire_child(parent, component, true, Purpose::ProtectedAncestor((index + 1) as u8), end, stop)?;
             self.book.inspect_protected(slot, FileType::Directory, None, end, stop)?;
             self.ancestors[index + 1] = Some(slot);
@@ -1484,7 +1484,7 @@ impl InstalledRuntimeCustody {
     pub(crate) fn android_data(&self) -> AdmissionResult<crate::runtime::VerifiedRuntime> {
         if !self.retain_android || !self.book.ready() || !self.retained_bindings_present() { return Err(AdmissionFailure::TransferUnavailable); }
         let anchor = MANIFEST_ANCHOR.filter(|value| sha(value)).ok_or(AdmissionFailure::MissingCompileAnchor)?;
-        let cwd = std::path::PathBuf::from("/opt/mobile-release-kit/versions").join(TARGET).join(anchor);
+        let cwd = std::path::PathBuf::from("/var/lib/mobile-release-kit/versions").join(TARGET).join(anchor);
         Ok(crate::runtime::VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("android_build_bootstrap.py"),
             core: cwd.join("core.zip"), cwd })
     }
@@ -2082,9 +2082,13 @@ mod platform_native_tests {
             book.inspect_namespace_controls(root, credentials, end, &stop)?;
             phase = "os-release";
             book.inspect_os_release(root, end, &stop)?;
-            phase = "protected-opt";
-            let opt = book.acquire_child(root, "opt", true, Purpose::OsDirectory, end, &stop)?;
-            book.inspect_protected(opt, FileType::Directory, None, end, &stop)?;
+            phase = "protected-var";
+            let var = book.acquire_child(root, "var", true, Purpose::OsDirectory, end, &stop)?;
+            book.inspect_protected(var, FileType::Directory, None, end, &stop)?;
+            phase = "protected-var-lib";
+            let lib = book.acquire_child(var, "lib", true, Purpose::OsDirectory, end, &stop)?;
+            book.inspect_protected(lib, FileType::Directory, None, end, &stop)?;
+            book.inspect_protected(var, FileType::Directory, None, end, &stop)?;
             book.inspect_protected(root, FileType::Directory, None, end, &stop)?;
             phase = "credential-recheck";
             if book.current_credentials(end, &stop)? != credentials { return Err(AdmissionFailure::Namespace); }

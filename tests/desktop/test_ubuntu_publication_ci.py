@@ -567,10 +567,11 @@ class PublisherCI(unittest.TestCase):
             path.write_bytes(package_data(extra, controls))
             with self.assertRaises(ValueError):
                 S.deb_readback(path, expected, expected_control)
-            forbidden = {**files, "opt/unexpected": b"never package published versions"}
-            path.write_bytes(package_data(forbidden, controls))
-            with self.assertRaises(ValueError):
-                S.deb_readback(path, package_rows(forbidden), expected_control)
+            for name in ("opt/unexpected", "var/lib/mobile-release-kit/versions/unexpected"):
+                forbidden = {**files, name: b"never package published versions"}
+                path.write_bytes(package_data(forbidden, controls))
+                with self.subTest(path=name), self.assertRaises(ValueError):
+                    S.deb_readback(path, package_rows(forbidden), expected_control)
             path.write_bytes(package_data(files, controls, trailing=True))
             with self.assertRaises(ValueError):
                 S.deb_readback(path, expected, expected_control)

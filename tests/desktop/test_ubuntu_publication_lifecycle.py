@@ -42,6 +42,23 @@ def needrestart_data(*names, present=True, stamp=0):
 
 
 class LifecycleData(unittest.TestCase):
+    def test_version_store_prefixes_bind_exact_application_children(self):
+        app = Path("/var/lib/mobile-release-kit")
+        self.assertEqual(L.PREFIX, app / "versions" / L.TARGET)
+        children = {app: {"versions"}, app / "versions": {L.TARGET}, L.PREFIX: {L.M}}
+        nodes = {path: needrestart_stat(stat.S_IFDIR | 0o755, ino=index + 1)
+                 for index, path in enumerate(children)}
+        with patch.object(L, "directory") as checked, patch.object(L, "_xattrs") as attrs, \
+                patch.object(L.Path, "lstat", lambda path: nodes[path]), \
+                patch.object(L.Path, "iterdir", lambda path: iter(path / name for name in children[path])):
+            actual = L._prefixes(("P0",))
+            self.assertEqual(actual, {str(path): list(L.identity(nodes[path])) for path in children})
+            self.assertEqual(checked.call_args_list, [unittest.mock.call(path, protected=True) for path in children])
+            self.assertEqual(attrs.call_args_list, [unittest.mock.call(path, True) for path in children])
+            children[L.PREFIX].add("unexpected")
+            with self.assertRaises(L.Refused):
+                L._prefixes(("P0",))
+
     def test_directory_refusal_reports_the_same_inspected_ancestor_without_weakening_policy(self):
         path = Path("/inert/\u00e9\nleaf")
         ancestors = [path, *path.parents]

@@ -313,7 +313,7 @@ def deb_readback(path, data_rows, control_rows):
                 name = name.removesuffix("/") or "."
                 if name != ".":
                     D.relative(name)
-                D.need(name not in seen and name in rows and name != "opt" and not name.startswith("opt/")
+                D.need(name not in seen and name in rows and name.split("/", 1)[0] not in {"opt", "var"}
                        and member.uid == member.gid == 0 and member.uname in ("", "root")
                        and member.gname in ("", "root") and not member.pax_headers and not member.issparse()
                        and member.linkname == "", "Debian tar member/owner/extension differs")
