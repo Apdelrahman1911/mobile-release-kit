@@ -8,9 +8,12 @@ build result, supply acceptance, installed-runtime readiness or legal clearance.
 Hosted build H `35505213499/1` at `37079ce7874bedc804f434f8f8851c3adf5333ac`
 passed and its original configuration, projection, components and notices have
 independent bounded acceptance. The committed `conventional-review/` kit and
-literal pins admit that exact result to offline DATA preparation A only.
-A has not yet run; B, installed-runtime qualification and product gates remain
-closed. This acceptance does not establish legal or release clearance.
+literal pins admitted that exact result to offline DATA preparation A.
+A `35507734308/1` at `977c71d99821cd2ad2fe2c88173920492d4c5cfb` passed;
+its original 47-file artifact and prepared manifest/protocol have independent
+acceptance. B now pins that exact prepared result but has not yet run.
+Installed-runtime qualification and product gates remain closed. These bounded
+acceptances do not establish legal or release clearance.
 Legacy/static semantics and selectors are unchanged. H/D4/D3 are not
 modified or reused as execution authority. No linker shim, maps, probe recorder,
 private-W adapter, new process owner or container/package installer is added.
@@ -191,9 +194,8 @@ are added only here. Current generic prepare_runtime remains unchanged and adds
 six bootstraps +core.zip +CA and the manifest: reserve eight files/nine entries,
 64 MiB headroom, unchanged2048/8192/512 MiB-file/1 GiB-total/1 MiB-manifest limits.
 
-Remaining sequence: focused A literal/input DATA checks and independent diff
-acceptance -> original offline copier/generic preparation A -> independent A
-artifact acceptance -> separate B pin and bootstrap smoke -> actual installed
+Remaining sequence: focused B literal/input DATA checks and independent diff
+acceptance -> original B bootstrap smoke and result acceptance -> actual installed
 custody/loader/TLS/XML/API/cancellation/close qualification. Reuse the unchanged
-source-bound publisher/route tests and successful H build; do not rerun them for
-this DATA admission. No full-repository/native matrix is proposed here.
+source-bound publisher/route tests and successful H/A results; do not rerun them
+for this DATA admission. No full-repository/native matrix is proposed here.

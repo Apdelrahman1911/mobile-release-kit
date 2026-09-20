@@ -1,14 +1,14 @@
-"""Fixed conventional-interpreter smoke probe; SOURCE ONLY, no admitted output yet.
+"""Fixed conventional-interpreter smoke probe; prepared inputs admitted, not yet run.
 
 This is not a launcher, installer, TLS client or runtime-custody constructor.
-The later reviewed outer command must first call inspect_prepared() in its
+The reviewed outer command must first call inspect_prepared() in its
 trusted host interpreter, bind this source, and retain the original candidate
 wait and bounded output closes. Calling this file under Python is ALREADY an
 execution: its own checks cannot retroactively authorize that launch.
 
-The two absent source pins deliberately refuse before input access. They must
-select the accepted prepared manifest/protocol, not merely a source-build result.
-No workflow/runner, fallback, candidate discovery or production gate is supplied.
+The two source pins select the independently accepted prepared manifest/protocol,
+not merely a source-build result. Missing pins still refuse before input access.
+No fallback, candidate discovery or production gate is supplied by this probe.
 """
 from __future__ import annotations
 
@@ -23,8 +23,8 @@ import time
 
 PROFILE = "cpython-3.14.7-linux-x86_64-source-v1"
 SCOPE = "conventional-interpreter-behavior-smoke-v1"
-APPROVED_PREPARED_MANIFEST_SHA256: str | None = None
-APPROVED_PROTOCOL_SHA256: str | None = None
+APPROVED_PREPARED_MANIFEST_SHA256: str | None = 'e3375ff140d69df54b2445f756711e0245d397ba6ded76e8559732ec2e4e3801'
+APPROVED_PROTOCOL_SHA256: str | None = '860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e'
 TARGET = "x86_64-unknown-linux-gnu"
 CA = (240216, "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f")
 SELECTED = {

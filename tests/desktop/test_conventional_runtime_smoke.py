@@ -49,13 +49,15 @@ def selected(document):
 
 class ConventionalRuntimeSmokeTests(unittest.TestCase):
     def test_missing_prepared_pins_refuse_before_path_or_observer(self):
-        self.assertIsNone(P.APPROVED_PREPARED_MANIFEST_SHA256)
-        self.assertIsNone(P.APPROVED_PROTOCOL_SHA256)
-        with patch.multiple(P, Path=forbidden, _read=forbidden, _observe=forbidden):
-            with self.assertRaises(P.SmokeRefused):
-                P.inspect_prepared(object())
-            with self.assertRaises(P.SmokeRefused):
-                P.main()
+        for missing in ("APPROVED_PREPARED_MANIFEST_SHA256", "APPROVED_PROTOCOL_SHA256"):
+            pins = {"APPROVED_PREPARED_MANIFEST_SHA256": "a" * 64,
+                    "APPROVED_PROTOCOL_SHA256": "b" * 64, missing: None}
+            with self.subTest(missing=missing), patch.multiple(P, **pins,
+                    Path=forbidden, _read=forbidden, _observe=forbidden):
+                with self.assertRaises(P.SmokeRefused):
+                    P.inspect_prepared(object())
+                with self.assertRaises(P.SmokeRefused):
+                    P.main()
 
     def test_exact_conventional_sixty_ca_and_profile_are_reused(self):
         self.assertEqual(P.EXPECTED_BUILTINS,
