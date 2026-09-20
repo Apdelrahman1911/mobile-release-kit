@@ -101,6 +101,8 @@ SOURCE_PROFILE = "cpython-3.14.7-linux-x86_64-source-v1"
 APPROVED_SOURCE_OUTPUT_SHA256: str | None = None
 APPROVED_SOURCE_COMPONENTS_SHA256: str | None = None
 APPROVED_SOURCE_NOTICES_SHA256: str | None = None
+APPROVED_SOURCE_COPIER_PYTHON_SHA256: str | None = None
+_SOURCE_COPIER_PYTHON = "/usr/bin/python3.12"
 
 
 class _SourcePolicy(NamedTuple):
@@ -656,6 +658,76 @@ def _require_source_policy(policy: _SourcePolicy) -> None:
     _need(type(policy.license_size) is int and 0 < policy.license_size <= MAX_NOTICE_BYTES, "Invalid source license policy")
 
 
+def _require_source_copier_host() -> None:
+    # This is the actual local DATA interpreter, NOT the original build root's
+    # host_python role. The separately admitted command must still bind the
+    # existing accepted stdlib/support TCB; this executable pin cannot replace it.
+    expected = APPROVED_SOURCE_COPIER_PYTHON_SHA256
+    _need(expected is not None, "Source preparation closed: actual copier Python admission missing")
+    _sha(expected)
+    _need(os.path.realpath(sys.executable) == _SOURCE_COPIER_PYTHON and sys.flags.isolated == 1
+          and sys.flags.no_site == 1 and sys.flags.dont_write_bytecode == 1,
+          "Use only the admitted local copier Python with -I -S -B")
+    _checked(Path(_SOURCE_COPIER_PYTHON), expected, limit=16 * 1024 * 1024)
+
+
+def _source_host_inputs(raw: bytes, output: dict, root_raw: bytes, lock_raw: bytes) -> dict:
+    """Original closed-root correspondence DATA; never inspect its live tool paths."""
+    _need(_digest(raw) == _sha(output["hostInputsSha256"])
+          and _digest(root_raw) == _sha(output["rootfsSha256"])
+          and _digest(lock_raw) == _sha(output["inputLockSha256"]), "Original source host/root/lock binding differs")
+    doc = _keys(_decode(raw), {"schema", "profile", "target", "state", "nativeQualification", "scope",
+                              "rootfs", "selectionSha256", "memberPlanSha256", "toolRoles"})
+    helper = _source_helpers()
+    _need(doc["schema"] == "mrk-cpython-source-host-inputs-1" and doc["profile"] == SOURCE_PROFILE
+          and _canonical(doc["target"]) == _canonical(helper.TARGET)
+          and doc["state"] == "immutable-input-correspondence-only" and doc["nativeQualification"] == "not-established"
+          and doc["scope"] == "Expected closed-root input correspondence, not executed tool versions, effective containment, "
+              "ownership, successful work or runtime qualification. All implicit tools, loaders, libraries and headers "
+              "remain covered by the complete rootfs inventory.", "Different source host-input contract")
+    rootfs, lock = _decode(root_raw), _decode(lock_raw)
+    _need(type(rootfs) is dict and rootfs.get("schema") == "mrk-cpython-source-rootfs-1"
+          and rootfs.get("profile") == SOURCE_PROFILE and rootfs.get("nativeQualification") == "not-established",
+          "Different source host root origin")
+    root_record = {"path": "/work/inputs/rootfs.json", "size": len(root_raw), "sha256": output["rootfsSha256"]}
+    host_record = {"path": "/work/inputs/host-inputs.json", "size": len(raw), "sha256": output["hostInputsSha256"]}
+    _need(_record(doc["rootfs"], limit=MAX_INVENTORY_BYTES, absolute=True) == root_record
+          and type(lock) is dict and lock.get("rootfs") == root_record and lock.get("hostInputs") == host_record,
+          "Original source host/root records differ")
+    _need(_sha(doc["selectionSha256"]) == rootfs.get("selectionSha256")
+          and _sha(doc["memberPlanSha256"]) == rootfs.get("memberPlanSha256"), "Source host selection/member plan differs")
+    # Select only these nine already-declared roles from the SAME pinned rootfs
+    # DATA. No new host/dependency census, alias resolution or tool execution.
+    _need(type(rootfs.get("files")) is list and len(rootfs["files"]) <= MAX_EVIDENCE_FILES,
+          "Source host root file records missing")
+    wanted = {path.removeprefix("/") for path in helper.SOURCE_TOOLS.values()}
+    originals = {}
+    for row in rootfs["files"]:
+        _need(type(row) is dict and type(row.get("name")) is str, "Invalid source host root file")
+        if row["name"] in wanted:
+            _need(row["name"] not in originals, "Ambiguous source host root tool")
+            originals[row["name"]] = row
+    _need(originals.keys() == wanted and type(doc["toolRoles"]) is list
+          and len(doc["toolRoles"]) == len(helper.SOURCE_TOOLS), "Source host tool roster incomplete")
+    roles = []
+    for row in doc["toolRoles"]:
+        _keys(row, {"role", "path", "size", "sha256", "mode", "origin"})
+        role = row["role"]
+        _need(type(role) is str and role in helper.SOURCE_TOOLS and role not in roles, "Source host role is foreign or repeated")
+        roles.append(role)
+        _need(row["path"] == helper.SOURCE_TOOLS[role], "Source host tool path differs")
+        _record({key: row[key] for key in ("path", "size", "sha256")}, limit=MAX_EVIDENCE_FILE_BYTES, absolute=True)
+        _need(row["size"] > 0 and type(row["mode"]) is int and row["mode"] == 0o555, "Source host tool size/mode differs")
+        origin = _keys(row["origin"], {"archiveId", "member"})
+        _relative(origin["archiveId"])
+        _relative(origin["member"])
+        original = originals[row["path"].removeprefix("/")]
+        _need(all(row[key] == original.get(key) for key in ("size", "sha256", "mode"))
+              and origin == original.get("source"), "Source host tool is not the pinned root member")
+    _need(roles == sorted(helper.SOURCE_TOOLS), "Source host role order differs")
+    return rootfs
+
+
 def _source_output_inventory(raw: bytes) -> dict:
     helper = _source_helpers()
     doc = _keys(_decode(raw), {"schema", "profile", "target", "inputLockSha256", "hostInputsSha256",
@@ -794,7 +866,8 @@ def _source_coverage(document: dict, rootfs: dict, notices: dict) -> None:
           "Native outputs lack the full conservative component union")
 
 
-def _source_evidence(root: Path, raw: bytes, output: dict, notice_raw: bytes, policy: _SourcePolicy) -> dict:
+def _source_evidence(root: Path, raw: bytes, output: dict, notice_raw: bytes, policy: _SourcePolicy,
+                     host_raw: bytes) -> dict:
     doc = _keys(_decode(raw), {"schema", "profile", "inputLockSha256", "rootfsSha256", "resultSha256",
         "noticeInventorySha256", "coverage", "sourceAvailabilityNotice", "bundledExpatNotice", "nativeSources", "systemSources",
         "outputCoverage", "files", "configurationReview", "obligationReview"})
@@ -813,8 +886,9 @@ def _source_evidence(root: Path, raw: bytes, output: dict, notice_raw: bytes, po
         _need(records.get(row["path"]) == row and row["size"] > 0, "Independent configuration/conditions review absent")
     _need(records.get("source-result.json") == output["result"] and records.get("rootfs.json", {}).get("sha256") == output["rootfsSha256"]
           and records.get("input-lock.json", {}).get("sha256") == output["inputLockSha256"], "Original input/result evidence absent")
-    rootfs = _decode(_read_checked(actual["rootfs.json"], limit=MAX_INVENTORY_BYTES))
-    _need(rootfs["schema"] == "mrk-cpython-source-rootfs-1" and rootfs["profile"] == SOURCE_PROFILE, "Different root origin")
+    rootfs = _source_host_inputs(host_raw, output,
+        _read_checked(actual["rootfs.json"], limit=MAX_INVENTORY_BYTES),
+        _read_checked(actual["input-lock.json"], limit=MAX_INVENTORY_BYTES))
     notice = _decode(notice_raw)
     _need(notice["profile"] == SOURCE_PROFILE, "Cross-profile source notices")
     notice_records = _records(notice["files"], max_files=MAX_NOTICE_FILES, max_bytes=MAX_NOTICE_BYTES, file_limit=MAX_NOTICE_BYTES)
@@ -926,6 +1000,8 @@ def _source_stage_items(root: Path, document: dict, policy: _SourcePolicy) -> li
 def _prepare_source_with_policy(stage: Path, output_inventory: Path, receipts: Path, components: Path,
         notices: Path, notice_inventory: Path, host_inputs: Path, output: Path, report: Path, policy: _SourcePolicy) -> dict:
     _require_source_policy(policy)  # Before any caller path inspection or output effect.
+    if policy is _SOURCE_PRODUCTION_POLICY:
+        _require_source_copier_host()
     inputs = (stage, output_inventory, receipts, components, notices, notice_inventory, host_inputs)
     for path in (*inputs, output, report):
         _absolute(path)
@@ -939,8 +1015,8 @@ def _prepare_source_with_policy(stage: Path, output_inventory: Path, receipts: P
     document = _source_output_inventory(_checked(output_inventory, policy.output_inventory_sha256, limit=MAX_INVENTORY_BYTES))
     notice_raw = _checked(notice_inventory, policy.notice_inventory_sha256, limit=MAX_NOTICE_INVENTORY_BYTES)
     component_raw = _checked(components, policy.components_sha256, limit=MAX_INVENTORY_BYTES)
-    _host_inputs(_checked(host_inputs, document["hostInputsSha256"], limit=MAX_INVENTORY_BYTES), policy)
-    _source_evidence(receipts, component_raw, document, notice_raw, policy)
+    host_raw = _checked(host_inputs, document["hostInputsSha256"], limit=MAX_INVENTORY_BYTES)
+    _source_evidence(receipts, component_raw, document, notice_raw, policy, host_raw)
     items = _source_stage_items(stage, document, policy)
     items.extend(_notice_items(notices, notice_raw, policy))
     directories = _preflight_items(items)

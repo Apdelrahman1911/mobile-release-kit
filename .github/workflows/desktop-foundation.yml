@@ -2,7 +2,7 @@ name: Desktop foundation verification
 
 on:
   push:
-    branches: [feature/desktop-application, verify/desktop-windows-snapshot]
+    branches: [feature/desktop-application, verify/desktop-windows-snapshot, verify/desktop-conventional-prepare, verify/desktop-conventional-smoke]
     paths:
       - desktop/**
       - tests/desktop/**
@@ -37,7 +37,7 @@ on:
         required: true
         type: choice
         default: foundation
-        options: [foundation, windows-snapshot]
+        options: [foundation, windows-snapshot, conventional-prepare, conventional-smoke]
       expected_sha:
         description: Exact reviewed commit on the selected ref (verification only)
         required: true
@@ -55,7 +55,9 @@ jobs:
     name: Desktop boundary / ${{ matrix.platform }}
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/feature/desktop-application') ||
-      (github.event_name == 'workflow_dispatch' && inputs.scope == 'foundation')
+      (github.event_name == 'workflow_dispatch' && inputs.scope == 'foundation' &&
+       github.ref != 'refs/heads/verify/desktop-conventional-prepare' &&
+       github.ref != 'refs/heads/verify/desktop-conventional-smoke')
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -241,7 +243,9 @@ jobs:
     name: Windows static snapshot / original native boundaries
     if: >-
       (github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-windows-snapshot') ||
-      (github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-snapshot')
+      (github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-snapshot' &&
+       github.ref != 'refs/heads/verify/desktop-conventional-prepare' &&
+       github.ref != 'refs/heads/verify/desktop-conventional-smoke')
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -331,3 +335,168 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py clean'
+
+  conventional-prepare:
+    name: Conventional accepted H to prepared DATA only
+    if: >-
+      github.ref == 'refs/heads/verify/desktop-conventional-prepare' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.scope == 'conventional-prepare'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    env:
+      MRK_DESKTOP_HOSTED_CHECKS: conventional-runtime-data-preparation-v1
+      MRK_DESKTOP_DISPATCH_SCOPE: ${{ inputs.scope }}
+      MRK_DESKTOP_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+    steps:
+      - name: Check out reviewed preparation source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require source-literal H COPY committed review DATA and hosted TCB admissions
+        id: admit
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_foundation.py conventional-admit
+      # These are transport outputs of the reviewed literal gate, not workflow
+      # inputs or freshly observed hash authority. The token exists only here.
+      - name: Download exactly the independently accepted original H artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          repository: ${{ steps.admit.outputs.source-repository }}
+          run-id: ${{ steps.admit.outputs.source-runId }}
+          artifact-ids: ${{ steps.admit.outputs.source-artifactId }}
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+          path: ${{ steps.admit.outputs.root }}/source-artifact
+      - name: Copy and prepare once as DATA with original shell wait and writer closes
+        id: prepare
+        timeout-minutes: 10
+        shell: bash
+        env:
+          CONVENTIONAL_ROOT: ${{ steps.admit.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -C
+          umask 077
+          exec 4>"$CONVENTIONAL_ROOT/prepare.stdout"
+          exec 5>"$CONVENTIONAL_ROOT/prepare.stderr"
+          set +e
+          /usr/bin/python3.12 -I -S -B desktop/tools/ci_foundation.py conventional-prepare </dev/null 1>&4 2>&5 4>&- 5>&-
+          result=$?
+          set -e
+          exec 4>&- 5>&- || exit 125
+          (( result == 0 )) || exit "$result"
+          exec 3>"$CONVENTIONAL_ROOT/public/outer.json"
+          printf '{"schemaVersion":1,"scope":"conventional-runtime-data-preparation-v1","repository":"%s","sourceSha":"%s","runId":"%s","attempt":%s,"originalWait":true,"exitCode":%s,"outputWritersClosed":true,"statusWriterCloseGate":"original-step-success-required"}\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$result" >&3 || exit 125
+          exec 3>&- || exit 125
+      - name: Retain closed prepared archive and approved public source and notices
+        if: success() && steps.prepare.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-conventional-prepared-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.admit.outputs.root }}/public
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+    # NO candidate, Cargo, probe, libtest, cleanup or automatic smoke dependency.
+    # Actual A artifact/tar/M/Q/source delivery needs independent acceptance and
+    # a later literal-pin commit before a separate B push/dispatch is admitted.
+
+  conventional-smoke:
+    name: Conventional independently pinned W smoke only
+    if: >-
+      github.ref == 'refs/heads/verify/desktop-conventional-smoke' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.scope == 'conventional-smoke'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    env:
+      MRK_DESKTOP_HOSTED_CHECKS: conventional-runtime-bootstrap-smoke-v1
+      MRK_DESKTOP_DISPATCH_SCOPE: ${{ inputs.scope }}
+      MRK_DESKTOP_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+    steps:
+      - name: Check out reviewed consumer source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require independent prepared artifact M Q and hosted DATA TCB pins
+        id: admit
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_foundation.py conventional-admit
+      - name: Download exactly the independently accepted preparation artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          repository: ${{ steps.admit.outputs.prepared-repository }}
+          run-id: ${{ steps.admit.outputs.prepared-runId }}
+          artifact-ids: ${{ steps.admit.outputs.prepared-artifactId }}
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          digest-mismatch: error
+          path: ${{ steps.admit.outputs.root }}/prepared-artifact
+      - name: Authenticate unpack and compile one original locked headless libtest
+        timeout-minutes: 25
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_foundation.py conventional-compile
+      - name: Run one fixed probe and exactly two original ZIP cases
+        id: smoke
+        timeout-minutes: 5
+        shell: bash
+        env:
+          CONVENTIONAL_ROOT: ${{ steps.admit.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set +o posix
+          unset POSIXLY_CORRECT
+          set -C
+          umask 077
+          # Original owner byte capture is separately capped at 2 MiB. Compile
+          # and archive extraction already finished; this is only the smoke.
+          ulimit -S -f 2048
+          exec 4>"$CONVENTIONAL_ROOT/smoke.stdout"
+          exec 5>"$CONVENTIONAL_ROOT/smoke.stderr"
+          set +e
+          /usr/bin/python3.12 -I -S -B desktop/tools/ci_foundation.py conventional-smoke </dev/null 1>&4 2>&5 4>&- 5>&-
+          result=$?
+          set -e
+          exec 4>&- 5>&- || exit 125
+          (( result == 0 )) || exit "$result"
+          exec 3>"$CONVENTIONAL_ROOT/public/outer.json"
+          printf '{"schemaVersion":1,"scope":"conventional-runtime-bootstrap-smoke-v1","repository":"%s","sourceSha":"%s","runId":"%s","attempt":%s,"originalWait":true,"exitCode":%s,"outputWritersClosed":true,"statusWriterCloseGate":"original-step-success-required"}\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$result" >&3 || exit 125
+          exec 3>&- || exit 125
+      - name: Retain bounded original smoke receipts and approved source and notices
+        if: success() && steps.smoke.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-conventional-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.admit.outputs.root }}/public
+            ${{ steps.admit.outputs.root }}/prepared-artifact/source-kit/hosted-evidence.tar
+            ${{ steps.admit.outputs.root }}/prepared-artifact/source-kit/retained-files.json
+            ${{ steps.admit.outputs.root }}/prepared-artifact/source-kit/hosted-summary.json
+            ${{ steps.admit.outputs.root }}/prepared-artifact/components.json
+            ${{ steps.admit.outputs.root }}/prepared-artifact/notice-inventory.json
+            ${{ steps.admit.outputs.root }}/prepared-artifact/notices
+            ${{ steps.admit.outputs.root }}/prepared-artifact/reviews
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+    # No retry, fresh-root reset, cleanup or wider foundation/TLS/native jobs.

@@ -35,6 +35,33 @@ import zipfile
 RUST = "1.98.0"
 PYTHON = "3.14.7"
 NODE = "v24.20.0"
+# Independent source-literal admissions; no dispatch input/output or receipt can
+# promote a freshly observed archive/M/Q into either of these gates. A later
+# reviewed pin commit must also open COPY's four pins or the probe's two pins.
+# A: {sourceArtifact, reviewFiles, outputInventorySha256}; reviewFiles is the
+# complete committed conventional-review/ roster, not another artifact producer.
+# B: {preparedArtifact, manifestSha256, protocolSha256}.
+# Artifact: {repository, sourceSha, runId, attempt, artifactId, files}; files use
+# the existing {path,size,sha256} DATA records, including the approved source kit.
+CONVENTIONAL_PREPARE_INPUTS: dict | None = None
+CONVENTIONAL_SMOKE_INPUTS: dict | None = None
+# H's explicit trusted GitHub-hosted platform boundary, not a claimed complete
+# interpreter closure. {trustModel,imageOS,imageVersion,python:{path,size,sha256}}.
+# Startup/stdlib/cached bytecode/loader remain trusted platform TCB; -B prevents
+# writes, not cache reads. No H isolated-root/local Python or image fallback.
+CONVENTIONAL_HOSTED_PYTHON: dict | None = None
+CONVENTIONAL_PREPARE_SCOPE = "conventional-runtime-data-preparation-v1"
+CONVENTIONAL_SMOKE_SCOPE = "conventional-runtime-bootstrap-smoke-v1"
+CONVENTIONAL_SCOPES = frozenset({CONVENTIONAL_PREPARE_SCOPE, CONVENTIONAL_SMOKE_SCOPE})
+CONVENTIONAL_PHASES = ("conventional-admit", "conventional-prepare", "conventional-compile", "conventional-smoke")
+CONVENTIONAL_SOURCE_KIT = ("hosted-evidence.tar", "hosted-summary.json", "retained-files.json")
+CONVENTIONAL_TEST = "supervisor::hosted_tests::conventional_smoke::conventional_interpreter_bootstrap_smoke"
+CONVENTIONAL_SHARED_HELPERS = (
+    "desktop/tools/conventional_runtime_data.py", "desktop/tools/cpython_source_recipe.py",
+    "desktop/tools/cpython_source_setup.local", "desktop/tools/cpython_static_inputs.py",
+    "desktop/tools/prepare_cpython_source_payload.py", "desktop/tools/prepare_cpython_static_payload.py",
+    "desktop/tools/prepare_runtime.py",
+)
 BOUNDARY_SCOPE = "passive-v1"
 COMPILE_SCOPE = "shell-compile-v1"
 COMPILE_EVIDENCE_SCOPE = "desktop-shell-compile-only-v1"
@@ -7538,16 +7565,468 @@ def phase_environment_native(name: str, context: dict) -> None:
         environment_compile_record(context, argv, messages)
 
 
+def conventional_module(name: str):
+    """Only this fixed reviewed helper roster, after the source admission gate."""
+    import importlib.util
+    require(name in {"conventional_runtime_data", "prepare_runtime", "prepare_cpython_source_payload",
+                     "probe_cpython_source_runtime"}, "Unknown conventional DATA helper")
+    spec = importlib.util.spec_from_file_location("_mrk_conventional_" + name, Path(__file__).with_name(name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def conventional_admission(scope: str) -> tuple:
+    require(scope in CONVENTIONAL_SCOPES, "Unknown conventional route")
+    value = CONVENTIONAL_PREPARE_INPUTS if scope == CONVENTIONAL_PREPARE_SCOPE else CONVENTIONAL_SMOKE_INPUTS
+    # Before artifact/output paths, imports of the copier/probe, tools or writes.
+    require(type(value) is dict and type(CONVENTIONAL_HOSTED_PYTHON) is dict,
+            "Conventional route closed: accepted artifacts and actual hosted DATA TCB missing")
+    data = conventional_module("conventional_runtime_data")
+    wanted = ({"sourceArtifact", "reviewFiles", "outputInventorySha256"} if scope == CONVENTIONAL_PREPARE_SCOPE
+              else {"preparedArtifact", "manifestSha256", "protocolSha256"})
+    require(set(value) == wanted, "Conventional literal admission fields differ")
+    for key in sorted(wanted):
+        if key.endswith("Sha256"):
+            data.sha(value[key])
+            continue
+        if key == "reviewFiles":
+            rows = data.records(value[key])
+        else:
+            artifact = value[key]
+            require(type(artifact) is dict and set(artifact) == {"repository", "sourceSha", "runId", "attempt", "artifactId", "files"}
+                    and type(artifact["repository"]) is str
+                    and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", artifact["repository"]) is not None
+                    and type(artifact["sourceSha"]) is str and re.fullmatch(r"[0-9a-f]{40}", artifact["sourceSha"]) is not None
+                    and artifact["sourceSha"] != "0" * 40
+                    and all(type(artifact[field]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", artifact[field]) is not None
+                            for field in ("runId", "artifactId"))
+                    and type(artifact["attempt"]) is int and 0 < artifact["attempt"] <= 100,
+                    "Conventional literal artifact identity differs")
+            rows = data.records(artifact["files"])
+        required = (set(CONVENTIONAL_SOURCE_KIT) if key == "sourceArtifact"
+                    else {"components.json", "notice-inventory.json",
+                          "reviews/configuration-review.txt", "reviews/obligation-review.txt"})
+        if key == "preparedArtifact":
+            required |= {"prepared-runtime.tar", "preparation.json", "copy-result.json", "copy-report.json",
+                         "source-bindings.json", "outer.json", *("source-kit/" + name for name in CONVENTIONAL_SOURCE_KIT)}
+        require(required <= rows.keys() and (key != "sourceArtifact" or rows.keys() == required),
+                "Conventional admitted artifact lacks its concrete input/public kit")
+        if key != "sourceArtifact":
+            notices = {name for name in rows if name.startswith("notices/")}
+            require(bool(notices) and rows.keys() == required | notices
+                    and all(rows[name]["size"] > 0 for name in required),
+                    "Conventional public kit is missing, empty or has foreign members")
+    host = CONVENTIONAL_HOSTED_PYTHON
+    require(set(host) == {"trustModel", "imageOS", "imageVersion", "python"}
+            and host["trustModel"] == "github-hosted-platform-tcb-v1" and host["imageOS"] == "ubuntu24"
+            and type(host["imageVersion"]) is str
+            and re.fullmatch(r"[0-9]{8}\.[0-9]{1,6}\.[0-9]{1,6}", host["imageVersion"]) is not None,
+            "Conventional trusted platform admission differs")
+    body = data.records([host["python"]], absolute=True)
+    require(set(body) == {"/usr/bin/python3.12"} and 0 < host["python"]["size"] <= 16 << 20,
+            "Conventional actual hosted Python differs")
+    if scope == CONVENTIONAL_PREPARE_SCOPE:
+        copier = conventional_module("prepare_cpython_source_payload").P
+        review = {row["path"]: row for row in value["reviewFiles"]}
+        require((copier.APPROVED_SOURCE_OUTPUT_SHA256, copier.APPROVED_SOURCE_COMPONENTS_SHA256,
+                 copier.APPROVED_SOURCE_NOTICES_SHA256, copier.APPROVED_SOURCE_COPIER_PYTHON_SHA256)
+                == (value["outputInventorySha256"], review["components.json"]["sha256"],
+                    review["notice-inventory.json"]["sha256"], host["python"]["sha256"]),
+                "Accepted COPY public pins are closed or differ")
+    else:
+        probe = conventional_module("probe_cpython_source_runtime")
+        require((probe.APPROVED_PREPARED_MANIFEST_SHA256, probe.APPROVED_PROTOCOL_SHA256)
+                == (value["manifestSha256"], value["protocolSha256"]), "W probe prepared pins are closed or differ")
+    return data, value
+
+
+def conventional_host(data) -> None:
+    host = CONVENTIONAL_HOSTED_PYTHON
+    # Image/body correspondence and drift guards under the declared platform
+    # trust assumption; neither these hashes nor provider variables attest a
+    # complete startup/import/cache/loader closure.
+    require(sys.platform == "linux" and os.geteuid() != 0 and os.uname().machine == "x86_64"
+            and os.path.realpath(sys.executable) == "/usr/bin/python3.12" and sys.version_info[:2] == (3, 12)
+            and sys.flags.isolated == sys.flags.no_site == sys.flags.dont_write_bytecode == 1
+            and os.environ.get("ImageOS") == host["imageOS"] and os.environ.get("ImageVersion") == host["imageVersion"],
+            "Conventional route requires the admitted isolated hosted DATA Python")
+    path = Path(host["python"]["path"])
+    before = path.lstat()
+    require(stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o755
+            and before.st_uid == before.st_gid == 0 and before.st_nlink == 1,
+            "Conventional actual hosted Python metadata differs")
+    data.bound(path, host["python"])
+    require(data.state(path.lstat()) == data.state(before), "Conventional actual hosted Python changed during binding")
+
+
+def conventional_producer(context: dict) -> dict:
+    return {key: context[key] for key in ("repository", "sourceSha", "runId", "attempt")}
+
+
+def conventional_context(scope: str, data, *, create: bool = False) -> dict:
+    conventional_host(data)
+    require(os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+            and os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"
+            and os.environ.get("ImageOS") == "ubuntu24" and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") == scope,
+            "Conventional hosted scope differs")
+    sha, repository = os.environ.get("GITHUB_SHA", ""), os.environ.get("GITHUB_REPOSITORY", "")
+    run_id, attempt = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    dispatch = "conventional-prepare" if scope == CONVENTIONAL_PREPARE_SCOPE else "conventional-smoke"
+    ref = "refs/heads/verify/desktop-" + dispatch
+    require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None
+            and re.fullmatch(r"[1-9][0-9]{0,19}", run_id) is not None and attempt == "1"
+            and os.environ.get("GITHUB_WORKFLOW_SHA") == sha
+            and os.environ.get("GITHUB_REF") == ref
+            and os.environ.get("GITHUB_WORKFLOW_REF") == f"{repository}/.github/workflows/desktop-foundation.yml@{ref}",
+            "Conventional original source/workflow/run differs; rerun is not authorized")
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        require(os.environ.get("MRK_DESKTOP_EXPECTED_SHA") == sha
+                and os.environ.get("MRK_DESKTOP_DISPATCH_SCOPE") == dispatch, "Conventional explicit dispatch differs")
+    else:
+        require(os.environ.get("GITHUB_EVENT_NAME") == "push" and os.environ.get("MRK_PUSH_EVENT_AFTER") == sha,
+                "Conventional original push differs")
+    source = Path(os.environ["GITHUB_WORKSPACE"])
+    temp = Path(os.environ["RUNNER_TEMP"])
+    data.directory(source)
+    data.directory(temp)
+    require(source.resolve(strict=True) == source and temp.resolve(strict=True) == temp
+            and Path(__file__).resolve(strict=True) == source / "desktop/tools/ci_foundation.py",
+            "Conventional checkout/temporary paths differ")
+    root = temp / f"mrk-desktop-{dispatch}-{run_id}-{attempt}"
+    if create:
+        root.mkdir(mode=0o700)  # One original root; never retry/reset a failed attempt.
+        for name in ("home", "tmp", "cargo", "rustup", "target"):
+            (root / name).mkdir(mode=0o700)
+        data.write(root / "gitconfig-empty", b"")
+    data.directory(root)
+    git = shutil.which("git")
+    require(git is not None and Path(git).is_absolute(), "Hosted source reader unavailable")
+    context = {"source": str(source), "root": str(root), "sourceSha": sha, "repository": repository,
+               "runId": run_id, "attempt": 1, "platform": "linux", "git": git, "executionScope": scope}
+    source_unchanged(context)
+    context["sourceTree"] = run([git, "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=source,
+                               env=clean_environment(root), timeout=15, capture=True)
+    require(re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None, "Conventional source tree differs")
+    return context
+
+
+def conventional_files(data, path: Path, files: list[dict]) -> dict:
+    rows = data.records(files)
+    # Reuse the existing bounded ordinary tree reader, not a new census scheme.
+    preparer = conventional_module("prepare_runtime")
+    require({item.relative_to(path).as_posix() for item in preparer.files(path)} == rows.keys(),
+            "Conventional input/public kit contains extra/missing files")
+    for name, row in rows.items():
+        data.bound(path / name, row)
+    return rows
+
+
+def conventional_core(data, source: Path, raw: bytes, *, retained_source: Path | None = None) -> list[dict]:
+    """Join existing H core-source-files DATA across producer/consumer commits."""
+    rows = data.decode(raw)
+    originals = data.records(rows, absolute=True)
+    prefix = "/work/inputs/core-source/"
+    preparer = conventional_module("prepare_runtime")
+    fixed = {"desktop/" + name for name in (*preparer.BOOTSTRAPS, preparer.GITHUB_CA_NAME)}
+    fixed.add("desktop/tools/prepare_runtime.py")
+    expected = fixed | {"src/mobile_release/" + path.relative_to(source / "src/mobile_release").as_posix()
+                        for path in preparer.files(source / "src/mobile_release")}
+    require(set(originals) == {prefix + name for name in expected}, "Original complete core/handoff roster differs")
+    for name, row in originals.items():
+        relative = name.removeprefix(prefix)
+        # H's fixed prepare maps this one logical resource from the committed
+        # controls path. Do not add a shadow/untracked desktop/github-ca.pem.
+        checkout_name = "desktop/cpython-source-inputs/github-ca.pem" if relative == "desktop/github-ca.pem" else relative
+        data.bound(source / checkout_name, row)
+        if retained_source is not None:
+            data.bound(retained_source / relative, row)
+    if retained_source is not None:
+        require({"src/mobile_release/" + path.relative_to(retained_source / "src/mobile_release").as_posix()
+                 for path in preparer.files(retained_source / "src/mobile_release")}
+                == {name for name in expected if name.startswith("src/mobile_release/")},
+                "Retained H complete core roster differs")
+    return rows
+
+
+def conventional_recheck(context: dict, data) -> None:
+    conventional_host(data)
+    source_unchanged(context)
+
+
+def conventional_prepare(context: dict, data, admission: dict) -> None:
+    root, source = Path(context["root"]), Path(context["source"])
+    data.write(root / "prepare-started.json", data.canonical(conventional_producer(context)))
+    h_artifact = root / "source-artifact"
+    kit = source / "desktop/cpython-source-inputs/conventional-review"
+    h_rows = conventional_files(data, h_artifact, admission["sourceArtifact"]["files"])
+    kit_rows = conventional_files(data, kit, admission["reviewFiles"])
+    summary = data.decode(data.read(h_artifact / "hosted-summary.json", 64 << 10))
+    h = admission["sourceArtifact"]
+    require(type(summary) is dict and summary.get("schema") == "mrk-cpython-source-hosted-result-1"
+            and summary.get("profile") == data.PROFILE and summary.get("state") == "original-source-build-evidence-retained"
+            and all(data.same(summary.get(key), h[key]) for key in ("sourceSha", "runId", "attempt"))
+            and type(summary.get("originalClientExitCode")) is int and summary["originalClientExitCode"] == 0
+            and type(summary.get("originalUserdelExitCode")) is int and summary["originalUserdelExitCode"] == 0
+            and summary.get("nativeQualification") == summary.get("supplyAcceptance") == "not-established",
+            "Accepted H original result differs")
+    for field, leaf in (("archive", "hosted-evidence.tar"), ("inventory", "retained-files.json")):
+        require(data.same(summary["retained"][field], {**h_rows[leaf], "path": "/var/tmp/mrk-cpython-source-public-v1/" + leaf}),
+                "Accepted H retained bytes differ")
+    retained = data.decode(data.read(h_artifact / "retained-files.json"))
+    require(type(retained) is dict and set(retained) == {"schema", "profile", "coverage", "files"}
+            and retained["schema"] == "mrk-cpython-source-retention-1" and retained["profile"] == data.PROFILE
+            and retained["coverage"] == "conservative-component-review-required", "Original H retention inventory differs")
+    data.unpack(h_artifact / "hosted-evidence.tar", h_rows["hosted-evidence.tar"], root / "h", retained=retained["files"])
+    retained_rows = {row["path"]: row for row in retained["files"]}
+    h_root = root / "h"
+    core_raw = data.read(h_root / "controls/core-source-files.json")
+    core_source = h_root / "inputs/core-source"
+    conventional_core(data, source, core_raw, retained_source=core_source)
+    evidence = root / "evidence"
+    evidence.mkdir(mode=0o700)
+    for name, row in retained_rows.items():
+        if name.startswith("work/receipts/"):
+            leaf = name.removeprefix("work/receipts/")
+            require("/" not in leaf, "Original H receipt was renamed/nested")
+            data.copy(h_root / name, evidence / leaf, {key: row[key] for key in ("path", "size", "sha256")})
+    for leaf in ("configuration-review.txt", "obligation-review.txt"):
+        name = "reviews/" + leaf
+        data.copy(kit / name, evidence / leaf, kit_rows[name])
+    # COPY checks the exact original+review evidence roster and all existing
+    # output/root/lock/result/configuration joins. Never rewrite H originals.
+    conventional_recheck(context, data)
+    copier = conventional_module("prepare_cpython_source_payload").P
+    copied = copier.prepare_source(h_root / "work/stage", h_root / "work/receipts/source-output.json", evidence,
+        kit / "components.json", kit / "notices", kit / "notice-inventory.json", h_root / "controls/host-inputs.json",
+        root / "runtime", root / "copy-report.json")
+    preparer = conventional_module("prepare_runtime")
+    prepared = preparer.prepare(core_source, root / "runtime", TARGETS["linux"])
+    require(copied.get("operation") == "source-publisher-copy-completed"
+            and prepared.get("qualification") == "prepared-not-native-verified", "Original DATA preparation did not complete")
+    manifest_raw = data.read(root / "runtime/manifest.json", 1 << 20)
+    manifest = data.decode(manifest_raw, 1 << 20)
+    require(hashlib.sha256(manifest_raw).hexdigest() == prepared["manifestSha256"]
+            and manifest["protocolSha256"] == prepared["protocolSha256"], "Original preparation result differs")
+    files = sorted([*manifest["files"], data.file_record(root / "runtime/manifest.json", 1 << 20)], key=lambda row: row["path"])
+    require({path.relative_to(root / "runtime").as_posix() for path in preparer.files(root / "runtime")}
+            == {row["path"] for row in files}, "Prepared runtime has unlisted files")
+    conventional_recheck(context, data)
+    conventional_core(data, source, core_raw, retained_source=core_source)
+    conventional_files(data, h_artifact, admission["sourceArtifact"]["files"])
+    conventional_files(data, kit, admission["reviewFiles"])
+    public = root / "public"
+    public.mkdir(mode=0o700)
+    archive = data.pack_runtime(root / "runtime", files, public / "prepared-runtime.tar")
+    (public / "source-kit").mkdir(mode=0o700)
+    for name, row in h_rows.items():
+        data.copy(h_artifact / name, public / "source-kit" / name, row)
+    for name, row in kit_rows.items():
+        (public / name).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        data.copy(kit / name, public / name, row)
+    data.copy(root / "copy-report.json", public / "copy-report.json", data.file_record(root / "copy-report.json", 8 << 20))
+    require(data.file_record(public / "copy-report.json")["sha256"] == copied["reportSha256"], "Original COPY report differs")
+    data.write(public / "copy-result.json", data.canonical(copied))
+    data.write(public / "source-bindings.json", core_raw)  # Unchanged existing H core DATA, not a new schema.
+    conventional_recheck(context, data)
+    data.write(public / "preparation.json", data.canonical({**prepared, "scope": CONVENTIONAL_PREPARE_SCOPE,
+        "producer": conventional_producer(context), "archive": archive,
+        "sourceArtifact": {key: h[key] for key in ("repository", "sourceSha", "runId", "attempt", "artifactId")},
+        "helperFiles": fixed_file_inventory(source, CONVENTIONAL_SHARED_HELPERS),
+        "copyResult": copied, "sourceKit": list(h_rows.values()), "notVerified": data.NOT_VERIFIED}))
+
+
+def conventional_prepared(context: dict, data, admission: dict, *, unpack: bool = False) -> tuple:
+    root, source = Path(context["root"]), Path(context["source"])
+    artifact = root / "prepared-artifact"
+    rows = conventional_files(data, artifact, admission["preparedArtifact"]["files"])
+    prepared = data.decode(data.read(artifact / "preparation.json", 64 << 10))
+    producer = {key: admission["preparedArtifact"][key] for key in ("repository", "sourceSha", "runId", "attempt")}
+    require(type(prepared) is dict and set(prepared) == {"manifestSha256", "protocolSha256", "qualification", "scope",
+        "producer", "archive", "sourceArtifact", "helperFiles", "copyResult", "sourceKit", "notVerified"}
+        and prepared["scope"] == CONVENTIONAL_PREPARE_SCOPE and prepared["qualification"] == "prepared-not-native-verified"
+        and data.same(prepared["producer"], producer) and data.same(prepared["archive"], rows["prepared-runtime.tar"])
+        and data.same(prepared["sourceKit"], [{**rows["source-kit/" + name], "path": name} for name in CONVENTIONAL_SOURCE_KIT])
+        and data.same(prepared["helperFiles"], fixed_file_inventory(source, CONVENTIONAL_SHARED_HELPERS))
+        and all(prepared[key] == admission[key] for key in ("manifestSha256", "protocolSha256"))
+        and prepared["notVerified"] == data.NOT_VERIFIED, "Accepted producer/preparation binding differs")
+    data.outer(data.decode(data.read(artifact / "outer.json", 4096)), CONVENTIONAL_PREPARE_SCOPE, producer)
+    copied = data.decode(data.read(artifact / "copy-result.json", 4096))
+    require(data.same(prepared["copyResult"], copied) and copied.get("operation") == "source-publisher-copy-completed"
+            and copied.get("evidenceKind") == "descriptive-source-copy-mapping"
+            and copied.get("qualification") == "no-native-supply-or-legal-qualification"
+            and copied.get("reportSha256") == rows["copy-report.json"]["sha256"], "Accepted COPY result differs")
+    conventional_core(data, source, data.read(artifact / "source-bindings.json"))
+    if unpack:
+        data.unpack(artifact / "prepared-runtime.tar", rows["prepared-runtime.tar"], root / "prepared")
+    runtime = root / "prepared/runtime"
+    probe = conventional_module("probe_cpython_source_runtime")
+    inspected = probe.inspect_prepared(runtime)  # Trusted-host DATA BEFORE any candidate creation.
+    require(inspected["manifestSha256"] == admission["manifestSha256"]
+            and inspected["protocolSha256"] == admission["protocolSha256"], "Accepted W prepared binding differs")
+    return runtime, inspected, probe
+
+
+def conventional_compile_argv(cargo: str, context: dict) -> list[str]:
+    return [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--features",
+            "development-runtime", "--target", TARGETS["linux"], "--manifest-path",
+            str(Path(context["source"]) / "desktop/src-tauri/Cargo.toml"), "--target-dir",
+            str(Path(context["root"]) / "target"), "--lib", "--no-run", "--message-format=json"]
+
+
+def conventional_compile(context: dict, data, admission: dict) -> None:
+    root, source = Path(context["root"]), Path(context["source"])
+    data.write(root / "compile-started.json", data.canonical(conventional_producer(context)))
+    conventional_prepared(context, data, admission, unpack=True)
+    no_cargo_configuration((root, *root.parents, source / "desktop/src-tauri", source / "desktop", source, *source.parents))
+    environment = clean_environment(root)
+    context["rustup"] = shutil.which("rustup")
+    require(context["rustup"] is not None, "Hosted Rust selector unavailable")
+    conventional_recheck(context, data)
+    run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+        check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
+    cargo, _ = tools(context, environment)
+    conventional_recheck(context, data)
+    with (root / "cargo-metadata.json").open("x", encoding="utf-8") as output, \
+            (root / "acquire.stderr").open("x", encoding="utf-8") as diagnostics:
+        run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features", "--features",
+             "development-runtime", "--filter-platform", TARGETS["linux"], "--manifest-path",
+             str(source / "desktop/src-tauri/Cargo.toml")], check="github-locked-headless-metadata", cwd=root,
+             env=environment, timeout=600, output=output, diagnostics=diagnostics)
+    require((root / "cargo-metadata.json").stat().st_size <= 32 << 20, "Conventional Cargo metadata bound")
+    conventional_recheck(context, data)
+    conventional_prepared(context, data, admission)
+    # Deliberately route-local; never add these pins to global clean_environment.
+    environment.update(GITHUB_SHA=context["sourceSha"], MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=admission["manifestSha256"],
+                       MRK_BUNDLED_PROTOCOL_SHA256=admission["protocolSha256"])
+    argv = conventional_compile_argv(cargo, context)
+    messages = root / "github-compile-messages.jsonl"
+    with messages.open("x", encoding="utf-8", newline="\n") as output, \
+            (root / "compile.stderr").open("x", encoding="utf-8") as diagnostics:
+        run(argv, check="github-headless-test-compile-only", cwd=root, env=environment, timeout=600,
+            output=output, diagnostics=diagnostics)
+    conventional_recheck(context, data)
+    compiled = github_compile_record(context, argv, messages)  # Original fresh Cargo JSON, never glob/latest.
+    data.write(root / "compile-checks.json", data.canonical({"producer": conventional_producer(context),
+        "scope": CONVENTIONAL_SMOKE_SCOPE, "manifestSha256": admission["manifestSha256"],
+        "protocolSha256": admission["protocolSha256"], "compiledTest": compiled}))
+
+
+def conventional_owner(source: Path):
+    # Exact checked-out core source was joined to the admitted existing H roster.
+    # Ordinary run_owned only: no restricted command-evidence adapter is used.
+    sys.path.insert(0, str(source / "src"))
+    from mobile_release.owned_process import run_owned
+    return run_owned
+
+
+def conventional_capture(data, root: Path, label: str, result) -> dict:
+    require(type(result) is subprocess.CompletedProcess and type(result.returncode) is int
+            and type(result.stdout) is bytes and type(result.stderr) is bytes
+            and len(result.stdout) + len(result.stderr) <= 2 << 20, "Conventional original capture is incomplete")
+    stdout = data.write(root / (label + ".stdout"), result.stdout)
+    stderr = data.write(root / (label + ".stderr"), result.stderr)
+    require(result.returncode == 0, "Conventional original owner returned nonzero; retain without next launch")
+    return {"ordinaryOwnerReturned": True, "originalExitCode": result.returncode,
+            "stdout": stdout, "stderr": stderr, "outputFilesClosedAndReadBack": True}
+
+
+def conventional_smoke(context: dict, data, admission: dict) -> None:
+    root, source = Path(context["root"]), Path(context["source"])
+    data.write(root / "smoke-started.json", data.canonical(conventional_producer(context)))
+    compiled = github_original_artifact(context)
+    checks = data.decode(data.read(root / "compile-checks.json", 64 << 10))
+    require(data.same(checks, {"producer": conventional_producer(context), "scope": CONVENTIONAL_SMOKE_SCOPE,
+        "manifestSha256": admission["manifestSha256"], "protocolSha256": admission["protocolSha256"], "compiledTest": compiled}),
+        "Conventional original compile is missing or changed")
+    messages = data.read(root / "github-compile-messages.jsonl", 16 << 20)
+    require(hashlib.sha256(messages).hexdigest() == compiled["messagesSha256"]
+            and str(github_compiled_test(messages, source=source, target_root=root / "target")) == compiled["path"],
+            "Conventional original Cargo selection differs")
+    runtime, prepared, probe = conventional_prepared(context, data, admission)
+    conventional_recheck(context, data)
+    run_owned = conventional_owner(source)
+    # No platform token or ambient Python/loader options enter either owner.
+    environment = {"LANG": "C", "LC_ALL": "C"}
+    result = run_owned([str(runtime / "python/bin/python3"), "-I", "-S", "-B",
+        str(source / "desktop/tools/probe_cpython_source_runtime.py"), str(runtime)],
+        environ=environment, cwd=root, timeout=30, capture=True, text=False, output_limit=2 << 20)
+    probe_wait = conventional_capture(data, root, "probe", result)
+    require(result.stderr == b"", "Conventional probe emitted unexpected diagnostics")
+    probe_result = data.probe_receipt(data.decode(result.stdout, 32 << 10), prepared, list(probe.EXPECTED_BUILTINS))
+    # Any error/timeout/capture/close/unknown/input change above ends the route.
+    # No next native launch, retry, new root, reset or cleanup follows failure.
+    conventional_recheck(context, data)
+    runtime_after, prepared_after, _ = conventional_prepared(context, data, admission)
+    require(runtime_after == runtime and data.same(prepared_after, prepared)
+            and data.same(github_original_artifact(context), compiled), "Conventional original inputs changed after probe")
+    cases = root / "cases"
+    cases.mkdir(mode=0o700)
+    environment.update(MRK_DESKTOP_HOSTED_CHECKS=CONVENTIONAL_SMOKE_SCOPE,
+        MRK_DESKTOP_DEV_PYTHON=str(runtime / "python/bin/python3"), MRK_DESKTOP_DEV_CORE=str(source / "src"),
+        MRK_DESKTOP_TEST_CORE_ZIP=str(runtime / "core.zip"), MRK_DESKTOP_TEST_ROOT=str(cases),
+        GITHUB_ACTIONS=os.environ["GITHUB_ACTIONS"], RUNNER_ENVIRONMENT=os.environ["RUNNER_ENVIRONMENT"], GITHUB_SHA=context["sourceSha"])
+    result = run_owned([compiled["path"], CONVENTIONAL_TEST, "--exact", "--ignored", "--test-threads=1"],
+        environ=environment, cwd=root, timeout=180, capture=True, text=False, output_limit=2 << 20)
+    libtest_wait = conventional_capture(data, root, "libtest", result)
+    rows = {row["path"]: row for row in prepared["files"]}
+    bindings = {"sourceSha": context["sourceSha"], "host": "linux", "target": TARGETS["linux"],
+        "runtimeMode": "trusted-development-only", "coreZipSha256": rows["core.zip"]["sha256"],
+        "engineSha256": prepared["protocolSha256"], "bootstrapSha256": rows["engine_bootstrap.py"]["sha256"],
+        "cargoLockSha256": data.file_record(source / "desktop/src-tauri/Cargo.lock", 1 << 20)["sha256"],
+        "fixtureSha256": data.file_record(source / "desktop/src-tauri/tests/fixtures/passive_core/_desktop_engine.py", 1 << 20)["sha256"]}
+    receipt = data.smoke_receipt(data.decode(data.read(cases / "conventional-smoke-receipt.json", 64 << 10), 64 << 10), prepared, bindings)
+    conventional_recheck(context, data)
+    _, prepared_after, _ = conventional_prepared(context, data, admission)
+    require(data.same(prepared_after, prepared), "Conventional prepared bytes changed after original libtest")
+    public = root / "public"
+    public.mkdir(mode=0o700)
+    data.write(public / "probe.json", data.canonical(probe_result))
+    data.write(public / "conventional-smoke-receipt.json", data.canonical(receipt))
+    data.write(public / "smoke-checks.json", data.canonical({"scope": CONVENTIONAL_SMOKE_SCOPE,
+        "producer": conventional_producer(context), "prepared": prepared, "compiledTestSha256": compiled["sha256"],
+        "probe": probe_wait, "libtest": libtest_wait, "outerOriginalWaitRequired": True, "notVerified": data.NOT_VERIFIED}))
+
+
+def conventional_phase(name: str, scope: str) -> None:
+    require(scope in CONVENTIONAL_SCOPES and (name == "conventional-admit"
+        or scope == CONVENTIONAL_PREPARE_SCOPE and name == "conventional-prepare"
+        or scope == CONVENTIONAL_SMOKE_SCOPE and name in {"conventional-compile", "conventional-smoke"}),
+        "Conventional DATA/smoke routes are separate")
+    data, admission = conventional_admission(scope)
+    context = conventional_context(scope, data, create=name == "conventional-admit")
+    if name == "conventional-admit":
+        with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+            output.write("root=" + context["root"] + "\n")
+            for key in sorted(admission):
+                if key.endswith("Artifact"):
+                    artifact = admission[key]
+                    prefix = key.removesuffix("Artifact")
+                    # Transport only; these values came from source, not inputs.
+                    for field in ("repository", "runId", "artifactId"):
+                        output.write(f"{prefix}-{field}={artifact[field]}\n")
+    elif name == "conventional-prepare":
+        conventional_prepare(context, data, admission)
+    elif name == "conventional-compile":
+        conventional_compile(context, data, admission)
+    else:
+        conventional_smoke(context, data, admission)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core",
                         "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
-                         "environment-native", "offline-cli11", "retain"))
+                         "environment-native", "offline-cli11", "retain", *CONVENTIONAL_PHASES))
     args = parser.parse_args()
     os.umask(0o077)
     print(f"Starting fixed desktop phase: {args.phase}", flush=True)
     try:
         scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")
+        if scope in CONVENTIONAL_SCOPES or args.phase in CONVENTIONAL_PHASES:
+            conventional_phase(args.phase, scope)
+            return 0
         admit_phase(scope, args.phase)
         platform = (admitted_host(retention_only=True) if (scope == METADATA_NATIVE_SCOPE and args.phase == "clean"
                     or scope == ENVIRONMENT_NATIVE_SCOPE and args.phase == "retain"

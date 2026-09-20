@@ -170,6 +170,29 @@ def coverage_fixture():
         **{name: record(name) for name in ("NOTICE.fixture.txt", "SOURCE-AVAILABILITY.txt")}}
 
 
+def source_host_fixture():
+    """Nine inert correspondence rows, not a complete root, build or admission."""
+    roles, files = [], []
+    for role, path in sorted(I.SOURCE_TOOLS.items()):
+        pinned = record(path, ("INERT original tool DATA: " + role + "\n").encode("ascii"))
+        origin = {"archiveId": "inert-" + role, "member": path.removeprefix("/")}
+        roles.append({**pinned, "role": role, "mode": 0o555, "origin": origin})
+        files.append({"name": path.removeprefix("/"), "size": pinned["size"], "sha256": pinned["sha256"],
+                      "mode": 0o555, "source": dict(origin)})
+    rootfs = {"schema": "mrk-cpython-source-rootfs-1", "profile": I.SOURCE_PROFILE,
+              "nativeQualification": "not-established", "selectionSha256": "1" * 64,
+              "memberPlanSha256": "2" * 64, "files": sorted(files, key=lambda row: row["name"])}
+    host = {"schema": "mrk-cpython-source-host-inputs-1", "profile": I.SOURCE_PROFILE,
+            "target": dict(I.TARGET), "state": "immutable-input-correspondence-only",
+            "nativeQualification": "not-established",
+            "scope": "Expected closed-root input correspondence, not executed tool versions, effective containment, "
+                "ownership, successful work or runtime qualification. All implicit tools, loaders, libraries and headers "
+                "remain covered by the complete rootfs inventory.",
+            "selectionSha256": rootfs["selectionSha256"], "memberPlanSha256": rootfs["memberPlanSha256"],
+            "toolRoles": roles}
+    return host, rootfs
+
+
 class SourceProfileTests(unittest.TestCase):
     def test_source_data_names_survive_inventory_and_tree_checks(self):
         examples = {"cpython": ("Mac/Icons/Disk Image.icns", "Mac/Icons/Python Folder.icns"),
@@ -524,6 +547,173 @@ class SourceProfileTests(unittest.TestCase):
         with self.assertRaises(B.I.InputError):
             B.root_plan({"schema": "mrk-private-tool-member-plan-1", "fileCount": 8758, "bodyBytes": 580511397,
                 "aliases": [None] * 551, "lineage": {"selectionSha256": B.PUBLIC_SELECTION_SHA256}})
+
+
+class SourceCopierHostTests(unittest.TestCase):
+    @staticmethod
+    def bound_data(host, rootfs):
+        """Bind only synthetic in-memory DATA; no result or production policy."""
+        root_raw = P._canonical(rootfs)
+        root_record = record("/work/inputs/rootfs.json", root_raw)
+        raw = P._canonical({**host, "rootfs": root_record})
+        lock_raw = P._canonical({"rootfs": root_record, "hostInputs": record("/work/inputs/host-inputs.json", raw)})
+        output = {"hostInputsSha256": P._digest(raw), "rootfsSha256": P._digest(root_raw),
+                  "inputLockSha256": P._digest(lock_raw)}
+        return raw, output, root_raw, lock_raw
+
+    def test_source_host_correspondence_is_data_not_legacy_closure(self):
+        host, rootfs = source_host_fixture()
+        arguments = self.bound_data(host, rootfs)
+        with patch.object(P, "_source_helpers", return_value=I), \
+                patch.object(P, "_ordinary", side_effect=AssertionError("original tool stat")), \
+                patch.object(P, "_read_checked", side_effect=AssertionError("original tool read")), \
+                patch.object(P.os.path, "realpath", side_effect=AssertionError("original tool lookup")):
+            self.assertEqual(P._source_host_inputs(*arguments), rootfs)
+            with self.assertRaises(P.PayloadError):
+                P._host_inputs(arguments[0], P._PRODUCTION_POLICY)
+
+    def test_source_host_contract_requires_canonical_exact_claims(self):
+        host, rootfs = source_host_fixture()
+        changes = (("schema", "mrk-host-inputs-1"), ("profile", I.PROFILE),
+                   ("target", {**I.TARGET, "gil": 1}), ("state", "mandatory-work-complete"),
+                   ("nativeQualification", "established"), ("scope", "executed tool versions"),
+                   ("hostPython", record("/inert/legacy-python")))
+        with patch.object(P, "_source_helpers", return_value=I), \
+                patch.object(P, "_read_checked", side_effect=AssertionError("live tool read")):
+            for field, value in changes:
+                with self.subTest(field=field), self.assertRaises(P.PayloadError):
+                    P._source_host_inputs(*self.bound_data({**host, field: value}, rootfs))
+            missing = dict(host)
+            del missing["scope"]
+            with self.assertRaises(P.PayloadError):
+                P._source_host_inputs(*self.bound_data(missing, rootfs))
+            raw, output, root_raw, lock_raw = self.bound_data(host, rootfs)
+            raw = raw[:-1] + b" \n"
+            lock = P._decode(lock_raw)
+            lock["hostInputs"] = record("/work/inputs/host-inputs.json", raw)
+            lock_raw = P._canonical(lock)
+            output.update(hostInputsSha256=P._digest(raw), inputLockSha256=P._digest(lock_raw))
+            with self.assertRaisesRegex(P.PayloadError, "canonical publisher JSON"):
+                P._source_host_inputs(raw, output, root_raw, lock_raw)
+
+    def test_source_host_requires_original_digest_and_root_lock_bindings(self):
+        host, rootfs = source_host_fixture()
+        raw, output, root_raw, lock_raw = self.bound_data(host, rootfs)
+        with patch.object(P, "_source_helpers", return_value=I), \
+                patch.object(P, "_read_checked", side_effect=AssertionError("live tool read")):
+            for field in output:
+                with self.subTest(digest=field), self.assertRaisesRegex(P.PayloadError, "Original source host/root/lock binding"):
+                    P._source_host_inputs(raw, {**output, field: "0" * 64}, root_raw, lock_raw)
+            for field in ("rootfs", "hostInputs"):
+                lock = P._decode(lock_raw)
+                lock[field]["path"] = "/inert/substitute.json"
+                changed = P._canonical(lock)
+                with self.subTest(lock_record=field), self.assertRaisesRegex(P.PayloadError, "Original source host/root records"):
+                    P._source_host_inputs(raw, {**output, "inputLockSha256": P._digest(changed)}, root_raw, changed)
+            changed_host = P._decode(raw)
+            changed_host["rootfs"]["size"] += 1
+            changed_raw = P._canonical(changed_host)
+            lock = P._decode(lock_raw)
+            lock["hostInputs"] = record("/work/inputs/host-inputs.json", changed_raw)
+            changed_lock = P._canonical(lock)
+            changed_output = {**output, "hostInputsSha256": P._digest(changed_raw), "inputLockSha256": P._digest(changed_lock)}
+            with self.assertRaisesRegex(P.PayloadError, "Original source host/root records"):
+                P._source_host_inputs(changed_raw, changed_output, root_raw, changed_lock)
+            for field in ("selectionSha256", "memberPlanSha256"):
+                with self.subTest(root_binding=field), self.assertRaisesRegex(P.PayloadError, "selection/member plan"):
+                    P._source_host_inputs(*self.bound_data({**host, field: "0" * 64}, rootfs))
+            for field, value in (("schema", "mrk-other-root-1"), ("profile", I.PROFILE),
+                                 ("nativeQualification", "established")):
+                with self.subTest(root_contract=field), self.assertRaisesRegex(P.PayloadError, "Different source host root origin"):
+                    P._source_host_inputs(*self.bound_data(host, {**rootfs, field: value}))
+
+    def test_source_host_requires_unique_exact_root_tool_roles(self):
+        host, rootfs = source_host_fixture()
+        changes = {
+            "missing": lambda rows: rows.pop(),
+            "duplicate": lambda rows: rows.__setitem__(1, copy.deepcopy(rows[0])),
+            "foreign": lambda rows: rows[0].update(role="strip"),
+            "path": lambda rows: rows[0].update(path="/usr/local/bin/ar"),
+            "body": lambda rows: rows[0].update(sha256="0" * 64),
+            "size": lambda rows: rows[0].update(size=rows[0]["size"] + 1),
+            "typed-size": lambda rows: rows[0].update(size=float(rows[0]["size"])),
+            "mode": lambda rows: rows[0].update(mode=0o755),
+            "origin": lambda rows: rows[0]["origin"].update(archiveId="other-inert-archive"),
+            "order": lambda rows: rows.reverse(),
+        }
+        with patch.object(P, "_source_helpers", return_value=I), \
+                patch.object(P, "_ordinary", side_effect=AssertionError("original tool stat")), \
+                patch.object(P, "_read_checked", side_effect=AssertionError("original tool read")), \
+                patch.object(P.os.path, "realpath", side_effect=AssertionError("original tool lookup")):
+            for kind, change in changes.items():
+                changed = copy.deepcopy(host)
+                change(changed["toolRoles"])
+                with self.subTest(role=kind), self.assertRaises(P.PayloadError):
+                    P._source_host_inputs(*self.bound_data(changed, rootfs))
+            for kind in ("missing", "duplicate"):
+                changed = copy.deepcopy(rootfs)
+                if kind == "missing":
+                    changed["files"].pop()
+                else:
+                    changed["files"].append(copy.deepcopy(changed["files"][0]))
+                with self.subTest(root_member=kind), self.assertRaises(P.PayloadError):
+                    P._source_host_inputs(*self.bound_data(host, changed))
+
+    def test_source_copier_gates_refuse_before_caller_paths(self):
+        # Fictional pins reach only negative guards; never a copy or approval.
+        policy = P._SourcePolicy("1" * 64, "2" * 64, "3" * 64, P.LICENSE_BYTES, P.LICENSE_SHA256)
+        for missing in range(4):
+            fields = list(policy)
+            if missing < 3:
+                fields[missing] = None
+            with self.subTest(missing_gate=missing), \
+                    patch.object(P, "_SOURCE_PRODUCTION_POLICY", P._SourcePolicy(*fields)), \
+                    patch.object(P, "APPROVED_SOURCE_COPIER_PYTHON_SHA256", "4" * 64 if missing < 3 else None), \
+                    patch.object(P, "_absolute", side_effect=AssertionError("caller path")), \
+                    patch.object(P, "_write_payload", side_effect=AssertionError("output effect")), \
+                    patch.object(P, "_read_checked", side_effect=AssertionError("input read")), \
+                    patch.object(P.os.path, "realpath", side_effect=AssertionError("host lookup before gates")):
+                with self.assertRaisesRegex(P.PayloadError, "preparation closed"):
+                    P.prepare_source(*(object() for _ in range(9)))
+                if missing == 3:
+                    with self.assertRaisesRegex(P.PayloadError, "actual copier Python admission missing"):
+                        P._require_source_copier_host()
+
+    def test_source_copier_checks_fixed_python_flags_and_body_pin(self):
+        body = b"INERT actual copier Python DATA; never executed\n"
+        expected = P._digest(body)
+        flags = {"isolated": 1, "no_site": 1, "dont_write_bytecode": 1}
+        runtime = SimpleNamespace(executable="/inert/copier-python", flags=SimpleNamespace(**flags))
+        fixed_path = "/usr/bin/python3.12"
+        with patch.object(P, "APPROVED_SOURCE_COPIER_PYTHON_SHA256", expected), patch.object(P, "sys", runtime), \
+                patch.object(P.os.path, "realpath", return_value=fixed_path) as resolved, \
+                patch.object(P, "_read_checked", return_value=body) as read:
+            P._require_source_copier_host()
+        resolved.assert_called_once_with(runtime.executable)
+        read.assert_called_once_with(Path(fixed_path), limit=16 * 1024 * 1024)
+        for changed in ("path", *flags):
+            current = dict(flags)
+            if changed != "path":
+                current[changed] = 0
+            runtime = SimpleNamespace(executable="/inert/copier-python", flags=SimpleNamespace(**current))
+            path = "/work/stage/python/bin/python3" if changed == "path" else fixed_path
+            with self.subTest(changed=changed), patch.object(P, "APPROVED_SOURCE_COPIER_PYTHON_SHA256", expected), \
+                    patch.object(P, "sys", runtime), patch.object(P.os.path, "realpath", return_value=path), \
+                    patch.object(P, "_read_checked", side_effect=AssertionError("unadmitted host read")):
+                with self.assertRaisesRegex(P.PayloadError, "admitted local copier Python with -I -S -B"):
+                    P._require_source_copier_host()
+        runtime = SimpleNamespace(executable=fixed_path, flags=SimpleNamespace(**flags))
+        with patch.object(P, "APPROVED_SOURCE_COPIER_PYTHON_SHA256", expected), patch.object(P, "sys", runtime), \
+                patch.object(P.os.path, "realpath", return_value=fixed_path), \
+                patch.object(P, "_read_checked", return_value=body + b"changed") as read:
+            with self.assertRaisesRegex(P.PayloadError, "Pinned input hash/size differs"):
+                P._require_source_copier_host()
+        read.assert_called_once_with(Path(fixed_path), limit=16 * 1024 * 1024)
+        with patch.object(P, "APPROVED_SOURCE_COPIER_PYTHON_SHA256", "not-a-sha256"), \
+                patch.object(P.os.path, "realpath", side_effect=AssertionError("malformed pin host lookup")), \
+                patch.object(P, "_read_checked", side_effect=AssertionError("malformed pin host read")):
+            with self.assertRaisesRegex(P.PayloadError, "Invalid SHA256"):
+                P._require_source_copier_host()
 
 
 if __name__ == "__main__":
