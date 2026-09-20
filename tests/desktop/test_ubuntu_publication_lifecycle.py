@@ -79,12 +79,15 @@ class LifecycleData(unittest.TestCase):
 
     def test_dpkg_policy_uses_dynamic_default_or_explicit_empty_ordinary_home(self):
         links = {Path("/bin"): "usr/bin", Path("/sbin"): "usr/sbin", Path("/usr/bin/sh"): "dash"}
+        config = b"log /var/log/dpkg.log\n"
         fragments, environment, expected = Path("/etc/dpkg/dpkg.cfg.d"), dict(os.environ), None
         for case in ("default-first", "default-later", "explicit", "default-nonempty", "explicit-nonempty", "default-link", "explicit-link"):
             root = None if case.startswith("explicit") else Path("/inert/later" if case == "default-later" else "/inert/original")
             home = Path("/runner/work/home") if root is None else root / "private/home"
+            binding = None if root is None else {"path": str(root / "private/dpkg.log"), "identity": [1, 2, stat.S_IFREG | 0o600, 0, 0, 1]}
             home_reads = []
             def lstat(path):
+                self.assertFalse(path.is_relative_to("/var/log"), "Ambient dpkg log ancestry was inspected")
                 info = needrestart_stat(stat.S_IFLNK | 0o777 if path in links else stat.S_IFDIR | 0o755, nlink=1 if path in links else 2)
                 if path != Path("/") and path in (home, *home.parents):
                     info.st_uid = info.st_gid = 1001
@@ -98,10 +101,12 @@ class LifecycleData(unittest.TestCase):
                 home_reads.append(path)
                 return iter([home / "occupied"] if case.endswith("nonempty") else [])
             def record(path, limit=L.FILE_LIMIT):
-                return {"path": str(path), "size": 0, "sha256": hashlib.sha256(b"").hexdigest(),
-                        "identity": list(L.identity(needrestart_stat(stat.S_IFREG | 0o755)))}
+                raw = config if path == Path("/etc/dpkg/dpkg.cfg") else b""
+                return {"path": str(path), "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                        "identity": list(L.identity(needrestart_stat(stat.S_IFREG | 0o755, size=len(raw))))}
             with self.subTest(case=case), patch.object(L, "_ROOT", root), \
-                 patch.object(L, "protected_record", side_effect=record), patch.object(L, "read", return_value=b""), \
+                 patch.object(L, "protected_record", side_effect=record), patch.object(L, "read", return_value=config), \
+                 patch.object(L, "private_dpkg_log", return_value=binding) as private_log, \
                  patch.object(L, "needrestart_inputs", return_value={}), patch.object(L.os, "readlink", side_effect=links.__getitem__), \
                  patch.object(Path, "lstat", autospec=True, side_effect=lstat), patch.object(Path, "stat", autospec=True, side_effect=lstat), \
                  patch.object(Path, "iterdir", autospec=True, side_effect=entries), patch.object(L, "directory", wraps=L.directory) as directories:
@@ -111,10 +116,16 @@ class LifecycleData(unittest.TestCase):
                         L.dpkg_policy(**options)
                 else:
                     observed = L.dpkg_policy(**options)
+                    self.assertEqual("logBinding" in observed, root is not None)
+                    self.assertEqual(observed.pop("logBinding", None), binding)
                     if expected is None:
                         expected = observed
                     self.assertEqual(observed, expected)
                 directories.assert_any_call(home)
+                if root is None:
+                    private_log.assert_not_called()
+                else:
+                    private_log.assert_called_once_with()
                 self.assertEqual(home_reads, [] if case.endswith("link") else [home])
                 self.assertEqual(L._ROOT, root)
                 self.assertTrue(dict(os.environ) == environment, "Policy mutated the process environment")
@@ -206,13 +217,77 @@ class LifecycleData(unittest.TestCase):
                 else:
                     self.assertEqual(L.needrestart_state()["markers"], initial["markers"])
 
+    def test_private_dpkg_log_requires_fresh_protected_bounded_original(self):
+        root = Path("/inert")
+        log = root / "private/dpkg.log"
+        original = needrestart_stat(stat.S_IFREG | 0o600)
+        binding = {"path": str(log), "identity": list(L.identity(original)[:6])}
+        for case in ("empty", "append", "missing", "symlink", "mode", "uid", "gid", "links", "oversize", "xattr", "drift", "parent"):
+            item, reads = deepcopy(original), []
+            if case == "append": item.st_size, item.st_mtime_ns, item.st_ctime_ns = L.LIMIT, 1, 2
+            if case == "symlink": item.st_mode = stat.S_IFLNK | 0o600
+            if case == "mode": item.st_mode = stat.S_IFREG | 0o640
+            if case == "uid": item.st_uid = 1001
+            if case == "gid": item.st_gid = 1001
+            if case == "links": item.st_nlink = 2
+            if case == "oversize": item.st_size = L.LIMIT + 1
+            def lstat(path):
+                if path == log:
+                    reads.append(path)
+                    if case == "missing": raise FileNotFoundError()
+                    result = deepcopy(item)
+                    if case == "drift" and len(reads) == 2: result.st_ino += 1
+                    return result
+                mode = 0o770 if case == "parent" and path == log.parent else 0o700
+                return needrestart_stat(stat.S_IFDIR | mode, nlink=2)
+            with self.subTest(case=case), patch.object(L, "_ROOT", root), \
+                 patch.object(Path, "lstat", autospec=True, side_effect=lstat), \
+                 patch.object(L, "_xattrs", side_effect=L.Refused("Inert log ACL") if case == "xattr" else None), \
+                 patch.object(L, "directory", wraps=L.directory) as directory:
+                if case in {"empty", "append"}:
+                    self.assertEqual(L.private_dpkg_log(), binding)
+                else:
+                    with self.assertRaises((L.Refused, FileNotFoundError)):
+                        L.private_dpkg_log()
+                directory.assert_called_once_with(log.parent, protected=True)
+        # Reuse the unchanged exclusive DATA writer; an occupied name stops
+        # root entry before policy admission, with the original error intact.
+        for occupied in (False, True):
+            events = []
+            stopped = FileExistsError("Inert occupied log") if occupied else RuntimeError("Stop after initial policy")
+            def write(path, raw, mode):
+                self.assertEqual((path, raw, mode), (log, b"", 0o600))
+                context.assert_called_once_with(copying=True)
+                events.append("write")
+                if occupied: raise stopped
+            def policy():
+                events.append("policy")
+                raise stopped
+            with patch.multiple(L, _ROOT=root, _D=SimpleNamespace(write=write)), patch.object(L, "_root_ids"), \
+                 patch.object(L, "_context", return_value=({}, "a" * 64)) as context, patch.object(L, "_namespaces"), \
+                 patch.object(L, "dpkg_policy", side_effect=policy), patch.object(L, "command", side_effect=AssertionError("Package launch")):
+                with self.assertRaises(type(stopped)) as refused:
+                    L.unit_start()
+                self.assertIs(refused.exception, stopped)
+                self.assertEqual(events, ["write"] if occupied else ["write", "policy"])
+
     def test_package_observation_uses_original_return_and_latches_every_failure(self):
+        root = Path("/inert")
+        binding = {"path": str(root / "private/dpkg.log"), "identity": [1, 2, stat.S_IFREG | 0o600, 0, 0, 1]}
+        policy = {"logBinding": binding}
         before, after = needrestart_data(present=False), needrestart_data("unpacked")
-        for case in ("complete", "collision", "endpoint", "policy", "before", "command", "after", "changed", "late", "endpoint-late"):
-            phase, codes = ("duplicate", (1,)) if case == "collision" else ("unpack", (0,))
-            argv = ["/usr/bin/dpkg", "--debug=2", "--no-triggers", L.PACKAGE_ACTIONS[phase], "/inert/P0.deb"]
+        for case in ("complete", "collision", "endpoint", "caller-log", "policy", "before", "command", "log-failure", "log-change",
+                     "after", "changed", "late", "endpoint-late"):
+            phase = "duplicate" if case == "collision" else "upgrade-configure" if case.startswith("endpoint") else "unpack"
+            codes = (1,) if case == "collision" else (0,)
+            argv = ["/usr/bin/dpkg", "--debug=2", "--no-triggers", L.PACKAGE_ACTIONS[phase],
+                    L.PACKAGE if phase == "upgrade-configure" else "/inert/P0.deb"]
+            owned = argv[:4] + ["--log=" + str(root / "private/dpkg.log"), argv[4]]
+            if case == "caller-log": argv.insert(4, "--log=/foreign")
+            caller = list(argv)
             endpoint = 150 if case.startswith("endpoint") else None
-            completed = subprocess.CompletedProcess(argv, codes[0], b"", b"")
+            completed = subprocess.CompletedProcess(owned, codes[0], b"", b"")
+            owner_error = RuntimeError("inert original owner failure")
             reads, events = [], []
             def snapshot():
                 events.append("snapshot")
@@ -222,31 +297,53 @@ class LifecycleData(unittest.TestCase):
                 result = deepcopy(before if len(reads) == 1 else after)
                 if case == "changed" and len(reads) == 2: result["markers"]["unpacked"]["size"] = 1
                 return result
+            def read_log():
+                events.append("log")
+                self.assertTrue(L._FAILED, "Post-log observation did not retain the failed latch")
+                if case == "log-failure": raise ValueError("inert log refusal")
+                result = deepcopy(binding)
+                if case == "log-change": result["identity"][1] += 1
+                return result
             def command(label, actual, **options):
                 events.append("command")
-                if case == "command": raise RuntimeError("inert original owner failure")
-                self.assertEqual((actual, options["maximum"], options["env"]["PATH"], options["codes"]), (argv, 240, L.DPKG_PATH, codes))
+                if case == "command": raise owner_error
+                self.assertEqual((actual, options["maximum"], options["env"]["PATH"], options["codes"]), (owned, 240, L.DPKG_PATH, codes))
                 if endpoint is None: self.assertNotIn("endpoint", options)
                 else: self.assertEqual(options["endpoint"], endpoint)
                 L._COMMANDS.append({"phase": label, "argv": actual, "exitCode": completed.returncode})
                 return completed
-            with self.subTest(case=case), patch.multiple(L, _ROOT=Path("/inert"), _END=200, _FAILED=False, _COMMANDS=[], _PHASE="inert"), \
-                 patch.object(L, "dpkg_policy", return_value={"changed": 1} if case == "policy" else {}), \
+            with self.subTest(case=case), patch.multiple(L, _ROOT=root, _END=200, _FAILED=False, _COMMANDS=[], _PHASE="inert"), \
+                 patch.object(L, "dpkg_policy", return_value={"changed": 1} if case == "policy" else policy), \
+                 patch.object(L, "private_dpkg_log", side_effect=read_log), \
                  patch.object(L, "needrestart_state", side_effect=snapshot), patch.object(L, "command", side_effect=command), \
                  patch.object(L.time, "monotonic", return_value=201 if case == "late" else 151 if case == "endpoint-late" else 100):
                 if case in {"complete", "collision", "endpoint"}:
-                    self.assertIs(L.package_command(phase, argv, policy={}, codes=codes, endpoint=endpoint), completed)
+                    self.assertIs(L.package_command(phase, argv, policy=policy, codes=codes, endpoint=endpoint), completed)
                     self.assertFalse(L._FAILED)
-                    self.assertEqual(events, ["snapshot", "command", "snapshot"])
+                    self.assertEqual(events, ["snapshot", "command", "log", "snapshot"])
                     self.assertIs(L._COMMANDS[0]["needrestartMarkers"]["loggerCompletionClaimed"], False)
-                    L.verify_package_observations(L._COMMANDS)
-                    missing = deepcopy(L._COMMANDS); missing[0].pop("needrestartMarkers")
-                    with self.assertRaises(ValueError): L.verify_package_observations(missing)
+                    with patch.object(L, "_ROOT", None), patch.object(L, "private_dpkg_log", side_effect=AssertionError("Collector probed private log")):
+                        L.verify_package_observations(L._COMMANDS, root)
+                        with self.assertRaises(ValueError): L.verify_package_observations(L._COMMANDS, Path("/different-original-root"))
+                        for changed in ("missing-observation", "missing-log", "foreign-log", "wrong-order", "duplicate-log"):
+                            rows = deepcopy(L._COMMANDS)
+                            if changed == "missing-observation": rows[0].pop("needrestartMarkers")
+                            if changed == "missing-log": rows[0]["argv"].pop(4)
+                            if changed == "foreign-log": rows[0]["argv"][4] = "--log=/foreign"
+                            if changed == "wrong-order": rows[0]["argv"][4:6] = reversed(rows[0]["argv"][4:6])
+                            if changed == "duplicate-log": rows[0]["argv"].insert(4, owned[4])
+                            with self.assertRaises(ValueError): L.verify_package_observations(rows, root)
                 else:
-                    with self.assertRaises((ValueError, RuntimeError)):
-                        L.package_command(phase, argv, policy={}, codes=codes, endpoint=endpoint)
+                    with self.assertRaises((ValueError, RuntimeError)) as refused:
+                        L.package_command(phase, argv, policy=policy, codes=codes, endpoint=endpoint)
+                    if case == "command": self.assertIs(refused.exception, owner_error)
                     self.assertTrue(L._FAILED)
-                if case in {"policy", "before"}: self.assertNotIn("command", events)
+                    settled = list(events)
+                    with self.assertRaises(ValueError): L.package_command(phase, argv, policy=policy, codes=codes, endpoint=endpoint)
+                    self.assertEqual(events, settled)
+                self.assertEqual(argv, caller)
+                if case in {"caller-log", "policy", "before"}: self.assertNotIn("command", events)
+                if case in {"caller-log", "policy", "before", "command"}: self.assertNotIn("log", events)
                 if case == "command": self.assertEqual(len(reads), 1)
 
     def test_all_package_mutations_share_the_observed_command_wrapper(self):

@@ -653,6 +653,19 @@ def needrestart_transition(before, after):
             need(stat.S_IMODE(row["identity"][2]) == 0o644, "New marker did not use dpkg umask 022")
 
 
+def private_dpkg_log():
+    path = _ROOT / "private/dpkg.log"
+    directory(path.parent, protected=True)
+    before = path.lstat()
+    need(stat.S_ISREG(before.st_mode) and before.st_uid == before.st_gid == 0 and before.st_nlink == 1
+         and stat.S_IMODE(before.st_mode) == 0o600 and 0 <= before.st_size <= LIMIT, "Untrusted or oversized private dpkg log")
+    _xattrs(path, False)
+    need(identity(path.lstat()) == identity(before), "Private dpkg log changed during observation")
+    # Append DATA is diagnostic only; this binding claims no successful write
+    # or durability and deliberately excludes changing size/times/content.
+    return {"path": str(path), "identity": list(identity(before)[:6])}
+
+
 def package_command(label, argv, *, policy, codes=(0,), endpoint=None):
     global _FAILED, _PHASE
     try:
@@ -661,20 +674,22 @@ def package_command(label, argv, *, policy, codes=(0,), endpoint=None):
              and argv[:3] == ["/usr/bin/dpkg", "--debug=2", "--no-triggers"] and argv[3] == PACKAGE_ACTIONS[label],
              "Fixed package mutation required")
         need(dpkg_policy() == policy, "Dpkg configuration/helper input changed before " + label)
+        actual = argv[:4] + ["--log=" + str(_ROOT / "private/dpkg.log"), argv[4]]
         before = needrestart_state()
         needrestart_transition(before, before)
         previous = [row["needrestartMarkers"]["after"] for row in _COMMANDS if "needrestartMarkers" in row]
         if previous:
             needrestart_transition(previous[-1], before)
         options = {} if endpoint is None else {"endpoint": endpoint}
-        result = command(label, argv, maximum=240, codes=codes, env={**_environment(), "PATH": DPKG_PATH}, **options)
+        result = command(label, actual, maximum=240, codes=codes, env={**_environment(), "PATH": DPKG_PATH}, **options)
         # Only a positive return of the SAME original command owner permits any
         # post-state access (including expected dpkg collision exit 1).
         _FAILED = True
+        need(private_dpkg_log() == policy["logBinding"], "Original private dpkg log changed")
         after = needrestart_state()
         needrestart_transition(before, after)
         need(time.monotonic() < min(_END, _END if endpoint is None else endpoint), "Package observation completed late")
-        need(_COMMANDS and _COMMANDS[-1]["phase"] == label and _COMMANDS[-1]["argv"] == argv,
+        need(_COMMANDS and _COMMANDS[-1]["phase"] == label and _COMMANDS[-1]["argv"] == actual,
              "Original package command record missing")
         _COMMANDS[-1]["needrestartMarkers"] = {"before": before, "after": after, "loggerCompletionClaimed": False}
         _FAILED = False
@@ -684,14 +699,15 @@ def package_command(label, argv, *, policy, codes=(0,), endpoint=None):
         raise
 
 
-def verify_package_observations(commands):
+def verify_package_observations(commands, root):
     previous = None
     for row in commands:
         if row["phase"] not in PACKAGE_ACTIONS:
             need("needrestartMarkers" not in row and row["argv"][0] != "/usr/bin/dpkg", "Unwrapped package command")
             continue
-        need(row["argv"][:4] == ["/usr/bin/dpkg", "--debug=2", "--no-triggers", PACKAGE_ACTIONS[row["phase"]]]
-             and len(row["argv"]) == 5, "Closed package command differs")
+        need(row["argv"][:5] == ["/usr/bin/dpkg", "--debug=2", "--no-triggers", PACKAGE_ACTIONS[row["phase"]],
+                                 "--log=" + str(root / "private/dpkg.log")]
+             and len(row["argv"]) == 6, "Closed package command differs")
         observed = row.get("needrestartMarkers")
         need(type(observed) is dict and set(observed) == {"before", "after", "loggerCompletionClaimed"}
              and observed["loggerCompletionClaimed"] is False, "Marker observation is missing or claims logger acknowledgement")
@@ -731,13 +747,8 @@ def dpkg_policy(*, home=None):
         result["configs"].append(row)
     need(before == identity(fragments.stat()), "Dpkg config directory drift")
     result["directory"] = list(before)
-    if any("log /var/log/dpkg.log" in row["options"] for row in result["configs"]):
-        log = Path("/var/log/dpkg.log")
-        directory(log.parent, protected=True)
-        item = log.lstat()
-        need(stat.S_ISREG(item.st_mode) and item.st_nlink == 1 and item.st_uid == item.st_gid == 0
-             and not item.st_mode & 0o7022, "Untrusted configured dpkg log")
-        result["logBinding"] = list(identity(item)[:6])  # its content legitimately changes
+    if home is None:
+        result["logBinding"] = private_dpkg_log()
     home = _ROOT / "private/home" if home is None else home
     directory(home)
     need(not list(home.iterdir()), "Dpkg HOME is no longer empty")
@@ -1000,6 +1011,7 @@ def _binaries(value, phase, label):
 def unit_start():
     _root_ids()
     value, request_sha = _context(copying=True)
+    _D.write(_ROOT / "private/dpkg.log", b"", 0o600)
     namespaces = _namespaces(True)
     policy = dpkg_policy()
     start = {**_domain(value, "start"), "runnerUid": value["runnerUid"], "runnerGid": value["runnerGid"],
@@ -1094,7 +1106,7 @@ def unit_start():
     observation("purge")
     need(tuple(row["phase"] for row in _COMMANDS) == ROOT_PHASES and not _FAILED and time.monotonic() < _END,
          "Original fixed root command roster incomplete or late")
-    verify_package_observations(_COMMANDS)
+    verify_package_observations(_COMMANDS, root_path(value))
     _retain("mutation-denials.txt", canonical({phase: row["denials"] for phase, row in observations.items()}))
     _retain("unit-result.json", canonical({"sourceSha": value["sourceSha"], "handoffSha256": request_sha,
         "entrySha256": start["entrySha256"], "invocationId": start["invocationId"], "unit": start["unit"]["Id"],
@@ -1196,7 +1208,7 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
     for row in outcome["commands"]:
         codes = (0, 1) if row["phase"] in {"state-initial", "state-purge"} else ((1,) if row["phase"] in {"nonroot-helper", "duplicate"} else (0,))
         need(type(row["exitCode"]) is int and row["exitCode"] in codes, "Original lifecycle phase exit differs")
-    verify_package_observations(outcome["commands"])
+    verify_package_observations(outcome["commands"], root)
     rows = outcome["files"] + stop["files"] + [stop["result"]]
     for name in ("unit-stop.json",):
         pin = record(root / "public" / name, JSON_LIMIT)
