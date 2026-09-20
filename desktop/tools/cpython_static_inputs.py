@@ -526,6 +526,13 @@ SOURCE_ENV = {**FIXED_ENV, "SOURCE_DATE_EPOCH": "1785925789", "CONFIG_SHELL": SO
     "CC": SOURCE_TOOLS["cc"], "CXX": SOURCE_TOOLS["cxx"], "AR": SOURCE_TOOLS["ar"],
     "RANLIB": SOURCE_TOOLS["ranlib"], "LD": SOURCE_TOOLS["ld"], "MAKE": SOURCE_TOOLS["make"],
     "PERL": SOURCE_TOOLS["perl"]}
+SOURCE_PYTHON_ENV = {**SOURCE_ENV, "CPPFLAGS": "-I/work/deps/include", "LDFLAGS": "-L/work/deps/lib",
+    "ZLIB_CFLAGS": "-I/work/deps/include", "ZLIB_LIBS": "/work/deps/lib/libz.a",
+    "LIBFFI_CFLAGS": "-I/work/deps/include", "LIBFFI_LIBS": "/work/deps/lib/libffi.a"}
+# Pinned configure appends these supplied precious variables in this order,
+# before its later library probing. In particular LIBFFI_LIBS has no -ldl yet.
+SOURCE_PYTHON_PRECIOUS = ("CC", "CFLAGS", "LDFLAGS", "CPPFLAGS", "LIBFFI_CFLAGS", "LIBFFI_LIBS",
+                         "ZLIB_CFLAGS", "ZLIB_LIBS")
 SOURCE_OPENSSL_LDFLAGS = "LDFLAGS=-Wl,--enable-new-dtags,-z,origin,-rpath,'$$ORIGIN'"
 SOURCE_PYTHON_LDFLAGS = "LDFLAGS=-Wl,--enable-new-dtags,-z,origin,-rpath,'$$ORIGIN/../lib'"
 SOURCE_PYTHON_MAKE = (SOURCE_PYTHON_LDFLAGS, "PYTHON_FOR_BUILD=./$(BUILDPYTHON) -E -B",
@@ -773,7 +780,9 @@ def source_material_configuration(files: dict[str, bytes], setup: bytes, patchle
     need(_make_value(make, "MODULE__SSL_CFLAGS").split() == ["-I/work/deps/include"]
          and _make_value(make, "MODULE__SSL_LDFLAGS").split() == ["-L/work/deps/lib", "-lssl", "-lcrypto"],
          "Unselected OpenSSL module headers/link flags")
-    need(tuple(shlex.split(_make_value(make, "CONFIG_ARGS"))) == SOURCE_PYTHON_CONFIGURE,
+    original_args = (*SOURCE_PYTHON_CONFIGURE,
+                     *(name + "=" + SOURCE_PYTHON_ENV[name] for name in SOURCE_PYTHON_PRECIOUS))
+    need(tuple(shlex.split(_make_value(make, "CONFIG_ARGS"))) == original_args,
          "Original Python configure arguments differ")
     for name in ("CONFIGURE_CFLAGS", "CONFIGURE_CFLAGS_NODIST", "CONFIGURE_LDFLAGS", "CONFIGURE_LDFLAGS_NODIST"):
         need(not any(flag in _make_value(make, name) for flag in ("-flto", "-fprofile", "-B/work/capture")),
@@ -840,6 +849,37 @@ def source_elf(raw: bytes, name: str) -> dict:
     return {"needed": needed, "runpath": runpath, "notALoaderQualification": True}
 
 
+def source_openssl_configuration(files: dict[str, bytes], *, headers: bool) -> None:
+    """Check generated OpenSSL DATA without evaluating configdata.pm as Perl.
+
+    OpenSSL 3.5.8 deliberately emits no OPENSSL_NO_MODULE/OPENSSL_NO_LEGACY.
+    Its sorted dump_data rows and generated Makefile are the relevant controls.
+    """
+    raw = files["configdata.pm"]
+    declarations = re.findall(rb"^[ \t]*our[ \t]+%disabled\b[^\n]*", raw, re.M)
+    need(declarations == [b"our %disabled = ("], "OpenSSL disabled table missing/repeated")
+    blocks = re.findall(rb"^our %disabled = \(\n(.*?)\n\);$", raw, re.M | re.S)
+    need(len(blocks) == 1, "OpenSSL disabled table framing differs")
+    keys, disabled = [], {}
+    for row in blocks[0].split(b",\n"):
+        match = re.fullmatch(rb'    "([a-z0-9_+.-]+)" => "([a-z0-9_+(). -]+)"', row)
+        need(match is not None, "OpenSSL disabled table scalar syntax differs")
+        keys.append(match[1])
+        disabled[match[1]] = match[2]
+    need(keys == sorted(set(keys)), "OpenSSL disabled table keys repeated/unsorted")
+    for name in ("module", "dso", "engine", "autoload-config", "legacy"):
+        need(disabled.get(name.encode()) == b"option", "OpenSSL explicit no-" + name + " control differs")
+    for name in ("MODULES", "INSTALL_MODULES"):
+        need(_make_value(files["Makefile"], name) == "", "OpenSSL " + name + " must be empty")
+    if headers:
+        for macro in ("DSO", "ENGINE", "AUTOLOAD_CONFIG"):
+            need(re.search(rb"^#[ \t]*define[ \t]+OPENSSL_NO_" + macro.encode() + rb"\b",
+                           files["include/openssl/configuration.h"], re.M) is not None,
+                 "OpenSSL generated OPENSSL_NO_" + macro + " control missing")
+        need(re.search(rb'^#[ \t]*define[ \t]+OPENSSL_VERSION_STR[ \t]+"3\.5\.8"',
+                       files["include/openssl/opensslv.h"], re.M) is not None, "OpenSSL version differs")
+
+
 def source_capture_configuration(phase: str) -> list[dict]:
     if phase in {"python-configure", "python-build"}:
         root, names = WORK / "build/cpython", SOURCE_CONFIG_FILES
@@ -863,13 +903,8 @@ def source_capture_configuration(phase: str) -> list[dict]:
     if phase.startswith("python-"):
         source_material_configuration(captured, source_read(Path(__file__).with_name("cpython_source_setup.local")),
             source_read(SOURCE_ROOT / "cpython/Include/patchlevel.h", 1 << 20))
-    elif phase in {"openssl-build", "openssl-install"}:
-        for macro in ("MODULE", "DSO", "ENGINE", "AUTOLOAD_CONFIG", "LEGACY"):
-            need(re.search(rb"^#[ \t]*define[ \t]+OPENSSL_NO_" + macro.encode() + rb"\b",
-                           captured["include/openssl/configuration.h"], re.M) is not None,
-                 "OpenSSL optional loading control differs")
-        need(re.search(rb'^#[ \t]*define[ \t]+OPENSSL_VERSION_STR[ \t]+"3\.5\.8"',
-                       captured["include/openssl/opensslv.h"], re.M) is not None, "OpenSSL version differs")
+    elif phase.startswith("openssl-"):
+        source_openssl_configuration(captured, headers=phase != "openssl-configure")
     return records
 
 
