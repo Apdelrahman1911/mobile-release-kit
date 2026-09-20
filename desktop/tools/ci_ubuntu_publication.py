@@ -1034,6 +1034,15 @@ def protected_host_file(path, limit=MAX_BINARY):
             "links": links, "ancestry": ancestry}
 
 
+def shell_host_diagnostic(message, selected, component, item):
+    """Only already-observed public OS metadata, within failure_reason's bound."""
+    detail = json.dumps({"selectedPath": str(selected), "component": str(component),
+                         "mode": format(item.st_mode, "06o"), "uid": item.st_uid, "gid": item.st_gid},
+                        ensure_ascii=True, separators=(",", ":"))
+    result = message + ": " + detail
+    return result if len(result) <= 512 else message
+
+
 def shell_host_binding(path, *, directory_only=False, absent=False, limit=MAX_BINARY):
     """Shell-only directory/absence companion to the unchanged OS file reader."""
     path = Path(path)
@@ -1044,7 +1053,7 @@ def shell_host_binding(path, *, directory_only=False, absent=False, limit=MAX_BI
 
     def directory(name, item):
         D.need(stat.S_ISDIR(item.st_mode) and item.st_uid == item.st_gid == 0 and not item.st_mode & 0o7022,
-               "Unprotected shell directory ancestry")
+               shell_host_diagnostic("Unprotected shell directory ancestry", path, name, item))
         ancestry[str(name)] = [item.st_dev, item.st_ino, item.st_mode, item.st_uid, item.st_gid]
 
     directory(resolved, resolved.lstat())
@@ -1065,7 +1074,8 @@ def shell_host_binding(path, *, directory_only=False, absent=False, limit=MAX_BI
             D.need(absent, "Required shell host path is absent")
             missing, resolved = str(candidate), candidate.joinpath(*pending)
             break
-        D.need(item.st_uid == item.st_gid == 0, "Shell host path has a nonroot owner")
+        D.need(item.st_uid == item.st_gid == 0,
+               shell_host_diagnostic("Shell host path has a nonroot owner", path, candidate, item))
         if stat.S_ISLNK(item.st_mode):
             target = os.readlink(candidate)
             D.need(item.st_nlink == 1 and len(links) < 40 and 0 < len(target) <= 4096
@@ -1079,7 +1089,8 @@ def shell_host_binding(path, *, directory_only=False, absent=False, limit=MAX_BI
                 parts = target.parts
             pending = [*parts, *pending]
         else:
-            D.need(not item.st_mode & 0o7022, "Writable/special shell host input")
+            D.need(not item.st_mode & 0o7022,
+                   shell_host_diagnostic("Writable/special shell host input", path, candidate, item))
             resolved = candidate
             if pending or directory_only:
                 directory(resolved, item)
@@ -2265,8 +2276,10 @@ def shell_native_inputs(check, work, environment):
            and all(re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", row) for row in pkg_config["versions"].splitlines()),
            "Shell GTK/WebKit package-config versions differ")
     lifecycle = local("ubuntu_publication_lifecycle")
+    check.phase = "shell-runtime-data"
     snapshot = lifecycle.shell_data_snapshot(shell_host_binding)
     runtime_data = shell_data_records(snapshot, check.root / "public", "shell-data")
+    check.phase = "shell-module-roots"
     roots, root_bindings, module_paths = shell_module_inventory()
     D.need(all(set(names) <= set(module_paths) for names in snapshot["moduleSelections"].values()),
            "Current module catalogue selects an unadmitted module")
