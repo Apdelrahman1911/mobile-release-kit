@@ -256,6 +256,26 @@ class InstalledShellCompilerContracts(unittest.TestCase):
         with self.assertRaises(S.D.Refused):
             S.shell_compiler_units(units[1:], packages, nodes)
 
+    def test_full_metadata_budget_does_not_widen_other_json_profiles(self):
+        value = metadata()
+        value["metadata"] = [None] * 50000
+        raw = S.D.canonical(value)
+        with self.assertRaises(S.C.CheckFailure):
+            S.C.bounded_json(raw, S.SHELL_METADATA_LIMIT)
+        _, packages, _ = S.shell_cargo_metadata(raw, Path("/source"), Path("/target"))
+        self.assertEqual(len(packages), 36)
+        value["metadata"] = [None] * 200000
+        with self.assertRaises(S.C.CheckFailure):
+            S.shell_cargo_metadata(S.D.canonical(value), Path("/source"), Path("/target"))
+        for budget in (True, 0, 200001):
+            with self.subTest(budget=budget), self.assertRaises(S.C.CheckFailure):
+                S.C.bounded_json(b"{}", 2, max_nodes=budget)
+        for malformed in (b'{"a":1,"a":2}', b'{"a":1.5}', b'{"a":NaN}', b'\xff', b'[' * 17 + b'0' + b']' * 17):
+            with self.subTest(malformed=malformed), self.assertRaises(S.C.CheckFailure):
+                S.C.bounded_json(malformed, S.SHELL_METADATA_LIMIT, max_nodes=200000)
+        with self.assertRaises(S.C.CheckFailure):
+            S.C.bounded_json(b"{}", 1, max_nodes=200000)
+
     def test_only_owned_ignored_generated_source_roots_are_allowed(self):
         S.shell_source_status(b"", ())
         S.shell_source_status(b"!! desktop/node_modules/react/index.js\0!! desktop/dist/index.html\0", S.SHELL_GENERATED)

@@ -1956,7 +1956,7 @@ def shell_generated_tree(path, *, links=False):
 
 def shell_cargo_metadata(raw, source, target):
     """Validate the actual full Cargo graph, not a remembered Tauri subset."""
-    metadata = C.bounded_json(raw, SHELL_METADATA_LIMIT)
+    metadata = C.bounded_json(raw, SHELL_METADATA_LIMIT, max_nodes=200000)
     packages, resolve = metadata.get("packages"), metadata.get("resolve")
     D.need(type(packages) is list and 36 <= len(packages) <= 512 and type(resolve) is dict
            and metadata.get("workspace_root") == str(source / "desktop/src-tauri")

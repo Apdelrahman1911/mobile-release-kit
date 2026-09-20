@@ -2382,7 +2382,10 @@ def sha256_value(value: object) -> bool:
     return type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
-def bounded_json(data: bytes, limit: int) -> object:
+def bounded_json(data: bytes, limit: int, *, max_nodes: int = 50000) -> object:
+    # Full GUI Cargo metadata needs a larger finite graph budget. Other
+    # evidence/transport callers retain the existing default and depth limit.
+    require(type(max_nodes) is int and 1 <= max_nodes <= 200000, "Fixed JSON node budget exceeds its bound")
     require(len(data) <= limit, "Fixed JSON input exceeds its bound")
 
     def pairs(items: list[tuple[str, object]]) -> dict:
@@ -2403,7 +2406,7 @@ def bounded_json(data: bytes, limit: int) -> object:
     while pending:
         value, depth = pending.pop()
         nodes += 1
-        require(depth <= 16 and nodes <= 50000, "Fixed JSON structure exceeds its bound")
+        require(depth <= 16 and nodes <= max_nodes, "Fixed JSON structure exceeds its bound")
         if type(value) is dict:
             pending.extend((child, depth + 1) for child in value.values())
         elif type(value) is list:
