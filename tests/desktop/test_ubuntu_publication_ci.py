@@ -339,7 +339,8 @@ class PublisherCI(unittest.TestCase):
             S.test_result(raw, b"unexpected diagnostic")
 
     def test_single_native_selection_requires_one_actual_exact_pass(self):
-        name = "installed_runtime::tests::kernel_scope_is_reviewed_ubuntu"
+        name = "installed_runtime::pure_tests::kernel_scope_is_reviewed_ubuntu"
+        self.assertEqual(S.KERNEL_SELECTOR, name)
         raw = ("running 1 test\n"
                f"test {name} ... ok\n"
                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
