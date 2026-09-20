@@ -15,7 +15,14 @@ pub struct Project { pub id: String, pub name: String, pub path: String }
 #[serde(rename_all = "camelCase")]
 pub struct AppInfo {
     pub app_name: &'static str, pub app_version: &'static str,
-    pub runtime: RuntimeStatus, pub capabilities: Option<Value>,
+    pub runtime: RuntimeStatus, pub capabilities: Option<Value>, pub project_selection: ProjectSelectionAvailability,
+}
+#[derive(Serialize)]
+pub struct ProjectSelectionAvailability { pub available: bool, pub reason: Option<&'static str> }
+impl ProjectSelectionAvailability {
+    fn new(available: bool) -> Self {
+        Self { available, reason: if available { None } else { Some("Project selection is not available in the current desktop runtime profile.") } }
+    }
 }
 
 fn native_capabilities(mut value: Value, available: impl Fn(&str) -> bool) -> Value {
@@ -42,6 +49,7 @@ pub struct DesktopBridge {
     pub(crate) diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner,
     pub(crate) preflight: crate::offline_preflight_owner::OfflinePreflightOwner,
     pub(crate) android_build: crate::android_build_owner::AndroidBuildOwner,
+    installed_project_selection_available: bool,
     projects: Mutex<BTreeMap<String, RegisteredProject>>,
     project_generation: AtomicU32,
     #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
@@ -50,6 +58,7 @@ pub struct DesktopBridge {
 impl DesktopBridge {
     pub fn new(resource_dir: PathBuf) -> Self {
         let runtime = RuntimeConfig::packaged(resource_dir);
+        let installed_project_selection_available = runtime.project_selection_profile_available();
         Self {
             supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime.clone()),
             diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime.clone()),
@@ -57,11 +66,13 @@ impl DesktopBridge {
             // Retain the owner and compiled profile DATA only; neither is tool
             // custody or qualification. The renderer cannot select this profile.
             android_build: crate::android_build_owner::AndroidBuildOwner::new(runtime, crate::android_toolchain::AndroidToolchainProfile::compiled()),
+            installed_project_selection_available,
             projects: Mutex::new(BTreeMap::new()), project_generation: AtomicU32::new(1),
             #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
             sequence: AtomicU64::new(1),
         }
     }
+    pub(crate) fn installed_project_selection_available(&self) -> bool { self.installed_project_selection_available }
     pub(crate) async fn app_info(&self, document: &crate::asset_session::DocumentBinding) -> AppInfo {
         let result = match document.passive_query(self, Method::Capabilities, json!({})) {
             Ok(query) => query.wait().await, Err(error) => Err(error),
@@ -74,7 +85,10 @@ impl DesktopBridge {
                 reason: Some(error.message), mode: self.supervisor.runtime_mode(),
             }, None),
         };
-        AppInfo { app_name: "Mobile Release Kit", app_version: env!("CARGO_PKG_VERSION"), runtime, capabilities }
+        // Display DATA only. Selection does not imply that snapshot or any
+        // other core method is available, nor that live native admission holds.
+        AppInfo { app_name: "Mobile Release Kit", app_version: env!("CARGO_PKG_VERSION"), runtime, capabilities,
+            project_selection: ProjectSelectionAvailability::new(document.project_selection_available()) }
     }
     pub(crate) async fn catalog(&self, document: &crate::asset_session::DocumentBinding) -> Result<Value, BridgeError> { document.passive_query(self, Method::Catalog, json!({}))?.wait().await }
     pub(crate) async fn environment_requirements(&self, document: &crate::asset_session::DocumentBinding, input: crate::environment::Request) -> Result<crate::environment::Requirements, BridgeError> {
@@ -330,15 +344,19 @@ pub(crate) fn assert_native_capability_intersection_contract() {
         "methods": [
             {"method": "capabilities", "available": true, "reason": "implemented"},
             {"method": "catalog", "available": false, "reason": "core refusal"},
+            {"method": "project.snapshot", "available": true, "reason": "implemented"},
             {"method": "config.validate", "available": true, "reason": "implemented"},
+            {"method": "config.suggest", "available": false, "reason": "core refusal"},
+            {"method": "config.preview", "available": true, "reason": "implemented"},
+            {"method": "environment.requirements", "available": true, "reason": "implemented"},
             {"method": "future.method", "available": true, "reason": "implemented"}
         ]});
-    let result = native_capabilities(input.clone(), |name| matches!(name, "capabilities" | "catalog"));
+    let result = native_capabilities(input.clone(), |name|
+        matches!(name, "capabilities" | "catalog" | "project.snapshot" | "config.validate" | "config.suggest" | "config.preview"));
     assert_eq!(result["coreVersion"], input["coreVersion"]);
     assert_eq!(result["actions"], input["actions"]);
-    assert_eq!(result["methods"][0], input["methods"][0]);
-    assert_eq!(result["methods"][1], input["methods"][1]);
-    for index in [2, 3] {
+    for index in 0..6 { assert_eq!(result["methods"][index], input["methods"][index]); }
+    for index in [6, 7] {
         assert_eq!(result["methods"][index]["available"], false);
         assert_eq!(result["methods"][index]["method"], input["methods"][index]["method"]);
         assert_eq!(result["methods"][index]["reason"], "This function is not available in the current desktop runtime profile.");
@@ -351,5 +369,12 @@ mod capability_tests {
     #[test]
     fn core_availability_is_intersected_without_enabling_actions_or_rewriting_core_failures() {
         assert_native_capability_intersection_contract();
+    }
+    #[test]
+    fn project_selection_availability_is_bounded_display_data() {
+        assert_eq!(serde_json::to_value(ProjectSelectionAvailability::new(true)).unwrap(),
+            json!({"available": true, "reason": null}));
+        assert_eq!(serde_json::to_value(ProjectSelectionAvailability::new(false)).unwrap(),
+            json!({"available": false, "reason": "Project selection is not available in the current desktop runtime profile."}));
     }
 }

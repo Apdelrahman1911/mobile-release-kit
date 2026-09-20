@@ -4,6 +4,7 @@ import ast
 import errno
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import stat
@@ -221,21 +222,22 @@ class LifecycleData(unittest.TestCase):
         contracts = b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
         maps = [{"role": role, "path": row["paths"][0], **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
                 for role, row in sorted(expected.items())]
-        captures = {"normal": bootstrap,
-                    "positive": bootstrap + contracts + b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n",
-                    "quit-outstanding": contracts + L.CHILD_MARKER.encode() + L.canonical(maps)
-                        + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n"}
-        for case, raw in captures.items():
+        captures = {"normal": (bootstrap, b""), "positive": positive_capture(),
+                    "quit-outstanding": (contracts + L.CHILD_MARKER.encode() + L.canonical(maps)
+                        + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n", b"")}
+        for case, (stdout, stderr) in captures.items():
             with self.subTest(case=case):
-                self.assertEqual(L.shell_result(raw, b"", case, 0, expected)["case"], case)
-                self.assertEqual(L.shell_result(b"", raw, case, 0, expected)["case"], case)
-                for changed in (b"", raw + contracts, raw.replace(b"=available", b"=unavailable"),
-                                raw.replace(contracts, b""), raw.replace(b'"inode":1', b'"inode":999')):
-                    if changed != raw:
+                self.assertEqual(L.shell_result(stdout, stderr, case, 0, expected)["case"], case)
+                if case != "positive":
+                    self.assertEqual(L.shell_result(stderr, stdout, case, 0, expected)["case"], case)
+                for changed in ((b"", b""), (stdout + contracts, stderr),
+                                (stdout.replace(b"=available", b"=unavailable"), stderr.replace(b"=available", b"=unavailable")),
+                                (stdout.replace(contracts, b""), stderr), (stdout.replace(b'"inode":1', b'"inode":999'), stderr)):
+                    if changed != (stdout, stderr):
                         with self.assertRaises(ValueError):
-                            L.shell_result(changed, b"", case, 0, expected)
+                            L.shell_result(*changed, case, 0, expected)
                 with self.assertRaises(ValueError):
-                    L.shell_result(raw, b"", case, True, expected)
+                    L.shell_result(stdout, stderr, case, True, expected)
 
     def test_normal_controller_joins_the_original_even_when_start_or_input_fails(self):
         value, expected = installed_handoff(), map_data()
@@ -1136,6 +1138,211 @@ class LifecycleData(unittest.TestCase):
                 (first if side == "start" else last)["events"][counter][key] = 1
                 with self.subTest(side=side, counter=counter, key=key), self.assertRaises(ValueError):
                     L.verify_finality(first, last, 0)
+
+
+def project_draft_receipt():
+    """Expected typed schema DATA, not a native observation or original owner."""
+    return {
+        "schemaVersion": 1, "fixture": "android-static-v1", "projectGateContract": True,
+        "methods": "six-passive", "mutationActions": False,
+        "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
+        "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
+        "snapshot": {"config": "missing", "androidHint": True, "sourceFiles": 1},
+        "suggestion": {"coreProvenance": True, "explicitAdoption": True},
+        "field": {"path": "version.source", "catalogHelp": True, "explicitUnset": True},
+        "validation": {"valid": False, "issue": "config.invalid"},
+        "review": {"kind": "redacted", "required": True, "present": False},
+        "draft": {"unsaved": True, "saveAvailable": False},
+        "quit": {"operation": 3, "originalsSettled": True, "relayJoined": True, "exit": True},
+    }
+
+
+def positive_capture(receipt=None):
+    return (b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + L.SHELL_PROJECT_MARKER + L.canonical(project_draft_receipt() if receipt is None else receipt)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n",
+            b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n")
+
+
+def project_fixture_data(value):
+    source = (b'plugins { id("com.android.application") }\n'
+              b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
+    return {"schemaVersion": 1, "fixture": "android-static-v1", "root": str(L.root_path(value) / "positive-project"),
+            "entries": [
+                {"path": ".", "kind": "directory", "identity": [1, 100, stat.S_IFDIR | 0o555, 0, 0, 3, 4096, 11, 11], "children": ["app"]},
+                {"path": "app", "kind": "directory", "identity": [1, 101, stat.S_IFDIR | 0o555, 0, 0, 2, 4096, 11, 11], "children": ["build.gradle.kts"]},
+                {"path": "app/build.gradle.kts", "kind": "file", "identity": [1, 102, stat.S_IFREG | 0o444, 0, 0, 1, len(source), 11, 11],
+                 "size": len(source), "sha256": hashlib.sha256(source).hexdigest()},
+            ], "absent": [".gitignore", "release/mobile-release.json"]}
+
+
+def closed_shell_data():
+    value, expected = installed_handoff(), map_data()
+    value.pop("installed")
+    value["shell"] = {"rosterSha256": "a" * 64, "producerAttempt": "1", "artifactId": "7",
+                      "acceptedU": {"sourceSha": "b" * 40, "runId": "8", "attempt": "1", "artifactId": "9"}}
+    maps = [{"role": role, "path": row["paths"][0], **{key: row[key] for key in ("deviceMajor", "deviceMinor", "inode")}}
+            for role, row in sorted(expected.items())]
+    captures = {"normal": (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n", b""),
+                "positive": positive_capture(),
+                "quit-outstanding": (b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+                    + L.CHILD_MARKER.encode() + L.canonical(maps) + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n", b"")}
+    cases, files, commands = {}, {}, []
+    for case, (stdout, stderr) in captures.items():
+        cases[case] = L.shell_result(stdout, stderr, case, 0, expected)
+        files["shell-" + case + ".stdout"], files["shell-" + case + ".stderr"] = stdout, stderr
+        commands.append({"phase": "shell-" + case, "argv": L.shell_argv(value, case), "exitCode": 0})
+    files["shell-cases.json"] = L.canonical(cases)
+    fixture = L.canonical(project_fixture_data(value))
+    files["shell-positive-project-before.json"] = files["shell-positive-project-after.json"] = fixture
+    keys = [{"phase": "key", "exitCode": 0, "stdout": "", "stderr": "",
+             "argv": L._drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key])} for key in ("ctrl+q", "alt+o")]
+    files["shell-normal-control.json"] = L.canonical({"joined": True, "inputs": 2, "workerGuardState": "RESTORED",
+        "workerErrorCount": 0, "errorType": None, "originalDeadline": value["deadline"], "commands": [*keys, *({"phase": "DATA"} for _ in range(9))]})
+    files["observe-p0.stdout"] = L.canonical({"published": {"P0": {"DATA": True}}})
+    files["published-before-upgrade.txt"] = L.canonical({"P0": {"DATA": True}})
+    outcome = {"shellRosterSha256": value["shell"]["rosterSha256"], "shellProducerAttempt": "1", "shellArtifactId": "7",
+               "acceptedU": value["shell"]["acceptedU"], "consumerAttempt": value["attempt"],
+               "packageLifecycleQualified": False, "shellPackageBuilt": False, "commands": commands}
+    return value, outcome, files, expected
+
+
+class ProjectDraftLifecycleContracts(unittest.TestCase):
+    def test_shell_fixture_roster_fits_the_unchanged_root_evidence_cap(self):
+        value, _, _, _ = closed_shell_data()
+        roster = L.public_files(value)
+        self.assertEqual({name for name in roster if name.startswith("shell-positive-project-")},
+                         {"shell-positive-project-before.json", "shell-positive-project-after.json"})
+        self.assertEqual(len(roster), 74)
+        self.assertLessEqual(len(roster), 128)
+        for case in ("positive", "refuse-writable", "refuse-pth"):
+            self.assertFalse(any(name.startswith("shell-positive-project-") for name in L.public_files(installed_handoff(case))))
+
+    def test_positive_typed_schema_rejects_each_missing_or_changed_leaf(self):
+        expected = project_draft_receipt()
+        self.assertEqual(L.shell_project_receipt(L.canonical(expected)), expected)
+
+        def leaves(value, prefix=()):
+            for key, child in value.items():
+                if type(child) is dict:
+                    yield from leaves(child, (*prefix, key))
+                else:
+                    yield (*prefix, key), child
+
+        for path, original in leaves(expected):
+            for mode in ("missing", "changed", "wrong-type"):
+                changed = deepcopy(expected)
+                parent = changed
+                for key in path[:-1]:
+                    parent = parent[key]
+                if mode == "missing":
+                    del parent[path[-1]]
+                elif mode == "wrong-type":
+                    parent[path[-1]] = int(original) if type(original) is bool else True if type(original) is int else None
+                else:
+                    parent[path[-1]] = not original if type(original) is bool else original + 1 if type(original) is int else original + "-other"
+                with self.subTest(path=path, mode=mode), self.assertRaises(ValueError):
+                    L.shell_project_receipt(L.canonical(changed))
+        raw = L.canonical(expected)
+        for changed in (b"", b"{}", raw.replace(b'"valid":false', b'"valid":false,"valid":false'),
+                        L.canonical({**expected, "message": "ConfigurationError text is not a receipt field"}), raw + b" " * 2048):
+            with self.subTest(raw=changed), self.assertRaises(ValueError):
+                L.shell_project_receipt(changed)
+
+    def test_positive_completion_is_last_on_original_stdout_not_inferred_from_zero(self):
+        stdout, stderr = positive_capture()
+        parsed = L.shell_result(stdout, stderr, "positive", 0, map_data())
+        self.assertEqual(parsed["projectDraft"], project_draft_receipt())
+        lines = stdout.splitlines(keepends=True)
+        for out, err in ((stdout, b""), (b"", stderr), (stderr, stdout), (stdout + lines[-1], stderr),
+                         (b"".join([lines[-1], *lines[:-1]]), stderr), (b"".join([lines[1], lines[0], lines[2]]), stderr),
+                         (lines[0] + lines[-1], stderr), (stdout, stderr + stderr),
+                         (stdout, stderr.replace(b"=available", b"=unavailable"))):
+            with self.subTest(stdout=out, stderr=err), self.assertRaises(ValueError):
+                L.shell_result(out, err, "positive", 0, map_data())
+        for code in (True, False, 1, -1, None):
+            with self.subTest(code=code), self.assertRaises(ValueError):
+                L.shell_result(stdout, stderr, "positive", code, map_data())
+
+    def test_fixture_inventory_is_exact_immutable_inert_and_has_no_config_or_ignore(self):
+        value = installed_handoff()
+        original = project_fixture_data(value)
+        raw = L.canonical(original)
+        result = L.shell_project_fixture(value, raw, raw)
+        self.assertEqual(result, {"fixture": "android-static-v1", "unchanged": True, "configAbsent": True, "gitignoreAbsent": True,
+            "entryCount": 3, "sourceBytes": original["entries"][2]["size"], "inventoryBytes": len(raw), "inventorySha256": hashlib.sha256(raw).hexdigest()})
+        mutations = (
+            lambda v: v.update(schemaVersion=True), lambda v: v.update(root="/other/project"),
+            lambda v: v.update(absent=[".gitignore"]), lambda v: v["entries"].append(deepcopy(v["entries"][2])),
+            lambda v: v["entries"][0].update(children=["app", "release"]),
+            lambda v: v["entries"][1].update(children=["build.gradle.kts", ".gitignore"]),
+            lambda v: v["entries"][2].update(path="app/../build.gradle.kts"),
+            lambda v: v["entries"][2].update(sha256="0" * 64), lambda v: v["entries"][2].update(size=True),
+            lambda v: v["entries"][2]["identity"].__setitem__(2, stat.S_IFLNK | 0o444),
+            lambda v: v["entries"][2]["identity"].__setitem__(2, stat.S_IFREG | 0o555),
+            lambda v: v["entries"][2]["identity"].__setitem__(2, stat.S_IFREG | 0o666),
+            lambda v: v["entries"][2]["identity"].__setitem__(3, 1000),
+            lambda v: v["entries"][2]["identity"].__setitem__(5, 2),
+            lambda v: v["entries"][2]["identity"].__setitem__(1, True),
+        )
+        for mutate in mutations:
+            changed = deepcopy(original); mutate(changed); encoded = L.canonical(changed)
+            with self.subTest(mutate=mutate):
+                with self.assertRaises(ValueError):
+                    L.shell_project_fixture(value, raw, encoded)
+                with self.assertRaises(ValueError):
+                    L.shell_project_fixture(value, encoded, encoded)
+        changed = deepcopy(original); changed["entries"][2]["identity"][8] += 1
+        with self.assertRaises(ValueError):
+            L.shell_project_fixture(value, raw, L.canonical(changed))
+        for encoded in (b"{}", b"[]", json.dumps(original, indent=2).encode(), raw + b" " * 8192):
+            with self.assertRaises(ValueError):
+                L.shell_project_fixture(value, encoded, encoded)
+
+    def test_prepare_creates_only_one_positive_fixture_without_running_anything(self):
+        value = installed_handoff(); root = L.root_path(value)
+        for case in L.SHELL_CASES:
+            writer = Mock()
+            with self.subTest(case=case), patch.object(L, "_ROOT", root), patch.object(L, "_D", SimpleNamespace(write=writer)), \
+                 patch.object(Path, "mkdir") as mkdir, patch.object(L.os, "chown"), patch.object(L.os, "chmod") as chmod, \
+                 patch.object(L, "_absent"), patch.object(L, "_retain") as retain, \
+                 patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)) as inventory:
+                L._shell_prepare(value, case)
+                fixture_writes = [call for call in writer.call_args_list if call.args[0] == root / "positive-project/app/build.gradle.kts"]
+                self.assertEqual(len(fixture_writes), int(case == "positive"))
+                self.assertEqual(mkdir.call_count, 10 if case == "positive" else 8)
+                if case == "positive":
+                    self.assertEqual(fixture_writes[0].args[1:], (L.SHELL_PROJECT_SOURCE, 0o444))
+                    self.assertEqual([call.args for call in chmod.call_args_list], [(root / "positive-project/app", 0o555), (root / "positive-project", 0o555)])
+                    inventory.assert_called_once_with(value)
+                    retain.assert_called_once_with("shell-positive-project-before.json", L.canonical(project_fixture_data(value)))
+                else:
+                    inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
+
+    def test_closed_case_requires_native_receipt_and_same_before_after_originals(self):
+        value, outcome, files, expected = closed_shell_data()
+        with patch.object(L, "shell_closed_loader", return_value=expected):
+            result = L.shell_closed_result(value, outcome, files)
+        self.assertEqual(result["projectDraft"]["native"], project_draft_receipt())
+        self.assertTrue(result["projectDraft"]["fixture"]["unchanged"])
+        self.assertEqual(result["cases"]["normal"]["domAndGtkObserved"], False)
+        self.assertEqual(len(result["cases"]["quit-outstanding"]["maps"]), 1)
+        for change in ("missing-before", "missing-after", "different-after", "coerced-case", "missing-receipt", "wrong-argv"):
+            changed, current = deepcopy(files), deepcopy(outcome)
+            if change.startswith("missing-") and change != "missing-receipt":
+                changed.pop("shell-positive-project-" + change.removeprefix("missing-") + ".json")
+            elif change == "different-after":
+                altered = L.decode(changed["shell-positive-project-after.json"]); altered["entries"][0]["identity"][1] += 1
+                changed["shell-positive-project-after.json"] = L.canonical(altered)
+            elif change == "coerced-case":
+                altered = L.decode(changed["shell-cases.json"]); altered["positive"]["projectDraft"]["select"]["originalsSettled"] = 1
+                changed["shell-cases.json"] = L.canonical(altered)
+            elif change == "missing-receipt":
+                changed["shell-positive.stdout"] = b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n"
+            else:
+                current["commands"][1]["argv"][-1] = "quit-outstanding"
+            with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=expected), self.assertRaises((ValueError, KeyError)):
+                L.shell_closed_result(value, current, changed)
 
 
 if __name__ == "__main__":

@@ -44,6 +44,19 @@ export function methodReason(info: AppInfo | null, method: string, mode: BridgeM
   return capability?.available ? null : capability?.reason ?? 'This operation is not available in the current engine.';
 }
 
+export function projectSelectionReason(info: AppInfo | null, mode: BridgeMode): string | null {
+  if (mode === 'preview') return 'Browser preview cannot select a native project folder.';
+  if (mode !== 'native') return 'The native desktop bridge is unavailable.';
+  if (!info) return 'Application capabilities have not been loaded.';
+  const unavailable = 'Project selection is not available in the current desktop runtime profile.';
+  const selection = info.projectSelection;
+  if (!selection || typeof selection !== 'object' || Array.isArray(selection)
+      || Object.keys(selection).length !== 2 || !Object.hasOwn(selection, 'available') || !Object.hasOwn(selection, 'reason')) return unavailable;
+  if (selection.available === true && selection.reason === null) return null;
+  return selection.available === false && typeof selection.reason === 'string'
+    && selection.reason.trim().length > 0 && selection.reason.length <= 512 ? selection.reason : unavailable;
+}
+
 export function futureReason(capabilities: Capabilities | null | undefined, action: string, fallback: string): string {
   return capabilities?.actions.find((entry) => entry.id === action)?.reason ?? fallback;
 }

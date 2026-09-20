@@ -35,6 +35,7 @@ interface EditorProps {
   session: ProjectSession | null;
   metadataOnly?: boolean;
   preview: boolean;
+  chooseReason: string | null;
   validateReason: string | null;
   reviewReason: string | null;
   suggestReason: string | null;
@@ -55,10 +56,10 @@ interface EditorProps {
   onHelp: (help: HelpContent) => void;
 }
 
-export function DraftEditor({ catalog, session, metadataOnly = false, preview, validateReason, reviewReason, suggestReason, saveReason, discardReason, onChoose, onNewDraft, onEdit, onValidate, onReview, onSuggest, onPrepareSave, onAdoptSuggestion, onRemoveForbidden, onUndoRemoval, onForgetRemoval, onDiscard, onHelp }: EditorProps) {
+export function DraftEditor({ catalog, session, metadataOnly = false, preview, chooseReason, validateReason, reviewReason, suggestReason, saveReason, discardReason, onChoose, onNewDraft, onEdit, onValidate, onReview, onSuggest, onPrepareSave, onAdoptSuggestion, onRemoveForbidden, onUndoRemoval, onForgetRemoval, onDiscard, onHelp }: EditorProps) {
   const [tab, setTab] = useState<string>('general');
   const [search, setSearch] = useState('');
-  if (!session) return <div className="card"><EmptyState icon="folder" title="First, choose a project" description="The native folder picker establishes the project boundary. Drafts remain separate for every project you open."><button className="button primary" onClick={onChoose}><Icon name="folder" size={17} />{preview ? 'Load example workspace' : 'Choose project folder'}</button></EmptyState></div>;
+  if (!session) return <div className="card"><EmptyState icon="folder" title="First, choose a project" description="The native folder picker establishes the project boundary. Drafts remain separate for every project you open."><button className="button primary" disabled={chooseReason !== null} aria-describedby={chooseReason ? 'draft-choose-reason' : undefined} onClick={onChoose}><Icon name="folder" size={17} />{preview ? 'Load example workspace' : 'Choose project folder'}</button>{chooseReason && <p id="draft-choose-reason" className="toolbar-reason">{chooseReason}</p>}</EmptyState></div>;
   if (!catalog) return <div className="card"><EmptyState icon="settings" title="The field catalogue is unavailable" description="A compatible core must provide the schema and contextual help before configuration controls are enabled. No fallback policy is substituted." /></div>;
   if (!session.draft) return <>
     <div className="card"><EmptyState icon="metadata" title={session.snapshotRequest ? 'Reading the static configuration…' : 'No editable configuration loaded'} description={session.snapshotRequest ? 'The engine reads only a bounded selection of static files. No project code runs.' : 'Begin an empty draft or explicitly prepare a core suggestion below. Both stay in memory and create no files.'}>{!session.snapshotRequest && <button className="button secondary" onClick={onNewDraft}><Icon name="plus" size={17} />Start an empty draft</button>}</EmptyState></div>

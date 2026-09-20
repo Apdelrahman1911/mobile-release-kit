@@ -46,8 +46,8 @@ function SavedVersionCard({ state, reason, onRead, onHelp }: {
   </section>;
 }
 
-export function Dashboard({ session, info, preview, chooseDisabled, refreshReason, releaseVersionState, releaseVersionReason, onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
-  session: ProjectSession | null; info: AppInfo | null; preview: boolean; chooseDisabled: boolean; refreshReason: string | null;
+export function Dashboard({ session, info, preview, chooseDisabled, chooseReason, refreshReason, releaseVersionState, releaseVersionReason, onReadVersion, onChoose, onRefresh, onNavigate, onHelp }: {
+  session: ProjectSession | null; info: AppInfo | null; preview: boolean; chooseDisabled: boolean; chooseReason: string | null; refreshReason: string | null;
   releaseVersionState: ReleaseVersionState; releaseVersionReason: string | null; onReadVersion: () => void;
   onChoose: () => void; onRefresh: () => void; onNavigate: (page: Page) => void; onHelp: (help: HelpContent) => void;
 }) {
@@ -59,8 +59,9 @@ export function Dashboard({ session, info, preview, chooseDisabled, refreshReaso
   const observedLabel = observationDate && Number.isFinite(observationDate.valueOf()) ? observationDate.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : null;
   return <>
     <PageHeading eyebrow="YOUR RELEASE WORKSPACE" title={session ? `Let’s get ${session.project.name} ready.` : 'Good releases start here.'} description="A calmer place to prepare your mobile app. Understand the project first; release with evidence, not assumptions.">
-      <button type="button" className="button secondary" disabled={chooseDisabled} onClick={onChoose}><Icon name="folder" size={17} />{preview ? 'Load example workspace' : session ? 'Open another project' : 'Choose a project'}</button>
+      <button type="button" className="button secondary" disabled={chooseDisabled} aria-describedby={chooseReason ? 'project-choose-reason' : undefined} onClick={onChoose}><Icon name="folder" size={17} />{preview ? 'Load example workspace' : session ? 'Open another project' : 'Choose a project'}</button>
     </PageHeading>
+    {chooseReason && <p id="project-choose-reason" className="toolbar-reason">{chooseReason}</p>}
     <section className="project-overview card">
       <div className="project-overview-main"><div className="project-art" aria-hidden="true"><div className="orbit orbit-one" /><div className="orbit orbit-two" /><div className="project-art-mark"><Icon name="rocket" size={32} /></div><span className="art-dot dot-one" /><span className="art-dot dot-two" /></div><div className="project-identity"><div className="inline-heading"><span className="eyebrow">{preview && session ? 'ILLUSTRATIVE PROJECT' : 'CURRENT PROJECT'}</span><HelpButton content={projectHelp} onHelp={onHelp} /></div><h2>{session?.project.name ?? 'Your next release, organized.'}</h2><p className="project-path">{session?.project.path ?? 'Select a project to see its configuration and discover static build hints.'}</p><div className="project-badges"><Badge tone={status.tone} dot>{status.label}</Badge>{config && getValue(config, 'android.enabled') === true && <span className="platform-chip"><Icon name="android" size={15} />Android</span>}{config && getValue(config, 'ios.enabled') === true && <span className="platform-chip"><Icon name="apple" size={15} />iOS</span>}{session && isDirty(session) && <Badge tone="warning">Unsaved draft</Badge>}</div></div></div>
       <div className="project-overview-action">{session ? <><button type="button" className="button primary" onClick={() => onNavigate('settings')}>Review project settings<Icon name="arrow" size={17} /></button><span>{preview ? 'Example values · not validated' : 'Configured is not verified'}</span></> : <><button type="button" className="button primary" disabled={chooseDisabled} onClick={onChoose}><Icon name="plus" size={17} />{preview ? 'Explore example workspace' : 'Open project folder'}</button><span>Folder selection does not write files</span></>}</div>

@@ -1,5 +1,6 @@
 //! One real document gate, one retained native operation, session-only records.
-//! The capability intentionally remains false. Source authoring/pure tests do
+//! The asset capability intentionally remains false. Project selection has a
+//! separate fixed installed profile; it never grants a session. Pure tests do
 //! not qualify GTK, source custody, runtime IO, allocation bounds or assignment.
 use std::{future::Future, pin::Pin, sync::{Arc, Mutex, MutexGuard, Weak, atomic::{AtomicBool, Ordering}}, task::{Context as TaskContext, Poll, Waker}, time::{Duration, Instant}};
 use serde::{Serialize, Serializer};
@@ -508,6 +509,20 @@ fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
     }
     Ok(())
 }
+fn common_document_gate(state: &DocumentState, session: bool, owner_gate: impl FnOnce() -> Result<(), AssetError>) -> Result<(), AssetError> {
+    // Shared native lifecycle/state checks only. The caller retains the real
+    // document mutex; each route must still apply its own qualification gate.
+    if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
+    if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
+    if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
+    owner_gate()?;
+    if state.compatibility_picker_pending { return Err(AssetError::new(Reason::Busy)); }
+    if session && state.slot.as_ref().is_some_and(|slot| slot.operation.evidence()
+        && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
+    if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
+    Ok(())
+}
 fn preflight_document_gate(state: &DocumentState, profile: Option<crate::offline_preflight_protocol::Profile>)
     -> Option<crate::offline_preflight_protocol::Availability> {
     use crate::offline_preflight_protocol::Availability;
@@ -575,6 +590,20 @@ impl DocumentBinding {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) { return context.permits(self); }
         false
+    }
+    fn project_selection_qualified(&self) -> bool {
+        if self.inner.bridge.installed_project_selection_available() { return true; }
+        // Preserve SG1's existing, separately consumed development permission.
+        // It is not installed-profile authority and does not select that core.
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(context) = self.inner.fixture.as_ref().and_then(Weak::upgrade) { return context.permits(self); }
+        false
+    }
+    pub(crate) fn project_selection_available(&self) -> bool {
+        // Profile/display DATA, never live lifecycle permission. Preserve the
+        // preexisting non-Linux compatibility picker without implying native
+        // owner qualification or availability of any passive core method.
+        self.project_selection_qualified() || cfg!(all(feature = "desktop-shell", not(target_os = "linux")))
     }
     fn evidence_qualified(&self) -> bool {
         // Existing fixture permits do NOT authorize the new picker/query route.
@@ -953,22 +982,22 @@ impl DocumentBinding {
         }
         self.bump(&mut state);
     }
+    fn common_gate(&self, state: &DocumentState, session: bool) -> Result<(), AssetError> {
+        common_document_gate(state, session, || {
+            if self.inner.bridge.diagnostics.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
+            if self.inner.bridge.preflight.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
+            if self.inner.bridge.android_build.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
+            if self.inner.bridge.diagnostics.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
+            if self.inner.bridge.preflight.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
+            if self.inner.bridge.android_build.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
+            if self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy() || self.inner.bridge.android_build.busy() {
+                return Err(AssetError::new(Reason::Busy));
+            }
+            Ok(())
+        })
+    }
     fn gate(&self, state: &DocumentState, session: bool) -> Result<(), AssetError> {
-        if !state.lifetime.original_bound() { return Err(AssetError::new(Reason::DocumentLost)); }
-        if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
-        if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
-        if self.inner.bridge.diagnostics.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
-        if self.inner.bridge.preflight.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
-        if self.inner.bridge.android_build.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
-        if self.inner.bridge.diagnostics.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
-        if self.inner.bridge.preflight.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
-        if self.inner.bridge.android_build.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
-        if self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy() || self.inner.bridge.android_build.busy()
-            || state.compatibility_picker_pending { return Err(AssetError::new(Reason::Busy)); }
-        if session && state.slot.as_ref().is_some_and(|slot| slot.operation.evidence()
-            && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
-        if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
-        if !cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { return Err(AssetError::new(Reason::UnsupportedPlatform)); }
+        self.common_gate(state, session)?;
         if !self.native_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
         if session && !state.session { return Err(AssetError::new(Reason::Closed)); } Ok(())
     }
@@ -2266,7 +2295,9 @@ impl DocumentBinding {
     pub(crate) fn choose_project(&self, app: tauri::AppHandle) -> Result<u32, AssetError> {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
         self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed();
-        self.inner.bridge.android_build.context_changed(); self.gate(&state, false)?; idle(&state)?;
+        self.inner.bridge.android_build.context_changed(); self.common_gate(&state, false)?;
+        if !self.project_selection_qualified() { return Err(AssetError::new(Reason::Unqualified)); }
+        idle(&state)?;
         // Acquire the registry's checked generation before any native work;
         // poison is sticky document Unknown, never merely a later picker error.
         let generation = self.registry_result(&mut state, self.inner.bridge.native_generation())?;
@@ -2413,6 +2444,76 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     // GTK dispatch or body-ended flag is substituted for those joins.
 }
 
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod installed_project_observation {
+    use super::*;
+    // Private DATA observations of the existing originals only. No fixture
+    // publication, source path opening, permission, worker or new native owner.
+    fn live_closed_document(state: &DocumentState, operation: u32) -> bool {
+        state.lifetime.original_bound() && !state.lost_observed && !state.unknown && !state.exhausted
+            && !state.stopping && !state.retiring && !state.session && !state.lock_pending
+            && !state.quit_pending && !state.quit_accepted && state.quit.is_none()
+            && !state.compatibility_picker_pending && state.next_operation == operation
+            && state.context.is_none() && state.records.is_empty() && state.assignments.is_empty()
+    }
+    fn settled_project_slot(slot: &Slot, operation: u32) -> bool {
+        slot.operation == Operation::ChooseProject && slot.owner.id == operation
+            && slot.phase == Phase::Idle && slot.settlement == Settlement::Known
+            && slot.owner.resources_settled() && slot.owner.coordinator.try_lock().is_ok_and(|book|
+                book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            && slot.staged.is_none() && slot.context.is_none() && slot.candidate.is_none()
+            && slot.selection.is_none() && slot.preview.is_none() && slot.retired_payload.is_none()
+    }
+    fn completed_picker(slot: &Slot, accepted: bool) -> bool {
+        slot.owner.gui.facts().is_some_and(|facts| facts.dispatched && facts.created && !facts.not_created
+            && facts.response && facts.accepted == accepted && !facts.declined
+            && facts.accepted_at.is_some() == accepted && facts.refusal.is_none()
+            && facts.destroyed && facts.released && facts.close_ack && facts.selected.is_none())
+        // The original chooser consumes its filename before the probe. A None
+        // here is transfer/consumption, not proof of which filename was read;
+        // the existing shell observer compares that actual read separately.
+    }
+    impl DocumentBinding {
+        pub(crate) fn installed_observation_cancelled(&self) -> bool {
+            self.reconcile(); let state = self.lock();
+            live_closed_document(&state, 1) && state.slot.as_ref().is_some_and(|slot|
+                settled_project_slot(slot, 1) && completed_picker(slot, false)
+                    && slot.reason == Reason::UserCancelled && slot.project.is_none()
+                    && slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::New && book.handle.is_none())
+                    && slot.owner.source.try_lock().is_ok_and(|book| book.not_started()))
+                && self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == 1 && roster.roots.is_empty())
+        }
+        pub(crate) fn installed_observation_project(&self) -> Option<Project> {
+            self.reconcile(); let state = self.lock(); let slot = state.slot.as_ref()?;
+            if !live_closed_document(&state, 2) || !settled_project_slot(slot, 2) || !completed_picker(slot, true)
+                || slot.reason != Reason::None || slot.error.is_some() || slot.cleanup_end.is_some() || slot.owner.stopped()
+                || !slot.owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+                || !slot.owner.source.try_lock().is_ok_and(|book| !book.not_started() && book.settled()) { return None; }
+            let project = slot.project.as_ref()?;
+            let roster = self.inner.bridge.native_roster().ok()?;
+            let (generation, root) = self.inner.bridge.native_project(&project.id).ok()?;
+            if roster.generation != 2 || generation != roster.generation || roster.roots.len() != 1
+                || root.path != roster.roots[0].path || root.identity != roster.roots[0].identity
+                || root.path.to_str() != Some(project.path.as_str()) { return None; }
+            // Genuine registered DTO for private opaque-id correspondence, not
+            // a constructed fixture project and never exported as telemetry.
+            Some(project.clone())
+        }
+        pub(crate) fn installed_observation_final(&self) -> bool {
+            let state = self.lock();
+            state.lifetime.original_bound() && !state.lost_observed && !state.unknown && !state.exhausted
+                && state.next_operation == 3 && state.stopping && state.quit_accepted
+                && !state.session && !state.lock_pending && state.context.is_none()
+                && state.records.is_empty() && state.assignments.is_empty() && assets_can_exit_locked(&state)
+                && state.slot.as_ref().is_some_and(|slot| settled_project_slot(slot, 2) && slot.project.is_some())
+                && state.quit.as_ref().is_some_and(|quit| quit.id == 3 && quit.resources_settled()
+                    && quit.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none()))
+        }
+    }
+}
+
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod fixture_observation {
     use super::*;
@@ -2491,6 +2592,62 @@ pub(crate) use fixture_observation::Selection as FixtureSelection;
 mod android_build_wiring_tests;
 
 #[cfg(test)]
+pub(crate) fn assert_project_selection_gate_contract() {
+    // DATA-only truth table shared with the harness=false observer's explicit
+    // pre-GTK entry. No DesktopBridge constructor, source IO, task or native
+    // work is performed; model facts are not actual original join receipts.
+    fn state(bound: bool) -> DocumentState {
+        let mut lifetime = DocumentLifetime::default();
+        if bound { lifetime.crash_hook_installed(); lifetime.started(true); lifetime.finished(true); }
+        DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+            session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+            compatibility_picker_pending: false, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
+    }
+    let reason = |state: &DocumentState| common_document_gate(state, false, || Ok(())).err().map(|error| error.reason);
+    assert!(!NATIVE_QUALIFIED, "Project profile admission cannot open the broad asset gate.");
+    let unbound = state(false);
+    assert_eq!(common_document_gate(&unbound, false, || panic!("Unbound document reached an owner gate.")).err().map(|error| error.reason), Some(Reason::DocumentLost));
+    let mut lost = state(true); lost.lifetime.invalidate(); lost.lost_observed = true;
+    assert_eq!(reason(&lost), Some(Reason::DocumentLost));
+    for (modify, expected) in [
+        ((|state: &mut DocumentState| state.unknown = true) as fn(&mut DocumentState), Reason::CleanupUnknown),
+        (|state| state.stopping = true, Reason::Shutdown),
+        (|state| state.quit_pending = true, Reason::Busy),
+        (|state| state.retiring = true, Reason::Busy),
+        (|state| state.lock_pending = true, Reason::Busy),
+        (|state| state.compatibility_picker_pending = true, Reason::Busy),
+    ] {
+        let mut blocked = state(true); modify(&mut blocked);
+        assert_eq!(reason(&blocked), Some(expected));
+        assert!(!blocked.session && blocked.records.is_empty() && blocked.assignments.is_empty());
+    }
+    let mut ready = state(true);
+    for refusal in [Reason::CleanupUnknown, Reason::Shutdown, Reason::Busy] {
+        assert_eq!(common_document_gate(&ready, false, || Err(AssetError::new(refusal))).err().map(|error| error.reason), Some(refusal));
+    }
+    let platform = if cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")) { None } else { Some(Reason::UnsupportedPlatform) };
+    assert_eq!(reason(&ready), platform);
+    assert!(!ready.session && ready.context.is_none() && ready.records.is_empty() && ready.assignments.is_empty());
+    assert!(idle(&ready).is_ok());
+    // Model original join/retirement facts only, not actual native settlement.
+    let owner = OriginalWork::new(1, false, Weak::new());
+    let mut slot = Slot::new(owner.clone(), Operation::ChooseProject, None, None, None); slot.phase = Phase::Idle;
+    ready.slot = Some(slot);
+    assert_eq!(idle(&ready).err().map(|error| error.reason), Some(Reason::Busy));
+    owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+    assert!(idle(&ready).is_ok());
+    owner.retired.store(false, Ordering::SeqCst);
+    assert_eq!(idle(&ready).err().map(|error| error.reason), Some(Reason::Busy));
+    owner.retired.store(true, Ordering::SeqCst);
+    ready.slot.as_mut().unwrap().phase = Phase::Capturing;
+    assert_eq!(idle(&ready).err().map(|error| error.reason), Some(Reason::Busy));
+    ready.slot.as_mut().unwrap().operation = Operation::InspectEvidence;
+    assert_eq!(common_document_gate(&ready, true, || Ok(())).err().map(|error| error.reason), Some(Reason::Busy));
+    assert!(!ready.session && ready.records.is_empty() && ready.assignments.is_empty());
+}
+
+#[cfg(test)]
 mod tests {
     // Synthetic in-memory predicates only. No DesktopBridge constructor/RNG,
     // runtime, task spawn, dialog, fd, source path access or native receipts.
@@ -2502,6 +2659,11 @@ mod tests {
             compatibility_picker_pending: false,
             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
             github: ConnectionState::new(), evidence: EvidenceRegistry::new() }
+    }
+
+    #[test]
+    fn project_selection_shares_lifecycle_checks_without_granting_an_asset_session() {
+        assert_project_selection_gate_contract();
     }
 
     #[test]

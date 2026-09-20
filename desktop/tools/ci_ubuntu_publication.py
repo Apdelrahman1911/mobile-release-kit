@@ -2118,6 +2118,65 @@ def shell_private_search(records, libraries):
     return sorted(result, key=lambda row: (row["requester"], row["path"]))
 
 
+def shell_package_owner(row, package_files, query, admit):
+    """Keep a selected link's supplier separate from its canonical provider.
+
+    Callbacks retain the existing command owner and complete package captures.
+    This resolver only compares bounded DATA; it cannot admit an executable.
+    """
+    def spellings(path):
+        names = {path}
+        if path.startswith("/usr/lib/"):
+            names.add(path.removeprefix("/usr"))
+        elif path.startswith("/lib/"):
+            names.add("/usr" + path)
+        return names
+
+    canonical, selected = spellings(row["path"]), spellings(row["selectedPath"])
+    aliases = canonical | selected
+
+    def members():
+        mapping = {}
+        for name, paths in package_files.items():
+            for path in aliases & paths:
+                D.need(path not in mapping, "Shell native member has two admitted suppliers")
+                mapping[path] = name
+        for group in (canonical, selected):
+            D.need(len({mapping[path] for path in group if path in mapping}) <= 1,
+                   "Shell native usr-merge name has ambiguous suppliers")
+        return mapping
+
+    known = members()
+    canonical_owners = {known[path] for path in canonical if path in known}
+    # A canonical cache hit alone must not omit an unqueried link supplier.
+    if canonical_owners and (canonical & selected or selected & known.keys()):
+        return next(iter(canonical_owners))
+
+    stdout, stderr = query(sorted(aliases))
+    reported, missing = {}, set()
+    for line in stdout.decode("ascii").splitlines():
+        name, separator, path = line.rpartition(": ")
+        D.need(separator and path in aliases and path not in reported
+               and re.fullmatch(r"[a-z0-9][a-z0-9+.-]+(?::amd64)?", name),
+               "Shell native ownership query contains an unrelated or duplicate member")
+        reported[path] = name
+    prefix = "dpkg-query: no path found matching pattern "
+    for line in stderr.decode("ascii").splitlines():
+        path = line.removeprefix(prefix)
+        D.need(line.startswith(prefix) and path in aliases and path not in missing and path not in reported,
+               "Unexpected or conflicting shell ownership query diagnostic")
+        missing.add(path)
+    D.need(set(reported) | missing == aliases and all(reported.get(path) == name for path, name in known.items()),
+           "Shell native ownership query is incomplete or changed an admitted member")
+    for name in sorted(set(reported.values())):
+        admit(name)
+    D.need(all(path in package_files[name] for path, name in reported.items()) and members() == reported,
+           "Shell native file is absent from its own package roster")
+    canonical_owners = {reported[path] for path in canonical if path in reported}
+    D.need(len(canonical_owners) == 1, "Shell canonical provider ownership is missing/ambiguous")
+    return next(iter(canonical_owners))
+
+
 def shell_native_inputs(check, work, environment):
     """Fresh shell-only static provider closure; never a widened J/U allowlist.
 
@@ -2167,36 +2226,11 @@ def shell_native_inputs(check, work, environment):
     def owner(row):
         nonlocal counter
         counter += 1
-        aliases = {row["path"], row["selectedPath"]}
-        for path in list(aliases):
-            if path.startswith("/usr/lib/"):
-                aliases.add(path.removeprefix("/usr"))
-            elif path.startswith("/lib/"):
-                aliases.add("/usr" + path)
-        # Each already-queried package has a complete original member roster.
-        # Reuse exact membership, not guessed basename/package correspondence
-        # or a fresh dpkg launch for every one of a supplier's module files.
-        known = {name for name, members in package_files.items() if aliases & members}
-        D.need(len(known) <= 1, "Shell native member has ambiguous admitted suppliers")
-        if known:
-            return next(iter(known))
-        # Query canonical/usr-merge aliases once, not a retry/fallback launch.
-        result = check.command("shell-file-owner-" + str(counter), ["/usr/bin/dpkg-query", "-S", *sorted(aliases)],
-                               environment, work, timeout=15, codes=(0, 1), limit=64 << 10)
-        owners = set()
-        for line in result.stdout.decode("ascii").splitlines():
-            name, separator, path = line.rpartition(": ")
-            D.need(separator and path in aliases and re.fullmatch(r"[a-z0-9][a-z0-9+.-]+(?::amd64)?", name),
-                   "Shell native ownership query contains an unrelated member")
-            owners.add(name)
-        D.need(len(owners) == 1, "Shell native file ownership is missing/ambiguous")
-        for line in result.stderr.decode("ascii").splitlines():
-            D.need(any(line == "dpkg-query: no path found matching pattern " + path for path in aliases),
-                   "Unexpected shell ownership query diagnostic")
-        name = next(iter(owners))
-        package(name)
-        D.need(bool(aliases & package_files[name]), "Shell native file is absent from its package roster")
-        return name
+        def query(aliases):
+            result = check.command("shell-file-owner-" + str(counter), ["/usr/bin/dpkg-query", "-S", *aliases],
+                                   environment, work, timeout=15, codes=(0, 1), limit=64 << 10)
+            return result.stdout, result.stderr
+        return shell_package_owner(row, package_files, query, package)
 
     tools = {name: host(path) for name, path in (("cc", "/usr/bin/cc"), ("pkgConfig", "/usr/bin/pkg-config"),
                                               ("ldconfig", "/usr/sbin/ldconfig.real"))}
@@ -2944,6 +2978,45 @@ def verify_installed():
         raise
 
 
+def shell_project_draft_observation(observed, lifecycle):
+    """Consume only verify_service_result's original-finality-gated DATA."""
+    D.need(type(observed) is dict and observed.get("state") == "normal-shell-installed-runtime-connection-observed"
+           and observed.get("productQualified") is False and observed.get("packageLifecycleQualified") is False
+           and observed.get("shellPackageBuilt") is False, "Closed project/draft observation was relabelled as qualification")
+    cases, combined, files = observed.get("cases"), observed.get("projectDraft"), observed.get("files")
+    # The unchanged root cap is 128; its exporter adds the original client's
+    # stdout/stderr, not two more root evidence slots or another capture.
+    D.need(type(cases) is dict and set(cases) == {"normal", "positive", "quit-outstanding"}
+           and type(combined) is dict and set(combined) == {"native", "fixture"}
+           and type(files) is list and len(files) <= 130, "Closed project/draft receipt or exported original roster is missing")
+    positive = cases["positive"]
+    D.need(type(positive) is dict and set(positive) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "projectDraft"}
+           and positive["case"] == "positive" and type(positive["exitCode"]) is int and positive["exitCode"] == 0
+           and positive["bootstrapReturned"] is True and positive["domAndGtkObserved"] is True and positive["maps"] == [],
+           "Closed positive original result is incomplete")
+    receipt = lifecycle.shell_project_receipt(D.canonical(positive["projectDraft"]))
+    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed positive native receipt correspondence differs")
+    fixture = combined["fixture"]
+    D.need(type(fixture) is dict and set(fixture) == {"fixture", "unchanged", "configAbsent", "gitignoreAbsent", "entryCount",
+                                                   "sourceBytes", "inventoryBytes", "inventorySha256"}
+           and fixture["fixture"] == "android-static-v1" and fixture["unchanged"] is True
+           and fixture["configAbsent"] is True and fixture["gitignoreAbsent"] is True
+           and type(fixture["entryCount"]) is int and fixture["entryCount"] == 3
+           and type(fixture["sourceBytes"]) is int and fixture["sourceBytes"] == len(lifecycle.SHELL_PROJECT_SOURCE)
+           and type(fixture["inventoryBytes"]) is int and 0 < fixture["inventoryBytes"] <= 8192
+           and type(fixture["inventorySha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", fixture["inventorySha256"]) is not None,
+           "Closed positive fixture inventory or absence DATA differs")
+    # Both hashes must be the two original root captures already copied only
+    # after StopPost/client finality. No reopened source, replay or new query.
+    for phase in ("before", "after"):
+        name = "lifecycle-shell-positive-project-" + phase + ".json"
+        matches = [row for row in files if type(row) is dict and row.get("path") == name]
+        D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+               and type(matches[0]["size"]) is int and matches[0]["size"] == fixture["inventoryBytes"]
+               and matches[0]["sha256"] == fixture["inventorySha256"], "Original positive before/after export pin differs")
+    return {"native": receipt, "fixture": fixture}
+
+
 def verify_installed_shell():
     """One installed connection gate; reuse U, not its entire lifecycle again."""
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe", "Only the fixed shell observation job is accepted")
@@ -3002,9 +3075,11 @@ def verify_installed_shell():
             {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "HOME": str(work / "home")},
             work, timeout=1200, limit=2 << 20)
         observed = lifecycle.verify_service_result(path, pin["sha256"], entry_sha, client, public)
+        project_draft = shell_project_draft_observation(observed, lifecycle)
         source_check("after")
         D.need(time.monotonic() < deadline, "Original shell result endpoint expired")
         D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
+            "projectDraft": project_draft,
             "commands": check.commands, "cases": ["normal", "positive", "quit-outstanding"], "compilerRerun": False,
             "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
             "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}))

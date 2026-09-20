@@ -102,7 +102,9 @@ struct Manifest {
 struct PayloadFile { path: String, sha256: String, size: u64 }
 
 fn unavailable() -> BridgeError { BridgeError::unavailable("The packaged runtime is absent, incompatible, or fails its trusted inventory.") }
-fn installed_passive_method(name: &str) -> bool { matches!(name, "capabilities" | "catalog") }
+fn installed_passive_method(name: &str) -> bool {
+    matches!(name, "capabilities" | "catalog" | "project.snapshot" | "config.validate" | "config.suggest" | "config.preview")
+}
 fn deadline(end: Instant) -> Result<(), BridgeError> { if Instant::now() >= end { Err(BridgeError::timeout()) } else { Ok(()) } }
 fn digest(bytes: &[u8]) -> String { hex(&Sha256::digest(bytes)) }
 fn hex(bytes: &[u8]) -> String {
@@ -299,6 +301,17 @@ impl RuntimeConfig {
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))))]
         { let _ = name; false }
     }
+    /// Fixed selection DATA for the project-only picker, not an asset session
+    /// qualification or a substitute for its original document/lifecycle gate.
+    /// Even the feature-off passive candidate cannot select this shell route.
+    pub(crate) fn project_selection_profile_available(&self) -> bool {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.passive_installed_profile().is_ok() }
+        #[cfg(not(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
     pub fn resolve(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
         #[cfg(all(feature = "development-runtime", debug_assertions))]
         { self.development(end) }
@@ -316,7 +329,7 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         let profile = self.passive_installed_profile()?;
         if !installed_passive_method(method.name()) {
-            return Err(BridgeError::unavailable("This installed desktop profile supports only capabilities and catalog."));
+            return Err(BridgeError::unavailable("This installed desktop profile supports only capabilities, catalog, project.snapshot, config.validate, config.suggest and config.preview."));
         }
         originals.inspect_once(profile, end, stop)
     }
@@ -639,13 +652,16 @@ pub(crate) fn assert_packaged_shell_allowlist_contract() {
     let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-shell-path-must-not-be-opened"));
     assert!(matches!(runtime.passive_installed, PassiveInstalledSelection::CandidateA));
     let bindings = PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
-    for name in ["capabilities", "catalog"] { assert_eq!(runtime.passive_method_available(name), bindings); }
-    for name in ["config.validate", "project.snapshot", "github.setup.propose", "release.version.observe", "unknown"] {
+    assert_eq!(runtime.project_selection_profile_available(), bindings);
+    for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview"] {
+        assert_eq!(runtime.passive_method_available(name), bindings);
+    }
+    for name in ["environment.requirements", "github.setup.propose", "release.version.observe", "config.save", "unknown"] {
         assert!(!runtime.passive_method_available(name));
     }
     let mut originals = crate::installed_runtime::PassiveRuntimeSlots::new();
     let (_sender, stop) = tokio::sync::watch::channel(false);
-    assert!(runtime.resolve_passive_installed(crate::protocol::Method::ProjectSnapshot, &mut originals, Instant::now(), &stop).is_err());
+    assert!(runtime.resolve_passive_installed(crate::protocol::Method::EnvironmentRequirements, &mut originals, Instant::now(), &stop).is_err());
     assert!(originals.never_started());
     assert!(runtime.resolve(Instant::now()).is_err());
     assert!(runtime.resolve_edit(Instant::now()).is_err());
@@ -654,6 +670,16 @@ pub(crate) fn assert_packaged_shell_allowlist_contract() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installed_allowlist_is_exactly_the_read_only_project_draft_services() {
+        for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview"] {
+            assert!(installed_passive_method(name));
+        }
+        for name in ["", "unknown", "config.save", "config.apply", "config.initialize", "github.setup.propose", "release.version.observe",
+            "environment.requirements", "project.snapshot ", "Config.Validate"] {
+            assert!(!installed_passive_method(name));
+        }
+    }
     #[test]
     fn payload_names_are_portable_and_unambiguous() {
         assert_eq!(REQUIRED_RUNTIME_RESOURCES, [
@@ -686,6 +712,7 @@ mod tests {
         // A pathname is DATA only: no channel, task, descriptor or profile.
         // The owner seam calls this exact gate before any inspection effect.
         let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-passive-path-must-not-be-opened"));
+        assert!(!runtime.project_selection_profile_available());
         let error = runtime.passive_installed_profile().err().unwrap();
         assert_eq!(error.code, "runtime_unavailable");
         assert_eq!(error.message, "The passive installed-runtime release and custody profile are not qualified.");
@@ -715,13 +742,14 @@ mod tests {
         // No native inspection or capability is performed/fabricated here.
         let candidate = RuntimeConfig::installed_passive_candidate_a();
         assert!(matches!(candidate.passive_installed, PassiveInstalledSelection::CandidateA));
+        assert!(!candidate.project_selection_profile_available());
         let packaged = RuntimeConfig::packaged(PathBuf::from("/inert-passive-candidate-path"));
         assert!(matches!(packaged.passive_installed, PassiveInstalledSelection::Closed));
         assert!(packaged.passive_installed_profile().is_err());
         assert!(candidate.resolve(Instant::now()).is_err());
         let mut originals = crate::installed_runtime::PassiveRuntimeSlots::new();
         let (_sender, stop) = tokio::sync::watch::channel(false);
-        assert!(candidate.resolve_passive_installed(crate::protocol::Method::ProjectSnapshot, &mut originals, Instant::now(), &stop).is_err());
+        assert!(candidate.resolve_passive_installed(crate::protocol::Method::EnvironmentRequirements, &mut originals, Instant::now(), &stop).is_err());
         assert!(originals.never_started()); // An unselected method cannot begin inspection.
         let profile = candidate.passive_installed_profile();
         assert_eq!(profile.is_ok(), PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR));

@@ -8,7 +8,7 @@ import githubConnectionResource from '../../src/mobile_release/api/data/github-c
 import credentialGuideResource from '../../src/mobile_release/api/data/credential-guide-v1.json' with { type: 'json' };
 import { emptyDraft, fieldsFor, getValue, localeRequirements, setValue } from '../src/catalog.ts';
 import { apiError, bridgeMode, createNativeApi } from '../src/bridge.ts';
-import { methodReason } from '../src/certainty.ts';
+import { methodReason, projectSelectionReason } from '../src/certainty.ts';
 
 test('browser preview requires the exact explicit flag; native errors cannot select it', async () => {
   for (const flag of [undefined, '', '0', 'true', true, 1]) assert.equal(bridgeMode(flag, false), 'unavailable');
@@ -99,6 +99,34 @@ test('unknown errors do not expose raw bridge values; no capability means no ope
   info.capabilities.methods.push({ method: 'config.validate', available: true, reason: 'Pure only' });
   assert.equal(methodReason(info, 'config.validate', 'native'), null);
   assert.notEqual(methodReason(info, 'config.validate', 'preview'), null);
+});
+
+test('project selection is additive profile data, separate from core and browser preview availability', async () => {
+  const original = { runtime: { state: 'available', reason: null, mode: 'bundled' },
+    capabilities: { methods: [{ method: 'project.snapshot', available: false, reason: 'Core refusal' }] } };
+  assert.notEqual(projectSelectionReason(null, 'native'), null);
+  const admitted = { available: true, reason: null };
+  const refused = { available: false, reason: 'Project picker profile unavailable.' };
+  for (const selection of [undefined, null, false, true, 1, 'available', [], {}, { available: true },
+    { reason: null }, { available: 'true', reason: null }, { available: 1, reason: null },
+    { available: true, reason: '' }, { available: true, reason: 'Contradictory reason' },
+    { available: true, reason: null, extra: true }, { available: false, reason: null },
+    { available: false, reason: '' }, { available: false, reason: 'x'.repeat(513) }, refused, admitted]) {
+    const reply = { ...original, ...(selection === undefined ? {} : { projectSelection: selection }) };
+    const calls = [];
+    const api = createNativeApi('native', async (command, args) => { calls.push({ command, args }); return reply; });
+    const info = await api.appInfo();
+    assert.deepEqual(calls, [{ command: 'app_info', args: undefined }], 'availability does not invoke a picker');
+    assert.equal(projectSelectionReason(info, 'native') === null, selection === admitted);
+    if (selection === refused) assert.equal(projectSelectionReason(info, 'native'), refused.reason);
+    assert.equal(methodReason(info, 'project.snapshot', 'native'), 'Core refusal', 'selection never enables a core-refused method');
+    assert.notEqual(projectSelectionReason(info, 'preview'), null);
+    assert.notEqual(projectSelectionReason(info, 'unavailable'), null);
+  }
+  const noEngine = { ...original, projectSelection: admitted,
+    runtime: { state: 'unavailable', reason: 'Engine unavailable.', mode: 'bundled' }, capabilities: null };
+  assert.equal(projectSelectionReason(noEngine, 'native'), null, 'profile DATA does not claim a successful core inspection');
+  assert.equal(methodReason(noEngine, 'project.snapshot', 'native'), 'Engine unavailable.');
 });
 
 test('core fields have reachable help and metadata preserves its per-platform mapping', () => {

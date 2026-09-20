@@ -20,15 +20,26 @@ filesystem, opener, build, Store, credential, or recovery commands/plugins.
 The sole local webview denies remote/new-window navigation.
 The CSP allows only local assets and Tauri IPC, not project-provided web content.
 
-**Production runtime execution is disabled, even when both compile-time hashes
-are provided and a manifest is valid.** A digest binds bytes at inspection, not
-later path consumption. M1 does not yet supply an immutable runtime namespace,
-nonblocking component-bound no-follow readers, original consumption custody,
-platform file/handle identity, installation/update lease, or native qualification.
-Both the resolver and spawn function deny production launch. There is no switch
-or runtime environment override that enables it. `app_info` remains usable and
-reports unavailable, with null capabilities; it never falls back to source,
-PATH, an ambient Python, browser preview, or synthetic successful core output.
+**The general packaged resolver remains disabled.** A valid manifest and its
+compile-time digests alone do not authorize later path consumption. A separate
+fixed Linux x86-64 installed-A profile now connects the normal
+`desktop-shell,custom-protocol` build to the original installed-runtime owner.
+Every request must retain its inspection, transfer, final claim, process owner
+and finality checks; byte hashes alone are not custody. The fixed target,
+manifest/protocol and platform checks remain mandatory, without an environment
+or renderer override. Other platforms/profiles do not gain production launch.
+
+That installed profile admits exactly `capabilities`, `catalog`,
+`project.snapshot`, `config.validate`, `config.suggest` and `config.preview`.
+The native bridge intersects core availability with this allowlist. A separate
+project-only gate uses the existing document/picker/source/registry chain, not
+the closed credential/asset-session grant. `app_info.projectSelection` is
+bounded availability DATA, not live admission; absent/malformed data disables
+the UI action. Snapshots are bounded named observations, not selection-to-query
+custody, saved-base authority or an atomic project snapshot. Drafts do not save.
+Installed-shell/project-flow native acceptance is still pending. These changes
+do not qualify a standalone installer, general Linux, macOS or Windows. There
+is no source, PATH, ambient-Python, browser-preview or synthetic-result fallback.
 `inspect_bundle_for_packaging` is explicitly **unqualified preparation work**;
 its result contains no executable/core/bootstrap paths and active app commands
 never reach it. Its current pathname-based reads are not a safe execution admission

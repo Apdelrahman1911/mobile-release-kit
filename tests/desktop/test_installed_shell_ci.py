@@ -169,6 +169,60 @@ def transport_data(work, change=None):
             "MRK_INSTALLED_SHELL_ARTIFACT_ID": "17", "MRK_INSTALLED_SHELL_ROSTER_SHA256": hashlib.sha256(roster).hexdigest()}, elf, source_inputs
 
 
+class ShellPackageOwnershipContracts(unittest.TestCase):
+    def test_split_link_provider_and_missing_alternative_retain_exact_suppliers(self):
+        # Actual hosted dpkg output, never a local dpkg/process invocation.
+        row = {"path": "/usr/bin/pkgconf", "selectedPath": "/usr/bin/pkg-config"}
+        stdout = b"pkgconf:amd64: /usr/bin/pkg-config\npkgconf-bin: /usr/bin/pkgconf\n"
+        rosters = {"pkgconf:amd64": {row["selectedPath"]}, "pkgconf-bin": {row["path"]}}
+        for initial in ({}, {"pkgconf-bin": rosters["pkgconf-bin"]}):
+            admitted, queried = [], []
+            def admit(name):
+                admitted.append(name)
+                initial[name] = rosters[name]
+            def query(aliases):
+                queried.append(aliases)
+                return stdout, b""
+            self.assertEqual(S.shell_package_owner(row, initial, query, admit), "pkgconf-bin")
+            self.assertEqual(set(initial), {"pkgconf:amd64", "pkgconf-bin"})
+            self.assertIn("pkgconf:amd64", admitted)
+            self.assertEqual(queried, [["/usr/bin/pkg-config", "/usr/bin/pkgconf"]])
+            self.assertEqual(S.shell_package_owner(row, initial, query, admit), "pkgconf-bin")
+            self.assertEqual(len(queried), 1)  # Both original complete rosters now cover this pair.
+        gcc = {"path": "/usr/bin/x86_64-linux-gnu-gcc-13", "selectedPath": "/usr/bin/cc"}
+        known = {}
+        self.assertEqual(S.shell_package_owner(gcc, known,
+            lambda aliases: (b"gcc-13-x86-64-linux-gnu: /usr/bin/x86_64-linux-gnu-gcc-13\n",
+                             b"dpkg-query: no path found matching pattern /usr/bin/cc\n"),
+            lambda name: known.update({name: {gcc["path"]}})), "gcc-13-x86-64-linux-gnu")
+        library = {"path": "/usr/lib/x86_64-linux-gnu/libc.so.6", "selectedPath": "/lib/x86_64-linux-gnu/libc.so.6"}
+        self.assertEqual(S.shell_package_owner(library, {"libc6:amd64": {library["selectedPath"]}},
+            lambda _: self.fail("Already bound usr-merge spelling must not query again"),
+            lambda _: self.fail("Already bound supplier must not be readmitted")), "libc6:amd64")
+
+    def test_ambiguous_alias_only_conflicting_or_incomplete_ownership_refuses(self):
+        row = {"path": "/usr/bin/pkgconf", "selectedPath": "/usr/bin/pkg-config"}
+        good = b"pkgconf:amd64: /usr/bin/pkg-config\npkgconf-bin: /usr/bin/pkgconf\n"
+        rosters = {"pkgconf:amd64": {row["selectedPath"]}, "pkgconf-bin": {row["path"]}}
+        cases = (
+            (good + b"other: /usr/bin/pkgconf\n", b"", rosters),
+            (good + b"pkgconf-bin: /usr/bin/pkgconf\n", b"", rosters),
+            (b"pkgconf:amd64: /usr/bin/pkg-config\n", b"dpkg-query: no path found matching pattern /usr/bin/pkgconf\n", rosters),
+            (good, b"dpkg-query: no path found matching pattern /usr/bin/pkg-config\n", rosters),
+            (good + b"other: /unrelated\n", b"", rosters),
+            (b"pkgconf-bin: /usr/bin/pkgconf\n", b"", rosters),
+            (good, b"", {"pkgconf:amd64": {row["path"]}, "pkgconf-bin": {row["path"]}}),
+        )
+        for stdout, stderr, listed in cases:
+            with self.subTest(stdout=stdout, stderr=stderr), self.assertRaises(S.D.Refused):
+                known = {}
+                S.shell_package_owner(row, known, lambda _: (stdout, stderr),
+                                      lambda name: known.update({name: listed[name]}))
+        with self.assertRaises(S.D.Refused):
+            S.shell_package_owner(row, {"pkgconf-bin": {row["path"]}, "other": {row["path"]}},
+                                  lambda _: self.fail("Ambiguous cache must refuse before querying"), lambda _: None)
+
+
 class InstalledShellCompilerContracts(unittest.TestCase):
     def test_one_build_exact_production_features_and_two_selected_targets(self):
         argv = S.shell_compile_argv("/tools/cargo", Path("/source"), Path("/target"))
@@ -465,6 +519,73 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                 (root / "font.ttf").chmod(0o755)
                 with self.assertRaises(ValueError):
                     lifecycle.shell_data_snapshot(binding)
+
+
+def closed_project_draft_data(lifecycle):
+    """Synthetic closed-result schema DATA only; no native/finality claim."""
+    receipt = deepcopy(lifecycle.SHELL_PROJECT_RECEIPT)
+    fixture = {"fixture": "android-static-v1", "unchanged": True, "configAbsent": True, "gitignoreAbsent": True,
+               "entryCount": 3, "sourceBytes": len(lifecycle.SHELL_PROJECT_SOURCE), "inventoryBytes": 512, "inventorySha256": "a" * 64}
+    return {"state": "normal-shell-installed-runtime-connection-observed", "productQualified": False,
+            "packageLifecycleQualified": False, "shellPackageBuilt": False,
+            "cases": {
+                "normal": {"case": "normal", "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": False, "maps": []},
+                "positive": {"case": "positive", "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                             "maps": [], "projectDraft": receipt},
+                "quit-outstanding": {"case": "quit-outstanding", "exitCode": 0, "bootstrapReturned": False,
+                                     "domAndGtkObserved": True, "maps": [[{"DATA": True}]]},
+            }, "projectDraft": {"native": deepcopy(receipt), "fixture": fixture},
+            "files": [{"path": "lifecycle-shell-positive-project-" + phase + ".json", "size": 512, "sha256": "a" * 64}
+                      for phase in ("before", "after")]}
+
+
+class InstalledProjectDraftReceiptContracts(unittest.TestCase):
+    def test_consumes_one_combined_positive_only_after_matching_closed_export_pins(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        observed = closed_project_draft_data(lifecycle)
+        result = S.shell_project_draft_observation(observed, lifecycle)
+        self.assertEqual(result, observed["projectDraft"])
+        self.assertFalse(result["native"]["mutationActions"])
+        self.assertFalse(result["native"]["draft"]["saveAvailable"])
+        self.assertTrue(result["fixture"]["configAbsent"])
+        self.assertTrue(result["fixture"]["gitignoreAbsent"])
+        self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding"})
+
+    def test_rejects_legacy_partial_mistyped_or_relabelled_positive_receipts(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        mutations = (
+            lambda v: v.pop("projectDraft"), lambda v: v["cases"]["positive"].pop("projectDraft"),
+            lambda v: v["cases"]["positive"].update(exitCode=True),
+            lambda v: v["cases"]["positive"].update(domAndGtkObserved=1),
+            lambda v: v["cases"]["positive"]["projectDraft"]["select"].update(originalsSettled=False),
+            lambda v: v["cases"]["positive"]["projectDraft"]["quit"].update(relayJoined=False),
+            lambda v: v["projectDraft"]["native"]["cancel"].update(originalsSettled=1),
+            lambda v: v["projectDraft"]["fixture"].update(unchanged=1),
+            lambda v: v["projectDraft"]["fixture"].update(configAbsent=False),
+            lambda v: v["projectDraft"]["fixture"].update(gitignoreAbsent=False),
+            lambda v: v["projectDraft"]["fixture"].update(entryCount=True),
+            lambda v: v["projectDraft"]["fixture"].update(sourceBytes=0),
+            lambda v: v["projectDraft"]["fixture"].update(inventoryBytes=8193),
+            lambda v: v["projectDraft"]["fixture"].update(inventorySha256="unbound"),
+            lambda v: v.update(productQualified=True), lambda v: v.update(packageLifecycleQualified=True),
+            lambda v: v.update(shellPackageBuilt=True), lambda v: v.update(state="project-draft-qualified"),
+        )
+        for mutate in mutations:
+            observed = closed_project_draft_data(lifecycle); mutate(observed)
+            with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError)):
+                S.shell_project_draft_observation(observed, lifecycle)
+
+    def test_missing_duplicate_or_mismatched_original_inventory_exports_refuse(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        for mutate in (
+            lambda v: v["files"].pop(), lambda v: v["files"].append(deepcopy(v["files"][0])),
+            lambda v: v["files"][1].update(sha256="b" * 64), lambda v: v["files"][0].update(size=513),
+            lambda v: v["files"][1].update(size=True), lambda v: v["files"][1].update(path="unbound-after.json"),
+            lambda v: v["files"][0].update(extra=True),
+        ):
+            observed = closed_project_draft_data(lifecycle); mutate(observed)
+            with self.subTest(mutate=mutate), self.assertRaises(S.D.Refused):
+                S.shell_project_draft_observation(observed, lifecycle)
 
 
 if __name__ == "__main__":

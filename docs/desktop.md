@@ -15,17 +15,27 @@ than duplicating it in JavaScript or Rust. The CLI remains supported.
 
 The production distribution must include its Python engine and non-SDK helpers.
 An absent or invalid bundled runtime is an error, not permission to use an
-arbitrary system Python. **Production engine launch is currently gated off even
-if a manifest is supplied:** manifest hashing alone does not hold filesystem
-custody through later executable/import opens. The reviewed native bundle
-admission implementation and its platform evidence are still required. The
-foundation's engine integration is available only to an explicit trusted
-development build. Android still needs a compatible JDK/Android SDK and
+arbitrary system Python. The general bundled-runtime resolver remains closed:
+manifest hashing alone does not hold filesystem custody through later opens.
+There is now a separate, fixed Linux installed-runtime path for the normal
+shell, with per-request original custody and finality. Its current scope is
+capabilities/help, native project selection, a static project snapshot, and
+in-memory configuration suggestion, validation and redacted review. The
+installed-shell and project/draft native checks are still pending; this is not
+general Linux or production qualification. Saving, credentials, tools, network
+and Store actions remain unavailable on that path. Trusted development builds
+remain a separate explicit mode, never a fallback. Android still needs a compatible JDK/Android SDK and
 project Gradle wrapper. iOS native work requires macOS/Xcode locally or on a
 protected hosted macOS runner. The desktop does not make these SDK requirements
 disappear. No complete installer or clean-machine qualification is claimed here.
 
 ## Foundation capabilities
+
+This table describes implemented surfaces, not a grant to execute them. The
+installed path above admits only its six passive core methods and the separate
+project-only picker; the UI shows an explicit reason for unavailable actions.
+Choosing a project does not enable the credential/asset session. Draft changes
+stay in memory, with no configuration or ignore-file writes.
 
 | Surface | Foundation behavior | What this does not prove |
 | --- | --- | --- |
@@ -205,8 +215,8 @@ observation; they are not file custody, build consent or release-readiness evide
 This read does not match a build Prepare snapshot or implement a build Start
 recheck. Retry is explicit, and retiring a UI result does not cancel or
 claim settlement of its native owner. Browser preview never fabricates a read.
-Installed/production runtime execution remains disabled even with a valid
-manifest, and Windows observation remains unavailable. The card reports real
+This saved-version method is not part of the installed six-method profile,
+and Windows observation remains unavailable. The card reports real
 runtime/platform unavailability rather than using ambient Python.
 
 This is build-input preparation, **not offline preflight**. Even core preflight

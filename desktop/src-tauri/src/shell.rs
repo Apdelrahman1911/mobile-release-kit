@@ -208,17 +208,43 @@ async fn artifact_evidence_cancel(webview: Webview, request: tauri::ipc::Request
 #[tauri::command(rename_all = "camelCase")]
 async fn project_snapshot(project_id: String, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
-    state.bridge.project_snapshot(&state.document, project_id).await
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let observed_project = project_id.clone();
+    let result = state.bridge.project_snapshot(&state.document, project_id).await;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.snapshot(&observed_project, &result); }
+    result
 }
 #[tauri::command]
 async fn validate_config(draft: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
-    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action.")); state.bridge.validate_config(&state.document, draft).await }
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.validate_request(&draft); }
+    let result = state.bridge.validate_config(&state.document, draft).await;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.validation(&result); }
+    result
+}
 #[tauri::command]
 async fn suggest_config(hints: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
-    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action.")); state.bridge.suggest_config(&state.document, hints).await }
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.suggest_request(&hints); }
+    let result = state.bridge.suggest_config(&state.document, hints).await;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.suggestion(&result); }
+    result
+}
 #[tauri::command]
 async fn preview_config(base: Value, draft: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
-    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action.")); state.bridge.preview_config(&state.document, base, draft).await }
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.review_request(&base, &draft); }
+    let result = state.bridge.preview_config(&state.document, base, draft).await;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.review(&result); }
+    result
+}
 #[tauri::command]
 async fn propose_github_setup(request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
@@ -567,6 +593,8 @@ async fn choose_project(webview: Webview, app: tauri::AppHandle, request: tauri:
         state.document.project_result(id).await
     }.await;
     fixture_result!(observed, project, &result);
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.project_result(&result); }
     result
 }
 
@@ -841,7 +869,7 @@ mod owned_gtk {
         let Some(window) = app.get_webview_window(MAIN_WINDOW) else { not_created(&call, Reason::DocumentLost); return; };
         let parent = match window.gtk_window() { Ok(parent) => parent, Err(_) => { not_created(&call, Reason::Unqualified); return; } };
         if let Some(mut facts) = call.facts() { facts.constructing = true; } else { call.failed(Reason::CleanupUnknown); return; }
-        if matches!(choice, DialogChoice::File(_)) {
+        if matches!(choice, DialogChoice::File(_) | DialogChoice::Project) {
             let Some(settings) = gtk::Settings::default() else { not_created(&call, Reason::Unqualified); return; };
             settings.set_gtk_recent_files_enabled(false);
             if settings.is_gtk_recent_files_enabled() { not_created(&call, Reason::Unqualified); return; }
@@ -871,7 +899,10 @@ mod owned_gtk {
         }));
         if let Some(mut facts) = call.facts() { facts.created = true; facts.constructing = false; }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        if let Some(q) = observation.as_ref().and_then(Weak::upgrade) { q.native_created(owner.id, matches!(choice, DialogChoice::Quit)); }
+        if let Some(q) = observation.as_ref().and_then(Weak::upgrade) {
+            if matches!(choice, DialogChoice::Project) { q.project_created(owner.id); }
+            else { q.native_created(owner.id, matches!(choice, DialogChoice::Quit)); }
+        }
         gtk_fixture!(call, Adopted, 1);
         DIALOG.with(|book| {
             let mut book = book.borrow_mut();
@@ -895,8 +926,13 @@ mod owned_gtk {
                         }
                         dialog.add_filter(filter.clone()); dialog.set_filter(&filter); entry.filter = Some(filter);
                     }
+                    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    let (response_observation, destroy_observation, observed_id) = (observation.clone(), observation.clone(), owner.id);
                     entry.response = Some(dialog.connect_response(move |dialog, response| {
                         let Some(call) = response_call.upgrade() else { return; };
+                        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                        let (observed_accept, observed_cancel, observed_delete) = (response == gtk::ResponseType::Accept,
+                            response == gtk::ResponseType::Cancel, response == gtk::ResponseType::DeleteEvent);
                         gtk_fixture!(call, ResponseEnter, match response { gtk::ResponseType::Accept => 1,
                             gtk::ResponseType::Cancel => 2, gtk::ResponseType::DeleteEvent => 3, _ => 4 });
                         // Latch the actual response/endpoint under the real
@@ -907,10 +943,36 @@ mod owned_gtk {
                             gtk::ResponseType::Cancel | gtk::ResponseType::DeleteEvent => NativeResponse::Decline,
                             _ => NativeResponse::Other,
                         };
-                        if call.begin_response(response, false) == Some(true) { call.selected_path(native_path(dialog, &call)); }
+                        let read_one_path = call.begin_response(response, false);
+                        if read_one_path == Some(true) {
+                            let path = native_path(dialog, &call);
+                            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                            if let Some(q) = response_observation.as_ref().and_then(Weak::upgrade) {
+                                q.project_filename(observed_id, path.as_ref().ok().map(PathBuf::as_path));
+                            }
+                            call.selected_path(path);
+                        }
+                        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                        if let Some(q) = response_observation.as_ref().and_then(Weak::upgrade) {
+                            let (accepted, cancelled, disposal) = call.facts().map_or((false, false, false), |facts| {
+                                let response = facts.response && !facts.declined && !facts.destroyed && !facts.released && facts.refusal.is_none();
+                                (observed_accept && read_one_path == Some(true) && response && facts.accepted && facts.selected.is_some() && !facts.close_ack,
+                                 observed_cancel && read_one_path == Some(false) && response && !facts.accepted && facts.selected.is_none() && !facts.close_ack,
+                                 observed_delete && read_one_path.is_none() && response && facts.close_ack)
+                            });
+                            q.project_response(observed_id, accepted, cancelled, disposal);
+                        }
                         gtk_fixture!(call, ResponseLeave, 1);
                     }));
-                    entry.destroy = Some(dialog.connect_destroy(move |_| destroyed(&destroy_call)));
+                    entry.destroy = Some(dialog.connect_destroy(move |_| {
+                        destroyed(&destroy_call);
+                        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                        if let Some(q) = destroy_observation.as_ref().and_then(Weak::upgrade) {
+                            let seen = destroy_call.upgrade().is_some_and(|call| call.facts().is_some_and(|facts|
+                                facts.destroyed && facts.response && !facts.declined && facts.refusal.is_none()));
+                            q.native_destroyed(observed_id, seen);
+                        }
+                    }));
                 }
                 Object::Message(dialog) => {
                     dialog.set_title("Quit and discard unsaved drafts?"); dialog.set_destroy_with_parent(true);
@@ -1009,6 +1071,60 @@ mod owned_gtk {
         gtk_fixture!(call, Released, u32::from(DIALOG.with(|book| book.borrow().is_none())));
         gtk_fixture!(call, ReleaseLeave, 1);
         call.changed();
+    }
+
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn observed_project_dialog(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>) -> Result<Option<(u32, gtk::FileChooserDialog)>, ()> {
+        if !gtk::is_initialized_main_thread() { return Err(()); }
+        let original = DIALOG.with(|book| {
+            let book = book.try_borrow().map_err(|_| ())?;
+            let Some(entry) = book.as_ref() else { return Ok(None); };
+            let Object::File(dialog) = &entry.object else { return Err(()); };
+            let (context, call) = entry.observation.as_ref().ok_or(())?;
+            Ok(Some((entry.id, dialog.clone(), context.clone(), call.clone())))
+        })?;
+        let Some((id, dialog, context, call)) = original else { return Ok(None); };
+        if !context.upgrade().is_some_and(|actual| Arc::ptr_eq(&actual, q)) { return Err(()); }
+        let call = call.upgrade().ok_or(())?; let owner = call.owner().ok_or(())?;
+        if owner.id != id || !Arc::ptr_eq(&owner.gui, &call) || owner.interrupted()
+            || !call.facts().is_some_and(|facts| facts.created && facts.showing && !facts.constructing
+                && !facts.not_created && !facts.response && !facts.destroyed && !facts.released && facts.refusal.is_none()) { return Err(()); }
+        let main = app.get_webview_window(MAIN_WINDOW).ok_or(())?;
+        let parent: gtk::Window = main.gtk_window().map_err(|_| ())?.upcast();
+        if dialog.title().as_deref() != Some("Choose a mobile project folder") || !dialog.is_visible() || !dialog.is_modal()
+            || dialog.transient_for().as_ref() != Some(&parent)
+            || dialog.property::<gtk::FileChooserAction>("action") != gtk::FileChooserAction::SelectFolder
+            || !dialog.property::<bool>("local-only") || dialog.property::<bool>("select-multiple") || dialog.property::<bool>("create-folders")
+            || gtk::Settings::default().is_none_or(|settings| settings.is_gtk_recent_files_enabled()) { return Err(()); }
+        // Temporary refs to the actual retained original, released in this
+        // main-thread callback. No test-side GTK/source owner is installed.
+        Ok(Some((id, dialog)))
+    }
+
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn select_observed_project(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>) -> Result<bool, ()> {
+        let Some((id, dialog)) = observed_project_dialog(app, q)? else { return Ok(false); };
+        let path = q.project_path().ok_or(())?;
+        q.project_selection(id)?;
+        // Exactly one actual chooser selection. The next original relay tick
+        // permits GTK to render/load it before its real Select widget is used.
+        // Never read filename here: the admitted response owns that sole read.
+        if !dialog.set_filename(path) { return Err(()); }
+        Ok(true)
+    }
+
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn activate_observed_project(app: &tauri::AppHandle, q: &Arc<installed_observation::Observation>, select: bool) -> Result<bool, ()> {
+        let Some((id, dialog)) = observed_project_dialog(app, q)? else { return Ok(false); };
+        let response = if select { gtk::ResponseType::Accept } else { gtk::ResponseType::Cancel };
+        let button = dialog.widget_for_response(response).ok_or(())?.downcast::<gtk::Button>().map_err(|_| ())?;
+        if !button.is_visible() || dialog.response_for_widget(&button) != response
+            || button.label().as_deref() != Some(if select { "Select" } else { "Cancel" }) { return Err(()); }
+        if !button.is_sensitive() { return Ok(false); }
+        q.project_activation(id, select)?;
+        // GtkDialog's original clicked handler produces the response. Neither
+        // response() nor the admission begin_response() is called by this seam.
+        button.emit_clicked(); Ok(true)
     }
 
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1494,7 +1610,7 @@ fn run_builder(builder: tauri::Builder<tauri::Wry>) -> Result<LoopReturn, Initia
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if matches!(event, tauri::RunEvent::Exit) {
             let state = app.state::<ShellState>();
-            if let Some(q) = &state.observation { q.actual_exit(state.exit_ready.load(Ordering::SeqCst)); }
+            if let Some(q) = &state.observation { q.actual_exit(state.exit_ready.load(Ordering::SeqCst), &state.document); }
         }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if matches!(event, tauri::RunEvent::Exit) {

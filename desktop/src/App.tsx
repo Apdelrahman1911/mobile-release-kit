@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore }
 import { desktopApi } from './api.ts';
 import { apiError } from './bridge.ts';
 import { emptyDraft } from './catalog.ts';
-import { methodReason } from './certainty.ts';
+import { methodReason, projectSelectionReason } from './certainty.ts';
 import { initialWorkspace, isDirty, retainedEditAttention, workspaceReducer } from './drafts.ts';
 import type { RetainedEditAttention, WorkspaceAction } from './drafts.ts';
 import { configurationOwnerReason, editRetainsDraft, editStartReason } from './configEdit.ts';
@@ -431,7 +431,14 @@ export function App() {
   const validateReason = savedCommandBusy() ?? methodReason(info, 'config.validate', mode);
   const reviewReason = savedCommandBusy() ?? methodReason(info, 'config.preview', mode);
   const suggestReason = savedCommandBusy() ?? methodReason(info, 'config.suggest', mode);
-  const chooseDisabled = loading || choosing || savedCommandBusy() !== null || mode === 'unavailable' || saveState.status?.capability.reason === 'shutdown' || workflowState.status?.capability.reason === 'shutdown' || metadataState.edit.status?.capability.reason === 'shutdown' || diagnosticsState.status?.capability.reason === 'shutdown';
+  // Example loading remains an explicit preview action, never a fallback for
+  // missing native project-selection DATA or a failed native picker.
+  const chooseReason = loading ? 'Application capabilities are being loaded.' : choosing ? 'Finish the original project selection first.'
+    : savedCommandBusy() ?? (preview ? null : projectSelectionReason(info, mode))
+      ?? (saveState.status?.capability.reason === 'shutdown' || workflowState.status?.capability.reason === 'shutdown'
+        || metadataState.edit.status?.capability.reason === 'shutdown' || diagnosticsState.status?.capability.reason === 'shutdown'
+        ? 'The application is shutting down.' : null);
+  const chooseDisabled = chooseReason !== null;
 
   const loadSnapshot = async (projectId: string) => {
     offlinePreflight.snapshotIntent(projectId);
@@ -538,6 +545,7 @@ export function App() {
   const editor = (metadataOnly = false) => <DraftEditor
     key={`${session?.project.id ?? 'none'}-${metadataOnly ? 'metadata' : 'settings'}`}
     catalog={catalog} session={session} metadataOnly={metadataOnly} preview={preview}
+    chooseReason={chooseReason}
     validateReason={loading ? 'Engine capabilities are being loaded.' : validateReason}
     reviewReason={loading ? 'Engine capabilities are being loaded.' : reviewReason}
     suggestReason={loading ? 'Engine capabilities are being loaded.' : suggestReason}
@@ -600,7 +608,7 @@ export function App() {
           onShowProject={(projectId) => { dispatch({ type: 'switch', projectId }); navigate('settings'); }} onHelp={setHelp} />
         {page !== 'github' && workflowPanel(false)}
         {page !== 'metadata' && <MetadataTextSave state={metadataState} controller={metadataText} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
-        {page === 'dashboard' && <Dashboard session={session} info={info} preview={preview} chooseDisabled={chooseDisabled} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
+        {page === 'dashboard' && <Dashboard session={session} info={info} preview={preview} chooseDisabled={chooseDisabled} chooseReason={chooseReason} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
           releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => { androidBuild.versionIntent(); void releaseVersion.read(); }}
           onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="A little clarity before the next release." description="Edit a practical, schema-driven draft. The bundled core provides every field, requirement, and validation rule." />{editor()}</>}

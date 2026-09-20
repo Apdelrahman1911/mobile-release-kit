@@ -44,6 +44,22 @@ CHILD_MARKER = "MRK_INSTALLED_NATIVE_CHILD="
 EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
 SHELL_CASES = ("normal", "positive", "quit-outstanding")
 SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
+SHELL_PROJECT_SOURCE = (b'plugins { id("com.android.application") }\n'
+                        b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
+SHELL_PROJECT_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_DRAFT="
+SHELL_PROJECT_RECEIPT = {
+    "schemaVersion": 1, "fixture": "android-static-v1", "projectGateContract": True,
+    "methods": "six-passive", "mutationActions": False,
+    "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
+    "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
+    "snapshot": {"config": "missing", "androidHint": True, "sourceFiles": 1},
+    "suggestion": {"coreProvenance": True, "explicitAdoption": True},
+    "field": {"path": "version.source", "catalogHelp": True, "explicitUnset": True},
+    "validation": {"valid": False, "issue": "config.invalid"},
+    "review": {"kind": "redacted", "required": True, "present": False},
+    "draft": {"unsaved": True, "saveAvailable": False},
+    "quit": {"operation": 3, "originalsSettled": True, "relayJoined": True, "exit": True},
+}
 OS_SONAMES = {"libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
               "libpthread.so.0", "librt.so.1", "libutil.so.1", "libgcc_s.so.1"}
 PRIVATE_SONAMES = {"libssl.so.3", "libcrypto.so.3"}
@@ -1121,7 +1137,8 @@ def public_files(value):
     fixed |= {"unit-start.json", "unit-result.json", "unit-stop.json", "inputs.json", "dpkg-policy.json", "scripts-unpacked.json", "binaries-unpacked.json"}
     if "shell" in value:
         return fixed | {"loader-entry.json", "loader-final.json", "loader-runtime.json", "shell-cases.json",
-                        "shell-normal-control.json", "published-before-upgrade.txt", "mutation-denials.txt"} \
+                        "shell-normal-control.json", "shell-positive-project-before.json", "shell-positive-project-after.json",
+                        "published-before-upgrade.txt", "mutation-denials.txt"} \
             | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
     installed = value.get("installed")
     if installed is not None:
@@ -2160,6 +2177,73 @@ def shell_argv(value, case):
         "--error-file=/dev/stderr", "--server-args=-screen 0 1280x1024x24 -noreset", *command])
 
 
+def _shell_project_inventory(value):
+    """Three fixed inert nodes only; ordinary GUI caches are outside this tree."""
+    need(_ROOT == root_path(value), "Positive fixture differs from the original service root")
+    root = _ROOT / "positive-project"
+    rows = []
+    for relative, expected in ((".", ["app"]), ("app", ["build.gradle.kts"])):
+        path = root if relative == "." else root / relative
+        directory(path, protected=True)
+        before = path.lstat()
+        need(stat.S_IMODE(before.st_mode) == 0o555 and before.st_uid == before.st_gid == 0,
+             "Positive fixture directory is not the fixed root-owned read-only node")
+        children = []
+        with os.scandir(path) as entries:
+            for entry in entries:
+                need(len(children) < len(expected) and entry.name in expected, "Unexpected positive fixture entry")
+                children.append(entry.name)
+        need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Positive fixture directory changed")
+        rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
+    source = protected_record(root / "app/build.gradle.kts", len(SHELL_PROJECT_SOURCE))
+    need(source["size"] == len(SHELL_PROJECT_SOURCE) and source["sha256"] == hashlib.sha256(SHELL_PROJECT_SOURCE).hexdigest()
+         and stat.S_IMODE(source["identity"][2]) == 0o444, "Positive fixture source bytes or non-executable mode differ")
+    rows.append({**source, "path": "app/build.gradle.kts", "kind": "file"})
+    for relative in (".gitignore", "release/mobile-release.json"):
+        _absent(root / relative)
+    return {"schemaVersion": 1, "fixture": "android-static-v1", "root": str(root), "entries": rows,
+            "absent": [".gitignore", "release/mobile-release.json"]}
+
+
+def shell_project_fixture(value, before_raw, after_raw):
+    """Closed DATA correspondence, never permission to inspect possible-live work."""
+    before, after = decode(before_raw, 8192), decode(after_raw, 8192)
+    need(type(before) is dict and set(before) == {"schemaVersion", "fixture", "root", "entries", "absent"}
+         and canonical(before) == before_raw == after_raw == canonical(after)
+         and type(before["schemaVersion"]) is int and before["schemaVersion"] == 1
+         and before["fixture"] == "android-static-v1" and before["root"] == str(root_path(value) / "positive-project")
+         and before["absent"] == [".gitignore", "release/mobile-release.json"], "Positive fixture inventory changed or is incomplete")
+    rows = before["entries"]
+    need(type(rows) is list and len(rows) == 3, "Positive fixture node roster differs")
+    for index, (relative, mode) in enumerate(((".", stat.S_IFDIR | 0o555), ("app", stat.S_IFDIR | 0o555),
+                                              ("app/build.gradle.kts", stat.S_IFREG | 0o444))):
+        row = rows[index]
+        wanted = {"path", "kind", "identity", "children"} if index < 2 else {"path", "kind", "identity", "size", "sha256"}
+        need(type(row) is dict and set(row) == wanted and row["path"] == relative
+             and row["kind"] == ("directory" if index < 2 else "file"), "Positive fixture node kind/path differs")
+        original = row["identity"]
+        need(type(original) is list and len(original) == 9 and all(type(number) is int and 0 <= number < 1 << 64 for number in original)
+             and original[0] > 0 and original[1] > 0 and original[2] == mode and original[3] == original[4] == 0
+             and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Positive fixture original identity differs")
+        if index < 2:
+            need(row["children"] == (["app"] if index == 0 else ["build.gradle.kts"]), "Positive fixture has an extra or missing child")
+        else:
+            need(original[5] == 1 and original[6] == len(SHELL_PROJECT_SOURCE) and type(row["size"]) is int
+                 and row["size"] == len(SHELL_PROJECT_SOURCE) and row["sha256"] == hashlib.sha256(SHELL_PROJECT_SOURCE).hexdigest(),
+                 "Positive fixture source is not the fixed non-executable DATA")
+    return {"fixture": "android-static-v1", "unchanged": True, "configAbsent": True, "gitignoreAbsent": True,
+            "entryCount": 3, "sourceBytes": len(SHELL_PROJECT_SOURCE), "inventoryBytes": len(before_raw),
+            "inventorySha256": hashlib.sha256(before_raw).hexdigest()}
+
+
+def shell_project_receipt(raw):
+    receipt = decode(raw, 2048)
+    # Canonical comparison is deliberately type-sensitive: Python's True == 1
+    # cannot turn missing boolean/original settlement DATA into a success.
+    need(canonical(receipt) == canonical(SHELL_PROJECT_RECEIPT), "Positive project/draft receipt is missing, malformed or premature")
+    return receipt
+
+
 def _shell_prepare(value, case):
     base, environment = _ROOT / ("gui-" + case), shell_environment(value, case)
     for path in (base, *(base / name for name in ("home", "tmp", "runtime", "config", "cache", "data", "empty-config"))):
@@ -2179,6 +2263,16 @@ def _shell_prepare(value, case):
     _D.write(_ROOT / ("shell-" + case + "-bus.conf"), config, 0o444)
     for path in (Path("/tmp/.X99-lock"), Path("/tmp/.X11-unix/X99"), bus, base / "runtime/absent-system-bus"):
         _absent(path)  # Conflict is failure, never permission to repair/remove.
+    if case == "positive":
+        project = _ROOT / "positive-project"
+        project.mkdir(mode=0o700)
+        (project / "app").mkdir(mode=0o700)
+        _D.write(project / "app/build.gradle.kts", SHELL_PROJECT_SOURCE, 0o444)
+        # Root creates the exact inert source. Directories need search bits;
+        # no source file is executable or writable by the nonroot GUI process.
+        os.chmod(project / "app", 0o555)
+        os.chmod(project, 0o555)
+        _retain("shell-positive-project-before.json", canonical(_shell_project_inventory(value)))
     return environment
 
 
@@ -2190,12 +2284,19 @@ def shell_result(stdout, stderr, case, code, expected):
     lines = [line for line in stdout.splitlines() + stderr.splitlines() if line.startswith(b"MRK_")]
     marker = b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified"
     contracts = b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified"
-    if case in {"normal", "positive"}:
+    if case == "positive":
+        output = [line for line in stdout.splitlines() if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(len(output) == 3 and output[0] == contracts and output[1].startswith(SHELL_PROJECT_MARKER)
+             and output[2] == marker and diagnostics == [b"MRK_DESKTOP_CAPABILITIES=available", b"MRK_DESKTOP_CATALOGUE=returned"],
+             "Positive original bootstrap/contract/receipt/completion order differs")
+        receipt = shell_project_receipt(output[1][len(SHELL_PROJECT_MARKER):])
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                "maps": [], "projectDraft": receipt}
+    if case == "normal":
         wanted = [b"MRK_DESKTOP_CAPABILITIES=available", b"MRK_DESKTOP_CATALOGUE=returned"]
-        if case == "positive":
-            wanted += [contracts, marker]
         need(sorted(lines) == sorted(wanted), "Actual normal capabilities/catalogue or observer completion missing")
-        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": case == "positive", "maps": []}
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": False, "maps": []}
     # The outstanding case cannot advertise success. Its IPC caller may retire
     # before the fixed unavailable diagnostic; only the held original's later
     # genuine settlement/map report plus completed GUI observation is required.
@@ -2479,6 +2580,10 @@ def unit_start():
             else:
                 result = command("shell-" + case, shell_argv(value, case), maximum=60, env=environment)
                 cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected)
+                if case == "positive":
+                    after = canonical(_shell_project_inventory(value))
+                    _retain("shell-positive-project-after.json", after)
+                    shell_project_fixture(value, read(_ROOT / "public/shell-positive-project-before.json", 8192), after)
         need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during shell observations")
         state("shell-finished", "install ok installed", "P0")
         _finish_body(value, request_sha, start, states, observations, traces, cases, loader)
@@ -2740,7 +2845,9 @@ def shell_closed_result(value, outcome, raw_files):
         phase = "shell-" + case
         need(commands[phase]["argv"] == shell_argv(value, case), "Closed original shell argv differs")
         result = shell_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected)
-        need(result == cases[case], "Closed original shell capture differs")
+        need(canonical(result) == canonical(cases[case]) if case == "positive" else result == cases[case],
+             "Closed original shell capture differs")
+    fixture = shell_project_fixture(value, raw_files["shell-positive-project-before.json"], raw_files["shell-positive-project-after.json"])
     control = decode(raw_files["shell-normal-control.json"])
     need(control.get("joined") is True and control.get("inputs") == 2 and control.get("workerGuardState") == "RESTORED"
          and control.get("workerErrorCount") == 0 and control.get("errorType") is None
@@ -2756,7 +2863,8 @@ def shell_closed_result(value, outcome, raw_files):
          "Original unchanged P0 publication observation differs")
     return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
             "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
-            "cases": cases, "packageLifecycleQualified": False, "shellPackageBuilt": False}
+            "cases": cases, "projectDraft": {"native": cases["positive"]["projectDraft"], "fixture": fixture},
+            "packageLifecycleQualified": False, "shellPackageBuilt": False}
 
 
 def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_result, public_destination):

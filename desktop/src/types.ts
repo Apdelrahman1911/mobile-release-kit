@@ -309,6 +309,9 @@ export interface AppInfo {
     mode: 'bundled' | 'development' | 'unavailable';
   };
   capabilities: Capabilities | null;
+  // Optional additive profile DATA. It grants neither a live native request
+  // nor availability of any core method or asset-session operation.
+  projectSelection?: { available: boolean; reason: string | null };
 }
 
 export type BridgeMode = 'native' | 'preview' | 'unavailable';
