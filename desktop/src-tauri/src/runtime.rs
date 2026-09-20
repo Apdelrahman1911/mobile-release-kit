@@ -48,6 +48,24 @@ pub struct RuntimeConfig { bundle_root: PathBuf,
 #[derive(Debug)]
 pub struct VerifiedRuntime { pub python: PathBuf, pub bootstrap: PathBuf, pub core: PathBuf, pub cwd: PathBuf }
 
+// No release is qualified in this slice. This private-field, non-cloneable
+// profile is deliberately impossible to obtain through an environment, hash,
+// test permit or inspected-path result. Only a later reviewed source change
+// may supply the missing immutable-publication / loader / import qualification.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct PassiveInstalledProfile { _private: () }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl PassiveInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if COMPILED_TARGET != "x86_64-unknown-linux-gnu" { return Err(unavailable()); }
+        let anchor = MANIFEST_ANCHOR.filter(|value| sha(value)).ok_or_else(unavailable)?;
+        let cwd = PathBuf::from("/opt/mobile-release-kit/versions").join(COMPILED_TARGET).join(anchor);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("engine_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+}
+
 /// Packaging inspection is NOT admission to execution or a native-custody proof.
 pub struct BundleInspection { pub files: usize, pub target: String }
 
@@ -243,6 +261,19 @@ impl RuntimeConfig {
             let _ = end;
             Err(BridgeError::unavailable("Packaged execution is disabled until an immutable, nonblocking runtime-custody backend is qualified. A manifest digest alone cannot enable it."))
         }
+    }
+    /// The sole passive installed inspection seam. The caller already owns the
+    /// registered original slots and blocking worker; this never returns custody.
+    /// The unconditional release refusal precedes even descriptor inspection.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_passive_installed(&self, originals: &mut crate::installed_runtime::PassiveRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        let profile = self.passive_installed_profile()?;
+        originals.inspect_once(profile, end, stop)
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn passive_installed_profile(&self) -> Result<PassiveInstalledProfile, BridgeError> {
+        Err(BridgeError::unavailable("The passive installed-runtime release and custody profile are not qualified."))
     }
     /// Separate fixed entry point for the finite configuration owner. Never
     /// dispatch stateful work through the passive engine or its supervisor.
@@ -573,5 +604,15 @@ mod tests {
         let error = runtime.resolve_github_readonly(Instant::now()).unwrap_err();
         assert_eq!(error.code, "runtime_unavailable");
         assert_eq!(error.message, "The GitHub read-only runtime and TLS profile are not qualified.");
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn passive_installed_profile_refuses_an_inert_bundle_before_inspection() {
+        // A pathname is DATA only: no channel, task, descriptor or profile.
+        // The owner seam calls this exact gate before any inspection effect.
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-passive-path-must-not-be-opened"));
+        let error = runtime.passive_installed_profile().err().unwrap();
+        assert_eq!(error.code, "runtime_unavailable");
+        assert_eq!(error.message, "The passive installed-runtime release and custody profile are not qualified.");
     }
 }

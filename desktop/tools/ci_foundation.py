@@ -530,6 +530,7 @@ CONVENTIONAL_SCOPES = frozenset({CONVENTIONAL_PREPARE_SCOPE, CONVENTIONAL_SMOKE_
 CONVENTIONAL_PHASES = ("conventional-admit", "conventional-prepare", "conventional-compile", "conventional-smoke")
 CONVENTIONAL_SOURCE_KIT = ("hosted-evidence.tar", "hosted-summary.json", "retained-files.json")
 CONVENTIONAL_TEST = "supervisor::hosted_tests::conventional_smoke::conventional_interpreter_bootstrap_smoke"
+CONVENTIONAL_CLOSED_PASSIVE_TEST = "supervisor::tests::closed_passive_profile_returns_through_original_owner_without_effects"
 CONVENTIONAL_SHARED_HELPERS = (
     "desktop/tools/conventional_runtime_data.py", "desktop/tools/cpython_source_recipe.py",
     "desktop/tools/cpython_source_setup.local", "desktop/tools/cpython_static_inputs.py",
@@ -3726,8 +3727,10 @@ def github_executable_path(value: object, *, target_root: Path) -> Path:
     return path
 
 
-def github_compiled_test(messages: bytes, *, source: Path, target_root: Path) -> Path:
+def github_compiled_test(messages: bytes, *, source: Path, target_root: Path, closed_passive: bool = False) -> Path:
     """One original Cargo result, not a glob, newest output or second build."""
+    require(type(closed_passive) is bool, "Unknown fixed headless compiler profile")
+    features = [] if closed_passive else ["development-runtime"]
     require(type(messages) is bytes and 0 < len(messages) <= 16 * 1024 * 1024,
             "G1 original compiler messages exceed their bound")
     executable, finished = None, False
@@ -3742,7 +3745,7 @@ def github_compiled_test(messages: bytes, *, source: Path, target_root: Path) ->
                     and target.get("src_path") == str(source / "desktop/src-tauri/src/lib.rs")
                     and row.get("manifest_path") == str(source / "desktop/src-tauri/Cargo.toml")
                     and type(profile) is dict and profile.get("test") is True and profile.get("debug_assertions") is True
-                    and row.get("features") == ["development-runtime"] and row.get("fresh") is False,
+                    and row.get("features") == features and row.get("fresh") is False,
                     "G1 original executable is not the requested fresh libtest")
             executable = github_executable_path(row["executable"], target_root=target_root)
         elif row["reason"] == "build-finished":
@@ -3772,24 +3775,27 @@ def github_artifact_identity(path: Path, root: Path) -> dict:
     return {"identity": before, "size": before["size"], "sha256": digest}
 
 
-def github_compile_record(context: dict, argv: list[str], messages: Path) -> dict:
+def github_compile_record(context: dict, argv: list[str], messages: Path, *, closed_passive: bool = False) -> dict:
+    require(type(closed_passive) is bool, "Unknown fixed headless compiler profile")
     ordinary(messages)
     require(messages.stat().st_size <= 16 * 1024 * 1024, "G1 compiler output exceeds its bound")
     with messages.open("rb") as stream:
         raw = stream.read(16 * 1024 * 1024 + 1)
     root = Path(context["root"])
-    path = github_compiled_test(raw, source=Path(context["source"]), target_root=root / "target")
+    path = github_compiled_test(raw, source=Path(context["source"]), target_root=root / "target", closed_passive=closed_passive)
     value = {"schemaVersion": 1, "sourceSha": context["sourceSha"], "sourceTree": context["sourceTree"],
              "path": str(path), **github_artifact_identity(path, root),
              "invocationSha256": hashlib.sha256(canonical_json(argv)).hexdigest(),
              "messagesSha256": hashlib.sha256(raw).hexdigest()}
-    write_json(root / "github-compiled-test.json", value)
+    write_json(root / ("closed-passive-compiled-test.json" if closed_passive else "github-compiled-test.json"), value)
     return value
 
 
-def github_original_artifact(context: dict) -> dict:
+def github_original_artifact(context: dict, *, closed_passive: bool = False) -> dict:
+    require(type(closed_passive) is bool, "Unknown fixed headless compiler profile")
     root = Path(context["root"])
-    value = closed_object(read_bounded_json(root / "github-compiled-test.json", 16384),
+    value = closed_object(read_bounded_json(root / ("closed-passive-compiled-test.json" if closed_passive
+                                                  else "github-compiled-test.json"), 16384),
         {"schemaVersion", "sourceSha", "sourceTree", "path", "identity", "size", "sha256", "invocationSha256", "messagesSha256"},
         "G1 compiled artifact record differs")
     require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
@@ -8342,9 +8348,11 @@ def conventional_prepared(context: dict, data, admission: dict, *, unpack: bool 
     return runtime, inspected, probe
 
 
-def conventional_compile_argv(cargo: str, context: dict) -> list[str]:
-    return [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--features",
-            "development-runtime", "--target", TARGETS["linux"], "--manifest-path",
+def conventional_compile_argv(cargo: str, context: dict, *, closed_passive: bool = False) -> list[str]:
+    require(type(closed_passive) is bool, "Unknown fixed headless compiler profile")
+    features = [] if closed_passive else ["--features", "development-runtime"]
+    return [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", *features,
+            "--target", TARGETS["linux"], "--manifest-path",
             str(Path(context["source"]) / "desktop/src-tauri/Cargo.toml"), "--target-dir",
             str(Path(context["root"]) / "target"), "--lib", "--no-run", "--message-format=json"]
 
@@ -8385,6 +8393,18 @@ def conventional_compile(context: dict, data, admission: dict) -> None:
     data.write(root / "compile-checks.json", data.canonical({"producer": conventional_producer(context),
         "scope": CONVENTIONAL_SMOKE_SCOPE, "manifestSha256": admission["manifestSha256"],
         "protocolSha256": admission["protocolSha256"], "compiledTest": compiled}))
+    # The production refusal branch is compiled out of W. Reuse the acquired
+    # dependencies, not W's feature selection, artifact record or output stream.
+    argv = conventional_compile_argv(cargo, context, closed_passive=True)
+    messages = root / "closed-passive-compile-messages.jsonl"
+    with messages.open("x", encoding="utf-8", newline="\n") as output, \
+            (root / "closed-passive-compile.stderr").open("x", encoding="utf-8") as diagnostics:
+        run(argv, check="github-headless-test-compile-only", cwd=root, env=environment, timeout=600,
+            output=output, diagnostics=diagnostics)
+    conventional_recheck(context, data)
+    closed = github_compile_record(context, argv, messages, closed_passive=True)
+    require(closed["path"] != compiled["path"] and data.same(github_original_artifact(context), compiled),
+            "Closed passive compilation replaced the original W artifact")
 
 
 def conventional_owner(source: Path):
@@ -8406,6 +8426,46 @@ def conventional_capture(data, root: Path, label: str, result) -> dict:
             "stdout": stdout, "stderr": stderr, "outputFilesClosedAndReadBack": True}
 
 
+def conventional_closed_passive_result(stdout: bytes, stderr: bytes) -> None:
+    """A successful zero-test libtest exit is not an executed owner regression."""
+    require(type(stdout) is bytes and type(stderr) is bytes and len(stdout) <= 64 << 10 and stderr == b"",
+            "Closed passive test capture differs")
+    try:
+        lines = [line for line in stdout.decode("ascii").splitlines() if line]
+    except UnicodeDecodeError as error:
+        raise CheckFailure("Closed passive test output is not the fixed libtest report") from error
+    require(len(lines) == 3 and lines[0] == "running 1 test"
+            and lines[1] == f"test {CONVENTIONAL_CLOSED_PASSIVE_TEST} ... ok"
+            and re.fullmatch(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; "
+                             r"[0-9]+ filtered out; finished in [0-9]+\.[0-9]+s", lines[2]) is not None,
+            "The exact closed passive owner case did not pass once")
+
+
+def conventional_closed_passive(context: dict, data, run_owned) -> dict:
+    root, source = Path(context["root"]), Path(context["source"])
+    compiled = github_original_artifact(context, closed_passive=True)
+    messages = data.read(root / "closed-passive-compile-messages.jsonl", 16 << 20)
+    require(hashlib.sha256(messages).hexdigest() == compiled["messagesSha256"]
+            and str(github_compiled_test(messages, source=source, target_root=root / "target", closed_passive=True))
+                == compiled["path"], "Closed passive original Cargo selection differs")
+    conventional_recheck(context, data)
+    environment = {"LANG": "C", "LC_ALL": "C", "MRK_DESKTOP_HOSTED_CHECKS": CONVENTIONAL_SMOKE_SCOPE,
+        "GITHUB_ACTIONS": os.environ["GITHUB_ACTIONS"], "RUNNER_ENVIRONMENT": os.environ["RUNNER_ENVIRONMENT"],
+        "GITHUB_SHA": context["sourceSha"]}
+    result = run_owned([compiled["path"], CONVENTIONAL_CLOSED_PASSIVE_TEST, "--exact", "--ignored", "--test-threads=1"],
+        environ=environment, cwd=root, timeout=30, capture=True, text=False, output_limit=2 << 20)
+    original = conventional_capture(data, root, "closed-passive", result)
+    conventional_closed_passive_result(result.stdout, result.stderr)
+    conventional_recheck(context, data)
+    require(data.same(github_original_artifact(context, closed_passive=True), compiled),
+            "Closed passive artifact changed after original test")
+    return {"schemaVersion": 1, "scope": "passive-owner-closed-profile-refusal-v1",
+        "qualification": "no-effect-owner-refusal-only", "producer": conventional_producer(context),
+        "test": CONVENTIONAL_CLOSED_PASSIVE_TEST, "passed": 1, "failed": 0, "ignored": 0,
+        "compiledTestSha256": compiled["sha256"], "features": [], "original": original,
+        "outerOriginalWaitRequired": True}
+
+
 def conventional_smoke(context: dict, data, admission: dict) -> None:
     root, source = Path(context["root"]), Path(context["source"])
     data.write(root / "smoke-started.json", data.canonical(conventional_producer(context)))
@@ -8421,6 +8481,11 @@ def conventional_smoke(context: dict, data, admission: dict) -> None:
     runtime, prepared, probe = conventional_prepared(context, data, admission)
     conventional_recheck(context, data)
     run_owned = conventional_owner(source)
+    closed_passive = conventional_closed_passive(context, data, run_owned)
+    runtime_now, prepared_now, _ = conventional_prepared(context, data, admission)
+    require(runtime_now == runtime and data.same(prepared_now, prepared)
+            and data.same(github_original_artifact(context), compiled),
+            "Conventional original inputs changed during closed owner test")
     # No platform token or ambient Python/loader options enter either owner.
     environment = {"LANG": "C", "LC_ALL": "C"}
     result = run_owned([str(runtime / "python/bin/python3"), "-I", "-S", "-B",
@@ -8456,6 +8521,7 @@ def conventional_smoke(context: dict, data, admission: dict) -> None:
     require(data.same(prepared_after, prepared), "Conventional prepared bytes changed after original libtest")
     public = root / "public"
     public.mkdir(mode=0o700)
+    data.write(public / "closed-passive-owner.json", data.canonical(closed_passive))
     data.write(public / "probe.json", data.canonical(probe_result))
     data.write(public / "conventional-smoke-receipt.json", data.canonical(receipt))
     data.write(public / "smoke-checks.json", data.canonical({"scope": CONVENTIONAL_SMOKE_SCOPE,

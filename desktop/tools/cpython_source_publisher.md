@@ -11,7 +11,9 @@ independent bounded acceptance. The committed `conventional-review/` kit and
 literal pins admitted that exact result to offline DATA preparation A.
 A `35507734308/1` at `977c71d99821cd2ad2fe2c88173920492d4c5cfb` passed;
 its original 47-file artifact and prepared manifest/protocol have independent
-acceptance. B now pins that exact prepared result but has not yet run.
+acceptance. B pins that exact prepared result. Original job `35509211634/1` at
+`dfb2b442c5f532b1551c392f7a6c1e2fc86f26bb` passed; its artifact acceptance and
+this successor's integrated owner-lifecycle verification are separate gates.
 Installed-runtime qualification and product gates remain closed. These bounded
 acceptances do not establish legal or release clearance.
 Legacy/static semantics and selectors are unchanged. H/D4/D3 are not
@@ -194,8 +196,8 @@ are added only here. Current generic prepare_runtime remains unchanged and adds
 six bootstraps +core.zip +CA and the manifest: reserve eight files/nine entries,
 64 MiB headroom, unchanged2048/8192/512 MiB-file/1 GiB-total/1 MiB-manifest limits.
 
-Remaining sequence: focused B literal/input DATA checks and independent diff
-acceptance -> original B bootstrap smoke and result acceptance -> actual installed
+Further gates: integrated closed passive-owner refusal and B bootstrap smoke
+with independent result acceptance -> actual positive installed
 custody/loader/TLS/XML/API/cancellation/close qualification. Reuse the unchanged
 source-bound publisher/route tests and successful H/A results; do not rerun them
 for this DATA admission. No full-repository/native matrix is proposed here.

@@ -511,9 +511,9 @@ impl InstalledRuntimeCustody {
             && self.book.namespaces[1].is_some_and(|id| self.book.live_binding(id, Purpose::InitialPidNamespace))
     }
 
-    fn transfer_ready(&self) -> bool {
+    fn inspected_originals_ready(&self) -> bool {
         self.book.phase == Phase::InspectedOnly && !self.book.settlement_started && !self.book.interrupted
-            && !self.book.unknown && !self.transferred && self.book.operation == Operation::Idle
+            && !self.book.unknown && self.book.operation == Operation::Idle
             && self.retained_bindings_present()
             && self.book.records.iter().filter(|r| r.original.is_some()).count() == RETAINED_COUNT
             && self.book.records.iter().all(|r| r.acquisition == Acquisition::Original
@@ -523,6 +523,7 @@ impl InstalledRuntimeCustody {
                     CloseReceipt::Attempted | CloseReceipt::Unknown => false,
                 })
     }
+    fn transfer_ready(&self) -> bool { !self.transferred && self.inspected_originals_ready() }
 }
 
 /// Move the whole original ledger, once. No syscall, await, allocation, callback
@@ -540,6 +541,126 @@ pub(crate) fn transfer_original(
     original.transferred = true;
     *destination = Some(original);
     Ok(receipt)
+}
+
+/// One passive Owner's registered slots, not a second owner/controller. The
+/// original inspection and acquisition workers borrow this SAME storage.
+/// Profiles and path data are prepared before the serialized whole-ledger move.
+pub(crate) struct PassiveRuntimeSlots {
+    inspection: Option<InstalledRuntimeCustody>,
+    profile: Option<crate::runtime::PassiveInstalledProfile>,
+    selection: Option<crate::runtime::VerifiedRuntime>,
+    acquisition: Option<PassiveInstalledRuntime>,
+    inspection_started: bool,
+    settlement_started: bool,
+}
+
+/// Domain-local capability, never cloned/serialized or returned by a worker.
+/// Construction requires the unavailable release profile AND the same inspected
+/// originals. InspectedOnly alone cannot construct this private-field type.
+pub(crate) struct PassiveInstalledRuntime {
+    original: InstalledRuntimeCustody,
+    _profile: crate::runtime::PassiveInstalledProfile,
+    _selection: crate::runtime::VerifiedRuntime,
+    claimed: bool,
+    refused_before_effect: bool,
+}
+
+impl PassiveInstalledRuntime {
+    fn ready(&self) -> bool {
+        self.original.transferred && self.original.inspected_originals_ready()
+            && !self.claimed && !self.refused_before_effect
+    }
+    pub(crate) fn claim_once(&mut self) -> AdmissionResult<()> {
+        if !self.ready() { return Err(AdmissionFailure::TransferUnavailable); }
+        self.claimed = true;
+        Ok(())
+    }
+    /// Called ONLY by the unconditional production spawn refusal, not an OS
+    /// spawn-error mapper. This records no creation effect, never pipe closes.
+    pub(crate) fn record_closed_spawn_gate(&mut self) {
+        self.refused_before_effect = true;
+    }
+}
+
+impl PassiveRuntimeSlots {
+    pub(crate) fn new() -> Self {
+        Self { inspection: Some(InstalledRuntimeCustody::new()), profile: None, selection: None,
+            acquisition: None, inspection_started: false, settlement_started: false }
+    }
+    pub(crate) fn never_started(&self) -> bool {
+        !self.inspection_started && !self.settlement_started && self.profile.is_none() && self.selection.is_none()
+            && self.acquisition.is_none() && self.inspection.as_ref().is_some_and(|original|
+                original.book.phase == Phase::New && original.book.records.is_empty()
+                && !original.book.unknown && !original.book.interrupted && !original.book.settlement_started)
+    }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::PassiveInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        use crate::error::BridgeError;
+        if !self.never_started() { return Err(BridgeError::cleanup_unknown()); }
+        self.selection = Some(profile.selection()?);
+        self.profile = Some(profile);
+        self.inspection_started = true;
+        let Some(original) = self.inspection.as_mut() else { return Err(BridgeError::cleanup_unknown()); };
+        match original.inspect_once(end, stop) {
+            InspectionOutcome::InspectedOnly => {
+                let Some(data) = self.selection.as_ref() else { return Err(BridgeError::cleanup_unknown()); };
+                Ok(crate::runtime::VerifiedRuntime { python: data.python.clone(), bootstrap: data.bootstrap.clone(),
+                    core: data.core.clone(), cwd: data.cwd.clone() }) // DATA only; originals never leave these slots.
+            }
+            InspectionOutcome::Refused(_) => Err(BridgeError::unavailable("The passive installed runtime failed original-custody inspection.")),
+            InspectionOutcome::Unknown => Err(BridgeError::cleanup_unknown()),
+        }
+    }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        if self.acquisition.is_some() { return Err(AdmissionFailure::DestinationOccupied); }
+        if !self.inspection_started || self.settlement_started || self.profile.is_none() || self.selection.is_none()
+            || !self.inspection.as_ref().is_some_and(InstalledRuntimeCustody::transfer_ready) {
+            return Err(AdmissionFailure::TransferUnavailable);
+        }
+        // All fallible checks precede the actual source take. These two values
+        // own no native resources; a failed precondition cannot discard custody.
+        let profile = self.profile.take().ok_or(AdmissionFailure::LedgerInvariant)?;
+        let selection = self.selection.take().ok_or(AdmissionFailure::LedgerInvariant)?;
+        let Some(mut original) = self.inspection.take() else {
+            self.profile = Some(profile); self.selection = Some(selection);
+            return Err(AdmissionFailure::LedgerInvariant);
+        };
+        original.transferred = true;
+        self.acquisition = Some(PassiveInstalledRuntime { original, _profile: profile, _selection: selection,
+            claimed: false, refused_before_effect: false });
+        Ok(()) // No syscall, allocation, await or fallible work after the actual take.
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut PassiveInstalledRuntime> {
+        if self.settlement_started { return Err(AdmissionFailure::TransferUnavailable); }
+        self.acquisition.as_mut().ok_or(AdmissionFailure::TransferUnavailable)
+    }
+    pub(crate) fn no_child_effect(&self) -> bool {
+        match (&self.inspection, &self.acquisition) {
+            (Some(_), None) => true,
+            (None, Some(runtime)) => !runtime.claimed || runtime.refused_before_effect,
+            _ => false,
+        }
+    }
+    pub(crate) fn mark_interrupted(&mut self) {
+        if let Some(original) = &mut self.inspection { original.mark_interrupted(); }
+        if let Some(runtime) = &mut self.acquisition { runtime.original.mark_interrupted(); }
+    }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.settlement_started { return CloseOutcome::Unknown; }
+        self.settlement_started = true;
+        let mut count = 0; let mut positive = true;
+        if let Some(original) = &mut self.inspection { count += 1; positive &= original.settle_originals() == CloseOutcome::Settled; }
+        if let Some(runtime) = &mut self.acquisition { count += 1; positive &= runtime.original.settle_originals() == CloseOutcome::Settled; }
+        if count == 1 && positive && self.settled() { CloseOutcome::Settled } else { CloseOutcome::Unknown }
+    }
+    pub(crate) fn settled(&self) -> bool {
+        self.settlement_started && match (&self.inspection, &self.acquisition) {
+            (Some(original), None) => original.settled(),
+            (None, Some(runtime)) => runtime.original.settled(),
+            _ => false,
+        }
+    }
 }
 
 fn checkpoint(end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
@@ -1879,5 +2000,44 @@ mod pure_tests {
             assert_eq!(original.observation().live_originals(), 0);
             assert!(original.book.settlement_started && original.book.interrupted && !original.transfer_ready());
         } else { panic!("rejected transfer consumed its original source"); }
+    }
+
+    #[test]
+    fn empty_passive_slots_cannot_transfer_or_expose_a_capability() {
+        // No release profile is fabricated. These are the actual empty slots,
+        // with no inspection/open/FD/child; even their empty settlement cannot
+        // create execution authority or witness a native close.
+        let mut slots = PassiveRuntimeSlots::new();
+        let original = slots.inspection.as_ref().map(std::ptr::from_ref);
+        assert!(slots.never_started() && !slots.settled());
+        assert!(matches!(slots.transfer_once(), Err(AdmissionFailure::TransferUnavailable)));
+        assert!(slots.capability().is_err());
+        assert_eq!(slots.inspection.as_ref().map(std::ptr::from_ref), original);
+        assert!(slots.acquisition.is_none() && slots.profile.is_none() && slots.selection.is_none());
+        assert_eq!(slots.inspection.as_ref().unwrap().observation().records(), 0);
+        assert_eq!(slots.settle_originals(), CloseOutcome::Settled); // ZERO originals: no close syscall.
+        assert!(!slots.never_started() && slots.settled() && slots.capability().is_err());
+        assert!(matches!(slots.transfer_once(), Err(AdmissionFailure::TransferUnavailable)));
+        assert_eq!(slots.inspection.as_ref().map(std::ptr::from_ref), original);
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown); // No second settlement worker/attempt.
+    }
+
+    #[test]
+    fn interrupted_empty_passive_slots_preserve_the_original_and_unknown() {
+        let mut slots = PassiveRuntimeSlots::new();
+        let original = slots.inspection.as_ref().map(std::ptr::from_ref);
+        slots.mark_interrupted(); // Negative zero-resource state only, not a synthetic positive worker return.
+        assert!(!slots.never_started() && !slots.settled());
+        assert!(matches!(slots.transfer_once(), Err(AdmissionFailure::TransferUnavailable)));
+        assert!(slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert!(!slots.settled());
+        assert_eq!(slots.inspection.as_ref().map(std::ptr::from_ref), original);
+        let observed = slots.inspection.as_ref().unwrap().observation();
+        assert_eq!(observed.phase(), "unknown");
+        assert_eq!(observed.records(), 0);
+        assert_eq!(observed.live_originals(), 0);
+        assert_eq!(observed.positive_closes(), 0);
+        assert!(slots.acquisition.is_none());
     }
 }

@@ -9,6 +9,7 @@ import ast
 from copy import deepcopy
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -483,7 +484,7 @@ class ProgressionContracts(unittest.TestCase):
         compiled = {"path": "/inert/libtest", "messagesSha256": hashlib.sha256(messages).hexdigest()}
         checks = {"producer": helper.conventional_producer(CONTEXT), "scope": helper.CONVENTIONAL_SMOKE_SCOPE,
                   "manifestSha256": SMOKE["manifestSha256"], "protocolSha256": SMOKE["protocolSha256"], "compiledTest": compiled}
-        for reason in ("nonzero", "timeout", "unknown", "capture", "close", "malformed", "source-change", "artifact-change"):
+        for reason in ("closed-passive", "closed-input-change", "nonzero", "timeout", "unknown", "capture", "close", "malformed", "source-change", "artifact-change"):
             owner = Mock(return_value=subprocess.CompletedProcess(["inert"], 0, data.canonical(probe_value()), b""))
             if reason == "nonzero": owner.return_value.returncode = 1
             if reason == "timeout": owner.side_effect = subprocess.TimeoutExpired(["inert"], 30)
@@ -499,14 +500,18 @@ class ProgressionContracts(unittest.TestCase):
             current = (Path("/inert-root/prepared/runtime"), prepared(), SimpleNamespace(EXPECTED_BUILTINS=["inert"]))
             with self.subTest(reason=reason), patch.object(helper, "github_original_artifact", return_value=compiled), \
                     patch.object(helper, "github_compiled_test", return_value=Path(compiled["path"])), \
-                    patch.object(helper, "conventional_prepared", side_effect=[current, helper.CheckFailure("inert artifact drift")]
-                                 if reason == "artifact-change" else None, return_value=current), \
+                    patch.object(helper, "conventional_closed_passive", return_value={},
+                                 side_effect=helper.CheckFailure("inert closed-profile failure") if reason == "closed-passive" else None), \
+                    patch.object(helper, "conventional_prepared", side_effect=
+                                 [current, helper.CheckFailure("inert pre-probe drift")] if reason == "closed-input-change" else
+                                 [current, current, helper.CheckFailure("inert artifact drift")] if reason == "artifact-change" else None,
+                                 return_value=current), \
                     patch.object(helper, "conventional_recheck", side_effect=[None, helper.CheckFailure("inert source drift")]
                                  if reason == "source-change" else None), \
                     patch.object(helper, "conventional_owner", return_value=owner), patch.object(Path, "mkdir") as mkdir, \
                     self.assertRaises((ValueError, OSError, RuntimeError, subprocess.TimeoutExpired)):
                 helper.conventional_smoke(CONTEXT, inert, SMOKE)
-            self.assertEqual(owner.call_count, 1)
+            self.assertEqual(owner.call_count, 0 if reason in {"closed-passive", "closed-input-change"} else 1)
             mkdir.assert_not_called()
             self.assertFalse(any(call.args[0].name == "smoke-checks.json" for call in inert.write.call_args_list))
 
@@ -514,6 +519,8 @@ class ProgressionContracts(unittest.TestCase):
         argv = helper.conventional_compile_argv("/inert/cargo", CONTEXT)
         self.assertEqual(argv[:8], ["/inert/cargo", "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--features"])
         self.assertEqual(argv[-3:], ["--lib", "--no-run", "--message-format=json"])
+        closed_argv = helper.conventional_compile_argv("/inert/cargo", CONTEXT, closed_passive=True)
+        self.assertEqual(closed_argv, [item for item in argv if item not in {"--features", "development-runtime"}])
         source, target = Path(CONTEXT["source"]), Path("/inert-target")
         executable = target / data.TARGET / "debug/deps/mobile_release_desktop-0123456789abcdef"
         row = {"reason": "compiler-artifact", "executable": str(executable), "fresh": False, "features": ["development-runtime"],
@@ -521,18 +528,53 @@ class ProgressionContracts(unittest.TestCase):
                "manifest_path": str(source / "desktop/src-tauri/Cargo.toml"), "profile": {"test": True, "debug_assertions": True}}
         final = {"reason": "build-finished", "success": True}
         self.assertEqual(helper.github_compiled_test(data.canonical(row) + data.canonical(final), source=source, target_root=target), executable)
+        closed = data.canonical({**row, "features": []}) + data.canonical(final)
+        self.assertEqual(helper.github_compiled_test(closed, source=source, target_root=target, closed_passive=True), executable)
+        for raw, mode in ((closed, False), (data.canonical(row) + data.canonical(final), True), (closed, 1)):
+            with self.assertRaises(helper.CheckFailure):
+                helper.github_compiled_test(raw, source=source, target_root=target, closed_passive=mode)
         for rows in ([{**row, "fresh": True}, final], [row, row, final], [row, {**final, "success": False}],
                      [{**row, "features": ["desktop-shell", "development-runtime"]}, final]):
             with self.assertRaises(helper.CheckFailure):
                 helper.github_compiled_test(b"".join(data.canonical(item) for item in rows), source=source, target_root=target)
 
+    def test_closed_passive_compile_records_are_separate_from_w(self):
+        root = Path(CONTEXT["root"])
+        for closed, name in ((False, "github-compiled-test.json"), (True, "closed-passive-compiled-test.json")):
+            executable = root / "target" / data.TARGET / "debug/deps/mobile_release_desktop-0123456789abcdef"
+            raw = b"inert compiler DATA"
+            messages = SimpleNamespace(stat=lambda: SimpleNamespace(st_size=len(raw)), open=lambda *_: io.BytesIO(raw))
+            identity = {"identity": {"suppliedFixtureOnly": True}, "size": 5, "sha256": "f" * 64}
+            with self.subTest(closed=closed), patch.object(helper, "ordinary"), \
+                    patch.object(helper, "github_compiled_test", return_value=executable) as select, \
+                    patch.object(helper, "github_artifact_identity", return_value=identity), \
+                    patch.object(helper, "write_json") as write:
+                record = helper.github_compile_record(CONTEXT, ["inert-compile"], messages, closed_passive=closed)
+                select.assert_called_once_with(raw, source=Path(CONTEXT["source"]), target_root=root / "target", closed_passive=closed)
+                write.assert_called_once_with(root / name, record)
+                with patch.object(helper, "read_bounded_json", return_value=record) as read:
+                    self.assertEqual(helper.github_original_artifact(CONTEXT, closed_passive=closed), record)
+                    read.assert_called_once_with(root / name, 16384)
+
+    def test_closed_passive_result_requires_one_exact_executed_case(self):
+        good = (f"\nrunning 1 test\ntest {helper.CONVENTIONAL_CLOSED_PASSIVE_TEST} ... ok\n\n"
+                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out; finished in 0.01s\n\n").encode()
+        helper.conventional_closed_passive_result(good, b"")
+        for stdout, stderr in ((good.replace(b"running 1 test", b"running 0 tests"), b""),
+                               (good.replace(b"1 passed; 0 failed; 0 ignored", b"0 passed; 0 failed; 1 ignored"), b""),
+                               (good.replace(helper.CONVENTIONAL_CLOSED_PASSIVE_TEST.encode(), b"different_test"), b""),
+                               (good + b"unexpected output\n", b""), (good, b"unexpected diagnostics")):
+            with self.assertRaises(helper.CheckFailure):
+                helper.conventional_closed_passive_result(stdout, stderr)
+
     def test_source_has_only_fixed_ordinary_owner_calls_and_route_local_mq(self):
         tree = ast.parse((SOURCE / "desktop/tools/ci_foundation.py").read_text())
         functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
-        ordinary = [node for node in ast.walk(functions["conventional_smoke"]) if isinstance(node, ast.Call)
+        ordinary = [node for name in ("conventional_closed_passive", "conventional_smoke")
+                    for node in ast.walk(functions[name]) if isinstance(node, ast.Call)
                     and isinstance(node.func, ast.Name) and node.func.id == "run_owned"]
-        self.assertEqual(len(ordinary), 2)
-        self.assertEqual([next(key.value.value for key in call.keywords if key.arg == "timeout") for call in ordinary], [30, 180])
+        self.assertEqual(len(ordinary), 3)
+        self.assertEqual([next(key.value.value for key in call.keywords if key.arg == "timeout") for call in ordinary], [30, 30, 180])
         for call in ordinary:
             self.assertIs(next(key.value.value for key in call.keywords if key.arg == "text"), False)
             self.assertNotIn("_evidence", [key.arg for key in call.keywords])

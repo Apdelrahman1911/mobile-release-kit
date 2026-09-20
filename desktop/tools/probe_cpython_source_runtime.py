@@ -1,4 +1,4 @@
-"""Fixed conventional-interpreter smoke probe; prepared inputs admitted, not yet run.
+"""Fixed conventional-interpreter smoke probe for independently admitted inputs.
 
 This is not a launcher, installer, TLS client or runtime-custody constructor.
 The reviewed outer command must first call inspect_prepared() in its

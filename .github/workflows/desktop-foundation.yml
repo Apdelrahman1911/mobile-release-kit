@@ -449,13 +449,13 @@ jobs:
           github-token: ${{ github.token }}
           digest-mismatch: error
           path: ${{ steps.admit.outputs.root }}/prepared-artifact
-      - name: Authenticate unpack and compile one original locked headless libtest
+      - name: Authenticate unpack and compile the two fixed headless profiles
         timeout-minutes: 25
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_foundation.py conventional-compile
-      - name: Run one fixed probe and exactly two original ZIP cases
+      - name: Require closed owner refusal then run the fixed probe and two ZIP cases
         id: smoke
         timeout-minutes: 5
         shell: bash

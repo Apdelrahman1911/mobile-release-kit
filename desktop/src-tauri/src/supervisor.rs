@@ -16,6 +16,8 @@ use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::Child, sync::
 use tokio::process::Command;
 use crate::{error::BridgeError, github_connection_protocol::{self as github_protocol, GitHubReadOutcome},
     protocol::{self, Method}, runtime::{RuntimeConfig, VerifiedRuntime}};
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+use crate::installed_runtime::{CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
 
 pub const OPERATION_TIME: Duration = Duration::from_secs(10);
 pub const CLEANUP_TIME: Duration = Duration::from_secs(2);
@@ -193,9 +195,19 @@ impl OwnerState {
 #[derive(Default)]
 struct Resources {
     inspection: Option<JoinHandle<Result<VerifiedRuntime, BridgeError>>>,
+    inspection_return: Option<ManagementJoin>, inspection_error: Option<tokio::task::JoinError>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     github_environment: Option<JoinHandle<Result<Option<bool>, ()>>>,
     acquisition: Option<JoinHandle<std::io::Result<Child>>>, child: Option<Child>,
+    acquisition_return: Option<ManagementJoin>, acquisition_error: Option<tokio::task::JoinError>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    passive: Option<Arc<Mutex<PassiveRuntimeSlots>>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    native_settlement: Option<JoinHandle<CloseOutcome>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    native_return: Option<Result<CloseOutcome, tokio::task::JoinError>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    native_started: bool,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     failed_writer: Option<JoinHandle<WriteEnd>>, failed_stdout: Option<JoinHandle<ReadEnd>>, failed_stderr: Option<JoinHandle<ReadEnd>>,
     waited: Option<ExitStatus>, write_end: Option<WriteEnd>, out_end: Option<ReadEnd>, err_end: Option<ReadEnd>,
@@ -390,7 +402,13 @@ impl Supervisor {
         let (stop, _) = watch::channel(false);
         let owner = Arc::new(Owner {
             key, id, profile, github_receipt, state: Mutex::new(OwnerState::new(endpoint, reply)),
-            resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(),
+            resources: AsyncMutex::new(Resources {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                passive: if passive_selected(profile) {
+                    Some(Arc::new(Mutex::new(PassiveRuntimeSlots::new())))
+                } else { None },
+                ..Resources::default()
+            }), stop, changed: Notify::new(),
             permit: Mutex::new(Some(permit)), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
             #[cfg(all(test, feature = "development-runtime"))]
             observation: Arc::new(Mutex::new(hosted_tests::Observation::default())),
@@ -650,17 +668,168 @@ async fn wait_original(child: &mut Option<Child>) -> std::io::Result<ExitStatus>
     match child { Some(child) => child.wait().await, None => pending().await }
 }
 
+// Decision DATA only. Production callers derive these from the actual retained
+// handle and Ready result; no fixture can use them to construct native authority.
+#[derive(Clone, Copy)]
+struct OriginalBorrow { returned: Option<ManagementJoin>, handle: bool, error: bool }
+impl OriginalBorrow {
+    fn returned(self) -> bool {
+        match self.returned {
+            None | Some(ManagementJoin::Returned) => !self.handle && !self.error,
+            Some(result) => result.original_result() && self.handle && self.error,
+        }
+    }
+    fn positive(self) -> bool { matches!(self.returned, None | Some(ManagementJoin::Returned)) && self.returned() }
+}
+fn passive_selected(profile: Profile) -> bool {
+    cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", not(all(feature = "development-runtime", debug_assertions))))
+        && matches!(profile, Profile::Passive(_))
+}
+fn passive_claim_clear(original: bool, profile: Profile, state: &OwnerState, now: Instant,
+    stopping: bool, disabled: bool, stop: bool) -> bool {
+    original && matches!(profile, Profile::Passive(_)) && !state.terminal && !state.unknown && state.error.is_none()
+        && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
+}
+fn passive_completion_clear(inspection: OriginalBorrow, acquisition: OriginalBorrow,
+    started: bool, joined: bool, handle_retained: bool, positive_close: bool, same_ledger_settled: bool) -> bool {
+    inspection.returned == Some(ManagementJoin::Returned) && inspection.positive() && acquisition.positive()
+        && started && joined && !handle_retained && positive_close && same_ledger_settled
+}
+fn passive_never_started_clear(inspection: OriginalBorrow, acquisition: OriginalBorrow, empty_unstarted_book: bool) -> bool {
+    empty_unstarted_book && inspection.positive() && acquisition.returned.is_none() && acquisition.positive()
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn passive_borrows(resources: &Resources) -> (OriginalBorrow, OriginalBorrow) {
+    (OriginalBorrow { returned: resources.inspection_return, handle: resources.inspection.is_some(), error: resources.inspection_error.is_some() },
+     OriginalBorrow { returned: resources.acquisition_return, handle: resources.acquisition.is_some(), error: resources.acquisition_error.is_some() })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn passive_worker_lost(resources: &Resources) {
+    // Only called AFTER this original inspection/acquisition/settlement worker
+    // returned JoinError. Never race a pending borrower because a clock expired.
+    if let Some(native) = &resources.passive {
+        match native.lock() { Ok(mut slots) => slots.mark_interrupted(), Err(error) => error.into_inner().mark_interrupted() }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn transfer_passive(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) -> Result<(), BridgeError> {
+    let Some(native) = &resources.passive else {
+        return if passive_selected(owner.profile) { Err(BridgeError::cleanup_unknown()) } else { Ok(()) };
+    };
+    let (inspection, acquisition) = passive_borrows(resources);
+    if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
+        || acquisition.returned.is_some() || !acquisition.positive() { return Err(BridgeError::cleanup_unknown()); }
+    let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+    let owners = lock(&inner.owners); let state = lock(&owner.state);
+    if !passive_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+        &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+        return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
+    }
+    // No native operation or allocation inside the whole-original move.
+    slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn spawn_passive_original(runtime: &mut PassiveInstalledRuntime) -> std::io::Result<Child> {
+    // STILL unconditional; only this no-effect stub can record this receipt.
+    // A future OS spawn error must never be interpreted as this no-child proof.
+    runtime.record_closed_spawn_gate();
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "packaged runtime execution is not qualified"))
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<PassiveRuntimeSlots>>) -> std::io::Result<Child> {
+    let refused = || std::io::Error::new(std::io::ErrorKind::Unsupported, "passive installed custody is unavailable");
+    let mut slots = native.lock().map_err(|_| refused())?;
+    let runtime = slots.capability().map_err(|_| refused())?;
+    let owners = lock(&inner.owners); let state = lock(&owner.state);
+    if !passive_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+        &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+        return Err(refused());
+    }
+    runtime.claim_once().map_err(|_| refused())?;
+    drop(state); drop(owners);
+    spawn_passive_original(runtime) // No await/callback/IO between final claim and the (closed) creation boundary.
+}
+
+async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Owner>) -> bool {
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { let _ = (resources, inner, owner); true }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        let Some(native) = resources.passive.clone() else {
+            if passive_selected(owner.profile) { owner.unknown(inner); return false; }
+            return true; // Explicitly unselected domain/profile, never a missing required book.
+        };
+        let (inspection, acquisition) = passive_borrows(resources);
+        if !inspection.returned() || !acquisition.returned() { owner.unknown(inner); return false; }
+        if !resources.native_started {
+            let no_child = {
+                let slots = match native.try_lock() { Ok(slots) => slots, Err(_) => { owner.unknown(inner); return false; } };
+                // Closed profile, or STOP before any worker was created: actual
+                // original-return/no-worker records AND a never-started empty book.
+                if passive_never_started_clear(inspection, acquisition, slots.never_started()) {
+                    return true;
+                }
+                slots.no_child_effect()
+            };
+            let consumers_returned = if resources.child.is_none() { no_child } else {
+                resources.waited.is_some() && resources.writer.is_none() && resources.stdout.is_none() && resources.stderr.is_none()
+                    && resources.failed_writer.is_none() && resources.failed_stdout.is_none() && resources.failed_stderr.is_none()
+                    && resources.write_end.is_some() && resources.out_end.as_ref().is_some_and(|end| end.eof)
+                    && resources.err_end.as_ref().is_some_and(|end| end.eof)
+            };
+            if !consumers_returned { owner.unknown(inner); return false; }
+            let closing = native.clone();
+            let (release, enter) = oneshot::channel();
+            resources.native_started = true;
+            resources.native_settlement = Some(tokio::task::spawn_blocking(move || {
+                if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
+                match closing.lock() {
+                    Ok(mut slots) => slots.settle_originals(),
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
+                }
+            }));
+            let _ = release.send(()); // The original close handle is registered before its first effect.
+        }
+        if resources.native_return.is_none() {
+            let result = join_slot(&mut resources.native_settlement).await;
+            if result.is_ok() { resources.native_settlement.take(); }
+            else { passive_worker_lost(resources); } // Retain consumed failed handle; never poll it again.
+            resources.native_return = Some(result);
+        }
+        let positive = passive_completion_clear(inspection, acquisition, resources.native_started,
+            resources.native_return.as_ref().is_some_and(Result::is_ok), resources.native_settlement.is_some(),
+            matches!(resources.native_return.as_ref(), Some(Ok(CloseOutcome::Settled))),
+            native.try_lock().is_ok_and(|slots| slots.settled()));
+        if !positive { owner.unknown(inner); }
+        positive
+    }
+}
+
+async fn ready_after_custody(resources: &mut Resources, inner: &Inner, owner: &Arc<Owner>,
+    result: Result<ReadOutcome, BridgeError>) -> DriverEnd {
+    if settle_passive(resources, inner, owner).await { DriverEnd::Ready(result) } else { DriverEnd::RetainedUnknown }
+}
+
 enum Event { Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
 
 async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEnd {
     let mut resources = owner.resources.lock().await;
     if owner.failed() || Instant::now() >= owner.endpoint() {
         owner.fail(BridgeError::timeout());
-        return DriverEnd::Ready(Err(BridgeError::timeout()));
+        return ready_after_custody(&mut resources, &inner, &owner, Err(BridgeError::timeout())).await;
     }
     let config = inner.runtime.clone();
     let endpoint = owner.endpoint();
     let profile = owner.profile;
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let inspection_native = resources.passive.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let inspection_stop = owner.stop.subscribe();
     #[cfg(all(test, feature = "development-runtime"))]
     let inspection_gate = inner.test.inspection.clone();
     #[cfg(all(windows, test, feature = "development-runtime"))]
@@ -669,11 +838,22 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let github_fixture = lock(&inner.test.github_fixture).clone();
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     let github_tls = lock(&inner.test.github_tls).clone();
+    let (inspect_start, inspect_enter) = oneshot::channel();
+    resources.inspection_return = Some(ManagementJoin::Pending);
     resources.inspection = Some(tokio::task::spawn_blocking(move || {
+        inspect_enter.blocking_recv().map_err(|_| BridgeError::cleanup_unknown())?;
         #[cfg(all(test, feature = "development-runtime"))]
         inspection_gate.wait();
         let runtime = match profile {
-            Profile::Passive(_) => config.resolve(endpoint)?,
+            Profile::Passive(_) => {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if passive_selected(profile) {
+                    let native = inspection_native.ok_or_else(BridgeError::cleanup_unknown)?;
+                    let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+                    return config.resolve_passive_installed(&mut originals, endpoint, &inspection_stop);
+                }
+                config.resolve(endpoint)?
+            },
             Profile::GitHubReadOnly => {
                 // The same original inspection and endpoint. This private
                 // test-only value exists only after the fixed hosted Case has
@@ -702,7 +882,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         };
         Ok(runtime)
     }));
+    let _ = inspect_start.send(());
     let inspected = join_slot(&mut resources.inspection).await;
+    resources.inspection_return = Some(match &inspected { Ok(_) => ManagementJoin::Returned, Err(error) => ManagementJoin::error(error) });
     #[cfg(all(test, feature = "development-runtime"))]
     if inspected.is_ok() { lock(&owner.observation).inspection_joined = true; }
     let runtime = match inspected {
@@ -710,39 +892,79 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         Ok(Err(error)) => {
             resources.inspection.take();
             owner.fail(error.clone()); // Original detection, not later management-return scheduling.
-            return DriverEnd::Ready(Err(error));
+            return ready_after_custody(&mut resources, &inner, &owner, Err(error)).await;
         }
-        Err(_) => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }
+        Err(error) => {
+            resources.inspection_error = Some(error);
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            passive_worker_lost(&resources);
+            owner.unknown(&inner);
+            let _ = settle_passive(&mut resources, &inner, &owner).await;
+            return DriverEnd::RetainedUnknown;
+        }
     };
     if owner.failed() || Instant::now() >= owner.endpoint() {
         owner.fail(BridgeError::timeout());
-        return DriverEnd::Ready(Err(BridgeError::timeout()));
+        return ready_after_custody(&mut resources, &inner, &owner, Err(BridgeError::timeout())).await;
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Err(error) = transfer_passive(&resources, &inner, &owner) {
+        if error.code == "cleanup_unknown" { owner.unknown(&inner); }
+        owner.fail(error.clone());
+        return ready_after_custody(&mut resources, &inner, &owner, Err(error)).await;
     }
     // Blocking startup cannot starve the independent deadline watchdog. Its
     // original result/Child remains in this retained acquisition handle.
     let acquiring_owner = owner.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let acquiring_inner = inner.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let acquisition_native = resources.passive.clone();
     #[cfg(all(test, feature = "development-runtime"))]
     let acquisition_gate = inner.test.acquisition.clone();
+    let (acquire_start, acquire_enter) = oneshot::channel();
+    resources.acquisition_return = Some(ManagementJoin::Pending);
     resources.acquisition = Some(tokio::task::spawn_blocking(move || {
+        if acquire_enter.blocking_recv().is_err() {
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
+        }
         // Scheduling instrumentation inside THIS retained original task,
         // before spawn_original's two final creation checks. No new deadline.
         #[cfg(all(test, feature = "development-runtime"))]
         acquisition_gate.wait();
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if passive_selected(acquiring_owner.profile) {
+            let Some(native) = acquisition_native else {
+                acquiring_owner.unknown(&acquiring_inner);
+                return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "original passive custody is missing"));
+            };
+            return acquire_passive_original(&acquiring_inner, &acquiring_owner, &native);
+        }
         spawn_original(runtime, acquiring_owner)
     }));
+    let _ = acquire_start.send(());
     let acquired = join_slot(&mut resources.acquisition).await;
+    resources.acquisition_return = Some(match &acquired { Ok(_) => ManagementJoin::Returned, Err(error) => ManagementJoin::error(error) });
     #[cfg(all(test, feature = "development-runtime"))]
     if acquired.is_ok() { lock(&owner.observation).acquisition_joined = true; }
-    resources.child = match acquired {
+    let child = match acquired {
         Ok(Ok(child)) => { resources.acquisition.take(); Some(child) },
         Ok(Err(_)) => {
             resources.acquisition.take();
             let error = BridgeError::unavailable("The selected isolated core could not start.");
             owner.fail(error.clone());
-            return DriverEnd::Ready(Err(error));
+            return ready_after_custody(&mut resources, &inner, &owner, Err(error)).await;
         }
-        Err(_) => { owner.unknown(&inner); return DriverEnd::RetainedUnknown; }
+        Err(error) => {
+            resources.acquisition_error = Some(error);
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            passive_worker_lost(&resources);
+            owner.unknown(&inner);
+            let _ = settle_passive(&mut resources, &inner, &owner).await;
+            return DriverEnd::RetainedUnknown;
+        }
     };
+    resources.child = child;
     #[cfg(all(test, feature = "development-runtime"))]
     { lock(&owner.observation).spawned = true; }
     #[cfg(all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -878,6 +1100,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     if !resources.write_end.is_some_and(|end| end.complete) {
         owner.fail(BridgeError::new("io_error", "The original request writer did not complete."));
     }
+    // Original child wait and IO/EOF evidence are still in Resources here.
+    // Keep custody through them, then join its one explicit native settlement.
+    if !settle_passive(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
     let output = resources.out_end.take();
     let diagnostics = resources.err_end.take();
     if output.as_ref().is_some_and(|end| end.overflow) || diagnostics.as_ref().is_some_and(|end| end.overflow) {
@@ -894,8 +1119,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
 
 #[cfg(test)]
 mod tests {
-    // Pure bookkeeping only. These tests do not start a runtime or child and do
-    // not establish native process finality. Genuine IO/fault tests are hosted.
+    // Default cases are pure bookkeeping. The one ignored feature-off case
+    // exercises real no-effect owner tasks, not a child or native close.
+    // Genuine child/IO/fault tests remain separately hosted.
     use super::*;
     fn inert_owner() -> Owner {
         let (stop, receiver) = watch::channel(false);
@@ -936,5 +1162,193 @@ mod tests {
         assert_eq!(ACTIVE_LIMIT, 2);
         assert_eq!(OPERATION_TIME, Duration::from_secs(10));
         assert_eq!(CLEANUP_TIME, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn passive_claim_uses_the_original_endpoint_stop_and_domain() {
+        let now = Instant::now(); let endpoint = now + OPERATION_TIME;
+        let mut state = OwnerState::new(endpoint, None);
+        let passive = Profile::Passive(Method::Capabilities);
+        assert!(passive_claim_clear(true, passive, &state, endpoint - Duration::from_nanos(1), false, false, false));
+        assert!(!passive_claim_clear(true, passive, &state, endpoint, false, false, false));
+        assert!(!passive_claim_clear(true, passive, &state, endpoint + Duration::from_nanos(1), false, false, false));
+        assert!(!passive_claim_clear(false, passive, &state, now, false, false, false));
+        assert!(!passive_claim_clear(true, Profile::GitHubReadOnly, &state, now, false, false, false));
+        assert!(!passive_selected(Profile::GitHubReadOnly));
+        for (stopping, disabled, stop) in [(true, false, false), (false, true, false), (false, false, true)] {
+            assert!(!passive_claim_clear(true, passive, &state, now, stopping, disabled, stop));
+        }
+        state.unknown = true;
+        assert!(!passive_claim_clear(true, passive, &state, now, false, false, false));
+        state.unknown = false; state.terminal = true;
+        assert!(!passive_claim_clear(true, passive, &state, now, false, false, false));
+        state.terminal = false;
+        state.fail_at(BridgeError::timeout(), now);
+        assert!(!passive_claim_clear(true, passive, &state, now, false, false, false));
+        assert_eq!(state.cleanup_endpoint, Some(now + CLEANUP_TIME));
+        state.fail_at(BridgeError::shutdown(), endpoint);
+        assert_eq!(state.endpoint, endpoint);
+        assert_eq!(state.cleanup_endpoint, Some(now + Duration::from_secs(2)));
+        state.error = None; // Even contradictory decision DATA cannot renew first F.
+        assert!(!passive_claim_clear(true, passive, &state, now, false, false, false));
+    }
+
+    #[test]
+    fn passive_borrow_return_requires_the_original_handle_and_ready_record() {
+        let absent = OriginalBorrow { returned: None, handle: false, error: false };
+        let joined = OriginalBorrow { returned: Some(ManagementJoin::Returned), ..absent };
+        assert!(absent.returned() && absent.positive() && joined.returned() && joined.positive());
+        assert!(!(OriginalBorrow { returned: Some(ManagementJoin::Pending), handle: true, error: false }).returned());
+        assert!(!(OriginalBorrow { handle: true, ..joined }).returned());
+        assert!(!(OriginalBorrow { error: true, ..joined }).returned());
+        assert!(!(OriginalBorrow { handle: true, ..absent }).returned());
+        for failed in [ManagementJoin::Cancelled, ManagementJoin::Panicked, ManagementJoin::Failed] {
+            let actual_failed = OriginalBorrow { returned: Some(failed), handle: true, error: true };
+            assert!(actual_failed.returned() && !actual_failed.positive());
+            assert!(!(OriginalBorrow { handle: false, ..actual_failed }).returned());
+            assert!(!(OriginalBorrow { error: false, ..actual_failed }).returned());
+        }
+        for invalid in [ManagementJoin::Missing, ManagementJoin::InvalidReturn, ManagementJoin::Pending] {
+            assert!(!(OriginalBorrow { returned: Some(invalid), handle: true, error: true }).returned());
+        }
+    }
+
+    #[test]
+    fn passive_completion_requires_join_close_and_same_ledger_settlement() {
+        // Bounded decisions only, not fabricated JoinHandles, FDs or capabilities.
+        let absent = OriginalBorrow { returned: None, handle: false, error: false };
+        let joined = OriginalBorrow { returned: Some(ManagementJoin::Returned), ..absent };
+        assert!(passive_completion_clear(joined, joined, true, true, false, true, true));
+        assert!(passive_completion_clear(joined, absent, true, true, false, true, true)); // No acquisition ever queued.
+        assert!(!passive_completion_clear(absent, absent, true, true, false, true, true));
+        for (started, returned, retained, closed, ledger) in [
+            (false, true, false, true, true), (true, false, false, true, true),
+            (true, true, true, true, true), (true, true, false, false, true), (true, true, false, true, false),
+        ] {
+            assert!(!passive_completion_clear(joined, joined, started, returned, retained, closed, ledger));
+        }
+        for incomplete in [
+            OriginalBorrow { returned: Some(ManagementJoin::Pending), handle: true, error: false },
+            OriginalBorrow { returned: Some(ManagementJoin::Panicked), handle: true, error: true },
+            OriginalBorrow { handle: true, ..joined }, OriginalBorrow { error: true, ..joined },
+        ] {
+            assert!(!passive_completion_clear(incomplete, joined, true, true, false, true, true));
+            assert!(!passive_completion_clear(joined, incomplete, true, true, false, true, true));
+        }
+    }
+
+    #[test]
+    fn passive_no_effect_refusal_requires_a_never_started_book_and_returned_borrow() {
+        let absent = OriginalBorrow { returned: None, handle: false, error: false };
+        let joined = OriginalBorrow { returned: Some(ManagementJoin::Returned), ..absent };
+        assert!(passive_never_started_clear(absent, absent, true)); // STOP before worker registration.
+        assert!(passive_never_started_clear(joined, absent, true)); // Actual closed-profile return.
+        assert!(!passive_never_started_clear(joined, absent, false));
+        assert!(!passive_never_started_clear(joined, joined, true));
+        for pending_or_lost in [
+            OriginalBorrow { returned: Some(ManagementJoin::Pending), handle: true, error: false },
+            OriginalBorrow { returned: Some(ManagementJoin::Panicked), handle: true, error: true },
+            OriginalBorrow { handle: true, ..joined },
+        ] {
+            assert!(!passive_never_started_clear(pending_or_lost, absent, true));
+            assert!(!passive_never_started_clear(joined, pending_or_lost, true));
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+        not(feature = "development-runtime"), not(feature = "desktop-shell")))]
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "only the separately reviewed feature-off passive owner verification"]
+    async fn closed_passive_profile_returns_through_original_owner_without_effects() {
+        // Existing hosted routing/source guards only: no runtime selection,
+        // fixture permit or production-profile override is introduced.
+        for (name, value) in [("GITHUB_ACTIONS", "true"), ("RUNNER_ENVIRONMENT", "github-hosted"),
+            ("MRK_DESKTOP_HOSTED_CHECKS", "conventional-runtime-bootstrap-smoke-v1")] {
+            assert_eq!(std::env::var(name).ok().as_deref(), Some(value), "fixed hosted route required");
+        }
+        let source = option_env!("GITHUB_SHA").expect("compiled original source binding required");
+        assert!(source.len() == 40 && source.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert_eq!(std::env::var("GITHUB_SHA").ok().as_deref(), Some(source), "original source binding differs");
+        let supervisor = Supervisor::new(RuntimeConfig::packaged(std::path::PathBuf::from(
+            "/inert-passive-owner-path-must-not-be-opened")));
+        assert_eq!(supervisor.runtime_mode(), "bundled");
+        assert!(passive_selected(Profile::Passive(Method::Capabilities)));
+        let ticket = supervisor.start_passive(Method::Capabilities, serde_json::json!({}))
+            .expect("the actual passive owner must register");
+        let owner = ticket.owner.clone();
+        let endpoint = owner.endpoint();
+        // Current-thread executor: no spawned management task has been polled.
+        // Retain only Arcs to the SAME owner/storage, never clone a native book.
+        let originals = {
+            let resources = owner.resources.try_lock().expect("fresh original resources");
+            let originals = resources.passive.as_ref().expect("production passive slots").clone();
+            assert!(lock(&originals).never_started());
+            assert!(resources.inspection.is_none() && resources.inspection_return.is_none()
+                && resources.acquisition.is_none() && resources.acquisition_return.is_none());
+            originals
+        };
+        {
+            let owners = lock(&supervisor.inner.owners);
+            assert_eq!(owners.len(), 1);
+            assert!(owners.get(&owner.key).is_some_and(|registered| Arc::ptr_eq(registered, &owner)));
+        }
+        assert!(lock(&owner.permit).is_some());
+        assert_eq!(supervisor.inner.permits.available_permits(), ACTIVE_LIMIT - 1);
+        assert!(owner.driver.try_lock().unwrap().as_ref().is_some_and(|task| !task.is_finished()));
+        assert!(owner.watchdog.try_lock().unwrap().as_ref().is_some_and(|task| !task.is_finished()));
+        assert!(owner.observer.try_lock().unwrap().as_ref().is_some_and(|task| !task.is_finished()));
+        // All custody/registry/handle guards above have ended before yielding.
+        let result = ticket.wait().await;
+        // Product code alone consumes driver/watchdog. Move out and await only
+        // the original final observer's tail, with no slot guard across the join.
+        let observer = { owner.observer.lock().await.take() };
+        let Some(mut observer) = observer else {
+            eprintln!("closed passive owner verification retained: original observer missing");
+            return pending::<()>().await;
+        };
+        if (&mut observer).await.is_err() {
+            // Keep the consumed failed original; never abort, repoll or replace.
+            *owner.observer.lock().await = Some(observer);
+            eprintln!("closed passive owner verification retained: original observer failed");
+            return pending::<()>().await;
+        }
+        drop(observer); // Actual positive original join, not elapsed-time inference.
+
+        let error = result.expect_err("the production passive profile must still refuse");
+        assert_eq!(error.code, "runtime_unavailable");
+        assert_eq!(error.message, "The passive installed-runtime release and custody profile are not qualified.");
+        {
+            let resources = owner.resources.try_lock().expect("original borrowers returned");
+            assert!(resources.passive.as_ref().is_some_and(|actual| Arc::ptr_eq(actual, &originals)));
+            assert_eq!(resources.inspection_return, Some(ManagementJoin::Returned));
+            assert!(resources.inspection.is_none() && resources.inspection_error.is_none());
+            assert!(resources.acquisition.is_none() && resources.acquisition_return.is_none()
+                && resources.acquisition_error.is_none() && resources.child.is_none());
+            assert!(resources.writer.is_none() && resources.stdout.is_none() && resources.stderr.is_none()
+                && resources.failed_writer.is_none() && resources.failed_stdout.is_none()
+                && resources.failed_stderr.is_none());
+            assert!(resources.waited.is_none() && resources.write_end.is_none()
+                && resources.out_end.is_none() && resources.err_end.is_none() && !resources.kill_attempted);
+            assert!(!resources.native_started && resources.native_settlement.is_none() && resources.native_return.is_none());
+        }
+        {
+            let originals = lock(&originals);
+            // This is the never-started/no-effect exception, NOT a close receipt.
+            assert!(originals.never_started() && !originals.settled());
+        }
+        {
+            let state = lock(&owner.state);
+            assert_eq!(state.endpoint, endpoint);
+            assert_eq!(state.driver_join, ManagementJoin::Returned);
+            assert_eq!(state.watchdog_join, ManagementJoin::Returned);
+            assert!(matches!(state.watchdog_end, Some(WatchdogEnd::DriverObserved(ManagementJoin::Returned))));
+            assert!(state.terminal && !state.unknown && state.reply.is_none() && state.cleanup_endpoint.is_some());
+            assert_eq!(state.error.as_ref().map(|error| error.code.as_str()), Some("runtime_unavailable"));
+        }
+        assert!(owner.driver.try_lock().unwrap().is_none() && owner.watchdog.try_lock().unwrap().is_none()
+            && owner.observer.try_lock().unwrap().is_none());
+        assert!(lock(&owner.permit).is_none());
+        assert!(supervisor.can_exit() && !supervisor.disabled() && !supervisor.stopping());
+        assert_eq!(supervisor.inner.permits.available_permits(), ACTIVE_LIMIT);
     }
 }
