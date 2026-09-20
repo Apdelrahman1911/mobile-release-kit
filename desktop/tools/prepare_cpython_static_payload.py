@@ -883,7 +883,7 @@ def _source_evidence(root: Path, raw: bytes, output: dict, notice_raw: bytes, po
         elif name in {"zlib-configure", "libffi-configure"}:
             required_data = [name + ("-configure.log" if name == "zlib-configure" else "-config.log")]
         elif name in {"openssl-layout", "python-project"}:
-            required_data = ["openssl-layout.json" if name == "openssl-layout" else "source-projection.json"]
+            required_data = [helper.SOURCE_OPENSSL_LAYOUT_DATA if name == "openssl-layout" else "source-projection.json"]
         _need([r["path"] for r in phase["dataFiles"]] == required_data, "Mandatory generated/configuration DATA missing")
     projection = _read_checked(actual["source-projection.json"], limit=MAX_INVENTORY_BYTES)
     _need(_digest(projection) == result["projectionSha256"]

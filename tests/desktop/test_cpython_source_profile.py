@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import shlex
+import stat
 import struct
 import tempfile
 from types import SimpleNamespace
@@ -170,11 +171,44 @@ def coverage_fixture():
 
 
 class SourceProfileTests(unittest.TestCase):
+    def test_source_data_names_survive_inventory_and_tree_checks(self):
+        examples = {"cpython": ("Mac/Icons/Disk Image.icns", "Mac/Icons/Python Folder.icns"),
+                    "libffi": ("m4/lt~obsolete.m4",), "openssl": ("inert source~.txt",),
+                    "zlib": ("inert source~.txt",)}
+        for identifier, leaves in examples.items():
+            root = Path("/work/inputs/sources") / identifier
+            names = sorted(str(root / name) for name in leaves)
+            rows = [{**record(name), "mode": 0o644} for name in names]
+            raw = I.canonical({"files": rows})
+            source = {"root": str(root), "inventory": record("/inert/inventory.json", raw)}
+            with self.subTest(source=identifier), patch.object(I, "source_bound", return_value=raw):
+                self.assertEqual(list(I.source_inventory(source)), names)
+                with self.assertRaises(I.InputError):
+                    I.source_inventory({**source, "root": "/work/inputs/sources/another"})
+            # No real /work access: run original tree/path/file checks over
+            # synthetic entries. Filename syntax alone never grants membership.
+            files = [Path(name) for name in names]
+            with patch.object(I, "ordinary_directory"), \
+                 patch.object(Path, "iterdir", return_value=iter(files)), \
+                 patch.object(Path, "lstat", return_value=SimpleNamespace(st_mode=stat.S_IFREG | 0o644, st_nlink=1)):
+                self.assertEqual(I.ordinary_tree(root), dict(zip(names, files)))
+        prefix = "/work/inputs/sources/cpython/"
+        for name in (prefix + "../escaped file", prefix + "double//spaced name", prefix + "bad\tname",
+                     prefix + "bad\\name", prefix + "$(command)", "/work/inputs/sources/unknown/spaced name",
+                     "/work/inputs/core-source/spaced name", "/work/inputs/recipe/spaced name", "/arbitrary~path"):
+            with self.subTest(name=name), self.assertRaises(I.InputError):
+                I.absolute(name)
+
     def test_closed_entries_refuse_before_paths_or_owner_import(self):
         admission = I._source_admission()
         pins = {"APPROVED_SOURCE_LOCK_SHA256", "APPROVED_SOURCE_EXECUTION_REVIEW_SHA256", "APPROVED_SOURCE_CORE_INPUTS_SHA256"}
         self.assertEqual({name for name in vars(admission) if not name.startswith("__")}, pins)
-        self.assertTrue(all(getattr(admission, name) is None and not hasattr(I, name) for name in pins))
+        self.assertTrue(all(not hasattr(I, name) for name in pins))
+        for name in pins:
+            value = getattr(admission, name)
+            if value is not None:
+                self.assertEqual(I.sha(value), value)
+        closed_admission = SimpleNamespace(**{name: None for name in pins})
         self.assertEqual(set(I.SOURCE_BUILD_FILES), {"cpython_source_recipe.py", "cpython_source_setup.local",
             "cpython_static_inputs.py", "cpython_static_builder_data.py", "prepare_cpython_static_payload.py",
             "prepare_cpython_source_payload.py"})
@@ -198,16 +232,19 @@ class SourceProfileTests(unittest.TestCase):
             I.source_execution_review(raw_review + b" ", review["sha256"])
         with self.assertRaises(I.InputError):
             I.source_execution_review(b"[]\n", I.digest(b"[]\n"))
-        with patch.object(I, "source_read", side_effect=AssertionError("read")):
+        with patch.object(I, "_source_admission", return_value=closed_admission), \
+                patch.object(I, "source_read", side_effect=AssertionError("read")):
             with self.assertRaises(I.InputError):
                 I.load_source_lock(Path("/does-not-exist"))
-        with patch.object(R, "_owner_modules", side_effect=AssertionError("owner import")):
+        with patch.object(R.I, "_source_admission", return_value=closed_admission), \
+                patch.object(R, "_owner_modules", side_effect=AssertionError("owner import")):
             with self.assertRaises(R.I.InputError):
                 R.build(Path("/does-not-exist"))
         with patch.object(P, "_absolute", side_effect=AssertionError("path access")):
             with self.assertRaises(P.PayloadError):
                 P.prepare_source(*(Path("/does-not-exist") for _ in range(9)))
-        with patch.object(B.I, "source_read", side_effect=AssertionError("read")):
+        with patch.object(B, "APPROVED_ROOT_REQUEST_SHA256", None), \
+                patch.object(B.I, "source_read", side_effect=AssertionError("read")):
             with self.assertRaises(B.I.InputError):
                 B.materialize_source_root(*(Path("/does-not-exist") for _ in range(3)))
 
@@ -261,7 +298,7 @@ class SourceProfileTests(unittest.TestCase):
         with patch.object(R.time, "monotonic_ns", side_effect=(i * R.NS for i in range(1, 300))), \
              patch.object(R.I, "source_write", side_effect=lambda path, raw, mode=0o600: record(path, raw)), \
              patch.object(R.I, "source_capture_configuration", return_value=[]), \
-             patch.object(R.I, "source_openssl_layout", return_value=record("/work/receipts/openssl-layout.json")), \
+             patch.object(R.I, "source_openssl_layout", return_value=record("/work/receipts/" + R.I.SOURCE_OPENSSL_LAYOUT_DATA)), \
              patch.object(R.I, "source_project", return_value=record("/work/receipts/source-projection.json")):
             result = R._run_phases({"_digest": "1" * 64}, owner, guard, 2400 * R.NS)
         self.assertEqual(len(result), 14)
@@ -275,6 +312,42 @@ class SourceProfileTests(unittest.TestCase):
             self.assertIsNone(call.kwargs["on_start"])
             self.assertFalse(call.kwargs["text"])
             self.assertFalse(call.kwargs["cleanup"])
+
+    def test_layout_data_and_phase_persist_without_filename_collision(self):
+        # Exercise the real DATA producer and real exclusive phase writes.
+        # These tiny synthetic ELF headers contain no executable code; no
+        # compiler, loader, source recipe or native owner is invoked.
+        with tempfile.TemporaryDirectory(prefix="mrk-source-layout-") as temporary:
+            root = Path(temporary)
+            receipts = root / "receipts"
+            receipts.mkdir()
+            for directory in (root / "build/openssl", root / "deps/lib"):
+                directory.mkdir(parents=True)
+                for name in R.I.SOURCE_LIBRARIES:
+                    (directory / name).write_bytes(elf(name))
+            projections = tuple(str(root / path) for path in
+                                ("build/cpython/lib", "build/lib", "stage/python/lib"))
+            with patch.object(R.I, "WORK", root), patch.object(R.I, "RECEIPTS", receipts), \
+                    patch.object(R.I, "SOURCE_LAYOUT_ROOTS", projections), \
+                    patch.object(R.time, "monotonic_ns", return_value=2 * R.NS):
+                data = R.I.source_openssl_layout()
+                original_data = Path(data["path"]).read_bytes()
+                phase = next(row for row in R.fixed_phases() if row["name"] == "openssl-layout")
+                result, retained = R._persist_phase(
+                    {"_digest": "1" * 64}, phase, None, R.NS, 10 * R.NS, [data], 0)
+                self.assertEqual(Path(data["path"]).read_bytes(), original_data)
+                self.assertEqual(result["path"], "openssl-layout.json")
+                self.assertEqual(Path(data["path"]).name, R.I.SOURCE_OPENSSL_LAYOUT_DATA)
+                self.assertNotEqual(Path(data["path"]).name, result["path"])
+                document = R.I.decode((receipts / result["path"]).read_bytes())
+                self.assertEqual(document["dataFiles"], [{**data, "path": R.I.SOURCE_OPENSSL_LAYOUT_DATA}])
+                self.assertEqual(document["state"], "complete")
+                self.assertEqual(document["kind"], "data")
+                self.assertIsNone(document["originalExitCode"])
+                self.assertEqual(retained, 0)
+                self.assertEqual(sorted(path.name for path in receipts.iterdir()), sorted((
+                    R.I.SOURCE_OPENSSL_LAYOUT_DATA, "openssl-layout.json",
+                    "openssl-layout.stderr", "openssl-layout.stdout")))
 
     def test_original_nonzero_stops_once_after_persisting_failure(self):
         owner = SimpleNamespace(run_owned=Mock(side_effect=lambda args, **kw: SimpleNamespace(args=args, returncode=7, stdout=b"out", stderr=b"err")))

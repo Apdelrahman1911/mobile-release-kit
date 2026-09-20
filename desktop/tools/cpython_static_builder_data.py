@@ -20,7 +20,7 @@ _SPEC = importlib.util.spec_from_file_location("_mrk_source_root_inputs", Path(_
 I = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(I)
 
-APPROVED_ROOT_REQUEST_SHA256: str | None = None
+APPROVED_ROOT_REQUEST_SHA256: str | None = "a413726fb84740ab8ba2b6877c598d95bbe91ec6eb477fffa8aa6c5e1e40b4d7"
 ROOT_SCHEMA = "mrk-cpython-source-rootfs-1"
 MEMBERS_SHA256 = "a9ddc292f72b4ce8a45b944f445b26e7d9cc2de411325ff4d8ba8e99a68d13a9"
 PUBLIC_SELECTION_SHA256 = "9166c3b1fe0d00d5ae6c093603d161f6eba1c71fa5f9129966428cb93b883ea4"

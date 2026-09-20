@@ -1,16 +1,19 @@
 # Conventional source-built CPython — source-only publisher contract
 
-This is the separate `cpython-3.14.7-linux-x86_64-source-v1` origin accepted for
-source authoring by PLAN01. It is **not executable admission, a build result,
-supply acceptance, installed-runtime readiness or legal clearance**. Its input,
-execution, core, root-preparation, output, component and notice selectors remain
-`None`. Legacy/static semantics and selectors are unchanged. H/D4/D3 are not
+This is the separate `cpython-3.14.7-linux-x86_64-source-v1` origin accepted by
+PLAN01. Its input lock, prerequisite envelope policy, current core and
+root-preparation inputs now have independently reviewed literal pins. The
+controls are in `desktop/cpython-source-inputs/`. **Input admission is not a
+build result, supply acceptance, installed-runtime readiness or legal clearance.**
+The exact hosted command still needs separate admission and actual results.
+Output, component, notice and product execution gates remain closed.
+Legacy/static semantics and selectors are unchanged. H/D4/D3 are not
 modified or reused as execution authority. No linker shim, maps, probe recorder,
 private-W adapter, new process owner or container/package installer is added.
 
 ## Acyclic admission root
 
-`cpython_source_admission.py` contains only the three literal closed pins for
+`cpython_source_admission.py` contains only the three literal pins for
 the input lock, prerequisite execution-envelope review and actual core roster.
 It is **not** a member of the lock's `recipeFiles`: the independently admitted
 final command must hash-pin this tiny root and every imported helper before any
@@ -21,14 +24,15 @@ Freeze helpers, then input-only lock **L**, then prerequisite envelope review
 command. E may bind L and the frozen inputs/envelope; it must not bind A or the
 final command, which would recreate the cycle. No code is normalized, ignored
 or excluded from final command authentication. There is no CLI/environment
-approval override or successful gate in this source-authoring slice.
+approval override. These prerequisite pins do not authorize an arbitrary command.
 
 E is a bounded canonical JSON object at the fixed path
 `/work/inputs/source-execution-review.json`, hash-bound by A independently of L.
 Its exact reviewed content is a prerequisite, not final execution authorization.
 The build retains identical `execution-review.json` bytes and binds their hash
-in `source-result.json`; the later source copier requires both. Real prerequisite
-review, final root selection and exact command admission remain future work.
+in `source-result.json`; the later source copier requires both. The selected E
+records reviewed requirements, not observed runner enforcement or native success.
+Final command admission and actual-result acceptance remain separate.
 
 ## Fixed recipe and original outcomes
 

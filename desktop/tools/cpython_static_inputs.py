@@ -65,6 +65,12 @@ WORK = Path("/work")
 RECEIPTS = WORK / "receipts"
 SOURCE_ROOT = WORK / "inputs/sources"
 CORE_ROOT = WORK / "inputs/core-source"
+# Source DATA may contain ordinary spaces/tilde (for example CPython icons and
+# libffi's lt~obsolete.m4). Never shell-expand or rename them. This syntax is
+# confined to the four fixed source trees; their pinned inventories authorize
+# membership. Core/control/command path syntax remains unchanged.
+SOURCE_DATA_PREFIXES = tuple(str(SOURCE_ROOT / name) + "/" for name in
+                             ("cpython", "libffi", "openssl", "zlib"))
 FIXED_ENV = {"PATH": "/usr/bin:/bin", "HOME": "/work/home", "TMPDIR": "/work/tmp",
     "LC_ALL": "C.UTF-8", "TZ": "UTC", "CONFIG_SITE": "/dev/null", "PYTHONDONTWRITEBYTECODE": "1",
     "PYTHONSTRICTEXTENSIONBUILD": "1", "PYTHON_COLORS": "0",
@@ -104,7 +110,9 @@ def sha(value: object) -> str:
 
 
 def absolute(value: object) -> Path:
-    need(type(value) is str and re.fullmatch(r"/[A-Za-z0-9_./+@=,-]+", value) is not None,
+    need(type(value) is str and (re.fullmatch(r"/[A-Za-z0-9_./+@=,-]+", value) is not None
+         or (value.startswith(SOURCE_DATA_PREFIXES)
+             and re.fullmatch(r"/[A-Za-z0-9_./+@=,~ -]+", value) is not None)),
          "Explicit bounded absolute publisher path required")
     p = Path(value)
     need(len(value) <= 4096 and str(p) == value and ".." not in p.parts, "Noncanonical publisher path")
@@ -526,6 +534,7 @@ SOURCE_ARCHIVE_TARGETS = tuple("Modules/_hacl/" + n for n in (
     "libHacl_Hash_MD5.a", "libHacl_Hash_SHA1.a", "libHacl_Hash_SHA2.a", "libHacl_Hash_SHA3.a",
     "libHacl_Hash_BLAKE2.a", "libHacl_HMAC.a")) + ("Modules/expat/libexpat.a",)
 SOURCE_LIBRARIES = ("libcrypto.so.3", "libssl.so.3")
+SOURCE_OPENSSL_LAYOUT_DATA = "openssl-layout-data.json"
 SOURCE_LAYOUT_ROOTS = ("/work/build/cpython/lib", "/work/build/lib", "/work/stage/python/lib")
 SOURCE_GENERATED_NAMES = ("_sysconfigdata__linux_x86_64-linux-gnu.py",
     "_sysconfig_vars__linux_x86_64-linux-gnu.json", "build-details.json")
@@ -879,7 +888,7 @@ def source_openssl_layout() -> dict:
             destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             copies.append(source_write(destination, raw, 0o644))
         rows.append({"original": original, "producerPhase": "openssl-build", "projections": copies})
-    return source_write(RECEIPTS / "openssl-layout.json", canonical({"profile": SOURCE_PROFILE, "libraries": rows}))
+    return source_write(RECEIPTS / SOURCE_OPENSSL_LAYOUT_DATA, canonical({"profile": SOURCE_PROFILE, "libraries": rows}))
 
 
 def source_pybuilddir(raw: bytes) -> str:
@@ -931,7 +940,7 @@ def source_project(lock: dict) -> dict:
                  "Unexpected Python shared native output; no pruning into success")
     source_elf(source_read(original / "python", 64 << 20), "python")
     copy(original / "python", "python/bin/python3", "python-build")
-    layout = decode(source_read(RECEIPTS / "openssl-layout.json", MAX_JSON))
+    layout = decode(source_read(RECEIPTS / SOURCE_OPENSSL_LAYOUT_DATA, MAX_JSON))
     for row in layout["libraries"]:
         raw = source_bound(row["original"], 64 << 20)
         for projection in row["projections"]:

@@ -1,0 +1,118 @@
+name: Conventional CPython source build
+
+on:
+  push:
+    # A new workflow_dispatch need not exist on the default branch yet. Only
+    # the separately reviewed lead push to this one verification ref admits a
+    # first run; ref creation itself is not successful verification evidence.
+    branches: [verify/desktop-cpython-source-build]
+    paths:
+      - .github/workflows/desktop-cpython-source-build.yml
+      - desktop/cpython-source-inputs/**
+      - desktop/tools/cpython_source_*.py
+      - desktop/tools/cpython_static_inputs.py
+      - desktop/tools/cpython_static_builder_data.py
+      - desktop/tools/prepare_cpython_source_payload.py
+      - desktop/tools/prepare_cpython_static_payload.py
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact independently reviewed source and command revision
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # One profile across ALL refs, not a per-branch concurrency group.
+  group: desktop-cpython-source-build
+  cancel-in-progress: false
+
+jobs:
+  source-build:
+    name: One disposable offline conventional source build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    env:
+      MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+    steps:
+      - name: Require exact first-attempt GitHub-hosted verification source
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$EUID" -ne 0 ]]
+          [[ "$RUNNER_OS:$RUNNER_ARCH:$ImageOS" == Linux:X64:ubuntu24 ]]
+          [[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ && "$GITHUB_RUN_ATTEMPT" == 1 ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-cpython-source-build ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" != 0000000000000000000000000000000000000000 ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-cpython-source-build.yml@$GITHUB_REF" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == push && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
+          fi
+          # Runner policy in the independently reviewed prerequisite envelope
+          # must also exclude self-hosted label matches and bind job disposal.
+          # The label alone is never qualification or phase-finality evidence.
+      - name: Check out exact reviewed source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prepare only closed public inputs with a credential-free environment
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/git rev-parse --verify HEAD)" == "$GITHUB_SHA" ]]
+          # No setup/install/repair, network retry, secret or credential fallback.
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            /usr/bin/sudo -n /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C.UTF-8 TZ=UTC HOME=/nonexistent PYTHONDONTWRITEBYTECODE=1 \
+            MRK_SOURCE_SHA="$GITHUB_SHA" MRK_RUN_ID="$GITHUB_RUN_ID" MRK_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            /usr/bin/python3.12 -I -S -B "$GITHUB_WORKSPACE/desktop/tools/cpython_source_hosted.py" prepare </dev/null
+      - name: Run one aggregate-bounded offline recipe and retain original evidence
+        timeout-minutes: 46
+        shell: bash
+        run: |
+          set -euo pipefail
+          # systemd limits, not this workflow timeout, own the build domain.
+          # The entry/inputs below are the original root-owned preparation.
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            /usr/bin/sudo -n /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C.UTF-8 TZ=UTC HOME=/nonexistent PYTHONDONTWRITEBYTECODE=1 \
+            MRK_SOURCE_SHA="$GITHUB_SHA" MRK_RUN_ID="$GITHUB_RUN_ID" MRK_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            /usr/bin/python3.12 -I -S -B \
+            /var/tmp/mrk-cpython-source-preparation-v1/inputs/recipe/cpython_source_hosted.py build </dev/null
+      - name: Retain only fixed bounded public evidence or classified failure
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: conventional-cpython-source-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            /var/tmp/mrk-cpython-source-public-v1/hosted-summary.json
+            /var/tmp/mrk-cpython-source-public-v1/hosted-failure.json
+            /var/tmp/mrk-cpython-source-public-v1/diagnostic-client.json
+            /var/tmp/mrk-cpython-source-public-v1/diagnostic-client.stdout
+            /var/tmp/mrk-cpython-source-public-v1/diagnostic-client.stderr
+            /var/tmp/mrk-cpython-source-public-v1/diagnostic-unit-start.json
+            /var/tmp/mrk-cpython-source-public-v1/diagnostic-unit-stop.json
+            /var/tmp/mrk-cpython-source-public-v1/diagnostic-preparation.json
+            /var/tmp/mrk-cpython-source-public-v1/retained-files.json
+            /var/tmp/mrk-cpython-source-public-v1/hosted-evidence.tar
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          include-hidden-files: false
+          overwrite: false
