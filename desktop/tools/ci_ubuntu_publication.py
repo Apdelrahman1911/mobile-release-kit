@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import io
+import json
 import math
 import os
 from pathlib import Path

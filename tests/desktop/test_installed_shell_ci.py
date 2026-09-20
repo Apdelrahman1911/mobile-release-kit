@@ -588,5 +588,23 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
                 S.shell_project_draft_observation(observed, lifecycle)
 
 
+class HostBindingDiagnosticContracts(unittest.TestCase):
+    def test_actual_module_diagnostic_retains_bounded_observed_fields(self):
+        message = "Writable/special shell host input"
+        for mode, uid, gid in ((0o040777, 0, 0), (0o100664, 1001, 1002)):
+            item = S.os.stat_result((mode, 1, 1, 1, uid, gid, 0, 0, 0, 0))
+            result = S.shell_host_diagnostic(message, Path("/example/data"), Path("/example"), item)
+            self.assertEqual(json.loads(result[len(message) + 2:]), {
+                "selectedPath": "/example/data", "component": "/example",
+                "mode": format(mode, "06o"), "uid": uid, "gid": gid,
+            })
+            self.assertLessEqual(len(result), 512)
+            self.assertEqual(S.failure_reason(S.D.Refused(result)), result)
+        escaped = S.shell_host_diagnostic(message, "/example/\u00e9\n", "/example", item)
+        self.assertTrue(all(32 <= ord(character) < 127 for character in escaped))
+        self.assertEqual(json.loads(escaped[len(message) + 2:])["selectedPath"], "/example/\u00e9\n")
+        self.assertEqual(S.shell_host_diagnostic(message, "/" + "x" * 2048, "/example", item), message)
+
+
 if __name__ == "__main__":
     unittest.main()
