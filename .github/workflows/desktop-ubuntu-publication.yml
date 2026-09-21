@@ -103,30 +103,36 @@ jobs:
               ('/usr/share/byobu/pixmaps/byobu.svg', 'file'),
           )
           SCOPE = 'fixed-shell-data-directory-preparation'
-          DEFAULT_ACL_REMOVAL = {'attempted': False, 'established': False,
-                                 'attemptedCount': 0, 'establishedCount': 0}
-          DEFAULT_ACL_ORIGINALS = set()
+          ACL_REMOVAL = {kind: {'attempted': False, 'established': False, 'attemptedCount': 0, 'establishedCount': 0}
+                         for kind in ('access', 'default')}
+          ACL_ORIGINALS = {kind: set() for kind in ACL_REMOVAL}
           _first_removal_refusal = None
+
+          def removal_receipt(all_states=False):
+              return {kind + 'AclRemoval': dict(state) for kind, state in ACL_REMOVAL.items()
+                      if all_states or state['attempted']}
+
 
           def need(ok, check, observed=None):
               global _first_removal_refusal
               if not ok:
                   payload = {'scope': SCOPE, 'failedCheck': check, 'observed': observed}
-                  if DEFAULT_ACL_REMOVAL['attempted']:
+                  effects = removal_receipt()
+                  if effects:
                       # Retain the first refusal if a later sole-close attempt also fails.
                       if _first_removal_refusal is None:
                           _first_removal_refusal = payload
                       if check.endswith('close'):
                           _first_removal_refusal['cleanupUnknown'] = True
-                      payload = {**_first_removal_refusal, 'defaultAclRemoval': dict(DEFAULT_ACL_REMOVAL)}
+                      payload = {**_first_removal_refusal, **effects}
                   diagnostic = json.dumps(payload, sort_keys=True, separators=(',', ':'))
                   if (len(diagnostic.encode('ascii')) > 2048 and isinstance(payload['observed'], dict)
-                          and 'defaultAclShape' in payload['observed']):
+                          and any(key in payload['observed'] for key in ('defaultAclShape', 'accessAclShape'))):
                       # An optional structure summary must never displace the first refusal.
                       payload = {**payload, 'observed': {key: value for key, value in payload['observed'].items()
-                                                        if key != 'defaultAclShape'}}
+                                                        if key not in ('defaultAclShape', 'accessAclShape')}}
                       diagnostic = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-                  if len(diagnostic.encode('ascii')) > 2048 and DEFAULT_ACL_REMOVAL['attempted']:
+                  if len(diagnostic.encode('ascii')) > 2048 and effects:
                       diagnostic = json.dumps({**payload, 'observed': None, 'truncated': True},
                                               sort_keys=True, separators=(',', ':'))
                   print(diagnostic if len(diagnostic.encode('ascii')) <= 2048
@@ -155,15 +161,64 @@ jobs:
                       'bindingUnknown': binding_unknown, 'probePerformed': probe_performed}
 
 
-          def public_default_acl_scope(path):
-              return path in PREPARE_DIRS or any(kind == 'directory' and (path == root or path.startswith(root + '/'))
-                                                for root, kind in DATA_ROOTS)
+          def public_acl_scope(path, item):
+              kind = 'directory' if stat.S_ISDIR(item.st_mode) else 'file' if stat.S_ISREG(item.st_mode) else None
+              return kind is not None and (kind == 'directory' and path in PREPARE_DIRS or any(
+                  path == root and kind == root_kind or root_kind == 'directory' and path.startswith(root + '/')
+                  for root, root_kind in DATA_ROOTS))
 
 
-          def public_default_acl_eligible(path, item):
+          def public_acl_eligible(path, item):
+              mode = stat.S_IMODE(item.st_mode)
               return (item.st_dev == MOUNT_DEVICE and item.st_uid == item.st_gid == 0
-                      and item.st_mode in (stat.S_IFDIR | 0o755, stat.S_IFDIR | 0o775, stat.S_IFDIR | 0o777)
-                      and public_default_acl_scope(path))
+                      and item.st_mode == stat.S_IFMT(item.st_mode) | mode and public_acl_scope(path, item)
+                      and (stat.S_ISDIR(item.st_mode) and mode in (0o755, 0o775, 0o777)
+                           or stat.S_ISREG(item.st_mode) and item.st_nlink == 1
+                           and mode in (0o444, 0o644, 0o664, 0o666, 0o555, 0o755, 0o775, 0o777)))
+
+
+          def supported_access_acl(value, item):
+              # Canonical v2, at most32 entries. Every masked non-owner class equals G,
+              # and O must be a subset of G: removing named entries cannot add access.
+              if (type(value) is not bytes or not 28 <= len(value) <= 260 or (len(value) - 4) % 8
+                      or value[:4] != b'\x02\0\0\0'):
+                  return False
+              rows = [tuple(int.from_bytes(value[i + a:i + b], 'little') for a, b in ((0, 2), (2, 4), (4, 8)))
+                      for i in range(4, len(value), 8)]
+              u, g, o = (item.st_mode >> shift & 7 for shift in (6, 3, 0))
+              undefined, index, group, named = 0xffffffff, 1, None, False
+              if rows[0] != (1, u, undefined) or o & ~g or any(row[1] > 7 for row in rows):
+                  return False
+              for tag in (2, 4, 8):
+                  previous = -1
+                  while index < len(rows) and rows[index][0] == tag:
+                      _, permissions, principal = rows[index]
+                      if permissions & g != g:
+                          return False
+                      index += 1
+                      if tag == 4:
+                          if principal != undefined:
+                              return False
+                          group = permissions
+                          break
+                      if principal == undefined or principal <= previous:
+                          return False
+                      previous, named = principal, True
+                  if tag == 4 and group is None:
+                      return False
+              if index < len(rows) and rows[index][0] == 16:
+                  if rows[index] != (16, g, undefined):
+                      return False
+                  index += 1
+              elif named or group != g:
+                  return False
+              return index == len(rows) - 1 and rows[index] == (32, o, undefined)
+
+
+          def supported_public_acl(path, item, attribute, value):
+              return public_acl_eligible(path, item) and (supported_access_acl(value, item)
+                  if attribute == 'system.posix_acl_access' else stat.S_ISDIR(item.st_mode)
+                  and attribute == 'system.posix_acl_default' and supported_default_acl(value))
 
 
           def supported_default_acl(value):
@@ -177,7 +232,7 @@ jobs:
                   and value[20:] == bytes.fromhex('04000700ffffffff 10000700ffffffff 20000700ffffffff'))
 
 
-          def default_acl_shape(value):
+          def acl_shape(value):
               # Structural decoding only; no semantic ACL validity or removal authority.
               shape = {'byteLength': None, 'version2': None, 'aligned': False,
                        'entryCount': None, 'entries': [], 'complete': False, 'reason': None}
@@ -216,7 +271,7 @@ jobs:
               return shape
 
 
-          def guarded_xattrs(fd, parent, name, path, item, phase, held=None, *, classify_default=False):
+          def guarded_xattrs(fd, parent, name, path, item, phase, held=None, *, classify_acls=False):
               # fgetxattr requires an ordinary FD, not O_PATH. Query only the two
               # guarded names; successful empty bytes are still forbidden presence.
               def binding():
@@ -229,9 +284,10 @@ jobs:
                   except OSError as error:
                       return False, error.errno
 
-              normalization_needed = False
-              for attribute in ('system.posix_acl_access', 'system.posix_acl_default'
-                                if stat.S_ISDIR(item.st_mode) else 'security.capability'):
+              needed = [False, False]
+              for index, attribute in enumerate(('system.posix_acl_access', 'system.posix_acl_default'
+                                                if stat.S_ISDIR(item.st_mode) else 'security.capability')):
+                  kind = attribute.rsplit('_', 1)[-1]
                   bound, number = binding()
                   result, truncated, probe_performed, shape = None, False, False, None
                   binding_unknown = not bound
@@ -247,15 +303,13 @@ jobs:
                       else:
                           # Only the no-effect DATA census may classify supported presence;
                           # this is normalization-needed, never absence or runtime admission.
-                          if (classify_default and attribute == 'system.posix_acl_default'
-                                  and public_default_acl_eligible(path, item) and supported_default_acl(value)):
-                              normalization_needed = True
+                          if classify_acls and supported_public_acl(path, item, attribute, value):
+                              needed[index] = True
                           else:
                               result = 'present'
                               truncated = type(value) is not bytes or len(value) > 65536
-                              if (classify_default and attribute == 'system.posix_acl_default'
-                                      and public_default_acl_scope(path)):
-                                  shape = default_acl_shape(value)
+                              if classify_acls and kind in ACL_REMOVAL and public_acl_scope(path, item):
+                                  shape = acl_shape(value)
                           del value  # Never retain raw attribute bytes or principal IDs.
                       bound, after_errno = binding()
                       if not bound:
@@ -267,9 +321,9 @@ jobs:
                                            probe_performed=probe_performed, binding_unknown=binding_unknown,
                                            truncated=truncated)
                       if shape is not None:
-                          error.observed['defaultAclShape'] = shape
+                          error.observed[kind + 'AclShape'] = shape
                       raise error
-              return normalization_needed
+              return tuple(needed)
 
 
           def changed_only(before, after, mode, gid):
@@ -332,11 +386,11 @@ jobs:
                    and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
                    'protected-ancestor', {'path': path, **record(s)})
 
-          def prepare_public_default_acl(fd, parent, name, path, before, ancestors, prefix):
-              # Original no-follow directory only; exact rooted custody, not a path-prefix grant.
-              # Ancestors remain strictly protected/default-free even when this target may change.
+          def prepare_public_acls(fd, parent, name, path, before, ancestors, prefix):
+              # Original no-follow object; exact rooted custody, not a path-prefix grant.
+              # Ancestors remain protected/ACL-free even when this target may change.
               parts = path.split('/')[1:]
-              need(public_default_acl_scope(path) and path.startswith('/') and parts
+              need(public_acl_scope(path, before) and path.startswith('/') and parts
                    and all(part not in {'', '.', '..'} for part in parts)
                    and [entry[3] for entry in ancestors] == [('/' + '/'.join(parts[:index]) if index else '/')
                                                              for index in range(len(parts))]
@@ -344,11 +398,11 @@ jobs:
                    and all(entry[1] == ancestors[index - 1][0] and entry[2] == parts[index - 1]
                            for index, entry in enumerate(ancestors) if index)
                    and ancestors[-1][0] == parent and fd not in {entry[0] for entry in ancestors},
-                   'fixed-public-default-target')
+                   'fixed-public-acl-target')
               for _, _, _, ancestor_path, expected in ancestors:
                   protected(expected, ancestor_path)
-              access, default = 'system.posix_acl_access', 'system.posix_acl_default'
-              effect_prefix = 'share-default' if path == '/usr/share' else prefix + '-default'
+              attributes = ('system.posix_acl_access', 'system.posix_acl_default'
+                            if stat.S_ISDIR(before.st_mode) else 'security.capability')
 
               def failure(attribute, phase, *, result='binding-unproven', number=None,
                           probe=False, unknown=True, truncated=False):
@@ -380,65 +434,72 @@ jobs:
                   if not bound:
                       raise first or failure(attribute, phase, number=number)
 
-              def query(item, attribute, phase, *, permit_supported=False):
+              def query(item, attribute, phase, *, permit_supported=False, expected=None):
                   require_binding(item, phase, attribute)
-                  present, error = False, None
+                  value, error = None, None
+                  kind = attribute.rsplit('_', 1)[-1]
                   try:
                       value = os.getxattr(fd, attribute)
                   except OSError as cause:
                       if cause.errno != errno.ENODATA:
-                          error = failure(attribute, phase, result='errno', number=cause.errno,
-                                          probe=True, unknown=False)
+                          error = failure(attribute, phase, result='errno', number=cause.errno, probe=True, unknown=False)
+                      elif expected is not None:
+                          error = failure(attribute, phase, result='errno', number=cause.errno, probe=True, unknown=False)
                   else:
-                      present = True
-                      allowed = (permit_supported and public_default_acl_eligible(path, before)
-                                 and supported_default_acl(value))
+                      allowed = (supported_public_acl(path, before, attribute, value) if permit_supported
+                                 else expected is not None and type(value) is bytes and value == expected)
                       if not allowed:
                           error = failure(attribute, phase, result='present', probe=True, unknown=False,
                                           truncated=type(value) is not bytes or len(value) > 65536)
-                          if permit_supported and attribute == default:
-                              error.observed['defaultAclShape'] = default_acl_shape(value)
-                      del value  # Never retain or print raw attribute bytes or principal IDs.
+                          if permit_supported and kind in ACL_REMOVAL:
+                              error.observed[kind + 'AclShape'] = acl_shape(value)
+                          value = None  # Retain only qualified bounded buffers for exact peer checks.
                   bound, number, first = binding(item, phase)
                   if error is not None:
                       error.observed['bindingUnknown'] = not bound
-                      raise error  # The first query refusal survives later binding failure.
+                      raise error  # First query refusal survives later binding failure.
                   if not bound:
                       raise first or failure(attribute, phase, number=number, probe=True)
-                  return present
+                  return value
 
               phase = 'share-default-before' if path == '/usr/share' else prefix + '-before'
-              query(before, access, phase)
-              if not query(before, default, phase, permit_supported=True):
-                  return before, 'absent'
-              phase = effect_prefix + '-remove'
-              require_binding(before, phase, default)
-              original_key = before.st_dev, before.st_ino
-              need(original_key not in DEFAULT_ACL_ORIGINALS, 'default-acl-removal-already-attempted')
-              need(len(DEFAULT_ACL_ORIGINALS) < 32768, 'default-acl-removal-attempt-bound')
-              DEFAULT_ACL_ORIGINALS.add(original_key)  # Register custody before the sole syscall.
-              DEFAULT_ACL_REMOVAL['attempted'] = True
-              DEFAULT_ACL_REMOVAL['established'] = False
-              DEFAULT_ACL_REMOVAL['attemptedCount'] += 1
-              try:
-                  os.removexattr(fd, 'system.posix_acl_default')  # One attempt, never ENODATA-as-success.
-              except OSError as error:
-                  raise failure(default, phase, result='errno', number=error.errno, probe=True) from None
-              phase = effect_prefix + '-after'
-              try:
-                  provisional = os.fstat(fd)
-              except OSError as error:
-                  raise failure(default, phase, number=error.errno) from None
-              if identity(provisional)[:-1] != identity(before)[:-1]:
-                  raise failure(default, phase)
-              # Only provisional ctime may differ; all postqueries bind this exact snapshot.
-              query(provisional, default, phase)
-              query(provisional, access, phase)
-              require_binding(provisional, phase, default)
-              DEFAULT_ACL_REMOVAL['establishedCount'] += 1
-              DEFAULT_ACL_REMOVAL['established'] = (DEFAULT_ACL_REMOVAL['establishedCount']
-                                                    == DEFAULT_ACL_REMOVAL['attemptedCount'])
-              return provisional, 'removed'
+              # Qualify BOTH original attributes before any effect (capability must be absent).
+              expected = {attribute: query(before, attribute, phase, permit_supported=True) for attribute in attributes}
+              item, result = before, {}
+              for kind in ('access', 'default') if stat.S_ISDIR(before.st_mode) else ('access',):
+                  attribute = 'system.posix_acl_' + kind
+                  result[kind + 'Acl'] = 'absent'
+                  if expected[attribute] is None:
+                      continue
+                  effect_prefix = ('share' if path == '/usr/share' else prefix) + '-' + kind
+                  phase = effect_prefix + '-remove'
+                  require_binding(item, phase, attribute)
+                  original_key, custody, state = (before.st_dev, before.st_ino), ACL_ORIGINALS[kind], ACL_REMOVAL[kind]
+                  need(original_key not in custody, kind + '-acl-removal-already-attempted')
+                  need(len(custody) < 32768, kind + '-acl-removal-attempt-bound')
+                  custody.add(original_key)  # Register per-attribute custody before its sole syscall.
+                  state['attempted'], state['established'] = True, False
+                  state['attemptedCount'] += 1
+                  try:
+                      os.removexattr(fd, attribute)  # Only the two fixed ACL names; never ENODATA-as-success.
+                  except OSError as error:
+                      raise failure(attribute, phase, result='errno', number=error.errno, probe=True) from None
+                  phase = effect_prefix + '-after'
+                  try:
+                      provisional = os.fstat(fd)
+                  except OSError as error:
+                      raise failure(attribute, phase, number=error.errno) from None
+                  if identity(provisional)[:-1] != identity(item)[:-1]:
+                      raise failure(attribute, phase)
+                  expected[attribute] = None
+                  # Provisional ctime only; removed attribute absent, peer buffer/absence unchanged.
+                  for other in (attribute, *(name for name in attributes if name != attribute)):
+                      query(provisional, other, phase, expected=expected[other])
+                  require_binding(provisional, phase, attribute)
+                  state['establishedCount'] += 1
+                  state['established'] = state['establishedCount'] == state['attemptedCount']
+                  item, result[kind + 'Acl'] = provisional, 'removed'
+              return item, result
 
 
           def prepare_directory(path):
@@ -483,8 +544,7 @@ jobs:
                           need(before.st_dev == MOUNT_DEVICE and (local_fonts or (stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
                                and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777))),
                                'target-policy', {'path': current, **record(before)})
-                          expected, default_acl = prepare_public_default_acl(fd, parent, name, path, before,
-                                                                              originals, 'prepare')
+                          expected, acl_status = prepare_public_acls(fd, parent, name, path, before, originals, 'prepare')
                           originals.append((fd, parent, name, current, expected))
                           recheck('prepare-before')
                           mount_unchanged()
@@ -507,7 +567,7 @@ jobs:
                           recheck('prepare-after-mode')
                           mount_unchanged()
                           return {'path': path, 'before': record(before), 'after': record(after),
-                                  'defaultAcl': default_acl}
+                                  **acl_status}
                       protected(before, current)
                       originals.append((fd, parent, name, current, before))
                       guarded_xattrs(fd, parent, name, current, before, 'prepare-before')
@@ -517,7 +577,7 @@ jobs:
                   authority_failure = error
                   raise
               except OSError as error:
-                  if DEFAULT_ACL_REMOVAL['attempted']:
+                  if removal_receipt():
                       need(False, 'preparation-os-error', {'path': path,
                            'errno': error.errno if type(error.errno) is int and 0 <= error.errno <= 4095 else None})
                   raise
@@ -539,7 +599,7 @@ jobs:
               # effects; only a fully supported scope may enter the normalization pass.
               flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
               file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
-              count, unsafe_count, unsupported_count, changed_count, default_acl_count = 0, 0, 0, 0, 0
+              count, unsafe_count, unsupported_count, changed_count, default_acl_count, access_acl_count = 0, 0, 0, 0, 0, 0
               unsafe, changed, fds, originals = [], [], [], []
               selected_links = []
 
@@ -575,7 +635,7 @@ jobs:
                   return after
 
               def visit(parent, name, path, depth, root_kind):
-                  nonlocal count, unsafe_count, unsupported_count, default_acl_count
+                  nonlocal count, unsafe_count, unsupported_count, default_acl_count, access_acl_count
                   count += 1
                   need(count <= 32768 and depth <= 16, 'metadata-entry-depth-bound')
                   try:
@@ -611,13 +671,13 @@ jobs:
                                                  number=error.errno) from None
                           fds.append(fd)
                           originals.append((fd, parent, name, path, item))
-                          if normalize and directory:
-                              item, _ = prepare_public_default_acl(fd, parent, name, path, item,
-                                                                   originals[:-1], 'metadata')
+                          if normalize:
+                              item, _ = prepare_public_acls(fd, parent, name, path, item, originals[:-1], 'metadata')
                               originals[-1] = (fd, parent, name, path, item)
-                          default_needed = guarded_xattrs(fd, parent, name, path, item,
-                              'metadata-before' if normalize else 'metadata-census', classify_default=not normalize)
+                          access_needed, default_needed = guarded_xattrs(fd, parent, name, path, item,
+                              'metadata-before' if normalize else 'metadata-census', classify_acls=not normalize)
                           bound(fd, parent, name, item)
+                          access_acl_count += int(access_needed)
                           default_acl_count += int(default_needed)
                           if normalize and not safe:
                               item = tighten(fd, parent, name, path, item, 0o755 if directory else mode & ~0o133)
@@ -702,7 +762,7 @@ jobs:
                           need(not failed_close, 'metadata-original-close')
               return {'_selectedLinks': selected_links, 'entries': count, 'unsafeCount': unsafe_count, 'unsafe': unsafe,
                       'unsafeListTruncated': unsafe_count > len(unsafe), 'unsupportedCount': unsupported_count,
-                      'defaultAclNormalizationCount': default_acl_count,
+                      'defaultAclNormalizationCount': default_acl_count, 'accessAclNormalizationCount': access_acl_count,
                       'changedCount': changed_count, 'changed': changed, 'changedListTruncated': changed_count > len(changed)}
 
           def link_closure_metadata(selections):
@@ -920,17 +980,18 @@ jobs:
               MOUNT_POINTS = mount_scope(MOUNT_RAW, MOUNT_DEVICE)
               prepared = [prepare_directory(path) for path in sorted(PREPARE_DIRS, key=lambda path: (path.count('/'), path))]
               metadata = metadata_preflight()
-              if metadata['unsupportedCount'] == 0 and (metadata['unsafeCount'] or metadata['defaultAclNormalizationCount']):
+              if metadata['unsupportedCount'] == 0 and (metadata['unsafeCount']
+                      or metadata['defaultAclNormalizationCount'] or metadata['accessAclNormalizationCount']):
                   metadata = metadata_preflight(normalize=True)
               mount_unchanged()
               selected_links = metadata.pop('_selectedLinks')
               metadata['selectedLinkCount'] = len(selected_links)
               receipt = json.dumps({'scope': SCOPE, 'prepared': prepared, 'metadata': metadata,
-                                    'defaultAclRemoval': dict(DEFAULT_ACL_REMOVAL),
+                                    **removal_receipt(all_states=True),
                                     'runtimeAdmission': False}, sort_keys=True, separators=(',', ':'))
               need(len(receipt.encode('ascii')) <= 65536, 'receipt-bound')
               print(receipt, flush=True)
-              need(metadata['unsafeCount'] == 0 and metadata['defaultAclNormalizationCount'] == 0,
+              need(metadata['unsafeCount'] == metadata['defaultAclNormalizationCount'] == metadata['accessAclNormalizationCount'] == 0,
                    'unhandled-unsafe-data-metadata')
 
               closure = link_closure_metadata(selected_links)
@@ -942,7 +1003,7 @@ jobs:
           except XattrFailure as error:
               need(False, 'guarded-xattr', error.observed)
           except OSError as error:
-              if DEFAULT_ACL_REMOVAL['attempted']:
+              if removal_receipt():
                   need(False, 'preparation-os-error',
                        {'errno': error.errno if type(error.errno) is int and 0 <= error.errno <= 4095 else None})
               raise
@@ -1074,30 +1135,36 @@ jobs:
               ('/usr/share/byobu/pixmaps/byobu.svg', 'file'),
           )
           SCOPE = 'fixed-shell-data-directory-preparation'
-          DEFAULT_ACL_REMOVAL = {'attempted': False, 'established': False,
-                                 'attemptedCount': 0, 'establishedCount': 0}
-          DEFAULT_ACL_ORIGINALS = set()
+          ACL_REMOVAL = {kind: {'attempted': False, 'established': False, 'attemptedCount': 0, 'establishedCount': 0}
+                         for kind in ('access', 'default')}
+          ACL_ORIGINALS = {kind: set() for kind in ACL_REMOVAL}
           _first_removal_refusal = None
+
+          def removal_receipt(all_states=False):
+              return {kind + 'AclRemoval': dict(state) for kind, state in ACL_REMOVAL.items()
+                      if all_states or state['attempted']}
+
 
           def need(ok, check, observed=None):
               global _first_removal_refusal
               if not ok:
                   payload = {'scope': SCOPE, 'failedCheck': check, 'observed': observed}
-                  if DEFAULT_ACL_REMOVAL['attempted']:
+                  effects = removal_receipt()
+                  if effects:
                       # Retain the first refusal if a later sole-close attempt also fails.
                       if _first_removal_refusal is None:
                           _first_removal_refusal = payload
                       if check.endswith('close'):
                           _first_removal_refusal['cleanupUnknown'] = True
-                      payload = {**_first_removal_refusal, 'defaultAclRemoval': dict(DEFAULT_ACL_REMOVAL)}
+                      payload = {**_first_removal_refusal, **effects}
                   diagnostic = json.dumps(payload, sort_keys=True, separators=(',', ':'))
                   if (len(diagnostic.encode('ascii')) > 2048 and isinstance(payload['observed'], dict)
-                          and 'defaultAclShape' in payload['observed']):
+                          and any(key in payload['observed'] for key in ('defaultAclShape', 'accessAclShape'))):
                       # An optional structure summary must never displace the first refusal.
                       payload = {**payload, 'observed': {key: value for key, value in payload['observed'].items()
-                                                        if key != 'defaultAclShape'}}
+                                                        if key not in ('defaultAclShape', 'accessAclShape')}}
                       diagnostic = json.dumps(payload, sort_keys=True, separators=(',', ':'))
-                  if len(diagnostic.encode('ascii')) > 2048 and DEFAULT_ACL_REMOVAL['attempted']:
+                  if len(diagnostic.encode('ascii')) > 2048 and effects:
                       diagnostic = json.dumps({**payload, 'observed': None, 'truncated': True},
                                               sort_keys=True, separators=(',', ':'))
                   print(diagnostic if len(diagnostic.encode('ascii')) <= 2048
@@ -1126,15 +1193,64 @@ jobs:
                       'bindingUnknown': binding_unknown, 'probePerformed': probe_performed}
 
 
-          def public_default_acl_scope(path):
-              return path in PREPARE_DIRS or any(kind == 'directory' and (path == root or path.startswith(root + '/'))
-                                                for root, kind in DATA_ROOTS)
+          def public_acl_scope(path, item):
+              kind = 'directory' if stat.S_ISDIR(item.st_mode) else 'file' if stat.S_ISREG(item.st_mode) else None
+              return kind is not None and (kind == 'directory' and path in PREPARE_DIRS or any(
+                  path == root and kind == root_kind or root_kind == 'directory' and path.startswith(root + '/')
+                  for root, root_kind in DATA_ROOTS))
 
 
-          def public_default_acl_eligible(path, item):
+          def public_acl_eligible(path, item):
+              mode = stat.S_IMODE(item.st_mode)
               return (item.st_dev == MOUNT_DEVICE and item.st_uid == item.st_gid == 0
-                      and item.st_mode in (stat.S_IFDIR | 0o755, stat.S_IFDIR | 0o775, stat.S_IFDIR | 0o777)
-                      and public_default_acl_scope(path))
+                      and item.st_mode == stat.S_IFMT(item.st_mode) | mode and public_acl_scope(path, item)
+                      and (stat.S_ISDIR(item.st_mode) and mode in (0o755, 0o775, 0o777)
+                           or stat.S_ISREG(item.st_mode) and item.st_nlink == 1
+                           and mode in (0o444, 0o644, 0o664, 0o666, 0o555, 0o755, 0o775, 0o777)))
+
+
+          def supported_access_acl(value, item):
+              # Canonical v2, at most32 entries. Every masked non-owner class equals G,
+              # and O must be a subset of G: removing named entries cannot add access.
+              if (type(value) is not bytes or not 28 <= len(value) <= 260 or (len(value) - 4) % 8
+                      or value[:4] != b'\x02\0\0\0'):
+                  return False
+              rows = [tuple(int.from_bytes(value[i + a:i + b], 'little') for a, b in ((0, 2), (2, 4), (4, 8)))
+                      for i in range(4, len(value), 8)]
+              u, g, o = (item.st_mode >> shift & 7 for shift in (6, 3, 0))
+              undefined, index, group, named = 0xffffffff, 1, None, False
+              if rows[0] != (1, u, undefined) or o & ~g or any(row[1] > 7 for row in rows):
+                  return False
+              for tag in (2, 4, 8):
+                  previous = -1
+                  while index < len(rows) and rows[index][0] == tag:
+                      _, permissions, principal = rows[index]
+                      if permissions & g != g:
+                          return False
+                      index += 1
+                      if tag == 4:
+                          if principal != undefined:
+                              return False
+                          group = permissions
+                          break
+                      if principal == undefined or principal <= previous:
+                          return False
+                      previous, named = principal, True
+                  if tag == 4 and group is None:
+                      return False
+              if index < len(rows) and rows[index][0] == 16:
+                  if rows[index] != (16, g, undefined):
+                      return False
+                  index += 1
+              elif named or group != g:
+                  return False
+              return index == len(rows) - 1 and rows[index] == (32, o, undefined)
+
+
+          def supported_public_acl(path, item, attribute, value):
+              return public_acl_eligible(path, item) and (supported_access_acl(value, item)
+                  if attribute == 'system.posix_acl_access' else stat.S_ISDIR(item.st_mode)
+                  and attribute == 'system.posix_acl_default' and supported_default_acl(value))
 
 
           def supported_default_acl(value):
@@ -1148,7 +1264,7 @@ jobs:
                   and value[20:] == bytes.fromhex('04000700ffffffff 10000700ffffffff 20000700ffffffff'))
 
 
-          def default_acl_shape(value):
+          def acl_shape(value):
               # Structural decoding only; no semantic ACL validity or removal authority.
               shape = {'byteLength': None, 'version2': None, 'aligned': False,
                        'entryCount': None, 'entries': [], 'complete': False, 'reason': None}
@@ -1187,7 +1303,7 @@ jobs:
               return shape
 
 
-          def guarded_xattrs(fd, parent, name, path, item, phase, held=None, *, classify_default=False):
+          def guarded_xattrs(fd, parent, name, path, item, phase, held=None, *, classify_acls=False):
               # fgetxattr requires an ordinary FD, not O_PATH. Query only the two
               # guarded names; successful empty bytes are still forbidden presence.
               def binding():
@@ -1200,9 +1316,10 @@ jobs:
                   except OSError as error:
                       return False, error.errno
 
-              normalization_needed = False
-              for attribute in ('system.posix_acl_access', 'system.posix_acl_default'
-                                if stat.S_ISDIR(item.st_mode) else 'security.capability'):
+              needed = [False, False]
+              for index, attribute in enumerate(('system.posix_acl_access', 'system.posix_acl_default'
+                                                if stat.S_ISDIR(item.st_mode) else 'security.capability')):
+                  kind = attribute.rsplit('_', 1)[-1]
                   bound, number = binding()
                   result, truncated, probe_performed, shape = None, False, False, None
                   binding_unknown = not bound
@@ -1218,15 +1335,13 @@ jobs:
                       else:
                           # Only the no-effect DATA census may classify supported presence;
                           # this is normalization-needed, never absence or runtime admission.
-                          if (classify_default and attribute == 'system.posix_acl_default'
-                                  and public_default_acl_eligible(path, item) and supported_default_acl(value)):
-                              normalization_needed = True
+                          if classify_acls and supported_public_acl(path, item, attribute, value):
+                              needed[index] = True
                           else:
                               result = 'present'
                               truncated = type(value) is not bytes or len(value) > 65536
-                              if (classify_default and attribute == 'system.posix_acl_default'
-                                      and public_default_acl_scope(path)):
-                                  shape = default_acl_shape(value)
+                              if classify_acls and kind in ACL_REMOVAL and public_acl_scope(path, item):
+                                  shape = acl_shape(value)
                           del value  # Never retain raw attribute bytes or principal IDs.
                       bound, after_errno = binding()
                       if not bound:
@@ -1238,9 +1353,9 @@ jobs:
                                            probe_performed=probe_performed, binding_unknown=binding_unknown,
                                            truncated=truncated)
                       if shape is not None:
-                          error.observed['defaultAclShape'] = shape
+                          error.observed[kind + 'AclShape'] = shape
                       raise error
-              return normalization_needed
+              return tuple(needed)
 
 
           def changed_only(before, after, mode, gid):
@@ -1303,11 +1418,11 @@ jobs:
                    and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
                    'protected-ancestor', {'path': path, **record(s)})
 
-          def prepare_public_default_acl(fd, parent, name, path, before, ancestors, prefix):
-              # Original no-follow directory only; exact rooted custody, not a path-prefix grant.
-              # Ancestors remain strictly protected/default-free even when this target may change.
+          def prepare_public_acls(fd, parent, name, path, before, ancestors, prefix):
+              # Original no-follow object; exact rooted custody, not a path-prefix grant.
+              # Ancestors remain protected/ACL-free even when this target may change.
               parts = path.split('/')[1:]
-              need(public_default_acl_scope(path) and path.startswith('/') and parts
+              need(public_acl_scope(path, before) and path.startswith('/') and parts
                    and all(part not in {'', '.', '..'} for part in parts)
                    and [entry[3] for entry in ancestors] == [('/' + '/'.join(parts[:index]) if index else '/')
                                                              for index in range(len(parts))]
@@ -1315,11 +1430,11 @@ jobs:
                    and all(entry[1] == ancestors[index - 1][0] and entry[2] == parts[index - 1]
                            for index, entry in enumerate(ancestors) if index)
                    and ancestors[-1][0] == parent and fd not in {entry[0] for entry in ancestors},
-                   'fixed-public-default-target')
+                   'fixed-public-acl-target')
               for _, _, _, ancestor_path, expected in ancestors:
                   protected(expected, ancestor_path)
-              access, default = 'system.posix_acl_access', 'system.posix_acl_default'
-              effect_prefix = 'share-default' if path == '/usr/share' else prefix + '-default'
+              attributes = ('system.posix_acl_access', 'system.posix_acl_default'
+                            if stat.S_ISDIR(before.st_mode) else 'security.capability')
 
               def failure(attribute, phase, *, result='binding-unproven', number=None,
                           probe=False, unknown=True, truncated=False):
@@ -1351,65 +1466,72 @@ jobs:
                   if not bound:
                       raise first or failure(attribute, phase, number=number)
 
-              def query(item, attribute, phase, *, permit_supported=False):
+              def query(item, attribute, phase, *, permit_supported=False, expected=None):
                   require_binding(item, phase, attribute)
-                  present, error = False, None
+                  value, error = None, None
+                  kind = attribute.rsplit('_', 1)[-1]
                   try:
                       value = os.getxattr(fd, attribute)
                   except OSError as cause:
                       if cause.errno != errno.ENODATA:
-                          error = failure(attribute, phase, result='errno', number=cause.errno,
-                                          probe=True, unknown=False)
+                          error = failure(attribute, phase, result='errno', number=cause.errno, probe=True, unknown=False)
+                      elif expected is not None:
+                          error = failure(attribute, phase, result='errno', number=cause.errno, probe=True, unknown=False)
                   else:
-                      present = True
-                      allowed = (permit_supported and public_default_acl_eligible(path, before)
-                                 and supported_default_acl(value))
+                      allowed = (supported_public_acl(path, before, attribute, value) if permit_supported
+                                 else expected is not None and type(value) is bytes and value == expected)
                       if not allowed:
                           error = failure(attribute, phase, result='present', probe=True, unknown=False,
                                           truncated=type(value) is not bytes or len(value) > 65536)
-                          if permit_supported and attribute == default:
-                              error.observed['defaultAclShape'] = default_acl_shape(value)
-                      del value  # Never retain or print raw attribute bytes or principal IDs.
+                          if permit_supported and kind in ACL_REMOVAL:
+                              error.observed[kind + 'AclShape'] = acl_shape(value)
+                          value = None  # Retain only qualified bounded buffers for exact peer checks.
                   bound, number, first = binding(item, phase)
                   if error is not None:
                       error.observed['bindingUnknown'] = not bound
-                      raise error  # The first query refusal survives later binding failure.
+                      raise error  # First query refusal survives later binding failure.
                   if not bound:
                       raise first or failure(attribute, phase, number=number, probe=True)
-                  return present
+                  return value
 
               phase = 'share-default-before' if path == '/usr/share' else prefix + '-before'
-              query(before, access, phase)
-              if not query(before, default, phase, permit_supported=True):
-                  return before, 'absent'
-              phase = effect_prefix + '-remove'
-              require_binding(before, phase, default)
-              original_key = before.st_dev, before.st_ino
-              need(original_key not in DEFAULT_ACL_ORIGINALS, 'default-acl-removal-already-attempted')
-              need(len(DEFAULT_ACL_ORIGINALS) < 32768, 'default-acl-removal-attempt-bound')
-              DEFAULT_ACL_ORIGINALS.add(original_key)  # Register custody before the sole syscall.
-              DEFAULT_ACL_REMOVAL['attempted'] = True
-              DEFAULT_ACL_REMOVAL['established'] = False
-              DEFAULT_ACL_REMOVAL['attemptedCount'] += 1
-              try:
-                  os.removexattr(fd, 'system.posix_acl_default')  # One attempt, never ENODATA-as-success.
-              except OSError as error:
-                  raise failure(default, phase, result='errno', number=error.errno, probe=True) from None
-              phase = effect_prefix + '-after'
-              try:
-                  provisional = os.fstat(fd)
-              except OSError as error:
-                  raise failure(default, phase, number=error.errno) from None
-              if identity(provisional)[:-1] != identity(before)[:-1]:
-                  raise failure(default, phase)
-              # Only provisional ctime may differ; all postqueries bind this exact snapshot.
-              query(provisional, default, phase)
-              query(provisional, access, phase)
-              require_binding(provisional, phase, default)
-              DEFAULT_ACL_REMOVAL['establishedCount'] += 1
-              DEFAULT_ACL_REMOVAL['established'] = (DEFAULT_ACL_REMOVAL['establishedCount']
-                                                    == DEFAULT_ACL_REMOVAL['attemptedCount'])
-              return provisional, 'removed'
+              # Qualify BOTH original attributes before any effect (capability must be absent).
+              expected = {attribute: query(before, attribute, phase, permit_supported=True) for attribute in attributes}
+              item, result = before, {}
+              for kind in ('access', 'default') if stat.S_ISDIR(before.st_mode) else ('access',):
+                  attribute = 'system.posix_acl_' + kind
+                  result[kind + 'Acl'] = 'absent'
+                  if expected[attribute] is None:
+                      continue
+                  effect_prefix = ('share' if path == '/usr/share' else prefix) + '-' + kind
+                  phase = effect_prefix + '-remove'
+                  require_binding(item, phase, attribute)
+                  original_key, custody, state = (before.st_dev, before.st_ino), ACL_ORIGINALS[kind], ACL_REMOVAL[kind]
+                  need(original_key not in custody, kind + '-acl-removal-already-attempted')
+                  need(len(custody) < 32768, kind + '-acl-removal-attempt-bound')
+                  custody.add(original_key)  # Register per-attribute custody before its sole syscall.
+                  state['attempted'], state['established'] = True, False
+                  state['attemptedCount'] += 1
+                  try:
+                      os.removexattr(fd, attribute)  # Only the two fixed ACL names; never ENODATA-as-success.
+                  except OSError as error:
+                      raise failure(attribute, phase, result='errno', number=error.errno, probe=True) from None
+                  phase = effect_prefix + '-after'
+                  try:
+                      provisional = os.fstat(fd)
+                  except OSError as error:
+                      raise failure(attribute, phase, number=error.errno) from None
+                  if identity(provisional)[:-1] != identity(item)[:-1]:
+                      raise failure(attribute, phase)
+                  expected[attribute] = None
+                  # Provisional ctime only; removed attribute absent, peer buffer/absence unchanged.
+                  for other in (attribute, *(name for name in attributes if name != attribute)):
+                      query(provisional, other, phase, expected=expected[other])
+                  require_binding(provisional, phase, attribute)
+                  state['establishedCount'] += 1
+                  state['established'] = state['establishedCount'] == state['attemptedCount']
+                  item, result[kind + 'Acl'] = provisional, 'removed'
+              return item, result
 
 
           def prepare_directory(path):
@@ -1454,8 +1576,7 @@ jobs:
                           need(before.st_dev == MOUNT_DEVICE and (local_fonts or (stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
                                and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777))),
                                'target-policy', {'path': current, **record(before)})
-                          expected, default_acl = prepare_public_default_acl(fd, parent, name, path, before,
-                                                                              originals, 'prepare')
+                          expected, acl_status = prepare_public_acls(fd, parent, name, path, before, originals, 'prepare')
                           originals.append((fd, parent, name, current, expected))
                           recheck('prepare-before')
                           mount_unchanged()
@@ -1478,7 +1599,7 @@ jobs:
                           recheck('prepare-after-mode')
                           mount_unchanged()
                           return {'path': path, 'before': record(before), 'after': record(after),
-                                  'defaultAcl': default_acl}
+                                  **acl_status}
                       protected(before, current)
                       originals.append((fd, parent, name, current, before))
                       guarded_xattrs(fd, parent, name, current, before, 'prepare-before')
@@ -1488,7 +1609,7 @@ jobs:
                   authority_failure = error
                   raise
               except OSError as error:
-                  if DEFAULT_ACL_REMOVAL['attempted']:
+                  if removal_receipt():
                       need(False, 'preparation-os-error', {'path': path,
                            'errno': error.errno if type(error.errno) is int and 0 <= error.errno <= 4095 else None})
                   raise
@@ -1510,7 +1631,7 @@ jobs:
               # effects; only a fully supported scope may enter the normalization pass.
               flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
               file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
-              count, unsafe_count, unsupported_count, changed_count, default_acl_count = 0, 0, 0, 0, 0
+              count, unsafe_count, unsupported_count, changed_count, default_acl_count, access_acl_count = 0, 0, 0, 0, 0, 0
               unsafe, changed, fds, originals = [], [], [], []
               selected_links = []
 
@@ -1546,7 +1667,7 @@ jobs:
                   return after
 
               def visit(parent, name, path, depth, root_kind):
-                  nonlocal count, unsafe_count, unsupported_count, default_acl_count
+                  nonlocal count, unsafe_count, unsupported_count, default_acl_count, access_acl_count
                   count += 1
                   need(count <= 32768 and depth <= 16, 'metadata-entry-depth-bound')
                   try:
@@ -1582,13 +1703,13 @@ jobs:
                                                  number=error.errno) from None
                           fds.append(fd)
                           originals.append((fd, parent, name, path, item))
-                          if normalize and directory:
-                              item, _ = prepare_public_default_acl(fd, parent, name, path, item,
-                                                                   originals[:-1], 'metadata')
+                          if normalize:
+                              item, _ = prepare_public_acls(fd, parent, name, path, item, originals[:-1], 'metadata')
                               originals[-1] = (fd, parent, name, path, item)
-                          default_needed = guarded_xattrs(fd, parent, name, path, item,
-                              'metadata-before' if normalize else 'metadata-census', classify_default=not normalize)
+                          access_needed, default_needed = guarded_xattrs(fd, parent, name, path, item,
+                              'metadata-before' if normalize else 'metadata-census', classify_acls=not normalize)
                           bound(fd, parent, name, item)
+                          access_acl_count += int(access_needed)
                           default_acl_count += int(default_needed)
                           if normalize and not safe:
                               item = tighten(fd, parent, name, path, item, 0o755 if directory else mode & ~0o133)
@@ -1673,7 +1794,7 @@ jobs:
                           need(not failed_close, 'metadata-original-close')
               return {'_selectedLinks': selected_links, 'entries': count, 'unsafeCount': unsafe_count, 'unsafe': unsafe,
                       'unsafeListTruncated': unsafe_count > len(unsafe), 'unsupportedCount': unsupported_count,
-                      'defaultAclNormalizationCount': default_acl_count,
+                      'defaultAclNormalizationCount': default_acl_count, 'accessAclNormalizationCount': access_acl_count,
                       'changedCount': changed_count, 'changed': changed, 'changedListTruncated': changed_count > len(changed)}
 
           def link_closure_metadata(selections):
@@ -1891,17 +2012,18 @@ jobs:
               MOUNT_POINTS = mount_scope(MOUNT_RAW, MOUNT_DEVICE)
               prepared = [prepare_directory(path) for path in sorted(PREPARE_DIRS, key=lambda path: (path.count('/'), path))]
               metadata = metadata_preflight()
-              if metadata['unsupportedCount'] == 0 and (metadata['unsafeCount'] or metadata['defaultAclNormalizationCount']):
+              if metadata['unsupportedCount'] == 0 and (metadata['unsafeCount']
+                      or metadata['defaultAclNormalizationCount'] or metadata['accessAclNormalizationCount']):
                   metadata = metadata_preflight(normalize=True)
               mount_unchanged()
               selected_links = metadata.pop('_selectedLinks')
               metadata['selectedLinkCount'] = len(selected_links)
               receipt = json.dumps({'scope': SCOPE, 'prepared': prepared, 'metadata': metadata,
-                                    'defaultAclRemoval': dict(DEFAULT_ACL_REMOVAL),
+                                    **removal_receipt(all_states=True),
                                     'runtimeAdmission': False}, sort_keys=True, separators=(',', ':'))
               need(len(receipt.encode('ascii')) <= 65536, 'receipt-bound')
               print(receipt, flush=True)
-              need(metadata['unsafeCount'] == 0 and metadata['defaultAclNormalizationCount'] == 0,
+              need(metadata['unsafeCount'] == metadata['defaultAclNormalizationCount'] == metadata['accessAclNormalizationCount'] == 0,
                    'unhandled-unsafe-data-metadata')
 
               closure = link_closure_metadata(selected_links)
@@ -1913,7 +2035,7 @@ jobs:
           except XattrFailure as error:
               need(False, 'guarded-xattr', error.observed)
           except OSError as error:
-              if DEFAULT_ACL_REMOVAL['attempted']:
+              if removal_receipt():
                   need(False, 'preparation-os-error',
                        {'errno': error.errno if type(error.errno) is int and 0 <= error.errno <= 4095 else None})
               raise

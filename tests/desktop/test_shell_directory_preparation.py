@@ -57,6 +57,20 @@ UNIVERSAL_DEFAULT_ACLS = (
 )
 HOST_DEFAULT_ACL = bytes.fromhex(
     "02000000 01000700ffffffff 0200070044332211 04000700ffffffff 10000700ffffffff 20000700ffffffff")
+
+
+def access_acl(mode=0o755, *, users=((0x11223344, 7),), groups=(), group_permissions=7):
+    """Canonical fixture bytes, not a production ACL evaluator or OS call."""
+    entries = [(1, (mode >> 6) & 7, 0xffffffff)]
+    entries += [(2, permissions, identity) for identity, permissions in users]
+    entries += [(4, group_permissions, 0xffffffff)]
+    entries += [(8, permissions, identity) for identity, permissions in groups]
+    entries += [(16, (mode >> 3) & 7, 0xffffffff), (32, mode & 7, 0xffffffff)]
+    return b"\x02\x00\x00\x00" + b"".join(
+        tag.to_bytes(2, "little") + permissions.to_bytes(2, "little") + identity.to_bytes(4, "little")
+        for tag, permissions, identity in entries)
+
+
 PREPARER_MARKER = ("          sudo /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent "
                    "/usr/bin/python3.12 -I -S -B - <<'PY'\n")
 
@@ -209,23 +223,28 @@ class DirectoryMetadataOS:
         return value
 
     def removexattr(self, fd, attribute):
-        # Only the already selected public directory scopes may be provisioned;
+        # Only the already selected public DATA scopes may be provisioned;
         # this is not a generic attribute-removal API, even in this inert fixture.
-        if type(fd) is not int or fd not in self.live or self.fd_flags[fd] != FLAGS:
-            raise AssertionError("Removal requires the original ordinary directory FD")
+        if type(fd) is not int or fd not in self.live or self.fd_flags[fd] not in (FLAGS, FILE_FLAGS):
+            raise AssertionError("Removal requires the original ordinary kind-specific FD")
         node = self.live[fd]
-        selected = node.path in PREPARE or any(
+        directory = stat.S_ISDIR(node.st_mode)
+        selected = (directory and node.path in PREPARE or
+                    not directory and stat.S_ISREG(node.st_mode) and node.path in FILES or any(
             root not in FILES and (node.path == root or node.path.startswith(root + "/")) for root in DATA)
-        if (not selected or attribute != DEFAULT_ACL or not stat.S_ISDIR(node.st_mode)
-                or (node.st_uid, node.st_gid) != (0, 0)
-                or stat.S_IMODE(node.st_mode) not in (0o755, 0o775, 0o777)):
-            raise AssertionError("Only an original qualified public directory default is removable")
-        if any(inode == node.st_ino for _, _, inode, _ in self.xattr_removals):
-            raise AssertionError("A public directory default may have only one original removal attempt")
+                    )
+        modes = (0o755, 0o775, 0o777) if directory else (0o444, 0o644, 0o664, 0o666, 0o555, 0o755, 0o775, 0o777)
+        if (not selected or attribute not in (ACCESS_ACL, DEFAULT_ACL) or attribute == DEFAULT_ACL and not directory
+                or (node.st_uid, node.st_gid) != (0, 0) or node.st_dev != 1
+                or not directory and (not stat.S_ISREG(node.st_mode) or node.st_nlink != 1)
+                or stat.S_IMODE(node.st_mode) not in modes):
+            raise AssertionError("Only an original qualified public DATA ACL is removable")
+        if any((inode, name) == (node.st_ino, attribute) for _, _, inode, name in self.xattr_removals):
+            raise AssertionError("A public ACL may have only one original removal attempt per attribute")
         self.xattr_removals.append((fd, node.path, node.st_ino, attribute))
         self.call("removexattr", node.path)
         if attribute not in node.xattrs:
-            raise OSError(errno.ENODATA, "Mock original default disappeared")
+            raise OSError(errno.ENODATA, "Mock original ACL disappeared")
         del node.xattrs[attribute]
         node.st_ctime_ns += 1
         self.call("removexattr-after", node.path)
@@ -414,12 +433,14 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         self.assertFalse(any(within(row[1]) for row in filesystem.xattr_removals))
 
     def authority_failure(self, observed):
-        self.assertEqual(set(observed) - {"defaultAclShape"},
+        self.assertEqual(set(observed) - {"defaultAclShape", "accessAclShape"},
                          {"path", "pathTruncated", "kind", "attribute", "result", "errno", "original",
                           "phase", "complete", "truncated", "cleanupUnknown", "bindingUnknown", "probePerformed"})
-        if "defaultAclShape" in observed:
-            self.assertEqual(observed["attribute"], DEFAULT_ACL)
-            shape = observed["defaultAclShape"]
+        for key, attribute in (("defaultAclShape", DEFAULT_ACL), ("accessAclShape", ACCESS_ACL)):
+            if key not in observed:
+                continue
+            self.assertEqual(observed["attribute"], attribute)
+            shape = observed[key]
             self.assertEqual(set(shape), {"byteLength", "version2", "aligned", "entryCount", "entries", "complete", "reason"})
             self.assertLessEqual(len(shape["entries"]), 16)
             self.assertIs(type(shape["complete"]), bool)
@@ -433,9 +454,12 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
             self.assertLessEqual(observed["errno"], 4095)
         self.assertIn(observed["phase"], ("prepare-before", "prepare-after-group", "prepare-after-mode",
                                           "prepare-default-remove", "prepare-default-after",
+                                          "prepare-access-remove", "prepare-access-after",
+                                          "share-access-before", "share-access-remove", "share-access-after",
                                           "share-default-before", "share-default-remove", "share-default-after",
                                           "metadata-census", "metadata-before", "metadata-after",
-                                          "metadata-default-remove", "metadata-default-after", "link-closure"))
+                                          "metadata-default-remove", "metadata-default-after",
+                                          "metadata-access-remove", "metadata-access-after", "link-closure"))
         self.assertLessEqual(len(observed["path"]), 512)
         self.assertNotIn("\n", observed["path"])
         self.assertEqual(len(observed["original"]), 9)
@@ -765,6 +789,261 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                     observed = rows[-1]["observed"]
                     self.assertEqual((observed["attribute"], observed["result"]), (DEFAULT_ACL, "present"))
                     self.assertTrue(observed["cleanupUnknown"])
+
+    def test_public_access_policy_is_mode_bound_canonical_and_non_additive(self):
+        filesystem = DirectoryMetadataOS()
+        namespace, _, error = self.run_inline(filesystem)
+        self.assertIsNone(error)
+        accepts = namespace["supported_access_acl"]
+        item = filesystem.snapshot(filesystem.node("/usr/share/glvnd"))
+        # Exercise all effective mask/other/named-entry combinations, including
+        # restrictive named entries. No process, principal lookup or OS ACL API.
+        for group in range(8):
+            for other in range(8):
+                mode = 0o700 | group << 3 | other
+                item.st_mode = stat.S_IFDIR | mode
+                for named in range(8):
+                    for owning_group in range(8):
+                        body = access_acl(mode, users=((7, named),), groups=((11, named),),
+                                          group_permissions=owning_group)
+                        expected = not (other & ~group) and named & group == group and owning_group & group == group
+                        self.assertEqual(accepts(body, item), expected, (mode, named, owning_group))
+                        if expected:
+                            # Independent caller classes: owner, named user
+                            # with/without owning-group membership, owning group,
+                            # named group only, and no matched ACL identity.
+                            before = (7, named & group, named & group, owning_group & group, named & group, other)
+                            after = (7, group, other, group, other, other)
+                            self.assertTrue(all(new & ~old == 0 for old, new in zip(before, after)))
+        item.st_mode = stat.S_IFDIR | 0o755
+        valid = access_acl()
+        # Undefined IDs belong only to object/mask/other entries. Named IDs are
+        # ordered and unique within their type, not looked up in the host.
+        self.assertTrue(accepts(access_acl(users=((0, 7), (7, 5), (0xfffffffe, 7)), groups=((0, 7), (9, 5))), item))
+        self.assertTrue(accepts(access_acl(users=(), group_permissions=5), item))
+        minimal = access_acl(users=(), group_permissions=5)
+        self.assertTrue(accepts(minimal[:20] + minimal[28:], item))  # no names/mask
+        malformed = [None, "not-bytes", b"", valid[:-1], valid + b"\0", b"\x03" + valid[1:],
+                     access_acl(users=((7, 7), (7, 7))), access_acl(users=((8, 7), (7, 7))),
+                     access_acl(users=((0xffffffff, 7),)), access_acl(groups=((9, 7), (9, 7))),
+                     access_acl(groups=((9, 7), (8, 7))), access_acl(groups=((0xffffffff, 7),)),
+                     access_acl(users=((7, 8),)), access_acl(users=tuple((n, 7) for n in range(29))),
+                     valid[:28] + valid[36:]]  # named user without mask
+        for offset, replacement in ((4, b"\x00\x00"), (6, b"\x06\x00"), (8, b"\0\0\0\0"),
+                                    (12, b"\x08\x00"), (24, b"\0\0\0\0"), (30, b"\x07\x00"),
+                                    (38, b"\x04\x00"), (40, b"\0\0\0\0")):
+            malformed.append(valid[:offset] + replacement + valid[offset + len(replacement):])
+        for body in malformed:
+            self.assertFalse(accepts(body, item))
+        for mode in (0o755, 0o775, 0o777, 0o444, 0o555, 0o644, 0o664, 0o666):
+            item.st_mode = stat.S_IFDIR | mode
+            self.assertTrue(accepts(access_acl(mode), item))
+        item.st_mode = stat.S_IFDIR | 0o705
+        self.assertFalse(accepts(access_acl(0o705), item))
+
+    def test_public_access_census_and_both_attributes_keep_parent_first_original_effects(self):
+        for both, child_mode in ((False, 0o755), (True, 0o775)):
+            filesystem = DirectoryMetadataOS()
+            fixed, parent = "/usr/share/glvnd", "/usr/share/fonts/aa-access"
+            child, leaf, file_root = parent + "/child", parent + "/child/inert.ttf", "/etc/drirc"
+            filesystem.add(parent)
+            filesystem.add(child, stat.S_IFDIR | child_mode)
+            filesystem.add(leaf, stat.S_IFREG | (0o664 if both else 0o644))
+            filesystem.node(file_root).st_mode = stat.S_IFREG | 0o444
+            selected = (fixed, parent, child, leaf, file_root)
+            original = {path: vars(filesystem.snapshot(filesystem.node(path))).copy() for path in selected}
+            defaults = {fixed, parent, child} if both else set()
+            for path in selected:
+                node = filesystem.node(path)
+                node.xattrs[ACCESS_ACL] = access_acl(stat.S_IMODE(node.st_mode))
+                if path in defaults:
+                    node.xattrs[DEFAULT_ACL] = HOST_DEFAULT_ACL
+            outside = fixed + "/not-a-data-root"
+            filesystem.add(outside, stat.S_IFREG | 0o644).xattrs[ACCESS_ACL] = access_acl(0o644)
+            census_finished, recursive = False, []
+
+            def hook(operation, path, _count):
+                nonlocal census_finished
+                if (not census_finished and operation == "getxattr" and path == BYOBU_ICON
+                        and filesystem.xattr_calls[-1][3] == FILE_CAPABILITY):
+                    self.assertEqual({row[1] for row in filesystem.xattr_removals}, {fixed})
+                    self.assertTrue(all(ACCESS_ACL in filesystem.node(name).xattrs for name in selected[1:]))
+                    census_finished = True
+                if operation == "removexattr" and path in selected[1:]:
+                    self.assertTrue(census_finished)
+                    recursive.append((path, filesystem.xattr_removals[-1][3]))
+                    ancestor = filesystem.node(path.rsplit("/", 1)[0])
+                    self.assertEqual(stat.S_IMODE(ancestor.st_mode), 0o755)
+                    self.assertNotIn(ACCESS_ACL, ancestor.xattrs)
+                    self.assertNotIn(DEFAULT_ACL, ancestor.xattrs)
+
+            filesystem.hook = hook
+            with self.subTest(both=both):
+                result = self.run_inline(filesystem)
+                self.assertTrue(self.closure(result)["safe"])
+                expected_order = []
+                for path in selected[1:]:
+                    expected_order.append((path, ACCESS_ACL))
+                    if path in defaults:
+                        expected_order.append((path, DEFAULT_ACL))
+                self.assertEqual(recursive, expected_order)
+                receipt = result[1][0]
+                for key, count in (("accessAclRemoval", len(selected)), ("defaultAclRemoval", len(defaults))):
+                    self.assertEqual(receipt[key], {"attempted": bool(count), "established": bool(count),
+                                                   "attemptedCount": count, "establishedCount": count})
+                self.assertEqual(receipt["metadata"]["accessAclNormalizationCount"], 0)
+                self.assertEqual(receipt["metadata"]["defaultAclNormalizationCount"], 0)
+                self.assertEqual(receipt["metadata"]["unsafeCount"], 0)
+                self.assertEqual(receipt["metadata"]["changedCount"], 2 if both else 0)
+                self.assertEqual(len(filesystem.xattr_removals), len(selected) + len(defaults))
+                self.assertEqual(filesystem.chowns, [])
+                for _, path, inode, _ in filesystem.xattr_removals:
+                    self.assertEqual(inode, original[path]["st_ino"])
+                    self.assertEqual(filesystem.node(path).xattrs, {})
+                    after = vars(filesystem.snapshot(filesystem.node(path)))
+                    for key in original[path].keys() - {"st_mode", "st_ctime_ns"}:
+                        self.assertEqual(after[key], original[path][key])
+                self.assertEqual(filesystem.node(outside).xattrs[ACCESS_ACL], access_acl(0o644))
+                self.assertFalse(any(row[1] == outside for row in filesystem.xattr_calls))
+                self.assertNotIn("287454020", json.dumps(result[1]))
+
+    def test_public_access_scope_and_unsupported_peers_refuse_without_recursive_effects(self):
+        for problem in ("access-deny", "default", "capability", "mode", "file-root-kind"):
+            filesystem = DirectoryMetadataOS()
+            first, later = "/usr/share/fonts/aa-access", "/usr/share/fonts/zz-refuse"
+            filesystem.add(first).xattrs[ACCESS_ACL] = access_acl()
+            filesystem.node(first).xattrs[DEFAULT_ACL] = HOST_DEFAULT_ACL
+            if problem == "file-root-kind":
+                filesystem.add(BYOBU_ICON)
+            elif problem == "mode":
+                filesystem.add(later, stat.S_IFREG | 0o650)
+            elif problem == "capability":
+                node = filesystem.add(later, stat.S_IFREG | 0o644)
+                node.xattrs = {ACCESS_ACL: access_acl(0o644), FILE_CAPABILITY: b"private-capability"}
+            else:
+                node = filesystem.add(later)
+                node.xattrs[ACCESS_ACL] = access_acl(users=((7, 0),)) if problem == "access-deny" else access_acl()
+                if problem == "default":
+                    node.xattrs[DEFAULT_ACL] = b"private-default"
+            before = vars(filesystem.snapshot(filesystem.node(first))).copy()
+            with self.subTest(problem=problem):
+                rows = self.refused(self.run_inline(filesystem))
+                self.assertEqual(filesystem.xattr_removals, [])
+                self.assertEqual(filesystem.chmods, [])
+                self.assertEqual(filesystem.chowns, [])
+                self.assertEqual(vars(filesystem.snapshot(filesystem.node(first))), before)
+                self.assertEqual(filesystem.node(first).xattrs, {ACCESS_ACL: access_acl(), DEFAULT_ACL: HOST_DEFAULT_ACL})
+                self.assertNotIn("private-", json.dumps(rows))
+        # Both attributes must be supported before either fixed-target effect.
+        for bad in (ACCESS_ACL, DEFAULT_ACL):
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.node("/usr/share/glvnd")
+            original.xattrs = {ACCESS_ACL: access_acl(), DEFAULT_ACL: HOST_DEFAULT_ACL}
+            original.xattrs[bad] = access_acl(users=((7, 0),)) if bad == ACCESS_ACL else b""
+            self.refused(self.run_inline(filesystem))
+            self.assertEqual(filesystem.xattr_removals, [])
+        # A valid public-looking external target is still outside effect scope.
+        filesystem = DirectoryMetadataOS()
+        outside = "/opt/mrk-public/inert.ttf"
+        filesystem.add(outside, stat.S_IFREG | 0o644).xattrs[ACCESS_ACL] = access_acl(0o644)
+        filesystem.link("/usr/share/fonts/alias.ttf", outside)
+        result = self.run_inline(filesystem)
+        diagnostic = self.closure(result, refused=True)
+        self.assertEqual(diagnostic["records"][0]["authorityFailure"]["attribute"], ACCESS_ACL)
+        self.assertEqual(filesystem.xattr_removals, [])
+        self.assertEqual(filesystem.node(outside).xattrs[ACCESS_ACL], access_acl(0o644))
+        self.metadata_only_under(filesystem, "/opt")
+
+    def test_public_access_original_failures_latch_separate_counts_without_retry(self):
+        changes = ("remove-error", "remove-missing", "access-reappears", "default-drift", "default-disappears", "identity",
+                   "default-remove-error", "close", "refusal-and-close")
+        for change in changes:
+            filesystem = DirectoryMetadataOS()
+            first, second = "/usr/share", "/usr/share/glvnd"
+            for path in (first, second):
+                filesystem.node(path).xattrs = {ACCESS_ACL: access_acl(), DEFAULT_ACL: HOST_DEFAULT_ACL}
+
+            def hook(operation, path, count):
+                if path != second:
+                    return
+                attribute = filesystem.xattr_removals[-1][3] if filesystem.xattr_removals else None
+                if operation == "removexattr" and attribute == ACCESS_ACL and change in {"remove-error", "remove-missing"}:
+                    raise OSError(errno.EIO if change == "remove-error" else errno.ENODATA, "private-access-removal")
+                if operation == "removexattr" and attribute == DEFAULT_ACL and change == "default-remove-error":
+                    raise OSError(errno.EIO, "private-default-removal")
+                if operation == "removexattr-after" and attribute == ACCESS_ACL:
+                    if change in {"access-reappears", "refusal-and-close"}:
+                        filesystem.node(second).xattrs[ACCESS_ACL] = access_acl()
+                    elif change == "default-drift":
+                        filesystem.node(second).xattrs[DEFAULT_ACL] = b"private-default-drift"
+                    elif change == "default-disappears":
+                        del filesystem.node(second).xattrs[DEFAULT_ACL]
+                    elif change == "identity":
+                        filesystem.node(second).st_ino += 1000
+                if operation == "close" and count == 1 and change in {"close", "refusal-and-close"}:
+                    raise OSError(errno.EIO, "private-access-close")
+
+            filesystem.hook = hook
+            with self.subTest(change=change):
+                rows = self.refused(self.run_inline(filesystem))
+                access_established = 2 if change in {"close", "default-remove-error"} else 1
+                default_attempted = 2 if change in {"close", "default-remove-error"} else 1
+                default_established = 2 if change == "close" else 1
+                self.assertEqual(rows[-1]["accessAclRemoval"], {
+                    "attempted": True, "established": access_established == 2,
+                    "attemptedCount": 2, "establishedCount": access_established})
+                self.assertEqual(rows[-1]["defaultAclRemoval"], {
+                    "attempted": True, "established": default_attempted == default_established,
+                    "attemptedCount": default_attempted, "establishedCount": default_established})
+                self.assertEqual(filesystem.node(first).xattrs, {})
+                self.assertEqual(len(filesystem.xattr_removals), 2 + default_attempted)
+                if change in {"close", "refusal-and-close"}:
+                    self.assertTrue(rows[-1].get("cleanupUnknown") or (rows[-1].get("observed") or {}).get("cleanupUnknown"))
+                if change == "refusal-and-close":
+                    self.assertEqual(rows[-1]["observed"]["attribute"], ACCESS_ACL)
+                if change == "default-disappears":
+                    observed = self.authority_failure(rows[-1]["observed"])
+                    self.assertEqual((observed["attribute"], observed["result"], observed["errno"]),
+                                     (DEFAULT_ACL, "errno", errno.ENODATA))
+                    self.assertFalse(observed["bindingUnknown"])
+                    self.assertEqual(observed["phase"], "prepare-access-after")
+                    self.assertEqual([row[3] for row in filesystem.xattr_removals if row[1] == second], [ACCESS_ACL])
+                self.assertNotIn("private-", json.dumps(rows))
+        # The regular-file companion is capability, never a removable ACL.
+        filesystem = DirectoryMetadataOS()
+        path = "/usr/share/fonts/inert.ttf"
+        filesystem.add(path, stat.S_IFREG | 0o777).xattrs[ACCESS_ACL] = access_acl(0o777)
+
+        def inject_capability(operation, observed_path, _count):
+            if operation == "removexattr-after" and observed_path == path:
+                filesystem.node(path).xattrs[FILE_CAPABILITY] = b"private-capability"
+
+        filesystem.hook = inject_capability
+        rows = self.refused(self.run_inline(filesystem))
+        self.assertEqual([row[3] for row in filesystem.xattr_removals], [ACCESS_ACL])
+        self.assertEqual(filesystem.chmods, [])
+        self.assertEqual(rows[-1]["accessAclRemoval"]["establishedCount"], 0)
+        self.assertEqual(rows[-1]["observed"]["attribute"], FILE_CAPABILITY)
+        filesystem = DirectoryMetadataOS()
+        path = "/usr/share/fonts"
+        filesystem.node(path).xattrs[ACCESS_ACL] = access_acl()
+        reintroduced = False
+
+        def reappear(operation, observed_path, _count):
+            nonlocal reintroduced
+            if (not reintroduced and operation == "open" and observed_path == path
+                    and filesystem.xattr_removals and ACCESS_ACL not in filesystem.node(path).xattrs):
+                reintroduced = True
+                filesystem.node(path).xattrs[ACCESS_ACL] = access_acl()
+                filesystem.node(path).st_ctime_ns += 1
+
+        filesystem.hook = reappear
+        rows = self.refused(self.run_inline(filesystem))
+        self.assertTrue(reintroduced)
+        self.assertEqual(len(filesystem.xattr_removals), 1)
+        self.assertEqual(rows[-1]["accessAclRemoval"]["attemptedCount"], 1)
+        self.assertEqual(rows[-1]["accessAclRemoval"]["establishedCount"], 1)
+        self.assertEqual(filesystem.node(path).xattrs[ACCESS_ACL], access_acl())
 
     def test_public_defaults_use_one_completed_census_then_parent_first_original_effects(self):
         # The0755 variant has no unsafe descendant modes: only the separate
