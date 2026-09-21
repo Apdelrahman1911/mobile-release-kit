@@ -76,6 +76,15 @@ def require(value: bool, code: str, module: str | None = None) -> None:
         raise ProbeFailure(code, module)
 
 
+def require_dependency_versions(openssl_version, sqlite_version) -> None:
+    # CPython retains OpenSSL's legacy major/minor/fix/patch/status layout.
+    # OpenSSL 3.5.7 encodes 0x30500070, not a semantic (3, 5, 7) prefix.
+    require(type(openssl_version) is tuple and len(openssl_version) == 5
+            and all(type(value) is int for value in openssl_version)
+            and openssl_version == (3, 5, 0, 7, 0), "native_openssl_version")
+    require(type(sqlite_version) is str and len(sqlite_version) <= 32, "native_sqlite_version")
+
+
 def path_key(value: str) -> str:
     # Equality normalizes case/separators only, not .., short names, device or
     # UNC prefixes, junctions, environment substitutions or a later resolution.
@@ -235,7 +244,7 @@ def behavior() -> dict:
     require(events == [("release", {"version": "1"}), "ready"]
             and ElementTree.fromstring(xml).text == "ready", "expat_behavior")
     require(decimal.Decimal("0.1") + decimal.Decimal("0.2") == decimal.Decimal("0.3"), "decimal_behavior")
-    require(ssl.OPENSSL_VERSION_INFO[:3] == (3, 5, 7) and len(sqlite3.sqlite_version) <= 32, "native_dependency_version")
+    require_dependency_versions(ssl.OPENSSL_VERSION_INFO, sqlite3.sqlite_version)
     return {"ctypes": True, "hashes": True, "compression": True, "expat": True,
             "decimal": True, "sqlite": sqlite3.sqlite_version, "ssl": ssl.OPENSSL_VERSION}
 

@@ -6,12 +6,14 @@ Execute only after separate SOURCE/COMMAND acceptance.
 """
 from __future__ import annotations
 
+import ast
 from contextlib import ExitStack
 import hashlib
 import importlib.util
 import io
 import json
 from pathlib import Path, PureWindowsPath
+import re
 import stat
 import tempfile
 from types import SimpleNamespace
@@ -84,6 +86,46 @@ def synthetic_pins(raw, notice, members):
 
 
 class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
+    def test_native_dependency_versions_use_exact_cpython_layout(self):
+        # Read the native probe only as bounded DATA. Never import or execute
+        # its module, behavior(), main(), supplier code or native API calls.
+        source = SOURCE / "tests/native_desktop_payload_windows.py"
+        with source.open("rb") as stream:
+            raw = stream.read(65537)
+        self.assertLessEqual(len(raw), 65536)
+        tree = ast.parse(raw, filename=str(source))
+        selected = []
+        for name, kind in (("ProbeFailure", ast.ClassDef), ("require", ast.FunctionDef),
+                           ("require_dependency_versions", ast.FunctionDef)):
+            matches = [node for node in tree.body if getattr(node, "name", None) == name]
+            self.assertEqual(len(matches), 1)
+            self.assertIsInstance(matches[0], kind)
+            self.assertEqual(matches[0].decorator_list, [])
+            selected.append(matches[0])
+        namespace = {"re": re}
+        exec(compile(ast.Module(body=selected, type_ignores=[]),
+                     "<windows-probe-dependency-version-data>", "exec", dont_inherit=True), namespace)
+        check = namespace["require_dependency_versions"]
+        failure = namespace["ProbeFailure"]
+        expected = (3, 5, 0, 7, 0)
+        for sqlite in ("", "3.51.1", "x" * 32):
+            with self.subTest(accepted_sqlite_length=len(sqlite)):
+                self.assertIsNone(check(expected, sqlite))
+        wrong_versions = [None, list(expected), (3, 5, 7), expected + (0,),
+                          (3, 5, 0, 6, 0), (3, 5, 0, 7, 15), (3, 5, False, 7, 0)]
+        wrong_versions.extend(expected[:index] + (float(value),) + expected[index + 1:]
+                              for index, value in enumerate(expected))
+        for version in wrong_versions:
+            with self.subTest(openssl=version), self.assertRaises(failure) as raised:
+                check(version, "3.51.1")
+            self.assertEqual(raised.exception.code, "native_openssl_version")
+            self.assertIsNone(raised.exception.module)
+        for sqlite in (None, b"3.51.1", 35101, "x" * 33):
+            with self.subTest(sqlite=sqlite), self.assertRaises(failure) as raised:
+                check(expected, sqlite)
+            self.assertEqual(raised.exception.code, "native_sqlite_version")
+            self.assertIsNone(raised.exception.module)
+
     def test_closed_actual_supplier_roster_keeps_all_native_and_notice_members(self):
         names = [row[0] for row in payload.MEMBERS]
         self.assertEqual(len(names), 37)
