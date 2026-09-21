@@ -33,6 +33,7 @@ ENTRY_LIMIT = 100000
 WORK_SECONDS = 1800
 FINAL_SECONDS = 30
 EVIDENCE_LIMIT = 256 * 1024 * 1024
+NOTICE_DATA_LIMIT = 8 * 1024 * 1024
 DISPOSABLE_DIRS = ("downloads", "sources", "build", "deps", "package-source", "home", "tmp", "poison")
 SYSTEM_DEPS = frozenset({"/usr/lib/libSystem.B.dylib", "/usr/lib/libffi.dylib",
     "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"})
@@ -46,6 +47,10 @@ REQUEST_SHIM = 'exec "$1" -I -S -B "$2" "$3" < "$4"'
 
 class Refused(ValueError):
     """Fixed diagnostic only; inputs/exception strings are not printed."""
+
+
+class NoticeLimit(Refused):
+    """Only the optional notice snapshot's own finite DATA budget expired."""
 
 
 def require(condition: bool, code: str) -> None:
@@ -370,7 +375,7 @@ def load_inputs(source: Path) -> dict:
     return value
 
 
-def protected_file(path: Path, poll=lambda: None, *, observe=lambda _: None) -> dict:
+def protected_nodes(path: Path, poll, observe, *, directory: bool = False) -> tuple:
     selected = path.resolve(strict=True)
     nodes = (selected, *selected.parents)
     require(len(str(path)) <= 1024 and len(nodes) <= 32
@@ -391,7 +396,13 @@ def protected_file(path: Path, poll=lambda: None, *, observe=lambda _: None) -> 
     observe(facts)
     for parent, value in originals:
         require(value.st_uid == 0 and not value.st_mode & 0o022
-                and (stat.S_ISREG(value.st_mode) if parent == selected else stat.S_ISDIR(value.st_mode)), "tool-ownership")
+                and (stat.S_ISREG(value.st_mode) if parent == selected and not directory
+                     else stat.S_ISDIR(value.st_mode)), "tool-ownership")
+    return selected, originals
+
+
+def protected_file(path: Path, poll=lambda: None, *, observe=lambda _: None) -> dict:
+    selected, originals = protected_nodes(path, poll, observe)
     original = originals[0][1]
     require(original.st_nlink >= 1, "tool-link-count")
     # Only this administratively trusted read-only route admits root-managed
@@ -401,11 +412,183 @@ def protected_file(path: Path, poll=lambda: None, *, observe=lambda _: None) -> 
     return {"path": str(selected), "linkCount": original.st_nlink, **row}
 
 
-def inspect_protected(job: Job, role: str, path: Path) -> dict:
+def inspect_protected(job: Job, role: str, path: Path, *, observe=lambda _: None) -> dict:
     require(re.fullmatch(r"[a-z0-9-]{1,64}", role), "tool-role")
     job.phase = "inspect-" + role
-    return protected_file(path, job.clock.check,
-        observe=lambda facts: job.save("protected-" + role + ".json", {"role": role, **facts}))
+
+    def record(facts):
+        job.save("protected-" + role + ".json", {"role": role, **facts})
+        observe(facts)
+
+    return protected_file(path, job.clock.check, observe=record)
+
+
+def notice_snapshot(job: Job, resource: Path, sdk: Path, selected_inputs: list[dict], selected_facts: list[dict]) -> None:
+    """Fixed public text snapshot, not a license decision or an include crawler."""
+    end, total, documents = time.monotonic() + 30, 0, 0
+    current = CLT
+    report = {"clt": str(CLT), "compilerResourceDirectory": str(resource), "sdk": str(sdk),
+        "observed": [], "directories": [], "unresolved": [], "snapshotBytes": 0,
+        "limits": {"seconds": 30, "dataBytes": NOTICE_DATA_LIMIT, "manifestBytes": 65536,
+                   "directoryEntries": 128, "vendorDocuments": 8, "documentBytes": 2 * 1024 * 1024,
+                   "ffiDelegates": 4},
+        "review": "unfinished-not-an-approval",
+        "reason": "Exact selected Apple CLT/SDK/LLVM runtime/header obligations need independent reconciliation."}
+
+    def poll():
+        job.clock.check()  # Global deadline/cancellation always wins; never softened.
+        if time.monotonic() >= end:
+            raise NoticeLimit("snapshot-time-limit")
+
+    def record(group, row):
+        report[group].append(row)
+        # Leave room for one final bounded local-limit diagnostic.
+        if len(canonical(report)) > 65536 - 2048:
+            report[group].pop()
+            raise NoticeLimit("snapshot-manifest-limit")
+
+    def unresolved(path, reason, **facts):
+        record("unresolved", {"source": str(path), "reason": reason, **facts})
+
+    def admit(path, *, directory=False, expected=None, allow_missing=True, parent=None):
+        poll()
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            if expected is not None or not allow_missing:
+                raise Refused("notice-selected-input-missing")
+            unresolved(path, "missing")
+            return None
+        observed = []
+        resolved, originals = protected_nodes(path, poll, observed.append, directory=directory)
+        facts = observed[0]
+        if expected is not None:
+            require(facts == expected, "notice-selected-input-changed")
+        # Only the one explicitly named receipt may resolve outside CLT.
+        receipt = path == Path("/var/db/receipts/com.apple.pkg.CLTools_Executables.plist")
+        if not (resolved.is_relative_to(CLT) or receipt and resolved in {
+                path, Path("/private/var/db/receipts/com.apple.pkg.CLTools_Executables.plist")}) \
+                or parent is not None and resolved.parent != parent:
+            unresolved(path, "out-of-scope", resolvedPath=str(resolved))
+            return None
+        return resolved, originals, facts
+
+    def unchanged(path, resolved, originals):
+        for node, original in originals:
+            poll()
+            after = node.lstat()
+            require(state(after) == state(original) and after.st_uid == original.st_uid, "notice-input-changed")
+        require(path.resolve(strict=True) == resolved, "notice-route-changed")
+
+    def capture(path, cap, *, index=None, allow_missing=True, parent=None):
+        nonlocal total, current
+        current, job.phase = path, "vendor-notice-snapshot"
+        admitted = admit(path, expected=selected_facts[index] if index is not None else None,
+                         allow_missing=allow_missing, parent=parent)
+        if admitted is None:
+            return None
+        resolved, originals, facts = admitted
+        original = originals[0][1]
+        require(original.st_nlink >= 1, "tool-link-count")
+        if original.st_size > cap:
+            unresolved(path, "file-size-limit", protected=facts)
+            return None
+        if total + original.st_size > NOTICE_DATA_LIMIT:
+            raise NoticeLimit("snapshot-data-limit")
+        pieces = []
+        row = read_stream(resolved, cap, pieces.append, poll, expected_links=original.st_nlink)
+        unchanged(path, resolved, originals)
+        if index is not None:
+            require({"path": str(resolved), "linkCount": original.st_nlink, **row} == selected_inputs[index],
+                    "notice-selected-input-changed")
+        body = b"".join(pieces)
+        destination = f"vendor/input-{len(report['observed']):02d}{path.suffix.lower()}"
+        item = {"source": str(path), "destination": "evidence/" + destination,
+                "protected": facts, "linkCount": original.st_nlink, **row}
+        poll()  # Admission and the complete original read precede any output.
+        record("observed", item)
+        # Once publishing starts, settle its bounded write/readback under the
+        # existing global clock; local expiry cannot conceal a partial copy.
+        require(job.retain(destination, body) == row, "notice-copy-write")
+        require(file_digest(job.root / "evidence" / destination, job.clock.check) == row, "notice-copy-readback")
+        job.projections.append({"source": str(path), "resolvedSource": str(resolved),
+                                "destination": item["destination"], **row})
+        total += row["size"]
+        report["snapshotBytes"] = total
+        return body
+
+    try:
+        wrapper = None
+        for path, index in ((resource / "include/stddef.h", 1), (resource / "include/stdarg.h", 2),
+                            (resource / "include/stdint.h", 3), (sdk / "usr/include/ffi/ffi.h", 5),
+                            (sdk / "usr/include/ffi/ffitarget.h", 6), (sdk / "SDKSettings.json", 4)):
+            body = capture(path, 65536 if index == 4 else 128 * 1024, index=index)
+            if index == 6:
+                wrapper = body
+        # Only direct literal declarations in the selected small wrapper.
+        # Both architecture notices may be retained; no macros or recursion.
+        delegates = set()
+        for number, line in enumerate((wrapper or b"").splitlines(), 1):
+            poll()
+            if not re.match(rb"^[ \t]*#[ \t]*include\b", line):
+                continue
+            match = re.fullmatch(rb'[ \t]*#[ \t]*include[ \t]*(?:"([^"\r\n]+)"|<([^>\r\n]+)>)[ \t]*(?://.*)?', line)
+            name = (match[1] or match[2]) if match else b""
+            if name.startswith(b"ffi/"):
+                name = name[4:]
+            if not re.fullmatch(rb"[A-Za-z0-9_+.-]{1,128}\.h", name):
+                unresolved(sdk / "usr/include/ffi/ffitarget.h", "ffi-include-out-of-scope", line=number)
+                continue
+            if name in {b"ffi.h", b"ffitarget.h"} or name in delegates:
+                continue
+            current = sdk / "usr/include/ffi" / name.decode("ascii")
+            if len(delegates) == 4:
+                raise NoticeLimit("ffi-include-limit")
+            delegates.add(name)
+            capture(sdk / "usr/include/ffi" / name.decode("ascii"), 128 * 1024,
+                    parent=sdk / "usr/include/ffi")
+        capture(Path("/var/db/receipts/com.apple.pkg.CLTools_Executables.plist"), 65536)
+        for directory in (CLT, CLT / "Library/Documentation", CLT / "usr/share",
+                          CLT / "usr/share/doc", CLT / "usr/share/clang", resource):
+            current = directory
+            admitted = admit(directory, directory=True)
+            if admitted is None:
+                continue
+            resolved, originals, facts = admitted
+            candidates, names, count = [], set(), 0
+            with os.scandir(resolved) as children:
+                for item in children:
+                    poll()
+                    count += 1
+                    if count > 128:
+                        break
+                    name = item.name.lower()
+                    names.add(name)
+                    if name.endswith((".txt", ".rtf", ".pdf")) and any(word in name for word in (
+                            "license", "licence", "copyright", "notice", "acknowledg")):
+                        candidates.append(directory / item.name)
+            unchanged(directory, resolved, originals)
+            record("directories", {"source": str(directory), "protected": facts, "entriesSeen": count,
+                                   "complete": count <= 128, "candidateCount": len(candidates)})
+            if count > 128:
+                unresolved(directory, "directory-entry-limit")
+                continue
+            former = {CLT: "License.rtf", CLT / "Library/Documentation": "License.rtf",
+                      CLT / "usr/share/clang": "LICENSE.txt"}.get(directory)
+            if former and former.lower() not in names:
+                unresolved(directory / former, "missing")
+            for path in sorted(candidates):
+                current = path
+                if documents == 8:
+                    raise NoticeLimit("vendor-document-limit")
+                documents += 1
+                capture(path, 2 * 1024 * 1024, allow_missing=False)
+    except NoticeLimit as error:
+        # Only our own local DATA budget is recoverable. Ownership/input drift,
+        # original close, global deadline/cancellation and write errors escape.
+        report["unresolved"].append({"source": str(current), "reason": error.args[0]})
+    require(len(canonical(report)) <= 65536, "notice-manifest-limit")
+    job.save("vendor-attribution-inputs.json", report)
 
 
 def selected_tool(job: Job, name: str, raw: bytes) -> tuple[str, dict]:
@@ -512,14 +695,14 @@ def prepare_tools(job: Job) -> dict:
     require(resource.is_relative_to(CLT / "usr/lib/clang") and resource.is_dir(), "compiler-resource-origin")
     # Actual selected metadata/inputs, not a broad SDK census or a claim that
     # all files in the Apple installation have been independently audited.
-    compiler_inputs = []
+    compiler_inputs, compiler_facts = [], []
     for index, path in enumerate((resource / "lib/darwin/libclang_rt.osx.a", resource / "include/stddef.h",
                  resource / "include/stdarg.h", resource / "include/stdint.h", sdk / "SDKSettings.json",
                  sdk / "usr/include/ffi/ffi.h", sdk / "usr/include/ffi/ffitarget.h",
                  sdk / "usr/lib/libSystem.tbd", sdk / "usr/lib/libffi.tbd")):
         job.phase = f"inspect-compiler-input-{index}"
         require(path.resolve(strict=True).is_relative_to(CLT), "compiler-input-origin")
-        compiler_inputs.append(inspect_protected(job, f"compiler-input-{index}", path))
+        compiler_inputs.append(inspect_protected(job, f"compiler-input-{index}", path, observe=compiler_facts.append))
     job.build_environment.update(SDKROOT=str(sdk), CC=tools["clang"], AR=tools["ar"], RANLIB=tools["ranlib"],
         LD=tools["ld"], CFLAGS=f"-arch arm64 -O2 -g0 -isysroot {sdk}", CPPFLAGS=f"-isysroot {sdk}",
         LDFLAGS=f"-arch arm64 -isysroot {sdk} -Wl,-headerpad_max_install_names",
@@ -528,16 +711,7 @@ def prepare_tools(job: Job) -> dict:
         "selectedCompilerInputs": compiler_inputs, "environment": job.build_environment,
         "kernel": tuple(os.uname()), "policy": "administratively-trusted-native-Apple-CLT",
         "sourceAttributionReview": "required", "protectedOSDependencies": sorted(SYSTEM_DEPS)})
-    # Retain actual installed vendor terms where present; absence is explicit,
-    # not invented Apple/LLVM permission or a transplanted GCC/glibc notice.
-    observed = []
-    for index, path in enumerate((CLT / "Library/Documentation/License.rtf", CLT / "License.rtf",
-                                CLT / "usr/share/clang/LICENSE.txt", sdk / "SDKSettings.json")):
-        if path.is_file():
-            row = job.copy(path, job.root / "evidence/vendor" / f"{index}-{path.name}")
-            observed.append({"source": str(path), **row})
-    job.save("vendor-attribution-inputs.json", {"observed": observed, "review": "unfinished-not-an-approval",
-        "reason": "Exact selected Apple CLT/SDK/LLVM runtime/header obligations need independent reconciliation."})
+    notice_snapshot(job, resource, sdk, compiler_inputs, compiler_facts)
     return tools
 
 
@@ -638,6 +812,24 @@ def generated_configuration(python_build: Path, poll=lambda: None) -> dict[str, 
     return result
 
 
+def retain_build_configuration(job: Job) -> None:
+    # CPython is built out of tree. Modules/Setup is a source input, unlike
+    # the generated/seeded build files; never adopt a same-named build decoy.
+    sources = {
+        "Makefile": "build/cpython/Makefile",
+        "pyconfig.h": "build/cpython/pyconfig.h",
+        "Modules/config.c": "build/cpython/Modules/config.c",
+        "Modules/Setup": "sources/cpython/Modules/Setup",
+        "Modules/Setup.local": "build/cpython/Modules/Setup.local",
+        "Modules/Setup.bootstrap": "build/cpython/Modules/Setup.bootstrap",
+        "Modules/Setup.stdlib": "build/cpython/Modules/Setup.stdlib",
+        "pybuilddir.txt": "build/cpython/pybuilddir.txt",
+    }
+    for name, source in sources.items():
+        job.phase = "configuration-" + name.replace("/", "-")
+        job.copy(job.root / source, job.root / "evidence/configuration" / name)
+
+
 def build(job: Job, tools: dict) -> dict[str, Path]:
     root, env = job.root, job.build_environment
     deps = root / "deps"
@@ -666,11 +858,12 @@ def build(job: Job, tools: dict) -> dict[str, Path]:
     job.run("python-build", [*make, job.python_build_name, "platform", "checksharedmods", "build-details.json"], python, env)
     # Preserve real generated configuration before classifying it. A roster/
     # native-profile refusal must not require another build just for diagnosis.
-    for name in ("Makefile", "pyconfig.h", "Modules/config.c", "Modules/Setup", "Modules/Setup.local",
-                 "Modules/Setup.bootstrap", "Modules/Setup.stdlib", "pybuilddir.txt"):
-        job.copy(python / name, root / "evidence/configuration" / name)
+    retain_build_configuration(job)
+    job.phase = "configuration-openssl-configdata"
     job.copy(openssl / "configdata.pm", root / "evidence/configuration/openssl-configdata.pm")
+    job.phase = "configuration-generated-selection"
     generated = generated_configuration(python, job.clock.check)
+    job.phase = "configuration-generated-copies"
     for name, path in generated.items():
         job.copy(path, root / "evidence/configuration" / name)
     config = read_file(python / "pyconfig.h", 1024 * 1024, job.clock.check).decode("ascii")

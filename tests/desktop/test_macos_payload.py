@@ -6,6 +6,7 @@ settlement evidence. Execute this file only after SOURCE/COMMAND acceptance.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import importlib.util
 import inspect
@@ -99,6 +100,49 @@ def tool_path_data():
                            overrides=overrides, lstat=lstat, resolve=resolve)
 
 
+def notice_data(root):
+    """Ordinary private DATA files; root/ancestor admission is metadata-double only."""
+    clt = root / "clt"
+    sdk, resource = clt / "SDKs/MacOSX26.5.sdk", clt / "usr/lib/clang/21"
+    paths = (resource / "lib/darwin/libclang_rt.osx.a", resource / "include/stddef.h",
+             resource / "include/stdarg.h", resource / "include/stdint.h", sdk / "SDKSettings.json",
+             sdk / "usr/include/ffi/ffi.h", sdk / "usr/include/ffi/ffitarget.h",
+             sdk / "usr/lib/libSystem.tbd", sdk / "usr/lib/libffi.tbd")
+    for path in paths:
+        payload.write_file(path, b"INERT HEADER DATA\n", 0o644)
+    paths[6].write_bytes(b'#include <ffi/ffitarget_arm64.h>\n#include "external-link.h"\n'
+                        b'#include "../outside.h"\n#include HEADER_NAME\n')
+    (paths[6].parent / "ffitarget_arm64.h").write_bytes(b'#include "must-not-follow.h"\n')
+    (paths[6].parent / "external-link.h").symlink_to(paths[2])
+    (paths[1].parent / "same-bytes.h").hardlink_to(paths[1])
+    for directory in (clt / "Library/Documentation", clt / "usr/share/doc", clt / "usr/share/clang"):
+        directory.mkdir(parents=True, exist_ok=True)
+    (clt / "LICENSE.txt").write_bytes(b"INERT NOTICE, NOT LICENSE APPROVAL\n")
+    (clt / "usr/share/doc/NOTICE.rtf").write_bytes(b"{INERT RTF; never render}\n")
+    output = root / "output"
+    (output / "evidence").mkdir(parents=True)
+    job = job_double(output)
+    job.projections = []
+    original_lstat = Path.lstat
+    overrides = {}
+
+    def lstat(path):
+        if path == Path("/var/db/receipts/com.apple.pkg.CLTools_Executables.plist"):
+            raise FileNotFoundError("inert absent receipt")
+        value = original_lstat(path)
+        fields = {name: getattr(value, name) for name in (
+            "st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")}
+        fields["st_uid"] = 0
+        if stat.S_ISDIR(value.st_mode):
+            # Avoid asserting host /tmp ancestry is trusted or time-stable.
+            fields.update(st_mode=stat.S_IFDIR | 0o755, st_nlink=2, st_size=0, st_mtime_ns=3, st_ctime_ns=4)
+        fields.update(overrides.get(path, {}))
+        return SimpleNamespace(**fields)
+
+    return SimpleNamespace(clt=clt, sdk=sdk, resource=resource, paths=paths,
+                           job=job, lstat=lstat, overrides=overrides)
+
+
 class MacOSPayloadDataTests(unittest.TestCase):
     def test_deadline_allocation_reserves_original_tail_without_renewal(self):
         self.assertEqual(payload.command_timeout(100, 94.1), 2)
@@ -139,6 +183,51 @@ class MacOSPayloadDataTests(unittest.TestCase):
                     text.replace('/* source comment */', '#if SOMETHING\n#endif')):
             with self.assertRaises(payload.Refused):
                 payload.builtin_table(bad)
+
+    def test_configuration_evidence_preserves_source_and_build_origins(self):
+        names = ("Makefile", "pyconfig.h", "Modules/config.c", "Modules/Setup", "Modules/Setup.local",
+                 "Modules/Setup.bootstrap", "Modules/Setup.stdlib", "pybuilddir.txt")
+        for case in ("source-only", "build-decoy", "source-missing"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="mrk-macos-payload-data-") as name:
+                root = Path(name)
+                source, build = root / "sources/cpython", root / "build/cpython"
+                expected = {}
+                for leaf in names:
+                    actual = (source if leaf == "Modules/Setup" else build) / leaf
+                    body = ("admitted " + leaf + "\n").encode("ascii")
+                    actual.parent.mkdir(parents=True, exist_ok=True)
+                    actual.write_bytes(body)
+                    expected[leaf] = body
+                    # Source-tree decoys must never replace generated build inputs.
+                    decoy = (build if leaf == "Modules/Setup" else source) / leaf
+                    if leaf != "Modules/Setup" or case != "source-only":
+                        decoy.parent.mkdir(parents=True, exist_ok=True)
+                        decoy.write_bytes(b"wrong-root decoy\n")
+                if case == "source-missing":
+                    (source / "Modules/Setup").unlink()
+                originals = {p: (p.read_bytes(), p.stat().st_mode) for parent in (source, build)
+                             for p in parent.rglob("*") if p.is_file()}
+                job = job_double(root)
+                job.projections = []
+                if case == "source-missing":
+                    with self.assertRaises(FileNotFoundError):
+                        payload.retain_build_configuration(job)
+                    copied = names[:3]
+                    self.assertEqual(job.phase, "configuration-Modules-Setup")
+                    self.assertFalse((root / "evidence/configuration/Modules/Setup").exists())
+                else:
+                    payload.retain_build_configuration(job)
+                    copied = names
+                    self.assertEqual(job.phase, "configuration-pybuilddir.txt")
+                self.assertEqual([r["destination"] for r in job.projections],
+                                 ["evidence/configuration/" + leaf for leaf in copied])
+                for leaf, row in zip(copied, job.projections):
+                    actual = (source if leaf == "Modules/Setup" else build) / leaf
+                    self.assertEqual(row["source"], str(actual))
+                    self.assertEqual(row["sha256"], hashlib.sha256(expected[leaf]).hexdigest())
+                    self.assertEqual((root / "evidence/configuration" / leaf).read_bytes(), expected[leaf])
+                self.assertEqual(job.evidence_bytes, sum(len(expected[leaf]) for leaf in copied))
+                self.assertEqual({p: (p.read_bytes(), p.stat().st_mode) for p in originals}, originals)
 
     def test_generated_configuration_uses_one_actual_pybuilddir_not_root_guess(self):
         with tempfile.TemporaryDirectory(prefix="mrk-macos-payload-data-") as name:
@@ -299,7 +388,8 @@ class MacOSPayloadDataTests(unittest.TestCase):
              patch.object(payload.os, "readlink", side_effect=data.aliases.__getitem__), \
              patch.object(payload.os.path, "lexists", return_value=False), \
              patch.object(payload.os, "uname", return_value=("Darwin", "INERT")), \
-             patch.object(payload, "source_binding"), patch.object(payload, "read_stream", return_value=row) as read:
+             patch.object(payload, "source_binding"), patch.object(payload, "notice_snapshot") as notices, \
+             patch.object(payload, "read_stream", return_value=row) as read:
             tools = payload.prepare_tools(job)
         records = {call.args[0]: call.args[1] for call in job.save.call_args_list}
         toolchain = records["toolchain.json"]
@@ -317,6 +407,130 @@ class MacOSPayloadDataTests(unittest.TestCase):
         alias_facts = records["protected-ranlib.json"]["invocationRoute"][0]
         self.assertEqual(alias_facts["linkTarget"], "libtool")
         self.assertEqual(stat.S_IMODE(alias_facts["mode"]), 0o777)
+        self.assertEqual(notices.call_args.args[:4], (job, data.resource, data.sdk, toolchain["selectedCompilerInputs"]))
+        self.assertEqual(notices.call_args.args[4][1], {key: value for key, value in
+                         records["protected-compiler-input-1.json"].items() if key != "role"})
+
+    def test_notice_snapshot_uses_protected_original_bytes_and_complete_accounting(self):
+        with tempfile.TemporaryDirectory(prefix="mrk-macos-payload-data-") as name:
+            data = notice_data(Path(name))
+            with patch.object(payload, "CLT", data.clt), \
+                 patch.object(Path, "lstat", autospec=True, side_effect=data.lstat), \
+                 patch.object(payload.time, "monotonic", return_value=0), \
+                 patch.object(payload, "copy_file", side_effect=AssertionError("No raw reopen after protected hashing")):
+                facts = []
+                inputs = [payload.protected_file(path, observe=facts.append) for path in data.paths]
+                with patch.object(payload, "read_stream", wraps=payload.read_stream) as reads:
+                    payload.notice_snapshot(data.job, data.resource, data.sdk, inputs, facts)
+                report = json.loads((data.job.root / "evidence/vendor-attribution-inputs.json").read_bytes())
+                self.assertEqual(report["review"], "unfinished-not-an-approval")
+                self.assertEqual(report["limits"]["dataBytes"], 8 * 1024 * 1024)
+                self.assertEqual(len(report["observed"]), 9)  # Five headers, SDK JSON, one delegate, two notices.
+                self.assertEqual(len(report["directories"]), 6)
+                self.assertTrue(all(row["complete"] for row in report["directories"]))
+                self.assertEqual(report["snapshotBytes"], sum(row["size"] for row in report["observed"]))
+                self.assertEqual(len(data.job.projections), len(report["observed"]))
+                for row in report["observed"]:
+                    destination = data.job.root / row["destination"]
+                    self.assertEqual(destination.read_bytes(), Path(row["source"]).read_bytes())
+                    self.assertEqual(hashlib.sha256(destination.read_bytes()).hexdigest(), row["sha256"])
+                    self.assertEqual(destination.lstat().st_nlink, 1)
+                    self.assertEqual(stat.S_IMODE(destination.lstat().st_mode), 0o600)
+                first = report["observed"][0]
+                self.assertEqual(first["protected"], facts[1])
+                self.assertEqual(first["linkCount"], 2)
+                originals = [call for call in reads.call_args_list if call.args[0] == data.paths[1]]
+                self.assertEqual(len(originals), 1)
+                self.assertEqual(originals[0].kwargs["expected_links"], 2)
+                self.assertNotIn("must-not-follow.h", " ".join(str(call.args[0]) for call in reads.call_args_list))
+                self.assertEqual(sum(row["reason"] == "ffi-include-out-of-scope" for row in report["unresolved"]), 2)
+                self.assertTrue(any(row["source"].endswith("CLTools_Executables.plist") and row["reason"] == "missing"
+                                    for row in report["unresolved"]))
+                self.assertTrue(any(row["source"].endswith("external-link.h") and row["reason"] == "out-of-scope"
+                                    and row["resolvedPath"] == str(data.paths[2]) for row in report["unresolved"]))
+                retained = [path for path in (data.job.root / "evidence").rglob("*") if path.is_file()]
+                self.assertEqual(sum(path.stat().st_size for path in retained), data.job.evidence_bytes)
+
+    def test_notice_snapshot_bounds_are_local_but_input_close_write_and_global_failures_escape(self):
+        # All mutations/failures are inert DATA doubles or ordinary fixture I/O.
+        for case in ("local-time", "data-limit", "file-limit", "entry-limit", "document-limit", "delegate-limit",
+                     "input-drift", "close-error", "write-error", "global-deadline", "cancellation"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="mrk-macos-payload-data-") as name:
+                data = notice_data(Path(name))
+                if case == "document-limit":
+                    for index in range(9):
+                        (data.clt / f"NOTICE-{index}.txt").write_bytes(b"INERT\n")
+                if case == "delegate-limit":
+                    data.paths[6].write_bytes(b"".join(f'#include "target-{i}.h"\n'.encode() for i in range(5)))
+                    for index in range(5):
+                        (data.paths[6].parent / f"target-{index}.h").write_bytes(b"INERT\n")
+                now, seen = [0], []
+                with patch.object(payload, "CLT", data.clt), \
+                     patch.object(Path, "lstat", autospec=True, side_effect=data.lstat), \
+                     patch.object(payload.time, "monotonic", side_effect=lambda: now[0]):
+                    facts = []
+                    inputs = [payload.protected_file(path, observe=facts.append) for path in data.paths]
+                    original_read, original_close, original_scan = payload.read_stream, payload.os.close, payload.os.scandir
+
+                    def read(path, limit, consume, poll=lambda: None, **kwargs):
+                        def piece(body):
+                            consume(body)
+                            if case == "local-time":
+                                now[0] = 31
+                        return original_read(path, limit, piece, poll, **kwargs)
+
+                    def close(fd):
+                        original_close(fd)  # The fixture must not leak a descriptor.
+                        if case == "close-error":
+                            raise OSError("inert original-close uncertainty")
+
+                    def entries():
+                        for index in range(1000):
+                            seen.append(index)
+                            yield SimpleNamespace(name=f"unrelated-{index}")
+
+                    def scan(path):
+                        return nullcontext(entries()) if case == "entry-limit" and path == data.clt else original_scan(path)
+
+                    if case == "input-drift":
+                        data.overrides[data.paths[1]] = {"st_ino": -1}
+                    if case == "file-limit":
+                        data.overrides[data.clt / "LICENSE.txt"] = {"st_size": 2 * 1024 * 1024 + 1}
+                    if case == "global-deadline":
+                        data.job.clock.check.side_effect = payload.Refused("work-deadline")
+                    if case == "cancellation":
+                        data.job.clock.check.side_effect = KeyboardInterrupt()
+                    with patch.object(payload, "read_stream", side_effect=read), \
+                         patch.object(payload.os, "close", side_effect=close), \
+                         patch.object(payload.os, "scandir", side_effect=scan), \
+                         patch.object(payload, "NOTICE_DATA_LIMIT", 1 if case == "data-limit" else payload.NOTICE_DATA_LIMIT), \
+                         (patch.object(payload, "write_file", side_effect=OSError("inert write failure"))
+                          if case == "write-error" else nullcontext()):
+                        error = {"input-drift": payload.Refused, "close-error": OSError, "write-error": OSError,
+                                 "global-deadline": payload.Refused, "cancellation": KeyboardInterrupt}.get(case)
+                        if error:
+                            with self.assertRaises(error):
+                                payload.notice_snapshot(data.job, data.resource, data.sdk, inputs, facts)
+                            self.assertFalse((data.job.root / "evidence/vendor-attribution-inputs.json").exists())
+                            if case == "write-error":
+                                self.assertEqual(data.job.evidence_bytes, inputs[1]["size"])
+                        else:
+                            payload.notice_snapshot(data.job, data.resource, data.sdk, inputs, facts)
+                            report = json.loads((data.job.root / "evidence/vendor-attribution-inputs.json").read_bytes())
+                            expected = {"local-time": "snapshot-time-limit", "data-limit": "snapshot-data-limit",
+                                        "file-limit": "file-size-limit",
+                                        "entry-limit": "directory-entry-limit", "document-limit": "vendor-document-limit",
+                                        "delegate-limit": "ffi-include-limit"}[case]
+                            self.assertTrue(any(row["reason"] == expected for row in report["unresolved"]))
+                            self.assertEqual(report["snapshotBytes"], sum(row["size"] for row in report["observed"]))
+                            if case in {"local-time", "data-limit"}:
+                                self.assertEqual(report["observed"], [])
+                                self.assertEqual(data.job.projections, [])
+                                self.assertEqual(list((data.job.root / "evidence").iterdir()),
+                                                 [data.job.root / "evidence/vendor-attribution-inputs.json"])
+                            if case == "entry-limit":
+                                self.assertEqual(len(seen), 129)
+                                self.assertFalse(report["directories"][0]["complete"])
 
     def test_selected_tool_routes_refuse_ambiguity_untrusted_aliases_and_changes(self):
         data = tool_path_data()
