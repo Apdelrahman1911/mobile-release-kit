@@ -68,13 +68,26 @@ make an unavailable profile pass. A user-writable copy or App Translocation
 cannot select the installed runtime by its executable pathname.
 
 `mrk-macos-install` is a one-shot **standard Installer** postinstall program.
-`pkgbuild --nopayload` supplies only a Scripts archive: input DATA, the fixed
-native installer and a fixed shell entry. There is no final-destination payload.
-The DATA auditor reads the package's XAR and CPIO bytes without extracting or
-executing them, demands a complete root:wheel roster/modes, rejects all links
-and specials, and rejects a Payload member. If PackageKit/pkgbuild does not
-preserve that precise archive policy on the selected host, stop and review the
-observed mismatch—never skip the audit or run Python as root to normalize it.
+`pkgbuild --nopayload` first supplies a retained original scripts-only package:
+input DATA, the fixed native installer and a fixed shell entry. Its Scripts
+archive may retain the ordinary packager's UID/GID despite `--ownership recommended`.
+The nonroot DATA preparation checks that exact owner, complete bytes/modes/roster
+and fixed package identity, then copies only the unchanged decoded `PackageInfo`
+bytes into fresh parts. Native macOS tar creates gzip odc Scripts with numeric
+UID0/GID0 overrides from the original fresh scripts tree; native xar assembles a
+separate fresh package. No source chown, privileged preparation, custom archive
+serializer, XML rewriting or final-destination payload is involved.
+
+Preparation is **not** final acceptance. The final DATA audit rechecks the
+original, requires byte-identical PackageInfo, exactly PackageInfo/Scripts XAR
+members and the complete root:wheel CPIO bytes/modes/roster before Installer.
+It rejects links, specials, missing/duplicate roots, extra members and changed
+contents. A tiny inert packaging-only probe runs before expensive compilation;
+neither its success nor its `exit97` hook is an Installer or GUI qualification.
+If the native format or ownership fails, retain the originals and review the
+fixed package-refusal diagnostic—never skip the audit, retry over outputs or
+run Python as root to normalize them. Actual native verification remains a
+separate evidence gate, not a claim made by this preparation route.
 
 The Installer:
 

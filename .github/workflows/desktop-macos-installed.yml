@@ -104,6 +104,54 @@ jobs:
               os.fsync(fd)
           finally: os.close(fd)
           PY
+      - name: Fail fast on native Scripts ownership and package format (never Installer)
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(/usr/bin/id -u)" != 0 ]]
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py package-format-input \
+            --output "$MRK_MACOS_WORK/package-format-scripts" > "$MRK_MACOS_WORK/package-format-input.json"
+          [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]]
+          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \
+            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.0 \
+            --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package \
+            --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/PackageFormat-original.pkg" \
+            --output "$MRK_MACOS_WORK/package-format-parts" > "$MRK_MACOS_WORK/package-format-prepare.json"
+          # Native tools only write fresh outputs as this nonroot account.
+          # Preparation is not final0:0 acceptance; preserve the original pkg.
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/package-format-scripts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/tar -c -z -f - --format=odc --uid=0 --gid=0 \
+              --no-acls --no-xattrs --no-fflags --no-mac-metadata .
+          ) > "$MRK_MACOS_WORK/package-format-parts/Scripts"
+          tar_status=$?
+          set -e
+          printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-format-tar.status"
+          [[ $tar_status == 0 ]]
+          # xar is not a streaming/O_EXCL tool: reserve its private output parent.
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-format-final"
+          [[ ! -e "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" && ! -L "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/package-format-parts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
+              --compression=none PackageInfo Scripts
+          )
+          xar_status=$?
+          set -e
+          printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-format-xar.status"
+          [[ $xar_status == 0 ]]
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
+            --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
+            --original-package "$MRK_MACOS_WORK/PackageFormat-original.pkg" > "$MRK_MACOS_WORK/package-format-audit.json"
+          # Only inert archive bytes were checked. Never run this exit97 hook.
       - name: Fail fast on the selected SDK public native API compile and link
         timeout-minutes: 2
         shell: bash
@@ -296,19 +344,50 @@ jobs:
             --input "$MRK_MACOS_WORK/input" --installer "$installer" \
             --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/scripts-fixture" > "$MRK_MACOS_WORK/scripts-fixture-result.json"
+          [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" ]]
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts-fixture" \
             --identifier dev.mobile-release-kit.desktop.installed-fixture --version 0.1.0 \
-            --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture.pkg"
+            --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg"
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --fixture \
+            --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" \
+            --output "$MRK_MACOS_WORK/package-fixture-parts" > "$MRK_MACOS_WORK/package-fixture-prepare.json"
+          # Native tools only write fresh outputs as this nonroot account.
+          # Preparation is not final0:0 acceptance; preserve the original pkg.
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/scripts-fixture" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/tar -c -z -f - --format=odc --uid=0 --gid=0 \
+              --no-acls --no-xattrs --no-fflags --no-mac-metadata .
+          ) > "$MRK_MACOS_WORK/package-fixture-parts/Scripts"
+          tar_status=$?
+          set -e
+          printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-fixture-tar.status"
+          [[ $tar_status == 0 ]]
+          # xar is not a streaming/O_EXCL tool: reserve its private output parent.
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-fixture-final"
+          [[ ! -e "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" && ! -L "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/package-fixture-parts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" \
+              --compression=none PackageInfo Scripts
+          )
+          xar_status=$?
+          set -e
+          printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-fixture-xar.status"
+          [[ $xar_status == 0 ]]
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package --fixture \
-            --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture.pkg" \
-            > "$MRK_MACOS_WORK/package-fixture-audit.json"
+            --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" \
+            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"
       - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector
         timeout-minutes: 18
         shell: bash
         run: |
           set -euo pipefail
           set -o noclobber
-          sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture.pkg" -target / -dumplog -verboseR \
+          sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" -target / -dumplog -verboseR \
             > "$MRK_MACOS_WORK/installer-fixture-output.txt" 2>&1
           # Setup and each fixed case retain their own original120s endpoint.
           # Any unexpected native failure/Unknown stops subsequent cases. No retry.
@@ -342,19 +421,50 @@ jobs:
             --input "$MRK_MACOS_WORK/input" --installer "$installer" \
             --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/scripts" > "$MRK_MACOS_WORK/scripts-result.json"
+          [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" ]]
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts" \
             --identifier dev.mobile-release-kit.desktop.installed --version 0.1.0 \
-            --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit.pkg"
+            --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg"
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package \
+            --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" \
+            --output "$MRK_MACOS_WORK/package-parts" > "$MRK_MACOS_WORK/package-prepare.json"
+          # Native tools only write fresh outputs as this nonroot account.
+          # Preparation is not final0:0 acceptance; preserve the original pkg.
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/scripts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/tar -c -z -f - --format=odc --uid=0 --gid=0 \
+              --no-acls --no-xattrs --no-fflags --no-mac-metadata .
+          ) > "$MRK_MACOS_WORK/package-parts/Scripts"
+          tar_status=$?
+          set -e
+          printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-tar.status"
+          [[ $tar_status == 0 ]]
+          # xar is not a streaming/O_EXCL tool: reserve its private output parent.
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-final"
+          [[ ! -e "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" && ! -L "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/package-parts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" \
+              --compression=none PackageInfo Scripts
+          )
+          xar_status=$?
+          set -e
+          printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-xar.status"
+          [[ $xar_status == 0 ]]
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
-            --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/MobileReleaseKit.pkg" \
-            > "$MRK_MACOS_WORK/package-audit.json"
+            --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" \
+            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" > "$MRK_MACOS_WORK/package-audit.json"
       - name: Standard Installer only is privileged; never execute the app or Python as root
         timeout-minutes: 5
         shell: bash
         run: |
           set -euo pipefail
           set -o noclobber
-          sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/MobileReleaseKit.pkg" -target / -dumplog -verboseR \
+          sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" -target / -dumplog -verboseR \
             > "$MRK_MACOS_WORK/installer-output.txt" 2>&1
           # A collision, partial publication, unknown close or timeout fails
           # here. Keep originals; no uninstall, rollback, retries or repair.
@@ -376,6 +486,13 @@ jobs:
           name: desktop-macos-installed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.work.outputs.root }}/source-binding.json
+            ${{ steps.work.outputs.root }}/package-format-input.json
+            ${{ steps.work.outputs.root }}/PackageFormat-original.pkg
+            ${{ steps.work.outputs.root }}/package-format-prepare.json
+            ${{ steps.work.outputs.root }}/package-format-tar.status
+            ${{ steps.work.outputs.root }}/package-format-xar.status
+            ${{ steps.work.outputs.root }}/package-format-audit.json
+            ${{ steps.work.outputs.root }}/package-format-final/PackageFormat.pkg
             ${{ steps.work.outputs.root }}/native-api-link.log
             ${{ steps.work.outputs.root }}/native-api-link.status
             ${{ steps.work.outputs.root }}/runtime-result.json
@@ -392,12 +509,20 @@ jobs:
             ${{ steps.work.outputs.root }}/package-fixture-audit.json
             ${{ steps.work.outputs.root }}/installer-fixture-output.txt
             ${{ steps.work.outputs.root }}/installer-fixture-observation.json
-            ${{ steps.work.outputs.root }}/MobileReleaseKit-InstallerFixture.pkg
+            ${{ steps.work.outputs.root }}/MobileReleaseKit-InstallerFixture-original.pkg
+            ${{ steps.work.outputs.root }}/package-fixture-prepare.json
+            ${{ steps.work.outputs.root }}/package-fixture-tar.status
+            ${{ steps.work.outputs.root }}/package-fixture-xar.status
+            ${{ steps.work.outputs.root }}/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg
             ${{ steps.work.outputs.root }}/scripts-result.json
             ${{ steps.work.outputs.root }}/package-audit.json
             ${{ steps.work.outputs.root }}/installation-observation.json
             ${{ steps.work.outputs.root }}/installer-output.txt
-            ${{ steps.work.outputs.root }}/MobileReleaseKit.pkg
+            ${{ steps.work.outputs.root }}/MobileReleaseKit-original.pkg
+            ${{ steps.work.outputs.root }}/package-prepare.json
+            ${{ steps.work.outputs.root }}/package-tar.status
+            ${{ steps.work.outputs.root }}/package-xar.status
+            ${{ steps.work.outputs.root }}/package-final/MobileReleaseKit.pkg
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

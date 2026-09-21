@@ -67,6 +67,42 @@ class Refused(Exception):
     pass
 
 
+GENERIC_REFUSAL = "Mac package staging/observation refused; preserve original outputs, no automatic cleanup or retry."
+PACKAGE_REFUSALS = {
+    "compressed-data-bound": "MRK_MACOS_PACKAGE_REFUSED=compressed-data-bound",
+    "xar-header-bound": "MRK_MACOS_PACKAGE_REFUSED=xar-header-bound",
+    "xar-member-encoding": "MRK_MACOS_PACKAGE_REFUSED=xar-member-encoding",
+    "scripts-only-package-no-payload": "MRK_MACOS_PACKAGE_REFUSED=scripts-only-package-no-payload",
+    "unsupported-scripts-cpio-format": "MRK_MACOS_PACKAGE_REFUSED=unsupported-scripts-cpio-format",
+    "cpio-trailer": "MRK_MACOS_PACKAGE_REFUSED=cpio-trailer",
+    "scripts-root-required": "MRK_MACOS_PACKAGE_REFUSED=scripts-root-required",
+    "scripts-root-duplicate": "MRK_MACOS_PACKAGE_REFUSED=scripts-root-duplicate",
+    "scripts-root-owner-mode": "MRK_MACOS_PACKAGE_REFUSED=scripts-root-owner-mode",
+    "scripts-entry-owner": "MRK_MACOS_PACKAGE_REFUSED=scripts-entry-owner",
+    "scripts-directory-mode": "MRK_MACOS_PACKAGE_REFUSED=scripts-directory-mode",
+    "scripts-file-type-mode": "MRK_MACOS_PACKAGE_REFUSED=scripts-file-type-mode",
+    "packager-identity": "MRK_MACOS_PACKAGE_REFUSED=packager-identity",
+    "packager-directory-mode-owner": "MRK_MACOS_PACKAGE_REFUSED=packager-directory-mode-owner",
+    "packager-file-mode-owner": "MRK_MACOS_PACKAGE_REFUSED=packager-file-mode-owner",
+    "original-package-owner": "MRK_MACOS_PACKAGE_REFUSED=original-package-owner",
+    "original-package-roster": "MRK_MACOS_PACKAGE_REFUSED=original-package-roster",
+    "complete-original-scripts-correspondence": "MRK_MACOS_PACKAGE_REFUSED=complete-original-scripts-correspondence",
+    "scripts-package-identity": "MRK_MACOS_PACKAGE_REFUSED=scripts-package-identity",
+    "final-package-roster": "MRK_MACOS_PACKAGE_REFUSED=final-package-roster",
+    "package-info-bytes-changed": "MRK_MACOS_PACKAGE_REFUSED=package-info-bytes-changed",
+    "complete-root-owned-scripts-correspondence": "MRK_MACOS_PACKAGE_REFUSED=complete-root-owned-scripts-correspondence",
+}
+
+
+def package_refusal_message(error):
+    # Select only a predeclared literal. Never stringify/reflect an exception.
+    if type(error) is Refused and len(error.args) == 1 and type(error.args[0]) is str:
+        message = PACKAGE_REFUSALS.get(error.args[0])
+        if message is not None:
+            return message + "\n" + GENERIC_REFUSAL
+    return GENERIC_REFUSAL
+
+
 def need(ok, reason):
     if not ok:
         raise Refused(reason)
@@ -222,7 +258,15 @@ def directories(files):
     return result
 
 
-def tree(path, *, installed=False):
+def packager_ids():
+    uid, gid = os.getuid(), os.getgid()
+    need(uid != 0 and uid == os.geteuid() and gid == os.getegid(), "packager-identity")
+    return uid, gid
+
+
+def tree(path, *, installed=False, packager=False):
+    need(not (installed and packager), "conflicting-tree-owner")
+    owner = packager_ids() if packager else None
     found = {}
     observed_directories = set()
     count = total = 0
@@ -233,6 +277,9 @@ def tree(path, *, installed=False):
         before = os.fstat(fd)
         if installed:
             need(before.st_uid == 0 and before.st_gid == 0 and stat.S_IMODE(before.st_mode) == 0o555, "installed-directory-mode-owner")
+        if owner is not None:
+            need((before.st_uid, before.st_gid) == owner and stat.S_IMODE(before.st_mode) == (0o755 if depth == 0 else 0o555),
+                 "packager-directory-mode-owner")
         no_xattrs(fd)
         names = sorted(os.listdir(fd))
         need(len(names) <= MAX_FILES, "directory-entry-bound")
@@ -257,6 +304,8 @@ def tree(path, *, installed=False):
                 need(len(found) < MAX_FILES and relative not in found, "tree-file-bound")
                 if installed:
                     need(info.st_uid == 0 and info.st_gid == 0, "installed-file-owner")
+                if owner is not None:
+                    need((info.st_uid, info.st_gid) == owner and stat.S_IMODE(info.st_mode) in (0o444, 0o555), "packager-file-mode-owner")
                 found[relative] = (body, stat.S_IMODE(info.st_mode))
         need(signature(os.fstat(fd)) == signature(before), "tree-root-changed")
 
@@ -522,9 +571,12 @@ def xar_members(body):
     return result
 
 
-def cpio_members(body):
+def _cpio_members(body, owner):
+    # The only nonzero owner caller is original-package PREPARATION below.
+    # Public cpio_members and final package acceptance are always fixed0:0.
     need(len(body) <= MAX_BYTES, "scripts-archive-bound")
     entries = {}
+    root_seen = False
     offset = 0
     for _ in range(4098):
         start = offset
@@ -560,13 +612,16 @@ def cpio_members(body):
         need(offset <= len(body), "cpio-data-bound")
         if name == "TRAILER!!!":
             need(size == 0 and not any(body[offset:]), "cpio-trailer")
+            need(root_seen, "scripts-root-required")
             return entries
+        if name in (".", "./"):
+            need(not root_seen, "scripts-root-duplicate")
+            need(stat.S_ISDIR(mode) and (uid, gid) == owner and stat.S_IMODE(mode) == 0o755 and size == 0, "scripts-root-owner-mode")
+            root_seen = True
+            continue
         if name.startswith("./"):
             name = name[2:]
-        if name == ".":
-            need(stat.S_ISDIR(mode) and uid == gid == 0 and stat.S_IMODE(mode) == 0o755 and size == 0, "scripts-root-owner-mode")
-            continue
-        need(safe_path(name) and name not in entries and uid == gid == 0, "scripts-entry-root-ownership")
+        need(safe_path(name) and name not in entries and (uid, gid) == owner, "scripts-entry-owner")
         if stat.S_ISDIR(mode):
             need(size == 0 and stat.S_IMODE(mode) == 0o555, "scripts-directory-mode")
             entries[name] = (None, 0o555)
@@ -574,6 +629,10 @@ def cpio_members(body):
             need(stat.S_ISREG(mode) and links == 1 and stat.S_IMODE(mode) in (0o444, 0o555), "scripts-file-type-mode")
             entries[name] = (body[data_start:data_start + size], stat.S_IMODE(mode))
     raise Refused("scripts-entry-count")
+
+
+def cpio_members(body):
+    return _cpio_members(body, (0, 0))
 
 
 def package_info(body, *, fixture=False):
@@ -591,11 +650,49 @@ def package_info(body, *, fixture=False):
     return identifier
 
 
+def original_package(scripts_path, package_path, *, fixture=False):
+    owner = packager_ids()
+    scripts = tree(scripts_path, packager=True)
+    with parent(package_path) as (fd, name):
+        package, info = read_at(fd, name, MAX_BYTES)
+        need((info.st_uid, info.st_gid) == owner, "original-package-owner")
+    members = xar_members(package)
+    need(set(members) == {"PackageInfo", "Scripts"}, "original-package-roster")
+    identifier = package_info(members["PackageInfo"], fixture=fixture)
+    archive = members["Scripts"]
+    if archive[:2] == b"\x1f\x8b":
+        archive = inflate(archive, MAX_BYTES, gzip=True)
+    actual = _cpio_members(archive, owner)
+    expected = {**scripts, **{name: (None, 0o555) for name in directories(scripts)}}
+    need(actual == expected, "complete-original-scripts-correspondence")
+    return scripts, package, members, identifier, owner
+
+
+def prepare_package_command(args):
+    scripts, package, members, identifier, owner = original_package(args.scripts, args.package, fixture=args.fixture)
+    # This is not archive extraction: only validated, unchanged PackageInfo
+    # DATA is copied to a fixed literal name in an exclusively-created root.
+    write_tree(args.output, {"PackageInfo": (members["PackageInfo"], 0o444)}, root_mode=0o700)
+    return {"schemaVersion": 1, "originalPackageSha256": digest(package), "originalPackageSize": len(package),
+            "packageInfoSha256": digest(members["PackageInfo"]), "packageIdentifier": identifier,
+            "scriptFileCount": len(scripts), "packagerUid": owner[0], "packagerGid": owner[1],
+            "qualification": "caller-owned-original-prepared-not-root-audited-or-installed"}
+
+
+def package_format_input_command(args):
+    files = {"input/readonly.txt": (b"MRK_MACOS_PACKAGE_FORMAT_DATA\n", 0o444),
+             "postinstall": (b"#!/bin/sh\n# Inert archive-format input; never execute.\nexit 97\n", 0o555)}
+    write_tree(args.output, files, root_mode=0o755)
+    return {"schemaVersion": 1, "scriptFileCount": len(files), "qualification": "tiny-inert-package-format-input-never-execute"}
+
+
 def audit_command(args):
-    scripts = tree(args.scripts)
+    scripts, original, original_members, identifier, _owner = original_package(args.scripts, args.original_package, fixture=args.fixture)
     package = read(args.package)
     members = xar_members(package)
-    identifier = package_info(members["PackageInfo"], fixture=args.fixture)
+    need(set(members) == {"PackageInfo", "Scripts"}, "final-package-roster")
+    need(members["PackageInfo"] == original_members["PackageInfo"], "package-info-bytes-changed")
+    package_info(members["PackageInfo"], fixture=args.fixture)
     archive = members["Scripts"]
     if archive[:2] == b"\x1f\x8b":
         archive = inflate(archive, MAX_BYTES, gzip=True)
@@ -603,6 +700,7 @@ def audit_command(args):
     expected = {**scripts, **{name: (None, 0o555) for name in directories(scripts)}}
     need(actual == expected, "complete-root-owned-scripts-correspondence")
     return {"schemaVersion": 1, "packageSha256": digest(package), "packageSize": len(package),
+            "originalPackageSha256": digest(original), "packageInfoSha256": digest(members["PackageInfo"]),
             "packageIdentifier": identifier, "scriptFileCount": len(scripts), "finalDestinationPayloadEntries": 0,
             "qualification": "scripts-only-package-audited-not-installed-or-GUI-qualified"}
 
@@ -838,10 +936,17 @@ def main():
     scripts.add_argument("--expected-source", required=True)
     scripts.add_argument("--fixture", action="store_true")
     scripts.add_argument("--output", required=True, type=Path)
-    audit = commands.add_parser("audit-package")
-    audit.add_argument("--scripts", required=True, type=Path)
-    audit.add_argument("--package", required=True, type=Path)
-    audit.add_argument("--fixture", action="store_true")
+    probe = commands.add_parser("package-format-input")
+    probe.add_argument("--output", required=True, type=Path)
+    for name in ("prepare-package", "audit-package"):
+        package = commands.add_parser(name)
+        package.add_argument("--scripts", required=True, type=Path)
+        package.add_argument("--package", required=True, type=Path)
+        package.add_argument("--fixture", action="store_true")
+        if name == "prepare-package":
+            package.add_argument("--output", required=True, type=Path)
+        else:
+            package.add_argument("--original-package", required=True, type=Path)
     for name in ("observe-installation", "observe-installer-fixture"):
         observation = commands.add_parser(name)
         observation.add_argument("--input", required=True, type=Path)
@@ -852,14 +957,22 @@ def main():
     args = parser.parse_args()
     need(args.command == "describe-runtime" or os.getuid() != 0 and os.getuid() == os.geteuid(), "only-installer-is-privileged")
     action = {"describe-runtime": runtime_command, "runtime": runtime_command, "app": app_command,
-              "input": input_command, "scripts": scripts_command, "audit-package": audit_command,
+              "input": input_command, "scripts": scripts_command, "package-format-input": package_format_input_command,
+              "prepare-package": prepare_package_command, "audit-package": audit_command,
               "observe-installation": observation_command, "observe-installer-fixture": fixture_observation_command}[args.command]
-    print(canonical(action(args)).decode("utf-8"))
+    try:
+        result = action(args)
+    except Refused as error:
+        if args.command in ("package-format-input", "prepare-package", "audit-package"):
+            print(package_refusal_message(error), file=sys.stderr)
+            raise SystemExit(1)
+        raise
+    print(canonical(result).decode("utf-8"))
 
 
 if __name__ == "__main__":
     try:
         main()
     except (Refused, OSError, ValueError, KeyError, TypeError, RecursionError, OverflowError, zipfile.BadZipFile, tarfile.TarError, ET.ParseError):
-        print("Mac package staging/observation refused; preserve original outputs, no automatic cleanup or retry.", file=sys.stderr)
+        print(GENERIC_REFUSAL, file=sys.stderr)
         raise SystemExit(1)
