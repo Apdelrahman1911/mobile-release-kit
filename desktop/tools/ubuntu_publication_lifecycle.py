@@ -3615,6 +3615,13 @@ def _shell_normal_markers(stdout, stderr):
               "app-info-enter", "catalog-enter", "content-terminated",
               "content-reason-crashed", "content-reason-exceeded-memory-limit",
               "content-reason-terminated-by-api", "content-reason-unknown")
+    # Exact static Rust records from the SAME capability admission/original wait.
+    # Unknown original codes map to literal other; unknown emitted bytes do not.
+    failure_codes = ("runtime_unavailable", "cleanup_unknown", "invalid_request", "shutting_down", "busy", "unavailable",
+                     "offline_preflight_busy", "android_build_busy", "environment_diagnostics_busy", "query_timeout",
+                     "protocol_error", "engine_failed", "io_error", "output_limit", "other")
+    stages += tuple("capabilities-" + origin + "-" + code
+                    for origin in ("admission", "query-wait") for code in failure_codes)
     prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
     stage_lines = {prefix + stage.encode("ascii") + b"\n": stage for stage in stages}
     result = {}

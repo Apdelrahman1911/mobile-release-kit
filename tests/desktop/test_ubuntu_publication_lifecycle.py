@@ -714,6 +714,15 @@ class LifecycleData(unittest.TestCase):
             self.assertTrue(all(count == 0 for count in row["markers"].values()))
             self.assertTrue(all(count == 0 for count in row["stages"].values()))
             self.assertEqual((row["unexpectedMrk"], row["unexpectedBootstrap"]), (0, 0))
+        # A finite original failure in an omitted middle is counted from the
+        # SAME validated capture, not recovered by opening another log.
+        failed_capability = b"MRKDBG_DESKTOP_BOOTSTRAP=capabilities-query-wait-query_timeout\n"
+        middle = subprocess.CompletedProcess(argv, 0, b"h" * 1024 + b"\n" + failed_capability + b"t" * 2048, b"")
+        counted_middle = observe(dict(holder, result=middle), display_log=b"")
+        self.assertEqual(counted_middle["bootstrap"]["stdout"]["stages"]["capabilities-query-wait-query_timeout"], 1)
+        summary = counted_middle["capture"]["stdout"]
+        self.assertTrue(summary["truncated"])
+        self.assertNotIn("capabilities-query-wait-query_timeout", summary["head"] + summary["tail"])
         self.assertEqual(observed["resources"], resource_observation())
         self.assertLess(len(L.canonical(observed["resources"])), 1024)
         unavailable = observe(resources=resource_observation(unavailable=True))
@@ -845,6 +854,12 @@ class LifecycleData(unittest.TestCase):
                   "page-finish-untrusted", "hook-installed", "app-info-enter", "catalog-enter", "content-terminated",
                   "content-reason-crashed", "content-reason-exceeded-memory-limit",
                   "content-reason-terminated-by-api", "content-reason-unknown")
+        capability_codes = ("runtime_unavailable", "cleanup_unknown", "invalid_request", "shutting_down", "busy", "unavailable",
+                            "offline_preflight_busy", "android_build_busy", "environment_diagnostics_busy", "query_timeout",
+                            "protocol_error", "engine_failed", "io_error", "output_limit", "other")
+        capability_stages = tuple("capabilities-" + origin + "-" + code
+                                  for origin in ("admission", "query-wait") for code in capability_codes)
+        stages += capability_stages
         prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
         stdout = (b"ordinary wrapper text\n" + b"".join(markers) + markers[0]
                   + b"".join(prefix + stage.encode("ascii") + b"\n" for stage in stages)
@@ -861,12 +876,24 @@ class LifecycleData(unittest.TestCase):
             "markers": {"capabilitiesAvailable": 0, "capabilitiesUnavailable": 1, "catalogueReturned": 0, "catalogueRefused": 0},
             "unexpectedMrk": 1, "stages": {stage: int(stage == "catalog-enter") for stage in stages}, "unexpectedBootstrap": 0})
         self.assertNotIn(b"private", L.canonical(counted))
-        for reason in stages[-4:]:
+        for reason in ("content-reason-crashed", "content-reason-exceeded-memory-limit",
+                       "content-reason-terminated-by-api", "content-reason-unknown", *capability_stages):
             line = prefix + reason.encode("ascii")
             for malformed in (line, line + b"\r\n", line + b" extra\n"):
                 row = L._shell_normal_markers(malformed, b"")["stdout"]
                 self.assertEqual(row["stages"][reason], 0)
                 self.assertEqual(row["unexpectedBootstrap"], 1)
+        for line in (prefix + b"capabilities-admission-PRIVATE_CODE\n",
+                     prefix + b"capabilities-PRIVATE_ORIGIN-query_timeout\n",
+                     prefix + b"capabilities-query-wait-protocol_error\x1b[31mPRIVATE\n"):
+            row = L._shell_normal_markers(line, b"")["stdout"]
+            self.assertTrue(all(row["stages"][stage] == 0 for stage in capability_stages))
+            self.assertEqual(row["unexpectedBootstrap"], 1)
+            self.assertNotIn(b"PRIVATE", L.canonical(row))
+        duplicate = prefix + b"capabilities-admission-busy\n"
+        row = L._shell_normal_markers(duplicate * 2, b"")["stdout"]
+        self.assertEqual(row["stages"]["capabilities-admission-busy"], 2)
+        self.assertEqual(row["unexpectedBootstrap"], 0)
         # Counts are diagnostic-only; a completed or empty stage sequence
         # cannot manufacture normal bootstrap success.
         with self.assertRaises(ValueError):

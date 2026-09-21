@@ -63,7 +63,7 @@ struct ShellState {
 }
 struct RelayBook { handle: Option<tauri::async_runtime::JoinHandle<()>>, settled: bool }
 
-fn diagnostic(line: &'static [u8]) {
+pub(crate) fn diagnostic(line: &'static [u8]) {
     use std::io::Write;
     // Fixed status only. A closed diagnostic channel must not panic, change
     // admission, or substitute for the original query/cleanup result.

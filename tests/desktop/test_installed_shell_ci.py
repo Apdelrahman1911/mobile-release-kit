@@ -1113,6 +1113,33 @@ class InstalledProjectPathReceiptContracts(unittest.TestCase):
 
 
 class InstalledFailureLabelSourceContracts(unittest.TestCase):
+    def test_normal_capability_error_literals_match_the_existing_joined_classifier(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        source = (SOURCE / "desktop/src-tauri/src/bridge.rs").read_text()
+        shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        classifier = source.split("fn capabilities_failure_line(", 1)[1].split("\nstruct RegisteredProject", 1)[0]
+        literal_rows = re.findall(r'b"(MRKDBG_DESKTOP_BOOTSTRAP=capabilities-[a-z_-]+)\\n"', classifier)
+        self.assertEqual(len(literal_rows), 30)
+        self.assertEqual(len(set(literal_rows)), 30)
+        prefix = "MRKDBG_DESKTOP_BOOTSTRAP="
+        consumer = lifecycle._shell_normal_markers(b"", b"")["stdout"]["stages"]
+        self.assertEqual({line[len(prefix):] for line in literal_rows},
+                         {stage for stage in consumer if stage.startswith("capabilities-")})
+        self.assertLessEqual(max(len(line.encode("ascii")) + 1 for line in literal_rows), 78)
+        self.assertNotIn("error.message", classifier); self.assertNotIn("format!", classifier)
+        self.assertNotIn(".to_string()", classifier); self.assertNotIn("std::io", classifier)
+        app_info = source.split("    pub(crate) async fn app_info(", 1)[1].split("    pub(crate) async fn catalog(", 1)[0]
+        self.assertEqual(app_info.count("document.passive_query(self, Method::Capabilities, json!({}))"), 1)
+        self.assertEqual(app_info.count("query.wait().await"), 1)
+        self.assertEqual(app_info.count('#[cfg(feature = "desktop-shell")]'), 2)
+        self.assertIn("if let Err(error) = &result", app_info)
+        self.assertIn("capabilities_failure_line(CapabilitiesFailureOrigin::QueryWait, error)", app_info)
+        self.assertIn("capabilities_failure_line(CapabilitiesFailureOrigin::Admission, &error)", app_info)
+        self.assertIn("pub(crate) fn diagnostic(line: &'static [u8])", shell)
+        self.assertIn("let _ = std::io::stderr().write_all(line);", shell)
+        # Source correspondence does not execute the Rust classifier, a query,
+        # or a window and cannot count as native capabilities acceptance.
+
     def test_literal_allowlists_correspond_to_bounded_rust_step_boundary_encoder(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
