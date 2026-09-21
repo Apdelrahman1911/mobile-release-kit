@@ -127,6 +127,42 @@ The 120-second Installer admission clock is not an extension of any application
 clock and cannot preempt a blocked kernel syscall. Unknown must remain Unknown;
 process absence or a standard Installer exit alone cannot prove native finality.
 
+## Installer entry and bounded diagnostics
+
+The fixed package hook admits only its existing absolute `.../postinstall`
+spelling and exact `./postinstall`, with target `/`. Both use physical `cd -P`
+and replace the shell with the same `./mrk-macos-install "$PWD/input"`; they
+cannot select another tool or destination. Literal stderr phase/refusal markers
+show entry, target, invocation spelling, physical-directory selection and the
+pre-exec boundary. They expose no raw arguments, working directory or environment,
+and do not claim that exec completed. The relative spelling is a robustness
+correction: error112 in run35646922068 did not establish its actual argv0/CWD.
+
+The existing nonroot DATA stager can record a cursor immediately before Installer
+and one diagnostic snapshot after its original return. It reads only physical
+`/private/var/log/install.log`: same root-owned single-link file identity,
+unchanged preceding4096-byte anchor, complete LF boundaries, at most1MiB of new
+bytes,128KiB per line and256KiB of selected raw project-anchored lines. Cursor
+JSON is bounded to16KiB and capture JSON to256KiB before output; selected bytes
+and status scalars are bounded before the explicit artifact upload. Unrelated
+neighboring lines are counted/hashed as part of the interval, never retained.
+Each selected line keeps its original interval offset and hash. Missing access,
+rotation, caps, incomplete/rewritten data or read/close/write uncertainty is
+explicitly unknown, with no retry, alternate log source or permission change.
+An output write/close failure can leave an unconfirmed task-owned file; preserve
+it as unknown, not as a complete capture.
+
+Original Installer status is saved before collection, including on failure;
+its nonzero exit is propagated unchanged. Cursor/capture statuses remain separate.
+No status is fabricated after timeout/cancellation. Log growth is recorded, and
+reopened metadata is not continuous original-FD custody. Selected lines are
+**project-correlated diagnostics, not authenticated PackageKit PID attribution**.
+Opposite/duplicate result markers remain mixed/ambiguous; even one marker remains
+unbound. No diagnostic capture or tail substitutes for the unchanged client-output
+record, source/inventory/manifest checks, fixture readback, ordinary readback or
+Aqua gates. The next native attempt must establish the actual channel before any
+separate change to readback authority can be considered.
+
 ## Fixed seven-case Installer fixture — separate package, not a runner
 
 `macos-installed-installer-fixture` selects one compile-time entry using the same

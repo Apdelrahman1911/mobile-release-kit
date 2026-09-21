@@ -155,11 +155,12 @@ export function parseGitHubSetupHelp(value: unknown): GitHubSetupHelp | null {
 
 export function parseCatalogGitHubSetup(value: unknown): GitHubSetupHelp | null {
   try {
-    // Admit only the original envelope and the four explicit combinations of
-    // its two optional guides. Neither independent guide grants Setup authority.
+    // Admit only the required envelope and the present, explicitly known
+    // additive guides. Each guide's own consumer validates its contents;
+    // no independent guide grants Setup authority or permits unknown keys.
     const envelope = ['schemaVersion', 'schema', 'fields', 'credentials', 'metadata', 'githubSetup', 'assurance'];
-    return (keys(value, envelope) || keys(value, [...envelope, 'credentialGuide']) ||
-      keys(value, [...envelope, 'githubConnection']) || keys(value, [...envelope, 'credentialGuide', 'githubConnection'])) && value.schemaVersion === 1
+    const guides = ['credentialGuide', 'githubConnection', 'metadataText'];
+    return record(value) && keys(value, [...envelope, ...guides.filter((key) => Object.hasOwn(value, key))]) && value.schemaVersion === 1
       ? parseGitHubSetupHelp(value.githubSetup) : null;
   } catch { return null; }
 }

@@ -72,6 +72,20 @@ def reported_fixture_data():
             "qualification": "native-installer-collisions-and-injected-policy-only"}
 
 
+def log_args(command="installer-log-cursor", *, fixture=False):
+    package = "/work/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" if fixture else "/work/package-final/MobileReleaseKit.pkg"
+    return SimpleNamespace(command=command, fixture=fixture, package=Path(package), expected_source="a" * 40,
+                           expected_inventory="b" * 64, expected_manifest="c" * 64, run_id="123", run_attempt="1",
+                           cursor=Path("/work/cursor.json"), selected_output=Path("/work/selected.txt"))
+
+
+def log_info(size=0, **changes):
+    values = dict(st_dev=1, st_ino=42, st_mode=stat.S_IFREG | 0o640, st_uid=0, st_gid=80,
+                  st_nlink=1, st_size=size, st_mtime_ns=1, st_ctime_ns=1)
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
 @unittest.skipUnless(TOOL is not None, "Darwin/POSIX DATA tool only")
 class MacInstalledData(unittest.TestCase):
     def test_portable_names_and_complete_directory_identity(self):
@@ -253,6 +267,188 @@ class MacInstalledData(unittest.TestCase):
         for error in (TOOL.Refused(), TOOL.Refused("/private/credential=value"), TOOL.Refused(NoReflection()),
                       TOOL.Refused("scripts-root-owner-mode", "/private/extra"), ValueError("scripts-root-owner-mode")):
             self.assertEqual(TOOL.package_refusal_message(error), TOOL.GENERIC_REFUSAL)
+
+    def test_postinstall_accepts_only_fixed_entry_and_preserves_exec_boundary(self):
+        stub = (Path(__file__).absolute().parents[2] / "desktop/macos-installed-inputs/postinstall").read_text(encoding="utf-8")
+        self.assertTrue(stub.startswith("#!/bin/sh\n"))
+        self.assertIn('if [ "${3:-}" != / ]; then', stub)
+        self.assertIn('./postinstall)\n        scripts=.', stub)
+        self.assertIn('/*/postinstall)\n        scripts=${0%/*}', stub)
+        self.assertIn('if ! cd -P "$scripts" 2>/dev/null; then', stub)
+        self.assertTrue(stub.endswith('exec ./mrk-macos-install "$PWD/input"\n'))
+        self.assertEqual(stub.count("\nexec "), 1)
+        phases = {"entry", "target-ok", "relative-entry", "absolute-entry", "cwd-ok", "pre-exec"}
+        refusals = {"target", "entry", "cwd"}
+        markers = TOOL.re.findall(r"'(MRK_MACOS_POSTINSTALL_[A-Z]+=[a-z-]+)'", stub)
+        self.assertEqual(set(markers), {"MRK_MACOS_POSTINSTALL_PHASE=" + value for value in phases}
+                         | {"MRK_MACOS_POSTINSTALL_REFUSED=" + value for value in refusals})
+        self.assertEqual(len(markers), len(phases) + len(refusals))
+        self.assertLess(stub.index("MRK_MACOS_POSTINSTALL_REFUSED=target"), stub.index("MRK_MACOS_POSTINSTALL_PHASE=target-ok"))
+        self.assertLess(stub.index("MRK_MACOS_POSTINSTALL_REFUSED=cwd"), stub.index("MRK_MACOS_POSTINSTALL_PHASE=pre-exec"))
+        for forbidden in ("PATH=", "eval ", "sh -c", "sudo ", 'printf "$', "post-exec", "../postinstall)", "    postinstall)"):
+            self.assertNotIn(forbidden, stub)
+
+    def test_installer_log_cursor_identity_binding_and_append_boundaries(self):
+        binding = TOOL.installer_log_binding(log_args())
+        tail, body = b"old log text\n", b"one new line\n"
+        identity = TOOL.installer_log_identity(log_info())
+        cursor = TOOL.make_log_cursor(binding, identity, len(tail), tail, 0)
+        self.assertEqual(TOOL.validate_log_cursor(cursor, binding), cursor)
+        self.assertNotIn("old log text", TOOL.canonical(cursor).decode())
+        self.assertEqual(cursor["precedingTailSha256"], TOOL.digest(tail))
+        self.assertEqual(TOOL.make_log_cursor(binding, identity, 0, b"", 0)["precedingTailBytes"], 0)
+        end = len(tail) + len(body)
+        TOOL.validate_log_window(cursor, identity, end, tail, body)
+        with mock.patch.object(TOOL, "os", mock.Mock(wraps=TOOL.os)) as api:
+            api.fstat.return_value = log_info(end + 3)
+            api.stat.return_value = log_info(end + 5)
+            self.assertEqual(TOOL.log_growth(9, 8, "install.log", identity, end), 5)
+        for changed in ({**cursor, "schemaVersion": True}, {**cursor, "offsetBytes": True}, {**cursor, "precedingTailBytes": 0},
+                        {**cursor, "growthBeyondSnapshotBytes": True}, {**cursor, "logPath": "/var/log/install.log"},
+                        {**cursor, "extra": 1}, {**cursor, "binding": {**binding, "runAttempt": "2"}}):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.validate_log_cursor(changed, binding)
+        for key, value in (("device", 2), ("inode", 43), ("mode", stat.S_IFREG | 0o600), ("uid", 501), ("gid", 20), ("links", 2)):
+            with self.subTest(identity=key), self.assertRaises(TOOL.Refused):
+                TOOL.validate_log_window(cursor, {**identity, key: value}, end, tail, body)
+        for changes in ({"st_uid": 501}, {"st_nlink": 2}, {"st_mode": stat.S_IFREG | 0o666}, {"st_mode": stat.S_IFLNK | 0o777}):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.installer_log_identity(log_info(**changes))
+        for observed_end, anchor, interval in ((len(tail) - 1, tail, b""), (end, b"changed text\n", body),
+                                               (end, tail, body[:-1]), (end - 1, tail, body[:-1]),
+                                               (len(tail) + TOOL.LOG_INTERVAL_BYTES + 1, tail, b"")):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.validate_log_window(cursor, identity, observed_end, anchor, interval)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.make_log_cursor(binding, identity, 7, b"partial", 0)
+        for args in (log_args(fixture=True), log_args()):
+            args.package = Path("/work/package-final/another.pkg")
+            with self.assertRaises(TOOL.Refused):
+                TOOL.installer_log_binding(args)
+
+    def test_installer_log_selection_is_bounded_raw_and_never_result_authority(self):
+        binding = TOOL.installer_log_binding(log_args())
+        result_line = b'PackageKit: MRK_MACOS_INSTALL_RESULT={"not":"acceptance"}\n'
+        lines = [b"unrelated private neighboring text\n", b"dev.mobile-release-kit.desktop.installed-fixture-suffix\n",
+                 b"prefixMRK_MACOS_INSTALL_RESULT={}\n", b"mrk-macos-install-helper\n",
+                 b"PackageKit: /work/package-final/MobileReleaseKit.pkg\n", b"MRK_MACOS_POSTINSTALL_PHASE=relative-entry\r\n",
+                 b"./mrk-macos-install: original loader bytes \xff\n", result_line]
+        selected, detail = TOOL.select_installer_log(b"".join(lines), binding)
+        self.assertEqual(selected, b"".join(lines[4:]))
+        self.assertEqual(detail["linesUnselected"], 4)
+        self.assertEqual(detail["resultMarkerState"], "unbound")
+        self.assertEqual(detail["selectedLines"][0]["relativeOffsetBytes"], len(b"".join(lines[:4])))
+        self.assertEqual(detail["selectedLines"][-1]["sha256"], TOOL.digest(result_line))
+        self.assertNotIn("private neighboring", TOOL.canonical(detail).decode())
+        opposite = b"MRK_MACOS_INSTALL_FIXTURE_RESULT={}\n"
+        raw, mixed = TOOL.select_installer_log(result_line + opposite, binding)
+        self.assertEqual(raw, result_line + opposite)
+        self.assertEqual(mixed["resultMarkerState"], "mixed")
+        self.assertEqual(TOOL.select_installer_log(result_line * 2, binding)[1]["resultMarkerState"], "duplicate")
+        self.assertEqual(TOOL.select_installer_log(lines[4], binding)[1]["resultMarkerState"], "missing")
+        header = b"mrk-macos-install "
+        limit_line = header + b"x" * (TOOL.LOG_LINE_BYTES - len(header) - 1) + b"\n"
+        for bad in (b"", b"unrelated\n", b"MRK_MACOS_POSTINSTALL_PHASE=unknown-value\n", result_line[:-1],
+                    b"x" * (TOOL.LOG_INTERVAL_BYTES + 1), limit_line[:-1] + b"x\n", limit_line * 3):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.select_installer_log(bad, binding)
+
+    def test_installer_log_failures_and_cli_never_manufacture_settlement(self):
+        args = log_args()
+        tail = b"before\n"
+        @TOOL.contextlib.contextmanager
+        def failed_close():
+            yield 9, 8, "install.log", log_info(len(tail))
+            raise TOOL.Refused("original-close-unknown")
+        with (mock.patch.object(TOOL, "installer_log_file", side_effect=failed_close),
+              mock.patch.object(TOOL, "positioned_log_read", return_value=tail),
+              mock.patch.object(TOOL, "log_growth", return_value=0),
+              mock.patch.object(TOOL, "write_log_selection") as writer):
+            result, status = TOOL.installer_log_diagnostic(args)
+            self.assertEqual((result["state"], result["reason"], status), ("unknown", "original-close-unknown", 1))
+            writer.assert_not_called()
+        with (mock.patch.object(TOOL, "installer_log_file", side_effect=PermissionError("private path must not be reflected")),
+              mock.patch.object(TOOL, "write_log_selection") as writer):
+            result, status = TOOL.installer_log_diagnostic(args)
+            self.assertEqual((result["state"], status, result["selectedOutputState"]), ("unknown", 1, "not-created"))
+            self.assertNotIn("private path", TOOL.canonical(result).decode())
+            writer.assert_not_called()
+        args = log_args("installer-log-capture")
+        binding = TOOL.installer_log_binding(args)
+        cursor = TOOL.make_log_cursor(binding, TOOL.installer_log_identity(log_info()), len(tail), tail, 0)
+        encoded = TOOL.canonical(cursor) + b"\n"
+        body = b"MRK_MACOS_INSTALL_RESULT={}\n"
+        @TOOL.contextlib.contextmanager
+        def log_file():
+            yield 9, 8, "install.log", log_info(len(tail) + len(body))
+        for write_error in (None, OSError("private exception text must not be reflected")):
+            with (mock.patch.object(TOOL, "parent") as parent,
+                  mock.patch.object(TOOL, "read_at", return_value=(encoded, log_info(st_uid=TOOL.os.getuid(), st_mode=stat.S_IFREG | 0o600))),
+                  mock.patch.object(TOOL, "installer_log_file", side_effect=log_file),
+                  mock.patch.object(TOOL, "positioned_log_read", side_effect=[tail, body, tail]),
+                  mock.patch.object(TOOL, "log_growth", return_value=7),
+                  mock.patch.object(TOOL, "write_log_selection", side_effect=write_error)):
+                parent.return_value.__enter__.return_value = (8, "cursor.json")
+                result, status = TOOL.installer_log_diagnostic(args)
+                self.assertEqual(result["scriptOutputFinality"], "unestablished")
+                self.assertEqual(result["authority"], TOOL.LOG_AUTHORITY)
+                if write_error is None:
+                    self.assertEqual(status, 0)
+                    self.assertEqual(result["resultMarkerState"], "unbound")
+                    self.assertEqual(result["growthBeyondSnapshotBytes"], 7)
+                    self.assertEqual(result["intervalSha256"], TOOL.digest(body))
+                    self.assertEqual(result["selectedData"]["sha256"], TOOL.digest(body))
+                else:
+                    self.assertEqual((status, result["state"], result["reason"]), (1, "unknown", "log-output-unavailable"))
+                    self.assertEqual(result["selectedOutputState"], "write-or-close-unknown-preserve-original")
+                    self.assertEqual(result["plannedSelectedData"]["sha256"], TOOL.digest(body))
+                    self.assertNotIn("private exception", TOOL.canonical(result).decode())
+        argv = ["installer-log-cursor", "--package", str(args.package),
+                "--expected-source", args.expected_source, "--expected-inventory", args.expected_inventory,
+                "--expected-manifest", args.expected_manifest, "--run-id", args.run_id, "--run-attempt", args.run_attempt]
+        with (mock.patch.object(TOOL, "os", mock.Mock(wraps=TOOL.os)) as api,
+              mock.patch.object(TOOL, "installer_log_diagnostic", return_value=({"state": "unknown"}, 1)) as diagnostic,
+              mock.patch.object(TOOL, "print", create=True)):
+            api.getuid.return_value = api.geteuid.return_value = 501
+            self.assertEqual(TOOL.main(argv), 1)
+            diagnostic.reset_mock()
+            api.getuid.return_value = 0
+            with self.assertRaises(TOOL.Refused):
+                TOOL.main(argv)
+            diagnostic.assert_not_called()
+
+    def test_installer_workflows_preserve_original_status_and_separate_diagnostics(self):
+        root = Path(__file__).absolute().parents[2] / ".github/workflows"
+        paths = [root / "desktop-macos-installed.yml"]
+        aqua = root / "desktop-macos-aqua.yml"
+        if aqua.is_file():
+            paths.append(aqua)  # A validates both; I does not pretend it includes A.
+        for path in paths:
+            workflow = path.read_text(encoding="utf-8")
+            names = [("Standard Installer only is privileged; never execute the app or Python as root", "installer")]
+            if path.name == "desktop-macos-installed.yml":
+                names.insert(0, ("Standard Installer runs the one fixed fixture, never root libtest or a scenario selector", "installer-fixture"))
+            for name, stem in names:
+                block = workflow.split("      - name: " + name + "\n", 1)[1].split("      - name: ", 1)[0]
+                self.assertIn("set -o noclobber", block)
+                self.assertIn("umask 077", block)
+                self.assertEqual(block.count("sudo -- /usr/sbin/installer -pkg "), 1)
+                self.assertEqual(block.count("installer-log-cursor "), 1)
+                self.assertEqual(block.count("installer-log-capture "), 1)
+                positions = [block.index(value) for value in (
+                    "set +e", "installer-log-cursor ", "cursor_status=$?", "cursor_status_saved=$?",
+                    "sudo -- /usr/sbin/installer -pkg ", "installer_status=$?", '"$installer_status" >',
+                    "installer_status_saved=$?", "installer-log-capture ", "capture_status=$?", "capture_status_saved=$?",
+                    "set -e\n", 'if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi',
+                    '[[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]]')]
+                self.assertEqual(positions, sorted(positions))
+                for filename in (stem + "-output.status", stem + "-log-cursor.json", stem + "-log-cursor.status",
+                                 stem + "-log-capture.json", stem + "-log-capture.status", stem + "-log-selected.txt"):
+                    self.assertIn('${{ steps.work.outputs.root }}/' + filename, workflow)
+                self.assertIn('--installer-output "$MRK_MACOS_WORK/' + stem + '-output.txt"', workflow)
+                self.assertNotIn("ulimit", block)
+                self.assertNotIn('[[ "$capture_status" == 0 ]]', block)
+                self.assertNotIn('--installer-output "$MRK_MACOS_WORK/' + stem + '-log-', workflow)
 
     def test_macho_header_data_refuses_an_unreviewed_target_or_minimum(self):
         header = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 1, 24, 0, 0)

@@ -391,8 +391,33 @@ jobs:
         run: |
           set -euo pipefail
           set -o noclobber
+          umask 077
+          diagnostic=(--fixture --package "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg"
+            --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256"
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-cursor "${diagnostic[@]}" \
+            > "$MRK_MACOS_WORK/installer-fixture-log-cursor.json"
+          cursor_status=$?
+          printf '%s\n' "$cursor_status" > "$MRK_MACOS_WORK/installer-fixture-log-cursor.status"
+          cursor_status_saved=$?
           sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" -target / -dumplog -verboseR \
             > "$MRK_MACOS_WORK/installer-fixture-output.txt" 2>&1
+          installer_status=$?
+          printf '%s\n' "$installer_status" > "$MRK_MACOS_WORK/installer-fixture-output.status"
+          installer_status_saved=$?
+          # Read only the fixed bounded log interval, also after Installer failure.
+          # The selected raw lines are unbound diagnostics, never readback input.
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-capture "${diagnostic[@]}" \
+            --cursor "$MRK_MACOS_WORK/installer-fixture-log-cursor.json" \
+            --selected-output "$MRK_MACOS_WORK/installer-fixture-log-selected.txt" > "$MRK_MACOS_WORK/installer-fixture-log-capture.json"
+          capture_status=$?
+          printf '%s\n' "$capture_status" > "$MRK_MACOS_WORK/installer-fixture-log-capture.status"
+          capture_status_saved=$?
+          set -e
+          if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi
+          [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]]
+          # Unknown diagnostics do not replace the independent client-record gate.
           # Setup and each fixed case retain their own original120s endpoint.
           # Any unexpected native failure/Unknown stops subsequent cases. No retry.
       - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged
@@ -470,8 +495,33 @@ jobs:
         run: |
           set -euo pipefail
           set -o noclobber
+          umask 077
+          diagnostic=(--package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg"
+            --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256"
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-cursor "${diagnostic[@]}" \
+            > "$MRK_MACOS_WORK/installer-log-cursor.json"
+          cursor_status=$?
+          printf '%s\n' "$cursor_status" > "$MRK_MACOS_WORK/installer-log-cursor.status"
+          cursor_status_saved=$?
           sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" -target / -dumplog -verboseR \
             > "$MRK_MACOS_WORK/installer-output.txt" 2>&1
+          installer_status=$?
+          printf '%s\n' "$installer_status" > "$MRK_MACOS_WORK/installer-output.status"
+          installer_status_saved=$?
+          # Read only the fixed bounded log interval, also after Installer failure.
+          # The selected raw lines are unbound diagnostics, never readback input.
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-capture "${diagnostic[@]}" \
+            --cursor "$MRK_MACOS_WORK/installer-log-cursor.json" \
+            --selected-output "$MRK_MACOS_WORK/installer-log-selected.txt" > "$MRK_MACOS_WORK/installer-log-capture.json"
+          capture_status=$?
+          printf '%s\n' "$capture_status" > "$MRK_MACOS_WORK/installer-log-capture.status"
+          capture_status_saved=$?
+          set -e
+          if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi
+          [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]]
+          # Unknown diagnostics do not replace the independent client-record gate.
           # A collision, partial publication, unknown close or timeout fails
           # here. Keep originals; no uninstall, rollback, retries or repair.
       - name: Nonroot byte/mode readback, not a headless GUI substitute
@@ -514,6 +564,12 @@ jobs:
             ${{ steps.work.outputs.root }}/scripts-fixture-result.json
             ${{ steps.work.outputs.root }}/package-fixture-audit.json
             ${{ steps.work.outputs.root }}/installer-fixture-output.txt
+            ${{ steps.work.outputs.root }}/installer-fixture-output.status
+            ${{ steps.work.outputs.root }}/installer-fixture-log-cursor.json
+            ${{ steps.work.outputs.root }}/installer-fixture-log-cursor.status
+            ${{ steps.work.outputs.root }}/installer-fixture-log-capture.json
+            ${{ steps.work.outputs.root }}/installer-fixture-log-capture.status
+            ${{ steps.work.outputs.root }}/installer-fixture-log-selected.txt
             ${{ steps.work.outputs.root }}/installer-fixture-observation.json
             ${{ steps.work.outputs.root }}/MobileReleaseKit-InstallerFixture-original.pkg
             ${{ steps.work.outputs.root }}/package-fixture-prepare.json
@@ -524,6 +580,12 @@ jobs:
             ${{ steps.work.outputs.root }}/package-audit.json
             ${{ steps.work.outputs.root }}/installation-observation.json
             ${{ steps.work.outputs.root }}/installer-output.txt
+            ${{ steps.work.outputs.root }}/installer-output.status
+            ${{ steps.work.outputs.root }}/installer-log-cursor.json
+            ${{ steps.work.outputs.root }}/installer-log-cursor.status
+            ${{ steps.work.outputs.root }}/installer-log-capture.json
+            ${{ steps.work.outputs.root }}/installer-log-capture.status
+            ${{ steps.work.outputs.root }}/installer-log-selected.txt
             ${{ steps.work.outputs.root }}/MobileReleaseKit-original.pkg
             ${{ steps.work.outputs.root }}/package-prepare.json
             ${{ steps.work.outputs.root }}/package-tar.status

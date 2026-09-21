@@ -6,6 +6,8 @@ ancestor, replacement, deletion, network, core import or interpreter rebuild is
 present. `describe-runtime` is the separate DATA step that supplies the proposed
 successor digest for independent review BEFORE app compilation. Other commands
 require an explicit digest, not a discovered adjacent-manifest authority.
+Installer-log actions only collect bounded nonroot diagnostics from one fixed
+physical log; they never give those bytes installation/readback authority.
 """
 from __future__ import annotations
 
@@ -61,6 +63,20 @@ MAX_FILES = 2048
 MAX_BYTES = 512 * 1024 * 1024
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _DARWIN_XATTRS = None
+INSTALL_LOG = Path("/private/var/log/install.log")
+LOG_TAIL_BYTES = 4096
+LOG_INTERVAL_BYTES = 1024 * 1024
+LOG_LINE_BYTES = 128 * 1024
+LOG_SELECTED_BYTES = 256 * 1024
+LOG_METADATA_BYTES = 256 * 1024
+LOG_AUTHORITY = "project-correlated-diagnostics-not-package-pid-authentication-or-original-fd-custody"
+LOG_REFUSALS = frozenset({
+    "log-input-binding", "log-file-policy", "log-file-identity", "log-cursor-shape", "log-cursor-binding",
+    "log-cursor-offset", "log-anchor-rewritten", "log-truncated", "log-incomplete-boundary",
+    "log-interval-bound", "log-line-bound", "log-selected-bound", "log-metadata-bound",
+    "log-no-project-lines", "log-read-incomplete", "log-output-readback", "original-close-unknown",
+    "ancestor-close-unknown",
+})
 
 
 class Refused(Exception):
@@ -728,6 +744,228 @@ def observation_inventory(args):
     return rows
 
 
+def installer_log_binding(args):
+    need(type(args.fixture) is bool and type(args.expected_source) is str
+         and re.fullmatch(r"[0-9a-f]{40}", args.expected_source)
+         and sha(args.expected_inventory) and sha(args.expected_manifest)
+         and type(args.run_id) is str and re.fullmatch(r"[1-9][0-9]{0,23}", args.run_id)
+         and type(args.run_attempt) is str and re.fullmatch(r"[1-9][0-9]{0,5}", args.run_attempt), "log-input-binding")
+    package = os.fspath(args.package)
+    basename = "MobileReleaseKit-InstallerFixture.pkg" if args.fixture else "MobileReleaseKit.pkg"
+    dirname = "package-fixture-final" if args.fixture else "package-final"
+    need(type(package) is str and package.startswith("/") and len(os.fsencode(package)) <= 4096
+         and all(ord(c) >= 32 and ord(c) != 127 for c in package)
+         and all(part and part not in (".", "..") for part in package.split("/")[1:])
+         and package.split("/")[-2:] == [dirname, basename], "log-input-binding")
+    return {"packageKind": "fixture" if args.fixture else "ordinary", "packageIdentifier": PACKAGE_ID + ("-fixture" if args.fixture else ""),
+            "packagePath": package, "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory,
+            "runtimeManifestSha256": args.expected_manifest, "runId": args.run_id, "runAttempt": args.run_attempt}
+
+
+def installer_log_identity(info):
+    identity = {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode,
+                "uid": info.st_uid, "gid": info.st_gid, "links": info.st_nlink}
+    validate_log_identity(identity)
+    return identity
+
+
+def validate_log_identity(identity):
+    need(type(identity) is dict and set(identity) == {"device", "inode", "mode", "uid", "gid", "links"}
+         and all(type(value) is int and value >= 0 for value in identity.values())
+         and identity["inode"] > 0 and stat.S_ISREG(identity["mode"]) and identity["uid"] == 0
+         and identity["links"] == 1 and identity["mode"] & 0o022 == 0, "log-file-policy")
+
+
+@contextlib.contextmanager
+def installer_log_file():
+    # A fresh nonroot read of the one fixed physical path, not an original FD
+    # held across Installer and not permission to inspect rotated/other logs.
+    with parent(INSTALL_LOG) as (outer, name):
+        named = installer_log_identity(os.stat(name, dir_fd=outer, follow_symlinks=False))
+        original = os.open(name, READ_FLAGS, dir_fd=outer)
+        try:
+            info = os.fstat(original)
+            need(installer_log_identity(info) == named, "log-file-identity")
+            yield original, outer, name, info
+        finally:
+            close_once(original)
+
+
+def positioned_log_read(fd, offset, size):
+    need(type(offset) is int and offset >= 0 and type(size) is int and 0 <= size <= LOG_INTERVAL_BYTES, "log-interval-bound")
+    body = bytearray()
+    while len(body) < size:
+        block = os.pread(fd, min(65536, size - len(body)), offset + len(body))
+        need(bool(block), "log-read-incomplete")
+        body.extend(block)
+    return bytes(body)
+
+
+def log_growth(fd, outer, name, identity, end):
+    current = os.fstat(fd)
+    named = os.stat(name, dir_fd=outer, follow_symlinks=False)
+    need(installer_log_identity(current) == installer_log_identity(named) == identity, "log-file-identity")
+    need(current.st_size >= end and named.st_size >= current.st_size, "log-truncated")
+    return named.st_size - end
+
+
+def make_log_cursor(binding, identity, offset, tail, growth):
+    need(type(offset) is int and 0 <= offset < 2 ** 63
+         and type(tail) is bytes and len(tail) == min(offset, LOG_TAIL_BYTES), "log-cursor-offset")
+    need(not offset or tail.endswith(b"\n"), "log-incomplete-boundary")
+    cursor = {"schemaVersion": 1, "kind": "installer-log-cursor", "state": "observed", "binding": binding,
+              "logPath": str(INSTALL_LOG), "identity": identity, "offsetBytes": offset,
+              "precedingTailBytes": len(tail), "precedingTailSha256": digest(tail),
+              "growthBeyondSnapshotBytes": growth, "authority": LOG_AUTHORITY}
+    validate_log_cursor(cursor, binding)
+    return cursor
+
+
+def validate_log_cursor(cursor, binding):
+    need(type(cursor) is dict and set(cursor) == {"schemaVersion", "kind", "state", "binding", "logPath", "identity",
+         "offsetBytes", "precedingTailBytes", "precedingTailSha256", "growthBeyondSnapshotBytes", "authority"}
+         and type(cursor["schemaVersion"]) is int and cursor["schemaVersion"] == 1
+         and cursor["kind"] == "installer-log-cursor" and cursor["state"] == "observed"
+         and cursor["logPath"] == str(INSTALL_LOG) and cursor["authority"] == LOG_AUTHORITY, "log-cursor-shape")
+    need(cursor["binding"] == binding, "log-cursor-binding")
+    validate_log_identity(cursor["identity"])
+    offset = cursor["offsetBytes"]
+    need(type(offset) is int and 0 <= offset < 2 ** 63 and type(cursor["precedingTailBytes"]) is int
+         and cursor["precedingTailBytes"] == min(offset, LOG_TAIL_BYTES) and sha(cursor["precedingTailSha256"])
+         and (offset != 0 or cursor["precedingTailSha256"] == digest(b""))
+         and type(cursor["growthBeyondSnapshotBytes"]) is int and 0 <= cursor["growthBeyondSnapshotBytes"] < 2 ** 63, "log-cursor-offset")
+    return cursor
+
+
+def validate_log_window(cursor, identity, end, anchor, body):
+    need(identity == cursor["identity"], "log-file-identity")
+    need(type(end) is int and end >= cursor["offsetBytes"], "log-truncated")
+    size = end - cursor["offsetBytes"]
+    need(0 <= size <= LOG_INTERVAL_BYTES, "log-interval-bound")
+    need(type(anchor) is bytes and len(anchor) == cursor["precedingTailBytes"]
+         and digest(anchor) == cursor["precedingTailSha256"], "log-anchor-rewritten")
+    need(type(body) is bytes and len(body) == size, "log-read-incomplete")
+    need((not anchor or anchor.endswith(b"\n")) and (not body or body.endswith(b"\n")), "log-incomplete-boundary")
+
+
+def select_installer_log(body, binding):
+    # Byte-preserving diagnostic selection only. No PID attribution, JSON result
+    # decoding, convenient-record choice, or acceptance/finality implication.
+    need(type(body) is bytes and len(body) <= LOG_INTERVAL_BYTES, "log-interval-bound")
+    need(not body or body.endswith(b"\n"), "log-incomplete-boundary")
+    def token(value, path=False):
+        chars = rb"A-Za-z0-9._+~%/-" if path else rb"A-Za-z0-9._+-"
+        return re.compile(rb"(?<![" + chars + rb"])" + re.escape(value) + rb"(?![" + chars + rb"])")
+    patterns = {
+        "package-identifier": token(binding["packageIdentifier"].encode()),
+        "package-path": token(binding["packagePath"].encode(), path=True),
+        "native-executable": token(b"mrk-macos-install"),
+        "fixture-result": re.compile(rb"(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_FIXTURE_RESULT="),
+        "ordinary-result": re.compile(rb"(?<![A-Za-z0-9_])MRK_MACOS_INSTALL_RESULT="),
+        "postinstall-phase": re.compile(rb"(?<![A-Za-z0-9_])MRK_MACOS_POSTINSTALL_PHASE=(?:entry|target-ok|relative-entry|absolute-entry|cwd-ok|pre-exec)(?![A-Za-z0-9_-])"),
+        "postinstall-refusal": re.compile(rb"(?<![A-Za-z0-9_])MRK_MACOS_POSTINSTALL_REFUSED=(?:target|entry|cwd)(?![A-Za-z0-9_-])"),
+    }
+    counts = {key: 0 for key in patterns}
+    selected = bytearray()
+    rows = []
+    offset = 0
+    total = 0
+    for line in body.splitlines(keepends=True):
+        need(line.endswith(b"\n") and len(line) <= LOG_LINE_BYTES, "log-line-bound")
+        matches = {key: sum(1 for _ in pattern.finditer(line)) for key, pattern in patterns.items()}
+        anchors = [key for key, count in matches.items() if count]
+        for key, count in matches.items():
+            counts[key] += count
+        if anchors:
+            need(len(selected) + len(line) <= LOG_SELECTED_BYTES, "log-selected-bound")
+            rows.append({"relativeOffsetBytes": offset, "retainedOffsetBytes": len(selected), "bytes": len(line),
+                         "sha256": digest(line), "anchors": anchors})
+            selected.extend(line)
+        offset += len(line)
+        total += 1
+    need(bool(selected), "log-no-project-lines")
+    wanted = "fixture-result" if binding["packageKind"] == "fixture" else "ordinary-result"
+    other = "ordinary-result" if wanted == "fixture-result" else "fixture-result"
+    state = "mixed" if counts[other] else "duplicate" if counts[wanted] > 1 else "unbound" if counts[wanted] == 1 else "missing"
+    return bytes(selected), {"linesObserved": total, "linesUnselected": total - len(rows), "selectedLines": rows,
+                             "markerCounts": counts, "resultMarkerState": state}
+
+
+def write_log_selection(path, body):
+    need(type(body) is bytes and 0 < len(body) <= LOG_SELECTED_BYTES, "log-selected-bound")
+    with parent(path) as (outer, name):
+        original = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=outer)
+        try:
+            offset = 0
+            while offset < len(body):
+                written = os.write(original, body[offset:])
+                need(written > 0, "log-output-readback")
+                offset += written
+            os.fsync(original)
+            info = os.fstat(original)
+            need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.getuid()
+                 and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size == len(body)
+                 and positioned_log_read(original, 0, len(body)) == body
+                 and signature(os.fstat(original)) == signature(info)
+                 and signature(os.stat(name, dir_fd=outer, follow_symlinks=False)) == signature(info), "log-output-readback")
+        finally:
+            close_once(original)
+
+
+def installer_log_diagnostic(args):
+    binding = None
+    phase = "input"
+    planned_selection = None
+    try:
+        binding = installer_log_binding(args)
+        if args.command == "installer-log-cursor":
+            with installer_log_file() as (fd, outer, name, info):
+                identity = installer_log_identity(info)
+                tail_size = min(info.st_size, LOG_TAIL_BYTES)
+                tail = positioned_log_read(fd, info.st_size - tail_size, tail_size)
+                need(positioned_log_read(fd, info.st_size - tail_size, tail_size) == tail, "log-anchor-rewritten")
+                growth = log_growth(fd, outer, name, identity, info.st_size)
+                result = make_log_cursor(binding, identity, info.st_size, tail, growth)
+            need(len(canonical(result)) <= 16383, "log-metadata-bound")
+            return result, 0
+        with parent(args.cursor) as (outer, name):
+            cursor_bytes, info = read_at(outer, name, 16384)
+            need(info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o600, "log-cursor-shape")
+        cursor = validate_log_cursor(decode(cursor_bytes), binding)
+        phase = "capture"
+        with installer_log_file() as (fd, outer, name, info):
+            identity = installer_log_identity(info)
+            need(identity == cursor["identity"], "log-file-identity")
+            start, end = cursor["offsetBytes"], info.st_size
+            need(end >= start, "log-truncated")
+            need(end - start <= LOG_INTERVAL_BYTES, "log-interval-bound")
+            anchor = positioned_log_read(fd, start - cursor["precedingTailBytes"], cursor["precedingTailBytes"])
+            body = positioned_log_read(fd, start, end - start)
+            validate_log_window(cursor, identity, end, anchor, body)
+            need(positioned_log_read(fd, start - len(anchor), len(anchor)) == anchor, "log-anchor-rewritten")
+            growth = log_growth(fd, outer, name, identity, end)
+        selected, selection = select_installer_log(body, binding)
+        result = {"schemaVersion": 1, "kind": "installer-log-capture", "state": "observed-project-correlated",
+                  "binding": binding, "logPath": str(INSTALL_LOG), "identity": identity, "cursorSha256": digest(cursor_bytes),
+                  "startOffsetBytes": start, "endOffsetBytes": end, "growthBeyondSnapshotBytes": growth,
+                  "intervalBytes": len(body), "intervalSha256": digest(body), **selection,
+                  "selectedData": {"file": Path(args.selected_output).name, "bytes": len(selected), "sha256": digest(selected)},
+                  "authority": LOG_AUTHORITY, "scriptOutputFinality": "unestablished"}
+        need(len(canonical(result)) < LOG_METADATA_BYTES, "log-metadata-bound")
+        phase = "output"
+        planned_selection = result["selectedData"]
+        write_log_selection(args.selected_output, selected)
+        return result, 0
+    except (Refused, OSError, ValueError, TypeError, KeyError, RecursionError, OverflowError) as error:
+        reason = "log-output-unavailable" if phase == "output" else "log-input-or-capture-unavailable"
+        if type(error) is Refused and len(error.args) == 1 and type(error.args[0]) is str and error.args[0] in LOG_REFUSALS:
+            reason = error.args[0]
+        return {"schemaVersion": 1, "kind": args.command, "state": "unknown", "reason": reason,
+                "binding": binding, "authority": LOG_AUTHORITY, "scriptOutputFinality": "unestablished",
+                "plannedSelectedData": planned_selection,
+                "selectedOutputState": "write-or-close-unknown-preserve-original" if phase == "output" else "not-created"}, 1
+
+
 def installer_record(log, *, fixture=False):
     marker = b"MRK_MACOS_INSTALL_FIXTURE_RESULT=" if fixture else b"MRK_MACOS_INSTALL_RESULT="
     other = b"MRK_MACOS_INSTALL_RESULT=" if fixture else b"MRK_MACOS_INSTALL_FIXTURE_RESULT="
@@ -912,7 +1150,7 @@ def fixture_observation_command(args):
             "nativeCloseFailureInjected": False, "qualification": "fixed-native-collisions-and-reported-policy-only-not-Aqua-Save-or-power-loss"}
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("describe-runtime", "runtime"):
@@ -954,8 +1192,24 @@ def main():
         observation.add_argument("--expected-manifest", required=True)
         observation.add_argument("--expected-source", required=True)
         observation.add_argument("--installer-output", required=True, type=Path)
-    args = parser.parse_args()
+    for name in ("installer-log-cursor", "installer-log-capture"):
+        diagnostic = commands.add_parser(name)
+        diagnostic.add_argument("--fixture", action="store_true")
+        diagnostic.add_argument("--package", required=True, type=Path)
+        diagnostic.add_argument("--expected-source", required=True)
+        diagnostic.add_argument("--expected-inventory", required=True)
+        diagnostic.add_argument("--expected-manifest", required=True)
+        diagnostic.add_argument("--run-id", required=True)
+        diagnostic.add_argument("--run-attempt", required=True)
+        if name == "installer-log-capture":
+            diagnostic.add_argument("--cursor", required=True, type=Path)
+            diagnostic.add_argument("--selected-output", required=True, type=Path)
+    args = parser.parse_args(argv)
     need(args.command == "describe-runtime" or os.getuid() != 0 and os.getuid() == os.geteuid(), "only-installer-is-privileged")
+    if args.command in ("installer-log-cursor", "installer-log-capture"):
+        result, status = installer_log_diagnostic(args)
+        print(canonical(result).decode("utf-8"))
+        return status
     action = {"describe-runtime": runtime_command, "runtime": runtime_command, "app": app_command,
               "input": input_command, "scripts": scripts_command, "package-format-input": package_format_input_command,
               "prepare-package": prepare_package_command, "audit-package": audit_command,
@@ -972,7 +1226,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
     except (Refused, OSError, ValueError, KeyError, TypeError, RecursionError, OverflowError, zipfile.BadZipFile, tarfile.TarError, ET.ParseError):
         print(GENERIC_REFUSAL, file=sys.stderr)
         raise SystemExit(1)
