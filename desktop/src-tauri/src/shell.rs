@@ -1098,7 +1098,7 @@ mod owned_gtk {
                         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                         if let Some(q) = destroy_observation.as_ref().and_then(Weak::upgrade) {
                             let seen = destroy_call.upgrade().is_some_and(|call| call.facts().is_some_and(|facts|
-                                facts.destroyed && facts.response && !facts.declined && facts.refusal.is_none()));
+                                installed_observation::file_destroyed(&facts, matches!(choice, DialogChoice::ProjectPath(_)))));
                             q.native_destroyed(observed_id, seen);
                         }
                     }));

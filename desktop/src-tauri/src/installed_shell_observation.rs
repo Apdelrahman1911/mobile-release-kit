@@ -265,6 +265,42 @@ fn assert_failure_pair_contract() {
     }
 }
 
+// Original destruction facts only. ProjectPath records an admitted Cancel as
+// declined; ordinary project/evidence pickers deliberately do not. Later close,
+// release and document-owner settlement are separate observations.
+pub(super) fn file_destroyed(facts: &crate::asset_session::GuiFacts, path_choice: bool) -> bool {
+    facts.destroyed && facts.response && facts.refusal.is_none()
+        && if path_choice { facts.accepted != facts.declined } else { !facts.declined }
+}
+
+fn assert_file_destroyed_contract() {
+    use crate::asset_session::GuiFacts;
+    let facts = |accepted, declined| GuiFacts {
+        dispatched: true, constructing: false, created: true, showing: false,
+        response: true, accepted, declined, accepted_at: None,
+        destroyed: true, released: false, not_created: false,
+        close_queued: true, close_ack: false, release_queued: false,
+        selected: None, refusal: None,
+    };
+    // These synthetic values prove only the predicate, never native finality.
+    for (path_choice, accepted, declined, expected) in [
+        (true, true, false, true), (true, false, true, true),
+        (true, false, false, false), (true, true, true, false),
+        (false, true, false, true), (false, false, false, true),
+        (false, false, true, false), (false, true, true, false),
+    ] {
+        assert_eq!(file_destroyed(&facts(accepted, declined), path_choice), expected);
+        if expected {
+            let mut missing = facts(accepted, declined); missing.destroyed = false;
+            assert!(!file_destroyed(&missing, path_choice));
+            let mut missing = facts(accepted, declined); missing.response = false;
+            assert!(!file_destroyed(&missing, path_choice));
+            let mut refused = facts(accepted, declined); refused.refusal = Some(PR::SourceRefused);
+            assert!(!file_destroyed(&refused, path_choice));
+        }
+    }
+}
+
 #[derive(Default)]
 struct Picker {
     created: bool, selected: bool, activated: bool, responded: bool, filename: bool,
@@ -2999,6 +3035,7 @@ pub(crate) fn main() -> std::process::ExitCode {
     crate::runtime::assert_packaged_shell_allowlist_contract();
     assert_recent_files_suppression_contract();
     assert_failure_pair_contract();
+    assert_file_destroyed_contract();
     assert_picker_activation_return_contract();
     assert_shell_fixture_path_contract();
     if case == Case::Positive {

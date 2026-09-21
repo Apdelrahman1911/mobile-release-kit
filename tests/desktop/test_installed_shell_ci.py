@@ -1239,6 +1239,28 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         # The actual helper's inert assertions run in the reviewed observer
         # before GTK. Original response, owner and finality evidence is separate.
 
+    def test_project_path_cancel_destruction_uses_choice_specific_original_facts(self):
+        shell = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        callback = shell.split("entry.destroy = Some(dialog.connect_destroy(move |_| {", 1)[1].split("}));", 1)[0]
+        self.assertIn("destroy_call.upgrade().is_some_and(|call| call.facts().is_some_and(|facts|", callback)
+        predicate = "installed_observation::file_destroyed(&facts, matches!(choice, DialogChoice::ProjectPath(_)))"
+        self.assertEqual(callback.count(predicate), 1)
+        self.assertLess(callback.index("destroyed(&destroy_call)"), callback.index(predicate))
+        self.assertLess(callback.index(predicate), callback.index("q.native_destroyed(observed_id, seen)"))
+        self.assertNotIn("!facts.declined", callback)
+        helper = source.split("pub(super) fn file_destroyed(", 1)[1].split("fn assert_file_destroyed_contract()", 1)[0]
+        self.assertIn("facts.destroyed && facts.response && facts.refusal.is_none()", helper)
+        self.assertIn("if path_choice { facts.accepted != facts.declined } else { !facts.declined }", helper)
+        self.assertNotIn("facts.close_ack", helper); self.assertNotIn("facts.released", helper)
+        self.assertIn("(true, false, true, true)", source)  # Path Cancel is declined.
+        self.assertIn("(false, false, false, true)", source)  # Ordinary Cancel is not.
+        self.assertLess(source.index("    assert_file_destroyed_contract();"),
+                        source.index("let returned = super::run_builder("))
+        self.assertIn("if !seen || !p.responded || p.destroyed", source)
+        self.assertIn("if !seen || !p.destroyed || p.released", source)
+        # Original GTK signals, destruction, release and joins require native evidence.
+
     def test_deadline_label_latches_once_before_report_outside_the_record_lock(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
         tick = source.split("    pub(super) fn tick(", 1)[1].split("        let step = {", 1)[0]
