@@ -3,6 +3,83 @@
 //! A returned Book settlement is not a production Resources/worker-join proof.
 use super::*;
 
+// This module is cfg(test). The caller reaches this only after its one original
+// settlement gate. No native call, later GetLastError, or success receipt here.
+pub(super) fn write_unavailable(book: &NativeBook, observation: &Result<bool>, output: &mut impl std::io::Write) {
+    if !book.settled() || !matches!(observation, Err(Error::Unavailable)) { return; }
+    let Some((call, returned)) = book.first_unavailable else { return; };
+    let (api, selector, kind) = match call {
+        Call::Architecture => ("IsWow64Process2", "null", "boolean"),
+        Call::Folder => ("SHGetFolderPathW", "null", "hresult"),
+        Call::WindowsDirectory => ("GetSystemWindowsDirectoryW", "null", "count"),
+        Call::SystemDirectory => ("GetSystemDirectoryW", "null", "count"),
+        Call::Mapping => ("QueryDosDeviceW", "null", "count"),
+        Call::Open(_) => ("NtCreateFile", "null", "ntstatus"),
+        Call::ProcessToken(_) => ("OpenProcessToken", "null", "boolean"),
+        Call::Info(class, size) => {
+            let selector = match class {
+                FS::FileBasicInfo if size == size_of::<FS::FILE_BASIC_INFO>() => r#""FileBasicInfo""#,
+                FS::FileStandardInfo if size == size_of::<FS::FILE_STANDARD_INFO>() => r#""FileStandardInfo""#,
+                FS::FileAttributeTagInfo if size == size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>() => r#""FileAttributeTagInfo""#,
+                FS::FileIdInfo if size == size_of::<FS::FILE_ID_INFO>() => r#""FileIdInfo""#,
+                FS::FileCaseSensitiveInfo if size == size_of::<FS::FILE_CASE_SENSITIVE_INFO>() => r#""FileCaseSensitiveInfo""#,
+                _ => return,
+            };
+            ("GetFileInformationByHandleEx", selector, "boolean")
+        }
+        Call::HandleInfo => ("GetHandleInformation", "null", "boolean"),
+        Call::FinalName => ("GetFinalPathNameByHandleW", "null", "count"),
+        Call::VolumeName => ("GetVolumeInformationByHandleW", "null", "boolean"),
+        Call::VolumeDevice => ("NtQueryVolumeInformationFile", r#""FileFsDeviceInformation""#, "ntstatus"),
+        Call::Streams => ("NtQueryInformationFile", r#""FileStreamInformation""#, "ntstatus"),
+        Call::Security => ("GetKernelObjectSecurity", "null", "boolean"),
+        Call::Token(class) => {
+            let selector = match class {
+                S::TokenStatistics => r#""TokenStatistics""#,
+                S::TokenType => r#""TokenType""#,
+                S::TokenElevation => r#""TokenElevation""#,
+                S::TokenElevationType => r#""TokenElevationType""#,
+                S::TokenUIAccess => r#""TokenUIAccess""#,
+                S::TokenVirtualizationEnabled => r#""TokenVirtualizationEnabled""#,
+                S::TokenUser => r#""TokenUser""#,
+                S::TokenIntegrityLevel => r#""TokenIntegrityLevel""#,
+                S::TokenGroups => r#""TokenGroups""#,
+                S::TokenPrivileges => r#""TokenPrivileges""#,
+                _ => return,
+            };
+            ("GetTokenInformation", selector, "boolean")
+        }
+        Call::Privilege(name) => {
+            let selector = match name {
+                PrivilegeName::ChangeNotify => r#""lookup-1""#,
+                PrivilegeName::Shutdown => r#""lookup-2""#,
+                PrivilegeName::Undock => r#""lookup-3""#,
+                PrivilegeName::IncreaseWorkingSet => r#""lookup-4""#,
+                PrivilegeName::TimeZone => r#""lookup-5""#,
+            };
+            ("LookupPrivilegeValueW", selector, "boolean")
+        }
+        Call::Read(_) => ("ReadFile", "null", "boolean"),
+        Call::Entries => ("GetFileInformationByHandleEx", r#""FileIdExtdDirectoryInfo""#, "boolean"),
+        Call::DriveType | Call::ThreadToken(_) | Call::Close(_) | Call::FileType => return,
+    };
+    // Pair the original API with its actual return class. A malformed synthetic
+    // pair, pending result or permitted EOF is not a printable terminal failure.
+    let (value, error) = match (kind, returned) {
+        ("boolean", Returned::Boolean(0, error)) if error != F::ERROR_IO_PENDING
+            && !(matches!(call, Call::Entries) && error == F::ERROR_NO_MORE_FILES) => (0i64, Some(error)),
+        ("count", Returned::Count(0, error)) if error != F::ERROR_IO_PENDING => (0i64, Some(error)),
+        ("ntstatus", Returned::Nt(value)) if (value as u32 >> 30) == 3 => (i64::from(value), None),
+        ("hresult", Returned::Hresult(value)) if value != F::S_OK && value != HRESULT_PENDING => (i64::from(value), None),
+        _ => return,
+    };
+    let error = match error { Some(value) => value.to_string(), None => "null".to_owned() };
+    let line = format!("MRK_WINDOWS_INSTALLED_NATIVE_UNAVAILABLE={{\"api\":\"{api}\",\"selector\":{selector},\"resultKind\":\"{kind}\",\"result\":{value},\"win32Error\":{error}}}\n");
+    // One bounded write attempt, no write_all/flush/retry. Missing or partial
+    // output stays incomplete evidence; the original observation still fails.
+    if line.len() < 512 { let _ = output.write(line.as_bytes()); }
+}
+
 fn require_fact(value: bool) -> Result<()> {
     if value { Ok(()) } else { Err(Error::Unsafe) }
 }
@@ -97,6 +174,9 @@ fn hosted_native_read_only_contract() -> Result<()> {
     // Pending/Unknown keeps the original arena/slots through the unchanged Book
     // Drop fallback. It does not print a success receipt or promote process exit.
     if settlement != CloseOutcome::Settled || !book.settled() { return Err(Error::Unknown); }
+    if matches!(observation, Err(Error::Unavailable)) {
+        write_unavailable(&book, &observation, &mut std::io::stderr().lock());
+    }
     let admitted = observation?;
     let closed = book.slots.iter().filter(|s| s.state == SlotState::Closed).count();
     require_fact(exact_slots && primary == 1 && owned == closed

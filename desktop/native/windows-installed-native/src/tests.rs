@@ -59,6 +59,7 @@ fn own_inert(book: &mut NativeBook, original: &Original, number: usize) -> Resul
 fn original_destinations_are_stable_registered_and_book_bound() -> Result<()> {
     let mut fixture = Inert::new(); let book = &mut fixture.book;
     assert!(book.never_started());
+    assert!(book.first_unavailable.is_none());
     let first = book.reserve(Kind::File, None, "first", "first".to_owned())?;
     let destination = book.slot(first.index)?.output.get();
     for i in 0..32 {
@@ -99,6 +100,7 @@ fn pending_and_lost_completion_keep_the_exact_arena_and_slots() -> Result<()> {
         let arena = book.arena()? as *const Arena;
         assert!(matches!(return_inert(book, returned, None, F::STATUS_PENDING, usize::MAX), Err(Error::Unknown)));
         assert!(book.is_unknown());
+        assert!(book.first_unavailable.is_none());
         assert_eq!(book.arena()? as *const Arena, arena);
         assert_eq!(book.slot(key.index)?.output.get(), destination);
         assert_eq!(book.state(&key)?, if acquiring { SlotState::Acquiring } else { SlotState::Owned });
@@ -113,6 +115,7 @@ fn pending_and_lost_completion_keep_the_exact_arena_and_slots() -> Result<()> {
         F::STATUS_SUCCESS, WP::FILE_OPENED as usize), Err(Error::Unknown)));
     assert_eq!(book.state(&key)?, SlotState::Acquiring); // Unknown never promotes
     assert!(book.active.is_some());
+    assert!(book.first_unavailable.is_none());
     Ok(())
 }
 
@@ -136,9 +139,17 @@ fn acquisition_needs_a_definite_consistent_receipt() -> Result<()> {
             assert_eq!(book.state(&key)?, SlotState::NoHandle);
             assert!(book.active.is_none() && !book.is_unknown());
             assert!(matches!(book.reserve(Kind::File, None, "receipt", "receipt".to_owned()), Err(Error::State)));
+            assert!(matches!(book.first_unavailable, Some((Call::Open(i), Returned::Nt(value))) if i == key.index && value == status));
+            book.retiring = true; // the only inert original is already NoHandle
+            assert!(book.settled());
+            let mut output = Vec::<u8>::new();
+            hosted_tests::write_unavailable(book, &Err(Error::Unavailable), &mut output);
+            let expected = format!("MRK_WINDOWS_INSTALLED_NATIVE_UNAVAILABLE={{\"api\":\"NtCreateFile\",\"selector\":null,\"resultKind\":\"ntstatus\",\"result\":{status},\"win32Error\":null}}\n");
+            assert_eq!(output.as_slice(), expected.as_bytes());
         } else {
             assert!(matches!(result, Err(Error::Unknown)));
             assert!(book.active.is_some() && book.is_unknown());
+            assert!(book.first_unavailable.is_none());
         }
     }
     let mut fixture = Inert::new(); let book = &mut fixture.book;
@@ -149,6 +160,182 @@ fn acquisition_needs_a_definite_consistent_receipt() -> Result<()> {
     assert!(matches!(return_inert(book, Returned::Nt(F::STATUS_SUCCESS), Some(34usize as F::HANDLE),
         F::STATUS_SUCCESS, WP::FILE_OPENED as usize), Err(Error::Unknown)));
     assert_eq!(book.state(&first)?, SlotState::Owned);
+    assert!(book.first_unavailable.is_none());
+
+    // Completed original-scalar families and every fixed public selector. These
+    // frames are inert; no native query, path, token or privilege is observed.
+    for (call, returned, api, selector, kind, value, error) in [
+        (Call::Architecture, Returned::Boolean(0, 5), "IsWow64Process2", "null", "boolean", 0i64, "5"),
+        (Call::HandleInfo, Returned::Boolean(0, 0), "GetHandleInformation", "null", "boolean", 0, "0"),
+        (Call::Info(FS::FileBasicInfo, size_of::<FS::FILE_BASIC_INFO>()), Returned::Boolean(0, 5), "GetFileInformationByHandleEx", r#""FileBasicInfo""#, "boolean", 0, "5"),
+        (Call::Info(FS::FileStandardInfo, size_of::<FS::FILE_STANDARD_INFO>()), Returned::Boolean(0, 5), "GetFileInformationByHandleEx", r#""FileStandardInfo""#, "boolean", 0, "5"),
+        (Call::Info(FS::FileAttributeTagInfo, size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>()), Returned::Boolean(0, 5), "GetFileInformationByHandleEx", r#""FileAttributeTagInfo""#, "boolean", 0, "5"),
+        (Call::Info(FS::FileIdInfo, size_of::<FS::FILE_ID_INFO>()), Returned::Boolean(0, 5), "GetFileInformationByHandleEx", r#""FileIdInfo""#, "boolean", 0, "5"),
+        (Call::Info(FS::FileCaseSensitiveInfo, size_of::<FS::FILE_CASE_SENSITIVE_INFO>()), Returned::Boolean(0, 5), "GetFileInformationByHandleEx", r#""FileCaseSensitiveInfo""#, "boolean", 0, "5"),
+        (Call::VolumeName, Returned::Boolean(0, 5), "GetVolumeInformationByHandleW", "null", "boolean", 0, "5"),
+        (Call::Security, Returned::Boolean(0, 5), "GetKernelObjectSecurity", "null", "boolean", 0, "5"),
+        (Call::Token(S::TokenStatistics), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenStatistics""#, "boolean", 0, "5"),
+        (Call::Token(S::TokenType), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenType""#, "boolean", 0, "5"),
+        (Call::Token(S::TokenElevation), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenElevation""#, "boolean", 0, "5"),
+        (Call::Token(S::TokenElevationType), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenElevationType""#, "boolean", 0, "5"),
+        (Call::Token(S::TokenUIAccess), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenUIAccess""#, "boolean", 0, "5"),
+        (Call::Token(S::TokenVirtualizationEnabled), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenVirtualizationEnabled""#, "boolean", 0, "5"),
+        (Call::Token(S::TokenUser), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenUser""#, "boolean", 0, "5"),
+        (Call::Token(S::TokenIntegrityLevel), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenIntegrityLevel""#, "boolean", 0, "5"),
+        (Call::Token(S::TokenGroups), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenGroups""#, "boolean", 0, "5"),
+        (Call::Token(S::TokenPrivileges), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenPrivileges""#, "boolean", 0, "5"),
+        (Call::Privilege(PrivilegeName::ChangeNotify), Returned::Boolean(0, 5), "LookupPrivilegeValueW", r#""lookup-1""#, "boolean", 0, "5"),
+        (Call::Privilege(PrivilegeName::Shutdown), Returned::Boolean(0, 5), "LookupPrivilegeValueW", r#""lookup-2""#, "boolean", 0, "5"),
+        (Call::Privilege(PrivilegeName::Undock), Returned::Boolean(0, 5), "LookupPrivilegeValueW", r#""lookup-3""#, "boolean", 0, "5"),
+        (Call::Privilege(PrivilegeName::IncreaseWorkingSet), Returned::Boolean(0, 5), "LookupPrivilegeValueW", r#""lookup-4""#, "boolean", 0, "5"),
+        (Call::Privilege(PrivilegeName::TimeZone), Returned::Boolean(0, 5), "LookupPrivilegeValueW", r#""lookup-5""#, "boolean", 0, "5"),
+        (Call::Read(1), Returned::Boolean(0, u32::MAX), "ReadFile", "null", "boolean", 0, "4294967295"),
+        (Call::Entries, Returned::Boolean(0, 5), "GetFileInformationByHandleEx", r#""FileIdExtdDirectoryInfo""#, "boolean", 0, "5"),
+        (Call::WindowsDirectory, Returned::Count(0, 5), "GetSystemWindowsDirectoryW", "null", "count", 0, "5"),
+        (Call::SystemDirectory, Returned::Count(0, 5), "GetSystemDirectoryW", "null", "count", 0, "5"),
+        (Call::Mapping, Returned::Count(0, 5), "QueryDosDeviceW", "null", "count", 0, "5"),
+        (Call::FinalName, Returned::Count(0, u32::MAX), "GetFinalPathNameByHandleW", "null", "count", 0, "4294967295"),
+        (Call::VolumeDevice, Returned::Nt(F::STATUS_ACCESS_DENIED), "NtQueryVolumeInformationFile", r#""FileFsDeviceInformation""#, "ntstatus", i64::from(F::STATUS_ACCESS_DENIED), "null"),
+        (Call::Streams, Returned::Nt(F::STATUS_ACCESS_DENIED), "NtQueryInformationFile", r#""FileStreamInformation""#, "ntstatus", i64::from(F::STATUS_ACCESS_DENIED), "null"),
+        (Call::Folder, Returned::Hresult(i32::MIN), "SHGetFolderPathW", "null", "hresult", i64::from(i32::MIN), "null"),
+        (Call::Folder, Returned::Hresult(1), "SHGetFolderPathW", "null", "hresult", 1, "null"),
+    ] {
+        let mut fixture = Inert::new(); let book = &mut fixture.book;
+        enter_inert(book, call, null_mut())?;
+        assert!(matches!(return_inert(book, returned, None, F::STATUS_PENDING, usize::MAX), Err(Error::Unavailable)));
+        assert!(book.first_unavailable.is_some() && book.active.is_none() && !book.is_unknown());
+        let mut output = Vec::<u8>::new();
+        hosted_tests::write_unavailable(book, &Err(Error::Unavailable), &mut output);
+        assert!(output.is_empty()); // not retired/settled yet
+        book.retiring = true; // no slots or native originals in this fixture
+        assert!(book.settled());
+        hosted_tests::write_unavailable(book, &Err(Error::Unavailable), &mut output);
+        let expected = format!("MRK_WINDOWS_INSTALLED_NATIVE_UNAVAILABLE={{\"api\":\"{api}\",\"selector\":{selector},\"resultKind\":\"{kind}\",\"result\":{value},\"win32Error\":{error}}}\n");
+        assert_eq!(output.as_slice(), expected.as_bytes());
+        assert!(output.len() < 512 && output.iter().filter(|&&b| b == b'\n').count() == 1);
+    }
+
+    // These completed receipts are success/absence/EOF, never Unavailable.
+    for (call, returned) in [
+        (Call::HandleInfo, Returned::Boolean(1, 0)),
+        (Call::FinalName, Returned::Count(1, 0)),
+        (Call::Folder, Returned::Hresult(F::S_OK)),
+        (Call::VolumeDevice, Returned::Nt(F::STATUS_SUCCESS)),
+        (Call::Entries, Returned::Boolean(0, F::ERROR_NO_MORE_FILES)),
+    ] {
+        let mut fixture = Inert::new(); let book = &mut fixture.book;
+        enter_inert(book, call, null_mut())?;
+        return_inert(book, returned, None, F::STATUS_SUCCESS, 0)?;
+        assert!(book.first_unavailable.is_none());
+    }
+    {
+        let mut fixture = Inert::new(); let book = &mut fixture.book;
+        let original = book.reserve(Kind::ThreadToken, None, "", String::new())?;
+        enter_inert(book, Call::ThreadToken(original.index), null_mut())?;
+        return_inert(book, Returned::Boolean(0, F::ERROR_NO_TOKEN), Some(null_mut()), 0, 0)?;
+        assert_eq!(book.state(&original)?, SlotState::NoHandle);
+        assert!(book.first_unavailable.is_none());
+    }
+    {
+        let mut fixture = Inert::new(); let book = &mut fixture.book;
+        let original = book.reserve(Kind::ProcessToken, None, "", String::new())?;
+        enter_inert(book, Call::ProcessToken(original.index), null_mut())?;
+        let complete = return_inert(book, Returned::Boolean(0, 5), Some(null_mut()), 0, 0)?;
+        assert_eq!(book.state(&original)?, SlotState::NoHandle);
+        assert!(book.first_unavailable.is_none()); // finish leaves this decision to its caller
+        // The live observe_user_once edge is source-inspected, never invoked or
+        // refactored here. Copy only this inert original's completed scalar.
+        let returned = complete.arena.returned()?;
+        assert!(matches!(returned, Returned::Boolean(0, 5)));
+        book.remember_unavailable(complete.arena.call, returned);
+        book.retiring = true;
+        assert!(book.settled());
+        let mut output = Vec::<u8>::new();
+        hosted_tests::write_unavailable(book, &Err(Error::Unsafe), &mut output);
+        assert!(output.is_empty()); // a masked initial failure is not emitted
+        hosted_tests::write_unavailable(book, &Err(Error::Unavailable), &mut output);
+        assert_eq!(output.as_slice(), b"MRK_WINDOWS_INSTALLED_NATIVE_UNAVAILABLE={\"api\":\"OpenProcessToken\",\"selector\":null,\"resultKind\":\"boolean\",\"result\":0,\"win32Error\":5}\n");
+    }
+
+    // Unrepresentable or mismatched scalar pairs cannot fabricate a diagnostic.
+    // Inject only DATA into the private recorder, not a native return decision.
+    for (call, returned) in [
+        (Call::Folder, Returned::Nt(F::STATUS_ACCESS_DENIED)),
+        (Call::VolumeDevice, Returned::Hresult(i32::MIN)),
+        (Call::FinalName, Returned::Boolean(0, 5)),
+        (Call::HandleInfo, Returned::Count(0, 5)),
+        (Call::Info(FS::FileBasicInfo, 0), Returned::Boolean(0, 5)),
+        (Call::Info(i32::MAX, 1), Returned::Boolean(0, 5)),
+        (Call::Token(i32::MAX), Returned::Boolean(0, 5)),
+        (Call::HandleInfo, Returned::Boolean(1, 0)),
+        (Call::HandleInfo, Returned::Boolean(0, F::ERROR_IO_PENDING)),
+        (Call::FinalName, Returned::Count(0, F::ERROR_IO_PENDING)),
+        (Call::VolumeDevice, Returned::Nt(F::STATUS_PENDING)),
+        (Call::VolumeDevice, Returned::Nt(1)),
+        (Call::Folder, Returned::Hresult(HRESULT_PENDING)),
+        (Call::Entries, Returned::Boolean(0, F::ERROR_NO_MORE_FILES)),
+        (Call::ThreadToken(0), Returned::Boolean(0, F::ERROR_NO_TOKEN)),
+        (Call::Close(0), Returned::Boolean(0, 5)),
+        (Call::DriveType, Returned::Scalar(0)),
+        (Call::FileType, Returned::Scalar(0)),
+    ] {
+        let mut fixture = Inert::new(); let book = &mut fixture.book;
+        book.remember_unavailable(call, returned);
+        book.retiring = true;
+        let mut output = Vec::<u8>::new();
+        hosted_tests::write_unavailable(book, &Err(Error::Unavailable), &mut output);
+        assert!(output.is_empty());
+    }
+
+    // First record survives another completed refusal and a completed inert
+    // close. No settle_once or other live original method is invoked.
+    let mut fixture = Inert::new(); let book = &mut fixture.book;
+    let original = book.reserve(Kind::File, None, "diagnostic", "diagnostic".to_owned())?;
+    own_inert(book, &original, 35)?;
+    for (call, returned) in [
+        (Call::HandleInfo, Returned::Boolean(0, 5)),
+        (Call::FinalName, Returned::Count(0, 122)),
+    ] {
+        enter_inert(book, call, 35usize as F::HANDLE)?;
+        assert!(matches!(return_inert(book, returned, None, 0, 0), Err(Error::Unavailable)));
+        assert!(matches!(book.first_unavailable, Some((Call::HandleInfo, Returned::Boolean(0, 5)))));
+    }
+    book.retiring = true;
+    enter_inert(book, Call::Close(original.index), 35usize as F::HANDLE)?;
+    return_inert(book, Returned::Boolean(1, 0), None, 0, 0)?;
+    assert!(book.settled());
+    assert!(matches!(book.first_unavailable, Some((Call::HandleInfo, Returned::Boolean(0, 5)))));
+    for observation in [Ok(true), Ok(false), Err(Error::Unsafe), Err(Error::Bounds), Err(Error::State), Err(Error::Unknown)] {
+        let mut output = Vec::<u8>::new();
+        hosted_tests::write_unavailable(book, &observation, &mut output);
+        assert!(output.is_empty());
+    }
+    struct Writer { limit: usize, fail: bool, writes: usize, flushes: usize, bytes: Vec<u8> }
+    impl std::io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            if self.fail { return Err(std::io::ErrorKind::BrokenPipe.into()); }
+            let count = self.limit.min(bytes.len());
+            self.bytes.extend_from_slice(&bytes[..count]); Ok(count)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1; Err(std::io::ErrorKind::Other.into())
+        }
+    }
+    let observation: Result<bool> = Err(Error::Unavailable);
+    for (limit, fail) in [(0, false), (7, false), (512, false), (512, true)] {
+        let mut output = Writer { limit, fail, writes: 0, flushes: 0, bytes: Vec::new() };
+        hosted_tests::write_unavailable(book, &observation, &mut output);
+        assert_eq!((output.writes, output.flushes), (1, 0));
+        assert_eq!(observation, Err(Error::Unavailable));
+        if fail { assert!(output.bytes.is_empty()); }
+        else if limit < 512 { assert_eq!(output.bytes.len(), limit); }
+        else { assert!(output.bytes.len() < 512 && output.bytes.ends_with(b"\n")); }
+    }
+    book.unknown = true; // inert failed settlement must be silent, even with a record
+    let mut output = Vec::<u8>::new();
+    hosted_tests::write_unavailable(book, &observation, &mut output);
+    assert!(output.is_empty());
     Ok(())
 }
 
@@ -175,6 +362,7 @@ fn close_retires_before_entry_and_failure_is_never_retried() -> Result<()> {
     assert!(matches!(enter_inert(book, Call::Close(first.index), 41usize as F::HANDLE), Err(Error::Unknown)));
     assert!(matches!(return_inert(book, Returned::Boolean(1, 0), None, 0, 0), Err(Error::Unknown)));
     assert_eq!(book.state(&first)?, SlotState::Unknown);
+    assert!(book.first_unavailable.is_none());
     Ok(())
 }
 

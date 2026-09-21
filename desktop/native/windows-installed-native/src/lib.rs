@@ -162,6 +162,8 @@ pub struct NativeBook {
     process_token: Option<usize>,
     user: Option<TokenFacts>,
     roots_started: bool,
+    #[cfg(test)]
+    first_unavailable: Option<(Call, Returned)>,
 }
 // SAFETY: actual Windows file/token handles are process-wide. Only ownership of
 // the serialized book moves; no reference to its UnsafeCell outputs escapes.
@@ -174,7 +176,15 @@ impl NativeBook {
     pub fn new() -> Self {
         Self { identity: Arc::new(()), slots: Vec::new(), active: None, unknown: false, started: false,
             retiring: false, entries: 0, bytes_read: 0, process_token: None,
-            user: None, roots_started: false }
+            user: None, roots_started: false,
+            #[cfg(test)]
+            first_unavailable: None }
+    }
+    #[cfg(test)]
+    fn remember_unavailable(&mut self, call: Call, returned: Returned) {
+        // Live callers are only the existing terminal Unavailable edges. Copy
+        // captured scalars; never inspect native output or format before settlement.
+        if self.first_unavailable.is_none() { self.first_unavailable = Some((call, returned)); }
     }
     fn clear(&self) -> Result<()> {
         if self.unknown || self.active.is_some() { Err(Error::Unknown) }
@@ -331,6 +341,8 @@ impl NativeBook {
                 if !handle.is_null() { return self.unknown(); }
                 self.slot_mut(index)?.state = SlotState::NoHandle;
                 let _complete = self.take_complete()?;
+                #[cfg(test)]
+                self.remember_unavailable(call, returned);
                 return Err(Error::Unavailable);
             }
             let frame = self.arena()?;
@@ -357,7 +369,10 @@ impl NativeBook {
             return self.take_complete();
         } else if let Returned::Nt(status) = returned {
             if status != F::STATUS_SUCCESS {
-                let _complete = self.take_complete()?; return Err(Error::Unavailable);
+                let _complete = self.take_complete()?;
+                #[cfg(test)]
+                self.remember_unavailable(call, returned);
+                return Err(Error::Unavailable);
             }
             let frame = self.arena()?;
             // SAFETY: query returned SUCCESS; IOSB must corroborate completion.
@@ -370,7 +385,11 @@ impl NativeBook {
             _ => false,
         };
         let result = self.take_complete()?;
-        if failed { Err(Error::Unavailable) } else { Ok(result) }
+        if failed {
+            #[cfg(test)]
+            self.remember_unavailable(call, returned);
+            Err(Error::Unavailable)
+        } else { Ok(result) }
     }
     fn duplicate_live(&self, index: usize, handle: F::HANDLE) -> bool {
         self.slots.iter().enumerate().any(|(i, s)| i != index && s.state == SlotState::Owned
@@ -699,7 +718,13 @@ impl NativeBook {
         let original = self.reserve(Kind::ProcessToken, None, "", String::new())?;
         self.process_token = Some(original.index); // no second primary-token open
         let opened = self.call(Call::ProcessToken(original.index), null_mut(), Vec::new())?;
-        if !matches!(opened.arena.returned()?, Returned::Boolean(v, _) if v != 0) { return Err(Error::Unavailable); }
+        if !matches!(opened.arena.returned()?, Returned::Boolean(v, _) if v != 0) {
+            #[cfg(test)]
+            if let Some(returned) = opened.arena.returned.get() {
+                self.remember_unavailable(opened.arena.call, returned);
+            }
+            return Err(Error::Unavailable);
+        }
         self.noninherited(original.index)?;
         self.user = Some(self.collect_user(original.index)?);
         self.user.as_ref().ok_or(Error::State)
