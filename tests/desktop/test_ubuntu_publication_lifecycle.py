@@ -695,6 +695,20 @@ class LifecycleData(unittest.TestCase):
         observed = observe()
         self.assertFalse(observed["qualified"])
         self.assertFalse(observed["cleanupEstablished"])
+        # Keep the complete short merged normal output instead of losing its
+        # middle. The shared observer/controller snippet limits do not change.
+        short = b"inert normal provider diagnostic " + b"x" * 777
+        completed = subprocess.CompletedProcess(argv, 0, short, b"")
+        normal = observe(dict(holder, result=completed), display_log=b"")["capture"]["stdout"]
+        self.assertEqual(normal["head"] + normal["tail"], short.decode("ascii"))
+        self.assertFalse(normal["truncated"])
+        long = subprocess.CompletedProcess(argv, 0, b"h" * 1024 + b"omitted" * 1024 + b"t" * 2048, b"")
+        for flags, sizes in (({}, (256, 256)), ({"normal": True}, (1024, 2048))):
+            row = L._shell_capture_summary(long, argv, **flags)["stdout"]
+            self.assertEqual((len(row["head"]), len(row["tail"])), sizes)
+            self.assertTrue(row["truncated"])
+        control = L._shell_capture_summary(completed, argv, controller=True, normal=True)["stdout"]
+        self.assertEqual((len(control["head"]), len(control["tail"])), (128, 128))
         self.assertEqual(set(observed["bootstrap"]), {"stdout", "stderr"})
         for row in observed["bootstrap"].values():
             self.assertTrue(all(count == 0 for count in row["markers"].values()))
@@ -828,7 +842,9 @@ class LifecycleData(unittest.TestCase):
         markers = (b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CAPABILITIES=unavailable\n",
                    b"MRK_DESKTOP_CATALOGUE=returned\n", b"MRK_DESKTOP_CATALOGUE=refused\n")
         stages = ("setup-enter", "page-start-trusted", "page-start-untrusted", "page-finish-trusted",
-                  "page-finish-untrusted", "hook-installed", "app-info-enter", "catalog-enter", "content-terminated")
+                  "page-finish-untrusted", "hook-installed", "app-info-enter", "catalog-enter", "content-terminated",
+                  "content-reason-crashed", "content-reason-exceeded-memory-limit",
+                  "content-reason-terminated-by-api", "content-reason-unknown")
         prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
         stdout = (b"ordinary wrapper text\n" + b"".join(markers) + markers[0]
                   + b"".join(prefix + stage.encode("ascii") + b"\n" for stage in stages)
@@ -845,6 +861,12 @@ class LifecycleData(unittest.TestCase):
             "markers": {"capabilitiesAvailable": 0, "capabilitiesUnavailable": 1, "catalogueReturned": 0, "catalogueRefused": 0},
             "unexpectedMrk": 1, "stages": {stage: int(stage == "catalog-enter") for stage in stages}, "unexpectedBootstrap": 0})
         self.assertNotIn(b"private", L.canonical(counted))
+        for reason in stages[-4:]:
+            line = prefix + reason.encode("ascii")
+            for malformed in (line, line + b"\r\n", line + b" extra\n"):
+                row = L._shell_normal_markers(malformed, b"")["stdout"]
+                self.assertEqual(row["stages"][reason], 0)
+                self.assertEqual(row["unexpectedBootstrap"], 1)
         # Counts are diagnostic-only; a completed or empty stage sequence
         # cannot manufacture normal bootstrap success.
         with self.assertRaises(ValueError):
@@ -946,15 +968,18 @@ class LifecycleData(unittest.TestCase):
         roster = next(item.value for item in source.body if isinstance(item, ast.Assign)
                       and any(isinstance(target, ast.Name) and target.id == "SHELL_PROGRAMS" for target in item.targets))
         self.assertEqual(sum(isinstance(item, ast.Constant) and item.value == "/usr/bin/prlimit" for item in roster.elts), 1)
+        self.assertEqual((L.LIMIT, L.TOTAL_LIMIT, L.SHELL_WORK_FILE_LIMIT), (2 << 20, 32 << 20, 64 << 20))
         for case in L.SHELL_CASES:
             argv = L.shell_argv(value, case)
             at = argv.index("/usr/bin/prlimit")
-            self.assertEqual(argv[at:at + 4], ["/usr/bin/prlimit", "--fsize=2097152:2097152", "--", "/usr/bin/dbus-run-session"])
+            self.assertEqual(argv[at:at + 4], ["/usr/bin/prlimit", "--fsize=67108864:67108864", "--", "/usr/bin/dbus-run-session"])
             self.assertIn("--error-file=" + str(root / ("shell-" + case + "-xvfb.log")), argv)
             self.assertNotIn("--error-file=/dev/stderr", argv)
             self.assertEqual(argv[:at], L._drop(value, []))
-        for bounds in ((-1, -1), (L.LIMIT, L.LIMIT), (L.LIMIT * 2, L.LIMIT * 3), (L.LIMIT - 1, -1), (-1, L.LIMIT - 1)):
-            accepted = all(number == -1 or number >= L.LIMIT for number in bounds)
+        ceiling = L.SHELL_WORK_FILE_LIMIT
+        for bounds in ((-1, -1), (ceiling, ceiling), (ceiling * 2, ceiling * 3),
+                       (ceiling - 1, -1), (-1, ceiling - 1), (L.LIMIT, L.LIMIT), (True, -1), (-2, -1), (-1,)):
+            accepted = len(bounds) == 2 and all(type(number) is int and (number == -1 or number >= ceiling) for number in bounds)
             with self.subTest(bounds=bounds), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
                  patch.object(L.resource, "getrlimit", return_value=bounds) as limits, \
                  patch.object(L.resource, "setrlimit") as change_limits, \
@@ -982,6 +1007,32 @@ class LifecycleData(unittest.TestCase):
             with self.assertRaises(FileExistsError): L._shell_log_prepare(value, "normal")
             self.assertEqual(opening.call_count, 1); closing.assert_not_called(); removing.assert_not_called()
 
+    def test_shell_capacity_adds_fixed_private_logs_without_changing_other_profiles(self):
+        value = installed_handoff()
+        value["compilerRecords"]["capacity"] = {"runtimeBytes": 1024,
+            "installedBytes": {key: 2048 for key in L.VERSIONS},
+            "installedEntries": {key: 16 for key in L.VERSIONS}}
+        for profile in ("root", "installed", "shell"):
+            candidate = deepcopy(value)
+            if profile != "installed":
+                candidate.pop("installed")
+            if profile == "shell":
+                candidate["shell"] = {"binaries": {"normal": {"size": 31}, "observer": {"size": 37}}}
+            baseline = (sum(row["size"] for row in candidate["packages"].values()) + candidate["library"]["size"]
+                        + (12 if profile == "installed" else 68 if profile == "shell" else 0)
+                        + 2 * 1024 + 1 + 2 * 2048 + (32 << 20) + (1 << 20))
+            required = baseline + ((256 << 20) if profile == "shell" else 0)
+            for available in (required - 1, required):
+                with self.subTest(profile=profile, available=available), \
+                     patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
+                     patch.object(L.os, "statvfs", return_value=SimpleNamespace(
+                         f_bavail=available, f_frsize=1, f_favail=2 * 16 + 2 * 8192 + 128)):
+                    if available < required:
+                        with self.assertRaisesRegex(ValueError, "Insufficient original host capacity"):
+                            L._capacity(candidate)
+                    else:
+                        self.assertIsNone(L._capacity(candidate))
+
     def test_shell_display_capture_requires_bound_original_and_complete_combined_bytes(self):
         value = installed_handoff(); value.pop("installed"); value["shell"] = {}
         root = L.root_path(value)
@@ -989,7 +1040,7 @@ class LifecycleData(unittest.TestCase):
         initial = L.identity(node)[:6]
         argv = L.shell_argv(value, "positive")
         for case in ("complete", "nonzero", "wrong-result", "wrong-mode", "wrong-inode", "wrong-owner", "wrong-group",
-                     "hardlink", "changed-after", "combined-bound", "read-error", "retain-error"):
+                     "hardlink", "changed-after", "combined-bound", "oversized-log", "read-error", "retain-error"):
             before, after = deepcopy(node), deepcopy(node)
             raw = b"inert\n"
             result = subprocess.CompletedProcess(argv, 2 if case == "nonzero" else 0, b"a", b"b")
@@ -999,6 +1050,7 @@ class LifecycleData(unittest.TestCase):
             if case in changes: setattr(before, *changes[case])
             if case == "changed-after": after.st_mtime_ns += 1
             if case == "combined-bound": raw = b"x" * (L.LIMIT - 1)
+            if case == "oversized-log": raw = b"x" * (L.LIMIT + 1)
             with self.subTest(case=case), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
                  patch.object(Path, "lstat", side_effect=[before, after]), patch.object(L, "_xattrs"), \
                  patch.object(L, "read", return_value=raw) as reading, patch.object(L, "_retain") as retain:

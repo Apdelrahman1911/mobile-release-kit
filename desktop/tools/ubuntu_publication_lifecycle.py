@@ -577,6 +577,9 @@ HELPER = "/usr/lib/mobile-release-kit/mrk-runtime-publish"
 HOST_PATH = "/usr/bin:/bin"
 DPKG_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"
 LIMIT, JSON_LIMIT, FILE_LIMIT, TOTAL_LIMIT = 2 << 20, 1 << 20, 512 << 20, 32 << 20
+# GUI shared-memory working files are not captured output. This finite per-file
+# headroom is independent of the unchanged combined capture/evidence bounds.
+SHELL_WORK_FILE_LIMIT = 64 << 20
 CLIENT_RESERVATION = 40  # start10 + stop10 + StopPost10 + original-client10
 PROPERTIES = {
     "User": "root", "Group": "root", "WorkingDirectory": "/", "UMask": "0077",
@@ -1062,6 +1065,11 @@ def _capacity(value):
                 + (value["installed"]["candidate"]["size"] if "installed" in value else 0)
                 + (sum(row["size"] for row in value["shell"]["binaries"].values()) if "shell" in value else 0)
                 + 2 * capacity["runtimeBytes"] + 1 + 2 * max(capacity["installedBytes"].values()) + TOTAL_LIMIT + JSON_LIMIT)
+    # The four original Xvfb logs share the GUI per-file ceiling. Account for
+    # those private files in addition to retained output. This free-space check
+    # is not a reservation, aggregate quota or a bound on every GUI cache/memfd.
+    if "shell" in value:
+        required += len(SHELL_CASES) * SHELL_WORK_FILE_LIMIT
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + 128
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
@@ -2823,7 +2831,7 @@ def shell_argv(value, case):
     command = [str(root_path(value) / ("shell-normal" if case == "normal" else "shell-observer"))]
     if case != "normal":
         command.append(case)
-    return _drop(value, ["/usr/bin/prlimit", "--fsize=" + str(LIMIT) + ":" + str(LIMIT), "--",
+    return _drop(value, ["/usr/bin/prlimit", "--fsize=" + str(SHELL_WORK_FILE_LIMIT) + ":" + str(SHELL_WORK_FILE_LIMIT), "--",
         "/usr/bin/dbus-run-session", "--dbus-daemon=/usr/bin/dbus-daemon",
         "--config-file=" + str(root_path(value) / ("shell-" + case + "-bus.conf")), "--",
         "/usr/bin/xvfb-run", "--server-num=99", "--auth-file=" + environment["XAUTHORITY"],
@@ -2836,7 +2844,7 @@ def _shell_log_prepare(value, case):
     need(case in SHELL_CASES and _ROOT == root_path(value), "Different original shell log root/case")
     bounds = resource.getrlimit(resource.RLIMIT_FSIZE)
     need(type(bounds) is tuple and len(bounds) == 2
-         and all(type(bound) is int and (bound == resource.RLIM_INFINITY or bound >= LIMIT) for bound in bounds),
+         and all(type(bound) is int and (bound == resource.RLIM_INFINITY or bound >= SHELL_WORK_FILE_LIMIT) for bound in bounds),
          "Inherited file bound is stricter than the fixed shell profile")
     directory(_ROOT, protected=True)
     path = _ROOT / ("shell-" + case + "-xvfb.log")
@@ -3399,14 +3407,15 @@ def _shell_call_summary(record):
             "ownerElapsedSeconds": elapsed if elapsed is not None and math.isfinite(elapsed) else None}
 
 
-def _shell_capture_summary(result, argv, display_log=None, *, controller=False):
+def _shell_capture_summary(result, argv, display_log=None, *, controller=False, normal=False):
     limit = 4096 if controller else LIMIT
     if not (type(result) is subprocess.CompletedProcess and result.args == argv
             and type(result.returncode) is int and type(result.stdout) is bytes
             and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= limit):
         return None
     captured = {"exitCode": result.returncode}
-    streams = [("stdout", result.stdout, 128 if controller else 256, 128 if controller else 256),
+    streams = [("stdout", result.stdout, 128 if controller else 1024 if normal else 256,
+                128 if controller else 2048 if normal else 256),
                ("stderr", result.stderr, 256 if controller else 1024, 256 if controller else 2048)]
     if not controller and type(display_log) is bytes and len(result.stdout) + len(result.stderr) + len(display_log) <= LIMIT:
         streams.append(("display", display_log, 1024, 2048))
@@ -3426,7 +3435,9 @@ def _shell_normal_markers(stdout, stderr):
                b"MRK_DESKTOP_CATALOGUE=refused\n": "catalogueRefused"}
     stages = ("setup-enter", "page-start-trusted", "page-start-untrusted",
               "page-finish-trusted", "page-finish-untrusted", "hook-installed",
-              "app-info-enter", "catalog-enter", "content-terminated")
+              "app-info-enter", "catalog-enter", "content-terminated",
+              "content-reason-crashed", "content-reason-exceeded-memory-limit",
+              "content-reason-terminated-by-api", "content-reason-unknown")
     prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
     stage_lines = {prefix + stage.encode("ascii") + b"\n": stage for stage in stages}
     result = {}
@@ -3671,7 +3682,7 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
             result = holder.get("result")
         data["errors"] = [error_data(item, origin) for item, origin in errors[:4]]
         data["errorsTruncated"] = len(errors) > 4
-        data["capture"] = _shell_capture_summary(result, argv, display_log if joined else None)
+        data["capture"] = _shell_capture_summary(result, argv, display_log if joined else None, normal=True)
         if data["capture"] is not None:
             try:
                 data["bootstrap"] = _shell_normal_markers(result.stdout, result.stderr)

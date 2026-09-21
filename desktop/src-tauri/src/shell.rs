@@ -1728,9 +1728,15 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                     let terminated = install.clone();
                     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                     let terminated_fixture = install_fixture.clone();
-                    let _signal_id = platform.inner().connect_web_process_terminated(move |_, _| {
+                    let _signal_id = platform.inner().connect_web_process_terminated(move |_, reason| {
                         terminated.lost();
                         diagnostic(b"MRKDBG_DESKTOP_BOOTSTRAP=content-terminated\n");
+                        diagnostic(match reason {
+                            webkit2gtk::WebProcessTerminationReason::Crashed => b"MRKDBG_DESKTOP_BOOTSTRAP=content-reason-crashed\n",
+                            webkit2gtk::WebProcessTerminationReason::ExceededMemoryLimit => b"MRKDBG_DESKTOP_BOOTSTRAP=content-reason-exceeded-memory-limit\n",
+                            webkit2gtk::WebProcessTerminationReason::TerminatedByApi => b"MRKDBG_DESKTOP_BOOTSTRAP=content-reason-terminated-by-api\n",
+                            _ => b"MRKDBG_DESKTOP_BOOTSTRAP=content-reason-unknown\n",
+                        });
                         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                         if let Some(q) = &terminated_fixture { q.lifecycle(qualification::EventKind::DocumentLost, 0); }
                     });
