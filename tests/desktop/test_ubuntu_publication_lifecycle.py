@@ -196,6 +196,76 @@ def shell_loader_data(*, compact=True):
     return value, files, expected
 
 
+class GuardedXattrDiagnostics(unittest.TestCase):
+    """Mock the sole xattr observation; diagnostics may not inspect another path."""
+
+    def test_guarded_roster_keeps_enodata_only_absence_and_stops_at_presence(self):
+        access = "system.posix_acl_access"
+        for directory, other in ((True, "system.posix_acl_default"), (False, "security.capability")):
+            path = Path("/usr/share/fonts" if directory else "/usr/share/fonts/inert.ttf")
+            with self.subTest(directory=directory), \
+                 patch.object(L.os, "getxattr", side_effect=OSError(errno.ENODATA, "mock absent")) as query:
+                self.assertIsNone(L._xattrs(path, directory))
+                self.assertEqual([call.args for call in query.call_args_list], [(path, access), (path, other)])
+                self.assertTrue(all(call.kwargs == {"follow_symlinks": False} for call in query.call_args_list))
+            for forbidden in (access, other):
+                for value in (b"", b"never-export-this-attribute-value"):
+                    def observed(_path, name, *, follow_symlinks):
+                        self.assertIs(follow_symlinks, False)
+                        if name == forbidden:
+                            return value
+                        raise OSError(errno.ENODATA, "mock absent")
+
+                    with self.subTest(directory=directory, attribute=forbidden, empty=not value), \
+                         patch.object(L.os, "getxattr", side_effect=observed) as query, self.assertRaises(L.Refused) as refused:
+                        L._xattrs(path, directory)
+                    message = str(refused.exception)
+                    self.assertIn("attribute=" + forbidden + " result=present errno=none", message)
+                    self.assertEqual([call.args[1] for call in query.call_args_list],
+                                     [access] if forbidden == access else [access, other])
+                    self.assertNotIn("never-export-this", message)
+
+    def test_unknown_xattr_errno_is_a_typed_refusal_not_absence(self):
+        for number in (errno.EACCES, errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS, errno.EBADF,
+                       errno.ENOENT, errno.EIO, None, -1, 4096):
+            with self.subTest(errno=number), \
+                 patch.object(L.os, "getxattr", side_effect=OSError(number, "private-error-marker")) as query, \
+                 self.assertRaises(L.Refused) as refused:
+                L._xattrs(Path("/usr/share/fonts"), True)
+            message = str(refused.exception)
+            expected = str(number) if type(number) is int and 0 <= number <= 4095 else "unknown"
+            self.assertIn("attribute=system.posix_acl_access result=errno errno=" + expected, message)
+            self.assertEqual(query.call_count, 1)
+            self.assertNotIn("private-error-marker", message)
+            self.assertLessEqual(len(message.encode("ascii")), 512)
+
+    def test_xattr_diagnostic_bounds_and_redacts_without_new_filesystem_observations(self):
+        cases = (("/usr/share/fonts/inert.ttf", False, False), ("/usr/share/" + "a" * 300, False, True),
+                 ("/home/private-path-marker/key", True, False), ("/usr/sharex/private-path-marker", True, False),
+                 ("/opt/private-path-marker", True, False),
+                 (str(L.PREFIX) + "/manifest.json", False, False),
+                 (str(L.PREFIX.parent) + "/other-target/private-path-marker", True, False),
+                 ("/usr/share/fonts/../private-path-marker", True, False),
+                 ("/usr/share/fonts/private-path-marker\nforged", True, False))
+        for path, redacted, truncated in cases:
+            with self.subTest(path=path), \
+                 patch.object(L.os, "getxattr", return_value=b"private-value-marker\nforged") as query, \
+                 patch.object(L.os, "open", side_effect=AssertionError("diagnostic reopened a file")), \
+                 patch.object(L.os, "listxattr", side_effect=AssertionError("diagnostic enumerated attributes")), \
+                 patch.object(Path, "lstat", side_effect=AssertionError("diagnostic restatted a file")), \
+                 patch.object(Path, "resolve", side_effect=AssertionError("diagnostic resolved a new path")), \
+                 self.assertRaises(L.Refused) as refused:
+                L._xattrs(path, False)
+            message = str(refused.exception)
+            self.assertIn("path=" + ("<redacted>" if redacted else path[:256]) + " pathTruncated=" + str(truncated).lower(), message)
+            self.assertIn(" kind=non-directory attribute=system.posix_acl_access result=present errno=none", message)
+            self.assertNotIn("private-path-marker", message)
+            self.assertNotIn("private-value-marker", message)
+            self.assertNotIn("\n", message)
+            self.assertLessEqual(len(message.encode("ascii")), 512)
+            self.assertEqual(query.call_count, 1)
+
+
 class LifecycleData(unittest.TestCase):
     def test_compact_shell_policy_is_exact_lossless_and_independent_of_wire_inputs(self):
         value, _, _ = shell_loader_data(compact=False)

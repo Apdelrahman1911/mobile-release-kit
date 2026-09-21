@@ -2,7 +2,7 @@ name: Installed production shell verification
 
 on:
   push:
-    branches: [verify/desktop-installed-shell]
+    branches: [verify/desktop-installed-shell, verify/desktop-shell-host-metadata]
     paths:
       - desktop/**
       - src/mobile_release/**
@@ -19,10 +19,11 @@ concurrency:
 
 jobs:
   compile:
+    name: ${{ github.ref == 'refs/heads/verify/desktop-shell-host-metadata' && 'host-metadata-only' || 'compile' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-shell-host-metadata' && 10 || 25 }}
     env:
-      MRK_INSTALLED_SHELL_CASE: compile
+      MRK_INSTALLED_SHELL_CASE: ${{ github.ref == 'refs/heads/verify/desktop-shell-host-metadata' && 'host-metadata-only' || 'compile' }}
       MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
       MRK_UBUNTU_PUBLICATION_VERIFY: '1'
     outputs:
@@ -30,22 +31,25 @@ jobs:
       shell_producer_attempt: ${{ steps.compile.outputs.shell_producer_attempt }}
       shell_artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
-      - name: Require the fixed disposable compile route
+      - name: Require one exact disposable preparation route
         shell: bash
         env:
           HOSTING: ${{ runner.environment }}
         run: |
           set -euo pipefail
           [[ "$HOSTING" == github-hosted && "$GITHUB_EVENT_NAME" == push ]]
-          [[ "$GITHUB_REF" == refs/heads/verify/desktop-installed-shell ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
-          [[ "$MRK_INSTALLED_SHELL_CASE" == compile ]]
+          case "$GITHUB_REF:$MRK_INSTALLED_SHELL_CASE" in
+            refs/heads/verify/desktop-installed-shell:compile|refs/heads/verify/desktop-shell-host-metadata:host-metadata-only) ;;
+            *) exit 70 ;;
+          esac
       - name: Check out exact reviewed source without credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Select the fixed frontend compiler
+        if: github.ref == 'refs/heads/verify/desktop-installed-shell'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24.20.0'
@@ -65,8 +69,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo /usr/bin/python3.12 -I -S -B - <<'PY'
-          import json, os, re, stat
+          sudo /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent /usr/bin/python3.12 -I -S -B - <<'PY'
+          import errno, json, os, re, stat
 
           # Only fixed public OS DATA scopes may lose permission bits. This is disposable
           # runner preparation, never runtime admission or arbitrary filesystem repair.
@@ -115,6 +119,62 @@ jobs:
           def record(s):
               return {'dev': s.st_dev, 'ino': s.st_ino, 'uid': s.st_uid, 'gid': s.st_gid,
                       'mode': format(s.st_mode, '06o'), 'nlink': s.st_nlink, 'size': s.st_size}
+
+          class XattrFailure(Exception):
+              def __init__(self, path, item, phase, *, attribute='system.posix_acl_access',
+                           result='binding-unproven', number=None, probe_performed=False,
+                           binding_unknown=True, truncated=False):
+                  super().__init__('guarded-xattr')
+                  self.observed = {'path': path[:512], 'pathTruncated': len(path) > 512,
+                      'kind': 'directory' if stat.S_ISDIR(item.st_mode) else 'regular',
+                      'attribute': attribute, 'result': result,
+                      'errno': number if type(number) is int and 0 <= number <= 4095 else None,
+                      'original': list(identity(item)), 'phase': phase, 'complete': False,
+                      'truncated': truncated or len(path) > 512, 'cleanupUnknown': False,
+                      'bindingUnknown': binding_unknown, 'probePerformed': probe_performed}
+
+
+          def guarded_xattrs(fd, parent, name, path, item, phase, held=None):
+              # fgetxattr requires an ordinary FD, not O_PATH. Query only the two
+              # guarded names; successful empty bytes are still forbidden presence.
+              def binding():
+                  try:
+                      same = (identity(os.fstat(fd)) == identity(item)
+                              == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)))
+                      if held is not None:
+                          same = same and identity(os.fstat(held)) == identity(item)
+                      return same, None
+                  except OSError as error:
+                      return False, error.errno
+
+              for attribute in ('system.posix_acl_access', 'system.posix_acl_default'
+                                if stat.S_ISDIR(item.st_mode) else 'security.capability'):
+                  bound, number = binding()
+                  result, truncated, probe_performed = None, False, False
+                  binding_unknown = not bound
+                  if not bound:
+                      result = 'binding-unproven'
+                  else:
+                      probe_performed = True
+                      try:
+                          value = os.getxattr(fd, attribute)
+                      except OSError as error:
+                          if error.errno != errno.ENODATA:
+                              result, number = 'errno', error.errno
+                      else:
+                          result = 'present'
+                          truncated = truncated or type(value) is not bytes or len(value) > 65536
+                          del value  # No value, length or raw exception text enters diagnostics.
+                      bound, after_errno = binding()
+                      if not bound:
+                          binding_unknown = True
+                          if result is None:
+                              result, number = 'binding-unproven', after_errno
+                  if result is not None:
+                      raise XattrFailure(path, item, phase, attribute=attribute, result=result, number=number,
+                                         probe_performed=probe_performed, binding_unknown=binding_unknown,
+                                         truncated=truncated)
+
 
           def changed_only(before, after, mode, gid):
               # chmod/chown may change ctime, never identity, link count, size or mtime.
@@ -179,10 +239,12 @@ jobs:
           def prepare_directory(path):
               need(path in PREPARE_DIRS, 'fixed-target')
               flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-              fds, originals = [], []
+              fds, originals, authority_failure = [], [], None
 
-              def recheck():
-                  for fd, parent, name, expected in originals:
+              def recheck(phase=None):
+                  for fd, parent, name, path, expected in originals:
+                      if phase is not None:
+                          guarded_xattrs(fd, parent, name, path, expected, phase)
                       need(identity(os.fstat(fd)) == identity(expected)
                            == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)), 'original-directory-changed')
 
@@ -191,8 +253,8 @@ jobs:
                   fds.append(root)
                   before = os.fstat(root)
                   protected(before, '/')
-                  originals.append((root, None, '/', before))
-                  recheck()
+                  originals.append((root, None, '/', '/', before))
+                  recheck('prepare-before')
                   parent, parts, current = root, path.split('/')[1:], ''
                   for index, name in enumerate(parts):
                       current += '/' + name
@@ -216,30 +278,36 @@ jobs:
                           need(before.st_dev == MOUNT_DEVICE and (local_fonts or (stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
                                and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777))),
                                'target-policy', {'path': current, **record(before)})
-                          originals.append((fd, parent, name, before))
-                          recheck()
+                          originals.append((fd, parent, name, current, before))
+                          recheck('prepare-before')
                           mount_unchanged()
                           if local_fonts:
                               os.fchown(fd, -1, 0)
                               grouped = os.fstat(fd)
                               need(changed_only(before, grouped, stat.S_IMODE(before.st_mode), 0),
                                    'same-object-group-change')
-                              originals[-1] = (fd, parent, name, grouped)
-                              recheck()
+                              originals[-1] = (fd, parent, name, current, grouped)
+                              recheck('prepare-after-group')
                               mount_unchanged()
                           if stat.S_IMODE(before.st_mode) != 0o755:
+                              recheck('prepare-before')
+                              mount_unchanged()
                               os.fchmod(fd, 0o755)
                           after = os.fstat(fd)
                           need(changed_only(before, after, 0o755, 0),
                                'same-object-mode-change')
-                          originals[-1] = (fd, parent, name, after)
-                          recheck()
+                          originals[-1] = (fd, parent, name, current, after)
+                          recheck('prepare-after-mode')
                           mount_unchanged()
                           return {'path': path, 'before': record(before), 'after': record(after)}
                       protected(before, current)
-                      originals.append((fd, parent, name, before))
+                      originals.append((fd, parent, name, current, before))
+                      guarded_xattrs(fd, parent, name, current, before, 'prepare-before')
                       parent = fd
                   need(False, 'missing-directory-target')
+              except XattrFailure as error:
+                  authority_failure = error
+                  raise
               finally:
                   failed_close = False
                   while fds:
@@ -248,7 +316,10 @@ jobs:
                           os.close(fd)
                       except OSError:
                           failed_close = True
-                  need(not failed_close, 'original-directory-close')
+                  if failed_close and authority_failure is not None:
+                      authority_failure.observed['cleanupUnknown'] = True
+                  else:
+                      need(not failed_close, 'original-directory-close')
 
           def metadata_preflight(*, normalize=False):
               # Two finite passes: first diagnose unsupported objects without descendant
@@ -264,23 +335,25 @@ jobs:
                        == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)),
                        'metadata-original-changed')
 
-              def recheck():
-                  for fd, parent, name, item in originals:
+              def recheck(phase=None):
+                  for fd, parent, name, path, item in originals:
+                      if phase is not None:
+                          guarded_xattrs(fd, parent, name, path, item, phase)
                       bound(fd, parent, name, item)
 
               def tighten(fd, parent, name, path, item, mode):
                   nonlocal changed_count
-                  for ancestor, _, _, before in originals[:-1]:
-                      protected(before, path)
-                      protected(os.fstat(ancestor), path)
-                  recheck()
+                  for ancestor, _, _, ancestor_path, before in originals[:-1]:
+                      protected(before, ancestor_path)
+                      protected(os.fstat(ancestor), ancestor_path)
+                  recheck('metadata-before')
                   need(mode & ~stat.S_IMODE(item.st_mode) == 0, 'data-permission-addition')
                   mount_unchanged()
                   os.fchmod(fd, mode)
                   after = os.fstat(fd)
                   need(changed_only(item, after, mode, 0), 'same-data-object-mode-change')
-                  originals[-1] = (fd, parent, name, after)
-                  recheck()
+                  originals[-1] = (fd, parent, name, path, after)
+                  recheck('metadata-after')
                   mount_unchanged()
                   changed_count += 1
                   if len(changed) < 64:
@@ -315,12 +388,18 @@ jobs:
                       or regular and mode in (0o644, 0o664, 0o666, 0o555, 0o755, 0o775, 0o777))
                   if normalize:
                       need(safe or repairable, 'unsupported-data-before-effect', {'path': path[:512], **record(item)})
-                  fd = None
+                  fd, authority_failure = None, None
                   try:
-                      if directory or normalize and not safe and repairable:
-                          fd = os.open(name, flags if directory else file_flags, dir_fd=parent)
+                      if directory or regular:
+                          try:
+                              fd = os.open(name, flags if directory else file_flags, dir_fd=parent)
+                          except OSError as error:
+                              raise XattrFailure(path, item, 'metadata-before' if normalize else 'metadata-census',
+                                                 number=error.errno) from None
                           fds.append(fd)
-                          originals.append((fd, parent, name, item))
+                          originals.append((fd, parent, name, path, item))
+                          guarded_xattrs(fd, parent, name, path, item,
+                                         'metadata-before' if normalize else 'metadata-census')
                           bound(fd, parent, name, item)
                           if normalize and not safe:
                               item = tighten(fd, parent, name, path, item, 0o755 if directory else mode & ~0o133)
@@ -342,6 +421,9 @@ jobs:
                       bound(fd, parent, name, item)
                       need(sorted(os.listdir(fd)) == children, 'metadata-membership-changed')
                       recheck()
+                  except XattrFailure as error:
+                      authority_failure = error
+                      raise
                   finally:
                       if fd is not None:
                           originals.pop()
@@ -349,16 +431,21 @@ jobs:
                           try:
                               os.close(fd)
                           except OSError:
-                              need(False, 'metadata-original-close')
+                              if authority_failure is not None:
+                                  authority_failure.observed['cleanupUnknown'] = True
+                              else:
+                                  need(False, 'metadata-original-close')
 
               for root, root_kind in DATA_ROOTS:
-                  originals = []
+                  originals, authority_failure = [], None
                   try:
                       parent = os.open('/', flags)
                       fds.append(parent)
                       before = os.fstat(parent)
                       protected(before, '/')
-                      originals.append((parent, None, '/', before))
+                      originals.append((parent, None, '/', '/', before))
+                      guarded_xattrs(parent, None, '/', '/', before,
+                                     'metadata-before' if normalize else 'metadata-census')
                       bound(parent, None, '/', before)
                       parts, current = root.split('/')[1:], ''
                       for name in parts[:-1]:
@@ -372,12 +459,17 @@ jobs:
                           fds.append(fd)
                           before = os.fstat(fd)
                           protected(before, current)
+                          originals.append((fd, parent, name, current, before))
+                          guarded_xattrs(fd, parent, name, current, before,
+                                         'metadata-before' if normalize else 'metadata-census')
                           bound(fd, parent, name, before)
-                          originals.append((fd, parent, name, before))
                           parent = fd
                       else:
                           visit(parent, parts[-1], root, 0, root_kind)
                       recheck()
+                  except XattrFailure as error:
+                      authority_failure = error
+                      raise
                   finally:
                       failed_close = False
                       while fds:
@@ -386,7 +478,10 @@ jobs:
                               os.close(fd)
                           except OSError:
                               failed_close = True
-                      need(not failed_close, 'metadata-original-close')
+                      if failed_close and authority_failure is not None:
+                          authority_failure.observed['cleanupUnknown'] = True
+                      else:
+                          need(not failed_close, 'metadata-original-close')
               return {'_selectedLinks': selected_links, 'entries': count, 'unsafeCount': unsafe_count, 'unsafe': unsafe,
                       'unsafeListTruncated': unsafe_count > len(unsafe), 'unsupportedCount': unsupported_count,
                       'changedCount': changed_count, 'changed': changed, 'changedListTruncated': changed_count > len(changed)}
@@ -394,6 +489,8 @@ jobs:
           def link_closure_metadata(selections):
               """Point-in-time public link metadata; never contents, effects or admission."""
               meta_flags = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
+              directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+              file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
               public = ('/usr/share', '/usr/local/share', '/usr/lib', '/etc/alternatives', '/opt')
               covered_ancestors, public_ancestors = {'/'}, {'/'}
               for roots, ancestors in ((tuple(path for path, _ in DATA_ROOTS), covered_ancestors),
@@ -413,7 +510,8 @@ jobs:
 
               def inspect(selected, expected):
                   row = {'selectedPath': selected, 'terminalPath': None, 'links': [],
-                         'externalPaths': [], 'unsafePaths': [], 'error': None, 'cleanupUnknown': False}
+                         'externalPaths': [], 'unsafePaths': [], 'error': None, 'cleanupUnknown': False,
+                         'authorityFailure': None}
                   fds, originals, link_originals, observations, raw_links = [], {}, [], {}, []
                   external, unsafe = set(), set()
 
@@ -453,6 +551,31 @@ jobs:
                               or not link and before.st_mode & 0o7022
                               or (link or stat.S_ISREG(before.st_mode)) and before.st_nlink != 1):
                           unsafe.add(path)
+                      if stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode):
+                          recheck()
+                          check(len(fds) < 24, 'fd-bound')
+                          try:
+                              ordinary_fd = os.open(original_name, directory_flags if stat.S_ISDIR(before.st_mode)
+                                                    else file_flags, dir_fd=original_parent)
+                          except OSError as error:
+                              raise XattrFailure(path, before, 'link-closure', number=error.errno) from None
+                          fds.append(ordinary_fd)  # Also register this extra original before fstat/query.
+                          authority_failure = None
+                          try:
+                              guarded_xattrs(ordinary_fd, original_parent, original_name, path, before,
+                                             'link-closure', held=fd)
+                          except XattrFailure as error:
+                              authority_failure = error
+                              raise
+                          finally:
+                              fds.pop()  # Retire before the sole close, including a failed first fstat.
+                              try:
+                                  os.close(ordinary_fd)
+                              except OSError:
+                                  row['cleanupUnknown'] = True
+                                  if authority_failure is None:
+                                      raise ValueError('original-close-unknown') from None
+                          recheck()
                       return fd, before
 
                   try:
@@ -502,6 +625,8 @@ jobs:
                                   unsafe.add(candidate)
                       check(found and row['terminalPath'] is not None, 'unresolved-terminal')
                       recheck()
+                  except XattrFailure as error:
+                      row['error'], row['authorityFailure'] = 'guarded-xattr', error.observed
                   except ValueError as error:
                       # All ValueErrors above carry fixed codes, never target/error text.
                       code = str(error)
@@ -515,6 +640,8 @@ jobs:
                               os.close(fd)
                           except OSError:
                               row['cleanupUnknown'] = True
+                      if row['authorityFailure'] is not None:
+                          row['authorityFailure']['cleanupUnknown'] = row['cleanupUnknown']
                       if row['cleanupUnknown'] and row['error'] is None:
                           row['error'] = 'original-close-unknown'
                   # A refused private/invalid target is not public diagnostic text.
@@ -528,7 +655,7 @@ jobs:
               report = {'scope': 'fixed-shell-data-link-closure', 'runtimeAdmission': False,
                         'selectedCount': len(selections), 'examinedCount': 0, 'externalCount': 0,
                         'unsafeCount': 0, 'complete': True, 'safe': True, 'truncated': False,
-                        'records': [], 'nodes': {}, 'globalError': None}
+                        'records': [], 'nodes': {}, 'globalError': None, '_authorityFailure': None}
               unsafe_paths = set()
               if len(selections) > 4096:
                   report.update(complete=False, safe=False, truncated=True, globalError='selection-bound')
@@ -536,6 +663,8 @@ jobs:
               for selected, expected in selections:
                   row, observations = inspect(selected, expected)
                   report['examinedCount'] += 1
+                  if row['authorityFailure'] is not None:
+                      report['_authorityFailure'] = row['authorityFailure']
                   unsafe_paths.update(row['unsafePaths'])
                   report['unsafeCount'] = len(unsafe_paths)
                   report['externalCount'] += bool(row['externalPaths'])
@@ -557,7 +686,7 @@ jobs:
                           report['nodes'] = previous
                           report.update(complete=False, safe=False, truncated=True, globalError='diagnostic-byte-bound')
                           break
-                  if (row['cleanupUnknown'] or row['error'] in {'mount-changed', 'mounted-target', 'wrong-device',
+                  if (row['cleanupUnknown'] or row['authorityFailure'] is not None or row['error'] in {'mount-changed', 'mounted-target', 'wrong-device',
                           'original-changed', 'original-link-changed', 'selected-link-changed'} or report['globalError']):
                       break
               if report['examinedCount'] != report['selectedCount']:
@@ -565,36 +694,42 @@ jobs:
               return report
 
 
-          need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0), 'root-credentials')
-          MOUNT_RAW = mount_table()
-          MOUNT_DEVICE = os.stat('/', follow_symlinks=False).st_dev
-          MOUNT_POINTS = mount_scope(MOUNT_RAW, MOUNT_DEVICE)
-          prepared = [prepare_directory(path) for path in sorted(PREPARE_DIRS, key=lambda path: (path.count('/'), path))]
-          metadata = metadata_preflight()
-          if metadata['unsupportedCount'] == 0 and metadata['unsafeCount']:
-              metadata = metadata_preflight(normalize=True)
-          mount_unchanged()
-          selected_links = metadata.pop('_selectedLinks')
-          metadata['selectedLinkCount'] = len(selected_links)
-          receipt = json.dumps({'scope': SCOPE, 'prepared': prepared, 'metadata': metadata,
-                                'runtimeAdmission': False}, sort_keys=True, separators=(',', ':'))
-          need(len(receipt.encode('ascii')) <= 65536, 'receipt-bound')
-          print(receipt, flush=True)
-          need(metadata['unsafeCount'] == 0, 'unhandled-unsafe-data-metadata')
+          try:
+              need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0), 'root-credentials')
+              MOUNT_RAW = mount_table()
+              MOUNT_DEVICE = os.stat('/', follow_symlinks=False).st_dev
+              MOUNT_POINTS = mount_scope(MOUNT_RAW, MOUNT_DEVICE)
+              prepared = [prepare_directory(path) for path in sorted(PREPARE_DIRS, key=lambda path: (path.count('/'), path))]
+              metadata = metadata_preflight()
+              if metadata['unsupportedCount'] == 0 and metadata['unsafeCount']:
+                  metadata = metadata_preflight(normalize=True)
+              mount_unchanged()
+              selected_links = metadata.pop('_selectedLinks')
+              metadata['selectedLinkCount'] = len(selected_links)
+              receipt = json.dumps({'scope': SCOPE, 'prepared': prepared, 'metadata': metadata,
+                                    'runtimeAdmission': False}, sort_keys=True, separators=(',', ':'))
+              need(len(receipt.encode('ascii')) <= 65536, 'receipt-bound')
+              print(receipt, flush=True)
+              need(metadata['unsafeCount'] == 0, 'unhandled-unsafe-data-metadata')
 
-          closure = link_closure_metadata(selected_links)
-          closure_receipt = json.dumps(closure, sort_keys=True, separators=(',', ':'))
-          need(len(closure_receipt.encode('ascii')) <= 65536, 'link-closure-receipt-bound')
-          print(closure_receipt, flush=True)
-          need(closure['complete'] and closure['safe'], 'unhandled-data-link-closure')
+              closure = link_closure_metadata(selected_links)
+              authority_failure = closure.pop('_authorityFailure')
+              closure_receipt = json.dumps(closure, sort_keys=True, separators=(',', ':'))
+              need(len(closure_receipt.encode('ascii')) <= 65536, 'link-closure-receipt-bound')
+              print(closure_receipt, flush=True)
+              need(closure['complete'] and closure['safe'], 'unhandled-data-link-closure', authority_failure)
+          except XattrFailure as error:
+              need(False, 'guarded-xattr', error.observed)
           PY
       - name: Prepare a fresh bounded compiler owner
+        if: github.ref == 'refs/heads/verify/desktop-installed-shell'
         id: prepare
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py prepare
       - name: Download the exact accepted A runtime as DATA
+        if: github.ref == 'refs/heads/verify/desktop-installed-shell'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           repository: Apdelrahman1911/mobile-release-kit
@@ -604,6 +739,7 @@ jobs:
           path: ${{ steps.prepare.outputs.root }}/work/admitted-a
           merge-multiple: true
       - name: Compile the normal shell and separate observer once without executing either
+        if: github.ref == 'refs/heads/verify/desktop-installed-shell'
         id: compile
         shell: bash
         env:
@@ -612,11 +748,11 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '12604a28b4fba2a2143703767b0a761bf6ed901403ef782f1bd4a730fa1961cd'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a785404056a9729f2dc5dfe60538b7b0d27cf32bc023bb6b2f7d722f3e1b6467'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
       - name: Retain original compiler evidence and shell outputs
         id: upload
-        if: always() && steps.prepare.outputs.root != ''
+        if: always() && github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.prepare.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-installed-shell-compile-${{ github.run_id }}-${{ github.run_attempt }}
@@ -626,6 +762,7 @@ jobs:
           compression-level: 1
 
   native:
+    if: github.ref == 'refs/heads/verify/desktop-installed-shell'
     needs: compile
     name: installed-shell
     runs-on: ubuntu-24.04
@@ -677,8 +814,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo /usr/bin/python3.12 -I -S -B - <<'PY'
-          import json, os, re, stat
+          sudo /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent /usr/bin/python3.12 -I -S -B - <<'PY'
+          import errno, json, os, re, stat
 
           # Only fixed public OS DATA scopes may lose permission bits. This is disposable
           # runner preparation, never runtime admission or arbitrary filesystem repair.
@@ -727,6 +864,62 @@ jobs:
           def record(s):
               return {'dev': s.st_dev, 'ino': s.st_ino, 'uid': s.st_uid, 'gid': s.st_gid,
                       'mode': format(s.st_mode, '06o'), 'nlink': s.st_nlink, 'size': s.st_size}
+
+          class XattrFailure(Exception):
+              def __init__(self, path, item, phase, *, attribute='system.posix_acl_access',
+                           result='binding-unproven', number=None, probe_performed=False,
+                           binding_unknown=True, truncated=False):
+                  super().__init__('guarded-xattr')
+                  self.observed = {'path': path[:512], 'pathTruncated': len(path) > 512,
+                      'kind': 'directory' if stat.S_ISDIR(item.st_mode) else 'regular',
+                      'attribute': attribute, 'result': result,
+                      'errno': number if type(number) is int and 0 <= number <= 4095 else None,
+                      'original': list(identity(item)), 'phase': phase, 'complete': False,
+                      'truncated': truncated or len(path) > 512, 'cleanupUnknown': False,
+                      'bindingUnknown': binding_unknown, 'probePerformed': probe_performed}
+
+
+          def guarded_xattrs(fd, parent, name, path, item, phase, held=None):
+              # fgetxattr requires an ordinary FD, not O_PATH. Query only the two
+              # guarded names; successful empty bytes are still forbidden presence.
+              def binding():
+                  try:
+                      same = (identity(os.fstat(fd)) == identity(item)
+                              == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)))
+                      if held is not None:
+                          same = same and identity(os.fstat(held)) == identity(item)
+                      return same, None
+                  except OSError as error:
+                      return False, error.errno
+
+              for attribute in ('system.posix_acl_access', 'system.posix_acl_default'
+                                if stat.S_ISDIR(item.st_mode) else 'security.capability'):
+                  bound, number = binding()
+                  result, truncated, probe_performed = None, False, False
+                  binding_unknown = not bound
+                  if not bound:
+                      result = 'binding-unproven'
+                  else:
+                      probe_performed = True
+                      try:
+                          value = os.getxattr(fd, attribute)
+                      except OSError as error:
+                          if error.errno != errno.ENODATA:
+                              result, number = 'errno', error.errno
+                      else:
+                          result = 'present'
+                          truncated = truncated or type(value) is not bytes or len(value) > 65536
+                          del value  # No value, length or raw exception text enters diagnostics.
+                      bound, after_errno = binding()
+                      if not bound:
+                          binding_unknown = True
+                          if result is None:
+                              result, number = 'binding-unproven', after_errno
+                  if result is not None:
+                      raise XattrFailure(path, item, phase, attribute=attribute, result=result, number=number,
+                                         probe_performed=probe_performed, binding_unknown=binding_unknown,
+                                         truncated=truncated)
+
 
           def changed_only(before, after, mode, gid):
               # chmod/chown may change ctime, never identity, link count, size or mtime.
@@ -791,10 +984,12 @@ jobs:
           def prepare_directory(path):
               need(path in PREPARE_DIRS, 'fixed-target')
               flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-              fds, originals = [], []
+              fds, originals, authority_failure = [], [], None
 
-              def recheck():
-                  for fd, parent, name, expected in originals:
+              def recheck(phase=None):
+                  for fd, parent, name, path, expected in originals:
+                      if phase is not None:
+                          guarded_xattrs(fd, parent, name, path, expected, phase)
                       need(identity(os.fstat(fd)) == identity(expected)
                            == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)), 'original-directory-changed')
 
@@ -803,8 +998,8 @@ jobs:
                   fds.append(root)
                   before = os.fstat(root)
                   protected(before, '/')
-                  originals.append((root, None, '/', before))
-                  recheck()
+                  originals.append((root, None, '/', '/', before))
+                  recheck('prepare-before')
                   parent, parts, current = root, path.split('/')[1:], ''
                   for index, name in enumerate(parts):
                       current += '/' + name
@@ -828,30 +1023,36 @@ jobs:
                           need(before.st_dev == MOUNT_DEVICE and (local_fonts or (stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
                                and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777))),
                                'target-policy', {'path': current, **record(before)})
-                          originals.append((fd, parent, name, before))
-                          recheck()
+                          originals.append((fd, parent, name, current, before))
+                          recheck('prepare-before')
                           mount_unchanged()
                           if local_fonts:
                               os.fchown(fd, -1, 0)
                               grouped = os.fstat(fd)
                               need(changed_only(before, grouped, stat.S_IMODE(before.st_mode), 0),
                                    'same-object-group-change')
-                              originals[-1] = (fd, parent, name, grouped)
-                              recheck()
+                              originals[-1] = (fd, parent, name, current, grouped)
+                              recheck('prepare-after-group')
                               mount_unchanged()
                           if stat.S_IMODE(before.st_mode) != 0o755:
+                              recheck('prepare-before')
+                              mount_unchanged()
                               os.fchmod(fd, 0o755)
                           after = os.fstat(fd)
                           need(changed_only(before, after, 0o755, 0),
                                'same-object-mode-change')
-                          originals[-1] = (fd, parent, name, after)
-                          recheck()
+                          originals[-1] = (fd, parent, name, current, after)
+                          recheck('prepare-after-mode')
                           mount_unchanged()
                           return {'path': path, 'before': record(before), 'after': record(after)}
                       protected(before, current)
-                      originals.append((fd, parent, name, before))
+                      originals.append((fd, parent, name, current, before))
+                      guarded_xattrs(fd, parent, name, current, before, 'prepare-before')
                       parent = fd
                   need(False, 'missing-directory-target')
+              except XattrFailure as error:
+                  authority_failure = error
+                  raise
               finally:
                   failed_close = False
                   while fds:
@@ -860,7 +1061,10 @@ jobs:
                           os.close(fd)
                       except OSError:
                           failed_close = True
-                  need(not failed_close, 'original-directory-close')
+                  if failed_close and authority_failure is not None:
+                      authority_failure.observed['cleanupUnknown'] = True
+                  else:
+                      need(not failed_close, 'original-directory-close')
 
           def metadata_preflight(*, normalize=False):
               # Two finite passes: first diagnose unsupported objects without descendant
@@ -876,23 +1080,25 @@ jobs:
                        == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)),
                        'metadata-original-changed')
 
-              def recheck():
-                  for fd, parent, name, item in originals:
+              def recheck(phase=None):
+                  for fd, parent, name, path, item in originals:
+                      if phase is not None:
+                          guarded_xattrs(fd, parent, name, path, item, phase)
                       bound(fd, parent, name, item)
 
               def tighten(fd, parent, name, path, item, mode):
                   nonlocal changed_count
-                  for ancestor, _, _, before in originals[:-1]:
-                      protected(before, path)
-                      protected(os.fstat(ancestor), path)
-                  recheck()
+                  for ancestor, _, _, ancestor_path, before in originals[:-1]:
+                      protected(before, ancestor_path)
+                      protected(os.fstat(ancestor), ancestor_path)
+                  recheck('metadata-before')
                   need(mode & ~stat.S_IMODE(item.st_mode) == 0, 'data-permission-addition')
                   mount_unchanged()
                   os.fchmod(fd, mode)
                   after = os.fstat(fd)
                   need(changed_only(item, after, mode, 0), 'same-data-object-mode-change')
-                  originals[-1] = (fd, parent, name, after)
-                  recheck()
+                  originals[-1] = (fd, parent, name, path, after)
+                  recheck('metadata-after')
                   mount_unchanged()
                   changed_count += 1
                   if len(changed) < 64:
@@ -927,12 +1133,18 @@ jobs:
                       or regular and mode in (0o644, 0o664, 0o666, 0o555, 0o755, 0o775, 0o777))
                   if normalize:
                       need(safe or repairable, 'unsupported-data-before-effect', {'path': path[:512], **record(item)})
-                  fd = None
+                  fd, authority_failure = None, None
                   try:
-                      if directory or normalize and not safe and repairable:
-                          fd = os.open(name, flags if directory else file_flags, dir_fd=parent)
+                      if directory or regular:
+                          try:
+                              fd = os.open(name, flags if directory else file_flags, dir_fd=parent)
+                          except OSError as error:
+                              raise XattrFailure(path, item, 'metadata-before' if normalize else 'metadata-census',
+                                                 number=error.errno) from None
                           fds.append(fd)
-                          originals.append((fd, parent, name, item))
+                          originals.append((fd, parent, name, path, item))
+                          guarded_xattrs(fd, parent, name, path, item,
+                                         'metadata-before' if normalize else 'metadata-census')
                           bound(fd, parent, name, item)
                           if normalize and not safe:
                               item = tighten(fd, parent, name, path, item, 0o755 if directory else mode & ~0o133)
@@ -954,6 +1166,9 @@ jobs:
                       bound(fd, parent, name, item)
                       need(sorted(os.listdir(fd)) == children, 'metadata-membership-changed')
                       recheck()
+                  except XattrFailure as error:
+                      authority_failure = error
+                      raise
                   finally:
                       if fd is not None:
                           originals.pop()
@@ -961,16 +1176,21 @@ jobs:
                           try:
                               os.close(fd)
                           except OSError:
-                              need(False, 'metadata-original-close')
+                              if authority_failure is not None:
+                                  authority_failure.observed['cleanupUnknown'] = True
+                              else:
+                                  need(False, 'metadata-original-close')
 
               for root, root_kind in DATA_ROOTS:
-                  originals = []
+                  originals, authority_failure = [], None
                   try:
                       parent = os.open('/', flags)
                       fds.append(parent)
                       before = os.fstat(parent)
                       protected(before, '/')
-                      originals.append((parent, None, '/', before))
+                      originals.append((parent, None, '/', '/', before))
+                      guarded_xattrs(parent, None, '/', '/', before,
+                                     'metadata-before' if normalize else 'metadata-census')
                       bound(parent, None, '/', before)
                       parts, current = root.split('/')[1:], ''
                       for name in parts[:-1]:
@@ -984,12 +1204,17 @@ jobs:
                           fds.append(fd)
                           before = os.fstat(fd)
                           protected(before, current)
+                          originals.append((fd, parent, name, current, before))
+                          guarded_xattrs(fd, parent, name, current, before,
+                                         'metadata-before' if normalize else 'metadata-census')
                           bound(fd, parent, name, before)
-                          originals.append((fd, parent, name, before))
                           parent = fd
                       else:
                           visit(parent, parts[-1], root, 0, root_kind)
                       recheck()
+                  except XattrFailure as error:
+                      authority_failure = error
+                      raise
                   finally:
                       failed_close = False
                       while fds:
@@ -998,7 +1223,10 @@ jobs:
                               os.close(fd)
                           except OSError:
                               failed_close = True
-                      need(not failed_close, 'metadata-original-close')
+                      if failed_close and authority_failure is not None:
+                          authority_failure.observed['cleanupUnknown'] = True
+                      else:
+                          need(not failed_close, 'metadata-original-close')
               return {'_selectedLinks': selected_links, 'entries': count, 'unsafeCount': unsafe_count, 'unsafe': unsafe,
                       'unsafeListTruncated': unsafe_count > len(unsafe), 'unsupportedCount': unsupported_count,
                       'changedCount': changed_count, 'changed': changed, 'changedListTruncated': changed_count > len(changed)}
@@ -1006,6 +1234,8 @@ jobs:
           def link_closure_metadata(selections):
               """Point-in-time public link metadata; never contents, effects or admission."""
               meta_flags = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
+              directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+              file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
               public = ('/usr/share', '/usr/local/share', '/usr/lib', '/etc/alternatives', '/opt')
               covered_ancestors, public_ancestors = {'/'}, {'/'}
               for roots, ancestors in ((tuple(path for path, _ in DATA_ROOTS), covered_ancestors),
@@ -1025,7 +1255,8 @@ jobs:
 
               def inspect(selected, expected):
                   row = {'selectedPath': selected, 'terminalPath': None, 'links': [],
-                         'externalPaths': [], 'unsafePaths': [], 'error': None, 'cleanupUnknown': False}
+                         'externalPaths': [], 'unsafePaths': [], 'error': None, 'cleanupUnknown': False,
+                         'authorityFailure': None}
                   fds, originals, link_originals, observations, raw_links = [], {}, [], {}, []
                   external, unsafe = set(), set()
 
@@ -1065,6 +1296,31 @@ jobs:
                               or not link and before.st_mode & 0o7022
                               or (link or stat.S_ISREG(before.st_mode)) and before.st_nlink != 1):
                           unsafe.add(path)
+                      if stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode):
+                          recheck()
+                          check(len(fds) < 24, 'fd-bound')
+                          try:
+                              ordinary_fd = os.open(original_name, directory_flags if stat.S_ISDIR(before.st_mode)
+                                                    else file_flags, dir_fd=original_parent)
+                          except OSError as error:
+                              raise XattrFailure(path, before, 'link-closure', number=error.errno) from None
+                          fds.append(ordinary_fd)  # Also register this extra original before fstat/query.
+                          authority_failure = None
+                          try:
+                              guarded_xattrs(ordinary_fd, original_parent, original_name, path, before,
+                                             'link-closure', held=fd)
+                          except XattrFailure as error:
+                              authority_failure = error
+                              raise
+                          finally:
+                              fds.pop()  # Retire before the sole close, including a failed first fstat.
+                              try:
+                                  os.close(ordinary_fd)
+                              except OSError:
+                                  row['cleanupUnknown'] = True
+                                  if authority_failure is None:
+                                      raise ValueError('original-close-unknown') from None
+                          recheck()
                       return fd, before
 
                   try:
@@ -1114,6 +1370,8 @@ jobs:
                                   unsafe.add(candidate)
                       check(found and row['terminalPath'] is not None, 'unresolved-terminal')
                       recheck()
+                  except XattrFailure as error:
+                      row['error'], row['authorityFailure'] = 'guarded-xattr', error.observed
                   except ValueError as error:
                       # All ValueErrors above carry fixed codes, never target/error text.
                       code = str(error)
@@ -1127,6 +1385,8 @@ jobs:
                               os.close(fd)
                           except OSError:
                               row['cleanupUnknown'] = True
+                      if row['authorityFailure'] is not None:
+                          row['authorityFailure']['cleanupUnknown'] = row['cleanupUnknown']
                       if row['cleanupUnknown'] and row['error'] is None:
                           row['error'] = 'original-close-unknown'
                   # A refused private/invalid target is not public diagnostic text.
@@ -1140,7 +1400,7 @@ jobs:
               report = {'scope': 'fixed-shell-data-link-closure', 'runtimeAdmission': False,
                         'selectedCount': len(selections), 'examinedCount': 0, 'externalCount': 0,
                         'unsafeCount': 0, 'complete': True, 'safe': True, 'truncated': False,
-                        'records': [], 'nodes': {}, 'globalError': None}
+                        'records': [], 'nodes': {}, 'globalError': None, '_authorityFailure': None}
               unsafe_paths = set()
               if len(selections) > 4096:
                   report.update(complete=False, safe=False, truncated=True, globalError='selection-bound')
@@ -1148,6 +1408,8 @@ jobs:
               for selected, expected in selections:
                   row, observations = inspect(selected, expected)
                   report['examinedCount'] += 1
+                  if row['authorityFailure'] is not None:
+                      report['_authorityFailure'] = row['authorityFailure']
                   unsafe_paths.update(row['unsafePaths'])
                   report['unsafeCount'] = len(unsafe_paths)
                   report['externalCount'] += bool(row['externalPaths'])
@@ -1169,7 +1431,7 @@ jobs:
                           report['nodes'] = previous
                           report.update(complete=False, safe=False, truncated=True, globalError='diagnostic-byte-bound')
                           break
-                  if (row['cleanupUnknown'] or row['error'] in {'mount-changed', 'mounted-target', 'wrong-device',
+                  if (row['cleanupUnknown'] or row['authorityFailure'] is not None or row['error'] in {'mount-changed', 'mounted-target', 'wrong-device',
                           'original-changed', 'original-link-changed', 'selected-link-changed'} or report['globalError']):
                       break
               if report['examinedCount'] != report['selectedCount']:
@@ -1177,28 +1439,32 @@ jobs:
               return report
 
 
-          need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0), 'root-credentials')
-          MOUNT_RAW = mount_table()
-          MOUNT_DEVICE = os.stat('/', follow_symlinks=False).st_dev
-          MOUNT_POINTS = mount_scope(MOUNT_RAW, MOUNT_DEVICE)
-          prepared = [prepare_directory(path) for path in sorted(PREPARE_DIRS, key=lambda path: (path.count('/'), path))]
-          metadata = metadata_preflight()
-          if metadata['unsupportedCount'] == 0 and metadata['unsafeCount']:
-              metadata = metadata_preflight(normalize=True)
-          mount_unchanged()
-          selected_links = metadata.pop('_selectedLinks')
-          metadata['selectedLinkCount'] = len(selected_links)
-          receipt = json.dumps({'scope': SCOPE, 'prepared': prepared, 'metadata': metadata,
-                                'runtimeAdmission': False}, sort_keys=True, separators=(',', ':'))
-          need(len(receipt.encode('ascii')) <= 65536, 'receipt-bound')
-          print(receipt, flush=True)
-          need(metadata['unsafeCount'] == 0, 'unhandled-unsafe-data-metadata')
+          try:
+              need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0), 'root-credentials')
+              MOUNT_RAW = mount_table()
+              MOUNT_DEVICE = os.stat('/', follow_symlinks=False).st_dev
+              MOUNT_POINTS = mount_scope(MOUNT_RAW, MOUNT_DEVICE)
+              prepared = [prepare_directory(path) for path in sorted(PREPARE_DIRS, key=lambda path: (path.count('/'), path))]
+              metadata = metadata_preflight()
+              if metadata['unsupportedCount'] == 0 and metadata['unsafeCount']:
+                  metadata = metadata_preflight(normalize=True)
+              mount_unchanged()
+              selected_links = metadata.pop('_selectedLinks')
+              metadata['selectedLinkCount'] = len(selected_links)
+              receipt = json.dumps({'scope': SCOPE, 'prepared': prepared, 'metadata': metadata,
+                                    'runtimeAdmission': False}, sort_keys=True, separators=(',', ':'))
+              need(len(receipt.encode('ascii')) <= 65536, 'receipt-bound')
+              print(receipt, flush=True)
+              need(metadata['unsafeCount'] == 0, 'unhandled-unsafe-data-metadata')
 
-          closure = link_closure_metadata(selected_links)
-          closure_receipt = json.dumps(closure, sort_keys=True, separators=(',', ':'))
-          need(len(closure_receipt.encode('ascii')) <= 65536, 'link-closure-receipt-bound')
-          print(closure_receipt, flush=True)
-          need(closure['complete'] and closure['safe'], 'unhandled-data-link-closure')
+              closure = link_closure_metadata(selected_links)
+              authority_failure = closure.pop('_authorityFailure')
+              closure_receipt = json.dumps(closure, sort_keys=True, separators=(',', ':'))
+              need(len(closure_receipt.encode('ascii')) <= 65536, 'link-closure-receipt-bound')
+              print(closure_receipt, flush=True)
+              need(closure['complete'] and closure['safe'], 'unhandled-data-link-closure', authority_failure)
+          except XattrFailure as error:
+              need(False, 'guarded-xattr', error.observed)
           PY
       - name: Prepare a fresh bounded native owner
         id: prepare
@@ -1236,7 +1502,7 @@ jobs:
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ needs.compile.outputs.shell_artifact_id }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '12604a28b4fba2a2143703767b0a761bf6ed901403ef782f1bd4a730fa1961cd'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'a785404056a9729f2dc5dfe60538b7b0d27cf32bc023bb6b2f7d722f3e1b6467'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path
@@ -1280,7 +1546,7 @@ jobs:
             os.execv('/usr/bin/python3.12',['/usr/bin/python3.12','-I','-S','-B',str(r/'entry.py'),'unit-start'])
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell
       - name: Retain only original public evidence for this shell observation
-        if: always() && steps.prepare.outputs.root != ''
+        if: always() && github.ref == 'refs/heads/verify/desktop-installed-shell' && steps.prepare.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-installed-shell-native-${{ github.run_id }}-${{ github.run_attempt }}

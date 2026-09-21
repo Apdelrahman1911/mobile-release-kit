@@ -959,13 +959,36 @@ def denied(error):
 
 
 def _xattrs(path, is_directory):
+    def refusal(name, result, number=None):
+        # Diagnose only the observation already made below. Never resolve or
+        # reopen a refused path, disclose private names, or print xattr bytes.
+        text = str(path)
+        public = ("/usr/bin", "/usr/sbin", "/usr/lib", "/usr/lib64", "/usr/share", "/usr/local/share",
+                  "/lib", "/lib64", "/bin", "/sbin", str(PREFIX))
+        fixed = {"/", "/usr", "/usr/local", "/opt", "/var", "/var/lib", "/var/cache",
+                 "/var/lib/mobile-release-kit", "/var/lib/mobile-release-kit/versions", "/etc", "/etc/glvnd",
+                 "/etc/ld.so.cache", "/etc/alternatives", "/run", "/run/needrestart",
+                 "/run/needrestart/unpacked", "/run/needrestart/errored", "/dev", "/dev/null"}
+        scoped = (text in fixed or any(text == root or text.startswith(root + "/") for root in public)
+                  or any(text == root or kind == "directory" and text.startswith(root + "/")
+                         for root, kind in SHELL_DATA_ROOTS))
+        grammar = (text == "/" or 0 < len(text) <= 4096 and re.fullmatch(r"/[A-Za-z0-9_./+@\-]+", text)
+                   and all(part not in {"", ".", ".."} for part in text.split("/")[1:]))
+        shown = text if scoped and grammar else "<redacted>"
+        truncated = len(shown) > 256
+        number = str(number) if type(number) is int and 0 <= number <= 4095 else "unknown"
+        return ("Extended attribute refused: path=" + shown[:256] + " pathTruncated=" + str(truncated).lower()
+                + " kind=" + ("directory" if is_directory else "non-directory") + " attribute=" + name
+                + " result=" + result + " errno=" + (number if result == "errno" else "none"))
+
     for name in ("system.posix_acl_access", "system.posix_acl_default" if is_directory else "security.capability"):
         try:
             os.getxattr(path, name, follow_symlinks=False)
         except OSError as error:
-            need(error.errno == errno.ENODATA, "Extended-attribute absence is unproven")
+            if error.errno != errno.ENODATA:
+                raise Refused(refusal(name, "errno", error.errno)) from None
         else:
-            raise Refused("Published object grants extra mutation/execution authority")
+            raise Refused(refusal(name, "present"))
 
 
 def _tree(root, manifest, *, published):

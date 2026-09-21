@@ -48,6 +48,11 @@ FILES = {"/etc/drirc", "/usr/share/mime/mime.cache", BYOBU_ICON,
 FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 META_FLAGS = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
+ACCESS_ACL = "system.posix_acl_access"
+DEFAULT_ACL = "system.posix_acl_default"
+FILE_CAPABILITY = "security.capability"
+PREPARER_MARKER = ("          sudo /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent "
+                   "/usr/bin/python3.12 -I -S -B - <<'PY'\n")
 
 
 class DirectoryMetadataOS:
@@ -58,6 +63,7 @@ class DirectoryMetadataOS:
         self.live, self.fd_flags, self.calls, self.listings = {}, {}, {}, {}
         self.opened, self.open_attempts, self.closed, self.reads, self.chmods = [], [], [], [], []
         self.chowns, self.open_details, self.attempt_details, self.close_details, self.link_reads = [], [], [], [], []
+        self.xattr_calls = []
         self.hook = None
         self.uids = self.gids = (0, 0, 0)
         self.mount_raw = b"1 2 0:1 / / rw,relatime - ext4 /dev/mock rw\n"
@@ -71,7 +77,7 @@ class DirectoryMetadataOS:
         self.sequence += 1
         return SimpleNamespace(path=path, st_dev=1, st_ino=self.sequence, st_mode=mode,
                                st_uid=uid, st_gid=gid, st_nlink=2 if stat.S_ISDIR(mode) else 1,
-                               st_size=0, st_mtime_ns=1, st_ctime_ns=1, children={}, target=None)
+                               st_size=0, st_mtime_ns=1, st_ctime_ns=1, children={}, target=None, xattrs={})
 
     def node(self, path):
         node = self.root
@@ -178,6 +184,24 @@ class DirectoryMetadataOS:
         self.link_reads.append((dir_fd, node.path, node.st_ino, node.target))
         return node.target
 
+    def getxattr(self, fd, attribute):
+        # O_PATH cannot service fgetxattr. Reopening must retain the original
+        # ordinary object, not query a pathname or follow a selected symlink.
+        if type(fd) is not int or fd not in self.live or self.fd_flags[fd] not in (FLAGS, FILE_FLAGS):
+            raise AssertionError("Guarded attributes require an original ordinary no-follow FD")
+        node = self.live[fd]
+        expected = (ACCESS_ACL, DEFAULT_ACL if stat.S_ISDIR(node.st_mode) else FILE_CAPABILITY)
+        if attribute not in expected:
+            raise AssertionError("Only the two kind-specific guarded names may be queried")
+        self.xattr_calls.append((fd, node.path, node.st_ino, attribute, self.fd_flags[fd]))
+        self.call("getxattr", node.path)
+        if attribute not in node.xattrs:
+            raise OSError(errno.ENODATA, "Mock absent guarded attribute")
+        value = node.xattrs[attribute]
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
     def fchmod(self, fd, mode):
         if self.fd_flags[fd] == META_FLAGS:
             raise AssertionError("Diagnostic metadata originals never authorize effects")
@@ -234,8 +258,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         raw = WORKFLOW.read_bytes()
         if len(raw) > 128 << 10:
             raise AssertionError("Workflow source exceeds this DATA read bound")
-        marker = "          sudo /usr/bin/python3.12 -I -S -B - <<'PY'\n"
-        blocks = [textwrap.dedent(part.split("          PY\n", 1)[0]) for part in raw.decode("utf-8").split(marker)[1:]]
+        blocks = [textwrap.dedent(part.split("          PY\n", 1)[0]) for part in raw.decode("utf-8").split(PREPARER_MARKER)[1:]]
         if len(blocks) != 2 or blocks[0] != blocks[1]:
             raise AssertionError("Compiler/native directory-preparation bodies must be identical")
         cls.inline = blocks[0]
@@ -246,8 +269,8 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
 
         namespace, output, error = {"__name__": "workflow_directory_preparation"}, io.StringIO(), None
         replacements = {name: forbidden for name in ("lstat", "read", "write", "chmod", "chown", "fchown",
-                                                     "mkdir", "rmdir", "unlink", "rename", "symlink")}
-        replacements.update({name: getattr(filesystem, name) for name in ("open", "stat", "fstat", "listdir", "readlink", "fchmod", "fchown", "close")})
+                                                     "mkdir", "rmdir", "unlink", "rename", "symlink", "listxattr", "setxattr", "removexattr")}
+        replacements.update({name: getattr(filesystem, name) for name in ("open", "stat", "fstat", "listdir", "readlink", "getxattr", "fchmod", "fchown", "close")})
         replacements.update(getresuid=lambda: filesystem.uids, getresgid=lambda: filesystem.gids)
         with patch.multiple(os, **replacements), patch.object(builtins, "open", filesystem.open_mounts), redirect_stdout(output):
             try:
@@ -311,13 +334,16 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
             self.assertEqual(rows[-1]["failedCheck"], "unhandled-data-link-closure")
             self.assertGreater(len(rows) - 1, index)
         for row in diagnostic["records"]:
-            self.assertEqual(set(row), {"selectedPath", "terminalPath", "links", "externalPaths", "unsafePaths", "error", "cleanupUnknown"})
+            self.assertEqual(set(row), {"selectedPath", "terminalPath", "links", "externalPaths", "unsafePaths", "error", "cleanupUnknown", "authorityFailure"})
             self.assertIs(type(row["cleanupUnknown"]), bool)
             self.assertIsInstance(row["selectedPath"], str)
             self.assertTrue(row["terminalPath"] is None or isinstance(row["terminalPath"], str))
             if row["error"] is not None:
                 self.assertRegex(row["error"], r"^[a-z][a-z0-9-]{0,63}$")
                 self.assertFalse(diagnostic["complete"])
+            if row["authorityFailure"] is not None:
+                self.assertEqual(row["error"], "guarded-xattr")
+                self.authority_failure(row["authorityFailure"])
             if row["error"] is not None or row["cleanupUnknown"]:
                 self.assertTrue(all(target == "<redacted>" for _, target in row["links"]))
             self.assertLessEqual(len(row["links"]), 40)
@@ -338,9 +364,414 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
 
     def metadata_only_under(self, filesystem, prefix):
         within = lambda path: path == prefix or path.startswith(prefix + "/")
-        self.assertTrue(all(flags == META_FLAGS for path, flags in filesystem.attempt_details if within(path)))
+        self.assertTrue(all(flags in (META_FLAGS, FLAGS, FILE_FLAGS)
+                            for path, flags in filesystem.attempt_details if within(path)))
+        # A raced ordinary reopen may be refused before its first query. Every
+        # attempted reopen still needs a held path; every query needs the exact
+        # original inode, never that rejected replacement.
+        held, paths = set(), set()
+        for path, flags, inode in filesystem.open_details:
+            if not within(path):
+                continue
+            if flags == META_FLAGS:
+                held.add((path, inode))
+                paths.add(path)
+            else:
+                self.assertIn(path, paths)
+        for _, path, inode, _, _ in filesystem.xattr_calls:
+            if within(path):
+                self.assertIn((path, inode), held)
         self.assertFalse(any(within(path) for path, _ in filesystem.reads))
         self.assertFalse(any(within(row[0]) for row in (*filesystem.chmods, *filesystem.chowns)))
+
+    def authority_failure(self, observed):
+        self.assertEqual(set(observed), {"path", "pathTruncated", "kind", "attribute", "result", "errno", "original",
+                                         "phase", "complete", "truncated", "cleanupUnknown", "bindingUnknown", "probePerformed"})
+        self.assertIsInstance(observed["path"], str)
+        self.assertIn(observed["kind"], ("directory", "regular"))
+        self.assertIn(observed["attribute"], (ACCESS_ACL, DEFAULT_ACL, FILE_CAPABILITY))
+        self.assertIn(observed["result"], ("present", "errno", "binding-unproven"))
+        self.assertTrue(observed["errno"] is None or type(observed["errno"]) is int)
+        if observed["errno"] is not None:
+            self.assertGreaterEqual(observed["errno"], 0)
+            self.assertLessEqual(observed["errno"], 4095)
+        self.assertIn(observed["phase"], ("prepare-before", "prepare-after-group", "prepare-after-mode",
+                                          "metadata-census", "metadata-before", "metadata-after", "link-closure"))
+        self.assertLessEqual(len(observed["path"]), 512)
+        self.assertNotIn("\n", observed["path"])
+        self.assertEqual(len(observed["original"]), 9)
+        self.assertTrue(all(type(number) is int for number in observed["original"]))
+        self.assertIs(observed["complete"], False)
+        for key in ("pathTruncated", "truncated", "cleanupUnknown", "bindingUnknown", "probePerformed"):
+            self.assertIs(type(observed[key]), bool)
+        if observed["pathTruncated"]:
+            self.assertTrue(observed["truncated"])
+        if observed["result"] in {"present", "errno"}:
+            self.assertTrue(observed["probePerformed"])
+        else:
+            self.assertTrue(observed["bindingUnknown"])
+        self.assertLessEqual(len(json.dumps(observed, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
+        return observed
+
+    def test_xattr_queries_use_kind_specific_ordinary_fds_in_census_and_link_targets(self):
+        filesystem = DirectoryMetadataOS()
+        directory = "/usr/share/fonts/nested"
+        regular = directory + "/inert.ttf"
+        selected, target = directory + "/alias.ttf", "/opt/mrk-public/face.ttf"
+        filesystem.add(directory)
+        filesystem.add(regular, stat.S_IFREG | 0o444)
+        filesystem.add(target, stat.S_IFREG | 0o444)
+        link = filesystem.link(selected, target)
+        link.xattrs = {ACCESS_ACL: b"unqueried-link-value", FILE_CAPABILITY: b"unqueried-link-value"}
+        outside = "/usr/share/not-selected.ttf"
+        filesystem.add(outside, stat.S_IFREG | 0o444).xattrs[ACCESS_ACL] = b"unselected-value"
+        diagnostic = self.closure(self.run_inline(filesystem))
+        self.assertTrue(diagnostic["complete"] and diagnostic["safe"])
+        for path, names, flags in ((directory, {ACCESS_ACL, DEFAULT_ACL}, FLAGS),
+                                  (regular, {ACCESS_ACL, FILE_CAPABILITY}, FILE_FLAGS),
+                                  ("/opt/mrk-public", {ACCESS_ACL, DEFAULT_ACL}, FLAGS),
+                                  (target, {ACCESS_ACL, FILE_CAPABILITY}, FILE_FLAGS)):
+            calls = [call for call in filesystem.xattr_calls if call[1] == path]
+            self.assertEqual({call[3] for call in calls}, names)
+            self.assertEqual({call[4] for call in calls}, {flags})
+            self.assertEqual({call[2] for call in calls}, {filesystem.node(path).st_ino})
+        self.assertFalse(any(path in {selected, outside} for _, path, _, _, _ in filesystem.xattr_calls))
+        self.metadata_only_under(filesystem, "/opt")
+        self.assertEqual(filesystem.chmods, [])
+        self.assertEqual(filesystem.chowns, [])
+
+    def test_xattr_presence_refuses_before_any_effect_on_the_original(self):
+        cases = (("/etc/fonts", ACCESS_ACL, "prepare-before", True),
+                 ("/etc/fonts", DEFAULT_ACL, "prepare-before", True),
+                 ("/usr/local/share/fonts", ACCESS_ACL, "prepare-before", True),
+                 ("/usr/share/fonts/inert.ttf", ACCESS_ACL, "metadata-census", False),
+                 ("/usr/share/fonts/inert.ttf", FILE_CAPABILITY, "metadata-census", False))
+        for path, attribute, phase, directory in cases:
+            for value in (b"", b"never-export-this-attribute-value"):
+                filesystem = DirectoryMetadataOS()
+                original = filesystem.node(path) if directory else filesystem.add(path, stat.S_IFREG | 0o777)
+                if directory:
+                    original.st_mode = stat.S_IFDIR | 0o777
+                if path == "/usr/local/share/fonts":
+                    original.st_mode, original.st_gid = stat.S_IFDIR | 0o2775, 50
+                original.xattrs[attribute] = value
+                before = vars(filesystem.snapshot(original)).copy()
+                with self.subTest(path=path, attribute=attribute, empty=not value):
+                    rows = self.refused(self.run_inline(filesystem))
+                    self.assertEqual(rows[-1]["failedCheck"], "guarded-xattr")
+                    observed = self.authority_failure(rows[-1]["observed"])
+                    self.assertEqual((observed["path"], observed["attribute"], observed["phase"]), (path, attribute, phase))
+                    self.assertEqual(observed["kind"], "directory" if directory else "regular")
+                    self.assertEqual(observed["result"], "present")
+                    self.assertIsNone(observed["errno"])
+                    self.assertTrue(observed["probePerformed"])
+                    self.assertFalse(observed["bindingUnknown"] or observed["cleanupUnknown"] or observed["truncated"])
+                    self.assertEqual(observed["original"], list(before.values()))
+                    self.assertEqual(vars(filesystem.snapshot(original)), before)
+                    self.assertEqual(filesystem.chmods, [])
+                    self.assertEqual(filesystem.chowns, [])
+                    self.assertNotIn("never-export-this", json.dumps(rows))
+
+    def test_xattr_errno_is_never_absence_or_a_normalizable_condition(self):
+        path = "/usr/share/fonts/inert.ttf"
+        for number in (errno.EACCES, errno.EPERM, errno.EOPNOTSUPP, errno.ENOSYS, errno.EBADF,
+                       errno.ENOENT, errno.EIO, None, -1, 4096):
+            filesystem = DirectoryMetadataOS()
+            filesystem.add(path, stat.S_IFREG | 0o777).xattrs[ACCESS_ACL] = OSError(number, "private-error-marker")
+            with self.subTest(errno=number):
+                rows = self.refused(self.run_inline(filesystem))
+                self.assertEqual(rows[-1]["failedCheck"], "guarded-xattr")
+                observed = self.authority_failure(rows[-1]["observed"])
+                self.assertEqual((observed["result"], observed["attribute"]), ("errno", ACCESS_ACL))
+                self.assertEqual(observed["errno"], number if type(number) is int and 0 <= number <= 4095 else None)
+                self.assertTrue(observed["probePerformed"])
+                self.assertFalse(observed["bindingUnknown"] or observed["cleanupUnknown"])
+                self.assertEqual([call[3] for call in filesystem.xattr_calls if call[1] == path], [ACCESS_ACL])
+                self.assertNotIn("private-error-marker", json.dumps(rows))
+                self.assertEqual(filesystem.chmods, [])
+
+    def test_xattr_value_and_path_bounds_keep_typed_refusal_without_value_disclosure(self):
+        short = "/usr/share/fonts/inert.ttf"
+        long = "/usr/share/fonts/" + "/".join("a" * 200 for _ in range(3)) + "/inert.ttf"
+        cases = ((short, b"private-value-marker" + b"x" * (65536 - 20), False),
+                 (short, b"private-value-marker" + b"x" * (65537 - 20), True),
+                 (short, None, True), (short, "private-value-marker", True), (long, b"", True))
+        for path, value, truncated in cases:
+            filesystem = DirectoryMetadataOS()
+            filesystem.add(path, stat.S_IFREG | 0o444).xattrs[FILE_CAPABILITY] = value
+            with self.subTest(path_length=len(path), value_type=type(value).__name__, truncated=truncated):
+                rows = self.refused(self.run_inline(filesystem))
+                observed = self.authority_failure(rows[-1]["observed"])
+                self.assertEqual(observed["result"], "present")
+                self.assertEqual(observed["path"], path[:512])
+                self.assertEqual(observed["pathTruncated"], len(path) > 512)
+                self.assertEqual(observed["truncated"], truncated)
+                self.assertTrue(observed["probePerformed"])
+                self.assertNotIn("private-value-marker", json.dumps(rows))
+                self.assertLessEqual(len(json.dumps(rows[-1], sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
+                self.assertEqual(filesystem.chmods, [])
+
+    def test_xattr_rechecks_between_census_and_effect_and_after_group_or_mode_change(self):
+        cases = (("between-passes", "/usr/share/fonts/00-inert.ttf", FILE_CAPABILITY, "metadata-before"),
+                 ("prepare-mode", "/etc/fonts", DEFAULT_ACL, "prepare-after-mode"),
+                 ("prepare-group", "/usr/local/share/fonts", ACCESS_ACL, "prepare-after-group"),
+                 ("metadata-mode", "/usr/share/fonts/00-inert.ttf", FILE_CAPABILITY, "metadata-after"),
+                 ("ancestor-before-mode", "/usr/share/fonts/00-inert.ttf", DEFAULT_ACL, "metadata-before"),
+                 ("ancestor-after-mode", "/usr/share/fonts/00-inert.ttf", ACCESS_ACL, "metadata-after"))
+        for change, path, attribute, phase in cases:
+            filesystem = DirectoryMetadataOS()
+            directory = change.startswith("prepare-")
+            original = filesystem.node(path) if directory else filesystem.add(path, stat.S_IFREG | 0o777)
+            if directory:
+                original.st_mode = stat.S_IFDIR | 0o777
+            if change == "prepare-group":
+                original.st_mode, original.st_gid = stat.S_IFDIR | 0o2775, 50
+            authority_path = "/usr/share/fonts" if change == "ancestor-before-mode" else "/usr" if change == "ancestor-after-mode" else path
+            authority_node = filesystem.node(authority_path)
+            following = "/usr/share/fonts/zz-later.ttf"
+            filesystem.add(following, stat.S_IFREG | 0o777)
+
+            def hook(operation, current, count):
+                if change == "ancestor-before-mode":
+                    # The first pair was the no-effect census. Introduce the
+                    # ancestor attribute during the next target query, before
+                    # tighten must recheck all retained ancestor descriptors.
+                    if current == path and operation == "getxattr" and count == 3:
+                        authority_node.xattrs[attribute] = b""
+                    return
+                trigger = "close" if change == "between-passes" else "fchown" if change == "prepare-group" else "fchmod"
+                if current == path and operation == trigger and count == 1:
+                    authority_node.xattrs[attribute] = b""
+
+            filesystem.hook = hook
+            with self.subTest(change=change):
+                rows = self.refused(self.run_inline(filesystem))
+                observed = self.authority_failure(rows[-1]["observed"])
+                self.assertEqual((observed["path"], observed["phase"], observed["result"]), (authority_path, phase, "present"))
+                self.assertTrue(observed["probePerformed"])
+                mode = 0o755 if directory else 0o644
+                changed_mode = change in {"prepare-mode", "metadata-mode", "ancestor-after-mode"}
+                self.assertEqual(filesystem.chmods, [(path, original.st_ino, mode)]
+                                 if changed_mode else [])
+                self.assertEqual(filesystem.chowns, [(path, original.st_ino, -1, 0)] if change == "prepare-group" else [])
+                self.assertEqual(stat.S_IMODE(filesystem.node(following).st_mode), 0o777)
+                if change == "prepare-group":
+                    self.assertEqual((original.st_gid, stat.S_IMODE(original.st_mode)), (0, 0o2775))
+                else:
+                    self.assertEqual(stat.S_IMODE(original.st_mode), mode if changed_mode else 0o777)
+
+    def test_xattr_query_drift_preserves_the_first_result_and_original_identity(self):
+        path = "/usr/share/fonts/inert.ttf"
+        for change in ("name", "state", "disappearance", "present-and-name", "errno-and-name"):
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.add(path, stat.S_IFREG | 0o444)
+            before = list(vars(filesystem.snapshot(original)).values())
+            if change == "present-and-name":
+                original.xattrs[ACCESS_ACL] = b"private-value-marker"
+            elif change == "errno-and-name":
+                original.xattrs[ACCESS_ACL] = OSError(errno.EPERM, "private-error-marker")
+
+            def hook(operation, current, count):
+                if operation == "getxattr" and current == path and count == 1:
+                    if change == "state":
+                        original.st_size += 1
+                    elif change == "disappearance":
+                        filesystem.remove(path)
+                    else:
+                        filesystem.add(path, stat.S_IFREG | 0o444)
+
+            filesystem.hook = hook
+            with self.subTest(change=change):
+                rows = self.refused(self.run_inline(filesystem))
+                observed = self.authority_failure(rows[-1]["observed"])
+                self.assertEqual(observed["original"], before)
+                self.assertEqual(observed["result"], "present" if change == "present-and-name"
+                                 else "errno" if change == "errno-and-name" else "binding-unproven")
+                self.assertEqual(observed["errno"], errno.ENOENT if change == "disappearance"
+                                 else errno.EPERM if change == "errno-and-name" else None)
+                self.assertTrue(observed["bindingUnknown"] and observed["probePerformed"])
+                self.assertFalse(observed["cleanupUnknown"])
+                self.assertEqual([call[3] for call in filesystem.xattr_calls if call[1] == path], [ACCESS_ACL])
+                self.assertNotIn("private-value-marker", json.dumps(rows))
+                self.assertNotIn("private-error-marker", json.dumps(rows))
+                self.assertEqual(filesystem.chmods, [])
+
+    def test_xattr_ordinary_open_errors_are_typed_before_query_and_close_all_originals(self):
+        for closure in (False, True):
+            for number in (errno.EACCES, errno.ENOENT):
+                filesystem = DirectoryMetadataOS()
+                path = "/opt/mrk-public/face.ttf" if closure else "/usr/share/fonts/inert.ttf"
+                original = filesystem.add(path, stat.S_IFREG | 0o444)
+                if closure:
+                    filesystem.link("/usr/share/fonts/00-alias.ttf", path)
+                    filesystem.link("/usr/share/fonts/zz-after.ttf", path)
+
+                def hook(operation, current, count):
+                    if operation == "open" and current == path and filesystem.attempt_details[-1][1] == FILE_FLAGS:
+                        raise OSError(number, "private-open-marker")
+
+                filesystem.hook = hook
+                with self.subTest(closure=closure, errno=number):
+                    result = self.run_inline(filesystem)
+                    if closure:
+                        diagnostic = self.closure(result, refused=True)
+                        self.assertEqual(diagnostic["examinedCount"], 1)
+                        self.assertNotIn(("/usr/share/fonts/zz-after.ttf", META_FLAGS), filesystem.attempt_details)
+                        self.metadata_only_under(filesystem, "/opt")
+                    rows = self.refused(result)
+                    self.assertIsInstance(result[2], SystemExit)
+                    observed = self.authority_failure(rows[-1]["observed"])
+                    self.assertEqual((observed["path"], observed["result"], observed["errno"]), (path, "binding-unproven", number))
+                    self.assertEqual(observed["original"][1], original.st_ino)
+                    self.assertTrue(observed["bindingUnknown"])
+                    self.assertFalse(observed["probePerformed"] or observed["cleanupUnknown"])
+                    self.assertFalse(any(call[1] == path for call in filesystem.xattr_calls))
+                    self.assertNotIn("private-open-marker", json.dumps(rows))
+                    self.assertEqual(filesystem.chmods, [])
+
+    def test_xattr_link_reopen_is_bound_before_query_and_registered_before_first_fstat(self):
+        for change in ("replacement-before-reopen", "first-fstat-error", "drift-during-query"):
+            filesystem = DirectoryMetadataOS()
+            path = "/opt/mrk-public/face.ttf"
+            original = filesystem.add(path, stat.S_IFREG | 0o444)
+            selected, following = "/usr/share/fonts/00-alias.ttf", "/usr/share/fonts/zz-after.ttf"
+            filesystem.link(selected, path)
+            filesystem.link(following, path)
+            ordinary_opened = False
+
+            def hook(operation, current, count):
+                nonlocal ordinary_opened
+                if current != path:
+                    return
+                if operation == "open" and filesystem.attempt_details[-1][1] == FILE_FLAGS:
+                    ordinary_opened = True
+                    if change == "replacement-before-reopen":
+                        filesystem.add(path, stat.S_IFREG | 0o444)
+                elif operation == "fstat" and ordinary_opened and change == "first-fstat-error":
+                    ordinary_opened = False
+                    raise OSError(errno.EIO, "private-fstat-marker")
+                elif operation == "getxattr" and count == 1 and change == "drift-during-query":
+                    filesystem.add(path, stat.S_IFREG | 0o444)
+
+            filesystem.hook = hook
+            with self.subTest(change=change):
+                result = self.run_inline(filesystem)
+                diagnostic = self.closure(result, refused=True)
+                self.assertEqual(diagnostic["examinedCount"], 1)
+                observed = self.authority_failure(diagnostic["records"][0]["authorityFailure"])
+                self.assertEqual(observed, result[1][-1]["observed"])
+                self.assertEqual(observed["original"][1], original.st_ino)
+                self.assertEqual(observed["result"], "binding-unproven")
+                self.assertEqual(observed["errno"], errno.EIO if change == "first-fstat-error" else None)
+                self.assertTrue(observed["bindingUnknown"])
+                self.assertEqual(observed["probePerformed"], change == "drift-during-query")
+                self.assertEqual(sum(call[1] == path for call in filesystem.xattr_calls), int(change == "drift-during-query"))
+                self.assertNotIn((following, META_FLAGS), filesystem.attempt_details)
+                self.metadata_only_under(filesystem, "/opt")
+                self.assertNotIn("private-fstat-marker", json.dumps(result[1]))
+                self.assertEqual(filesystem.chmods, [])
+
+    def test_xattr_first_failure_survives_prepare_census_and_closure_close_uncertainty(self):
+        for phase, path in (("prepare-before", "/etc/fonts"), ("metadata-census", "/usr/share/fonts/inert.ttf"),
+                            ("link-closure", "/opt/mrk-public/face.ttf")):
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.node(path) if phase == "prepare-before" else filesystem.add(path, stat.S_IFREG | 0o444)
+            original.xattrs[ACCESS_ACL] = b""
+            if phase == "link-closure":
+                filesystem.link("/usr/share/fonts/00-alias.ttf", path)
+                filesystem.link("/usr/share/fonts/zz-after.ttf", path)
+
+            def hook(operation, current, count):
+                if operation == "close" and current == path and count == 1:
+                    raise OSError(errno.EIO, "private-close-marker")
+
+            filesystem.hook = hook
+            with self.subTest(phase=phase):
+                result = self.run_inline(filesystem)
+                rows = self.refused(result)
+                observed = self.authority_failure(rows[-1]["observed"])
+                self.assertEqual((observed["phase"], observed["result"], observed["attribute"]), (phase, "present", ACCESS_ACL))
+                self.assertTrue(observed["cleanupUnknown"] and observed["probePerformed"])
+                self.assertFalse(observed["bindingUnknown"])
+                if phase == "link-closure":
+                    diagnostic = self.closure(result, refused=True)
+                    self.assertEqual(diagnostic["examinedCount"], 1)
+                    self.assertTrue(diagnostic["records"][0]["cleanupUnknown"])
+                    self.assertEqual(diagnostic["records"][0]["authorityFailure"], observed)
+                    self.assertNotIn(("/usr/share/fonts/zz-after.ttf", META_FLAGS), filesystem.attempt_details)
+                self.assertNotIn("private-close-marker", json.dumps(rows))
+                self.assertEqual(filesystem.chmods, [])
+                self.assertEqual(filesystem.chowns, [])
+
+    def test_xattr_first_failure_is_retained_when_its_closure_row_exceeds_the_receipt_bound(self):
+        filesystem = DirectoryMetadataOS()
+        # Ten public links share six long ancestors. This reaches exactly23
+        # retained O_PATH originals plus one ordinary query FD, not a huge
+        # selection fixture, and overflows only the bounded diagnostic row.
+        root = "/opt/" + "/".join("d" * 250 for _ in range(6))
+        terminal = root + "/" + "t" * 200 + ".ttf"
+        target = filesystem.add(terminal, stat.S_IFREG | 0o444)
+        target.xattrs[FILE_CAPABILITY] = b"private-value-marker"
+        links = [root + "/" + str(index) + "-" + "a" * 200 for index in range(10)]
+        for index, path in enumerate(links):
+            filesystem.link(path, links[index + 1] if index + 1 < len(links) else terminal)
+        selected, following = "/usr/share/fonts/00-alias.ttf", "/usr/share/fonts/zz-after.ttf"
+        filesystem.link(selected, links[0])
+        filesystem.link(following, terminal)
+        result = self.run_inline(filesystem)
+        diagnostic = self.closure(result, refused=True)
+        self.assertEqual((diagnostic["selectedCount"], diagnostic["examinedCount"]), (2, 1))
+        self.assertEqual(diagnostic["globalError"], "diagnostic-byte-bound")
+        self.assertTrue(diagnostic["truncated"])
+        self.assertEqual(diagnostic["records"], [])
+        self.assertEqual(diagnostic["nodes"], {})
+        observed = self.authority_failure(result[1][-1]["observed"])
+        self.assertEqual((observed["path"], observed["attribute"], observed["result"]), (terminal[:512], FILE_CAPABILITY, "present"))
+        self.assertTrue(observed["pathTruncated"] and observed["truncated"] and observed["probePerformed"])
+        self.assertFalse(observed["bindingUnknown"] or observed["cleanupUnknown"])
+        self.assertEqual(filesystem.peak, 24)
+        self.assertNotIn((following, META_FLAGS), filesystem.attempt_details)
+        self.assertNotIn("private-value-marker", json.dumps(result[1]))
+        self.metadata_only_under(filesystem, "/opt")
+        self.assertEqual(filesystem.chmods, [])
+
+    def test_metadata_route_is_exact_and_excludes_all_compiler_download_and_native_steps(self):
+        source = WORKFLOW.read_text(encoding="utf-8")
+        full, metadata = "refs/heads/verify/desktop-installed-shell", "refs/heads/verify/desktop-shell-host-metadata"
+        self.assertIn("branches: [verify/desktop-installed-shell, verify/desktop-shell-host-metadata]\n", source)
+        self.assertNotIn("workflow_dispatch:", source)
+        compile_job, native_job = source.split("  native:\n", 1)
+        self.assertIn("case \"$GITHUB_REF:$MRK_INSTALLED_SHELL_CASE\" in\n"
+                      "            " + full + ":compile|" + metadata + ":host-metadata-only) ;;\n"
+                      "            *) exit 70 ;;\n          esac", compile_job)
+        self.assertIn('[[ "$HOSTING" == github-hosted && "$GITHUB_EVENT_NAME" == push ]]', compile_job)
+        self.assertIn('[[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]', compile_job)
+        self.assertIn("MRK_INSTALLED_SHELL_CASE: ${{ github.ref == '" + metadata + "' && 'host-metadata-only' || 'compile' }}", compile_job)
+        self.assertIn("timeout-minutes: ${{ github.ref == '" + metadata + "' && 10 || 25 }}", compile_job)
+        steps = re.split(r"^      - name: ", compile_job, flags=re.MULTILINE)[1:]
+        expected = {"Require one exact disposable preparation route", "Check out exact reviewed source without credentials",
+                    "Select the fixed frontend compiler", "Prepare shared Ubuntu shell inputs only on this disposable runner",
+                    "Prepare only fixed disposable Ubuntu DATA modes", "Prepare a fresh bounded compiler owner",
+                    "Download the exact accepted A runtime as DATA", "Compile the normal shell and separate observer once without executing either",
+                    "Retain original compiler evidence and shell outputs"}
+        self.assertEqual({step.splitlines()[0] for step in steps}, expected)
+        self.assertEqual(len(steps), len(expected))
+        unguarded = {"Require one exact disposable preparation route", "Check out exact reviewed source without credentials",
+                     "Prepare shared Ubuntu shell inputs only on this disposable runner", "Prepare only fixed disposable Ubuntu DATA modes"}
+        for step in steps:
+            name = step.splitlines()[0]
+            if name in unguarded:
+                self.assertNotRegex(step, r"(?m)^        if:")
+            elif name.startswith("Retain "):
+                self.assertIn("        if: always() && github.ref == '" + full + "' && steps.prepare.outputs.root != ''\n", step)
+            else:
+                self.assertIn("        if: github.ref == '" + full + "'\n", step)
+        self.assertIn("    if: github.ref == '" + full + "'\n    needs: compile\n", native_job)
+        self.assertIn("    timeout-minutes: 25\n", native_job)
+        self.assertEqual(source.count("        timeout-minutes: 8\n"), 2)
+        self.assertEqual(source.count("        timeout-minutes: 1\n"), 2)
+        self.assertEqual(source.count(PREPARER_MARKER), 2)
+        self.assertIn("          persist-credentials: false\n", compile_job)
 
     def test_actual_inline_imports_exact_rosters_and_allowed_modes(self):
         for mode in (0o755, 0o775, 0o777):
@@ -541,7 +972,10 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         self.assertIn("/usr/share/fonts/nested", {path for path, _ in filesystem.reads})
         for path in ("/usr/share/fonts/nested/inert.ttf", "/usr/share/fonts/nested/alias.ttf", "/usr/share/fonts/second-alias.ttf"):
             self.assertIn((path, META_FLAGS), filesystem.attempt_details)
-            self.assertTrue(all(flags == META_FLAGS for selected, flags in filesystem.attempt_details if selected == path))
+            allowed = (META_FLAGS, FILE_FLAGS) if path.endswith("/inert.ttf") else (META_FLAGS,)
+            self.assertTrue(all(flags in allowed for selected, flags in filesystem.attempt_details if selected == path))
+        self.assertTrue(any(path == "/usr/share/fonts/nested/inert.ttf" and flags == FILE_FLAGS
+                            for path, flags in filesystem.attempt_details))
         diagnostic = self.closure(result)
         self.assertEqual([diagnostic[key] for key in ("selectedCount", "examinedCount", "externalCount", "unsafeCount")], [2, 2, 0, 0])
         self.assertTrue(diagnostic["complete"] and diagnostic["safe"])
@@ -688,6 +1122,10 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
             original = filesystem.add(path, stat.S_IFREG | 0o777)
 
             def hook(operation, current, count):
+                if change == "close" and operation == "close" and current == path and filesystem.chmods:
+                    # Census now also opens ordinary files for fgetxattr. Keep
+                    # this existing case specifically on the post-effect close.
+                    raise OSError(errno.EIO, "Mock original file-close uncertainty")
                 if current == path and count == 1:
                     if change == "before-open-link" and operation == "open":
                         filesystem.add(path, stat.S_IFLNK | 0o777)
@@ -704,8 +1142,6 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                             filesystem.add(path, stat.S_IFREG | 0o777)
                         elif change == "after-size":
                             original.st_size += 1
-                    if operation == "close" and change == "close":
-                        raise OSError(errno.EIO, "Mock original file-close uncertainty")
 
             filesystem.hook = hook
             with self.subTest(change=change):
@@ -938,8 +1374,10 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
             filesystem.link(last, target)
             if change == "device":
                 original.st_dev = 2
+            drift_injected = False
 
             def hook(operation, path, count):
+                nonlocal drift_injected
                 if path == selected and count == 1:
                     if change == "selected-before-open" and operation == "open":
                         filesystem.link(selected, root + "/replacement.ttf")
@@ -960,8 +1398,12 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                     if operation == "close" and count == 1:
                         if change == "close":
                             raise OSError(errno.EIO, "Mock original metadata close uncertainty")
-                        if change == "between-selections":
-                            original.st_size += 1
+                    if (operation == "close" and change == "between-selections"
+                            and filesystem.close_details[-1][1] == META_FLAGS and not drift_injected):
+                        # The temporary ordinary fgetxattr FD closes earlier;
+                        # inject once, after the first retained O_PATH close.
+                        drift_injected = True
+                        original.st_size += 1
 
             filesystem.hook = hook
             with self.subTest(change=change):
