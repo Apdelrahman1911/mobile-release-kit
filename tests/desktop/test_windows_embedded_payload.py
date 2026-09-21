@@ -87,8 +87,8 @@ def synthetic_pins(raw, notice, members):
 
 
 class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
-    def test_native_imported_origins_bind_exact_expat_support_objects(self):
-        # Select the actual pure origin loop, not the whole native module or a
+    def test_native_origin_rules_bind_expat_and_system_images(self):
+        # Select the actual pure origin rules, not the whole native module or a
         # copied predicate. PureWindowsPath supplies Windows lexical operations
         # only; no supplier import, native API or host sys.modules mutation.
         source = SOURCE / "tests/native_desktop_payload_windows.py"
@@ -97,7 +97,7 @@ class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
         self.assertLessEqual(len(raw), 65536)
         tree = ast.parse(raw, filename=str(source))
         selected = []
-        for name in ("PATH_CHARS", "PAYLOAD_IMAGES"):
+        for name in ("PATH_CHARS", "PAYLOAD_IMAGES", "SYSTEM_IMAGES"):
             matches = [node for node in tree.body if isinstance(node, ast.Assign)
                        and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)]
             self.assertEqual(len(matches), 1)
@@ -117,7 +117,8 @@ class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
                                     for item in value.args[0].elts))
             selected.append(matches[0])
         for name, kind in (("ProbeFailure", ast.ClassDef), ("require", ast.FunctionDef),
-                           ("path_key", ast.FunctionDef), ("require_imported_module_origins", ast.FunctionDef)):
+                           ("path_key", ast.FunctionDef), ("require_imported_module_origins", ast.FunctionDef),
+                           ("require_system_image_origin", ast.FunctionDef)):
             matches = [node for node in tree.body if getattr(node, "name", None) == name]
             self.assertEqual(len(matches), 1)
             self.assertIsInstance(matches[0], kind)
@@ -125,7 +126,7 @@ class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
             selected.append(matches[0])
         namespace = {"re": re, "sys": sys, "Path": PureWindowsPath}
         exec(compile(ast.Module(body=selected, type_ignores=[]),
-                     "<windows-probe-import-origins-data>", "exec", dont_inherit=True), namespace)
+                     "<windows-probe-origin-rules-data>", "exec", dont_inherit=True), namespace)
         check, failure = namespace["require_imported_module_origins"], namespace["ProbeFailure"]
         runtime = PureWindowsPath("R:/mrk-data/runtime")
         python, core = runtime / "python", runtime / "core.zip"
@@ -269,6 +270,29 @@ class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
         self.assertEqual([target.id for target in stage.targets], ["STAGE"])
         self.assertIsInstance(stage.value, ast.Constant)
         self.assertEqual(stage.value.value, "import-origins")
+
+        check_system = namespace["require_system_image_origin"]
+        system_directory = "C:/Windows/System32"
+        for path in ("C:/Windows/System32/imm32.dll", r"c:\WINDOWS\system32\IMM32.DLL",
+                     "C:/Windows/System32/kernel32.dll", r"c:\windows\SYSTEM32\KERNEL32.DLL"):
+            with self.subTest(system_image=path):
+                self.assertIsNone(check_system(path, system_directory))
+        self.assertIsNone(check_system("R:/inert-windows/System32/imm32.dll", "R:/inert-windows/System32"))
+        refusals = (
+            ("C:/Windows/System32/unknown.dll", "system_image_unlisted", "unknown.dll"),
+            ("C:/Windows/System32/imm32-lookalike.dll", "system_image_unlisted", "imm32-lookalike.dll"),
+            ("C:/Windows/System32/imm32 copy.dll", "system_image_unlisted", None),
+            ("C:/outside/imm32.dll", "system_image_origin", "imm32.dll"),
+            ("R:/Windows/System32/imm32.dll", "system_image_origin", "imm32.dll"),
+            ("C:/Windows/SysWOW64/IMM32.DLL", "system_image_origin", "imm32.dll"),
+            ("C:/Windows/System32-lookalike/imm32.dll", "system_image_origin", "imm32.dll"),
+            ("C:/outside/KERNEL32.DLL", "system_image_origin", "kernel32.dll"),
+        )
+        for path, code, module in refusals:
+            with self.subTest(system_refusal=path):
+                with self.assertRaises(failure) as raised:
+                    check_system(path, system_directory)
+                self.assertEqual((raised.exception.code, raised.exception.module), (code, module))
 
     def test_native_dependency_versions_use_exact_cpython_layout(self):
         # Read the native probe only as bounded DATA. Never import or execute

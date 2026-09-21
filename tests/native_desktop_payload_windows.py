@@ -53,6 +53,7 @@ SYSTEM_IMAGES = frozenset({
     "ntdll.dll", "kernelbase.dll", "ucrtbase.dll", "msvcrt.dll", "sechost.dll", "bcryptprimitives.dll",
     "cryptbase.dll", "msasn1.dll", "nsi.dll", "mswsock.dll", "combase.dll", "gdi32.dll", "gdi32full.dll",
     "win32u.dll", "msvcp_win.dll", "shcore.dll", "shlwapi.dll",
+    "imm32.dll",  # Windows Input Method Manager (IMM) UI host.
     "api-ms-win-core-path-l1-1-0.dll",
     "api-ms-win-crt-conio-l1-1-0.dll", "api-ms-win-crt-convert-l1-1-0.dll",
     "api-ms-win-crt-environment-l1-1-0.dll", "api-ms-win-crt-filesystem-l1-1-0.dll",
@@ -96,6 +97,12 @@ def path_key(value: str) -> str:
     require(all(part and part not in {".", ".."} and not part.endswith((".", " "))
                 for part in text[3:].split("\\")), "path_form")
     return text.casefold()
+
+
+def require_system_image_origin(path: str, system_directory: str) -> None:
+    leaf = Path(path).name.casefold()
+    require(leaf in SYSTEM_IMAGES, "system_image_unlisted", leaf)
+    require(path_key(path) == path_key(str(Path(system_directory) / leaf)), "system_image_origin", leaf)
 
 
 def file_identity(value, mode: int) -> tuple:
@@ -349,8 +356,7 @@ def loaded_images(python: Path, entries: dict) -> tuple[str, list[dict]]:
                 require(fact == entries["python/" + leaf], "payload_image_digest", leaf)
                 origin = "payload"
             else:
-                require(leaf in SYSTEM_IMAGES and path_key(path) == path_key(str(Path(system_directory) / leaf)),
-                        "system_image_origin", leaf)
+                require_system_image_origin(path, system_directory)
                 fact, _ = file_fact(Path(path), IMAGE_BYTES, single_link=False)
                 origin = "system32"
             total += fact["size"]
