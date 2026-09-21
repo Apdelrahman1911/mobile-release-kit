@@ -164,6 +164,7 @@ jobs:
                   need(not any(point != '/' and (target == point or target.startswith(point + '/')
                                or subtree and point.startswith(target + '/')) for point in points),
                        'mounted-data-target', {'path': target})
+              return points
 
           def mount_unchanged():
               need(mount_table() == MOUNT_RAW, 'mount-table-changed')
@@ -254,6 +255,7 @@ jobs:
               file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
               count, unsafe_count, unsupported_count, changed_count = 0, 0, 0, 0
               unsafe, changed, fds, originals = [], [], [], []
+              selected_links = []
 
               def bound(fd, parent, name, item):
                   need(identity(os.fstat(fd)) == identity(item)
@@ -298,6 +300,9 @@ jobs:
                   if depth == 0:
                       need(directory if root_kind == 'directory' else regular or link,
                            'data-root-kind', {'path': path, **record(item)})
+                  if link:
+                      need(len(selected_links) < 4096, 'metadata-link-count-bound')
+                      selected_links.append((path, identity(item)))
                   owned = item.st_uid == item.st_gid == 0
                   single = directory or item.st_nlink == 1
                   safe = (owned and single and (directory or regular or link)
@@ -380,24 +385,206 @@ jobs:
                           except OSError:
                               failed_close = True
                       need(not failed_close, 'metadata-original-close')
-              return {'entries': count, 'unsafeCount': unsafe_count, 'unsafe': unsafe,
+              return {'_selectedLinks': selected_links, 'entries': count, 'unsafeCount': unsafe_count, 'unsafe': unsafe,
                       'unsafeListTruncated': unsafe_count > len(unsafe), 'unsupportedCount': unsupported_count,
                       'changedCount': changed_count, 'changed': changed, 'changedListTruncated': changed_count > len(changed)}
+
+          def link_closure_metadata(selections):
+              """Point-in-time public link metadata; never contents, effects or admission."""
+              meta_flags = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
+              public = ('/usr/share', '/usr/local/share', '/usr/lib', '/etc/alternatives', '/opt')
+              covered_ancestors, public_ancestors = {'/'}, {'/'}
+              for roots, ancestors in ((tuple(path for path, _ in DATA_ROOTS), covered_ancestors),
+                                       (public, public_ancestors)):
+                  for path in roots:
+                      while path != '/':
+                          path = path.rpartition('/')[0] or '/'
+                          ancestors.add(path)
+
+              def covered(path):
+                  return path in covered_ancestors or any(path == root or kind == 'directory'
+                      and path.startswith(root + '/') for root, kind in DATA_ROOTS)
+
+              def permitted(path):
+                  return covered(path) or path in public_ancestors or any(
+                      path == root or path.startswith(root + '/') for root in public)
+
+              def inspect(selected, expected):
+                  row = {'selectedPath': selected, 'terminalPath': None, 'links': [],
+                         'externalPaths': [], 'unsafePaths': [], 'error': None, 'cleanupUnknown': False}
+                  fds, originals, link_originals, observations, raw_links = [], {}, [], {}, []
+                  external, unsafe = set(), set()
+
+                  def check(ok, code):
+                      if not ok:
+                          raise ValueError(code)
+
+                  def recheck():
+                      check(mount_table() == MOUNT_RAW, 'mount-changed')
+                      for fd, parent, name, before in originals.values():
+                          check(identity(os.fstat(fd)) == identity(before)
+                                == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)), 'original-changed')
+                      for fd, target in link_originals:
+                          check(os.readlink('', dir_fd=fd) == target, 'original-link-changed')
+
+                  def acquire(path, parent, name):
+                      check(permitted(path), 'private-target-scope')
+                      check(not any(point != '/' and (path == point or path.startswith(point + '/'))
+                                    for point in MOUNT_POINTS), 'mounted-target')
+                      if path not in originals:
+                          check(len(fds) < 24, 'fd-bound')
+                          fd = os.open(name, meta_flags, dir_fd=parent)
+                          fds.append(fd)  # Register before fstat or any later fallible observation.
+                          before = os.fstat(fd)
+                          originals[path] = (fd, parent, name, before)
+                      fd, original_parent, original_name, before = originals[path]
+                      check(identity(os.fstat(fd)) == identity(before)
+                            == identity(os.stat(original_name, dir_fd=original_parent, follow_symlinks=False)),
+                            'original-changed')
+                      check(before.st_dev == MOUNT_DEVICE, 'wrong-device')
+                      observations[path] = record(before)
+                      if not covered(path):
+                          external.add(path)
+                      link = stat.S_ISLNK(before.st_mode)
+                      ordinary = link or stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode)
+                      if (not ordinary or before.st_uid != 0 or before.st_gid != 0
+                              or not link and before.st_mode & 0o7022
+                              or (link or stat.S_ISREG(before.st_mode)) and before.st_nlink != 1):
+                          unsafe.add(path)
+                      return fd, before
+
+                  try:
+                      check(type(selected) is str and selected.startswith('/') and len(selected) <= 4096
+                            and covered(selected), 'selection-scope')
+                      root_fd, root = acquire('/', None, '/')
+                      check(stat.S_ISDIR(root.st_mode), 'non-directory-root')
+                      recheck()
+                      current, parent, pending, steps, hops, found = '/', root_fd, selected.split('/')[1:], 0, 0, False
+                      while pending:
+                          steps += 1
+                          check(steps <= 256 and len(pending) <= 256, 'component-bound')
+                          name = pending.pop(0)
+                          if name in {'', '.'}:
+                              continue
+                          if name == '..':
+                              current = current.rpartition('/')[0] or '/'
+                              check(current in originals and stat.S_ISDIR(originals[current][3].st_mode), 'parent-unavailable')
+                              parent = originals[current][0]
+                              continue
+                          check(re.fullmatch(r'[A-Za-z0-9_.+@\-]+', name) is not None, 'component-grammar')
+                          candidate = current.rstrip('/') + '/' + name
+                          fd, item = acquire(candidate, parent, name)
+                          if candidate == selected:
+                              check(stat.S_ISLNK(item.st_mode) and identity(item) == tuple(expected), 'selected-link-changed')
+                              found = True
+                          if stat.S_ISLNK(item.st_mode):
+                              hops += 1
+                              check(hops <= 40, 'link-bound')
+                              target = os.readlink('', dir_fd=fd)
+                              check(type(target) is str and 0 < len(target) <= 4096
+                                    and re.fullmatch(r'[A-Za-z0-9_./+\-]+', target) is not None, 'link-grammar')
+                              link_originals.append((fd, target))
+                              raw_links.append([candidate, target])
+                              if target.startswith('/'):
+                                  current, parent, parts = '/', root_fd, target.split('/')[1:]
+                              else:
+                                  parts = target.split('/')
+                              pending = parts + pending
+                          elif pending:
+                              check(stat.S_ISDIR(item.st_mode), 'non-directory-component')
+                              current, parent = candidate, fd
+                          else:
+                              row['terminalPath'] = candidate
+                              check(stat.S_ISREG(item.st_mode), 'nonregular-terminal')
+                              if item.st_mode & 0o111:
+                                  unsafe.add(candidate)
+                      check(found and row['terminalPath'] is not None, 'unresolved-terminal')
+                      recheck()
+                  except ValueError as error:
+                      # All ValueErrors above carry fixed codes, never target/error text.
+                      code = str(error)
+                      row['error'] = code if re.fullmatch(r'[a-z][a-z-]{0,47}', code) else 'metadata-error'
+                  except OSError as error:
+                      row['error'] = 'unresolved-entry' if error.errno == 2 else 'metadata-os-error'
+                  finally:
+                      while fds:
+                          fd = fds.pop()  # One original close attempt; never retry this numeric FD.
+                          try:
+                              os.close(fd)
+                          except OSError:
+                              row['cleanupUnknown'] = True
+                      if row['cleanupUnknown'] and row['error'] is None:
+                          row['error'] = 'original-close-unknown'
+                  # A refused private/invalid target is not public diagnostic text.
+                  row['links'] = ([[path, '<redacted>'] for path, _ in raw_links]
+                                  if row['error'] is not None or row['cleanupUnknown'] else raw_links)
+                  row['externalPaths'], row['unsafePaths'] = sorted(external), sorted(unsafe)
+                  keep = set(row['externalPaths']) | set(row['unsafePaths']) | {selected, row['terminalPath']}
+                  keep.update(path for path, _ in raw_links)
+                  return row, {path: value for path, value in observations.items() if path in keep}
+
+              report = {'scope': 'fixed-shell-data-link-closure', 'runtimeAdmission': False,
+                        'selectedCount': len(selections), 'examinedCount': 0, 'externalCount': 0,
+                        'unsafeCount': 0, 'complete': True, 'safe': True, 'truncated': False,
+                        'records': [], 'nodes': {}, 'globalError': None}
+              unsafe_paths = set()
+              if len(selections) > 4096:
+                  report.update(complete=False, safe=False, truncated=True, globalError='selection-bound')
+                  return report
+              for selected, expected in selections:
+                  row, observations = inspect(selected, expected)
+                  report['examinedCount'] += 1
+                  unsafe_paths.update(row['unsafePaths'])
+                  report['unsafeCount'] = len(unsafe_paths)
+                  report['externalCount'] += bool(row['externalPaths'])
+                  if row['error'] is not None or row['cleanupUnknown']:
+                      report['complete'] = False
+                  report['safe'] = report['complete'] and not unsafe_paths
+                  if row['externalPaths'] or row['unsafePaths'] or row['error'] is not None:
+                      previous = report['nodes']
+                      nodes = dict(previous)
+                      for path, metadata in observations.items():
+                          if path in nodes and nodes[path] != metadata:
+                              report.update(complete=False, safe=False, globalError='between-selection-drift')
+                          else:
+                              nodes[path] = metadata  # Never replace the first differing observation.
+                      report['nodes'] = nodes
+                      report['records'].append(row)
+                      if len(json.dumps(report, sort_keys=True, separators=(',', ':')).encode('ascii')) > 65024:
+                          report['records'].pop()
+                          report['nodes'] = previous
+                          report.update(complete=False, safe=False, truncated=True, globalError='diagnostic-byte-bound')
+                          break
+                  if (row['cleanupUnknown'] or row['error'] in {'mount-changed', 'mounted-target', 'wrong-device',
+                          'original-changed', 'original-link-changed', 'selected-link-changed'} or report['globalError']):
+                      break
+              if report['examinedCount'] != report['selectedCount']:
+                  report['complete'] = report['safe'] = False
+              return report
+
 
           need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0), 'root-credentials')
           MOUNT_RAW = mount_table()
           MOUNT_DEVICE = os.stat('/', follow_symlinks=False).st_dev
-          mount_scope(MOUNT_RAW, MOUNT_DEVICE)
+          MOUNT_POINTS = mount_scope(MOUNT_RAW, MOUNT_DEVICE)
           prepared = [prepare_directory(path) for path in sorted(PREPARE_DIRS, key=lambda path: (path.count('/'), path))]
           metadata = metadata_preflight()
           if metadata['unsupportedCount'] == 0 and metadata['unsafeCount']:
               metadata = metadata_preflight(normalize=True)
           mount_unchanged()
+          selected_links = metadata.pop('_selectedLinks')
+          metadata['selectedLinkCount'] = len(selected_links)
           receipt = json.dumps({'scope': SCOPE, 'prepared': prepared, 'metadata': metadata,
                                 'runtimeAdmission': False}, sort_keys=True, separators=(',', ':'))
           need(len(receipt.encode('ascii')) <= 65536, 'receipt-bound')
           print(receipt, flush=True)
           need(metadata['unsafeCount'] == 0, 'unhandled-unsafe-data-metadata')
+
+          closure = link_closure_metadata(selected_links)
+          closure_receipt = json.dumps(closure, sort_keys=True, separators=(',', ':'))
+          need(len(closure_receipt.encode('ascii')) <= 65536, 'link-closure-receipt-bound')
+          print(closure_receipt, flush=True)
+          need(closure['complete'] and closure['safe'], 'unhandled-data-link-closure')
           PY
       - name: Prepare a fresh bounded compiler owner
         id: prepare
@@ -587,6 +774,7 @@ jobs:
                   need(not any(point != '/' and (target == point or target.startswith(point + '/')
                                or subtree and point.startswith(target + '/')) for point in points),
                        'mounted-data-target', {'path': target})
+              return points
 
           def mount_unchanged():
               need(mount_table() == MOUNT_RAW, 'mount-table-changed')
@@ -677,6 +865,7 @@ jobs:
               file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
               count, unsafe_count, unsupported_count, changed_count = 0, 0, 0, 0
               unsafe, changed, fds, originals = [], [], [], []
+              selected_links = []
 
               def bound(fd, parent, name, item):
                   need(identity(os.fstat(fd)) == identity(item)
@@ -721,6 +910,9 @@ jobs:
                   if depth == 0:
                       need(directory if root_kind == 'directory' else regular or link,
                            'data-root-kind', {'path': path, **record(item)})
+                  if link:
+                      need(len(selected_links) < 4096, 'metadata-link-count-bound')
+                      selected_links.append((path, identity(item)))
                   owned = item.st_uid == item.st_gid == 0
                   single = directory or item.st_nlink == 1
                   safe = (owned and single and (directory or regular or link)
@@ -803,24 +995,206 @@ jobs:
                           except OSError:
                               failed_close = True
                       need(not failed_close, 'metadata-original-close')
-              return {'entries': count, 'unsafeCount': unsafe_count, 'unsafe': unsafe,
+              return {'_selectedLinks': selected_links, 'entries': count, 'unsafeCount': unsafe_count, 'unsafe': unsafe,
                       'unsafeListTruncated': unsafe_count > len(unsafe), 'unsupportedCount': unsupported_count,
                       'changedCount': changed_count, 'changed': changed, 'changedListTruncated': changed_count > len(changed)}
+
+          def link_closure_metadata(selections):
+              """Point-in-time public link metadata; never contents, effects or admission."""
+              meta_flags = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
+              public = ('/usr/share', '/usr/local/share', '/usr/lib', '/etc/alternatives', '/opt')
+              covered_ancestors, public_ancestors = {'/'}, {'/'}
+              for roots, ancestors in ((tuple(path for path, _ in DATA_ROOTS), covered_ancestors),
+                                       (public, public_ancestors)):
+                  for path in roots:
+                      while path != '/':
+                          path = path.rpartition('/')[0] or '/'
+                          ancestors.add(path)
+
+              def covered(path):
+                  return path in covered_ancestors or any(path == root or kind == 'directory'
+                      and path.startswith(root + '/') for root, kind in DATA_ROOTS)
+
+              def permitted(path):
+                  return covered(path) or path in public_ancestors or any(
+                      path == root or path.startswith(root + '/') for root in public)
+
+              def inspect(selected, expected):
+                  row = {'selectedPath': selected, 'terminalPath': None, 'links': [],
+                         'externalPaths': [], 'unsafePaths': [], 'error': None, 'cleanupUnknown': False}
+                  fds, originals, link_originals, observations, raw_links = [], {}, [], {}, []
+                  external, unsafe = set(), set()
+
+                  def check(ok, code):
+                      if not ok:
+                          raise ValueError(code)
+
+                  def recheck():
+                      check(mount_table() == MOUNT_RAW, 'mount-changed')
+                      for fd, parent, name, before in originals.values():
+                          check(identity(os.fstat(fd)) == identity(before)
+                                == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)), 'original-changed')
+                      for fd, target in link_originals:
+                          check(os.readlink('', dir_fd=fd) == target, 'original-link-changed')
+
+                  def acquire(path, parent, name):
+                      check(permitted(path), 'private-target-scope')
+                      check(not any(point != '/' and (path == point or path.startswith(point + '/'))
+                                    for point in MOUNT_POINTS), 'mounted-target')
+                      if path not in originals:
+                          check(len(fds) < 24, 'fd-bound')
+                          fd = os.open(name, meta_flags, dir_fd=parent)
+                          fds.append(fd)  # Register before fstat or any later fallible observation.
+                          before = os.fstat(fd)
+                          originals[path] = (fd, parent, name, before)
+                      fd, original_parent, original_name, before = originals[path]
+                      check(identity(os.fstat(fd)) == identity(before)
+                            == identity(os.stat(original_name, dir_fd=original_parent, follow_symlinks=False)),
+                            'original-changed')
+                      check(before.st_dev == MOUNT_DEVICE, 'wrong-device')
+                      observations[path] = record(before)
+                      if not covered(path):
+                          external.add(path)
+                      link = stat.S_ISLNK(before.st_mode)
+                      ordinary = link or stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode)
+                      if (not ordinary or before.st_uid != 0 or before.st_gid != 0
+                              or not link and before.st_mode & 0o7022
+                              or (link or stat.S_ISREG(before.st_mode)) and before.st_nlink != 1):
+                          unsafe.add(path)
+                      return fd, before
+
+                  try:
+                      check(type(selected) is str and selected.startswith('/') and len(selected) <= 4096
+                            and covered(selected), 'selection-scope')
+                      root_fd, root = acquire('/', None, '/')
+                      check(stat.S_ISDIR(root.st_mode), 'non-directory-root')
+                      recheck()
+                      current, parent, pending, steps, hops, found = '/', root_fd, selected.split('/')[1:], 0, 0, False
+                      while pending:
+                          steps += 1
+                          check(steps <= 256 and len(pending) <= 256, 'component-bound')
+                          name = pending.pop(0)
+                          if name in {'', '.'}:
+                              continue
+                          if name == '..':
+                              current = current.rpartition('/')[0] or '/'
+                              check(current in originals and stat.S_ISDIR(originals[current][3].st_mode), 'parent-unavailable')
+                              parent = originals[current][0]
+                              continue
+                          check(re.fullmatch(r'[A-Za-z0-9_.+@\-]+', name) is not None, 'component-grammar')
+                          candidate = current.rstrip('/') + '/' + name
+                          fd, item = acquire(candidate, parent, name)
+                          if candidate == selected:
+                              check(stat.S_ISLNK(item.st_mode) and identity(item) == tuple(expected), 'selected-link-changed')
+                              found = True
+                          if stat.S_ISLNK(item.st_mode):
+                              hops += 1
+                              check(hops <= 40, 'link-bound')
+                              target = os.readlink('', dir_fd=fd)
+                              check(type(target) is str and 0 < len(target) <= 4096
+                                    and re.fullmatch(r'[A-Za-z0-9_./+\-]+', target) is not None, 'link-grammar')
+                              link_originals.append((fd, target))
+                              raw_links.append([candidate, target])
+                              if target.startswith('/'):
+                                  current, parent, parts = '/', root_fd, target.split('/')[1:]
+                              else:
+                                  parts = target.split('/')
+                              pending = parts + pending
+                          elif pending:
+                              check(stat.S_ISDIR(item.st_mode), 'non-directory-component')
+                              current, parent = candidate, fd
+                          else:
+                              row['terminalPath'] = candidate
+                              check(stat.S_ISREG(item.st_mode), 'nonregular-terminal')
+                              if item.st_mode & 0o111:
+                                  unsafe.add(candidate)
+                      check(found and row['terminalPath'] is not None, 'unresolved-terminal')
+                      recheck()
+                  except ValueError as error:
+                      # All ValueErrors above carry fixed codes, never target/error text.
+                      code = str(error)
+                      row['error'] = code if re.fullmatch(r'[a-z][a-z-]{0,47}', code) else 'metadata-error'
+                  except OSError as error:
+                      row['error'] = 'unresolved-entry' if error.errno == 2 else 'metadata-os-error'
+                  finally:
+                      while fds:
+                          fd = fds.pop()  # One original close attempt; never retry this numeric FD.
+                          try:
+                              os.close(fd)
+                          except OSError:
+                              row['cleanupUnknown'] = True
+                      if row['cleanupUnknown'] and row['error'] is None:
+                          row['error'] = 'original-close-unknown'
+                  # A refused private/invalid target is not public diagnostic text.
+                  row['links'] = ([[path, '<redacted>'] for path, _ in raw_links]
+                                  if row['error'] is not None or row['cleanupUnknown'] else raw_links)
+                  row['externalPaths'], row['unsafePaths'] = sorted(external), sorted(unsafe)
+                  keep = set(row['externalPaths']) | set(row['unsafePaths']) | {selected, row['terminalPath']}
+                  keep.update(path for path, _ in raw_links)
+                  return row, {path: value for path, value in observations.items() if path in keep}
+
+              report = {'scope': 'fixed-shell-data-link-closure', 'runtimeAdmission': False,
+                        'selectedCount': len(selections), 'examinedCount': 0, 'externalCount': 0,
+                        'unsafeCount': 0, 'complete': True, 'safe': True, 'truncated': False,
+                        'records': [], 'nodes': {}, 'globalError': None}
+              unsafe_paths = set()
+              if len(selections) > 4096:
+                  report.update(complete=False, safe=False, truncated=True, globalError='selection-bound')
+                  return report
+              for selected, expected in selections:
+                  row, observations = inspect(selected, expected)
+                  report['examinedCount'] += 1
+                  unsafe_paths.update(row['unsafePaths'])
+                  report['unsafeCount'] = len(unsafe_paths)
+                  report['externalCount'] += bool(row['externalPaths'])
+                  if row['error'] is not None or row['cleanupUnknown']:
+                      report['complete'] = False
+                  report['safe'] = report['complete'] and not unsafe_paths
+                  if row['externalPaths'] or row['unsafePaths'] or row['error'] is not None:
+                      previous = report['nodes']
+                      nodes = dict(previous)
+                      for path, metadata in observations.items():
+                          if path in nodes and nodes[path] != metadata:
+                              report.update(complete=False, safe=False, globalError='between-selection-drift')
+                          else:
+                              nodes[path] = metadata  # Never replace the first differing observation.
+                      report['nodes'] = nodes
+                      report['records'].append(row)
+                      if len(json.dumps(report, sort_keys=True, separators=(',', ':')).encode('ascii')) > 65024:
+                          report['records'].pop()
+                          report['nodes'] = previous
+                          report.update(complete=False, safe=False, truncated=True, globalError='diagnostic-byte-bound')
+                          break
+                  if (row['cleanupUnknown'] or row['error'] in {'mount-changed', 'mounted-target', 'wrong-device',
+                          'original-changed', 'original-link-changed', 'selected-link-changed'} or report['globalError']):
+                      break
+              if report['examinedCount'] != report['selectedCount']:
+                  report['complete'] = report['safe'] = False
+              return report
+
 
           need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0), 'root-credentials')
           MOUNT_RAW = mount_table()
           MOUNT_DEVICE = os.stat('/', follow_symlinks=False).st_dev
-          mount_scope(MOUNT_RAW, MOUNT_DEVICE)
+          MOUNT_POINTS = mount_scope(MOUNT_RAW, MOUNT_DEVICE)
           prepared = [prepare_directory(path) for path in sorted(PREPARE_DIRS, key=lambda path: (path.count('/'), path))]
           metadata = metadata_preflight()
           if metadata['unsupportedCount'] == 0 and metadata['unsafeCount']:
               metadata = metadata_preflight(normalize=True)
           mount_unchanged()
+          selected_links = metadata.pop('_selectedLinks')
+          metadata['selectedLinkCount'] = len(selected_links)
           receipt = json.dumps({'scope': SCOPE, 'prepared': prepared, 'metadata': metadata,
                                 'runtimeAdmission': False}, sort_keys=True, separators=(',', ':'))
           need(len(receipt.encode('ascii')) <= 65536, 'receipt-bound')
           print(receipt, flush=True)
           need(metadata['unsafeCount'] == 0, 'unhandled-unsafe-data-metadata')
+
+          closure = link_closure_metadata(selected_links)
+          closure_receipt = json.dumps(closure, sort_keys=True, separators=(',', ':'))
+          need(len(closure_receipt.encode('ascii')) <= 65536, 'link-closure-receipt-bound')
+          print(closure_receipt, flush=True)
+          need(closure['complete'] and closure['safe'], 'unhandled-data-link-closure')
           PY
       - name: Prepare a fresh bounded native owner
         id: prepare

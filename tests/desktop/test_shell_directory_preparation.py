@@ -41,6 +41,7 @@ DATA = (
 FILES = {"/etc/drirc", "/usr/share/mime/mime.cache", *DATA[-3:]}
 FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+META_FLAGS = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 class DirectoryMetadataOS:
@@ -48,9 +49,9 @@ class DirectoryMetadataOS:
     def __init__(self):
         self.sequence, self.next_fd, self.peak = 0, 10, 0
         self.root = self.make("/", stat.S_IFDIR | 0o755)
-        self.live, self.calls, self.listings = {}, {}, {}
+        self.live, self.fd_flags, self.calls, self.listings = {}, {}, {}, {}
         self.opened, self.open_attempts, self.closed, self.reads, self.chmods = [], [], [], [], []
-        self.chowns = []
+        self.chowns, self.open_details, self.attempt_details, self.close_details, self.link_reads = [], [], [], [], []
         self.hook = None
         self.uids = self.gids = (0, 0, 0)
         self.mount_raw = b"1 2 0:1 / / rw,relatime - ext4 /dev/mock rw\n"
@@ -64,7 +65,7 @@ class DirectoryMetadataOS:
         self.sequence += 1
         return SimpleNamespace(path=path, st_dev=1, st_ino=self.sequence, st_mode=mode,
                                st_uid=uid, st_gid=gid, st_nlink=2 if stat.S_ISDIR(mode) else 1,
-                               st_size=0, st_mtime_ns=1, st_ctime_ns=1, children={})
+                               st_size=0, st_mtime_ns=1, st_ctime_ns=1, children={}, target=None)
 
     def node(self, path):
         node = self.root
@@ -88,6 +89,11 @@ class DirectoryMetadataOS:
         parent, name = path.rsplit("/", 1)
         del self.node(parent or "/").children[name]
 
+    def link(self, path, target, uid=0, gid=0):
+        node = self.add(path, stat.S_IFLNK | 0o777, uid, gid)
+        node.target, node.st_size = target, len(target.encode("utf-8"))
+        return node
+
     def call(self, operation, path):
         key = operation, path
         self.calls[key] = self.calls.get(key, 0) + 1
@@ -110,18 +116,23 @@ class DirectoryMetadataOS:
         return "/" if parent is None else self.live[parent].path.rstrip("/") + "/" + name
 
     def open(self, name, flags, *, dir_fd=None):
-        if flags not in (FLAGS, FILE_FLAGS):
-            raise AssertionError("Only exact directory/regular no-follow flags are admitted")
+        if flags not in (FLAGS, FILE_FLAGS, META_FLAGS):
+            raise AssertionError("Only exact directory/regular or O_PATH no-follow flags are admitted")
+        if flags == META_FLAGS and dir_fd is None and self.live:
+            raise AssertionError("Every previous selection's originals must close before the next root opens")
         path = self.path(name, dir_fd)
         self.open_attempts.append(path)
+        self.attempt_details.append((path, flags))
         self.call("open", path)
         node = self.selected(name, dir_fd)
-        if not (stat.S_ISDIR(node.st_mode) if flags == FLAGS else stat.S_ISREG(node.st_mode)):
+        if flags != META_FLAGS and not (stat.S_ISDIR(node.st_mode) if flags == FLAGS else stat.S_ISREG(node.st_mode)):
             raise OSError(errno.ELOOP if stat.S_ISLNK(node.st_mode) else errno.ENOTDIR, "Not a direct mock directory")
         fd = self.next_fd
         self.next_fd += 1
         self.live[fd] = node
+        self.fd_flags[fd] = flags
         self.opened.append(fd)
+        self.open_details.append((path, flags, node.st_ino))
         self.peak = max(self.peak, len(self.live))
         return fd
 
@@ -142,14 +153,28 @@ class DirectoryMetadataOS:
         return self.snapshot(self.selected(name, dir_fd))
 
     def listdir(self, fd):
-        if type(fd) is not int or fd not in self.live:
-            raise AssertionError("Directory membership must use an original FD")
+        if type(fd) is not int or fd not in self.live or self.fd_flags[fd] != FLAGS:
+            raise AssertionError("Directory membership must use an original ordinary directory FD")
         node = self.live[fd]
         self.call("listdir", node.path)
         self.reads.append((node.path, node.st_ino))
         return list(self.listings.get(node.path, node.children))
 
+    def readlink(self, name, *, dir_fd=None):
+        # Linux readlinkat's empty pathname observes the retained O_PATH link
+        # itself, not a newly selected name in a possibly writable directory.
+        if name != "" or dir_fd not in self.live or self.fd_flags[dir_fd] != META_FLAGS:
+            raise AssertionError("Link text must use the original O_PATH no-follow FD")
+        node = self.live[dir_fd]
+        if not stat.S_ISLNK(node.st_mode) or type(node.target) is not str:
+            raise AssertionError("A selected inert link needs its truthful target")
+        self.call("readlink", node.path)
+        self.link_reads.append((dir_fd, node.path, node.st_ino, node.target))
+        return node.target
+
     def fchmod(self, fd, mode):
+        if self.fd_flags[fd] == META_FLAGS:
+            raise AssertionError("Diagnostic metadata originals never authorize effects")
         node = self.live[fd]
         self.call("fchmod", node.path)
         self.chmods.append((node.path, node.st_ino, mode))
@@ -157,6 +182,8 @@ class DirectoryMetadataOS:
         node.st_ctime_ns += 1
 
     def fchown(self, fd, uid, gid):
+        if self.fd_flags[fd] == META_FLAGS:
+            raise AssertionError("Diagnostic metadata originals never authorize effects")
         node = self.live[fd]
         self.call("fchown", node.path)
         if (uid, gid) != (-1, 0):
@@ -190,6 +217,7 @@ class DirectoryMetadataOS:
         # A failed mocked close is not successful-close evidence. Record the
         # sole attempt and reject the run; do not retry this numeric identity.
         node = self.live.pop(fd)
+        self.close_details.append((node.path, self.fd_flags.pop(fd), node.st_ino))
         self.closed.append(fd)
         self.call("close", node.path)
 
@@ -198,7 +226,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         raw = WORKFLOW.read_bytes()
-        if len(raw) > 65536:
+        if len(raw) > 128 << 10:
             raise AssertionError("Workflow source exceeds this DATA read bound")
         marker = "          sudo /usr/bin/python3.12 -I -S -B - <<'PY'\n"
         blocks = [textwrap.dedent(part.split("          PY\n", 1)[0]) for part in raw.decode("utf-8").split(marker)[1:]]
@@ -208,12 +236,12 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
 
     def run_inline(self, filesystem):
         def forbidden(*_args, **_kwargs):
-            raise AssertionError("Unexpected content, link-target or mutation API")
+            raise AssertionError("Unexpected content or mutation API")
 
         namespace, output, error = {"__name__": "workflow_directory_preparation"}, io.StringIO(), None
-        replacements = {name: forbidden for name in ("lstat", "read", "readlink", "write", "chmod", "chown", "fchown",
+        replacements = {name: forbidden for name in ("lstat", "read", "write", "chmod", "chown", "fchown",
                                                      "mkdir", "rmdir", "unlink", "rename", "symlink")}
-        replacements.update({name: getattr(filesystem, name) for name in ("open", "stat", "fstat", "listdir", "fchmod", "fchown", "close")})
+        replacements.update({name: getattr(filesystem, name) for name in ("open", "stat", "fstat", "listdir", "readlink", "fchmod", "fchown", "close")})
         replacements.update(getresuid=lambda: filesystem.uids, getresgid=lambda: filesystem.gids)
         with patch.multiple(os, **replacements), patch.object(builtins, "open", filesystem.open_mounts), redirect_stdout(output):
             try:
@@ -223,6 +251,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
             except BaseException as caught:
                 error = caught
         self.assertEqual(filesystem.live, {})
+        self.assertEqual(filesystem.fd_flags, {})
         self.assertEqual(sorted(filesystem.closed), filesystem.opened)
         self.assertLessEqual(filesystem.peak, 24)
         self.assertEqual(filesystem.mount_reads, filesystem.mount_closes)
@@ -236,6 +265,76 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
             self.assertEqual(error.code, 70)
         self.assertFalse(any(row.get("runtimeAdmission") is True for row in rows))
         return rows
+
+    def closure(self, result, *, refused=False):
+        _, rows, error = result
+        if refused:
+            self.refused(result)
+        else:
+            self.assertIsNone(error)
+        found = [(index, row) for index, row in enumerate(rows) if row.get("scope") == "fixed-shell-data-link-closure"]
+        self.assertEqual(len(found), 1)
+        index, diagnostic = found[0]
+        self.assertGreater(index, 0)
+        self.assertEqual(rows[index - 1]["scope"], "fixed-shell-data-directory-preparation")
+        self.assertIn("metadata", rows[index - 1])
+        self.assertEqual(set(diagnostic), {"scope", "runtimeAdmission", "selectedCount", "examinedCount", "externalCount",
+                                           "unsafeCount", "complete", "safe", "truncated", "records", "nodes", "globalError"})
+        self.assertIs(diagnostic["runtimeAdmission"], False)
+        for key in ("selectedCount", "examinedCount", "externalCount", "unsafeCount"):
+            self.assertIs(type(diagnostic[key]), int)
+            self.assertGreaterEqual(diagnostic[key], 0)
+        for key in ("complete", "safe", "truncated"):
+            self.assertIs(type(diagnostic[key]), bool)
+        self.assertLessEqual(diagnostic["examinedCount"], diagnostic["selectedCount"])
+        self.assertIsInstance(diagnostic["records"], list)
+        self.assertIsInstance(diagnostic["nodes"], dict)
+        self.assertLessEqual(len(json.dumps(diagnostic, sort_keys=True, separators=(",", ":")).encode("ascii")), 65536)
+        if diagnostic["complete"]:
+            self.assertEqual(diagnostic["examinedCount"], diagnostic["selectedCount"])
+            self.assertFalse(diagnostic["truncated"])
+            self.assertIsNone(diagnostic["globalError"])
+        if diagnostic["globalError"] is not None:
+            self.assertRegex(diagnostic["globalError"], r"^[a-z][a-z0-9-]{0,63}$")
+            self.assertFalse(diagnostic["complete"])
+        if diagnostic["safe"]:
+            self.assertTrue(diagnostic["complete"])
+            self.assertEqual(diagnostic["unsafeCount"], 0)
+        if refused:
+            self.assertFalse(diagnostic["safe"])
+            self.assertEqual(rows[-1]["failedCheck"], "unhandled-data-link-closure")
+            self.assertGreater(len(rows) - 1, index)
+        for row in diagnostic["records"]:
+            self.assertEqual(set(row), {"selectedPath", "terminalPath", "links", "externalPaths", "unsafePaths", "error", "cleanupUnknown"})
+            self.assertIs(type(row["cleanupUnknown"]), bool)
+            self.assertIsInstance(row["selectedPath"], str)
+            self.assertTrue(row["terminalPath"] is None or isinstance(row["terminalPath"], str))
+            if row["error"] is not None:
+                self.assertRegex(row["error"], r"^[a-z][a-z0-9-]{0,63}$")
+                self.assertFalse(diagnostic["complete"])
+            if row["error"] is not None or row["cleanupUnknown"]:
+                self.assertTrue(all(target == "<redacted>" for _, target in row["links"]))
+            self.assertLessEqual(len(row["links"]), 40)
+            for link in row["links"]:
+                self.assertIsInstance(link, list)
+                self.assertEqual(len(link), 2)
+                self.assertTrue(all(isinstance(value, str) for value in link))
+                self.assertLessEqual(len(link[1].encode("utf-8")), 4096)
+            for key in ("externalPaths", "unsafePaths"):
+                self.assertEqual(row[key], sorted(set(row[key])))
+                self.assertTrue(set(row[key]) <= diagnostic["nodes"].keys())
+        for path, row in diagnostic["nodes"].items():
+            self.assertTrue(path.startswith("/") and ".." not in path.split("/"))
+            self.assertEqual(set(row), {"dev", "ino", "uid", "gid", "mode", "nlink", "size"})
+            self.assertRegex(row["mode"], r"^[0-7]{6}$")
+            self.assertTrue(all(type(value) is int for key, value in row.items() if key != "mode"))
+        return diagnostic
+
+    def metadata_only_under(self, filesystem, prefix):
+        within = lambda path: path == prefix or path.startswith(prefix + "/")
+        self.assertTrue(all(flags == META_FLAGS for path, flags in filesystem.attempt_details if within(path)))
+        self.assertFalse(any(within(path) for path, _ in filesystem.reads))
+        self.assertFalse(any(within(row[0]) for row in (*filesystem.chmods, *filesystem.chowns)))
 
     def test_actual_inline_imports_exact_rosters_and_allowed_modes(self):
         for mode in (0o755, 0o775, 0o777):
@@ -255,7 +354,12 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                 actual_roots = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
                                     and any(isinstance(target, ast.Name) and target.id == "SHELL_DATA_ROOTS" for target in node.targets))
                 self.assertEqual(expected_roots, actual_roots)
-                self.assertEqual(len(rows), 1)
+                self.assertEqual(len(rows), 2)
+                diagnostic = self.closure((namespace, rows, error))
+                self.assertEqual([diagnostic[key] for key in ("selectedCount", "examinedCount", "externalCount", "unsafeCount")], [0, 0, 0, 0])
+                self.assertTrue(diagnostic["complete"] and diagnostic["safe"])
+                self.assertEqual(diagnostic["records"], [])
+                self.assertEqual(diagnostic["nodes"], {})
                 receipt = rows[0]
                 self.assertFalse(receipt["runtimeAdmission"])
                 self.assertEqual(receipt["metadata"]["unsafeCount"], 0)
@@ -369,18 +473,24 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                 elif operation in {"stat", "fstat"}:
                     self.assertEqual(filesystem.chmods, [])
 
-    def test_metadata_walk_uses_original_directory_fds_without_content_or_link_reads(self):
+    def test_metadata_walk_uses_original_fds_without_content_or_target_directory_reads(self):
         filesystem = DirectoryMetadataOS()
         filesystem.add("/usr/share/fonts/nested")
         filesystem.add("/usr/share/fonts/nested/inert.ttf", stat.S_IFREG | 0o444)
-        filesystem.add("/usr/share/fonts/nested/alias.ttf", stat.S_IFLNK | 0o777)
-        filesystem.add("/usr/share/fonts/directory-alias", stat.S_IFLNK | 0o777)
-        _, rows, error = self.run_inline(filesystem)
+        filesystem.link("/usr/share/fonts/nested/alias.ttf", "inert.ttf")
+        filesystem.link("/usr/share/fonts/second-alias.ttf", "nested/inert.ttf")
+        result = self.run_inline(filesystem)
+        _, rows, error = result
         self.assertIsNone(error)
         self.assertEqual(rows[0]["metadata"]["unsafeCount"], 0)
         self.assertIn("/usr/share/fonts/nested", {path for path, _ in filesystem.reads})
-        for path in ("/usr/share/fonts/nested/inert.ttf", "/usr/share/fonts/nested/alias.ttf", "/usr/share/fonts/directory-alias"):
-            self.assertNotIn(path, filesystem.open_attempts)
+        for path in ("/usr/share/fonts/nested/inert.ttf", "/usr/share/fonts/nested/alias.ttf", "/usr/share/fonts/second-alias.ttf"):
+            self.assertIn((path, META_FLAGS), filesystem.attempt_details)
+            self.assertTrue(all(flags == META_FLAGS for selected, flags in filesystem.attempt_details if selected == path))
+        diagnostic = self.closure(result)
+        self.assertEqual([diagnostic[key] for key in ("selectedCount", "examinedCount", "externalCount", "unsafeCount")], [2, 2, 0, 0])
+        self.assertTrue(diagnostic["complete"] and diagnostic["safe"])
+        self.assertEqual(diagnostic["records"], [])
         self.assertEqual(filesystem.chmods, [])
 
     def test_metadata_replacements_disappearance_and_membership_drift_retire_originals(self):
@@ -459,7 +569,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         outside = "/usr/share/not-shell-data.sh"
         filesystem.add(outside, stat.S_IFREG | 0o777)
         alias = root + "/alias.ttf"
-        filesystem.add(alias, stat.S_IFLNK | 0o777)
+        filesystem.link(alias, "file-0o644")
         originals = {path: filesystem.snapshot(filesystem.node(path)) for path in expected}
         _, rows, error = self.run_inline(filesystem)
         self.assertIsNone(error)
@@ -474,7 +584,8 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(filesystem.node(root + "/read-only").st_mode), 0o555)
         self.assertEqual(stat.S_IMODE(filesystem.node(outside).st_mode), 0o777)
         self.assertNotIn(outside, filesystem.open_attempts)
-        self.assertNotIn(alias, filesystem.open_attempts)
+        self.assertIn((alias, META_FLAGS), filesystem.attempt_details)
+        self.assertTrue(all(flags == META_FLAGS for path, flags in filesystem.attempt_details if path == alias))
         metadata = rows[0]["metadata"]
         self.assertEqual(metadata["unsafeCount"], 0)
         self.assertEqual(metadata["unsupportedCount"], 0)
@@ -603,6 +714,298 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                 self.assertEqual(rows[-1]["failedCheck"], "metadata-membership-bound-grammar" if change in {"members", "grammar"}
                                  else "metadata-entry-depth-bound")
                 self.assertEqual(filesystem.chmods, [])
+
+    def test_safe_internal_absolute_relative_and_external_multihop_links_use_original_metadata_only(self):
+        filesystem = DirectoryMetadataOS()
+        filesystem.add("/usr/share/fonts/nested")
+        filesystem.add("/usr/share/fontconfig/source.ttf", stat.S_IFREG | 0o444)
+        filesystem.link("/usr/share/fonts/absolute.ttf", "/usr/share/fontconfig/source.ttf")
+        filesystem.link("/usr/share/fonts/nested/relative.ttf", "../../fontconfig/source.ttf")
+        filesystem.link("/usr/share/fonts/internal-hop.ttf", "absolute.ttf")
+        selected = "/usr/share/fonts/external.ttf"
+        intermediate, terminal = "/etc/alternatives/mrk-font", "/opt/mrk-public/face.ttf"
+        filesystem.link(selected, intermediate)
+        filesystem.link(intermediate, "/opt/mrk-public/links/../face.ttf")
+        filesystem.add("/opt/mrk-public/links", stat.S_IFDIR | 0o555)
+        filesystem.add(terminal, stat.S_IFREG | 0o444)
+        filesystem.add("/opt/mrk-public/not-selected.sh", stat.S_IFREG | 0o777)
+
+        diagnostic = self.closure(self.run_inline(filesystem))
+        self.assertEqual([diagnostic[key] for key in ("selectedCount", "examinedCount", "externalCount", "unsafeCount")], [4, 4, 1, 0])
+        self.assertTrue(diagnostic["complete"] and diagnostic["safe"])
+        self.assertFalse(diagnostic["truncated"])
+        self.assertEqual(len(diagnostic["records"]), 1)
+        row = diagnostic["records"][0]
+        self.assertEqual(row["selectedPath"], selected)
+        self.assertEqual(row["terminalPath"], terminal)
+        self.assertEqual(row["links"], [[selected, intermediate], [intermediate, "/opt/mrk-public/links/../face.ttf"]])
+        self.assertEqual(row["unsafePaths"], [])
+        self.assertIsNone(row["error"])
+        self.assertFalse(row["cleanupUnknown"])
+        self.assertEqual(diagnostic["nodes"][terminal]["mode"], "100444")
+        self.assertEqual(sum(path == "/opt/mrk-public" and flags == META_FLAGS for path, flags, _ in filesystem.open_details), 1)
+        self.assertEqual({path for _, path, _, _ in filesystem.link_reads}, {
+            "/usr/share/fonts/absolute.ttf", "/usr/share/fonts/nested/relative.ttf",
+            "/usr/share/fonts/internal-hop.ttf", selected, intermediate})
+        for prefix in ("/etc/alternatives", "/opt"):
+            self.metadata_only_under(filesystem, prefix)
+        self.assertFalse(any(path == "/opt/mrk-public/not-selected.sh" for _, path in filesystem.calls))
+        self.assertEqual(filesystem.chmods, [])
+        self.assertEqual(filesystem.chowns, [])
+
+    def test_complete_multitarget_unsafe_roster_deduplicates_without_external_effects(self):
+        filesystem = DirectoryMetadataOS()
+        icons = "/usr/share/icons/hicolor/scalable/apps"
+        first, second = "/usr/share/vendor-a", "/usr/share/vendor-b"
+        filesystem.add(first, stat.S_IFDIR | 0o777)
+        filesystem.add(first + "/art", stat.S_IFDIR | 0o775)
+        middle = filesystem.link(first + "/current", "art")
+        middle.st_nlink = 2
+        target_a, target_b = first + "/art/icon.svg", second + "/icon.svg"
+        filesystem.add(target_a, stat.S_IFREG | 0o644)
+        filesystem.add(second, stat.S_IFDIR | 0o755, uid=1000, gid=1000)
+        filesystem.add(target_b, stat.S_IFREG | 0o777).st_nlink = 2
+        filesystem.add(first + "/unselected.sh", stat.S_IFREG | 0o777)
+        filesystem.link(icons + "/alpha.svg", first + "/current/icon.svg")
+        filesystem.link(icons + "/beta.svg", target_b)
+        filesystem.link(icons + "/gamma.svg", target_a)
+        unsafe = {first, first + "/art", first + "/current", second, target_b}
+        originals = {path: filesystem.snapshot(filesystem.node(path)) for path in (*unsafe, target_a)}
+
+        diagnostic = self.closure(self.run_inline(filesystem), refused=True)
+        self.assertEqual([diagnostic[key] for key in ("selectedCount", "examinedCount", "externalCount", "unsafeCount")], [3, 3, 3, 5])
+        self.assertTrue(diagnostic["complete"])
+        self.assertFalse(diagnostic["safe"] or diagnostic["truncated"])
+        rows = {row["selectedPath"]: row for row in diagnostic["records"]}
+        self.assertEqual(set(rows), {icons + "/" + name + ".svg" for name in ("alpha", "beta", "gamma")})
+        self.assertEqual(rows[icons + "/alpha.svg"]["terminalPath"], target_a)
+        self.assertEqual(rows[icons + "/alpha.svg"]["links"], [
+            [icons + "/alpha.svg", first + "/current/icon.svg"], [first + "/current", "art"]])
+        self.assertEqual(rows[icons + "/gamma.svg"]["terminalPath"], target_a)
+        self.assertEqual(set().union(*(set(row["unsafePaths"]) for row in rows.values())), unsafe)
+        self.assertTrue(all(row["error"] is None and not row["cleanupUnknown"] for row in rows.values()))
+        self.assertEqual(diagnostic["nodes"][first]["mode"], "040777")
+        self.assertEqual(diagnostic["nodes"][target_b]["mode"], "100777")
+        self.assertEqual(diagnostic["nodes"][target_b]["nlink"], 2)
+        self.assertEqual(diagnostic["nodes"][second]["uid"], 1000)
+        self.assertEqual(diagnostic["nodes"][second]["gid"], 1000)
+        for path, before in originals.items():
+            self.assertEqual(vars(filesystem.snapshot(filesystem.node(path))), vars(before))
+        for prefix in (first, second):
+            self.metadata_only_under(filesystem, prefix)
+        self.assertFalse(any(path == first + "/unselected.sh" for _, path in filesystem.calls))
+        self.assertEqual(filesystem.chmods, [])
+        self.assertEqual(filesystem.chowns, [])
+
+    def test_unresolved_private_nonregular_and_loop_rosters_are_incomplete_without_disclosure(self):
+        cases = {"missing": "unresolved-entry", "private": "private-target-scope",
+                 "typed-file-descendant": "private-target-scope",
+                 "directory": "nonregular-terminal", "fifo": "nonregular-terminal", "device": "nonregular-terminal",
+                 "regular-before-private": "non-directory-component", "loop-before-private": "link-bound",
+                 "grammar": "link-grammar"}
+        for change, code in cases.items():
+            filesystem = DirectoryMetadataOS()
+            selected, after = "/usr/share/fonts/00-alias.ttf", "/usr/share/fonts/zz-after.ttf"
+            root, terminal = "/usr/share/vendor", "/usr/share/vendor/target.ttf"
+            filesystem.add(root)
+            target = terminal
+            if change == "private":
+                target = "/home/private-marker/.credential"
+                filesystem.add(target, stat.S_IFREG | 0o444)
+            elif change == "typed-file-descendant":
+                target = "/etc/drirc/child"
+
+                def replace_file_root(operation, path, count):
+                    if operation == "readlink" and path == selected and count == 1:
+                        # The real top-level preparation already observed the
+                        # typed file root. Its later directory replacement must
+                        # not turn that exact public name into subtree scope.
+                        filesystem.add("/etc/drirc", stat.S_IFDIR | 0o755)
+                        filesystem.add("/etc/drirc/child", stat.S_IFREG | 0o444)
+
+                filesystem.hook = replace_file_root
+            elif change in {"directory", "fifo", "device"}:
+                kind = {"directory": stat.S_IFDIR, "fifo": stat.S_IFIFO, "device": stat.S_IFCHR}[change]
+                filesystem.add(terminal, kind | 0o644)
+                if change == "directory":
+                    filesystem.add(terminal + "/not-selected", stat.S_IFREG | 0o444)
+            elif change == "regular-before-private":
+                filesystem.add(terminal, stat.S_IFREG | 0o444)
+                target += "/../../home/private-marker"
+            elif change == "loop-before-private":
+                filesystem.link(terminal, "other.ttf")
+                filesystem.link(root + "/other.ttf", "target.ttf")
+                target += "/../../home/private-marker"
+            elif change == "grammar":
+                target = root + "/invalid target"
+            filesystem.link(selected, target)
+            filesystem.add("/opt/after/ok.ttf", stat.S_IFREG | 0o444)
+            filesystem.link(after, "/opt/after/ok.ttf")
+
+            with self.subTest(change=change):
+                result = self.run_inline(filesystem)
+                diagnostic = self.closure(result, refused=True)
+                self.assertEqual(diagnostic["selectedCount"], 2)
+                self.assertEqual(diagnostic["examinedCount"], 2)
+                self.assertFalse(diagnostic["complete"] or diagnostic["safe"] or diagnostic["truncated"])
+                self.assertIsNone(diagnostic["globalError"])
+                rows = {row["selectedPath"]: row for row in diagnostic["records"]}
+                self.assertEqual(rows[selected]["error"], code)
+                self.assertFalse(rows[selected]["cleanupUnknown"])
+                self.assertEqual(rows[after]["terminalPath"], "/opt/after/ok.ttf")
+                self.assertIsNone(rows[after]["error"])
+                self.assertNotIn("private-marker", json.dumps(result[1]))
+                self.assertFalse(any(path == "/home" or path.startswith("/home/") for _, path in filesystem.calls))
+                for prefix in (root, "/opt"):
+                    self.metadata_only_under(filesystem, prefix)
+                if change == "directory":
+                    self.assertFalse(any(path == terminal + "/not-selected" for _, path in filesystem.calls))
+                if change == "typed-file-descendant":
+                    self.assertTrue(stat.S_ISDIR(filesystem.node("/etc/drirc").st_mode))
+                    self.assertFalse(any(path == "/etc/drirc/child" for _, path in filesystem.calls))
+                    self.assertNotIn("/etc/drirc/child", json.dumps(result[1]))
+                self.assertEqual(filesystem.chmods, [])
+                self.assertEqual(filesystem.chowns, [])
+
+    def test_closure_original_drift_and_unknown_close_stop_before_another_selection(self):
+        cases = {"selected-before-open": "selected-link-changed", "selected-during-readlink": "original-changed",
+                 "terminal-name": "original-changed", "terminal-state": "original-changed", "ancestor-name": "original-changed",
+                 "mount": "mount-changed", "device": "wrong-device", "close": "original-close-unknown",
+                 "error-and-close": "private-target-scope", "between-selections": None}
+        for change, code in cases.items():
+            filesystem = DirectoryMetadataOS()
+            root, target = "/opt/mrk-data", "/opt/mrk-data/face.ttf"
+            original = filesystem.add(target, stat.S_IFREG | 0o444)
+            selected = "/usr/share/fonts/00-alias.ttf"
+            following, last = "/usr/share/fonts/10-next.ttf", "/usr/share/fonts/zz-after.ttf"
+            first_link = filesystem.link(selected, "/home/private-marker/.credential" if change == "error-and-close" else target)
+            filesystem.link(following, target)
+            filesystem.link(last, target)
+            if change == "device":
+                original.st_dev = 2
+
+            def hook(operation, path, count):
+                if path == selected and count == 1:
+                    if change == "selected-before-open" and operation == "open":
+                        filesystem.link(selected, root + "/replacement.ttf")
+                    if change == "selected-during-readlink" and operation == "readlink":
+                        filesystem.link(selected, "/home/private-marker/.credential")
+                    if change == "error-and-close" and operation == "close":
+                        raise OSError(errno.EIO, "Mock first failure plus original close uncertainty")
+                if path == target:
+                    if operation == "fstat" and count == 1:
+                        if change == "terminal-name":
+                            filesystem.add(target, stat.S_IFREG | 0o444)
+                        elif change == "ancestor-name":
+                            filesystem.add(root)
+                        elif change == "mount":
+                            filesystem.mount_raw += b"3 1 0:1 /other /elsewhere rw - ext4 /dev/mock rw\n"
+                    if change == "terminal-state" and operation == "fstat" and count == 2:
+                        original.st_size += 1
+                    if operation == "close" and count == 1:
+                        if change == "close":
+                            raise OSError(errno.EIO, "Mock original metadata close uncertainty")
+                        if change == "between-selections":
+                            original.st_size += 1
+
+            filesystem.hook = hook
+            with self.subTest(change=change):
+                result = self.run_inline(filesystem)
+                diagnostic = self.closure(result, refused=True)
+                self.assertEqual(diagnostic["selectedCount"], 3)
+                self.assertEqual(diagnostic["examinedCount"], 2 if change == "between-selections" else 1)
+                self.assertFalse(diagnostic["complete"] or diagnostic["safe"] or diagnostic["truncated"])
+                row = diagnostic["records"][0]
+                self.assertEqual(row["selectedPath"], selected)
+                self.assertEqual(row["error"], code)
+                self.assertEqual(row["cleanupUnknown"], change in {"close", "error-and-close"})
+                self.assertNotIn((last, META_FLAGS), filesystem.attempt_details)
+                if change != "between-selections":
+                    self.assertNotIn((following, META_FLAGS), filesystem.attempt_details)
+                    self.assertIsNone(diagnostic["globalError"])
+                else:
+                    self.assertEqual(diagnostic["globalError"], "between-selection-drift")
+                    self.assertEqual(diagnostic["nodes"][target]["size"], 0)
+                    self.assertEqual(filesystem.node(target).st_size, 1)
+                if change == "selected-during-readlink":
+                    observed = [(inode, text) for _, path, inode, text in filesystem.link_reads if path == selected]
+                    self.assertTrue(observed)
+                    self.assertTrue(all(inode == first_link.st_ino and text == target for inode, text in observed))
+                self.assertNotIn("private-marker", json.dumps(result[1]))
+                self.assertFalse(any(path == "/home" or path.startswith("/home/") for _, path in filesystem.calls))
+                self.metadata_only_under(filesystem, "/opt")
+                self.assertEqual(filesystem.chmods, [])
+                self.assertEqual(filesystem.chowns, [])
+
+    def test_external_mount_intercepts_are_refused_before_target_metadata_operations(self):
+        for point in ("/opt", "/opt/mrk-data", "/opt/mrk-data/face.ttf"):
+            filesystem = DirectoryMetadataOS()
+            selected, target = "/usr/share/fonts/alias.ttf", "/opt/mrk-data/face.ttf"
+            filesystem.add(target, stat.S_IFREG | 0o444)
+            filesystem.link(selected, target)
+            filesystem.mount_raw += ("3 1 0:1 /other " + point + " rw - ext4 /dev/mock rw\n").encode("ascii")
+            with self.subTest(mount=point):
+                diagnostic = self.closure(self.run_inline(filesystem), refused=True)
+                self.assertEqual(diagnostic["examinedCount"], 1)
+                self.assertFalse(diagnostic["complete"])
+                self.assertEqual(diagnostic["records"][0]["error"], "mounted-target")
+                self.assertFalse(any(path == point or path.startswith(point + "/") for _, path in filesystem.calls))
+                self.metadata_only_under(filesystem, "/opt")
+                self.assertEqual(filesystem.chmods, [])
+                self.assertEqual(filesystem.chowns, [])
+
+    def test_closure_fd_component_selection_link_text_and_diagnostic_byte_bounds(self):
+        for change in ("fds", "components", "link-text", "diagnostic-bytes", "selections"):
+            filesystem = DirectoryMetadataOS()
+            selected = "/usr/share/fonts/alias.ttf"
+            if change == "fds":
+                target = "/opt/" + "/".join("deep-" + str(index) for index in range(30)) + "/face.ttf"
+                filesystem.add(target, stat.S_IFREG | 0o444)
+                filesystem.link(selected, target + "/../../home/private-marker")
+            elif change == "components":
+                filesystem.add("/opt/mrk-data/nested")
+                filesystem.add("/opt/mrk-data/face.ttf", stat.S_IFREG | 0o444)
+                filesystem.link(selected, "/opt/mrk-data/" + "nested/../" * 129 + "face.ttf")
+            elif change == "link-text":
+                filesystem.link(selected, "/usr/share/vendor/" + "x" * 4096 + "/../../home/private-marker")
+            elif change == "diagnostic-bytes":
+                for index in range(256):
+                    target = "/opt/mrk-data/" + str(index).zfill(3) + "-" + "a" * 140 + ".ttf"
+                    filesystem.add(target, stat.S_IFREG | 0o444)
+                    filesystem.link("/usr/share/fonts/alias-" + str(index).zfill(3), target)
+            else:
+                filesystem.add("/usr/share/fonts/inert.ttf", stat.S_IFREG | 0o444)
+                for index in range(4097):
+                    filesystem.link("/usr/share/fonts/alias-" + str(index).zfill(4), "inert.ttf")
+
+            with self.subTest(bound=change):
+                result = self.run_inline(filesystem)
+                if change == "selections":
+                    rows = self.refused(result)
+                    self.assertEqual(rows[-1]["failedCheck"], "metadata-link-count-bound")
+                    self.assertFalse(any(flags == META_FLAGS for _, flags in filesystem.attempt_details))
+                else:
+                    diagnostic = self.closure(result, refused=True)
+                    self.assertFalse(diagnostic["complete"] or diagnostic["safe"])
+                    if change == "diagnostic-bytes":
+                        self.assertEqual(diagnostic["selectedCount"], 256)
+                        self.assertGreater(diagnostic["examinedCount"], 1)
+                        self.assertLess(diagnostic["examinedCount"], diagnostic["selectedCount"])
+                        self.assertTrue(diagnostic["truncated"])
+                        self.assertEqual(diagnostic["globalError"], "diagnostic-byte-bound")
+                        self.assertTrue(diagnostic["records"] and diagnostic["nodes"])
+                    else:
+                        self.assertEqual(diagnostic["examinedCount"], 1)
+                        self.assertEqual(diagnostic["records"][0]["error"], {
+                            "fds": "fd-bound", "components": "component-bound", "link-text": "link-grammar"}[change])
+                        self.assertIsNone(diagnostic["globalError"])
+                    if change == "fds":
+                        self.assertEqual(sum(flags == META_FLAGS for _, flags in filesystem.attempt_details), 24)
+                    self.assertNotIn("private-marker", json.dumps(result[1]))
+                    self.assertFalse(any(path == "/home" or path.startswith("/home/") for _, path in filesystem.calls))
+                self.metadata_only_under(filesystem, "/opt")
+                self.assertEqual(filesystem.chmods, [])
+                self.assertEqual(filesystem.chowns, [])
 
 
 if __name__ == "__main__":
