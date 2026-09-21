@@ -8592,16 +8592,44 @@ def conventional_phase(name: str, scope: str) -> None:
 
 
 
+def windows_installed_identity(details, mode: int) -> tuple[int, ...]:
+    return (details.st_dev, details.st_ino, mode, details.st_nlink, details.st_size,
+            details.st_mtime_ns, details.st_birthtime_ns, details.st_file_attributes,
+            details.st_reparse_tag)
+
+
+def windows_installed_state(details) -> tuple[int, ...]:
+    if os.name == "nt":
+        return windows_installed_identity(details, details.st_mode) + (details.st_ctime_ns,)
+    return (details.st_dev, details.st_ino, details.st_mode, details.st_nlink,
+            details.st_size, details.st_mtime_ns, details.st_ctime_ns)
+
+
 def windows_installed_bytes(path: Path, limit: int) -> bytes:
-    ordinary(path)
     before = path.lstat()
-    signature = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+    require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+            and not getattr(before, "st_file_attributes", 0) & 0x400,
+            "Expected an ordinary, single-link file")
     require(before.st_size <= limit, "Windows native DATA exceeds its bound")
     with path.open("rb") as stream:
-        require(signature(os.fstat(stream.fileno())) == signature(before), "Windows native DATA changed at open")
-        value = stream.read(limit + 1)
-        require(signature(os.fstat(stream.fileno())) == signature(before), "Windows native DATA changed during read")
-    require(len(value) == before.st_size and signature(path.lstat()) == signature(before), "Windows native DATA changed")
+        opened = os.fstat(stream.fileno())
+        if os.name == "nt":
+            # CPython 3.14 named stat decorates executable suffixes and reports
+            # birthtime as ctime. Descriptor stat has raw mode and ChangeTime.
+            # Normalize only this cross-API comparison, never raw snapshots.
+            named_mode = before.st_mode
+            if path.name.lower().endswith((".exe", ".bat", ".cmd", ".com")):
+                named_mode &= ~0o111
+            matches = (windows_installed_identity(before, named_mode)
+                       == windows_installed_identity(opened, opened.st_mode))
+        else:
+            matches = windows_installed_state(opened) == windows_installed_state(before)
+        require(matches, "Windows native DATA changed at open")
+        value = stream.read(before.st_size + 1)
+        require(windows_installed_state(os.fstat(stream.fileno())) == windows_installed_state(opened),
+                "Windows native DATA changed during read")
+    require(len(value) == before.st_size and windows_installed_state(path.lstat()) == windows_installed_state(before),
+            "Windows native DATA changed")
     return value
 
 
@@ -8658,6 +8686,22 @@ def windows_installed_inputs(context: dict) -> None:
         "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER")), "Windows native ambient compiler injection is not admitted")
 
 
+def windows_installed_tool(path: Path, role: str) -> None:
+    require(type(role) is str and role in ("python", "git", "rustup"), "Unknown Windows native tool role")
+    details = path.lstat()
+    regular = stat.S_ISREG(details.st_mode)
+    single_link = details.st_nlink == 1
+    reparse = bool(getattr(details, "st_file_attributes", 0) & 0x400)
+    admitted = regular and single_link and not reparse
+    if not admitted:
+        # Only this original metadata observation and fixed role leave the
+        # helper. No path, raw exception, retry or relaxed tool admission.
+        print("MRK_WINDOWS_INSTALLED_TOOL_REFUSED=" + json.dumps(
+            {"role": role, "regular": regular, "singleLink": single_link, "reparse": reparse},
+            sort_keys=True, separators=(",", ":")), flush=True)
+    require(admitted, "Expected an ordinary, single-link file")
+
+
 def windows_installed_context(*, create: bool) -> dict:
     binding = windows_installed_binding()
     source, temp = Path(os.environ["GITHUB_WORKSPACE"]), Path(os.environ["RUNNER_TEMP"])
@@ -8665,7 +8709,7 @@ def windows_installed_context(*, create: bool) -> dict:
     windows_installed_directories(temp)
     root = temp / ("mrk-windows-installed-native-" + binding["runId"] + "-1")
     selected = Path(os.environ["MRK_PYTHON"])
-    ordinary(selected)
+    windows_installed_tool(selected, "python")
     require(selected.is_absolute() and selected == Path(sys.executable), "Windows native selected Python differs")
     if create:
         root.mkdir(mode=0o700)
@@ -8675,7 +8719,7 @@ def windows_installed_context(*, create: bool) -> dict:
         git, rustup = shutil.which("git"), shutil.which("rustup")
         require(git is not None and rustup is not None and Path(git).is_absolute() and Path(rustup).is_absolute(),
                 "Windows native hosted compiler tools are unavailable")
-        ordinary(Path(git)); ordinary(Path(rustup))
+        windows_installed_tool(Path(git), "git"); windows_installed_tool(Path(rustup), "rustup")
         environment = clean_environment(root)
         require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15, capture=True)
                 == binding["sourceSha"], "Windows native checkout differs")

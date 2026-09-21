@@ -178,6 +178,98 @@ def validate_transaction_eof(report: dict) -> dict:
 
 
 class FixedCompilerHelperTests(unittest.TestCase):
+    def test_windows_installed_reader_preserves_native_metadata_identity(self):
+        # Actual reader, inert bytes and only path/stream/stat boundaries doubled.
+        # These are CPython metadata contracts, not native Windows evidence.
+        content = b"INERT READER DATA; NEVER EXECUTED\n"
+        common = {"st_dev": 7, "st_ino": 13, "st_nlink": 1, "st_size": len(content),
+                  "st_mtime_ns": 10000, "st_birthtime_ns": 2000,
+                  "st_file_attributes": 0x20, "st_reparse_tag": 0}
+        named = SimpleNamespace(**common, st_mode=stat.S_IFREG | 0o777, st_ctime_ns=2000)
+        opened = SimpleNamespace(**common, st_mode=stat.S_IFREG | 0o666, st_ctime_ns=3000)
+
+        def changed(value, **fields):
+            return SimpleNamespace(**{**vars(value), **fields})
+
+        def exercise(*, name="python.exe", before=named, first=opened, after=opened,
+                     final=named, payload=content, error=None, opens=1, limit=1024,
+                     platform="nt", close_error=False):
+            calls = {"named": 0, "opened": 0, "closed": 0, "fstat": 0, "read": []}
+
+            class Stream:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    calls["closed"] += 1
+                    if close_error:
+                        raise OSError("inert close failure")
+
+                def fileno(self):
+                    return 73  # Never passed to a real OS function.
+
+                def read(self, count):
+                    calls["read"].append(count)
+                    return payload[:count]
+
+            class NamedInput:
+                def lstat(self):
+                    calls["named"] += 1
+                    self_case.assertLessEqual(calls["named"], 2)
+                    return before if calls["named"] == 1 else final
+
+                def open(self, mode):
+                    self_case.assertEqual(mode, "rb")
+                    calls["opened"] += 1
+                    return Stream()
+
+            def fstat(fd):
+                self.assertEqual(fd, 73)
+                calls["fstat"] += 1
+                self.assertLessEqual(calls["fstat"], 2)
+                return first if calls["fstat"] == 1 else after
+
+            self_case = self
+            path = NamedInput()
+            path.name = name
+            with patch.object(helper, "os", SimpleNamespace(name=platform, fstat=fstat)):
+                if error is None:
+                    self.assertEqual(helper.windows_installed_bytes(path, limit), content)
+                    self.assertEqual((calls["named"], calls["fstat"]), (2, 2))
+                else:
+                    with self.assertRaises(error):
+                        helper.windows_installed_bytes(path, limit)
+            self.assertEqual(calls["opened"], opens)
+            self.assertEqual(calls["closed"], opens)
+            self.assertIn(calls["read"], ([], [before.st_size + 1]))
+
+        for name in ("python.EXE", "helper.bat", "helper.cmd", "helper.com"):
+            with self.subTest(suffix=name):
+                exercise(name=name)
+        data_named = changed(named, st_mode=opened.st_mode)
+        exercise(name="record.json", before=data_named, final=data_named)
+        exercise(name="record.json", before=opened, final=opened, platform="posix")
+        for changes in ({"st_ino": 14}, {"st_mode": stat.S_IFREG | 0o444},
+                        {"st_birthtime_ns": 2001}, {"st_nlink": 2},
+                        {"st_file_attributes": 0x400}, {"st_reparse_tag": 1}):
+            with self.subTest(opened=changes):
+                exercise(first=changed(opened, **changes), error=helper.CheckFailure)
+        # Do not mask suffix bits globally or ignore real descriptor ChangeTime.
+        exercise(name="record.json", error=helper.CheckFailure)
+        exercise(after=changed(opened, st_ctime_ns=3001), error=helper.CheckFailure)
+        exercise(final=changed(named, st_ctime_ns=2001), error=helper.CheckFailure)
+        exercise(final=changed(named, st_mode=stat.S_IFREG | 0o775), error=helper.CheckFailure)
+        exercise(after=changed(opened, st_nlink=2), error=helper.CheckFailure)
+        exercise(final=changed(named, st_file_attributes=0x400), error=helper.CheckFailure)
+        exercise(payload=content[:-1], error=helper.CheckFailure)
+        exercise(payload=content + b"x", error=helper.CheckFailure)
+        exercise(before=changed(named, st_nlink=2), error=helper.CheckFailure, opens=0)
+        exercise(before=changed(named, st_file_attributes=0x400), error=helper.CheckFailure, opens=0)
+        exercise(limit=len(content) - 1, error=helper.CheckFailure, opens=0)
+        missing = SimpleNamespace(**{key: value for key, value in vars(opened).items() if key != "st_birthtime_ns"})
+        exercise(first=missing, error=AttributeError)
+        exercise(error=OSError, close_error=True)
+
     def test_passive_management_requires_v2_complete_roster_and_existing_bindings(self):
         self.assertEqual(helper.NATIVE_CASES, NATIVE_CASE_NAMES)
         for platform in ("linux", "macos", "windows"):
