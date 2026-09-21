@@ -435,6 +435,14 @@ def root_path(value):
     return Path("/var/lib/mrk-ubuntu-native-" + value["runId"] + "-" + value["attempt"])
 
 
+def service_task_limit(value):
+    # The validated shell handoff includes GTK/WebKit threads, Xvfb, private
+    # D-Bus and the original command controllers in this same bounded domain.
+    # Its observed task denial at 64 needs headroom, not an unlimited budget
+    # or a change to the package/passive lifecycles' existing limit.
+    return "256" if "shell" in value else PROPERTIES["TasksMax"]
+
+
 def service_properties(deadline, now=None):
     now = time.monotonic() if now is None else now
     need(type(deadline) in {int, float} and math.isfinite(deadline) and 0 < deadline - now <= 1200,
@@ -453,7 +461,7 @@ def service_argv(handoff_path, handoff_sha256, entry_sha256):
     entry = absolute(value["source"]) / ENTRY
     need(type(entry_sha256) is str and re.fullmatch(r"[0-9a-f]{64}", entry_sha256) is not None
          and record(entry, JSON_LIMIT)["sha256"] == entry_sha256, "Workflow entry pin differs")
-    properties = service_properties(value["deadline"])
+    properties = {**service_properties(value["deadline"]), "TasksMax": service_task_limit(value)}
     return _service_argv(value, handoff_path, handoff_sha256, entry_sha256, properties)
 
 
@@ -725,7 +733,8 @@ def _domain(value, label):
     need(_kernel(cgroup / "cgroup.type") == "domain\n", "Original cgroup is not an aggregate domain")
     effective = {name: _kernel(cgroup / name).strip() for name in ("memory.max", "memory.swap.max", "memory.oom.group", "pids.max", "cpu.max")}
     need(props["MemoryMax"] == effective["memory.max"] == str(6 << 30) and props["MemorySwapMax"] == effective["memory.swap.max"] == "0"
-         and props["TasksMax"] == effective["pids.max"] == "64" and effective["memory.oom.group"] == "1", "Effective aggregate limits differ")
+         and props["TasksMax"] == effective["pids.max"] == service_task_limit(value)
+         and effective["memory.oom.group"] == "1", "Effective aggregate limits differ")
     quota, period = effective["cpu.max"].split()
     need(quota.isdecimal() and period.isdecimal() and int(period) > 0 and int(quota) == 2 * int(period), "Effective CPU ceiling differs")
     events = {name: {key: int(number) for key, number in (line.split() for line in _kernel(cgroup / name).splitlines())}
@@ -3543,7 +3552,7 @@ def verify_service_result(handoff_path, handoff_sha256, entry_sha256, client_res
     runtime = [arg.removeprefix("--property=RuntimeMaxSec=") for arg in client_result.args if arg.startswith("--property=RuntimeMaxSec=")]
     need(len(runtime) == 1 and re.fullmatch(r"[1-9][0-9]{0,3}s", runtime[0]) is not None and int(runtime[0][:-1]) < 1200,
          "Original client finite lifetime argument missing")
-    properties = {**PROPERTIES, "RuntimeMaxSec": runtime[0]}
+    properties = {**PROPERTIES, "TasksMax": service_task_limit(value), "RuntimeMaxSec": runtime[0]}
     need(client_result.args == _service_argv(value, handoff_path, handoff_sha256, entry_sha256, properties), "Original service client argv differs")
     root = root_path(value)
     directory(root / "public", protected=True)

@@ -1683,6 +1683,95 @@ class LifecycleData(unittest.TestCase):
         self.assertEqual(first["ExitType"], "cgroup")
         self.assertEqual(first["Restart"], "no")
 
+    def test_shell_task_budget_is_role_bound_and_checked_end_to_end(self):
+        defaults = deepcopy(L.PROPERTIES)
+        self.assertEqual(defaults["TasksMax"], "64")
+        handoff_path, handoff_sha, entry_sha = Path("/inert/handoff.json"), "a" * 64, "b" * 64
+        for profile in ("ordinary", "installed", "shell"):
+            value = installed_handoff()
+            if profile != "installed":
+                value.pop("installed")
+            if profile == "shell":
+                value["shell"] = {}  # Shape was admitted by the doubled handoff boundary.
+            tasks = "256" if profile == "shell" else "64"
+            unit = L.root_path(value).name + ".service"
+            group = "/system.slice/" + unit
+            environment = {"MRK_UBUNTU_LIFECYCLE_BOOTSTRAP": L.BOOTSTRAP,
+                           "MRK_LIFECYCLE_RUNTIME_SECONDS": "1160", "INVOCATION_ID": "d" * 32}
+            with self.subTest(profile=profile), patch.object(L, "handoff", return_value=value), \
+                    patch.object(L, "record", return_value={"sha256": entry_sha}), \
+                    patch.object(L.os, "getresuid", return_value=(1001,) * 3), \
+                    patch.object(L.os, "getresgid", return_value=(1001,) * 3), \
+                    patch.dict(L.os.environ, environment, clear=True), \
+                    patch.object(L.time, "monotonic", return_value=100.0):
+                argv = L.service_argv(handoff_path, handoff_sha, entry_sha)
+                properties = dict(arg.removeprefix("--property=").split("=", 1)
+                                  for arg in argv if arg.startswith("--property="))
+                self.assertEqual(properties["TasksMax"], tasks)
+                self.assertEqual({key: properties[key] for key in defaults if key != "TasksMax"},
+                                 {key: item for key, item in defaults.items() if key != "TasksMax"})
+                self.assertEqual(properties["RuntimeMaxSec"], "1160s")
+
+                # The collector must authenticate this original profile's argv
+                # before any public-root observation. The sentinel is not a
+                # successful lifecycle result and no service is started here.
+                for wrong in (None, "64" if tasks == "256" else "256", "max", "257"):
+                    args = [arg if wrong is None or not arg.startswith("--property=TasksMax=")
+                            else "--property=TasksMax=" + wrong for arg in argv]
+                    client = subprocess.CompletedProcess(args, 0, b"", b"")
+                    boundary = RuntimeError("inert first public-root observation")
+                    with self.subTest(client_tasks=wrong), patch.object(L, "directory", side_effect=boundary) as directory, \
+                            patch.object(L, "read") as read:
+                        if wrong is None:
+                            with self.assertRaises(RuntimeError) as stopped:
+                                L.verify_service_result(handoff_path, handoff_sha, entry_sha, client, Path("/inert/public"))
+                            self.assertIs(stopped.exception, boundary)
+                            directory.assert_called_once_with(L.root_path(value) / "public", protected=True)
+                        else:
+                            with self.assertRaisesRegex(ValueError, "Original service client argv differs"):
+                                L.verify_service_result(handoff_path, handoff_sha, entry_sha, client, Path("/inert/public"))
+                            directory.assert_not_called()
+                        read.assert_not_called()
+
+                observed = {key: defaults[key] for key in L.SHOW if key in defaults}
+                observed.update(Id=unit, Type="exec", InvocationID="d" * 32, ControlGroup=group, Result="success",
+                                MemoryMax=str(6 << 30), TasksMax=tasks, RuntimeMaxUSec="1160s",
+                                RuntimeRandomizedExtraUSec="0", TimeoutStartUSec="10s", TimeoutStopUSec="10s",
+                                **{key: "no" for key in ("PrivateMounts", "PrivateTmp", "PrivateUsers",
+                                                        "PrivateNetwork", "ProtectControlGroups")})
+                kernel = {"/proc/self/cgroup": "0::" + group + "\n",
+                          **{str(Path("/sys/fs/cgroup" + group) / key): item for key, item in {
+                              "cgroup.type": "domain\n", "memory.max": str(6 << 30) + "\n",
+                              "memory.swap.max": "0\n", "memory.oom.group": "1\n", "pids.max": tasks + "\n",
+                              "cpu.max": "200000 100000\n", "memory.events": "max 0\noom 0\noom_kill 0\n",
+                              "pids.events": "max 0\n"}.items()}}
+                for phase in ("start", "stop"):
+                    for fault in (None, "systemd-limit", "kernel-limit", "both-limits", "unlimited", "task-denial", "memory-denial"):
+                        props, counters = dict(observed), dict(kernel)
+                        other = "64" if tasks == "256" else "256"
+                        if fault in {"systemd-limit", "both-limits", "unlimited"}:
+                            props["TasksMax"] = "infinity" if fault == "unlimited" else other
+                        if fault in {"kernel-limit", "both-limits", "unlimited"}:
+                            counters["/sys/fs/cgroup" + group + "/pids.max"] = ("max" if fault == "unlimited" else other) + "\n"
+                        if fault in {"task-denial", "memory-denial"}:
+                            key = "pids.events" if fault == "task-denial" else "memory.events"
+                            path = "/sys/fs/cgroup" + group + "/" + key
+                            counters[path] = counters[path].replace("max 0", "max 1")
+                        stdout = "".join(key + "=" + props[key] + "\n" for key in L.SHOW).encode("ascii")
+                        result = subprocess.CompletedProcess(["/inert-show"], 0, stdout, b"")
+                        with self.subTest(phase=phase, fault=fault), patch.object(L, "command", return_value=result) as command, \
+                                patch.object(L, "_kernel", side_effect=lambda path: counters[str(path)]):
+                            if fault is None:
+                                actual = L._domain(value, phase)
+                                self.assertEqual(actual["unit"]["TasksMax"], tasks)
+                                self.assertEqual(actual["effective"]["pids.max"], tasks)
+                            else:
+                                with self.assertRaisesRegex(ValueError, "Effective aggregate limits differ|Original aggregate resource denial"):
+                                    L._domain(value, phase)
+                            command.assert_called_once_with(phase + "-unit-show",
+                                ["/usr/bin/systemctl", "show", "--no-pager", "--property=" + ",".join(L.SHOW), unit], maximum=3)
+        self.assertEqual(L.PROPERTIES, defaults)
+
     def test_namespace_keys_survive_reopen_but_original_checks_stay_exact(self):
         expected = {"user": [7, 0xeffffffd], "pid": [7, 0xeffffffc], "mnt": [7, 45]}
         for case in ("root", "reopened", "device", "inode", "drift", "owner", "type", "close"):
