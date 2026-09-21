@@ -187,17 +187,60 @@ def manifest_inputs(runtime: Path) -> tuple[dict, str]:
     return entries, fact["sha256"]
 
 
-def imported_origins(core: Path, stdlib: Path, python: Path) -> None:
+def require_imported_module_origins(modules: dict, core: Path, stdlib: Path, python: Path) -> None:
+    require(type(modules) is dict and len(modules) <= 2048, "python_module_bound")
     roots = (path_key(str(core)), path_key(str(stdlib)))
-    require(len(sys.modules) <= 2048, "python_module_bound")
-    for name, module in tuple(sys.modules.items()):
+    # CPython's pyexpat creates two support modules without independent specs;
+    # xml.parsers.expat registers aliases of those same producer-owned objects.
+    # Validate both producers before classifying these four exact registry keys.
+    producer, wrapper = modules.get("pyexpat"), modules.get("xml.parsers.expat")
+    for name, owner in (("pyexpat", producer), ("xml.parsers.expat", wrapper)):
+        require(type(owner) is type(sys), "python_expat_parent_origin", name)
+        spec = getattr(owner, "__spec__", None)
+        origin = getattr(spec, "origin", None)
+        owner_name, spec_name = vars(owner).get("__name__"), getattr(spec, "name", None)
+        require(type(owner_name) is str and owner_name == name
+                and type(spec_name) is str and spec_name == name
+                and type(origin) is str, "python_expat_parent_origin", name)
+        key = path_key(origin)
+        if name == "pyexpat":
+            require(key == path_key(str(python / "pyexpat.pyd")), "python_expat_parent_origin", name)
+        else:
+            archive = getattr(getattr(spec, "loader", None), "archive", None)
+            require(type(archive) is str and path_key(archive) == roots[1]
+                    and key.startswith(roots[1] + "\\"), "python_expat_parent_origin", name)
+
+    support = {}
+    for suffix in ("errors", "model"):
+        canonical, alias = "pyexpat." + suffix, "xml.parsers.expat." + suffix
+        module = getattr(producer, suffix, None)
+        require(type(module) is type(sys) and modules.get(canonical) is module
+                and modules.get(alias) is module and getattr(wrapper, suffix, None) is module,
+                "python_expat_support_identity", canonical)
+        attributes = vars(module)
+        require(type(attributes.get("__name__")) is str and attributes["__name__"] == canonical
+                and all(field in attributes and attributes[field] is None
+                        for field in ("__spec__", "__loader__", "__package__"))
+                and "__file__" not in attributes and "__path__" not in attributes,
+                "python_expat_support_metadata", canonical)
+        support[canonical] = support[alias] = module
+
+    for name, module in modules.items():
         if module is None or name == "__main__":
             continue  # The Rust selector separately binds this exact probe copy.
+        if name in support:
+            require(module is support[name], "python_expat_support_identity", name)
+            continue
+        # New labels are closed benign names only; never reveal an unknown name
+        # or origin. Existing extension/image leaf diagnostics are unchanged.
+        label = name if name in {"pyexpat", "xml.parsers.expat", *support} else None
         spec = getattr(module, "__spec__", None)
+        require(spec is not None, "python_module_spec_missing", label)
         origin = getattr(spec, "origin", None)
+        require(origin is not None, "python_module_origin_missing", label)
+        require(type(origin) is str, "python_module_origin_type", label)
         if origin in {"built-in", "frozen"}:
             continue
-        require(type(origin) is str, "python_module_origin")
         key = path_key(origin)
         archive = getattr(getattr(spec, "loader", None), "archive", None)
         if type(archive) is str and path_key(archive) in roots:
@@ -208,6 +251,11 @@ def imported_origins(core: Path, stdlib: Path, python: Path) -> None:
         leaf = Path(origin).name.casefold()
         require(leaf in PAYLOAD_IMAGES and leaf.endswith(".pyd")
                 and key == path_key(str(python / leaf)), "python_extension_origin", leaf)
+
+
+def imported_origins(core: Path, stdlib: Path, python: Path) -> None:
+    require(len(sys.modules) <= 2048, "python_module_bound")
+    require_imported_module_origins(dict(sys.modules), core, stdlib, python)
 
 
 def behavior() -> dict:
@@ -381,6 +429,7 @@ def main() -> int:
         require(json.loads(raw) == catalog["schema" if name == "project.schema.json" else "fields"], "catalog_resource")
     STAGE = "behavior"
     behaviors = behavior()
+    STAGE = "import-origins"
     imported_origins(core, stdlib, python)
     STAGE = "loaded-images"
     system_directory, images = loaded_images(python, entries)

@@ -15,8 +15,9 @@ import json
 from pathlib import Path, PureWindowsPath
 import re
 import stat
+import sys
 import tempfile
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -86,6 +87,189 @@ def synthetic_pins(raw, notice, members):
 
 
 class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
+    def test_native_imported_origins_bind_exact_expat_support_objects(self):
+        # Select the actual pure origin loop, not the whole native module or a
+        # copied predicate. PureWindowsPath supplies Windows lexical operations
+        # only; no supplier import, native API or host sys.modules mutation.
+        source = SOURCE / "tests/native_desktop_payload_windows.py"
+        with source.open("rb") as stream:
+            raw = stream.read(65537)
+        self.assertLessEqual(len(raw), 65536)
+        tree = ast.parse(raw, filename=str(source))
+        selected = []
+        for name in ("PATH_CHARS", "PAYLOAD_IMAGES"):
+            matches = [node for node in tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)]
+            self.assertEqual(len(matches), 1)
+            self.assertEqual(len(matches[0].targets), 1)
+            value = matches[0].value
+            if name == "PATH_CHARS":
+                self.assertIsInstance(value, ast.Constant)
+                self.assertIs(type(value.value), int)
+            else:
+                self.assertIsInstance(value, ast.Call)
+                self.assertIsInstance(value.func, ast.Name)
+                self.assertEqual(value.func.id, "frozenset")
+                self.assertEqual(len(value.args), 1)
+                self.assertEqual(value.keywords, [])
+                self.assertIsInstance(value.args[0], ast.Set)
+                self.assertTrue(all(isinstance(item, ast.Constant) and type(item.value) is str
+                                    for item in value.args[0].elts))
+            selected.append(matches[0])
+        for name, kind in (("ProbeFailure", ast.ClassDef), ("require", ast.FunctionDef),
+                           ("path_key", ast.FunctionDef), ("require_imported_module_origins", ast.FunctionDef)):
+            matches = [node for node in tree.body if getattr(node, "name", None) == name]
+            self.assertEqual(len(matches), 1)
+            self.assertIsInstance(matches[0], kind)
+            self.assertEqual(matches[0].decorator_list, [])
+            selected.append(matches[0])
+        namespace = {"re": re, "sys": sys, "Path": PureWindowsPath}
+        exec(compile(ast.Module(body=selected, type_ignores=[]),
+                     "<windows-probe-import-origins-data>", "exec", dont_inherit=True), namespace)
+        check, failure = namespace["require_imported_module_origins"], namespace["ProbeFailure"]
+        runtime = PureWindowsPath("R:/mrk-data/runtime")
+        python, core = runtime / "python", runtime / "core.zip"
+        stdlib = python / "python314.zip"
+
+        def loaded(name, origin, archive=None):
+            module = ModuleType(name)
+            module.__spec__ = SimpleNamespace(name=name, origin=None if origin is None else str(origin),
+                                             loader=SimpleNamespace(archive=None if archive is None else str(archive)))
+            return module
+
+        def fixture_modules():
+            producer = loaded("pyexpat", python / "pyexpat.pyd")
+            wrapper = loaded("xml.parsers.expat", stdlib / "xml/parsers/expat.pyc", stdlib)
+            modules = {"pyexpat": producer, "xml.parsers.expat": wrapper,
+                       "sys": loaded("sys", "built-in"), "_frozen_importlib": loaded("_frozen_importlib", "frozen"),
+                       "mobile_release": loaded("mobile_release", core / "mobile_release/__init__.py", core),
+                       "json": loaded("json", stdlib / "json/__init__.pyc", stdlib),
+                       "_ssl": loaded("_ssl", python / "_ssl.pyd"),
+                       "__main__": ModuleType("__main__"), "inert_none_sentinel": None}
+            for suffix in ("errors", "model"):
+                child = ModuleType("pyexpat." + suffix)
+                setattr(producer, suffix, child)
+                setattr(wrapper, suffix, child)
+                modules["pyexpat." + suffix] = modules["xml.parsers.expat." + suffix] = child
+            return modules
+
+        def replace_support(modules, replacement):
+            for parent in ("pyexpat", "xml.parsers.expat"):
+                setattr(modules[parent], "errors", replacement)
+                modules[parent + ".errors"] = replacement
+
+        original = fixture_modules()
+        snapshot = dict(original)
+        attributes = {name: vars(module).copy() for name, module in original.items() if module is not None}
+        self.assertIsNone(check(original, core, stdlib, python))
+        self.assertEqual(original, snapshot)
+        for name, expected in attributes.items():
+            self.assertEqual(vars(original[name]), expected)
+        # Parent validation must not depend on registry order or path spelling.
+        reordered = {name: value for name, value in original.items() if name not in {"pyexpat", "xml.parsers.expat"}}
+        reordered.update({name: original[name] for name in ("pyexpat", "xml.parsers.expat")})
+        reordered["pyexpat"].__spec__.origin = str(python / "pyexpat.pyd").swapcase().replace("\\", "/")
+        self.assertIsNone(check(reordered, core, stdlib, python))
+        at_bound = fixture_modules()
+        at_bound.update(("inert_none_" + str(index), None) for index in range(2048 - len(at_bound)))
+        self.assertIsNone(check(at_bound, core, stdlib, python))
+        for invalid in ([], dict(at_bound, one_extra=None)):
+            with self.subTest(bound=type(invalid).__name__), self.assertRaises(failure) as raised:
+                check(invalid, core, stdlib, python)
+            self.assertEqual((raised.exception.code, raised.exception.module), ("python_module_bound", None))
+
+        mutations = [
+            ("missing producer", lambda m: m.pop("pyexpat"), "python_expat_parent_origin", "pyexpat"),
+            ("missing wrapper", lambda m: m.pop("xml.parsers.expat"), "python_expat_parent_origin", "xml.parsers.expat"),
+            ("non-module producer", lambda m: m.__setitem__("pyexpat", SimpleNamespace(**vars(m["pyexpat"]))),
+             "python_expat_parent_origin", "pyexpat"),
+            ("non-module wrapper", lambda m: m.__setitem__("xml.parsers.expat", SimpleNamespace(**vars(m["xml.parsers.expat"]))),
+             "python_expat_parent_origin", "xml.parsers.expat"),
+            ("missing producer name", lambda m: delattr(m["pyexpat"], "__name__"),
+             "python_expat_parent_origin", "pyexpat"),
+            ("producer path", lambda m: setattr(m["pyexpat"].__spec__, "origin", "R:/outside/pyexpat.pyd"),
+             "python_expat_parent_origin", "pyexpat"),
+            ("producer spec name", lambda m: setattr(m["pyexpat"].__spec__, "name", "other"),
+             "python_expat_parent_origin", "pyexpat"),
+            ("wrapper core loader", lambda m: setattr(m["xml.parsers.expat"].__spec__.loader, "archive", str(core)),
+             "python_expat_parent_origin", "xml.parsers.expat"),
+            ("wrapper core origin", lambda m: m.__setitem__("xml.parsers.expat",
+                                                         loaded("xml.parsers.expat", core / "xml/parsers/expat.pyc", core)),
+             "python_expat_parent_origin", "xml.parsers.expat"),
+            ("wrapper origin", lambda m: setattr(m["xml.parsers.expat"].__spec__, "origin", "R:/outside/expat.pyc"),
+             "python_expat_parent_origin", "xml.parsers.expat"),
+            ("producer attachment", lambda m: setattr(m["pyexpat"], "errors", ModuleType("pyexpat.errors")),
+             "python_expat_support_identity", "pyexpat.errors"),
+            ("wrapper attachment", lambda m: setattr(m["xml.parsers.expat"], "errors", ModuleType("pyexpat.errors")),
+             "python_expat_support_identity", "pyexpat.errors"),
+            ("same-named replacement", lambda m: m.__setitem__("pyexpat.errors", ModuleType("pyexpat.errors")),
+             "python_expat_support_identity", "pyexpat.errors"),
+            ("non-module support", lambda m: replace_support(m, SimpleNamespace(**vars(m["pyexpat.errors"]))),
+             "python_expat_support_identity", "pyexpat.errors"),
+            ("canonical name", lambda m: setattr(m["pyexpat.errors"], "__name__", "other"),
+             "python_expat_support_metadata", "pyexpat.errors"),
+            ("missing spec field", lambda m: delattr(m["pyexpat.errors"], "__spec__"),
+             "python_expat_support_metadata", "pyexpat.errors"),
+            ("fabricated spec", lambda m: setattr(m["pyexpat.errors"], "__spec__", SimpleNamespace(origin=None)),
+             "python_expat_support_metadata", "pyexpat.errors"),
+            ("fabricated loader", lambda m: setattr(m["pyexpat.errors"], "__loader__", object()),
+             "python_expat_support_metadata", "pyexpat.errors"),
+            ("fabricated package", lambda m: setattr(m["pyexpat.errors"], "__package__", "pyexpat"),
+             "python_expat_support_metadata", "pyexpat.errors"),
+            ("fabricated file", lambda m: setattr(m["pyexpat.errors"], "__file__", None),
+             "python_expat_support_metadata", "pyexpat.errors"),
+            ("fabricated path", lambda m: setattr(m["pyexpat.errors"], "__path__", []),
+             "python_expat_support_metadata", "pyexpat.errors"),
+            ("extra alias", lambda m: m.__setitem__("unknown.alias", m["pyexpat.errors"]),
+             "python_module_spec_missing", None),
+            ("unknown no-spec", lambda m: m.__setitem__("unknown.module", ModuleType("unknown.module")),
+             "python_module_spec_missing", None),
+            ("unknown missing origin", lambda m: m.__setitem__("unknown.origin", loaded("unknown.origin", None)),
+             "python_module_origin_missing", None),
+            ("core package from stdlib", lambda m: m.__setitem__("mobile_release",
+                                                              loaded("mobile_release", stdlib / "mobile_release/__init__.py", stdlib)),
+             "core_import_origin", None),
+            ("extension outside", lambda m: setattr(m["_ssl"].__spec__, "origin", "R:/outside/_ssl.pyd"),
+             "python_extension_origin", "_ssl.pyd"),
+        ]
+        for name in ("pyexpat.errors", "pyexpat.model", "xml.parsers.expat.errors", "xml.parsers.expat.model"):
+            canonical = "pyexpat." + name.rsplit(".", 1)[1]
+            mutations.append(("missing " + name, lambda m, name=name: m.pop(name),
+                              "python_expat_support_identity", canonical))
+            mutations.append(("None " + name, lambda m, name=name: m.__setitem__(name, None),
+                              "python_expat_support_identity", canonical))
+        for label, change, code, module in mutations:
+            with self.subTest(refusal=label):
+                values = fixture_modules()
+                change(values)
+                with self.assertRaises(failure) as raised:
+                    check(values, core, stdlib, python)
+                self.assertEqual((raised.exception.code, raised.exception.module), (code, module))
+        for origin in ([], {}, 7, False):
+            with self.subTest(origin_type=type(origin).__name__):
+                values = fixture_modules()
+                values["json"].__spec__.origin = origin
+                with self.assertRaises(failure) as raised:
+                    check(values, core, stdlib, python)
+                self.assertEqual((raised.exception.code, raised.exception.module), ("python_module_origin_type", None))
+        values = fixture_modules()
+        namespace_module = loaded("unknown.namespace", None)
+        namespace_module.__spec__.submodule_search_locations = [str(python / "unknown")]
+        values["unknown.namespace"] = namespace_module
+        with self.assertRaises(failure) as raised:
+            check(values, core, stdlib, python)
+        self.assertEqual((raised.exception.code, raised.exception.module), ("python_module_origin_missing", None))
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+        origin_calls = [index for index, node in enumerate(main.body) if isinstance(node, ast.Expr)
+                        and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                        and node.value.func.id == "imported_origins"]
+        self.assertEqual(len(origin_calls), 1)
+        stage = main.body[origin_calls[0] - 1]
+        self.assertIsInstance(stage, ast.Assign)
+        self.assertEqual([target.id for target in stage.targets], ["STAGE"])
+        self.assertIsInstance(stage.value, ast.Constant)
+        self.assertEqual(stage.value.value, "import-origins")
+
     def test_native_dependency_versions_use_exact_cpython_layout(self):
         # Read the native probe only as bounded DATA. Never import or execute
         # its module, behavior(), main(), supplier code or native API calls.
