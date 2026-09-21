@@ -220,9 +220,15 @@ class MacInstalledData(unittest.TestCase):
             audit = workflow.index('> "$MRK_MACOS_WORK/' + label + '-audit.json"', start)
             block = workflow[start:audit]
             self.assertIn('cd "$MRK_MACOS_WORK/' + scripts + '" || exit', block)
-            self.assertIn('/usr/bin/tar -c -z -f - --format=odc --uid=0 --gid=0', block)
+            target = '"$MRK_MACOS_WORK/' + label + '-parts/Scripts"'
+            guard = '[[ ! -e ' + target + ' && ! -L ' + target + ' ]]'
+            command = '/usr/bin/tar -c -z -f ' + target + ' --format=odc --uid=0 --gid=0'
+            self.assertIn(guard, block)
+            self.assertIn(command, block)
+            self.assertLess(block.index(guard), block.index(command))
+            self.assertNotIn('/usr/bin/tar -c -z -f - ', block)
             self.assertIn('--no-acls --no-xattrs --no-fflags --no-mac-metadata .', block)
-            self.assertIn(') > "$MRK_MACOS_WORK/' + label + '-parts/Scripts"', block)
+            self.assertNotIn(') > ' + target, block)
             self.assertIn('/bin/mkdir -m 700 "$MRK_MACOS_WORK/' + label + '-final"', block)
             self.assertIn('cd "$MRK_MACOS_WORK/' + label + '-parts" || exit', block)
             final = '$MRK_MACOS_WORK/' + label + '-final/' + basename + '.pkg'

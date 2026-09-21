@@ -77,6 +77,9 @@ bytes into fresh parts. Native macOS tar creates gzip odc Scripts with numeric
 UID0/GID0 overrides from the original fresh scripts tree; native xar assembles a
 separate fresh package. No source chown, privileged preparation, custom archive
 serializer, XML rewriting or final-destination payload is involved.
+Tar writes the guarded new regular `Scripts` file in its already private parts
+directory, not stdout: BSD tar pads stdout even when compressed, which the strict
+gzip audit correctly rejects. The native file writer has no other producer.
 
 Preparation is **not** final acceptance. The final DATA audit rechecks the
 original, requires byte-identical PackageInfo, exactly PackageInfo/Scripts XAR

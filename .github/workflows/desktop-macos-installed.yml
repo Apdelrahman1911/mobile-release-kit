@@ -123,13 +123,15 @@ jobs:
             --output "$MRK_MACOS_WORK/package-format-parts" > "$MRK_MACOS_WORK/package-format-prepare.json"
           # Native tools only write fresh outputs as this nonroot account.
           # Preparation is not final0:0 acceptance; preserve the original pkg.
+          # BSD tar pads stdout even when compressed; use the fresh private file.
+          [[ ! -e "$MRK_MACOS_WORK/package-format-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-format-parts/Scripts" ]]
           set +e
           (
             cd "$MRK_MACOS_WORK/package-format-scripts" || exit
             /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
-              /usr/bin/tar -c -z -f - --format=odc --uid=0 --gid=0 \
+              /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/package-format-parts/Scripts" --format=odc --uid=0 --gid=0 \
               --no-acls --no-xattrs --no-fflags --no-mac-metadata .
-          ) > "$MRK_MACOS_WORK/package-format-parts/Scripts"
+          )
           tar_status=$?
           set -e
           printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-format-tar.status"
@@ -353,13 +355,15 @@ jobs:
             --output "$MRK_MACOS_WORK/package-fixture-parts" > "$MRK_MACOS_WORK/package-fixture-prepare.json"
           # Native tools only write fresh outputs as this nonroot account.
           # Preparation is not final0:0 acceptance; preserve the original pkg.
+          # BSD tar pads stdout even when compressed; use the fresh private file.
+          [[ ! -e "$MRK_MACOS_WORK/package-fixture-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-fixture-parts/Scripts" ]]
           set +e
           (
             cd "$MRK_MACOS_WORK/scripts-fixture" || exit
             /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
-              /usr/bin/tar -c -z -f - --format=odc --uid=0 --gid=0 \
+              /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/package-fixture-parts/Scripts" --format=odc --uid=0 --gid=0 \
               --no-acls --no-xattrs --no-fflags --no-mac-metadata .
-          ) > "$MRK_MACOS_WORK/package-fixture-parts/Scripts"
+          )
           tar_status=$?
           set -e
           printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-fixture-tar.status"
@@ -430,13 +434,15 @@ jobs:
             --output "$MRK_MACOS_WORK/package-parts" > "$MRK_MACOS_WORK/package-prepare.json"
           # Native tools only write fresh outputs as this nonroot account.
           # Preparation is not final0:0 acceptance; preserve the original pkg.
+          # BSD tar pads stdout even when compressed; use the fresh private file.
+          [[ ! -e "$MRK_MACOS_WORK/package-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-parts/Scripts" ]]
           set +e
           (
             cd "$MRK_MACOS_WORK/scripts" || exit
             /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
-              /usr/bin/tar -c -z -f - --format=odc --uid=0 --gid=0 \
+              /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/package-parts/Scripts" --format=odc --uid=0 --gid=0 \
               --no-acls --no-xattrs --no-fflags --no-mac-metadata .
-          ) > "$MRK_MACOS_WORK/package-parts/Scripts"
+          )
           tar_status=$?
           set -e
           printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-tar.status"
