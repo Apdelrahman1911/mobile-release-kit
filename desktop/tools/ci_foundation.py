@@ -18,6 +18,7 @@ else:
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -357,6 +358,33 @@ NATIVE_TEST = "supervisor::hosted_tests::passive_hosted_contract"
 WINDOWS_SNAPSHOT_TEST = "supervisor::hosted_tests::windows_static_snapshot_hosted_contract"
 FOUNDATION_SCOPE = "passive-v1"
 WINDOWS_SNAPSHOT_SCOPE = "windows-snapshot-v1"
+WINDOWS_PAYLOAD_SCOPE = "windows-payload-v1"
+WINDOWS_PAYLOAD_EVIDENCE_SCOPE = "windows-embedded-payload-native-v1"
+WINDOWS_PAYLOAD_PHASES = frozenset({"prepare", "acquire", "compile", "windows-payload", "retain"})
+WINDOWS_PAYLOAD_WORKFLOW = ".github/workflows/desktop-windows-payload.yml"
+WINDOWS_PAYLOAD_REF = "refs/heads/verify/desktop-windows-payload"
+WINDOWS_PAYLOAD_TEST = "supervisor::hosted_tests::windows_embedded_payload_hosted_contract"
+WINDOWS_PAYLOAD_CASES = (
+    "copied-capabilities", "copied-catalog", "copied-probe",
+    "poisoned-capabilities", "poisoned-catalog", "poisoned-probe",
+    "refuse-pyvenv", "refuse-python-pth", "refuse-extra-pth", "refuse-sitecustomize", "refuse-usercustomize",
+)
+WINDOWS_PAYLOAD_SOURCES = tuple(sorted((
+    WINDOWS_PAYLOAD_WORKFLOW, "desktop/tools/prepare_windows_embedded_payload.py", "desktop/tools/prepare_runtime.py",
+    "desktop/tools/ci_foundation.py", "desktop/licenses/windows-embedded-runtime.txt", "desktop/github-ca.pem",
+    "desktop/licenses/CA-PROVENANCE.txt", "desktop/licenses/LICENSE.certifi", "desktop/licenses/LICENSE.MPL-2.0.txt",
+    "desktop/engine_bootstrap.py", "desktop/config_edit_bootstrap.py", "desktop/github_connection_bootstrap.py",
+    "desktop/environment_bootstrap.py", "desktop/offline_preflight_bootstrap.py", "desktop/android_build_bootstrap.py",
+    "desktop/src-tauri/src/hosted_tests.rs", "desktop/src-tauri/src/supervisor.rs", "desktop/src-tauri/src/runtime.rs",
+    "desktop/src-tauri/src/protocol.rs", "desktop/src-tauri/src/error.rs", "desktop/src-tauri/src/lib.rs",
+    "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
+    "desktop/src-tauri/runtime-contract.md", "tests/native_desktop_payload_windows.py",
+    "tests/desktop/test_windows_embedded_payload.py", "tests/desktop/test_runtime_preparation.py",
+)))
+WINDOWS_PAYLOAD_NOT_VERIFIED = (
+    "production-runtime-enablement", "installed-hostile-writer-custody", "windows-build-owner",
+    "windows-static-snapshot-transfer", "configuration-saving", "native-gui-quit", "tls", "stores", "installers",
+)
 WINDOWS_SNAPSHOT_PUBLIC_SCOPE = "windows-static-snapshot-native-only-not-desktop-enablement"
 WINDOWS_SNAPSHOT_PHASES = frozenset({"prepare", "acquire", "compile", "windows-snapshot", "clean"})
 WINDOWS_SNAPSHOT_RECEIPT_SCOPE = "windows-static-snapshot-native-v1"
@@ -947,6 +975,7 @@ TOOL_CHECKS = frozenset({
     "metadata-transaction-eof-native-contract", "metadata-core-ordinary", "metadata-core-committed-fsync",
     "metadata-core-committed-close", "metadata-source-status",
     "windows-snapshot-native-contract",
+    "windows-payload-download", "windows-payload-native-contract",
     "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
     "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
     "environment-source-status", "environment-source-inventory",
@@ -965,7 +994,7 @@ def require(condition: bool, message: str) -> None:
 
 def admit_phase(scope: str, phase: str) -> None:
     """Closed scope selection, before context, tools, or native dispatch."""
-    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
+    require(scope in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, WINDOWS_PAYLOAD_SCOPE, *COMPILE_PROFILES}, "Unknown desktop verification scope")
     if scope in COMPILE_PROFILES:
         require(phase in COMPILE_PHASES, "Compiler-only scope cannot execute a native phase")
     elif scope == WORKFLOW_NATIVE_SCOPE:
@@ -976,6 +1005,8 @@ def admit_phase(scope: str, phase: str) -> None:
         require(phase in environment_native_profile(scope)["phases"], "Environment-only scope cannot execute an unrelated phase")
     elif scope == WINDOWS_SNAPSHOT_SCOPE:
         require(phase in WINDOWS_SNAPSHOT_PHASES, "Windows snapshot scope cannot execute an unrelated phase")
+    elif scope == WINDOWS_PAYLOAD_SCOPE:
+        require(phase in WINDOWS_PAYLOAD_PHASES, "Windows payload scope cannot execute an unrelated phase")
     elif scope == GITHUB_READONLY_SCOPE:
         require(phase in GITHUB_READONLY_PHASES, "G1 scope cannot execute an unrelated phase")
     elif scope == GITHUB_TLS_SCOPE:
@@ -991,6 +1022,7 @@ def admit_platform(scope: str, platform: str) -> None:
     require(scope != METADATA_NATIVE_SCOPE or platform == "linux", "Metadata native verification requires Linux")
     require(scope not in ENVIRONMENT_NATIVE_SCOPES or platform in {"linux", "macos"}, "Environment native verification requires its exact Linux or macOS host")
     require(scope != WINDOWS_SNAPSHOT_SCOPE or platform == "windows", "Windows snapshot verification requires Windows")
+    require(scope != WINDOWS_PAYLOAD_SCOPE or platform == "windows", "Windows payload verification requires Windows")
     require(scope != GITHUB_READONLY_SCOPE or platform == "linux", "G1 native verification requires Linux")
     require(scope != GITHUB_TLS_SCOPE or platform == "linux", "TLS verification requires Linux")
 
@@ -1211,9 +1243,9 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
 def admitted_host(*, retention_only: bool = False) -> str:
     require(os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
-            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, *COMPILE_PROFILES},
+            and os.environ.get("MRK_DESKTOP_HOSTED_CHECKS") in {BOUNDARY_SCOPE, WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, WINDOWS_SNAPSHOT_SCOPE, WINDOWS_PAYLOAD_SCOPE, *COMPILE_PROFILES},
             "This fixed check requires an explicitly admitted disposable hosted job")
-    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, *ENVIRONMENT_NATIVE_SCOPES},
+    require(not retention_only or os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {METADATA_NATIVE_SCOPE, WINDOWS_PAYLOAD_SCOPE, *ENVIRONMENT_NATIVE_SCOPES},
             "DATA-only admission is restricted to fixed retention")
     platform = os.environ.get("MRK_DESKTOP_PLATFORM", "")
     require(platform in TARGETS and platform == {
@@ -1222,6 +1254,10 @@ def admitted_host(*, retention_only: bool = False) -> str:
     admit_platform(os.environ["MRK_DESKTOP_HOSTED_CHECKS"], platform)
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:
         admitted_scope(platform)
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_PAYLOAD_SCOPE:
+        windows_payload_binding(os.environ)
+        require(os.environ.get("RUNNER_OS") == "Windows" and os.environ.get("RUNNER_ARCH") == "X64"
+                and os.environ.get("ImageOS") == "win25", "Windows payload requires the Windows 2025 X64 image")
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
         require(os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"
                 and os.environ.get("ImageOS") == "ubuntu24" and (retention_only or os.uname().machine == "x86_64")
@@ -4979,9 +5015,397 @@ def metadata_public_bindings(context: dict) -> dict:
             "payloadBindings": METADATA_PAYLOAD_BINDINGS, "notVerified": list(METADATA_NOT_VERIFIED)}
 
 
+def windows_payload_module():
+    # Fixed tooling module, not a Python/runtime or arbitrary source selection.
+    path = Path(__file__).with_name("prepare_windows_embedded_payload.py")
+    spec = importlib.util.spec_from_file_location("_mrk_windows_payload_preparation", path)
+    require(spec is not None and spec.loader is not None, "Windows payload preparer unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def windows_payload_binding(environment: dict[str, str]) -> dict:
+    """Only the exact reviewed route/source/first attempt, never a general CI opt-in."""
+    sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
+    run_id, attempt = environment.get("GITHUB_RUN_ID", ""), environment.get("GITHUB_RUN_ATTEMPT", "")
+    require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None and sha != "0" * 40
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None
+            and re.fullmatch(r"[1-9][0-9]{0,19}", run_id) is not None and attempt == "1",
+            "Windows payload source or original run identity differs")
+    workflow_ref = f"{repository}/{WINDOWS_PAYLOAD_WORKFLOW}@{WINDOWS_PAYLOAD_REF}"
+    event = environment.get("GITHUB_EVENT_NAME")
+    event_source_matches = ((event == "push" and environment.get("MRK_EVENT_AFTER") == sha)
+                            or (event == "workflow_dispatch" and environment.get("MRK_EXPECTED_SHA") == sha))
+    require(environment.get("MRK_DESKTOP_HOSTED_CHECKS") == WINDOWS_PAYLOAD_SCOPE
+            and environment.get("GITHUB_JOB") == "windows-payload"
+            and event_source_matches
+            and environment.get("GITHUB_REF") == WINDOWS_PAYLOAD_REF
+            and environment.get("GITHUB_WORKFLOW_SHA") == sha
+            and environment.get("GITHUB_WORKFLOW_REF") == workflow_ref,
+            "Windows payload exact event/source/workflow binding differs")
+    return {"sourceSha": sha, "workflowSha": sha, "workflowPath": WINDOWS_PAYLOAD_WORKFLOW,
+            "workflowRef": workflow_ref, "runId": run_id, "attempt": attempt}
+
+
+def windows_payload_public(context: dict) -> dict:
+    return {"schemaVersion": 1, "scope": WINDOWS_PAYLOAD_EVIDENCE_SCOPE,
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha", "workflowPath", "workflowRef",
+                                            "workflowSha256", "runId", "attempt", "platform", "image", "sources", "coreFiles")},
+            "target": TARGETS["windows"], "pythonVersion": PYTHON, "rustVersion": RUST,
+            "toolPythonSha256": context["toolPythonSha256"], "notVerified": list(WINDOWS_PAYLOAD_NOT_VERIFIED)}
+
+
+def prepare_windows_payload(platform: str) -> None:
+    admit_platform(WINDOWS_PAYLOAD_SCOPE, platform)
+    binding = windows_payload_binding(os.environ)
+    source = Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True)
+    temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+    payload = windows_payload_module()
+    # The exact recipient-text gate precedes even root creation, tools or
+    # acquisition. No adjacent LICENSE, SPDX or workflow flag opens it; this
+    # experiment does not establish recipient assent or binary-delivery approval.
+    payload.notice_bytes(source)
+    payload.runtime_preparation._root(source)
+    payload.runtime_preparation._root(temp)
+    for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/target", "desktop/src-tauri/gen"):
+        require(not (source / relative).exists() and not (source / relative).is_symlink(), "Windows payload checkout is not fresh")
+    no_cargo_configuration((source / "desktop/src-tauri", source / "desktop", source, *source.parents, temp, *temp.parents))
+    root = temp / f"mrk-desktop-foundation-windows-payload-{binding['runId']}-{binding['attempt']}"
+    root.mkdir(mode=0o700)  # Deterministic one-use root; never replace failed work.
+    for name in ("home", "cargo", "rustup", "tmp", "target", "appdata", "localappdata", "windows-payload", "inputs"):
+        (root / name).mkdir(mode=0o700)
+    (root / "gitconfig-empty").touch(mode=0o600, exist_ok=False)
+    git, rustup = shutil.which("git"), shutil.which("rustup")
+    require(git is not None and rustup is not None and Path(git).is_absolute() and Path(rustup).is_absolute(),
+            "Windows hosted headless tools unavailable")
+    curl = Path(os.environ["SystemRoot"]) / "System32/curl.exe"
+    payload.runtime_preparation._root(curl.parent)
+    ordinary(curl)
+    environment = clean_environment(root)
+    tree = run([git, "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=source, env=environment, timeout=15, capture=True)
+    require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "Windows payload tree differs")
+    core_names = tuple(path.relative_to(source / "src").as_posix()
+                       for path in payload.runtime_preparation.files(source / "src/mobile_release"))
+    context = {"root": str(root), "source": str(source), "platform": platform, "executionScope": WINDOWS_PAYLOAD_SCOPE,
+               **binding, "sourceTree": tree, "image": os.environ["ImageOS"] + "/" + os.environ["ImageVersion"],
+               "workflowSha256": hash_file(source / WINDOWS_PAYLOAD_WORKFLOW),
+               "git": git, "rustup": rustup, "curl": str(curl), "curlSha256": hash_file(curl),
+               "python": str(Path(sys.executable).resolve(strict=True)), "toolPythonSha256": hash_file(Path(sys.executable)),
+               "sources": fixed_file_inventory(source, WINDOWS_PAYLOAD_SOURCES),
+               "coreFiles": fixed_file_inventory(source / "src", core_names)}
+    source_unchanged(context)
+    require(run([git, "status", "--porcelain=v1", "--untracked-files=all"], check="source-clean", cwd=source,
+                env=environment, timeout=15, capture=True) == "", "Windows payload checkout contains untracked input")
+    write_json(root / "context.json", context)
+    write_json(root / "public-bindings.json", windows_payload_public(context))
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as output:
+        output.write(f"root={root}\n")
+    print("Prepared exact Windows payload source bindings; no payload execution or native qualification.")
+
+
+def load_windows_payload_context(platform: str, *, retention_only: bool = False) -> dict:
+    admit_platform(WINDOWS_PAYLOAD_SCOPE, platform)
+    binding = windows_payload_binding(os.environ)
+    root = Path(os.environ["MRK_DESKTOP_CI_ROOT"])
+    temp = Path(os.environ["RUNNER_TEMP"]) if retention_only else Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+    require(root.is_absolute() and root.parent == temp
+            and root.name == f"mrk-desktop-foundation-windows-payload-{binding['runId']}-{binding['attempt']}",
+            "Windows payload task root differs")
+    details = root.lstat()
+    require(stat.S_ISDIR(details.st_mode) and not getattr(details, "st_file_attributes", 0) & 0x400, "Windows payload root is redirected")
+    context = read_bounded_json(root / "context.json", 512 * 1024)
+    require(type(context) is dict and all(context.get(key) == value for key, value in binding.items())
+            and context.get("executionScope") == WINDOWS_PAYLOAD_SCOPE and context.get("platform") == platform
+            and context.get("root") == str(root), "Windows payload context binding differs")
+    require(same_compile_json(read_bounded_json(root / "public-bindings.json", 512 * 1024), windows_payload_public(context)),
+            "Windows payload original public binding changed")
+    if not retention_only:
+        source = Path(context["source"])
+        require(source == Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True)
+                and context["python"] == str(Path(sys.executable).resolve(strict=True))
+                and context["toolPythonSha256"] == hash_file(Path(sys.executable))
+                and context["workflowSha256"] == hash_file(source / WINDOWS_PAYLOAD_WORKFLOW), "Windows tooling/source changed")
+        payload = windows_payload_module()
+        payload.notice_bytes(source)
+        require(fixed_file_inventory(source, WINDOWS_PAYLOAD_SOURCES) == context["sources"], "Windows fixed source roster changed")
+        names = tuple(path.relative_to(source / "src").as_posix()
+                      for path in payload.runtime_preparation.files(source / "src/mobile_release"))
+        require(fixed_file_inventory(source / "src", names) == context["coreFiles"], "Windows whole-core source changed")
+    # Retention deliberately does not reopen source, runtime, compiler or native
+    # executables, nor launch git/tools after a failed/unknown original phase.
+    return context
+
+
+def windows_payload_compile_anchors(prepared: object) -> dict[str, str]:
+    value = closed_object(prepared, {"manifestSha256", "protocolSha256", "qualification", "inputSha256",
+                                    "supplierInventorySha256", "stdlibInventorySha256", "noticeSha256"},
+                          "Windows preparation fields differ")
+    require(value["qualification"] == "prepared-not-native-verified"
+            and all(sha256_value(value[key]) for key in value if key != "qualification"),
+            "Windows preparation anchors are unavailable")
+    return {"MRK_BUNDLED_RUNTIME_MANIFEST_SHA256": value["manifestSha256"],
+            "MRK_BUNDLED_PROTOCOL_SHA256": value["protocolSha256"]}
+
+
+def windows_payload_inventory(context: dict) -> tuple[dict, list[dict]]:
+    root, source = Path(context["root"]), Path(context["source"])
+    payload = windows_payload_module()
+    prepared = read_bounded_json(root / "windows-prepared.json", 4096)
+    windows_payload_compile_anchors(prepared)
+    require(prepared["inputSha256"] == payload.ZIP_SHA256
+            and prepared["supplierInventorySha256"] == payload.OUTER_INVENTORY_SHA256
+            and prepared["stdlibInventorySha256"] == payload.STDLIB_INVENTORY_SHA256,
+            "Windows supplier admission pins differ")
+    notices = payload.notice_bytes(source)
+    require(prepared["noticeSha256"] == hashlib.sha256(notices).hexdigest(), "Windows notice binding differs")
+    payload.check_supplier_copy(root / "runtime/python", notices)
+    names = tuple(path.relative_to(root / "runtime").as_posix()
+                  for path in payload.runtime_preparation.files(root / "runtime"))
+    expected = tuple(sorted(("manifest.json", "core.zip", "github-ca.pem", *payload.runtime_preparation.BOOTSTRAPS,
+                             *["python/" + name for name, _, _ in payload.MEMBERS], "python/" + payload.NOTICE_NAME)))
+    require(names == expected, "Windows prepared runtime roster differs")
+    inventory = fixed_file_inventory(root / "runtime", names)
+    manifest = read_bounded_json(root / "runtime/manifest.json", 1024 * 1024)
+    require(hash_file(root / "runtime/manifest.json") == prepared["manifestSha256"]
+            and manifest["schemaVersion"] == 1 and manifest["protocol"] == 1 and manifest["coreVersion"] == "0.3.0"
+            and manifest["target"] == TARGETS["windows"] and manifest["protocolSha256"] == prepared["protocolSha256"]
+            and same_compile_json(manifest["files"], [row for row in inventory if row["path"] != "manifest.json"])
+            and manifest["inventorySha256"] == hashlib.sha256(canonical_json(manifest["files"])).hexdigest()
+            and manifest["coreSha256"] == next(row["sha256"] for row in inventory if row["path"] == "core.zip")
+            and prepared["protocolSha256"] == next(row["sha256"] for row in context["coreFiles"]
+                                                   if row["path"] == "mobile_release/_desktop_engine.py"),
+            "Windows prepared manifest/core/protocol binding differs")
+    return prepared, inventory
+
+
+def windows_payload_phase_value(context: dict, name: str, **facts: object) -> dict:
+    return {"schemaVersion": 1, "scope": WINDOWS_PAYLOAD_EVIDENCE_SCOPE, "phase": name, "status": "passed",
+            **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowSha256", "runId", "attempt")}, **facts}
+
+
+def windows_payload_claim(context: dict, name: str) -> None:
+    phases = ("acquire", "compile", "windows-payload")
+    require(name in phases, "Windows payload native phase differs")
+    root = Path(context["root"])
+    for previous in phases[:phases.index(name)]:
+        claim = read_bounded_json(root / f"{previous}-started.json", 4096)
+        require(same_compile_json(claim, windows_payload_phase_value(context, previous, status="started")),
+                "Windows original phase claim differs")
+        receipt = read_bounded_json(root / f"{previous}-checks.json", 64 * 1024)
+        require(type(receipt) is dict and all(receipt.get(key) == value
+                for key, value in windows_payload_phase_value(context, previous).items()), "Windows predecessor did not pass")
+    for later in phases[phases.index(name):]:
+        for suffix in ("started", "checks"):
+            path = root / f"{later}-{suffix}.json"
+            require(not path.exists() and not path.is_symlink(), "Windows phase already claimed; preserve outputs without retry")
+    write_json(root / f"{name}-started.json", windows_payload_phase_value(context, name, status="started"))
+
+
+def windows_payload_native_receipt(context: dict, inputs: dict) -> dict:
+    root = Path(context["root"])
+    value = read_bounded_json(root / "windows-payload/receipt.json", 256 * 1024)
+    require(type(value) is dict and value.get("schemaVersion") == 1 and value.get("scope") == WINDOWS_PAYLOAD_EVIDENCE_SCOPE
+            and value.get("status") == "passed" and value.get("failureCode") is None and value.get("allOwnersSettled") is True
+            and value.get("inputSha256") == hash_file(root / "windows-payload-inputs.json")
+            and same_compile_json(value.get("bindings"), inputs["bindings"])
+            and value.get("finalInventorySha256") == hashlib.sha256(canonical_json(inputs["files"])).hexdigest(),
+            "Windows native receipt is not a bound successful original observation")
+    cases = value.get("cases")
+    require(type(cases) is list and [row.get("case") for row in cases if type(row) is dict] == list(WINDOWS_PAYLOAD_CASES),
+            "Windows native case roster differs")
+    probes = []
+    for index, row in enumerate(cases):
+        spawned = index < 6
+        require(row.get("passed") is True and row.get("failureCode") is None and row.get("observerReturned") is True
+                and row.get("registeredOwners") == 0 and row.get("disabled") is False
+                and row.get("preparedInventorySha256") == value["finalInventorySha256"], "Windows native case did not settle")
+        owners = row.get("owners")
+        require(type(owners) is list and len(owners) == 1, "Windows original owner roster differs")
+        owner = owners[0]
+        require(owner.get("id") == "query-1" and owner.get("terminal") is True
+                and owner.get("unknownLatched") is False and owner.get("permitRetained") is False,
+                "Windows original passive owner remained unresolved")
+        native = owner.get("native")
+        require(type(native) is dict and all(native.get(key) is True for key in (
+                "inspection_joined", "driver_joined", "watchdog_joined")) and native.get("spawned") is spawned,
+                "Windows original inspection/management observation differs")
+        if spawned:
+            require(all(native.get(key) is True for key in ("acquisition_joined", "waited", "exit_success", "writer_joined",
+                    "writer_complete", "stdout_eof", "stderr_eof", "stdout_joined", "stderr_joined"))
+                    and native.get("stderr_bytes") == 0, "Windows original wait/EOF/IO joins differ")
+            frame = row.get("frame")
+            require(type(frame) is dict and frame.get("path") == f"{row['case']}/control/response.jsonl"
+                    and integer_between(frame.get("size"), 1, 4 * 1024 * 1024) and sha256_value(frame.get("sha256")),
+                    "Windows original frame binding differs")
+            path = root / "windows-payload" / frame["path"]
+            ordinary(path)
+            require(path.stat().st_size == frame["size"] == native.get("stdout_bytes") and hash_file(path) == frame["sha256"],
+                    "Windows retained original frame changed")
+            with path.open("rb") as stream:
+                raw = stream.read(frame["size"] + 1)
+            require(raw.endswith(b"\n") and raw.count(b"\n") == 1, "Windows retained original response framing differs")
+            response = bounded_json(raw, 4 * 1024 * 1024)
+            require(type(response) is dict and set(response) == {"protocol", "id", "ok", "result"}
+                    and response["protocol"] == 1 and response["id"] == owner["id"] and response["ok"] is True,
+                    "Windows retained original response envelope differs")
+            if index in (2, 5):
+                require(frame["size"] <= 64 * 1024 and response["result"].get("scope") == WINDOWS_PAYLOAD_EVIDENCE_SCOPE,
+                        "Windows fixed probe response differs")
+                probes.append(response["result"])
+        else:
+            require(native.get("acquisition_joined") is False and native.get("waited") is False
+                    and native.get("exit_success") is None and native.get("stdout_bytes") == 0 and native.get("stderr_bytes") == 0
+                    and row.get("frame") is None, "Windows refusal was not prelaunch")
+    require(len(probes) == 2 and same_compile_json(probes[0], probes[1]), "Windows hostile-parent probe changed origins/results")
+    return value
+
+
+def retain_windows_payload(context: dict) -> None:
+    # DATA only, including on failure. Never rescan live runtime/source or delete
+    # any work. No interpreter ZIP, DLL, compiler binary or generated executable
+    # is uploaded by this workflow, even when native checks pass.
+    root = Path(context["root"])
+    output = root / "evidence"
+    output.mkdir(mode=0o700)
+    names = ["public-bindings.json", "windows-prepared.json", "windows-payload-inputs.json", "windows-compiled-test.json",
+             "windows-compile-messages.jsonl",
+             "acquire-started.json", "acquire-checks.json", "compile-started.json", "compile-checks.json",
+             "windows-payload-started.json", "windows-payload-checks.json", "windows-payload/receipt.json"]
+    names.extend(f"windows-payload/{name}/control/{stream}.jsonl" for name in WINDOWS_PAYLOAD_CASES for stream in ("response", "stderr"))
+    retained, total = [], 0
+    for name in names:
+        path = root / name
+        if not path.exists() and not path.is_symlink():
+            continue
+        # Fixed existing case/control ancestry only; no recursion/glob discovery.
+        for parent in path.parents:
+            if parent == root:
+                break
+            details = parent.lstat()
+            require(stat.S_ISDIR(details.st_mode) and not getattr(details, "st_file_attributes", 0) & 0x400,
+                    "Windows retention input ancestry is redirected")
+        ordinary(path)
+        size = path.stat().st_size
+        limit = (16 * 1024 * 1024 if name == "windows-compile-messages.jsonl" else 64 * 1024 if name.endswith("/stderr.jsonl")
+                 else 4 * 1024 * 1024 if name.endswith(".jsonl") else 512 * 1024)
+        require(size <= limit and total + size <= 64 * 1024 * 1024, "Windows retained evidence bound exceeded")
+        with path.open("rb") as source:
+            data = source.read(size + 1)
+        require(len(data) == size, "Windows retained evidence changed")
+        destination = output / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("xb") as target:
+            require(target.write(data) == size, "Windows evidence copy incomplete")
+        total += size
+        retained.append({"path": name, "size": size, "sha256": hashlib.sha256(data).hexdigest()})
+    write_json(output / "retention.json", {"schemaVersion": 1, "scope": WINDOWS_PAYLOAD_EVIDENCE_SCOPE,
+               "sourceSha": context["sourceSha"], "runId": context["runId"], "attempt": context["attempt"],
+               "files": retained, "deleted": False, "binaryUpload": False, "vmDisposalRequired": True})
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(f"evidence={output}\n")
+
+
+def phase_windows_payload(name: str, context: dict) -> None:
+    admit_phase(WINDOWS_PAYLOAD_SCOPE, name)
+    require(name != "prepare", "Windows preparation has a separate fixed entry")
+    if name == "retain":
+        retain_windows_payload(context)
+        return
+    root, source = Path(context["root"]), Path(context["source"])
+    windows_payload_claim(context, name)
+    # A repeated/failed original phase is refused using only retained claims,
+    # before any source/tool/runtime reopening or new native tool process.
+    context = load_windows_payload_context("windows")
+    source_unchanged(context)
+    no_cargo_configuration((root, *root.parents, source / "desktop/src-tauri", source / "desktop", source, *source.parents))
+    environment = clean_environment(root)
+    environment["GITHUB_SHA"] = context["sourceSha"]
+    manifest = source / "desktop/src-tauri/Cargo.toml"
+    if name == "acquire":
+        payload = windows_payload_module()
+        payload.notice_bytes(source)
+        curl = Path(context["curl"])
+        require(hash_file(curl) == context["curlSha256"], "Windows fixed acquisition tool changed")
+        archive = root / "inputs" / payload.ZIP_NAME
+        require(not archive.exists() and not archive.is_symlink(), "Windows acquisition output already exists")
+        # No redirect following, retry, index, ambient curlrc/proxy or executable
+        # acquisition. A non-200 response is rejected even if curl exits zero.
+        response = run([str(curl), "--disable", "--proto", "=https", "--tlsv1.2", "--noproxy", "*",
+                        "--connect-timeout", "15", "--max-time", "120", "--max-filesize", "67108864",
+                        "--retry", "0", "--max-redirs", "0", "--fail", "--silent", "--show-error",
+                        "--output", str(archive), "--write-out", "%{http_code}\n%{url_effective}\n%{num_redirects}\n%{size_download}\n",
+                        payload.ZIP_URL], check="windows-payload-download", cwd=root, env=environment, timeout=120, capture=True)
+        require(response.splitlines() == ["200", payload.ZIP_URL, "0", str(payload.ZIP_BYTES)], "Windows fixed HTTPS response differs")
+        prepared = payload.prepare(source, archive, root / "runtime")
+        write_json(root / "windows-prepared.json", prepared)
+        windows_payload_inventory(context)
+        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+            check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
+        cargo, _ = tools(context, environment)
+        with (root / "metadata.json").open("x", encoding="utf-8", newline="\n") as output:
+            run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                 "--features", "development-runtime", "--filter-platform", TARGETS["windows"], "--manifest-path", str(manifest)],
+                check="locked-platform-metadata", cwd=root, env=environment, timeout=600, output=output)
+        source_unchanged(context)
+        write_json(root / "acquire-checks.json", windows_payload_phase_value(context, name, prepared=prepared,
+                   acquisition={"url": payload.ZIP_URL, "size": payload.ZIP_BYTES, "sha256": payload.ZIP_SHA256,
+                                "httpStatus": 200, "redirects": 0, "toolSha256": context["curlSha256"]}))
+        return
+    prepared, files = windows_payload_inventory(context)
+    environment.update(windows_payload_compile_anchors(prepared))
+    if name == "compile":
+        cargo, _ = tools(context, environment)
+        argv = [cargo, "test", "--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", TARGETS["windows"],
+                "--manifest-path", str(manifest), "--target-dir", str(root / "target"), "--lib", "--no-run",
+                "--features", "development-runtime", "--message-format=json"]
+        messages = root / "windows-compile-messages.jsonl"
+        with messages.open("x", encoding="utf-8", newline="\n") as output:
+            run(argv, check="headless-test-compile-only", cwd=root, env=environment, timeout=600, output=output)
+        compiled = windows_compile_record(context, argv, messages)
+        source_unchanged(context)
+        require(windows_payload_inventory(context) == (prepared, files), "Windows runtime changed during compilation")
+        write_json(root / "compile-checks.json", windows_payload_phase_value(context, name, compiled=compiled, prepared=prepared))
+        return
+    require(name == "windows-payload", "Unknown Windows payload dispatch")
+    compiled = read_bounded_json(root / "windows-compiled-test.json", 8192)
+    executable = ordinary_windows_executable(compiled["path"], target_root=root / "target")
+    require(compiled["sourceSha"] == context["sourceSha"] and executable.stat().st_size == compiled["size"]
+            and hash_file(executable) == compiled["sha256"]
+            and same_compile_json(read_bounded_json(root / "compile-checks.json", 64 * 1024),
+                                  windows_payload_phase_value(context, "compile", compiled=compiled, prepared=prepared)),
+            "Windows original compiled executable or anchors changed")
+    inputs = {"schemaVersion": 1, "scope": WINDOWS_PAYLOAD_EVIDENCE_SCOPE, "bindings": windows_payload_public(context),
+              "prepared": prepared, "files": files, "compiled": compiled}
+    write_json(root / "windows-payload-inputs.json", inputs)
+    environment.update(MRK_DESKTOP_DEV_PYTHON=str(root / "runtime/python/python.exe"), MRK_DESKTOP_DEV_CORE=str(root / "runtime/core.zip"),
+                       MRK_DESKTOP_TEST_ROOT=str(root / "windows-payload"), MRK_DESKTOP_TEST_CORE_ZIP=str(root / "runtime/core.zip"),
+                       MRK_DESKTOP_HOSTED_CHECKS=WINDOWS_PAYLOAD_SCOPE, GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
+                       RUNNER_OS="Windows", RUNNER_ARCH="X64", ImageOS="win25")
+    for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF", "GITHUB_REF",
+                "GITHUB_EVENT_NAME", "GITHUB_JOB", "GITHUB_REPOSITORY"):
+        environment[key] = os.environ[key]
+    for key in ("MRK_EVENT_AFTER", "MRK_EXPECTED_SHA"):
+        environment[key] = os.environ.get(key, "")
+    # This exact no-run artifact, once. Cargo/tool discovery is not invoked in
+    # the native branch. Existing CI timeout is failure/disposal, not evidence of
+    # original passive owner finality. Unknown never authorizes a successor.
+    run([str(executable), WINDOWS_PAYLOAD_TEST, "--exact", "--ignored", "--test-threads=1"],
+        check="windows-payload-native-contract", cwd=root, env=environment, timeout=120)
+    receipt = windows_payload_native_receipt(context, inputs)
+    require(windows_payload_inventory(context) == (prepared, files), "Windows final prepared inventory changed")
+    source_unchanged(context)
+    write_json(root / "windows-payload-checks.json", windows_payload_phase_value(context, name,
+               nativeReceiptSha256=hash_file(root / "windows-payload/receipt.json"),
+               finalInventorySha256=receipt["finalInventorySha256"], compiled=compiled))
+
+
 def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, "prepare")
     admit_platform(scope, platform)
+    if scope == WINDOWS_PAYLOAD_SCOPE:
+        prepare_windows_payload(platform)
+        return
     if scope in ENVIRONMENT_NATIVE_SCOPES:
         prepare_environment_native(platform)
         return
@@ -5138,6 +5562,8 @@ def metadata_invocation() -> dict:
 
 def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: bool = False) -> dict:
     admit_platform(scope, platform)
+    if scope == WINDOWS_PAYLOAD_SCOPE:
+        return load_windows_payload_context(platform, retention_only=retention_only)
     if scope in ENVIRONMENT_NATIVE_SCOPES:
         return load_environment_native_context(platform, retention_only=retention_only)
     require(not retention_only or scope == METADATA_NATIVE_SCOPE, "Unexpected DATA-only context route")
@@ -5668,6 +6094,9 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
 def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, name)
     admit_platform(scope, platform)
+    if scope == WINDOWS_PAYLOAD_SCOPE:
+        phase_windows_payload(name, load_windows_payload_context(platform, retention_only=True))
+        return
     context = (load_context(platform, scope, retention_only=True) if (scope == METADATA_NATIVE_SCOPE and name == "clean"
                or scope == ENVIRONMENT_NATIVE_SCOPE and name == "retain" or scope == OFFLINE_NATIVE_SCOPE)
                else load_context(platform, scope))
@@ -7541,7 +7970,7 @@ def phase_environment_native(name: str, context: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=(*BOUNDARY_PHASES, "workflow-owner", "workflow-transaction-eof", "workflow-core",
-                        "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "github-owner", "github-tls", "github-tls-deadline",
+                        "metadata-owner", "metadata-transaction-eof", "metadata-core", "windows-snapshot", "windows-payload", "github-owner", "github-tls", "github-tls-deadline",
                          "environment-native", "offline-cli11", "retain"))
     args = parser.parse_args()
     os.umask(0o077)
@@ -7550,6 +7979,7 @@ def main() -> int:
         scope = os.environ.get("MRK_DESKTOP_HOSTED_CHECKS", "")
         admit_phase(scope, args.phase)
         platform = (admitted_host(retention_only=True) if (scope == METADATA_NATIVE_SCOPE and args.phase == "clean"
+                    or scope == WINDOWS_PAYLOAD_SCOPE and args.phase != "prepare"
                     or scope == ENVIRONMENT_NATIVE_SCOPE and args.phase == "retain"
                     or scope == OFFLINE_NATIVE_SCOPE and args.phase != "prepare") else admitted_host())
         prepare(platform, scope) if args.phase == "prepare" else phase(args.phase, platform, scope)

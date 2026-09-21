@@ -12,19 +12,34 @@ type Query = Result<Value, BridgeError>;
 const FIXTURE: &str = include_str!("../tests/fixtures/passive_core/_desktop_engine.py");
 const PACKAGE: &str = include_str!("../tests/fixtures/passive_core/__init__.py");
 
-// Two fixed modes only. No arbitrary bootstrap path/callback or production opt-in.
+// Fixed private modes only. No arbitrary bootstrap path/callback or production opt-in.
 #[cfg(windows)]
 #[derive(Clone, Default)]
 pub(super) enum WindowsBootstrap {
     #[default]
     Ordinary,
     Snapshot { group: &'static str, id: &'static str, nonce: String, binding: String, manifest: String },
+    #[cfg(all(debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        target_arch = "x86_64", target_env = "msvc"))]
+    PreparedPayload(windows_payload::Admission),
+    #[cfg(all(debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+        target_arch = "x86_64", target_env = "msvc"))]
+    PreparedPayloadProbe(windows_payload::Admission),
 }
 
 #[cfg(windows)]
 pub(super) fn select_windows_bootstrap(runtime: VerifiedRuntime, selection: WindowsBootstrap,
     endpoint: Instant) -> Result<VerifiedRuntime, BridgeError> {
-    windows_snapshot::select(runtime, selection, endpoint).map_err(|_| {
+    let selected = match selection {
+        #[cfg(all(debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+            target_arch = "x86_64", target_env = "msvc"))]
+        WindowsBootstrap::PreparedPayload(admission) => windows_payload::select(runtime, admission, false, endpoint),
+        #[cfg(all(debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+            target_arch = "x86_64", target_env = "msvc"))]
+        WindowsBootstrap::PreparedPayloadProbe(admission) => windows_payload::select(runtime, admission, true, endpoint),
+        selection => windows_snapshot::select(runtime, selection, endpoint),
+    };
+    selected.map_err(|_| {
         if Instant::now() >= endpoint { BridgeError::timeout() }
         else { BridgeError::unavailable("The fixed hosted Windows fixture copy or descriptor was not admitted.") }
     })
@@ -48,6 +63,9 @@ pub(super) struct Observation {
     #[cfg(windows)]
     #[serde(skip)]
     pub windows_stderr: Vec<u8>,
+    #[cfg(windows)]
+    #[serde(skip)]
+    pub windows_stdout: Vec<u8>,
     #[cfg(windows)]
     #[serde(skip)]
     pub windows_exit_code: Option<i32>,
@@ -119,7 +137,11 @@ pub(super) async fn observed_read<R: AsyncRead + Unpin>(reader: R, limit: usize,
             #[cfg(windows)]
             { observed.windows_stderr = end.bytes.clone(); }
         }
-        else { observed.stdout_eof = end.eof; observed.stdout_bytes = end.bytes.len(); }
+        else {
+            observed.stdout_eof = end.eof; observed.stdout_bytes = end.bytes.len();
+            #[cfg(windows)]
+            { observed.windows_stdout = end.bytes.clone(); }
+        }
     }
     if let Some(gate) = gate { gate.wait().await; }
     end
@@ -3082,6 +3104,486 @@ mod windows_snapshot {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Disposable fixed Windows scope only; independent source review and execution admission required"]
 async fn windows_static_snapshot_hosted_contract() { windows_snapshot::run().await; }
+
+// Trusted/quiescent prepared-payload fixture only. The original passive owner
+// still performs inspection/acquisition/wait/IO/management under its unchanged
+// endpoints. No Windows build owner, installed custody or production opt-in.
+#[cfg(all(debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+    target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+mod windows_payload {
+    use super::*;
+    use std::{collections::BTreeMap, ffi::OsString, io::{Read, Write}, os::windows::fs::MetadataExt};
+
+    const SCOPE: &str = "windows-embedded-payload-native-v1";
+    const MODE: &str = "windows-payload-v1";
+    const WORKFLOW: &str = ".github/workflows/desktop-windows-payload.yml";
+    const REF: &str = "refs/heads/verify/desktop-windows-payload";
+    const PROBE: &[u8] = include_bytes!("../../../tests/native_desktop_payload_windows.py");
+    const ENGINE: &[u8] = include_bytes!("../../engine_bootstrap.py");
+    const ZIP_SHA: &str = "d297e5ff019966817ad8502465176139f2d3d840fa4ed84b13bed399a6ab1f15";
+    const STDLIB_SHA: &str = "5a7a66daf1a2c2e3c8d7a4a0d095685ec301efc3ef28cc2419e3041bf5729b65";
+    const CASES: &[&str] = &["copied-capabilities", "copied-catalog", "copied-probe",
+        "poisoned-capabilities", "poisoned-catalog", "poisoned-probe", "refuse-pyvenv", "refuse-python-pth",
+        "refuse-extra-pth", "refuse-sitecustomize", "refuse-usercustomize"];
+    const EXTRAS: &[&str] = &["pyvenv.cfg", "python._pth", "extra.pth", "sitecustomize.py", "usercustomize.py"];
+    const CANARY: &[u8] = b"# MRK INERT hostile-startup/DLL canary; no executable code.\n";
+    const NOT_VERIFIED: &[&str] = &["production-runtime-enablement", "installed-hostile-writer-custody", "windows-build-owner",
+        "windows-static-snapshot-transfer", "configuration-saving", "native-gui-quit", "tls", "stores", "installers"];
+
+    fn before(end: Instant) -> Check<()> { require(Instant::now() < end, "windows_payload_deadline") }
+    fn text(value: &Value) -> Check<&str> { value.as_str().ok_or("windows_payload_string") }
+    fn canonical(value: &Value) -> Check<Vec<u8>> {
+        // Input/manifest inventory paths are ASCII. Unlike the original frame,
+        // these fixed binding objects do not contain translated catalogue text.
+        serde_json::to_vec(value).map_err(|_| "windows_payload_json")
+    }
+    fn parse(bytes: &[u8], limit: usize) -> Check<Value> {
+        require(!bytes.is_empty() && bytes.len() <= limit, "windows_payload_json_bound")?;
+        protocol::strict_json(bytes).map_err(|_| "windows_payload_json")
+    }
+    fn ordinary(metadata: &fs::Metadata) -> bool {
+        !metadata.file_type().is_symlink() && metadata.file_attributes() & 0x400 == 0
+    }
+    fn absolute(path: PathBuf) -> Check<PathBuf> {
+        let name = path.to_str().ok_or("windows_payload_path")?;
+        require(name.is_ascii() && name.len() <= 1024 && path.is_absolute()
+            && name.len() >= 3 && !name[2..].contains(':')
+            && name[3..].split(|c| c == '\\' || c == '/').all(|part| !part.is_empty() && part != "." && part != ".."
+                && !part.ends_with('.') && !part.ends_with(' '))
+            && matches!(path.components().next(), Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::Disk(_)))
+            && !path.components().any(|part| matches!(part, std::path::Component::CurDir | std::path::Component::ParentDir)),
+            "windows_payload_drive_path")?;
+        Ok(path)
+    }
+    fn anchor(path: &Path) -> Check<()> {
+        absolute(path.to_path_buf())?;
+        let mut current = PathBuf::new();
+        for component in path.components() {
+            current.push(component.as_os_str());
+            if matches!(component, std::path::Component::Prefix(_)) { continue; }
+            require(ordinary(&fs::symlink_metadata(&current).map_err(|_| "windows_payload_ancestry")?), "windows_payload_reparse")?;
+        }
+        Ok(())
+    }
+    fn stamp(value: &fs::Metadata) -> (u64, u64, u64, u32) {
+        (value.len(), value.creation_time(), value.last_write_time(), value.file_attributes())
+    }
+    fn read(path: &Path, limit: u64, end: Instant) -> Check<Vec<u8>> {
+        before(end)?; anchor(path)?;
+        let initial = fs::symlink_metadata(path).map_err(|_| "windows_payload_file")?;
+        require(initial.is_file() && ordinary(&initial) && initial.len() <= limit, "windows_payload_file_bound")?;
+        let mut file = fs::File::open(path).map_err(|_| "windows_payload_open")?;
+        let opened = file.metadata().map_err(|_| "windows_payload_metadata")?;
+        require(ordinary(&opened) && stamp(&initial) == stamp(&opened), "windows_payload_changed")?;
+        let mut bytes = Vec::new(); let mut block = [0u8; 65536];
+        loop {
+            before(end)?;
+            let count = file.read(&mut block).map_err(|_| "windows_payload_read")?;
+            if count == 0 { break; }
+            require(bytes.len() as u64 + count as u64 <= limit, "windows_payload_file_bound")?;
+            bytes.extend_from_slice(&block[..count]);
+        }
+        let ending = file.metadata().map_err(|_| "windows_payload_metadata")?;
+        let named = fs::symlink_metadata(path).map_err(|_| "windows_payload_metadata")?;
+        require(ordinary(&ending) && ordinary(&named) && stamp(&opened) == stamp(&ending)
+            && stamp(&opened) == stamp(&named) && bytes.len() as u64 == ending.len(), "windows_payload_changed")?;
+        Ok(bytes) // Original ordinary stream closes by RAII; never a numeric retry.
+    }
+    fn executable_hash(path: &Path, end: Instant) -> Check<(u64, String)> {
+        before(end)?; anchor(path)?;
+        let initial = fs::symlink_metadata(path).map_err(|_| "windows_payload_executable")?;
+        require(initial.is_file() && initial.len() <= 512 * 1024 * 1024, "windows_payload_executable_bound")?;
+        let mut file = fs::File::open(path).map_err(|_| "windows_payload_executable")?;
+        require(file.metadata().is_ok_and(|value| ordinary(&value) && stamp(&initial) == stamp(&value)), "windows_payload_changed")?;
+        let mut digest = Sha256::new(); let mut count = 0u64; let mut block = [0u8; 65536];
+        loop {
+            before(end)?;
+            let size = file.read(&mut block).map_err(|_| "windows_payload_executable")?;
+            if size == 0 { break; }
+            count += size as u64;
+            require(count <= initial.len(), "windows_payload_changed")?;
+            digest.update(&block[..size]);
+        }
+        require(count == initial.len()
+            && file.metadata().is_ok_and(|value| ordinary(&value) && stamp(&initial) == stamp(&value))
+            && fs::symlink_metadata(path).is_ok_and(|value| ordinary(&value) && stamp(&initial) == stamp(&value)),
+            "windows_payload_changed")?;
+        Ok((count, format!("{:x}", digest.finalize())))
+    }
+    fn write(path: &Path, bytes: &[u8]) -> Check<()> {
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(|_| "windows_payload_new_file")?;
+        file.write_all(bytes).map_err(|_| "windows_payload_write")
+    }
+    fn inspect(task: &Path, end: Instant) -> Check<()> {
+        let inspected = RuntimeConfig::packaged(task.to_path_buf()).inspect_bundle_for_packaging(end)
+            .map_err(|_| "windows_payload_packaging_inspection")?;
+        require(inspected.files == 46 && inspected.target == "x86_64-pc-windows-msvc", "windows_payload_manifest_roster")
+    }
+
+    // Opaque, no public constructor. Only this module's fixed Case minting after
+    // exact hosted/source/compiled/manifest admission can populate these fields.
+    #[derive(Clone)]
+    pub(in crate::supervisor) struct Admission { task: PathBuf, case: &'static str, input_sha: String, probe: bool }
+
+    pub(super) fn select(mut runtime: VerifiedRuntime, admission: Admission, probe: bool, end: Instant) -> Check<VerifiedRuntime> {
+        before(end)?;
+        require(environment("MRK_DESKTOP_HOSTED_CHECKS")? == MODE && CASES.contains(&admission.case)
+            && admission.probe == probe, "windows_payload_selection")?;
+        let test = admission.task.join("windows-payload");
+        require(PathBuf::from(environment("MRK_DESKTOP_TEST_ROOT")?) == test
+            && hash(&read(&admission.task.join("windows-payload-inputs.json"), 512 * 1024, end)?) == admission.input_sha,
+            "windows_payload_private_input_changed")?;
+        let payload = admission.task.join("runtime");
+        require(runtime.python == payload.join("python/python.exe") && runtime.core == payload.join("core.zip")
+            && read(&runtime.bootstrap, 64 * 1024, end)? == ENGINE, "windows_payload_original_selection_changed")?;
+        // This is inside the original retained passive inspection and its
+        // original endpoint. The helper remains unqualified packaging DATA;
+        // the private hosted admission, not a product gate, selects execution.
+        inspect(&admission.task, end)?;
+        let case = test.join(admission.case);
+        let bootstrap = if probe {
+            let copied = case.join("control/payload-probe.py");
+            require(read(&copied, 64 * 1024, end)? == PROBE, "windows_payload_probe_copy_changed")?;
+            copied
+        } else {
+            let copied = payload.join("engine_bootstrap.py");
+            require(read(&copied, 64 * 1024, end)? == ENGINE, "windows_payload_engine_copy_changed")?;
+            copied
+        };
+        let cwd = case.join("canaries/cwd");
+        anchor(&cwd)?;
+        require(fs::symlink_metadata(&cwd).is_ok_and(|value| value.is_dir()), "windows_payload_case_cwd")?;
+        before(end)?;
+        runtime.bootstrap = bootstrap; runtime.cwd = cwd;
+        Ok(runtime)
+    }
+
+    struct PayloadInputs { base: Inputs, task: PathBuf, original: Vec<u8>, input_sha: String, files_sha: String }
+    impl PayloadInputs {
+        fn admit(end: Instant) -> Check<Self> {
+            require(environment("MRK_DESKTOP_HOSTED_CHECKS")? == MODE && environment("GITHUB_ACTIONS")? == "true"
+                && environment("RUNNER_ENVIRONMENT")? == "github-hosted" && environment("RUNNER_OS")? == "Windows"
+                && environment("RUNNER_ARCH")? == "X64" && environment("ImageOS")? == "win25"
+                && environment("GITHUB_JOB")? == "windows-payload"
+                && environment("GITHUB_REF")? == REF && environment("GITHUB_RUN_ATTEMPT")? == "1"
+                && crate::runtime::COMPILED_TARGET == "x86_64-pc-windows-msvc", "windows_payload_hosted_admission")?;
+            let sha = environment("GITHUB_SHA")?;
+            let event_source_matches = match environment("GITHUB_EVENT_NAME")?.as_str() {
+                "push" => environment("MRK_EVENT_AFTER")? == sha,
+                "workflow_dispatch" => environment("MRK_EXPECTED_SHA")? == sha,
+                _ => false,
+            };
+            require(sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && sha != "0".repeat(40) && Some(sha.as_str()) == option_env!("GITHUB_SHA")
+                && environment("GITHUB_WORKFLOW_SHA")? == sha && event_source_matches
+                && environment("GITHUB_WORKFLOW_REF")? == format!("{}/{WORKFLOW}@{REF}", environment("GITHUB_REPOSITORY")?),
+                "windows_payload_compiled_source")?;
+            let root = absolute(PathBuf::from(environment("MRK_DESKTOP_TEST_ROOT")?))?;
+            anchor(&root)?;
+            require(root.file_name().is_some_and(|name| name == "windows-payload")
+                && fs::read_dir(&root).map_err(|_| "windows_payload_test_root")?.next().is_none(), "windows_payload_root_not_fresh")?;
+            let task = root.parent().ok_or("windows_payload_task")?.to_path_buf();
+            let run = environment("GITHUB_RUN_ID")?;
+            require(!run.is_empty() && run.len() <= 20 && !run.starts_with('0') && run.bytes().all(|b| b.is_ascii_digit())
+                && task.file_name().and_then(|name| name.to_str()) == Some(format!("mrk-desktop-foundation-windows-payload-{run}-1").as_str()),
+                "windows_payload_original_attempt")?;
+            let original = read(&task.join("windows-payload-inputs.json"), 512 * 1024, end)?;
+            let input = parse(&original, 512 * 1024)?;
+            require(input.as_object().is_some_and(|object| object.len() == 6)
+                && input["schemaVersion"] == 1 && input["scope"] == SCOPE, "windows_payload_input_scope")?;
+            let bindings = input["bindings"].clone();
+            require(bindings["scope"] == SCOPE && bindings["sourceSha"] == sha && bindings["workflowSha"] == sha
+                && bindings["workflowPath"] == WORKFLOW && bindings["workflowRef"] == environment("GITHUB_WORKFLOW_REF")?
+                && bindings["runId"] == run && bindings["attempt"] == "1" && bindings["platform"] == "windows"
+                && bindings["target"] == crate::runtime::COMPILED_TARGET && bindings["pythonVersion"] == "3.14.7"
+                && bindings["rustVersion"] == "1.98.0", "windows_payload_binding")?;
+            let checkout = absolute(Path::new(env!("CARGO_MANIFEST_DIR")).parent().and_then(Path::parent)
+                .ok_or("windows_payload_checkout")?.to_path_buf())?;
+            require(!checkout.starts_with(&task) && !task.starts_with(&checkout), "windows_payload_checkout_layout")?;
+            let sources = bindings["sources"].as_array().ok_or("windows_payload_sources")?;
+            require(!sources.is_empty() && sources.len() <= 64, "windows_payload_source_bound")?;
+            let mut previous = ""; let mut probe_bound = false; let mut engine_bound = false;
+            for row in sources {
+                let name = text(&row["path"])?;
+                require(name > previous && crate::runtime::safe_payload_path(name), "windows_payload_source_path")?;
+                let bytes = read(&checkout.join(name), 8 * 1024 * 1024, end)?;
+                require(row["size"].as_u64() == Some(bytes.len() as u64) && row["sha256"] == hash(&bytes), "windows_payload_source_changed")?;
+                if name == "tests/native_desktop_payload_windows.py" { probe_bound = bytes == PROBE; }
+                if name == "desktop/engine_bootstrap.py" { engine_bound = bytes == ENGINE; }
+                previous = name;
+            }
+            require(probe_bound && engine_bound, "windows_payload_compile_bound_scripts")?;
+            let core_files = bindings["coreFiles"].as_array().ok_or("windows_payload_core_sources")?;
+            require(!core_files.is_empty() && core_files.len() <= 2048, "windows_payload_core_source_bound")?;
+            let mut previous = ""; let mut total = 0u64;
+            for row in core_files {
+                let name = text(&row["path"])?;
+                require(name > previous && name.starts_with("mobile_release/") && crate::runtime::safe_payload_path(name), "windows_payload_core_path")?;
+                let bytes = read(&checkout.join("src").join(name), 8 * 1024 * 1024, end)?;
+                total += bytes.len() as u64;
+                require(total <= 32 * 1024 * 1024 && row["size"].as_u64() == Some(bytes.len() as u64)
+                    && row["sha256"] == hash(&bytes), "windows_payload_core_changed")?;
+                previous = name;
+            }
+            let prepared = &input["prepared"];
+            require(prepared["qualification"] == "prepared-not-native-verified" && prepared["inputSha256"] == ZIP_SHA
+                && prepared["manifestSha256"].as_str() == option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")
+                && prepared["protocolSha256"].as_str() == option_env!("MRK_BUNDLED_PROTOCOL_SHA256")
+                && prepared["manifestSha256"].as_str().is_some_and(|value| value.len() == 64)
+                && prepared["protocolSha256"].as_str().is_some_and(|value| value.len() == 64), "windows_payload_missing_compiled_anchors")?;
+            inspect(&task, end)?;
+            let manifest_bytes = read(&task.join("runtime/manifest.json"), 1024 * 1024, end)?;
+            let manifest = parse(&manifest_bytes, 1024 * 1024)?;
+            let mut expected = manifest["files"].as_array().ok_or("windows_payload_manifest_files")?.clone();
+            expected.push(json!({"path":"manifest.json","sha256":hash(&manifest_bytes),"size":manifest_bytes.len()}));
+            expected.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+            require(input["files"] == Value::Array(expected), "windows_payload_original_inventory")?;
+            let compiled = &input["compiled"];
+            let executable = absolute(PathBuf::from(text(&compiled["path"])?))?;
+            let current = std::env::current_exe().map_err(|_| "windows_payload_current_exe")?;
+            let current_text = current.to_str().ok_or("windows_payload_current_exe")?;
+            let current = PathBuf::from(current_text.strip_prefix("\\\\?\\").unwrap_or(current_text));
+            require(executable == current && executable.starts_with(task.join("target")) && compiled["sourceSha"] == sha,
+                "windows_payload_original_executable")?;
+            let (size, digest) = executable_hash(&executable, end)?;
+            require(compiled["size"].as_u64() == Some(size) && compiled["sha256"] == digest, "windows_payload_compiled_test_changed")?;
+            let zip = task.join("runtime/core.zip");
+            require(PathBuf::from(environment("MRK_DESKTOP_DEV_CORE")?) == zip
+                && PathBuf::from(environment("MRK_DESKTOP_TEST_CORE_ZIP")?) == zip
+                && PathBuf::from(environment("MRK_DESKTOP_DEV_PYTHON")?) == task.join("runtime/python/python.exe"),
+                "windows_payload_copied_selection")?;
+            Ok(Self { base: Inputs { root, source: checkout.join("src"), zip, bindings }, task,
+                input_sha: hash(&original), files_sha: hash(&canonical(&input["files"])?), original })
+        }
+        fn unchanged(&self, end: Instant) -> Check<()> {
+            require(read(&self.task.join("windows-payload-inputs.json"), 512 * 1024, end)? == self.original,
+                "windows_payload_private_inputs_changed")?;
+            inspect(&self.task, end)
+        }
+    }
+
+    struct ParentEnvironment(Vec<(&'static str, Option<OsString>)>);
+    impl ParentEnvironment {
+        fn poison(case: &Case) -> Self {
+            let outside = case.root.join("canaries/outside");
+            let mut saved = Vec::new();
+            for (name, path) in [("PYTHONHOME", outside.join("venv")), ("PYTHONPATH", outside.clone()),
+                ("PATH", case.root.join("canaries/cwd")), ("VIRTUAL_ENV", outside.join("venv")),
+                ("PYTHONUSERBASE", outside.clone()), ("PYTHONSTARTUP", outside.join("startup.py"))] {
+                saved.push((name, std::env::var_os(name))); std::env::set_var(name, path);
+            }
+            Self(saved)
+        }
+    }
+    impl Drop for ParentEnvironment {
+        fn drop(&mut self) {
+            for (name, previous) in &self.0 {
+                if let Some(value) = previous { std::env::set_var(name, value); } else { std::env::remove_var(name); }
+            }
+        }
+    }
+    fn canary_inventory(root: &Path, end: Instant) -> Check<Value> {
+        let mut pending = vec![root.to_path_buf()]; let mut rows = BTreeMap::new(); let mut entries = 0usize;
+        while let Some(directory) = pending.pop() {
+            before(end)?; anchor(&directory)?;
+            for entry in fs::read_dir(&directory).map_err(|_| "windows_payload_canary_inventory")? {
+                let entry = entry.map_err(|_| "windows_payload_canary_inventory")?;
+                entries += 1; require(entries <= 64, "windows_payload_canary_bound")?;
+                let path = entry.path(); let metadata = fs::symlink_metadata(&path).map_err(|_| "windows_payload_canary_inventory")?;
+                require(ordinary(&metadata), "windows_payload_canary_redirected")?;
+                let name = path.strip_prefix(root).map_err(|_| "windows_payload_canary_path")?.to_str()
+                    .ok_or("windows_payload_canary_path")?.replace('\\', "/");
+                require(crate::runtime::safe_payload_path(&name) && name.split('/').count() <= 5, "windows_payload_canary_path")?;
+                if metadata.is_dir() {
+                    rows.insert(name.clone(), json!({"path":name,"kind":"directory"})); pending.push(path);
+                } else {
+                    let bytes = read(&path, 4096, end)?;
+                    rows.insert(name.clone(), json!({"path":name,"kind":"file","size":bytes.len(),"sha256":hash(&bytes)}));
+                }
+            }
+        }
+        Ok(Value::Array(rows.into_values().collect()))
+    }
+    fn prepare_case(inputs: &PayloadInputs, name: &'static str, poisoned: bool, probe: bool, end: Instant) -> Check<(Case, Value)> {
+        let case = Case::new(&inputs.base, name, None, true)?;
+        let canaries = case.root.join("canaries");
+        fs::create_dir(&canaries).and_then(|_| fs::create_dir(canaries.join("cwd")))
+            .and_then(|_| fs::create_dir(canaries.join("outside"))).map_err(|_| "windows_payload_canary_directory")?;
+        if poisoned {
+            for name in ["cwd/mobile_release", "outside/venv", "outside/mobile_release"] {
+                fs::create_dir(canaries.join(name)).map_err(|_| "windows_payload_canary_directory")?;
+            }
+            for name in ["cwd/sitecustomize.py", "cwd/usercustomize.py", "cwd/extra.pth", "cwd/python314._pth",
+                "cwd/pyvenv.cfg", "cwd/python314.dll", "cwd/libcrypto-3.dll", "cwd/_ctypes.pyd",
+                "cwd/mobile_release/__init__.py", "cwd/mobile_release/_desktop_engine.py", "outside/startup.py",
+                "outside/sitecustomize.py", "outside/usercustomize.py", "outside/extra.pth", "outside/venv/pyvenv.cfg",
+                "outside/mobile_release/__init__.py", "outside/mobile_release/_desktop_engine.py"] {
+                write(&canaries.join(name), CANARY)?;
+            }
+        }
+        if probe { write(&case.control.join("payload-probe.py"), PROBE)?; }
+        let admission = Admission { task: inputs.task.clone(), case: name, input_sha: inputs.input_sha.clone(), probe };
+        *lock(&case.supervisor.inner.test.windows_bootstrap) = if probe {
+            WindowsBootstrap::PreparedPayloadProbe(admission)
+        } else { WindowsBootstrap::PreparedPayload(admission) };
+        let inventory = canary_inventory(&canaries, end)?;
+        Ok((case, inventory))
+    }
+    fn successful_result(result: &Value, index: usize, inputs: &PayloadInputs) -> Check<()> {
+        match index % 3 {
+            0 => require(result["coreVersion"] == "0.3.0" && result["apiVersion"] == 1
+                && result["hostPlatform"] == "windows" && result["mode"] == "read-only-foundation", "windows_payload_capabilities"),
+            1 => require(result["schemaVersion"] == 1 && result["schema"]["$id"] == "urn:mobile-release-kit:schema:project:1"
+                && result["fields"].as_array().is_some_and(|fields| !fields.is_empty()), "windows_payload_catalog"),
+            _ => {
+                let input = parse(&inputs.original, 512 * 1024)?;
+                let core_sha = input["files"].as_array().ok_or("windows_payload_files")?.iter()
+                    .find(|row| row["path"] == "core.zip").ok_or("windows_payload_core")?["sha256"].clone();
+                require(result["scope"] == SCOPE && result["pythonVersion"] == json!([3,14,7]) && result["machine"] == "AMD64"
+                    && result["gilEnabled"] == true && result["manifestSha256"] == input["prepared"]["manifestSha256"]
+                    && result["coreSha256"] == core_sha && result["stdlibSha256"] == STDLIB_SHA
+                    && result["flags"] == json!({"isolated":1,"noSite":1,"noUserSite":1,"ignoreEnvironment":1,
+                        "dontWriteBytecode":true,"safePath":true})
+                    && result["loadedImages"].as_array().is_some_and(|images| !images.is_empty() && images.len() <= 128),
+                    "windows_payload_probe")
+            },
+        }
+    }
+    fn retain_original_output(case: &Case) -> Check<()> {
+        let owners = case.supervisor.inner.test.owners();
+        require(owners.len() == 1, "windows_payload_original_owner")?;
+        let observed = lock(&owners[0].observation);
+        require(observed.windows_stdout.len() <= protocol::RESPONSE_LIMIT
+            && observed.windows_stderr.len() <= protocol::STDERR_LIMIT, "windows_payload_output_bound")?;
+        // These bytes are copies already retained by the original readers, not
+        // new pipe reads or substitute EOF evidence. Keep failed frames and the
+        // fixed probe's bounded diagnostic too; no raw transcript is logged.
+        for (name, bytes) in [("response.jsonl", &observed.windows_stdout), ("stderr.jsonl", &observed.windows_stderr)] {
+            if !bytes.is_empty() { write(&case.control.join(name), bytes)?; }
+        }
+        Ok(())
+    }
+    fn original_frame(case: &Case, result: &Query, child: bool) -> Check<Option<Value>> {
+        case.native_facts(child, child)?;
+        let owners = case.supervisor.inner.test.owners();
+        require(owners.len() == 1 && case.supervisor.can_exit() && !case.supervisor.disabled()
+            && case.supervisor.inner.permits.available_permits() == ACTIVE_LIMIT, "windows_payload_original_owner")?;
+        let owner = &owners[0]; let state = lock(&owner.state); let observed = lock(&owner.observation);
+        require(state.terminal && !state.unknown && observed.observer_joined && lock(&owner.permit).is_none()
+            && owner.id == "query-1", "windows_payload_original_finality")?;
+        if !child {
+            require(result.as_ref().is_err_and(|error| error.code == "runtime_unavailable" && !error.retryable)
+                && !observed.acquisition_joined && !observed.waited && observed.exit_success.is_none()
+                && observed.windows_stdout.is_empty() && observed.windows_stderr.is_empty(), "windows_payload_prelaunch_refusal")?;
+            return Ok(None);
+        }
+        require(observed.exit_success == Some(true) && observed.windows_exit_code == Some(0) && observed.windows_stderr.is_empty()
+            && !observed.windows_stdout.is_empty() && observed.windows_stdout.len() <= protocol::RESPONSE_LIMIT,
+            "windows_payload_original_success")?;
+        let decoded = protocol::decode_response(&observed.windows_stdout, &owner.id).map_err(|_| "windows_payload_original_frame")?;
+        require(result.as_ref().is_ok_and(|result| *result == decoded), "windows_payload_original_result")?;
+        let relative = format!("{}/control/response.jsonl", case.name);
+        Ok(Some(json!({"path":relative,"size":observed.windows_stdout.len(),"sha256":hash(&observed.windows_stdout)})))
+    }
+    struct PayloadReceipt { path: PathBuf, bindings: Value, input_sha: String, files_sha: String, cases: Vec<Value> }
+    impl PayloadReceipt {
+        fn write(&self, status: &str, failure: Option<&str>) -> Check<()> {
+            let value = json!({"schemaVersion":1,"scope":SCOPE,"status":status,"failureCode":failure,"bindings":self.bindings,
+                "inputSha256":self.input_sha,"cases":self.cases,"allOwnersSettled":status == "passed",
+                "finalInventorySha256":if status == "passed" {Some(self.files_sha.as_str())} else {None},"notVerified":NOT_VERIFIED});
+            let bytes = canonical(&value)?;
+            require(bytes.len() <= 256 * 1024, "windows_payload_receipt_bound")?;
+            fs::write(&self.path, bytes).map_err(|_| "windows_payload_receipt_write")
+        }
+    }
+
+    pub(super) async fn run() {
+        let begin = Instant::now(); let end = begin + Duration::from_secs(120);
+        let inputs = PayloadInputs::admit(end).unwrap_or_else(|code| panic!("Windows payload admission refused before native work: {code}"));
+        let mut receipt = PayloadReceipt { path: inputs.base.root.join("receipt.json"), bindings: inputs.base.bindings.clone(),
+            input_sha: inputs.input_sha.clone(), files_sha: inputs.files_sha.clone(), cases: Vec::new() };
+        receipt.write("running", None).expect("Windows payload receipt unavailable before native work");
+        let mut baselines = Vec::new();
+        for (index, name) in CASES.iter().enumerate() {
+            // Leave the unchanged original 10s + 2s owner and observer margin.
+            // This batch clock never renews an original operation endpoint.
+            if begin.elapsed() >= Duration::from_secs(96) {
+                let _ = receipt.write("failed-retained", Some("windows_payload_batch_allowance"));
+                panic!("Windows payload batch allowance exhausted; retain original evidence");
+            }
+            let probe = index < 6 && index % 3 == 2; let poisoned = (3..6).contains(&index); let child = index < 6;
+            let (mut case, canaries) = prepare_case(&inputs, name, poisoned, probe, end)
+                .unwrap_or_else(|code| { let _ = receipt.write("failed-retained", Some(code)); panic!("Windows payload fixture refused: {code}"); });
+            let extra = if child { None } else { Some(inputs.task.join("runtime/python").join(EXTRAS[index - 6])) };
+            if let Some(path) = &extra {
+                if let Err(code) = inputs.unchanged(end).and_then(|_| write(path, CANARY)) {
+                    let _ = receipt.write("failed-retained", Some(code)); panic!("Windows startup refusal fixture failed: {code}");
+                }
+            }
+            let poison = poisoned.then(|| ParentEnvironment::poison(&case));
+            let request = case.start(if child && index % 3 == 0 { Method::Capabilities } else { Method::Catalog }, json!({}));
+            let outcome = case.result(request).await;
+            if !case.settle(outcome.is_err()).await {
+                let _ = retain_original_output(&case);
+                receipt.cases.push(case.evidence(false, Some("windows_payload_original_custody_unresolved")));
+                let _ = receipt.write("failed-retained", Some("windows_payload_original_custody_unresolved"));
+                // Keep original case/owner slots, poison guard and any extra.
+                // No next child, owner abort, deletion, reset or replacement wait.
+                pending::<()>().await;
+                return;
+            }
+            let checked: Check<Value> = (|| {
+                retain_original_output(&case)?;
+                let result = outcome?;
+                let frame = original_frame(&case, &result, child)?;
+                require(canary_inventory(&case.root.join("canaries"), end)? == canaries, "windows_payload_canaries_changed")?;
+                if child {
+                    let value = result.map_err(|_| "windows_payload_core_failed")?;
+                    successful_result(&value, index, &inputs)?;
+                    if index < 3 { baselines.push(value); }
+                    else { require(value == baselines[index - 3], "windows_payload_hostile_parent_changed_result")?; }
+                    if probe { require(frame.as_ref().and_then(|row| row["size"].as_u64()).is_some_and(|size| size <= 64 * 1024), "windows_payload_probe_bound")?; }
+                }
+                if let Some(path) = &extra {
+                    require(read(path, 4096, end)? == CANARY, "windows_payload_refused_extra_changed")?;
+                    // Only this exact fixed ordinary canary, only after positive
+                    // no-spawn and original settlement; never publisher repair.
+                    fs::remove_file(path).map_err(|_| "windows_payload_refused_extra_remove")?;
+                }
+                inputs.unchanged(end)?;
+                let mut record = case.evidence(true, None);
+                record["frame"] = json!(frame);
+                record["observerReturned"] = json!(true); // Checked original observer above.
+                record["preparedInventorySha256"] = json!(inputs.files_sha);
+                record["canaryInventorySha256"] = json!(hash(&canonical(&canaries)?));
+                Ok(record)
+            })();
+            drop(poison); // Only after the actual original resources settled.
+            match checked {
+                Ok(record) => {
+                    receipt.cases.push(record);
+                    receipt.write("running", None).expect("Windows payload receipt failed after original settlement");
+                },
+                Err(code) => {
+                    receipt.cases.push(case.evidence(false, Some(code)));
+                    let _ = receipt.write("failed-retained", Some(code));
+                    panic!("Windows payload predicate failed after original settlement; retain evidence: {code}");
+                },
+            }
+        }
+        if let Err(code) = inputs.unchanged(end) {
+            let _ = receipt.write("failed-retained", Some(code)); panic!("Windows final inventory failed: {code}");
+        }
+        receipt.write("passed", None).expect("Windows payload final receipt failed after all original settlement");
+    }
+}
+
+#[cfg(all(debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"),
+    target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "Only the separately reviewed exact Windows embedded-payload hosted dispatch"]
+async fn windows_embedded_payload_hosted_contract() { windows_payload::run().await; }
 
 // A separate literal entry and runtime selection. This is genuine local TLS in
 // the reviewed private namespaces, never an owner23 alias or production opt-in.

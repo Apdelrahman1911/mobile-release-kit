@@ -8,9 +8,11 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import stat
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 
 _SOURCE = Path(__file__).resolve().parents[2]
@@ -23,6 +25,33 @@ _SPEC.loader.exec_module(preparation)
 
 
 class RuntimePreparationTests(unittest.TestCase):
+    def test_windows_checked_reader_keeps_descriptor_change_time_after_suffix_normalization(self):
+        # Exercise the actual bounded reader on inert bytes, mocking only the
+        # CPython 3.14 Windows metadata shape. This is not native Windows proof.
+        content = b"INERT FILE DATA; NEVER EXECUTED\n"
+        common = {"st_dev": 7, "st_ino": 13, "st_nlink": 1, "st_size": len(content),
+                  "st_mtime_ns": 10000, "st_birthtime_ns": 2000,
+                  "st_file_attributes": 0x20, "st_reparse_tag": 0}
+        named = SimpleNamespace(**common, st_mode=stat.S_IFREG | 0o777, st_ctime_ns=2000)
+        opened = SimpleNamespace(**common, st_mode=stat.S_IFREG | 0o666, st_ctime_ns=3000)
+        changed = SimpleNamespace(**common, st_mode=stat.S_IFREG | 0o666, st_ctime_ns=3001)
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "python.exe"
+            path.write_bytes(content)
+            descriptor_stat = Mock(side_effect=[opened, opened])
+            with patch.object(preparation, "os", SimpleNamespace(name="nt", fstat=descriptor_stat)), \
+                    patch.object(type(path), "lstat", return_value=named) as named_stat:
+                self.assertEqual(preparation.read_checked(path, limit=1024), content)
+                self.assertEqual(descriptor_stat.call_count, 2)
+                self.assertEqual(named_stat.call_count, 2)
+            descriptor_stat = Mock(side_effect=[opened, changed])
+            with patch.object(preparation, "os", SimpleNamespace(name="nt", fstat=descriptor_stat)), \
+                    patch.object(type(path), "lstat", return_value=named):
+                with self.assertRaisesRegex(preparation.PreparationError, "changed during reading"):
+                    preparation.read_checked(path, limit=1024)
+                self.assertEqual(descriptor_stat.call_count, 2)
+            self.assertEqual(path.read_bytes(), content)
+
     def test_portable_names_and_complete_path_depth_match_the_inspector(self):
         for name in ("core.zip", "engine_bootstrap.py", "libstdc++.so.6", "python3", "data-1"):
             self.assertTrue(preparation._safe_name(name), name)

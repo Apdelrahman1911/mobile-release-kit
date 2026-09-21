@@ -1,0 +1,111 @@
+name: Windows embedded passive payload
+
+on:
+  push:
+    branches: [verify/desktop-windows-payload]
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact independently reviewed source commit (not release authority)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-windows-payload-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-payload:
+    if: github.ref == 'refs/heads/verify/desktop-windows-payload' && ((github.event_name == 'push' && !github.event.deleted) || github.event_name == 'workflow_dispatch')
+    runs-on: windows-2025
+    # Disposal backstop, never original-child settlement evidence.
+    timeout-minutes: 30
+    env:
+      MRK_DESKTOP_PLATFORM: windows
+      MRK_DESKTOP_HOSTED_CHECKS: windows-payload-v1
+      MRK_EVENT_AFTER: ${{ github.event.after }}
+      MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
+    steps:
+      - name: Require original exact-source run and disposable Windows X64
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Windows && "$RUNNER_ARCH" == X64 ]]
+          [[ "$GITHUB_RUN_ATTEMPT" == 1 ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-windows-payload ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" != 0000000000000000000000000000000000000000 ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-windows-payload.yml@refs/heads/verify/desktop-windows-payload" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == push && "$MRK_EVENT_AFTER" == "$GITHUB_SHA" ]]
+          fi
+      - name: Check out exact candidate without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select fixed tooling Python (not the copied runtime)
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+          architecture: x64
+      - name: Gate exact notices and bind one fresh attempt
+        id: prepare
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py prepare'
+      - name: Acquire exact official ZIP once and locked headless tools only
+        timeout-minutes: 23
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
+      - name: Compile exactly one anchored headless libtest without running it
+        timeout-minutes: 11
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
+      - name: Invoke original compiled payload test directly once
+        timeout-minutes: 3
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py windows-payload'
+      - name: Retain bounded existing evidence without runtime probing or cleanup
+        id: retain
+        if: always() && steps.prepare.outcome == 'success'
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py retain'
+      - name: Upload evidence only (no Python/compiler/runtime binaries)
+        if: always() && steps.retain.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-windows-payload-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.retain.outputs.evidence }}
+          if-no-files-found: error
+          retention-days: 7

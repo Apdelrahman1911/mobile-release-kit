@@ -70,6 +70,56 @@ launch path. Its initial Ubuntu 24.04 / GA6.8 / x86_64 GNU / same-root ext4/XFS
 scope requires separate native qualification. Adding these source modules does
 not enable either the packaged-runtime or native-save gate.
 
+### Windows embedded passive payload (source admitted, native unverified)
+
+The separate `windows-payload-v1` hosted lane stages only the exact official
+CPython3.14.7 AMD64 embedded ZIP, SHA256
+`d297e5ff019966817ad8502465176139f2d3d840fa4ed84b13bed399a6ab1f15`.
+It retains all37 unmodified supplier files, including unused PE images and the
+catalog, with the unchanged80-byte `python314._pth` (only `python314.zip` and
+`.` active). Whole-ZIP admission is the accepted official HTTPS/release-digest
+basis, not verified Sigstore/catalog/PE signing or redistribution clearance.
+`prepare_windows_embedded_payload.py` requires the independently reviewed complete
+240822-byte recipient notice, SHA256
+`6c814672403bec2064b22e54dbd028b055e0cacdc6837557a66cd5c0a04af360`, before output.
+Missing or changed text still refuses; a source pin is not recipient assent,
+Microsoft onward-distributor compliance or binary-delivery approval. The fixed
+CA and its three target-neutral notices are exact copies of the previously
+accepted certifi2026.7.22/Mozilla input; no Windows TLS claim follows.
+
+After those gates and separate command admission, the existing `prepare_runtime`
+produces all six bootstraps/core/CA and unchanged manifest v1. Its sole shared
+reader amendment corrects CPython3.14 Windows pathname/fstat comparisons:
+normalize only named executable-suffix0111, compare common identity/birthtime,
+and retain complete same-API mode/ctime/birthtime/attribute/reparse stamps.
+The original POSIX comparison is unchanged; an inert mocked-reader regression
+is not real Windows proof. Two opaque headless debug
+test-only selections re-inspect that compile-anchored inventory inside the
+original passive inspection/endpoint: copied engine, or one compile-bound fixed
+probe. The eleven-case batch comprises copied capabilities/catalog/probe, the
+same calls with inert hostile cwd/parent environment canaries, and five separate
+extra-startup-file prelaunch refusals. Only the exact known refusal extra is
+removed, after positive original no-spawn/settlement; no general repair occurs.
+The probe measures a bounded current-process loaded-image roster against exact
+payload hashes or a finite named System32/API-set policy. Static PE imports and
+this prospective policy are not a measured complete dynamic closure.
+
+The fixed-ref Windows2025/X64 first-attempt workflow has five closed phases:
+prepare/acquire/compile/windows-payload/retain. One locked headless `--no-run`
+artifact is invoked directly once, never rebuilt by a Cargo native command.
+Only a non-deletion push to `verify/desktop-windows-payload` with actual event
+after equal to the source SHA, or an exact-SHA dispatch on that ref, is admitted.
+Python and the compiled Rust test independently recheck the source/workflow/run
+binding. Pre-push review establishes the candidate; the ref is not approval.
+The native batch allowance is120s; original10s work/2s cleanup stay unchanged.
+First unresolved ownership retains the original case and stops successors.
+Only bounded existing bindings/frames/receipts are uploaded; no payload or
+compiler binary upload is provided. The30min workflow limit is disposal only.
+Source authoring, inert DATA and native RESULT acceptance are separate gates;
+none has been substituted for native payload evidence. Installed custody,
+Windows product builds, W1–W6 transfer, Save/GUI/Quit, TLS/Stores/installers and
+production execution remain independently disabled/unqualified.
+
 Manifest exact keys:
 `schemaVersion:1`, `protocol:1`, `coreVersion:"0.3.0"`, `target`, `coreSha256`,
 `protocolSha256`, `inventorySha256`, `files:[{path,sha256,size}]`.
