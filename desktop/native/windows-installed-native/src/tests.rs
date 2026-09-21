@@ -16,12 +16,16 @@ impl Drop for Inert {
 }
 fn enter_inert(book: &mut NativeBook, call: Call, handle: F::HANDLE) -> Result<()> {
     assert!(book.active.is_none());
+    let token_length = match call {
+        Call::Token(class) => token_information_length(class)?,
+        _ => 0,
+    };
     let output_handle = match call {
         Call::Open(i) | Call::ProcessToken(i) | Call::ThreadToken(i) => book.slot(i)?.output.get(),
         _ => null_mut(),
     };
     book.active = Some(ManuallyDrop::new(Box::pin(Arena {
-        call, phase: Cell::new(Phase::Prepared), returned: Cell::new(None),
+        call, token_length, phase: Cell::new(Phase::Prepared), returned: Cell::new(None),
         input: Vec::new(), handle, output_handle, unicode: F::UNICODE_STRING::default(),
         attributes: OBJECT_ATTRIBUTES::default(), directory: false,
         bytes: UnsafeCell::new(Aligned([0; BUFFER])), count: UnsafeCell::new(u32::MAX),
@@ -184,6 +188,8 @@ fn acquisition_needs_a_definite_consistent_receipt() -> Result<()> {
         (Call::Token(S::TokenIntegrityLevel), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenIntegrityLevel""#, "boolean", 0, "5"),
         (Call::Token(S::TokenGroups), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenGroups""#, "boolean", 0, "5"),
         (Call::Token(S::TokenPrivileges), Returned::Boolean(0, 5), "GetTokenInformation", r#""TokenPrivileges""#, "boolean", 0, "5"),
+        (Call::Token(S::TokenElevation), Returned::Boolean(0, F::ERROR_BAD_LENGTH), "GetTokenInformation", r#""TokenElevation""#, "boolean", 0, "24"),
+        (Call::Token(S::TokenUser), Returned::Boolean(0, F::ERROR_INSUFFICIENT_BUFFER), "GetTokenInformation", r#""TokenUser""#, "boolean", 0, "122"),
         (Call::Privilege(PrivilegeName::ChangeNotify), Returned::Boolean(0, 5), "LookupPrivilegeValueW", r#""lookup-1""#, "boolean", 0, "5"),
         (Call::Privilege(PrivilegeName::Shutdown), Returned::Boolean(0, 5), "LookupPrivilegeValueW", r#""lookup-2""#, "boolean", 0, "5"),
         (Call::Privilege(PrivilegeName::Undock), Returned::Boolean(0, 5), "LookupPrivilegeValueW", r#""lookup-3""#, "boolean", 0, "5"),
@@ -456,8 +462,82 @@ fn token_sid(header: usize, field: usize, attributes: usize, flags: u32, princip
 }
 #[test]
 fn token_context_pointer_bounds_and_enableable_authority_are_checked() -> Result<()> {
+    // Literal target expectations are independent of the production selector.
+    // DWORD is the fixed output for both UIAccess and VirtualizationEnabled.
+    for (actual, expected) in [
+        (size_of::<S::TOKEN_STATISTICS>(), 56usize),
+        (size_of::<S::TOKEN_TYPE>(), 4),
+        (size_of::<S::TOKEN_ELEVATION>(), 4),
+        (size_of::<S::TOKEN_ELEVATION_TYPE>(), 4),
+        (size_of::<u32>(), 4),
+    ] { assert_eq!(actual, expected); }
+    assert_eq!(offset_of!(S::TOKEN_ELEVATION, TokenIsElevated), 0);
+    assert_eq!(BUFFER, 65_536);
+    assert_eq!(size_of::<Aligned>(), 65_536);
+    for (class, expected) in [
+        (S::TokenStatistics, 56u32),
+        (S::TokenType, 4),
+        (S::TokenElevation, 4),
+        (S::TokenElevationType, 4),
+        (S::TokenUIAccess, 4),
+        (S::TokenVirtualizationEnabled, 4),
+        (S::TokenUser, 65_536),
+        (S::TokenIntegrityLevel, 65_536),
+        (S::TokenGroups, 65_536),
+        (S::TokenPrivileges, 65_536),
+    ] {
+        assert_eq!(token_information_length(class)?, expected);
+        let mut fixture = Inert::new(); let book = &mut fixture.book;
+        enter_inert(book, Call::Token(class), null_mut())?;
+        assert_eq!(book.arena()?.token_length, expected);
+        let arena = book.arena()? as *const Arena;
+        let buffer = book.arena()?.buffer();
+        assert_eq!(buffer as usize % 8, 0);
+        let completed = return_inert(book, Returned::Boolean(1, 0), None, F::STATUS_PENDING, usize::MAX)?;
+        assert_eq!(completed.arena.as_ref().get_ref() as *const Arena, arena);
+        assert_eq!(completed.arena.buffer(), buffer);
+        // Initialized allocation extent only, not a successful native payload.
+        assert_eq!(completed.bytes(65_536)?.len(), 65_536);
+        assert!(matches!(completed.bytes(65_537), Err(Error::Unsafe)));
+        assert_eq!(completed.count(), Err(Error::Unsafe)); // untouched sentinel
+        assert!(book.active.is_none() && !book.is_unknown());
+    }
+    for (class, header) in [
+        (S::TokenUser, size_of::<S::TOKEN_USER>()),
+        (S::TokenIntegrityLevel, size_of::<S::TOKEN_MANDATORY_LABEL>()),
+        (S::TokenGroups, size_of::<S::TOKEN_GROUPS>()),
+        (S::TokenPrivileges, size_of::<S::TOKEN_PRIVILEGES>()),
+    ] { assert!(token_information_length(class)? as usize > header); }
+    for class in [-1, 0, S::TokenOwner, i32::MAX] {
+        assert_eq!(token_information_length(class), Err(Error::State));
+        let mut fixture = Inert::new();
+        assert_eq!(enter_inert(&mut fixture.book, Call::Token(class), null_mut()), Err(Error::State));
+        assert!(fixture.book.never_started());
+    }
+    // Complete's generic initialized-buffer bound is not the separate exact
+    // 4/56-byte consumer check. All of these counts are inert DATA, not OS output.
+    for count in [0u32, 4, 56, 65_536, 65_537, u32::MAX] {
+        let mut fixture = Inert::new(); let book = &mut fixture.book;
+        enter_inert(book, Call::Token(S::TokenUser), null_mut())?;
+        // SAFETY: this fixture arena has never been passed to native code.
+        unsafe { *book.arena()?.count.get() = count; }
+        let completed = return_inert(book, Returned::Boolean(1, 0), None, F::STATUS_PENDING, usize::MAX)?;
+        assert_eq!(completed.count(), if count <= 65_536 { Ok(count as usize) } else { Err(Error::Unsafe) });
+    }
+
     let allowed = [101, 102, 103, 104, 105];
     let identity = TokenIdentity { token_id: 1, authentication_id: 2, modified_id: 3, groups: 1, privileges: 1 };
+    let mut statistics = vec![0u8; 56];
+    put32(&mut statistics, offset_of!(S::TOKEN_STATISTICS, TokenType), S::TokenPrimary as u32);
+    put32(&mut statistics, offset_of!(S::TOKEN_STATISTICS, GroupCount), identity.groups);
+    put32(&mut statistics, offset_of!(S::TOKEN_STATISTICS, PrivilegeCount), identity.privileges);
+    put64(&mut statistics, offset_of!(S::TOKEN_STATISTICS, TokenId), identity.token_id);
+    put64(&mut statistics, offset_of!(S::TOKEN_STATISTICS, AuthenticationId), identity.authentication_id);
+    put64(&mut statistics, offset_of!(S::TOKEN_STATISTICS, ModifiedId), identity.modified_id);
+    assert_eq!(security::statistics(&statistics), Ok(identity));
+    assert_eq!(security::statistics(&statistics[..55]), Err(Error::Unsafe));
+    statistics.push(0);
+    assert_eq!(security::statistics(&statistics), Err(Error::Unsafe));
     let user_field = offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Sid);
     let mut user = token_sid(size_of::<S::TOKEN_USER>(), user_field,
         offset_of!(S::TOKEN_USER, User) + offset_of!(S::SID_AND_ATTRIBUTES, Attributes), 0, &sid(5, &[21, 11, 22, 33, 1001]));

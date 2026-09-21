@@ -92,12 +92,28 @@ enum Call {
     VolumeName, VolumeDevice, Streams, Security,
     Token(S::TOKEN_INFORMATION_CLASS), Privilege(PrivilegeName), Read(usize), Entries,
 }
+// A fixed output uses its complete SDK type, not the arena's spare capacity.
+// Variable outputs retain the one bounded buffer; no size-discovery query/retry.
+fn token_information_length(class: S::TOKEN_INFORMATION_CLASS) -> Result<u32> {
+    let length = match class {
+        S::TokenStatistics => size_of::<S::TOKEN_STATISTICS>(),
+        S::TokenType => size_of::<S::TOKEN_TYPE>(),
+        S::TokenElevation => size_of::<S::TOKEN_ELEVATION>(),
+        S::TokenElevationType => size_of::<S::TOKEN_ELEVATION_TYPE>(),
+        S::TokenUIAccess | S::TokenVirtualizationEnabled => size_of::<u32>(),
+        S::TokenUser | S::TokenIntegrityLevel | S::TokenGroups | S::TokenPrivileges => BUFFER,
+        _ => return Err(Error::State),
+    };
+    if length == 0 || length > BUFFER { return Err(Error::Bounds); }
+    u32::try_from(length).map_err(|_| Error::Bounds)
+}
 #[derive(Clone, Copy, Debug)]
 enum Returned { Boolean(i32, u32), Count(u32, u32), Hresult(i32), Nt(i32), Scalar(u32) }
 #[repr(C, align(8))]
 struct Aligned([u8; BUFFER]);
 struct Arena {
     call: Call,
+    token_length: u32,
     phase: Cell<Phase>,
     returned: Cell<Option<Returned>>,
     input: Vec<u16>,
@@ -250,7 +266,12 @@ impl NativeBook {
         if matches!(call, Call::Close(_)) {
             if self.active.is_some() { return self.unknown(); }
         } else { self.clear()?; }
-        let mut frame = Box::pin(Arena { call, phase: Cell::new(Phase::Prepared), returned: Cell::new(None),
+        // Select the input extent before publishing storage or entering the OS.
+        let token_length = match call {
+            Call::Token(class) => token_information_length(class)?,
+            _ => 0, // never consumed by a non-token dispatch
+        };
+        let mut frame = Box::pin(Arena { call, token_length, phase: Cell::new(Phase::Prepared), returned: Cell::new(None),
             input, handle, output_handle: null_mut(), unicode: F::UNICODE_STRING::default(),
             attributes: OBJECT_ATTRIBUTES::default(), directory: false,
             bytes: UnsafeCell::new(Aligned([0; BUFFER])), count: UnsafeCell::new(u32::MAX),
@@ -494,7 +515,7 @@ unsafe fn invoke(a: &Arena) -> Returned {
             Call::VolumeDevice => Returned::Nt(N::NtQueryVolumeInformationFile(a.handle, a.iosb.get(), a.buffer().cast(), size_of::<NS::FILE_FS_DEVICE_INFORMATION>() as u32, N::FileFsDeviceInformation)),
             Call::Streams => Returned::Nt(N::NtQueryInformationFile(a.handle, a.iosb.get(), a.buffer().cast(), BUFFER as u32, N::FileStreamInformation)),
             Call::Security => boolean(S::GetKernelObjectSecurity(a.handle, S::OWNER_SECURITY_INFORMATION | S::DACL_SECURITY_INFORMATION, a.buffer().cast(), BUFFER as u32, a.count.get())),
-            Call::Token(class) => boolean(S::GetTokenInformation(a.handle, class, a.buffer().cast(), BUFFER as u32, a.count.get())),
+            Call::Token(class) => boolean(S::GetTokenInformation(a.handle, class, a.buffer().cast(), a.token_length, a.count.get())),
             Call::Privilege(name) => boolean(S::LookupPrivilegeValueW(null(), match name {
                 PrivilegeName::ChangeNotify => S::SE_CHANGE_NOTIFY_NAME,
                 PrivilegeName::Shutdown => S::SE_SHUTDOWN_NAME,
