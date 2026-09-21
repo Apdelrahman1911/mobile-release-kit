@@ -66,11 +66,12 @@ def metadata():
             "packages": packages, "resolve": {"root": "root", "nodes": nodes}}
 
 
-def elf_fixture(*, runpath=None, needed="libgtk-3.so.0", soname=None, interpreter=True, rpath=False):
+def elf_fixture(*, runpath=None, needed="libgtk-3.so.0", soname=None, interpreter=True, rpath=False,
+                kind=3, flags_1=()):
     """Structural ELF DATA only, never an executable instruction body."""
     raw = bytearray(1536)
     raw[:16] = b"\x7fELF\x02\x01\x01" + b"\0" * 9
-    interpreter_bytes = b"/lib64/ld-linux-x86-64.so.2\0"
+    interpreter_bytes = (interpreter if type(interpreter) is bytes else b"/lib64/ld-linux-x86-64.so.2\0")
     strings = b"\0" + needed.encode("ascii") + b"\0"
     dynamic = [(1, 1), (5, 1024), (10, 0)]
     if runpath:
@@ -81,6 +82,7 @@ def elf_fixture(*, runpath=None, needed="libgtk-3.so.0", soname=None, interprete
         dynamic.append((14, len(strings)))
         strings += soname.encode("ascii") + b"\0"
     dynamic[2] = (10, len(strings))
+    dynamic.extend((0x6FFFFFFB, value) for value in flags_1)
     dynamic.append((0, 0))
     headers = [
         (1, 4, 0, 0, 0, len(raw), len(raw), 4096),
@@ -88,7 +90,7 @@ def elf_fixture(*, runpath=None, needed="libgtk-3.so.0", soname=None, interprete
     ]
     if interpreter:
         headers.append((3, 4, 512, 512, 512, len(interpreter_bytes), len(interpreter_bytes), 1))
-    struct.pack_into("<HHIQQQIHHHHHH", raw, 16, 3, 62, 1, 0, 64, 0, 0, 64, 56, len(headers), 0, 0, 0)
+    struct.pack_into("<HHIQQQIHHHHHH", raw, 16, kind, 62, 1, 0, 64, 0, 0, 64, 56, len(headers), 0, 0, 0)
     for index, values in enumerate(headers):
         struct.pack_into("<IIQQQQQQ", raw, 64 + 56 * index, *values)
     raw[512:512 + len(interpreter_bytes)] = interpreter_bytes
@@ -384,6 +386,37 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                                 elf_fixture(needed="libc.so.6", soname=soname, runpath=runpath, rpath=True, interpreter=False)):
                     with self.assertRaises(S.D.Refused):
                         S.elf_dependencies(changed, shell=True, shell_path=path)
+
+    def test_provider_role_accepts_dual_use_shared_objects_without_changing_records(self):
+        path = S.SHELL_LIBRARY_ROOT + "/libcap.so.2"
+        for interpreter in (False, True):
+            for flags in ((), (0,), (1,)):
+                with self.subTest(interpreter=interpreter, flags=flags):
+                    raw = elf_fixture(needed="libc.so.6", soname="libcap.so.2", interpreter=interpreter, flags_1=flags)
+                    actual = S.shell_elf_record(raw, role="provider", selected=path)
+                    self.assertEqual(actual, {"interpreter": "/lib64/ld-linux-x86-64.so.2" if interpreter else None,
+                        "needed": ["libc.so.6"], "versionNeeds": {}, "versionDefinitions": [], "soname": "libcap.so.2"})
+                    self.assertEqual(actual, S.elf_dependencies(raw, shell=True, shell_path=path))
+        raw = elf_fixture()
+        for options in ({"shell_provider": True}, {"runtime_path": "python/bin/python3", "shell_provider": True},
+                        {"shell": True, "shell_provider": 1}):
+            with self.subTest(options=options), self.assertRaises(S.D.Refused):
+                S.elf_dependencies(raw, **options)
+
+    def test_provider_role_refuses_executables_pie_duplicate_flags_and_other_loaders(self):
+        path = S.SHELL_LIBRARY_ROOT + "/libcap.so.2"
+        for options in ({"kind": 2}, {"kind": 2, "interpreter": False}, {"flags_1": (0x08000000,)},
+                        {"flags_1": (0x08000001,)}, {"flags_1": (0, 0)},
+                        {"interpreter": b"/unreviewed/loader\0"}):
+            raw = elf_fixture(needed="libc.so.6", soname="libcap.so.2", **options)
+            with self.subTest(options=options), self.assertRaises(S.D.Refused):
+                S.shell_elf_record(raw, role="provider", selected=path)
+        # The same legitimate program layouts keep their existing role; only
+        # promoting them to shared-object providers is refused.
+        for options in ({"kind": 2}, {"flags_1": (0x08000000,)}):
+            raw = elf_fixture(**options)
+            self.assertEqual(S.shell_elf_record(raw, role="program", selected="/usr/bin/inert")["needed"],
+                             ["libgtk-3.so.0"])
 
     def test_private_provider_is_not_promoted_to_the_global_namespace(self):
         path = S.SHELL_LIBRARY_ROOT + "/libproxy.so.1"

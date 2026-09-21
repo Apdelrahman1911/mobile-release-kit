@@ -554,7 +554,7 @@ def exact_test_result(stdout, stderr, name):
            "Exact singleton test did not pass once")
 
 
-def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None):
+def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None, shell_provider=False):
     """Bounded ELF DATA, including required/exported symbol-version labels.
 
     No binary, loader, ldd or readelf execution. The caller binds the actual
@@ -563,6 +563,7 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None):
     D.need(type(raw) is bytes and 64 <= len(raw) <= MAX_BINARY, "ELF byte bound")
     D.need(runtime_path is None or runtime_path in RUNTIME_ELF, "Only the fixed A ELF profile has a private RUNPATH")
     D.need(type(shell) is bool and not (shell and runtime_path is not None), "Separate shell/A ELF profiles required")
+    D.need(type(shell_provider) is bool and (not shell_provider or shell), "Provider role requires the shell ELF profile")
     D.need(shell_path is None or shell and type(shell_path) is str and Path(shell_path).is_absolute()
            and ".." not in Path(shell_path).parts, "Only the isolated shell profile has a requester path")
 
@@ -575,6 +576,7 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None):
     D.need(ident[:7] == b"\x7fELF\x02\x01\x01" and kind in (2, 3) and machine == 62
            and version == 1 and ehsize == 64 and phsize == 56 and 0 < phnum <= 128,
            "Expected bounded ELF64 little-endian x86_64")
+    D.need(not shell_provider or kind == 3, "Shell provider must be an ET_DYN shared object")
     headers = [unpack("<IIQQQQQQ", phoff + i * phsize) for i in range(phnum)]
     for p in headers:
         D.need(p[2] <= len(raw) and p[5] <= len(raw) - p[2]
@@ -614,6 +616,13 @@ def elf_dependencies(raw, *, runtime_path=None, shell=False, shell_path=None):
         values = tags.get(tag, [])
         D.need(len(values) == 1 or optional and not values, "ELF singleton dynamic tag")
         return values[0] if values else None
+
+    if shell_provider:
+        # PT_INTERP may also be present on a dual-use shared library. Loading
+        # it as DT_NEEDED does not execute that entry. Check its actual DSO
+        # role instead; providers never become approved subprocess programs.
+        flags = single(0x6FFFFFFB, True)  # DT_FLAGS_1
+        D.need(flags is None or flags & 0x08000000 == 0, "Shell provider must not be a PIE executable")
 
     size = single(10)
     D.need(0 < size <= (16 << 20 if shell else 2 << 20), "ELF string table bound")
@@ -710,7 +719,7 @@ def shell_elf_record(raw, *, role, selected=None):
                 and selected.startswith((SHELL_LIBRARY_ROOT + "/", "/usr/bin/", "/bin/"))),
            "Shell ELF diagnostic input is not a fixed public role/path")
     try:
-        return elf_dependencies(raw, shell=True, shell_path=selected)
+        return elf_dependencies(raw, shell=True, shell_path=selected, shell_provider=role == "provider")
     except Exception as error:
         label = role + (" " + selected if selected is not None else "")
         raise D.Refused(("Shell ELF " + label + ": " + failure_reason(error))[:500]) from error
@@ -2327,9 +2336,7 @@ def shell_native_inputs(check, work, environment):
         row = host(path)
         check.phase = "shell-native-provider:" + path
         elf = shell_elf_record(D.read(Path(row["path"]), MAX_BINARY), role="provider", selected=path)
-        D.need(elf["soname"] == name and (elf["interpreter"] is None or name in {"ld-linux-x86-64.so.2", "libc.so.6"}),
-               "Shell provider SONAME/interpreter differs: "
-               f"sonameMatches={elf['soname'] == name}, interpreterPresent={elf['interpreter'] is not None}")
+        D.need(elf["soname"] == name, "Shell provider SONAME differs")
         libraries[name] = {"file": shell_file_projection(row), "elf": elf, "package": owner(row)}
         edges(path, elf)
     loader = host("/lib64/ld-linux-x86-64.so.2")
