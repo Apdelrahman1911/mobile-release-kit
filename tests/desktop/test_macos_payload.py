@@ -68,6 +68,37 @@ def job_double(root, *, result=None, verdict=None):
     return job
 
 
+def tool_path_data():
+    # All metadata and resolution below are DATA, never host tool admission.
+    bin_path = payload.CLT / "usr/bin"
+    sdk, resource = payload.CLT / "SDKs/MacOSX26.5.sdk", payload.CLT / "usr/lib/clang/21"
+    aliases = {bin_path / "ranlib": "libtool", bin_path / "otool": "llvm-otool"}
+    overrides = {}
+    directories = set()
+    for path in (bin_path, Path("/usr/bin"), Path("/bin"), resource / "include",
+                 resource / "lib/darwin", sdk / "usr/include/ffi", sdk / "usr/lib"):
+        directories.update((path, *path.parents))
+
+    def lstat(path):
+        if path in overrides:
+            return overrides[path]
+        mode = stat.S_IFDIR | 0o755 if path in directories else (
+            stat.S_IFLNK | 0o777 if path in aliases else stat.S_IFREG | 0o755)
+        return SimpleNamespace(st_dev=1, st_ino=int.from_bytes(hashlib.sha256(str(path).encode()).digest()[:4]),
+            st_mode=mode, st_uid=0, st_nlink=1, st_size=6, st_mtime_ns=3, st_ctime_ns=4)
+
+    def resolve(path, strict=False):
+        for _ in range(9):
+            if path not in aliases:
+                return path
+            target = Path(aliases[path])
+            path = target if target.is_absolute() else path.parent / target
+        raise AssertionError("An invalid alias route reached the resolution double")
+
+    return SimpleNamespace(bin=bin_path, sdk=sdk, resource=resource, aliases=aliases,
+                           overrides=overrides, lstat=lstat, resolve=resolve)
+
+
 class MacOSPayloadDataTests(unittest.TestCase):
     def test_deadline_allocation_reserves_original_tail_without_renewal(self):
         self.assertEqual(payload.command_timeout(100, 94.1), 2)
@@ -243,6 +274,111 @@ class MacOSPayloadDataTests(unittest.TestCase):
             self.assertEqual(job.phase, "inspect-git")
             self.assertEqual(job.save.call_args.args[0], "protected-git.json")
             self.assertEqual(job.save.call_args.args[1]["nodes"][0]["uid"], 1001)
+
+    def test_selected_tool_roles_survive_protected_alias_hashing_and_environment(self):
+        data = tool_path_data()
+        row = {"size": 6, "sha256": hashlib.sha256(b"INERT\n").hexdigest()}
+        job = SimpleNamespace(build_environment={}, phase="new", clock=SimpleNamespace(check=Mock()),
+                              save=Mock(), copy=Mock(), root=Path("/inert/task"))
+
+        def run(name, argv, **kwargs):
+            if name == "sdk-selection":
+                return (str(data.sdk) + "\n").encode()
+            if name.startswith("select-"):
+                return (str((Path("/usr/bin") if argv[-1] == "codesign" else data.bin) / argv[-1]) + "\n").encode()
+            if name == "clang-version":
+                return b"INERT compiler DATA\n"
+            if name == "clang-resources":
+                return (str(data.resource) + "\n").encode()
+            raise AssertionError("Unexpected DATA command")
+
+        job.run = Mock(side_effect=run)
+        with patch.object(Path, "lstat", autospec=True, side_effect=data.lstat), \
+             patch.object(Path, "resolve", autospec=True, side_effect=data.resolve), \
+             patch.object(Path, "is_dir", return_value=True), patch.object(Path, "is_file", return_value=False), \
+             patch.object(payload.os, "readlink", side_effect=data.aliases.__getitem__), \
+             patch.object(payload.os.path, "lexists", return_value=False), \
+             patch.object(payload.os, "uname", return_value=("Darwin", "INERT")), \
+             patch.object(payload, "source_binding"), patch.object(payload, "read_stream", return_value=row) as read:
+            tools = payload.prepare_tools(job)
+        records = {call.args[0]: call.args[1] for call in job.save.call_args_list}
+        toolchain = records["toolchain.json"]
+        for name, physical in (("ranlib", "libtool"), ("otool", "llvm-otool"), ("ar", "ar")):
+            invocation, target = str(data.bin / name), str(data.bin / physical)
+            self.assertEqual(tools[name], invocation)
+            self.assertEqual(toolchain["identities"][name], {"invocationPath": invocation,
+                             "path": target, "linkCount": 1, **row})
+            self.assertEqual(records["protected-" + name + ".json"]["requestedPath"], invocation)
+            self.assertEqual(records["protected-" + name + ".json"]["resolvedPath"], target)
+            self.assertIn(Path(target), [call.args[0] for call in read.call_args_list])
+        self.assertEqual(job.build_environment["RANLIB"], str(data.bin / "ranlib"))
+        self.assertEqual(job.build_environment["AR"], str(data.bin / "ar"))
+        self.assertEqual(tools["codesign"], "/usr/bin/codesign")
+        alias_facts = records["protected-ranlib.json"]["invocationRoute"][0]
+        self.assertEqual(alias_facts["linkTarget"], "libtool")
+        self.assertEqual(stat.S_IMODE(alias_facts["mode"]), 0o777)
+
+    def test_selected_tool_routes_refuse_ambiguity_untrusted_aliases_and_changes(self):
+        data = tool_path_data()
+        nominal, target = data.bin / "ranlib", data.bin / "libtool"
+        raw = (str(nominal) + "\n").encode()
+        job = SimpleNamespace(phase="new", clock=SimpleNamespace(check=Mock()), save=Mock())
+        row = {"size": 6, "sha256": hashlib.sha256(b"INERT\n").hexdigest()}
+        with patch.object(Path, "lstat", autospec=True, side_effect=data.lstat), \
+             patch.object(Path, "resolve", autospec=True, side_effect=data.resolve), \
+             patch.object(payload.os, "readlink", side_effect=data.aliases.__getitem__), \
+             patch.object(payload, "read_stream", return_value=row) as read:
+            for invalid in (b"ranlib\n", raw + b"\n", raw + b"/other", b" " + raw,
+                            str(target).encode(), b"/tmp/ranlib\n", b"/usr/bin/../bin/ranlib\n"):
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(payload.Refused, "tool-selection"):
+                    payload.selected_tool(job, "ranlib", invalid)
+            read.assert_not_called()
+            for path, fields in ((nominal, {"st_uid": 1001}), (data.bin, {"st_mode": stat.S_IFDIR | 0o777}),
+                                 (data.bin, {"st_mode": stat.S_IFLNK | 0o777}),
+                                 (target, {"st_uid": 1001}), (target, {"st_mode": stat.S_IFREG | 0o775})):
+                with self.subTest(path=path, fields=fields):
+                    data.overrides[path] = SimpleNamespace(**dict(vars(data.lstat(path)), **fields))
+                    with self.assertRaisesRegex(payload.Refused, "tool-route-ownership"):
+                        payload.selected_tool(job, "ranlib", raw)
+                    read.assert_not_called()
+                    self.assertEqual(job.save.call_args.args[0], "protected-ranlib.json")
+                    data.overrides.clear()
+            for link, code in (("/tmp/libtool", "tool-alias-target"), ("../bin/libtool", "tool-alias-target"),
+                               ("ranlib", "tool-alias-cycle")):
+                with self.subTest(link=link), self.assertRaisesRegex(payload.Refused, code):
+                    data.aliases[nominal] = link
+                    payload.selected_tool(job, "ranlib", raw)
+            data.aliases[nominal] = "first-alias"
+            data.aliases[data.bin / "first-alias"] = str(target)
+            invocation, identity = payload.selected_tool(job, "ranlib", raw)
+            self.assertEqual(invocation, str(nominal))
+            self.assertEqual(identity["path"], str(target))
+            data.aliases.clear()
+            for index in range(9):
+                source = nominal if index == 0 else data.bin / ("alias-" + str(index))
+                data.aliases[source] = "alias-" + str(index + 1)
+            with self.assertRaisesRegex(payload.Refused, "tool-alias-limit"):
+                payload.selected_tool(job, "ranlib", raw)
+            data.aliases.clear()
+            data.aliases[nominal] = "libtool"
+
+            def changed_route(*args, **kwargs):
+                # Change only the alias spelling, with the same terminal target.
+                data.aliases[nominal] = str(target)
+                return row
+
+            read.side_effect = changed_route
+            with self.assertRaisesRegex(payload.Refused, "tool-route-changed"):
+                payload.selected_tool(job, "ranlib", raw)
+            data.aliases[nominal] = "libtool"
+
+            def changed_parent(*args, **kwargs):
+                data.overrides[data.bin] = SimpleNamespace(**dict(vars(data.lstat(data.bin)), st_uid=1001))
+                return row
+
+            read.side_effect = changed_parent
+            with self.assertRaisesRegex(payload.Refused, "tool-route-changed"):
+                payload.selected_tool(job, "ranlib", raw)
 
     def test_pinned_archive_bytes_are_used_and_original_timestamps_survive(self):
         with tempfile.TemporaryDirectory(prefix="mrk-macos-payload-data-") as name:

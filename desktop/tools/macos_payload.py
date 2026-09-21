@@ -37,6 +37,7 @@ DISPOSABLE_DIRS = ("downloads", "sources", "build", "deps", "package-source", "h
 SYSTEM_DEPS = frozenset({"/usr/lib/libSystem.B.dylib", "/usr/lib/libffi.dylib",
     "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation"})
 DYLIBS = ("libcrypto.3.dylib", "libssl.3.dylib")
+TOOL_NAMES = ("clang", "ld", "ar", "ranlib", "make", "otool", "install_name_tool", "codesign")
 HACL = ("Hash_MD5", "Hash_SHA1", "Hash_SHA2", "Hash_SHA3", "Hash_BLAKE2", "HMAC")
 OMIT = frozenset({"test", "tests", "__pycache__", "ensurepip", "idlelib", "turtledemo",
                   "tkinter", "venv", "site-packages"})
@@ -407,6 +408,73 @@ def inspect_protected(job: Job, role: str, path: Path) -> dict:
         observe=lambda facts: job.save("protected-" + role + ".json", {"role": role, **facts}))
 
 
+def selected_tool(job: Job, name: str, raw: bytes) -> tuple[str, dict]:
+    """Keep a fixed tool's invocation role separate from its physical identity."""
+    require(name in TOOL_NAMES, "tool-role")
+    role = name.replace("_", "-")
+    job.phase = "inspect-" + role
+    bins = (CLT / "usr/bin", Path("/usr/bin"))
+    choices = {str(directory / name).encode("ascii"): directory / name for directory in bins}
+    require(type(raw) is bytes and 0 < len(raw) <= 1025
+            and raw.removesuffix(b"\n") in choices, "tool-selection")
+    invocation = choices[raw.removesuffix(b"\n")]
+    current, originals, aliases = invocation, {}, {}
+
+    def save_route(facts: dict | None = None) -> None:
+        record = {"role": role, **(facts or {}), "invocationPath": str(invocation), "invocationRoute": [
+            {"path": str(node), "device": value.st_dev, "inode": value.st_ino,
+             "mode": value.st_mode, "uid": value.st_uid, "links": value.st_nlink,
+             "size": value.st_size, "mtimeNs": value.st_mtime_ns, "ctimeNs": value.st_ctime_ns,
+             **({"linkTarget": aliases[node]} if node in aliases else {})}
+            for node, value in originals.items()]}
+        require(len(canonical(record)) <= 65536, "tool-facts-bound")
+        job.save("protected-" + role + ".json", record)
+
+    try:
+        while True:
+            require(current.parent in bins, "tool-origin")
+            require(current not in aliases, "tool-alias-cycle")
+            for node in (current, *current.parents):
+                job.clock.check()
+                require(len(str(node)) <= 1024, "tool-path-bound")
+                if node not in originals:
+                    require(len(originals) < 32, "tool-path-bound")
+                    originals[node] = node.lstat()
+                value = originals[node]
+                is_alias = node == current and stat.S_ISLNK(value.st_mode)
+                expected_kind = is_alias or stat.S_ISREG(value.st_mode) if node == current else stat.S_ISDIR(value.st_mode)
+                require(value.st_uid == 0 and (is_alias or not value.st_mode & 0o022)
+                        and expected_kind, "tool-route-ownership")
+            if not stat.S_ISLNK(originals[current].st_mode):
+                break
+            require(len(aliases) < 8, "tool-alias-limit")
+            target = os.readlink(current)
+            require(0 < len(target) <= 1024, "tool-alias-target")
+            aliases[current] = target
+            destination = Path(target)
+            require(re.fullmatch(r"[A-Za-z0-9_+.-]{1,255}", destination.name)
+                    and destination.name not in {".", ".."}
+                    and (destination.is_absolute() and str(destination) == target and destination.parent in bins
+                         or not destination.is_absolute() and destination.name == target), "tool-alias-target")
+            current = destination if destination.is_absolute() else current.parent / destination
+        require(invocation.resolve(strict=True) == current, "tool-alias-resolution")
+    except (OSError, Refused):
+        save_route()
+        raise
+
+    row = protected_file(invocation, job.clock.check, observe=save_route)
+    require(row["path"] == str(current), "tool-alias-resolution")
+    for node, original in originals.items():
+        job.clock.check()
+        after = node.lstat()
+        require(state(after) == state(original) and after.st_uid == original.st_uid, "tool-route-changed")
+        if node in aliases:
+            require(os.readlink(node) == aliases[node], "tool-route-changed")
+    require(invocation.resolve(strict=True) == current, "tool-alias-resolution")
+    # ranlib and libtool may be the same bytes but are not the same invocation.
+    return str(invocation), {"invocationPath": str(invocation), **row}
+
+
 def source_binding(job: Job, git: str) -> None:
     environment = dict(job.environment, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
     argv = [git, "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"]
@@ -430,14 +498,9 @@ def prepare_tools(job: Job) -> dict:
     sdk_raw = job.run("sdk-selection", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"], env=env, cap=30)
     sdk = Path(sdk_raw.decode("utf-8").strip()).resolve(strict=True)
     require(sdk.is_relative_to(CLT / "SDKs") and sdk.name.startswith("MacOSX") and sdk.name.endswith(".sdk"), "sdk-selection")
-    tool_names = ("clang", "ld", "ar", "ranlib", "make", "otool", "install_name_tool", "codesign")
-    for name in tool_names:
+    for name in TOOL_NAMES:
         raw = job.run("select-" + name.replace("_", "-"), ["/usr/bin/xcrun", "--find", name], env=env, cap=30)
-        job.phase = "inspect-" + name.replace("_", "-")
-        selected = Path(raw.decode("utf-8").strip()).resolve(strict=True)
-        require(selected.is_relative_to(CLT / "usr/bin") or selected.parent == Path("/usr/bin"), "tool-origin")
-        identities[name] = inspect_protected(job, name.replace("_", "-"), selected)
-        tools[name] = str(selected)
+        tools[name], identities[name] = selected_tool(job, name, raw)
     for name in ("sh", "perl", "curl", "git"):
         path = Path("/bin/sh") if name == "sh" else Path("/usr/bin") / name
         identities[name] = inspect_protected(job, name, path)
