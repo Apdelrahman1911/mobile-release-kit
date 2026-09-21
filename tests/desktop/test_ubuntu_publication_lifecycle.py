@@ -56,6 +56,14 @@ def map_data():
     return {role: {"paths": ["/inert/" + role], "deviceMajor": 8, "deviceMinor": 2, "inode": index + 1} for index, role in enumerate(sorted(roles))}
 
 
+def resource_observation(phase="main-failure-before-join", *, unavailable=False):
+    return {"scope": "original-service-resource-observation-only", "phase": phase,
+            "bindingMatched": not unavailable, "pidsMax": None if unavailable else 64,
+            "pidsCurrent": None if unavailable else 62, "pidsEventsMax": None if unavailable else 1,
+            "memoryEvents": None if unavailable else {"max": 0, "oom": 0, "oom_kill": 0},
+            "unavailable": ["binding"] if unavailable else []}
+
+
 def native_capture(case, expected=None):
     prefix = "test " + L.INSTALLED_TESTS[case] + " ... "
     count = {"positive": 2, "shutdown": 1, "overlap": 2}.get(case, 0)
@@ -533,11 +541,20 @@ class LifecycleData(unittest.TestCase):
                 if case in ("log-error", "input-and-log-error"):
                     raise OSError("inert log retention failure")
                 return b"inert original display diagnostic\n"
+            def resources(observed_value, phase):
+                self.assertEqual(observed_value, value)
+                self.assertTrue(L._FAILED)
+                self.assertEqual(phase, "failure-after-join-attempt" if "join" in events else "main-failure-before-join")
+                events.append("resources")
+                if case == "input-and-log-error":
+                    raise OSError("private resource diagnostic error must not replace the original")
+                return resource_observation(phase, unavailable=case == "input-error")
             with self.subTest(case=case), patch.multiple(L, _ROOT=L.root_path(value), _END=value["deadline"],
                     _FAILED=False, _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=owned, ProcessError=ProcessError)), \
                  patch.object(L.threading, "Thread", Original), patch.object(L.time, "monotonic", side_effect=clock), \
                  patch.object(L.time, "sleep", side_effect=sleep), patch.object(L, "_shell_window_pid"), \
                  patch.object(L, "_shell_log_capture", side_effect=log_capture) as log, \
+                 patch.object(L, "_shell_resource_diagnostic", side_effect=resources) as resource_read, \
                  patch.object(L, "_retain", side_effect=lambda name, raw: retained.update({name: raw})), \
                  patch.object(L.sys, "stderr", new_callable=io.StringIO) as diagnostic:
                 if case == "diagnostic-write-error":
@@ -563,6 +580,11 @@ class LifecycleData(unittest.TestCase):
                         observed = json.loads(lines[0].split("=", 1)[1])
                         self.assertFalse(observed["qualified"])
                         self.assertFalse(observed["cleanupEstablished"])
+                        if case == "input-and-log-error":
+                            self.assertIsNone(observed["resources"])
+                        else:
+                            self.assertEqual(observed["resources"], resource_observation(
+                                resource_read.call_args.args[1], unavailable=case == "input-error"))
                         if case == "early-return":
                             self.assertEqual(observed["stage"], "initial-window")
                             self.assertEqual(observed["capture"]["exitCode"], 127)
@@ -644,6 +666,10 @@ class LifecycleData(unittest.TestCase):
                 self.assertEqual(originals[0].options["kwargs"], {"shell_diagnostic": True})
                 self.assertEqual(events.count("join"), 1)
                 self.assertEqual(log.call_count, int(case not in no_log_cases))
+                self.assertEqual(resource_read.call_count, int(case != "complete"))
+                if case != "complete":
+                    later = case in {"unjoined", "final-result-failure", "log-error", "worker-error", "guard-unknown", "missing-result"}
+                    self.assertEqual(events.index("resources") > events.index("join"), later)
 
     def test_normal_failure_diagnostic_is_bounded_joined_only_and_non_authoritative(self):
         argv = ["/inert/original"]
@@ -651,7 +677,8 @@ class LifecycleData(unittest.TestCase):
         holder = {"result": original, "guardState": "RESTORED", "errors": []}
         error = RuntimeError("private argv and environment must not be exported")
         display = b"\x00" * 8192
-        options = dict(joined=True, stage="initial-window", inputs=0, commands=[], error=error, display_log=display)
+        options = dict(joined=True, stage="initial-window", inputs=0, commands=[], error=error,
+                       display_log=display, resources=resource_observation())
         def observe(value=holder, **changes):
             with patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
                 L._shell_normal_failure(value, argv, **dict(options, **changes))
@@ -667,6 +694,12 @@ class LifecycleData(unittest.TestCase):
         observed = observe()
         self.assertFalse(observed["qualified"])
         self.assertFalse(observed["cleanupEstablished"])
+        self.assertEqual(observed["resources"], resource_observation())
+        self.assertLess(len(L.canonical(observed["resources"])), 1024)
+        unavailable = observe(resources=resource_observation(unavailable=True))
+        self.assertEqual(unavailable["resources"], resource_observation(unavailable=True))
+        self.assertFalse(unavailable["qualified"])
+        self.assertFalse(unavailable["cleanupEstablished"])
         for name in ("stdout", "stderr", "display"):
             raw = display if name == "display" else getattr(original, name)
             row = observed["capture"][name]
@@ -682,6 +715,7 @@ class LifecycleData(unittest.TestCase):
                       "lastCompleted": {"label": "search", "ordinal": 1, "stage": "initial-window",
                                         "argv": query.args, "result": query, "ownerCall": call}}
         observed = observe(controller=controller)
+        self.assertEqual(observed["resources"], resource_observation())
         # The complete escaped payload forces the existing fallback. Both old
         # and new snippets are stripped, while their sizes/hashes survive.
         for capture in (observed["capture"], observed["controller"]["lastCompleted"]["capture"]):
@@ -716,6 +750,7 @@ class LifecycleData(unittest.TestCase):
         self.assertIsNone(unjoined["capture"])
         self.assertIsNone(unjoined["workerCall"])
         self.assertIsNotNone(unjoined["controller"]["lastCompleted"]["capture"])
+        self.assertEqual(unjoined["resources"], resource_observation())
         for result in (subprocess.CompletedProcess(["/inert/different"], 127, b"", b""),
                        subprocess.CompletedProcess(argv, True, b"", b""),
                        subprocess.CompletedProcess(argv, 127, "not bytes", b""),
@@ -771,6 +806,92 @@ class LifecycleData(unittest.TestCase):
         with patch.object(L.sys, "stderr", SimpleNamespace(write=Mock(side_effect=OSError("synthetic write failure")))) as stream:
             L._shell_normal_failure(holder, argv, **options)
             self.assertEqual(stream.write.call_count, 1)
+
+    def test_normal_resource_diagnostic_is_original_bounded_and_failure_only(self):
+        value = installed_handoff()
+        root = L.root_path(value)
+        group = "/system.slice/" + root.name + ".service"
+        self_path, membership = "/proc/self/cgroup", "0::" + group + "\n"
+        files = {"pids.max": "64\n", "pids.current": "62\n", "pids.events": "max 1\nfuture_counter 7\n",
+                 "memory.events": "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n"}
+        leaves = [(str(Path("/sys/fs/cgroup" + group) / name), 1024) for name in files]
+        expected_calls = [(self_path, 512), *leaves, (self_path, 512)]
+        class Unprintable(OSError):
+            def __str__(self):
+                raise AssertionError("private kernel failure formatting is forbidden")
+        def observe(changes=None, *, bindings=None, original=value, selected_root=root):
+            calls, self_reads = [], [0]
+            content = {**files, **(changes or {})}
+            def kernel(path, limit):
+                calls.append((str(path), limit))
+                if str(path) == self_path:
+                    index = self_reads[0]
+                    self_reads[0] += 1
+                    raw = bindings[index] if bindings is not None else membership
+                else:
+                    raw = content[Path(path).name]
+                if isinstance(raw, BaseException):
+                    raise raw
+                return raw
+            with patch.object(L, "_ROOT", selected_root), patch.object(L, "_kernel", side_effect=kernel), \
+                 patch.object(L, "command", side_effect=AssertionError("no diagnostic process")) as command, \
+                 patch.object(L.threading, "Thread", side_effect=AssertionError("no diagnostic thread")) as thread:
+                result = L._shell_resource_diagnostic(original, "main-failure-before-join")
+                command.assert_not_called()
+                thread.assert_not_called()
+            self.assertIsNotNone(result)
+            self.assertLess(len(L.canonical(result)), 1024)
+            self.assertNotIn("future_counter", L.canonical(result).decode())
+            return result, calls
+        observed, calls = observe()
+        self.assertEqual(observed, resource_observation())
+        self.assertEqual(calls, expected_calls)
+        unlimited, _ = observe({"pids.max": "max\n"})
+        self.assertEqual(unlimited["pidsMax"], "max")  # Observation of drift, never policy acceptance.
+        upper, _ = observe({"pids.current": str((1 << 64) - 1) + "\n"})
+        self.assertEqual(upper["pidsCurrent"], (1 << 64) - 1)
+        for options, expected in (
+                ({"original": {**value, "runId": "../other"}}, []),
+                ({"original": {**value, "attempt": True}}, []),
+                ({"selected_root": Path("/other")}, []),
+                ({"bindings": ["0::/system.slice/other.service\n"]}, [(self_path, 512)]),
+                ({"bindings": [Unprintable("private input")]}, [(self_path, 512)]),
+                ({"bindings": [membership, "0::/system.slice/other.service\n"]}, expected_calls),
+                ({"bindings": [membership, Unprintable("private input")]}, expected_calls)):
+            with self.subTest(binding=options):
+                result, calls = observe(**options)
+                self.assertEqual(result, resource_observation(unavailable=True))
+                self.assertEqual(calls, expected)
+        failures = (
+            ("pids.max", "pidsMax", "64"), ("pids.current", "pidsCurrent", "-1\n"),
+            ("pids.current", "pidsCurrent", "\u0661\n"),
+            ("pids.current", "pidsCurrent", str(1 << 64) + "\n"),
+            ("pids.current", "pidsCurrent", b"62\n"),
+            ("pids.events", "pidsEventsMax", "max 1\nmax 2\n"),
+            ("pids.events", "pidsEventsMax", "max 1\n" + "x" * 1024),
+            ("pids.events", "pidsEventsMax", "max 1\n" + "".join("a" * count + " 0\n" for count in range(1, 33))),
+            ("pids.events", "pidsEventsMax", "max " + str(1 << 64) + "\n"),
+            ("memory.events", "memoryEvents", "max 0\noom 0\n"),
+            ("memory.events", "memoryEvents", "max 0\noom 0\noom_kill 0\nprivate/path 0\n"),
+            ("memory.events", "memoryEvents", Unprintable("private input")),
+        )
+        for leaf, field, raw in failures:
+            with self.subTest(leaf=leaf, input_type=type(raw).__name__):
+                result, calls = observe({leaf: raw})
+                expected = resource_observation()
+                expected[field], expected["unavailable"] = None, [leaf]
+                self.assertEqual(result, expected)
+                self.assertEqual(calls, expected_calls)
+        malformed = (
+            {"scope": "private input"}, {"phase": "private input"}, {"bindingMatched": 1},
+            {"pidsCurrent": True}, {"pidsEventsMax": 1 << 64}, {"pidsMax": "64"},
+            {"memoryEvents": {"max": 0, "oom": 0, "oom_kill": 0, "private": 0}},
+            {"unavailable": ["pids.current"]}, {"unavailable": ["binding", "binding"]},
+            {"unavailable": ["private input"]}, {"private": "x" * 1024},
+        )
+        for changed in malformed:
+            with self.subTest(fields=list(changed)):
+                self.assertIsNone(L._shell_resource_summary({**resource_observation(), **changed}))
 
     def test_shell_display_route_precreates_one_protected_log_and_never_widens_file_limits(self):
         value = installed_handoff(); value.pop("installed"); value["shell"] = {}

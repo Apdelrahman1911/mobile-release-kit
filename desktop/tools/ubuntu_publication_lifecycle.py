@@ -2700,6 +2700,91 @@ def _shell_capture_summary(result, argv, display_log=None, *, controller=False):
     return captured
 
 
+def _shell_resource_summary(value):
+    """Closed, bounded observation DATA; never a resource-policy/finality gate."""
+    try:
+        fields = {"pidsMax": "pids.max", "pidsCurrent": "pids.current", "pidsEventsMax": "pids.events",
+                  "memoryEvents": "memory.events"}
+        need(type(value) is dict and set(value) == {"scope", "phase", "bindingMatched", "unavailable", *fields}
+             and type(value["scope"]) is str and value["scope"] == "original-service-resource-observation-only"
+             and type(value["phase"]) is str and value["phase"] in {"main-failure-before-join", "failure-after-join-attempt"}
+             and type(value["bindingMatched"]) is bool, "Invalid resource observation")
+        missing = value["unavailable"]
+        need(type(missing) is list and len(missing) <= 5
+             and all(type(item) is str and item in {"binding", *fields.values()} for item in missing)
+             and len(set(missing)) == len(missing), "Invalid unavailable resource labels")
+        result = {key: value[key] for key in ("scope", "phase", "bindingMatched")}
+        result["unavailable"] = list(missing)
+        need(value["bindingMatched"] and "binding" not in missing or not value["bindingMatched"] and missing == ["binding"],
+             "Resource binding/availability differs")
+        for name, leaf in fields.items():
+            item = value[name]
+            if not value["bindingMatched"] or leaf in missing:
+                need(item is None, "Unavailable resource has a value")
+            elif name == "memoryEvents":
+                need(type(item) is dict and set(item) == {"max", "oom", "oom_kill"}
+                     and all(type(number) is int and 0 <= number < 1 << 64 for number in item.values()), "Invalid memory counters")
+                item = dict(item)
+            else:
+                need(type(item) is int and 0 <= item < 1 << 64 or name == "pidsMax" and type(item) is str and item == "max",
+                     "Invalid task counter")
+            result[name] = item
+        need(len(canonical(result)) < 1024, "Resource observation exceeds its bound")
+        return result
+    except BaseException:
+        return None
+
+
+def _shell_resource_diagnostic(value, phase):
+    """One original service's public counters, never a failed-owner/private read.
+
+    Only called after the original startup _domain admission. Sequential reads
+    are not an atomic snapshot, the failing spawn's errno, or cleanup evidence.
+    """
+    unavailable = {"scope": "original-service-resource-observation-only", "phase": phase,
+                   "bindingMatched": False, "pidsMax": None, "pidsCurrent": None,
+                   "pidsEventsMax": None, "memoryEvents": None, "unavailable": ["binding"]}
+    try:
+        need(type(value) is dict and all(type(value.get(key)) is str
+             and re.fullmatch(r"[1-9][0-9]{0,19}", value[key]) for key in ("runId", "attempt"))
+             and _ROOT == root_path(value), "Different original resource root")
+        group = "/system.slice/" + _ROOT.name + ".service"
+        membership = "0::" + group + "\n"
+        need(_kernel("/proc/self/cgroup", 512) == membership, "Different original resource domain")
+    except BaseException:
+        return _shell_resource_summary(unavailable)
+    result = {**unavailable, "bindingMatched": True, "unavailable": []}
+    for leaf, name in (("pids.max", "pidsMax"), ("pids.current", "pidsCurrent"),
+                       ("pids.events", "pidsEventsMax"), ("memory.events", "memoryEvents")):
+        try:
+            raw = _kernel(Path("/sys/fs/cgroup" + group) / leaf, 1024)
+            need(type(raw) is str and 0 < len(raw) <= 1024, "Resource input bound differs")
+            if leaf in {"pids.max", "pids.current"}:
+                need(leaf == "pids.max" and raw == "max\n" or re.fullmatch(r"[0-9]{1,20}\n", raw), "Invalid task scalar")
+                observed = "max" if raw == "max\n" else int(raw)
+                need(observed == "max" or observed < 1 << 64, "Task scalar exceeds its bound")
+            else:
+                lines, counters = raw.splitlines(keepends=True), {}
+                need(0 < len(lines) <= 32, "Resource event row bound differs")
+                for line in lines:
+                    match = re.fullmatch(r"([a-z_]{1,32}) ([0-9]{1,20})\n", line)
+                    need(match is not None, "Invalid resource event row")
+                    key, number = match.groups()
+                    need(key not in counters and int(number) < 1 << 64, "Duplicate or unbounded resource event")
+                    counters[key] = int(number)
+                keys = ("max",) if leaf == "pids.events" else ("max", "oom", "oom_kill")
+                need(all(key in counters for key in keys), "Required resource counter unavailable")
+                observed = counters["max"] if leaf == "pids.events" else {key: counters[key] for key in keys}
+            result[name] = observed
+        except BaseException:
+            result["unavailable"].append(leaf)
+    try:
+        need(_kernel("/proc/self/cgroup", 512) == membership, "Original resource domain changed")
+    except BaseException:
+        return _shell_resource_summary(unavailable)
+    return _shell_resource_summary(result)
+
+
 def _shell_failure_output(marker, data):
     # Includes JSON escaping and all metadata; never unbounded terminal text.
     raw = marker + canonical(data)
@@ -2732,7 +2817,7 @@ def _shell_command_failure(argv, result, case, display_log, log_error):
 
 def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, error,
                           join_error=None, capture_error=None, display_log=None,
-                          controller=None, error_origin="main"):
+                          controller=None, error_origin="main", resources=None):
     """Best-effort diagnosis from original memory, never finality or read authority.
 
     A failed service cannot export its private files. Its existing stderr can
@@ -2790,7 +2875,7 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
                 "stage": stage, "inputs": inputs, "controllerCommands": len(commands),
                 "lastControllerCommand": commands[-1]["phase"] if commands else None,
                 "workerGuardState": None, "workerErrorCount": None, "workerCall": None,
-                "controller": None, "capture": None}
+                "controller": None, "capture": None, "resources": _shell_resource_summary(resources)}
         if type(controller) is dict:
             observation = {}
             for name in ("normalStartMonotonic", "controllerEndpoint", "serviceEndpoint", "failureMonotonic"):
@@ -2859,17 +2944,28 @@ def _shell_normal(value, environment, expected, log_binding):
     failure, join_error, capture_error, joined, inputs = None, None, None, False, 0
     display_log = None
     stage, diagnostic_attempted = "start", False
+    resources, resource_attempted = None, False
     controller = {"normalStartMonotonic": started, "controllerEndpoint": end, "serviceEndpoint": _END,
                   "carrierTimeoutSeconds": seconds, "failureMonotonic": None,
                   "lastAttempt": None, "lastCompleted": None}
+
+    def resource_snapshot(phase):
+        nonlocal resources, resource_attempted
+        if not resource_attempted:
+            resource_attempted = True
+            try:
+                resources = _shell_resource_diagnostic(value, phase)
+            except BaseException:
+                pass  # Preserve the original error and join even if diagnosis fails.
 
     def diagnose(error, origin):
         nonlocal diagnostic_attempted
         if not diagnostic_attempted:
             diagnostic_attempted = True
+            resource_snapshot("failure-after-join-attempt")
             _shell_normal_failure(holder, argv, joined=joined, stage=stage, inputs=inputs, commands=commands,
                                   error=error, join_error=join_error, capture_error=capture_error, display_log=display_log,
-                                  controller=controller, error_origin=origin)
+                                  controller=controller, error_origin=origin, resources=resources)
 
     def xdo(label, args, *, codes=(0,)):
         attempt = {"label": label, "ordinal": len(commands) + 1, "stage": stage,
@@ -2963,6 +3059,7 @@ def _shell_normal(value, environment, expected, log_binding):
     except BaseException as error:
         failure = error
         _shell_note(controller, failureMonotonic=_shell_diagnostic_time())
+        resource_snapshot("main-failure-before-join")
     finally:
         try:
             # A failed start return does not prove that no thread was created.
