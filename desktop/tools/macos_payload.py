@@ -277,8 +277,11 @@ class Job:
         self.guard = DefaultCancellation(ProcessCleanupError, "macOS payload original cleanup is incomplete")
         self.clock = Deadline(self.end, self.guard)
         self.scope = CleanupScope(self.guard, self.close_clock, owns_cancellation=True, first_primary=True)
+        # CoreFoundation's real-UID/default shape avoids its passwd-home
+        # .CFUserTextEncoding fallback; a synthetic HOME alone is insufficient.
         self.environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
-                            "HOME": str(root / "home"), "TMPDIR": str(root / "tmp")}
+                            "HOME": str(root / "home"), "TMPDIR": str(root / "tmp"),
+                            "__CF_USER_TEXT_ENCODING": f"0x{os.getuid():X}:0:0"}
         self.build_environment = dict(self.environment, DEVELOPER_DIR=str(CLT), MACOSX_DEPLOYMENT_TARGET="26.0")
 
     def close_clock(self):
@@ -1036,7 +1039,7 @@ def package(job: Job, inputs: dict, payload: Path) -> dict:
 SMOKE = r'''import ctypes, hashlib, json, os, pathlib, resource, ssl, sys, zlib
 from xml.parsers import expat
 def _assert_clean_environment():
-    expected = {'PATH', 'LANG', 'LC_ALL', 'TZ', 'HOME', 'TMPDIR'}
+    expected = {'PATH', 'LANG', 'LC_ALL', 'TZ', 'HOME', 'TMPDIR', '__CF_USER_TEXT_ENCODING'}
     actual = set(os.environ)
     if actual != expected:
         # Failure-only key names, never values or exception representations.
@@ -1058,7 +1061,8 @@ def _assert_clean_environment():
             sys.stderr.write(message)
         except Exception:
             pass  # A diagnostic write cannot replace the original assertion.
-    assert set(os.environ) == {'PATH', 'LANG', 'LC_ALL', 'TZ', 'HOME', 'TMPDIR'}
+    assert set(os.environ) == expected
+    assert os.environ['__CF_USER_TEXT_ENCODING'] == f'0x{os.getuid():X}:0:0', 'CoreFoundation encoding policy mismatch'
 
 p = pathlib.Path(sys.argv[1])
 assert sys.version_info[:3] == (3, 14, 7) and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
@@ -1098,7 +1102,10 @@ def smoke(job: Job, tools: dict, payload: Path):
     write_file(poison / "pyvenv.cfg", b"home = /not-an-admitted-python\n")
     write_file(poison / "unexpected.pth", b"import sitecustomize\n")
     keys = {"PYTHONPATH": str(poison), "PYTHONHOME": str(poison), "PYTHONUSERBASE": str(poison), "VIRTUAL_ENV": str(poison),
-            "DYLD_LIBRARY_PATH": str(poison), "DYLD_INSERT_LIBRARIES": str(poison / "not-a-library")}
+            "DYLD_LIBRARY_PATH": str(poison), "DYLD_INSERT_LIBRARIES": str(poison / "not-a-library"),
+            # Same UID and valid syntax, so inheritance cannot be hidden by
+            # CoreFoundation's wrong-UID/malformed-value default fallback.
+            "__CF_USER_TEXT_ENCODING": f"0x{os.getuid():X}:1:1"}
     previous = {key: os.environ.get(key) for key in keys}
     try:
         os.environ.update(keys)

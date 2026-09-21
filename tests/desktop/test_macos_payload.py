@@ -144,11 +144,12 @@ def notice_data(root):
                            job=job, lstat=lstat, overrides=overrides)
 
 
-def smoke_environment_check(environ, stream, **overrides):
+def smoke_environment_check(environ, stream, *, uid=501, **overrides):
     # Compile only this DATA-only function, never SMOKE's native imports/body.
     function, = (node for node in ast.parse(payload.SMOKE).body
                  if isinstance(node, ast.FunctionDef) and node.name == "_assert_clean_environment")
-    namespace = {"os": SimpleNamespace(environ=environ), "sys": SimpleNamespace(stderr=stream), **overrides}
+    namespace = {"os": SimpleNamespace(environ=environ, getuid=lambda: uid),
+                 "sys": SimpleNamespace(stderr=stream), **overrides}
     exec(compile(ast.Module(body=[function], type_ignores=[]), "<smoke-key-check-data>", "exec"), namespace)
     return namespace["_assert_clean_environment"]
 
@@ -157,13 +158,25 @@ class MacOSPayloadDataTests(unittest.TestCase):
     def test_smoke_environment_key_diagnostic_preserves_assertion_and_redaction(self):
         class KeysOnly(dict):
             def __getitem__(self, key):
-                raise AssertionError("Environment values must never be read")
+                if key == "__CF_USER_TEXT_ENCODING":
+                    return super().__getitem__(key)
+                raise AssertionError("Other environment values must never be read")
             get = items = values = __getitem__
 
-        expected = {"PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR"}
+        expected = {"PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR", "__CF_USER_TEXT_ENCODING"}
         stream = io.StringIO()
-        smoke_environment_check(KeysOnly.fromkeys(expected, "DO-NOT-REPORT-VALUE"), stream)()
+        environ = KeysOnly.fromkeys(expected, "DO-NOT-REPORT-VALUE")
+        environ["__CF_USER_TEXT_ENCODING"] = "0x1F5:0:0"
+        smoke_environment_check(environ, stream)()
         self.assertEqual(stream.getvalue(), "")
+        self.assertEqual(environ["__CF_USER_TEXT_ENCODING"], "0x1F5:0:0")
+        for wrong in ("0x1F5:1:1", "0x1F6:0:0", "501:0:0", "0x1f5:0:0", "0x1F5:0x0:0", "", "DO-NOT-REPORT-VALUE"):
+            environ["__CF_USER_TEXT_ENCODING"] = wrong
+            with self.subTest(value=wrong), self.assertRaises(AssertionError) as raised:
+                smoke_environment_check(environ, stream)()
+            self.assertEqual(raised.exception.args, ("CoreFoundation encoding policy mismatch",))
+            self.assertEqual(stream.getvalue(), "")
+            self.assertEqual(environ["__CF_USER_TEXT_ENCODING"], wrong)  # Never repair to pass.
         environ = KeysOnly.fromkeys((expected - {"HOME"}) | {"UNEXPECTED_KEY"}, "DO-NOT-REPORT-VALUE")
         with self.assertRaises(AssertionError):
             smoke_environment_check(environ, stream)()
@@ -171,9 +184,14 @@ class MacOSPayloadDataTests(unittest.TestCase):
                          "extraListTruncated=False extraNameTruncated=False missing=[HOME] extra=['UNEXPECTED_KEY']\n")
         self.assertNotIn("DO-NOT-REPORT-VALUE", stream.getvalue())
         self.assertEqual(set(environ), (expected - {"HOME"}) | {"UNEXPECTED_KEY"})
+        stream = io.StringIO()
+        with self.assertRaises(AssertionError):  # The original key failure, not KeyError from a premature lookup.
+            smoke_environment_check(KeysOnly.fromkeys(expected - {"__CF_USER_TEXT_ENCODING"}), stream)()
+        self.assertIn("missingCount=1 extraCount=0", stream.getvalue())
+        self.assertIn("missing=[__CF_USER_TEXT_ENCODING]", stream.getvalue())
 
     def test_smoke_environment_key_diagnostic_bounds_and_ascii_escaping(self):
-        expected = {"PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR"}
+        expected = {"PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR", "__CF_USER_TEXT_ENCODING"}
         stream = io.StringIO()
         with self.assertRaises(AssertionError):
             smoke_environment_check(dict.fromkeys(expected | {"\u00e9\x1b\n\u2603"}, "PRIVATE"), stream)()
@@ -192,7 +210,7 @@ class MacOSPayloadDataTests(unittest.TestCase):
         self.assertNotIn("PRIVATE", message)
 
     def test_smoke_environment_key_diagnostic_keeps_assertion_on_formatting_failure(self):
-        environ = dict.fromkeys({"PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR", "EXTRA"}, "PRIVATE")
+        environ = dict.fromkeys({"PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR", "__CF_USER_TEXT_ENCODING", "EXTRA"}, "PRIVATE")
         stream = io.StringIO()
         with self.assertRaises(AssertionError):
             smoke_environment_check(environ, stream, ascii=Mock(side_effect=ValueError("DO-NOT-REPORT-ERROR")))()
@@ -791,6 +809,33 @@ class MacOSPayloadDataTests(unittest.TestCase):
         self.assertIn("assert sys.prefix == str(p / 'python')", payload.SMOKE)
         self.assertIn("assert sys._is_gil_enabled()", payload.SMOKE)
         self.assertIn("assert set(os.environ) ==", payload.SMOKE)
+        # Evaluate only the two DATA dictionaries, never Job initialization,
+        # its native owners, smoke() or the SMOKE interpreter program.
+        # This inert module is loaded without a sys.modules registration;
+        # inspect.getsource(class) would incorrectly classify it as built-in.
+        job_source, = (node for node in ast.parse((SOURCE / "desktop/tools/macos_payload.py").read_text(encoding="utf-8")).body
+                       if isinstance(node, ast.ClassDef) and node.name == "Job")
+        environment, = (node.value for node in ast.walk(job_source) if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+                                and target.value.id == "self" and target.attr == "environment" for target in node.targets))
+        smoke_source = ast.parse(inspect.getsource(payload.smoke))
+        poison, = (node.value for node in ast.walk(smoke_source) if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == "keys" for target in node.targets))
+        self.assertIsInstance(environment, ast.Dict)
+        self.assertIsInstance(poison, ast.Dict)
+        for uid in (501, 1001):
+            namespace = {"root": Path("/inert"), "poison": Path("/inert-poison"),
+                         "os": SimpleNamespace(getuid=lambda: uid)}  # No ambient environment is available.
+            fresh = eval(compile(ast.Expression(environment), "<clean-environment-data>", "eval"), namespace)
+            alternate = eval(compile(ast.Expression(poison), "<parent-poison-data>", "eval"), namespace)
+            self.assertEqual(fresh, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+                                    "HOME": "/inert/home", "TMPDIR": "/inert/tmp", "__CF_USER_TEXT_ENCODING": f"0x{uid:X}:0:0"})
+            self.assertEqual(alternate["__CF_USER_TEXT_ENCODING"], f"0x{uid:X}:1:1")
+        original_try, = (node for node in smoke_source.body[0].body if isinstance(node, ast.Try))
+        finalizer = ast.unparse(ast.Module(body=original_try.finalbody, type_ignores=[]))
+        self.assertIn("for key, value in previous.items():", finalizer)
+        self.assertIn("os.environ.pop(key, None)", finalizer)
+        self.assertIn("os.environ[key] = value", finalizer)
 
 
 if __name__ == "__main__":
