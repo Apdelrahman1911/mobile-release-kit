@@ -65,9 +65,11 @@ Failure-only `MRK_MACOS_INSTALL_ACL_DIAGNOSTIC` records carry finite object role
 API phase, return/error and free-error scalars (maximum512 bytes). No pathname,
 ACL content, environment or account information is written. Diagnostic output is
 non-panicking and cannot bypass original finalization. Collector selection stays
-unbound; the unchanged strict client-result/readback requirement remains a
-**separate unresolved result-channel obligation**. No log promotion or pending
-staging receipt can satisfy it. System/source ACLs and modes are never normalized.
+unbound; the protected final-result transport below is a separate channel, not
+promotion of a log or pending staging receipt. System/source ACLs and modes are
+never normalized. Run35659557286/1 passed its six original ACL probe controls and
+five focused regressions, then failed fixture setup; it is not Installer success.
+The changed transport/created-directory path still needs its own native evidence.
 
 ## Deliberately small product surface
 
@@ -135,6 +137,11 @@ The Installer:
    Existing system ancestors may have a different root-owned group but must be
    non-group/world-writable with empty ACLs. Product ancestors are root:wheel
    0755; a random, fresh `.install-…` staging directory is root:wheel 0700.
+   Darwin-created directories can inherit an admitted non-wheel parent's group.
+   Only a fresh root-uid/private original is normalized to0:0; checked original
+   clock/name/FD custody precedes fchown, and failure/expiry prevents chmod.
+   Both identity books refresh only after exact normalized named/FD comparison.
+   Existing directories and the private-file creation policy are unchanged.
 3. Copies with exclusive files, one process and no copy subprocesses. It hashes,
    explicitly closes, reopens only for readback of the same created inode,
    checks every file and complete directory roster, and seals staged directories
@@ -149,8 +156,9 @@ The Installer:
    repaired, overwritten, rolled back or deleted.
 5. Labels durable publication receipts as **pending final closes**. Only after
    closing every original descriptor and sampling the **same original deadline**
-   can `MRK_MACOS_INSTALL_RESULT` report `installed`. Equality is late; actual
-   positive closes stay Closed. The post-native persistence/forward-close gates
+   can the immutable installation DTO report `installed`; overall success also
+   requires the protected export below. Equality is late; actual positive closes
+   stay Closed. The post-native persistence/forward-close gates
    and final classifier preserve the first error; a final unknown close has its
    own fixed reason. Exit 20 is retained published-but-incomplete, never success.
    Timeout/unknown retains staging and any published object. This source has no
@@ -191,10 +199,51 @@ No status is fabricated after timeout/cancellation. Log growth is recorded, and
 reopened metadata is not continuous original-FD custody. Selected lines are
 **project-correlated diagnostics, not authenticated PackageKit PID attribution**.
 Opposite/duplicate result markers remain mixed/ambiguous; even one marker remains
-unbound. No diagnostic capture or tail substitutes for the unchanged client-output
-record, source/inventory/manifest checks, fixture readback, ordinary readback or
-Aqua gates. The next native attempt must establish the actual channel before any
-separate change to readback authority can be considered.
+unbound. No diagnostic capture, client-output marker or tail substitutes for the
+protected result export, source/inventory/manifest checks, fixture readback,
+ordinary readback or Aqua gates. Historical failed runs remain failed.
+
+### Protected same-invocation result transport
+
+The Installer client need not forward its child script's stdout. Successful
+ordinary and fixture entries therefore export their unchanged settled final DTO
+to exactly one root-owned file directly below `/Library/Application Support`:
+`MobileReleaseKit-InstallerResult-v1-{ordinary|fixture}-{source40}-{inventory64}-{manifest64}.json`.
+There is no alternate pathname, environment override, privileged Python reader,
+log fallback or general IPC service.
+
+Only original success starts export. A dedicated book owns at most four original
+FDs, separate from the settled installation: three protected parents and one
+exclusive0600 writer. The new root-uid private writer may inherit its parent's
+group, then only that original is normalized to0:0/0444. Occupied names refuse;
+no adoption, replacement, repair, retry or deletion occurs. JSON is closed,
+UTF-8 and at most65536 bytes including LF. Full sealed leaf identity/size,
+actual empty ACL/no-xattrs, file fsync+F_FULLFSYNC, one checked writer close,
+parent persistence, stable protected ancestry and reverse original closes must
+all pass. Ordinary export retains `Install.end`; the fixture captures one10s
+export-only endpoint after its aggregate settles, before serialization. A final
+post-close clock veto remains mandatory; no fallible stdout follows success.
+Export failure changes original ordinary0 to20 or fixture0 to1; partial effects
+and any installed objects are retained. Old nonzero outcomes never export.
+
+Before each original Installer invocation, the nonroot stager admits only ENOENT
+for this exact expected name, through checked protected parent originals. The
+workflow saves the original Installer status before diagnostics, preserves an
+original failure unchanged and checks status-write success separately. Required
+`--installer-status` is exactly `0` plus LF in the original task-owner0600 file
+under its private0700 work parent. This is saved same-run evidence, not a claim
+of crash-durable journaling. Nonroot export readback requires one original
+regular/single-link0:0/0444 file, exact expected bindings and all leaf/parent
+closes before accepting DATA. Existing ordinary/seven-case validators and
+complete installed roster/byte/mode proofs remain unchanged.
+
+The wrapper intentionally says `pending-original-export-finalization`: a file
+cannot certify its own later sync, close or timeout. Neither presence nor this
+old-success DTO independently establishes finality. Qualification also requires
+the original successful Installer return and reviewed producer finalization,
+plus checked readback and installed-tree evidence. Observation JSON retains the
+inner DTO and bounded export identity/hash with that explicit finality basis.
+This source change is not itself native Installer or Aqua qualification.
 
 ## Fixed seven-case Installer fixture — separate package, not a runner
 

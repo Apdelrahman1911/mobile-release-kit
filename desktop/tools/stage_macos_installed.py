@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import io
 import json
@@ -62,6 +63,8 @@ BOOTSTRAPS = {"engine_bootstrap.py", "config_edit_bootstrap.py", "github_connect
 MAX_FILES = 2048
 MAX_BYTES = 512 * 1024 * 1024
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+INSTALLER_RESULT_BYTES = 65536
+INSTALLER_RESULT_STATE = "pending-original-export-finalization"
 _DARWIN_XATTRS = None
 INSTALL_LOG = Path("/private/var/log/install.log")
 LOG_TAIL_BYTES = 4096
@@ -157,6 +160,8 @@ def decode(body):
             todo.extend((v, depth + 1) for v in item.values())
         elif type(item) is list:
             todo.extend((v, depth + 1) for v in item)
+        elif type(item) is float:
+            need(float("-inf") < item < float("inf"), "json-constant")
     return value
 
 
@@ -981,6 +986,118 @@ def installer_record(log, *, fixture=False):
     return records[0]
 
 
+def installer_result_path(source, inventory, manifest, *, fixture=False):
+    need(type(fixture) is bool and type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
+         and sha(inventory) and sha(manifest), "installer-export-binding")
+    kind = "fixture" if fixture else "ordinary"
+    name = "MobileReleaseKit-InstallerResult-v1-" + kind + "-" + source + "-" + inventory + "-" + manifest + ".json"
+    need(name.isascii() and len(name) <= 255, "installer-export-name")
+    return INSTALL_ROOT.parent / name
+
+
+def installer_parent_identity(info):
+    # Exclude unrelated child timestamps/link counts; preserve original object,
+    # protection and named/FD correspondence throughout this one read interval.
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+
+
+@contextlib.contextmanager
+def installer_channel_parent(path, *, private=None):
+    """Only the fixed export parent or original task's private status parent."""
+    path = Path(path)
+    need(path.is_absolute() and len(os.fsencode(path)) <= 4096 and path.parent == (INSTALL_ROOT.parent if private is None else private),
+         "installer-channel-path")
+    parts = os.fspath(path).split("/")[1:]
+    need(1 < len(parts) <= 40 and all(p and p not in (".", "..") and len(os.fsencode(p)) <= 255 for p in parts), "installer-channel-spelling")
+    uid, _gid = packager_ids()
+    originals = []
+    try:
+        for index, name in enumerate(("/", *parts[:-1])):
+            outer = originals[-1][0] if originals else None
+            before = os.stat(name, dir_fd=outer, follow_symlinks=False)
+            task_parent = private is not None and index == len(parts) - 1
+            need(stat.S_ISDIR(before.st_mode) and not before.st_mode & 0o7022
+                 and before.st_uid in ((0, uid) if private is not None else (0,))
+                 and (not task_parent or before.st_uid == uid and stat.S_IMODE(before.st_mode) == 0o700),
+                 "installer-channel-parent-protection")
+            original = os.open(name, READ_FLAGS | os.O_DIRECTORY, dir_fd=outer)
+            originals.append((original, outer, name, installer_parent_identity(before)))
+            need(installer_parent_identity(os.fstat(original)) == originals[-1][3]
+                 and installer_parent_identity(os.stat(name, dir_fd=outer, follow_symlinks=False)) == originals[-1][3],
+                 "installer-channel-parent-changed")
+        yield originals[-1][0], parts[-1]
+        for original, outer, name, identity in originals:
+            need(installer_parent_identity(os.fstat(original)) == identity
+                 and installer_parent_identity(os.stat(name, dir_fd=outer, follow_symlinks=False)) == identity,
+                 "installer-channel-parent-changed")
+    finally:
+        active = sys.exc_info()[0] is not None
+        unknown = False
+        for original, _outer, _name, _identity in reversed(originals):
+            try:
+                close_once(original)
+            except Refused:
+                unknown = True
+        if unknown and not active:
+            raise Refused("installer-channel-parent-close-unknown")
+
+
+def installer_result_absent_command(args):
+    path = installer_result_path(args.expected_source, args.expected_inventory, args.expected_manifest, fixture=args.fixture)
+    with installer_channel_parent(path) as (fd, name):
+        try:
+            os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except OSError as error:
+            need(error.errno == errno.ENOENT, "installer-export-absence-unknown")
+        else:
+            raise Refused("installer-export-name-occupied")
+    return {"schemaVersion": 1, "kind": "fixture" if args.fixture else "ordinary", "state": "expected-result-name-absent",
+            "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory, "runtimeManifestSha256": args.expected_manifest}
+
+
+def installer_success_status(args, *, fixture=False):
+    work = Path(args.input).parent
+    expected = work / ("installer-fixture-output.status" if fixture else "installer-output.status")
+    need(Path(args.input) == work / "input" and Path(args.installer_status) == expected, "installer-status-original-path")
+    uid, _gid = packager_ids()
+    with installer_channel_parent(expected, private=work) as (fd, name):
+        before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        need(stat.S_ISREG(before.st_mode) and before.st_uid == uid and before.st_nlink == 1
+             and stat.S_IMODE(before.st_mode) == 0o600 and before.st_size == 2, "installer-status-private-original")
+        body, actual = read_at(fd, name, 2)
+        need(signature(actual) == signature(before) and body == b"0\n", "installer-status-not-original-zero")
+
+
+def installer_result_document(body, source, inventory, manifest, *, fixture=False):
+    installer_result_path(source, inventory, manifest, fixture=fixture)  # Validate expected anchors, not document authority.
+    need(type(body) is bytes and 0 < len(body) <= INSTALLER_RESULT_BYTES and body.endswith(b"\n"), "installer-export-byte-bound")
+    document = decode(body.decode("utf-8"))  # Do not admit json.loads bytes auto-detected UTF-16/32.
+    need(type(document) is dict and set(document) == {"schemaVersion", "kind", "sourceCommit", "inventorySha256",
+         "runtimeManifestSha256", "transportState", "result"} and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+         and document["kind"] == ("fixture" if fixture else "ordinary") and document["sourceCommit"] == source
+         and document["inventorySha256"] == inventory and document["runtimeManifestSha256"] == manifest
+         and document["transportState"] == INSTALLER_RESULT_STATE and type(document["result"]) is dict, "installer-export-closed-binding")
+    return document["result"]
+
+
+def installer_result_readback(args, *, fixture=False):
+    # Saved same-run Installer0 is an independent gate, not a durable journal or
+    # something the pending export/diagnostic channel can certify about itself.
+    installer_success_status(args, fixture=fixture)
+    path = installer_result_path(args.expected_source, args.expected_inventory, args.expected_manifest, fixture=fixture)
+    with installer_channel_parent(path) as (fd, name):
+        before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        need(stat.S_ISREG(before.st_mode) and before.st_uid == before.st_gid == 0 and before.st_nlink == 1
+             and stat.S_IMODE(before.st_mode) == 0o444 and 0 < before.st_size <= INSTALLER_RESULT_BYTES, "installer-export-file-policy")
+        body, actual = read_at(fd, name, INSTALLER_RESULT_BYTES)
+        need(signature(actual) == signature(before), "installer-export-file-changed")
+        result = installer_result_document(body, args.expected_source, args.expected_inventory, args.expected_manifest, fixture=fixture)
+    # Both the leaf and all parent originals have actually closed before DATA
+    # can be returned. No private staging, log, alternate leaf or sudo reader.
+    return result, {"bytes": len(body), "sha256": digest(body), "identity": list(signature(actual)),
+                    "finalityBasis": "original-successful-Installer-return-and-checked-readback"}
+
+
 def bound_original_result(result, expected, source, inventory, manifest):
     need(type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source) and sha(inventory) and sha(manifest), "original-result-input-binding")
     reason, runtime, app, state, verified, _exit = expected
@@ -1012,7 +1129,7 @@ def byte_correspondence(actual, expected):
 
 def observation_command(args):
     expected = observation_inventory(args)
-    result = installer_record(read(args.installer_output, 1024 * 1024))
+    result, exported = installer_result_readback(args)
     bound_original_result(result, (None, "confirmed", "confirmed", "installed", True, 0),
                           args.expected_source, args.expected_inventory, args.expected_manifest)
     need(result["staging"] is not None, "installed-original-staging-missing")
@@ -1024,6 +1141,7 @@ def observation_command(args):
     return {"schemaVersion": 1, "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory,
             "runtimeManifestSha256": args.expected_manifest, "release": RELEASE, "installerDeadlineMetAfterFinalCloses": True,
             "installerReportedOriginalsSettled": True, "nonrootReadbackFileCount": len(actual),
+            "originalInstallerResult": result, "installerResultExport": exported,
             "applicationLaunched": False, "guiSaveQualified": False, "aquaGate": "required-separate-actual-session",
             "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
 
@@ -1037,9 +1155,13 @@ def visible_occupant(case):
 
 
 def fixture_record(log, source, inventory, manifest):
-    result = installer_record(log, fixture=True)
+    # Legacy marker parser is diagnostic/test-only, never readback authority.
+    return bound_fixture_result(installer_record(log, fixture=True), source, inventory, manifest)
+
+
+def bound_fixture_result(result, source, inventory, manifest):
     need(type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source) and sha(inventory) and sha(manifest), "fixture-input-binding")
-    need(set(result) == {"schemaVersion", "sourceCommit", "inventorySha256", "runtimeManifestSha256", "fixtureBase", "setupError",
+    need(type(result) is dict and set(result) == {"schemaVersion", "sourceCommit", "inventorySha256", "runtimeManifestSha256", "fixtureBase", "setupError",
          "setupOriginalsSettled", "setupDeadlineMet", "inertCloseDeadlinePolicyTable", "fixedCasesComplete", "passed", "cases",
          "genuineConcurrentRaceObserved", "nativeCloseFailureInjected", "applicationLaunched", "guiSaveQualified", "qualification"}, "fixture-closed-shape")
     need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1 and result["sourceCommit"] == source
@@ -1115,7 +1237,8 @@ def observe_occupant(path, witness):
 
 def fixture_observation_command(args):
     expected = observation_inventory(args)
-    result = fixture_record(read(args.installer_output, 1024 * 1024), args.expected_source, args.expected_inventory, args.expected_manifest)
+    result, exported = installer_result_readback(args, fixture=True)
+    bound_fixture_result(result, args.expected_source, args.expected_inventory, args.expected_manifest)
     base = INSTALL_ROOT.parent / result["fixtureBase"]  # Closed source/nonce component validated above.
     published = {name: row for name, row in expected.items() if name.startswith("runtime/")}
     observations = []
@@ -1151,7 +1274,7 @@ def fixture_observation_command(args):
             observations.append({"case": name, "accessibleOccupantChecked": visible_occupant(name) is not None,
                                  "runtimeReadbackFileCount": runtime_files, "protectedStagingOpened": False})
     return {"schemaVersion": 1, "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory,
-            "runtimeManifestSha256": args.expected_manifest, "originalFixtureResult": result, "nonrootReadback": observations,
+            "runtimeManifestSha256": args.expected_manifest, "originalFixtureResult": result, "installerResultExport": exported, "nonrootReadback": observations,
             "applicationLaunched": False, "guiSaveQualified": False, "genuineConcurrentRaceObserved": False,
             "nativeCloseFailureInjected": False, "qualification": "fixed-native-collisions-and-reported-policy-only-not-Aqua-Save-or-power-loss"}
 
@@ -1197,7 +1320,12 @@ def main(argv=None):
         observation.add_argument("--expected-inventory", required=True)
         observation.add_argument("--expected-manifest", required=True)
         observation.add_argument("--expected-source", required=True)
-        observation.add_argument("--installer-output", required=True, type=Path)
+        observation.add_argument("--installer-status", required=True, type=Path)
+    absent = commands.add_parser("check-installer-result-absent")
+    absent.add_argument("--fixture", action="store_true")
+    absent.add_argument("--expected-source", required=True)
+    absent.add_argument("--expected-inventory", required=True)
+    absent.add_argument("--expected-manifest", required=True)
     for name in ("installer-log-cursor", "installer-log-capture"):
         diagnostic = commands.add_parser(name)
         diagnostic.add_argument("--fixture", action="store_true")
@@ -1219,6 +1347,7 @@ def main(argv=None):
     action = {"describe-runtime": runtime_command, "runtime": runtime_command, "app": app_command,
               "input": input_command, "scripts": scripts_command, "package-format-input": package_format_input_command,
               "prepare-package": prepare_package_command, "audit-package": audit_command,
+              "check-installer-result-absent": installer_result_absent_command,
               "observe-installation": observation_command, "observe-installer-fixture": fixture_observation_command}[args.command]
     try:
         result = action(args)

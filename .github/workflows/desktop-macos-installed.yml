@@ -482,6 +482,9 @@ jobs:
           diagnostic=(--fixture --package "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg"
             --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256"
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py check-installer-result-absent --fixture \
+            --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"
           set +e
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-cursor "${diagnostic[@]}" \
             > "$MRK_MACOS_WORK/installer-fixture-log-cursor.json"
@@ -504,7 +507,7 @@ jobs:
           set -e
           if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi
           [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]]
-          # Unknown diagnostics do not replace the independent client-record gate.
+          # Unknown diagnostics do not replace the independent Installer-status/export readback gate.
           # Setup and each fixed case retain their own original120s endpoint.
           # Any unexpected native failure/Unknown stops subsequent cases. No retry.
       - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged
@@ -516,7 +519,7 @@ jobs:
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py observe-installer-fixture \
             --input "$MRK_MACOS_WORK/input" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
-            --installer-output "$MRK_MACOS_WORK/installer-fixture-output.txt" > "$MRK_MACOS_WORK/installer-fixture-observation.json"
+            --installer-status "$MRK_MACOS_WORK/installer-fixture-output.status" > "$MRK_MACOS_WORK/installer-fixture-observation.json"
           # Deterministic collisions and reported policy faults are not genuine
           # concurrent races, OS EIO/power-loss, native close failure or Aqua/Save.
       - name: Build the fixed one-shot root Installer and scripts-only package
@@ -586,6 +589,9 @@ jobs:
           diagnostic=(--package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg"
             --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256"
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py check-installer-result-absent \
+            --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"
           set +e
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-cursor "${diagnostic[@]}" \
             > "$MRK_MACOS_WORK/installer-log-cursor.json"
@@ -608,7 +614,7 @@ jobs:
           set -e
           if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi
           [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]]
-          # Unknown diagnostics do not replace the independent client-record gate.
+          # Unknown diagnostics do not replace the independent Installer-status/export readback gate.
           # A collision, partial publication, unknown close or timeout fails
           # here. Keep originals; no uninstall, rollback, retries or repair.
       - name: Nonroot byte/mode readback, not a headless GUI substitute
@@ -620,7 +626,7 @@ jobs:
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py observe-installation \
             --input "$MRK_MACOS_WORK/input" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
-            --installer-output "$MRK_MACOS_WORK/installer-output.txt" > "$MRK_MACOS_WORK/installation-observation.json"
+            --installer-status "$MRK_MACOS_WORK/installer-output.status" > "$MRK_MACOS_WORK/installation-observation.json"
           printf '%s\n' 'Engineering installation only. Actual installed runtime, Aqua project/Quit, and Save gates remain unverified.'
       - name: Preserve bounded originals; upload success is never GUI/native acceptance
         if: always() && steps.work.outputs.root != ''

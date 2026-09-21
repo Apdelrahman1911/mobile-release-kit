@@ -3,6 +3,7 @@
 These tests do not import the core, stage/extract M, launch Python/app children,
 write an installation, construct a panel, or fabricate an operation permit.
 """
+import contextlib
 import importlib.util
 from pathlib import Path
 import stat
@@ -86,6 +87,74 @@ def log_info(size=0, **changes):
     return SimpleNamespace(**values)
 
 
+def result_args(*, fixture=False):
+    return SimpleNamespace(input=Path("/work/input"), fixture=fixture, expected_source="a" * 40,
+                           expected_inventory="b" * 64, expected_manifest="c" * 64,
+                           installer_status=Path("/work/installer-fixture-output.status" if fixture else "/work/installer-output.status"))
+
+
+def export_document(*, fixture=False, result=None):
+    return {"schemaVersion": 1, "kind": "fixture" if fixture else "ordinary", "sourceCommit": "a" * 40,
+            "inventorySha256": "b" * 64, "runtimeManifestSha256": "c" * 64,
+            "transportState": "pending-original-export-finalization", "result": {} if result is None else result}
+
+
+@contextlib.contextmanager
+def channel_data(path, body=None, *, private=False):
+    # Finite DATA model for the existing original-FD reader. Every OS operation
+    # that could touch these numeric tokens is replaced; no fake FD reaches the
+    # host, no file is created, and no native ownership/ACL/finality is claimed.
+    names, objects, events, opened, closed = {}, {}, [], [], []
+    outer = None
+    for index, name in enumerate(path.parts[:-1]):
+        fd = 40 + index
+        task_parent = private and index == len(path.parts) - 2
+        names[(outer, name)] = fd
+        objects[fd] = log_info(st_ino=fd, st_mode=stat.S_IFDIR | (0o700 if task_parent else 0o755),
+                               st_uid=501 if task_parent else 0, st_gid=80, st_nlink=3)
+        outer = fd
+    leaf = 40 + len(path.parts) - 1
+    if body is not None:
+        names[(outer, path.name)] = leaf
+        objects[leaf] = log_info(len(body), st_ino=leaf, st_mode=stat.S_IFREG | (0o600 if private else 0o444),
+                                 st_uid=501 if private else 0, st_gid=80 if private else 0)
+    model = SimpleNamespace(names=names, objects=objects, events=events, opened=opened, closed=closed,
+                            parent=outer, leaf=leaf, offset=0)
+    def named(name, *, dir_fd=None, follow_symlinks=True):
+        assert follow_symlinks is False
+        fd = names.get((dir_fd, name))
+        if fd is None:
+            raise FileNotFoundError(TOOL.errno.ENOENT, "inert expected-name absence")
+        return objects[fd]
+    def acquire(name, flags, *, dir_fd=None):
+        fd = names[(dir_fd, name)]
+        expected = TOOL.READ_FLAGS | (TOOL.os.O_DIRECTORY if stat.S_ISDIR(objects[fd].st_mode) else 0)
+        assert flags == expected and fd not in opened
+        opened.append(fd); events.append(("open", fd))
+        return fd
+    def read(fd, size):
+        assert fd == leaf and fd in opened and fd not in closed and size >= 0
+        block = body[model.offset:model.offset + size]
+        model.offset += len(block); events.append(("read", fd))
+        return block
+    def close(fd):
+        assert fd in opened and fd not in closed
+        closed.append(fd); events.append(("close", fd))
+    api = mock.Mock(wraps=TOOL.os)
+    api.O_DIRECTORY = TOOL.os.O_DIRECTORY
+    api.getuid.return_value = api.geteuid.return_value = 501
+    api.getgid.return_value = api.getegid.return_value = 20
+    api.stat.side_effect = named
+    api.open.side_effect = acquire
+    api.fstat.side_effect = objects.__getitem__
+    api.read.side_effect = read
+    api.close.side_effect = close
+    model.api, model.named, model.read, model.close = api, named, read, close
+    with (mock.patch.object(TOOL, "os", api), mock.patch.object(TOOL, "no_xattrs") as attributes):
+        model.attributes = attributes
+        yield model
+
+
 @unittest.skipUnless(TOOL is not None, "Darwin/POSIX DATA tool only")
 class MacInstalledData(unittest.TestCase):
     def test_portable_names_and_complete_directory_identity(self):
@@ -100,7 +169,7 @@ class MacInstalledData(unittest.TestCase):
 
     def test_json_rejects_duplicates_and_nonfinite_constants(self):
         self.assertEqual(TOOL.decode(b'{"a":[1,true,null]}'), {"a": [1, True, None]})
-        for body in (b'{"a":1,"a":2}', b'{"a":NaN}', b'{"a":Infinity}'):
+        for body in (b'{"a":1,"a":2}', b'{"a":NaN}', b'{"a":Infinity}', b'{"a":1e999}', b'{"a":-1e999}'):
             with self.assertRaises(TOOL.Refused):
                 TOOL.decode(body)
 
@@ -492,8 +561,13 @@ class MacInstalledData(unittest.TestCase):
                 self.assertEqual(block.count("sudo -- /usr/sbin/installer -pkg "), 1)
                 self.assertEqual(block.count("installer-log-cursor "), 1)
                 self.assertEqual(block.count("installer-log-capture "), 1)
+                self.assertEqual(block.count("check-installer-result-absent "), 1)
+                precheck = block.split("check-installer-result-absent ", 1)[1].split("          set +e", 1)[0]
+                self.assertEqual("--fixture" in precheck, stem == "installer-fixture")
+                for option in ("--expected-source", "--expected-inventory", "--expected-manifest"):
+                    self.assertIn(option, precheck)
                 positions = [block.index(value) for value in (
-                    "set +e", "installer-log-cursor ", "cursor_status=$?", "cursor_status_saved=$?",
+                    "check-installer-result-absent ", "set +e", "installer-log-cursor ", "cursor_status=$?", "cursor_status_saved=$?",
                     "sudo -- /usr/sbin/installer -pkg ", "installer_status=$?", '"$installer_status" >',
                     "installer_status_saved=$?", "installer-log-capture ", "capture_status=$?", "capture_status_saved=$?",
                     "set -e\n", 'if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi',
@@ -502,10 +576,241 @@ class MacInstalledData(unittest.TestCase):
                 for filename in (stem + "-output.status", stem + "-log-cursor.json", stem + "-log-cursor.status",
                                  stem + "-log-capture.json", stem + "-log-capture.status", stem + "-log-selected.txt"):
                     self.assertIn('${{ steps.work.outputs.root }}/' + filename, workflow)
-                self.assertIn('--installer-output "$MRK_MACOS_WORK/' + stem + '-output.txt"', workflow)
+                self.assertIn('--installer-status "$MRK_MACOS_WORK/' + stem + '-output.status"', workflow)
+                self.assertNotIn("--installer-output", workflow)
                 self.assertNotIn("ulimit", block)
                 self.assertNotIn('[[ "$capture_status" == 0 ]]', block)
                 self.assertNotIn('--installer-output "$MRK_MACOS_WORK/' + stem + '-log-', workflow)
+
+    def test_installer_export_name_closed_wrapper_and_utf8_bound(self):
+        source, inventory, manifest = "a" * 40, "b" * 64, "c" * 64
+        for fixture in (False, True):
+            document = export_document(fixture=fixture)
+            body = TOOL.canonical(document) + b"\n"
+            path = TOOL.installer_result_path(source, inventory, manifest, fixture=fixture)
+            kind = "fixture" if fixture else "ordinary"
+            self.assertEqual(path.parent, Path("/Library/Application Support"))
+            self.assertEqual(path.name, f"MobileReleaseKit-InstallerResult-v1-{kind}-{source}-{inventory}-{manifest}.json")
+            self.assertLessEqual(len(path.name.encode("ascii")), 255)
+            self.assertEqual(TOOL.installer_result_document(body, source, inventory, manifest, fixture=fixture), {})
+            for key, value in (("schemaVersion", True), ("kind", "other"), ("sourceCommit", "f" * 40),
+                               ("inventorySha256", "f" * 64), ("runtimeManifestSha256", "f" * 64),
+                               ("transportState", "complete"), ("result", []), ("extra", True)):
+                with self.subTest(key=key, fixture=fixture), self.assertRaises(TOOL.Refused):
+                    TOOL.installer_result_document(TOOL.canonical({**document, key: value}) + b"\n", source, inventory, manifest, fixture=fixture)
+            for bad in (body[:-1], b"x" * 65536 + b"\n", b"{}\n", b"[]\n", b"\xff\n",
+                        body.decode("utf-8").encode("utf-16-be"), body.decode("utf-8").encode("utf-32-be"),
+                        body.replace(b'"schemaVersion":1', b'"schemaVersion":1,"schemaVersion":1'),
+                        body.replace(b'"result":{}', b'"result":{"bad":NaN}'),
+                        body.replace(b'"result":{}', b'"result":{"bad":1e999}')):
+                with self.subTest(body=bad[:24]), self.assertRaises((TOOL.Refused, ValueError)):
+                    TOOL.installer_result_document(bad, source, inventory, manifest, fixture=fixture)
+        for args in (("A" * 40, inventory, manifest), (source, "b" * 63, manifest), (source, inventory, "../other")):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.installer_result_path(*args)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.installer_result_path(source, inventory, manifest, fixture=1)
+
+    def test_installer_export_absence_accepts_only_enoent_and_settled_parents(self):
+        args = result_args()
+        path = TOOL.installer_result_path(args.expected_source, args.expected_inventory, args.expected_manifest)
+        with channel_data(path) as model:
+            self.assertEqual(TOOL.installer_result_absent_command(args)["state"], "expected-result-name-absent")
+            self.assertEqual(model.closed, list(reversed(model.opened)))
+            model.attributes.assert_not_called()
+        # A perfectly bound old document is still an occupied name, not adoptable.
+        with channel_data(path, TOOL.canonical(export_document()) + b"\n") as model:
+            with self.assertRaises(TOOL.Refused):
+                TOOL.installer_result_absent_command(args)
+            self.assertNotIn(model.leaf, model.opened)
+            self.assertEqual(model.closed, list(reversed(model.opened)))
+        for error in (TOOL.errno.EACCES, TOOL.errno.EIO, TOOL.errno.ENOTDIR):
+            with channel_data(path) as model:
+                def named(name, **kwargs):
+                    if name == path.name:
+                        raise OSError(error, "inert metadata refusal")
+                    return model.named(name, **kwargs)
+                model.api.stat.side_effect = named
+                with self.assertRaisesRegex(TOOL.Refused, "installer-export-absence-unknown"):
+                    TOOL.installer_result_absent_command(args)
+                self.assertEqual(model.closed, list(reversed(model.opened)))
+        with channel_data(path) as model:
+            def close(fd):
+                model.close(fd)
+                if fd == model.parent:
+                    raise OSError("inert ambiguous parent close")
+            model.api.close.side_effect = close
+            with self.assertRaisesRegex(TOOL.Refused, "installer-channel-parent-close-unknown"):
+                TOOL.installer_result_absent_command(args)
+            self.assertEqual(model.closed, list(reversed(model.opened)))
+
+    def test_installer_channel_parent_binds_protection_not_unrelated_child_times(self):
+        path = TOOL.installer_result_path("a" * 40, "b" * 64, "c" * 64)
+        with channel_data(path) as model:
+            with TOOL.installer_channel_parent(path) as (fd, name):
+                self.assertEqual((fd, name), (model.parent, path.name))
+                # Protected existing group80 is allowed and never normalized.
+                self.assertEqual(model.objects[fd].st_gid, 80)
+                model.objects[fd] = SimpleNamespace(**{**model.objects[fd].__dict__, "st_mtime_ns": 99, "st_ctime_ns": 99, "st_nlink": 4})
+            self.assertEqual(model.closed, list(reversed(model.opened)))
+            model.api.chown.assert_not_called()
+            model.api.chmod.assert_not_called()
+        for change in ({"st_gid": 81}, {"st_ino": 999}, {"st_uid": 501}, {"st_mode": stat.S_IFDIR | 0o775}):
+            with channel_data(path) as model:
+                with self.assertRaisesRegex(TOOL.Refused, "installer-channel-parent-changed"):
+                    with TOOL.installer_channel_parent(path) as (fd, _name):
+                        model.objects[fd] = SimpleNamespace(**{**model.objects[fd].__dict__, **change})
+                self.assertEqual(model.closed, list(reversed(model.opened)))
+        for mode in (stat.S_IFDIR | 0o775, stat.S_IFDIR | 0o1777, stat.S_IFLNK | 0o755):
+            with channel_data(path) as model:
+                model.objects[model.parent] = SimpleNamespace(**{**model.objects[model.parent].__dict__, "st_mode": mode})
+                with self.assertRaisesRegex(TOOL.Refused, "installer-channel-parent-protection"):
+                    with TOOL.installer_channel_parent(path):
+                        self.fail("unprotected parent admitted")
+                self.assertNotIn(model.parent, model.opened)
+                self.assertEqual(model.closed, list(reversed(model.opened)))
+
+    def test_installer_saved_status_is_exact_private_original_zero(self):
+        for fixture in (False, True):
+            args = result_args(fixture=fixture)
+            with channel_data(args.installer_status, b"0\n", private=True) as model:
+                self.assertIsNone(TOOL.installer_success_status(args, fixture=fixture))
+                self.assertEqual(model.closed, list(reversed(model.opened)))
+                model.attributes.assert_called_once_with(model.leaf)
+            for body in (b"1\n", b"00\n", b"0", b"0\r\n"):
+                with channel_data(args.installer_status, body, private=True) as model:
+                    with self.assertRaises(TOOL.Refused):
+                        TOOL.installer_result_readback(args, fixture=fixture)
+                    self.assertEqual(model.closed, list(reversed(model.opened)))
+            for change in ({"st_uid": 0}, {"st_mode": stat.S_IFREG | 0o644}, {"st_nlink": 2}):
+                with channel_data(args.installer_status, b"0\n", private=True) as model:
+                    model.objects[model.leaf] = SimpleNamespace(**{**model.objects[model.leaf].__dict__, **change})
+                    with self.assertRaisesRegex(TOOL.Refused, "installer-status-private-original"):
+                        TOOL.installer_success_status(args, fixture=fixture)
+                    self.assertNotIn(model.leaf, model.opened)
+            args.installer_status = Path("/work/other.status")
+            with self.assertRaisesRegex(TOOL.Refused, "installer-status-original-path"):
+                TOOL.installer_success_status(args, fixture=fixture)
+        args = result_args()
+        with channel_data(args.installer_status, b"0\n", private=True) as model:
+            model.objects[model.parent] = SimpleNamespace(**{**model.objects[model.parent].__dict__, "st_mode": stat.S_IFDIR | 0o755})
+            with self.assertRaisesRegex(TOOL.Refused, "installer-channel-parent-protection"):
+                TOOL.installer_success_status(args)
+
+    def test_installer_export_reader_checks_original_leaf_and_all_closes(self):
+        args = result_args()
+        path = TOOL.installer_result_path(args.expected_source, args.expected_inventory, args.expected_manifest)
+        body = TOOL.canonical(export_document()) + b"\n"
+        with (mock.patch.object(TOOL, "installer_success_status") as status, channel_data(path, body) as model):
+            result, summary = TOOL.installer_result_readback(args)
+            status.assert_called_once_with(args, fixture=False)
+            self.assertEqual(result, {})
+            self.assertEqual(summary, {"bytes": len(body), "sha256": TOOL.digest(body), "identity": list(TOOL.signature(model.objects[model.leaf])),
+                                      "finalityBasis": "original-successful-Installer-return-and-checked-readback"})
+            model.attributes.assert_called_once_with(model.leaf)
+            self.assertEqual(model.closed, list(reversed(model.opened)))
+        for change in ({"st_uid": 501}, {"st_gid": 80}, {"st_mode": stat.S_IFREG | 0o644}, {"st_nlink": 2}, {"st_size": 65537}):
+            with mock.patch.object(TOOL, "installer_success_status"), channel_data(path, body) as model:
+                model.objects[model.leaf] = SimpleNamespace(**{**model.objects[model.leaf].__dict__, **change})
+                with self.assertRaisesRegex(TOOL.Refused, "installer-export-file-policy"):
+                    TOOL.installer_result_readback(args)
+                self.assertNotIn(model.leaf, model.opened)
+                self.assertEqual(model.closed, list(reversed(model.opened)))
+        for fault in ("growth", "named-change", "attributes", "leaf-close", "parent-close"):
+            with mock.patch.object(TOOL, "installer_success_status"), channel_data(path, body) as model:
+                if fault == "growth":
+                    model.api.read.side_effect = [body + b"x", b""]
+                elif fault == "named-change":
+                    def named(name, **kwargs):
+                        info = model.named(name, **kwargs)
+                        if name == path.name and model.offset:
+                            return SimpleNamespace(**{**info.__dict__, "st_ino": 999})
+                        return info
+                    model.api.stat.side_effect = named
+                elif fault == "attributes":
+                    model.attributes.side_effect = TOOL.Refused("inert file attributes")
+                else:
+                    def close(fd):
+                        model.close(fd)
+                        if fd == (model.leaf if fault == "leaf-close" else model.parent):
+                            raise OSError("inert original-close refusal")
+                    model.api.close.side_effect = close
+                with self.subTest(fault=fault), self.assertRaises(TOOL.Refused):
+                    TOOL.installer_result_readback(args)
+                self.assertEqual(model.closed, list(reversed(model.opened)))
+
+    def test_installer_observation_cli_requires_status_without_legacy_fallback(self):
+        args = result_args()
+        options = ["--input", str(args.input), "--expected-source", args.expected_source,
+                   "--expected-inventory", args.expected_inventory, "--expected-manifest", args.expected_manifest]
+        api = mock.Mock(wraps=TOOL.os)
+        api.getuid.return_value = api.geteuid.return_value = 501
+        for command, action in (("observe-installation", "observation_command"), ("observe-installer-fixture", "fixture_observation_command")):
+            with (mock.patch.object(TOOL, "os", api), mock.patch.object(TOOL, action, return_value={}) as call,
+                  mock.patch.object(TOOL, "print", create=True), mock.patch.object(TOOL.sys, "stderr", TOOL.io.StringIO())):
+                TOOL.main([command, *options, "--installer-status", str(args.installer_status)])
+                self.assertEqual(call.call_args.args[0].installer_status, args.installer_status)
+                call.reset_mock()
+                with self.assertRaises(SystemExit):
+                    TOOL.main([command, *options, "--installer-output", "/work/old-output.txt"])
+                call.assert_not_called()
+        source = (Path(__file__).absolute().parents[2] / "desktop/tools/stage_macos_installed.py").read_text(encoding="utf-8")
+        ordinary = source.split("def observation_command(args):", 1)[1].split("def visible_occupant", 1)[0]
+        fixture = source.split("def fixture_observation_command(args):", 1)[1].split("def main", 1)[0]
+        for block in (ordinary, fixture):
+            self.assertIn("installer_result_readback(args", block)
+            self.assertNotIn("installer_record(", block)
+            self.assertNotIn("fixture_record(", block)
+            self.assertNotIn("installer_output", block)
+        self.assertIn("bound_original_result(result,", ordinary)
+        self.assertIn("bound_fixture_result(result,", fixture)
+
+    def test_installer_export_source_keeps_dedicated_custody_original_clocks_and_finality(self):
+        source = (Path(__file__).absolute().parents[2] / "desktop/src-tauri/src/bin/macos_install.rs").read_text(encoding="utf-8")
+        exporter = source.split("struct Export {", 1)[1].split("    impl Install {", 1)[0]
+        self.assertIn("Vec::with_capacity(4)", exporter)
+        self.assertIn('check(self.originals.len() < 4, "export-original-bound")', exporter)
+        self.assertNotIn("Install::new", exporter)
+        self.assertNotIn("Duration::", exporter)
+        writer = exporter.split("fn write(&mut self, name: &str, bytes: &[u8])", 1)[1].split("fn finish", 1)[0]
+        for flag in ("O_WRONLY", "O_CREAT", "O_EXCL", "O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK"):
+            self.assertIn("OFlag::" + flag, writer)
+        self.assertNotIn("create_file", writer)
+        self.assertIn("original.mode == 0o100600 && original.uid == 0 && original.links == 1 && original.size == 0", writer)
+        self.assertNotIn("original.gid == 0", writer)
+        self.assertIn("sealed.size == bytes.len() as i64", writer)
+        phases = [writer.index(value) for value in ("let original =", "while written <", "let before_seal =", "unistd::fchown",
+                  "stat::fchmod", "let sealed =", "self.persist(n, true)", "self.close(n)", "self.persist(support, false)",
+                  "self.named(n)? == sealed", "for (n, role)")]
+        self.assertEqual(phases, sorted(phases))
+        self.assertIn("for n in (0..self.originals.len()).rev()", exporter)
+        self.assertIn("export_final(result, settled, self.unknown, self.end, Instant::now())", exporter)
+        self.assertIn("finish_transport(&install.result_record(&final_result), final_result.exit, install.end)", source)
+        self.assertLess(source.index("let export_end = Instant::now() + Duration::from_secs(10);"),
+                        source.index('let record = serde_json::json!({"schemaVersion":1,"sourceCommit":source_commit'))
+        finish = exporter.split("fn finish_transport", 1)[1]
+        self.assertIn('if original_exit == 0 { export_result(record, end) } else { Err("original-installation-failed") }', finish)
+        self.assertLess(finish.index("if exit != 0 {"), finish.index("std::io::stdout"))
+        self.assertIn("pending-original-export-finalization", exporter)
+        self.assertNotIn("remove_file", exporter)
+        self.assertNotIn("unlink", exporter)
+        directory = source.split("fn directory(&mut self, parent: usize, name: &str, fresh: bool, mode: u32)", 1)[1].split("        fn close", 1)[0]
+        self.assertIn('Err(Errno::EEXIST) if !fresh => self.creations[effect].state = "existing-not-modified"', directory)
+        created = directory.split('if self.creations[effect].state == "created" {', 1)[1]
+        phases = [created.index(value) for value in ("self.protected(n, true, None)", "created_directory_private(before)",
+                  "self.check_name(n, true)?; self.clock()?;", "unistd::fchown", 'map_err(|_| "created-directory-owner")?;',
+                  "self.clock()?; // A failed/late", "stat::fchmod", "let actual =", "let named =", "created_directory_normalized(before, actual, named, mode)",
+                  "self.originals[n].identity = Some(actual)", "self.creations[effect].identity = Some(actual)")]
+        self.assertEqual(phases, sorted(phases))
+        self.assertEqual(directory.count("unistd::fchown"), 1)
+        private = source.split("fn created_directory_private", 1)[1].split("fn created_directory_normalized", 1)[0]
+        self.assertNotIn("gid", private)
+        self.assertIn("id.uid == 0 && id.mode & 0o7077 == 0", private)
+        normalized = source.split("fn created_directory_normalized", 1)[1].split("// Consumes only", 1)[0]
+        self.assertIn("actual == named && before.dev == actual.dev && before.ino == actual.ino", normalized)
+        self.assertIn("actual.uid == 0 && actual.gid == 0", normalized)
+        create_file = source.split("fn create_file", 1)[1].split("fn check_name", 1)[0]
+        self.assertIn("self.protected(n, false, Some(0o600))?", create_file)
 
     def test_macho_header_data_refuses_an_unreviewed_target_or_minimum(self):
         header = struct.pack("<8I", 0xFEEDFACF, 0x0100000C, 0, 2, 1, 24, 0, 0)
@@ -552,6 +857,7 @@ class MacInstalledData(unittest.TestCase):
         good = reported_fixture_data()
         log = marker + TOOL.canonical(good) + b"\n"
         self.assertEqual(TOOL.fixture_record(log, "a" * 40, "b" * 64, "c" * 64), good)
+        self.assertIs(TOOL.bound_fixture_result(good, "a" * 40, "b" * 64, "c" * 64), good)
         mutations = [(("sourceCommit",), "f" * 40), (("fixtureBase",), "/tmp/arbitrary"),
                      (("fixtureBase",), TOOL.FIXTURE_PREFIX + "f" * 12 + "-" + "e" * 32),
                      (("cases",), good["cases"][:-1]), (("cases",), list(reversed(good["cases"]))),
@@ -569,6 +875,8 @@ class MacInstalledData(unittest.TestCase):
             cursor[path[-1]] = value
             with self.subTest(path=path), self.assertRaises(TOOL.Refused):
                 TOOL.fixture_record(marker + TOOL.canonical(changed), "a" * 40, "b" * 64, "c" * 64)
+            with self.subTest(direct_path=path), self.assertRaises(TOOL.Refused):
+                TOOL.bound_fixture_result(changed, "a" * 40, "b" * 64, "c" * 64)
         for changed in (log + log, b"MRK_MACOS_INSTALL_RESULT={}\n" + log):
             with self.assertRaises(TOOL.Refused):
                 TOOL.fixture_record(changed, "a" * 40, "b" * 64, "c" * 64)
