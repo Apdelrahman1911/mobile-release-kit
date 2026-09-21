@@ -1007,7 +1007,7 @@ class LifecycleData(unittest.TestCase):
             with self.assertRaises(FileExistsError): L._shell_log_prepare(value, "normal")
             self.assertEqual(opening.call_count, 1); closing.assert_not_called(); removing.assert_not_called()
 
-    def test_shell_capacity_adds_fixed_private_logs_without_changing_other_profiles(self):
+    def test_shell_capacity_adds_fixed_private_logs_and_label_leaves_without_changing_other_profiles(self):
         value = installed_handoff()
         value["compilerRecords"]["capacity"] = {"runtimeBytes": 1024,
             "installedBytes": {key: 2048 for key in L.VERSIONS},
@@ -1021,17 +1021,22 @@ class LifecycleData(unittest.TestCase):
             baseline = (sum(row["size"] for row in candidate["packages"].values()) + candidate["library"]["size"]
                         + (12 if profile == "installed" else 68 if profile == "shell" else 0)
                         + 2 * 1024 + 1 + 2 * 2048 + (32 << 20) + (1 << 20))
-            required = baseline + ((256 << 20) if profile == "shell" else 0)
+            required = baseline + ((448 << 20) if profile == "shell" else 0)
+            inodes = 2 * 16 + 2 * 8192 + 128 + (3 if profile == "shell" else 0)
             for available in (required - 1, required):
                 with self.subTest(profile=profile, available=available), \
                      patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
                      patch.object(L.os, "statvfs", return_value=SimpleNamespace(
-                         f_bavail=available, f_frsize=1, f_favail=2 * 16 + 2 * 8192 + 128)):
+                         f_bavail=available, f_frsize=1, f_favail=inodes)):
                     if available < required:
                         with self.assertRaisesRegex(ValueError, "Insufficient original host capacity"):
                             L._capacity(candidate)
                     else:
                         self.assertIsNone(L._capacity(candidate))
+            with patch.object(Path, "stat", return_value=SimpleNamespace(st_dev=1)), \
+                 patch.object(L.os, "statvfs", return_value=SimpleNamespace(f_bavail=required, f_frsize=1, f_favail=inodes - 1)):
+                with self.assertRaisesRegex(ValueError, "Insufficient original host capacity"):
+                    L._capacity(candidate)
 
     def test_shell_display_capture_requires_bound_original_and_complete_combined_bytes(self):
         value = installed_handoff(); value.pop("installed"); value["shell"] = {}
@@ -1086,6 +1091,8 @@ class LifecycleData(unittest.TestCase):
                  patch.object(L.time, "monotonic", return_value=100.0), \
                  patch.object(L, "_retain", side_effect=lambda name, raw: events.append(name.rsplit(".", 1)[1])), \
                  patch.object(L, "_shell_log_capture", side_effect=capture) as log, \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original-label-binding")) as labels, \
+                 patch.object(L, "_shell_labels_read") as label_read, patch.object(L.os, "close") as closing, \
                  patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
                 if case == "diagnostic-error": stream.write = Mock(side_effect=OSError("inert diagnostic error"))
                 arguments = dict(maximum=60, shell_log=(value, "normal" if case == "wrong-route" else "positive", "original-log-binding"))
@@ -1100,6 +1107,9 @@ class LifecycleData(unittest.TestCase):
                         self.assertIs(raised.exception.__cause__, primary)
                     if case != "wrong-route": self.assertTrue(L._FAILED)
                 self.assertEqual(log.call_count, int(case not in ("owner-error", "bad-result", "wrong-route")))
+                self.assertEqual(labels.call_count, int(case != "wrong-route"))
+                self.assertEqual(closing.call_args_list, [] if case == "wrong-route" else [unittest.mock.call(41)])
+                label_read.assert_not_called()  # Generic owner error grants neither sidecar nor raw-log read.
                 if case == "nonzero":
                     raw = stream.getvalue().encode("ascii")
                     self.assertLessEqual(len(raw), 32768)
@@ -3053,6 +3063,194 @@ class ProjectPathLifecycleContracts(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in calls[0].keywords], [("changed", True)])
         self.assertEqual(set(L.SHELL_CASES), {"normal", "positive", "quit-outstanding", "project-paths"})
+
+
+class FailureLabelSinkContracts(unittest.TestCase):
+    def test_finite_pair_refuses_partial_reordered_duplicate_or_injected_data(self):
+        step = b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareSave\n"
+        boundary = b"MRK_INSTALLED_SHELL_FAILURE_PHASE=request\n"
+        good = step + boundary
+        self.assertEqual(L._shell_label_pair(good), {"step": "PrepareSave", "boundary": "request"})
+        self.assertEqual(L._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSettlement\n"
+                                           b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n"),
+                         {"step": "PathSettlement", "boundary": "settlement"})
+        for raw in (b"", good[:-1], step, boundary + step, step + step, good + boundary,
+                    b"prefix" + good, good.replace(b"PrepareSave", b"NotAnAllowedStep"),
+                    good.replace(b"request", b"unknown"), good.replace(b"\n", b"\r\n"),
+                    good + b"/private/injected\n", good + b"x" * 512, good.decode(), bytearray(good)):
+            with self.subTest(kind=type(raw).__name__, length=len(raw)):
+                self.assertIsNone(L._shell_label_pair(raw))
+
+    def test_preparation_exclusively_binds_original_fd_and_preserves_preparation_failure(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        root = L.root_path(value)
+        for fault in (None, "occupied", "owner", "acl", "hardlink", "parent"):
+            parent = needrestart_stat(stat.S_IFDIR | 0o711)
+            leaf = needrestart_stat(stat.S_IFREG | 0o620, ino=42); leaf.st_gid = value["runnerGid"]
+            if fault == "hardlink": leaf.st_nlink = 2
+            if fault == "parent": parent.st_mode = stat.S_IFDIR | 0o777
+            primary = OSError("inert preparation failure; must not be formatted")
+            with self.subTest(fault=fault), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
+                 patch.object(L, "_xattrs"), patch.object(Path, "lstat", lambda path: parent if path == root else leaf), \
+                 patch.object(L.os, "open", return_value=41) as opening, patch.object(L.os, "fchown") as chown, \
+                 patch.object(L.os, "fchmod") as chmod, patch.object(L.os, "fstat", return_value=leaf), \
+                 patch.object(L.os, "listxattr", return_value=["system.posix_acl_access"] if fault == "acl" else []), \
+                 patch.object(L.os, "close") as closing, patch.object(L.os, "unlink") as unlinking:
+                if fault == "occupied": opening.side_effect = primary
+                if fault == "owner":
+                    chown.side_effect = primary
+                    closing.side_effect = OSError("inert ambiguous close")
+                if fault is None:
+                    self.assertEqual(L._shell_labels_prepare(value, "positive"), (41, L.identity(leaf)[:6]))
+                    opening.assert_called_once_with(root / "shell-positive-failure.labels",
+                        os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+                    chown.assert_called_once_with(41, 0, value["runnerGid"])
+                    chmod.assert_called_once_with(41, 0o620)
+                    closing.assert_not_called()  # The command, not preparation, now owns this original.
+                else:
+                    with self.assertRaises((OSError, ValueError)) as raised:
+                        L._shell_labels_prepare(value, "positive")
+                    if fault in ("occupied", "owner"): self.assertIs(raised.exception, primary)
+                    self.assertEqual(closing.call_count, int(fault not in ("occupied", "parent")))
+                    self.assertEqual(opening.call_count, int(fault != "parent"))
+                unlinking.assert_not_called()
+
+    def test_original_fd_read_is_single_bounded_and_rejects_binding_or_metadata_loss(self):
+        raw = b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\nMRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n"
+        node = needrestart_stat(stat.S_IFREG | 0o620, size=len(raw)); node.st_gid = 1001
+        original = (41, L.identity(node)[:6])
+        for fault in (None, "inode", "link", "mode", "group", "oversized", "acl", "drift", "partial", "empty", "read-error"):
+            before, after = deepcopy(node), deepcopy(node)
+            for name, field, value in (("inode", "st_ino", 99), ("link", "st_nlink", 2),
+                    ("mode", "st_mode", stat.S_IFIFO | 0o620), ("group", "st_gid", 99),
+                    ("oversized", "st_size", 513)):
+                if fault == name: setattr(before, field, value)
+            if fault == "drift": after.st_ctime_ns += 1
+            if fault == "empty": before.st_size = after.st_size = 0
+            with self.subTest(fault=fault), patch.object(L.os, "fstat", side_effect=[before, after]), \
+                 patch.object(L.os, "listxattr", return_value=["user.inert"] if fault == "acl" else []), \
+                 patch.object(L.os, "read", return_value=b"" if fault == "empty" else raw[:-1] if fault == "partial" else raw) as reading, \
+                 patch.object(L.os, "open") as opening, patch.object(L, "read") as raw_read, \
+                 patch.object(L.os, "lseek") as seeking:
+                if fault == "read-error": reading.side_effect = InterruptedError("inert read interruption")
+                if fault in (None, "empty"):
+                    self.assertEqual(L._shell_labels_read(original), None if fault == "empty" else
+                                     {"step": "Bootstrap", "boundary": "bootstrap"})
+                else:
+                    with self.assertRaises((ValueError, OSError)): L._shell_labels_read(original)
+                if fault in ("inode", "link", "mode", "group", "oversized", "acl"):
+                    reading.assert_not_called()
+                else:
+                    reading.assert_called_once_with(41, 513)
+                opening.assert_not_called(); raw_read.assert_not_called(); seeking.assert_not_called()
+
+    def test_owner_exception_requires_exact_stored_true_facts_and_same_original_is_reraised(self):
+        class ProcessError(RuntimeError):
+            def __init__(self, contained=True, cleanup=True):
+                super().__init__("/private/inert-secret must not be exposed")
+                self.__dict__.update(dispatched=True, contained=contained, cleanup_complete=cleanup)
+            def __str__(self):
+                raise AssertionError("error formatting is forbidden")
+        class ProcessCleanupError(ProcessError): pass
+        class ProcessOutcomeUnknown(ProcessError): pass
+        class Unknown(ProcessError):
+            @property
+            def contained(self): raise AssertionError("subclass properties are not evidence")
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        argv = L.shell_argv(value, "positive")
+        errors = [ProcessError(), ProcessError(False), ProcessError(True, False), ProcessError(1),
+                  ProcessError(True, "true"), ProcessCleanupError(), ProcessOutcomeUnknown(), Unknown(),
+                  KeyboardInterrupt(), SystemExit(), OSError("private generic error")]
+        missing = ProcessError(); del missing.__dict__["cleanup_complete"]; errors.append(missing)
+        for index, primary in enumerate(errors):
+            if index:
+                primary.__cause__ = ProcessError()  # Cause-chain facts grant no read authority.
+            owner = SimpleNamespace(run_owned=Mock(side_effect=primary), ProcessError=ProcessError,
+                                    ProcessCleanupError=ProcessCleanupError, ProcessOutcomeUnknown=ProcessOutcomeUnknown)
+            with self.subTest(index=index), patch.multiple(L, _ROOT=L.root_path(value), _END=1000.0,
+                    _FAILED=False, _COMMANDS=[], _OWNER=owner), patch.object(L, "_root_ids"), \
+                 patch.object(L.time, "monotonic", return_value=100.0), \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original")), \
+                 patch.object(L, "_shell_labels_read", return_value={"step": "PrepareSave", "boundary": "request"}) as reading, \
+                 patch.object(L, "_shell_log_capture") as raw_log, patch.object(L, "_command_capture") as capture, \
+                 patch.object(L.os, "close") as closing, patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                with self.assertRaises(BaseException) as raised:
+                    L.command("shell-positive", argv, maximum=60, shell_log=(value, "positive", "original-log"))
+                self.assertIs(raised.exception, primary)
+                self.assertTrue(L._FAILED)
+                self.assertEqual(reading.call_count, int(index == 0))
+                raw_log.assert_not_called(); capture.assert_not_called(); closing.assert_called_once_with(41)
+                owner.run_owned.assert_called_once()
+                self.assertEqual(owner.run_owned.call_args.kwargs["timeout"], 60)
+                text = stream.getvalue()
+                self.assertLessEqual(len(text.encode("ascii")), 32768)
+                self.assertNotIn("inert-secret", text); self.assertNotIn("private generic", text)
+                data = json.loads(text.split("=", 1)[1])
+                self.assertEqual((data["case"], data["phase"]), ("positive", "owner-call"))
+                self.assertIsNone(data["capture"])
+                self.assertFalse(data["qualified"]); self.assertFalse(data["cleanupEstablished"])
+                self.assertEqual(data["labelsReason"], None if index == 0 else "owner-finality-unavailable")
+                self.assertEqual(data["labels"], {"step": "PrepareSave", "boundary": "request"} if index == 0 else None)
+                self.assertFalse(data["ownerCall"]["ownerReturned"])
+
+    def test_diagnostic_and_close_failures_cannot_replace_an_active_owner_exception(self):
+        class ProcessError(RuntimeError):
+            def __init__(self):
+                super().__init__("inert original")
+                self.__dict__.update(dispatched=True, contained=True, cleanup_complete=True)
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        argv = L.shell_argv(value, "project-paths")
+        for fault in ("read", "clock", "format", "write", "close", "diagnostic-dispatch"):
+            primary = ProcessError()
+            with self.subTest(fault=fault), patch.multiple(L, _ROOT=L.root_path(value), _END=1000.0, _FAILED=False,
+                    _COMMANDS=[], _OWNER=SimpleNamespace(ProcessError=ProcessError, run_owned=Mock(side_effect=primary))), \
+                 patch.object(L, "_root_ids"), patch.object(L.time, "monotonic", return_value=100.0), \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original")), \
+                 patch.object(L, "_shell_labels_read", return_value=None) as reading, \
+                 patch.object(L, "_shell_diagnostic_time", return_value=None) as clock, \
+                 patch.object(L, "canonical", wraps=L.canonical) as formatting, \
+                 patch.object(L, "_shell_owner_failure", wraps=L._shell_owner_failure) as diagnostic, \
+                 patch.object(L, "_shell_log_capture") as raw_log, patch.object(L.os, "close") as closing, \
+                 patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                failing = {"read": reading, "clock": clock, "format": formatting,
+                           "close": closing, "diagnostic-dispatch": diagnostic}
+                if fault == "write": stream.write = Mock(side_effect=OSError("inert diagnostic write"))
+                else: failing[fault].side_effect = OSError("inert diagnosis failure")
+                with self.assertRaises(ProcessError) as raised:
+                    L.command("shell-project-paths", argv, maximum=60, shell_log=(value, "project-paths", "log"))
+                self.assertIs(raised.exception, primary); self.assertTrue(L._FAILED)
+                closing.assert_called_once_with(41); raw_log.assert_not_called()
+                self.assertLessEqual(reading.call_count, 1)
+                if fault == "read":
+                    data = json.loads(stream.getvalue().split("=", 1)[1])
+                    self.assertIsNone(data["labels"]); self.assertEqual(data["labelsReason"], "unavailable")
+
+    def test_good_return_closes_once_and_close_loss_refuses_without_altering_capture(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        for synthetic, close_error in ((True, False), (True, True), (False, False)):
+            argv = L.shell_argv(value, "positive") if synthetic else ["/inert-fixed-command"]
+            result = subprocess.CompletedProcess(argv, 0, b"unchanged stdout", b"unchanged stderr")
+            with self.subTest(synthetic=synthetic, close_error=close_error), \
+                 patch.multiple(L, _ROOT=L.root_path(value), _END=1000.0, _FAILED=False,
+                    _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=Mock(return_value=result))), \
+                 patch.object(L, "_root_ids"), patch.object(L, "_retain") as retained, \
+                 patch.object(L.time, "monotonic", return_value=100.0), \
+                 patch.object(L, "_shell_labels_prepare", return_value=(41, "original")) as preparation, \
+                 patch.object(L, "_shell_labels_read") as reading, patch.object(L, "_shell_log_capture", return_value=b""), \
+                 patch.object(L.os, "close") as closing, patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                if close_error: closing.side_effect = OSError("inert close loss")
+                options = {"shell_log": (value, "positive", "log")} if synthetic else {}
+                if close_error:
+                    with self.assertRaises(OSError): L.command("shell-positive", argv, maximum=60, **options)
+                    self.assertTrue(L._FAILED)
+                else:
+                    label = "shell-positive" if synthetic else "inert-command"
+                    self.assertIs(L.command(label, argv, maximum=60, **options), result)
+                    self.assertFalse(L._FAILED)
+                self.assertEqual(preparation.call_count, int(synthetic))
+                self.assertEqual(closing.call_count, int(synthetic)); reading.assert_not_called()
+                self.assertEqual([call.args[1] for call in retained.call_args_list], [b"unchanged stdout", b"unchanged stderr"])
+                self.assertEqual(stream.getvalue(), "")
 
 
 if __name__ == "__main__":

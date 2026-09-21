@@ -4,6 +4,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import struct
 import tempfile
@@ -1109,6 +1110,54 @@ class InstalledProjectPathReceiptContracts(unittest.TestCase):
                 parent[path[-1]] = int(old) if type(old) is bool else True if type(old) is int else None
                 with self.subTest(path=path, target=target), self.assertRaises((S.D.Refused, ValueError)):
                     S.shell_project_draft_observation(changed, lifecycle)
+
+
+class InstalledFailureLabelSourceContracts(unittest.TestCase):
+    def test_literal_allowlists_correspond_to_bounded_rust_step_boundary_encoder(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        steps = {line.encode("ascii") + b"\n" for line in re.findall(
+            r'b"(MRK_INSTALLED_SHELL_FAILURE_STEP=[A-Za-z]+)\\n"', source)}
+        boundaries = {line.encode("ascii") + b"\n" for line in re.findall(
+            r'b"(MRK_INSTALLED_SHELL_FAILURE_PHASE=[a-z]+)\\n"', source)}
+        self.assertEqual(set(lifecycle.SHELL_FAILURE_STEPS), steps)
+        self.assertEqual(set(lifecycle.SHELL_FAILURE_BOUNDARIES), boundaries)
+        self.assertEqual(len(lifecycle.SHELL_FAILURE_STEPS), len(steps))
+        self.assertEqual(len(lifecycle.SHELL_FAILURE_BOUNDARIES), 7)
+        self.assertLessEqual(max(map(len, steps)) + max(map(len, boundaries)), 512)
+        self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
+        self.assertIn("fn assert_failure_pair_contract()", source)
+        self.assertIn("    assert_failure_pair_contract();", source)
+        self.assertIn("let end = Instant::now() + Duration::from_secs(45);", source)
+        self.assertEqual(lifecycle.SHELL_WORK_FILE_LIMIT, 64 << 20)
+        for case in lifecycle.SHELL_CASES[1:]:
+            self.assertIn('"shell-' + case + '-failure.labels"', source)
+        self.assertNotIn("shell-normal-failure.labels", source)
+        self.assertFalse(any(name.endswith("failure.labels") for name in lifecycle.public_files({"shell": {}})))
+
+    def test_test_only_original_fd_sink_has_one_attempt_before_existing_stderr(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        entry = (SOURCE / "desktop/src-tauri/tests/installed_shell_observation.rs").read_text()
+        opener = source.split("fn failure_sink(case: Case)", 1)[1].split("const FAILURE_PAIR_LIMIT", 1)[0]
+        self.assertIn("let project = project_path()?;", opener)
+        self.assertIn("OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC", opener)
+        self.assertIn("OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK", opener)
+        self.assertNotIn("OFlags::CREATE", opener); self.assertNotIn("OFlags::TRUNC", opener)
+        self.assertEqual(opener.count("fs::openat("), 1)
+        self.assertIn("item.st_mode != 0o100620", opener)
+        self.assertIn("item.st_nlink != 1 || item.st_size != 0", opener)
+        self.assertIn("before.st_mode != 0o040711", opener)
+        reporter = source.split("    fn report_failure(&self)", 1)[1].split("    pub(super) fn attach", 1)[0]
+        self.assertEqual(reporter.count("rustix::io::write("), 1)
+        self.assertLess(reporter.index("self.failure_reported.swap(true"), reporter.index("rustix::io::write("))
+        self.assertLess(reporter.index("rustix::io::write("), reporter.index("super::diagnostic(trace.0.failure_line())"))
+        self.assertNotIn("write_all", reporter); self.assertNotIn("loop {", reporter)
+        self.assertIn("failure_sink: rustix::fd::OwnedFd", source)
+        self.assertIn("#![forbid(unsafe_code)]", entry)
+        self.assertIn("not(feature = \"development-runtime\")", entry)
+        self.assertIn('target_os = "linux"', entry)
+        # The source contract is not a substitute for the next actual shared
+        # normal/observer compiler gate or runtime FD behavior on the host.
 
 
 if __name__ == "__main__":

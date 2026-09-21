@@ -45,6 +45,108 @@ INSTALLED_TESTS = {key: "supervisor::tests::installed_candidate_a_" + suffix for
 CHILD_MARKER = "MRK_INSTALLED_NATIVE_CHILD="
 EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
 SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths")
+SHELL_FAILURE_LABEL_LIMIT = 512
+# Literal observer labels only; never a prefix parser or raw-output escape.
+SHELL_FAILURE_STEPS = (
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Bootstrap\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Environment\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEnvironment\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Dashboard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseCancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Cancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Cancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseSelect\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SetProject\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Selected\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSnapshot\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Settings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Suggest\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSuggestion\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Adopt\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GuidanceEnvironment\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LoadRequirements\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadRequirements\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GitHub\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadGitHubEmpty\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterRepository\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterSha\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadGitHubInputs\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ProposeGitHub\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadProposal\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=OpenWorkflows\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadWorkflows\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=GuidanceSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadRetainedDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareSave\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSaveReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=OpenConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=KeepReviewing\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadKeptReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReopenConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadReopenedConfirmation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Acknowledge\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadAcknowledged\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Apply\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSaved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SavedDashboard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Refresh\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadReadback\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadVersion\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadVersionCard\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Metadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=LoadMetadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadMetadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterTitle\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterShortDescription\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EnterFullDescription\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadMetadataInputs\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ValidateMetadata\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadMetadataValidation\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SavedSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadSavedDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Artifacts\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceEmpty\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseEvidenceCancel\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=CancelEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceCancelled\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ChooseEvidenceSelect\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SetEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceSelected\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceSelected\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=InspectEvidence\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=EvidenceObserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadEvidenceObserved\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=CandidateSettings\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadCandidateDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PrepareNoop\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=ReadNoopReview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Close\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Quit\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=Exit\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathDraft\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathPreview\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathBrowse\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSet\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathActivate\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathSettlement\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathField\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_STEP=PathNavigation\n",
+)
+SHELL_FAILURE_BOUNDARIES = (
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=bootstrap\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=request\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=result\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n",
+    b"MRK_INSTALLED_SHELL_FAILURE_PHASE=exit\n",
+)
 SHELL_PATH_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_PATHS="
 SHELL_PATH_RECEIPT = {'assetAuthorityCreated': False,
  'cancel': [{'field': 'version.source', 'operation': 3}, {'field': 'metadata.root', 'operation': 7}],
@@ -1069,8 +1171,12 @@ def _capacity(value):
     # those private files in addition to retained output. This free-space check
     # is not a reservation, aggregate quota or a bound on every GUI cache/memfd.
     if "shell" in value:
-        required += len(SHELL_CASES) * SHELL_WORK_FILE_LIMIT
+        # Three additional write-only failure leaves. The512-byte emitter/read
+        # bound is not a filesystem quota; retain the unchanged64MiB ceiling.
+        required += (len(SHELL_CASES) + len(SHELL_CASES[1:])) * SHELL_WORK_FILE_LIMIT
     inodes = 2 * max(capacity["installedEntries"].values()) + 2 * 8192 + 128
+    if "shell" in value:
+        inodes += len(SHELL_CASES[1:])
     need(len({Path(name).stat().st_dev for name in ("/", "/var", "/var/lib", "/usr")}) == 1,
          "Capacity DATA does not cover the same root package/publication filesystem")
     space = os.statvfs("/var/lib")
@@ -1111,42 +1217,63 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, sh
     # The fixed overlap configure may only SHORTEN this original endpoint.
     need(endpoint is None or type(endpoint) in {int, float} and math.isfinite(endpoint), "Fixed finite command cap required")
     bound = _END if endpoint is None else min(_END, endpoint)
-    started = time.monotonic()
-    seconds = min(maximum, math.floor(bound - started))
-    need(seconds > 0, "Original root command endpoint exhausted")
     _FAILED = True
-    result = _OWNER.run_owned(argv, environ=_environment() if env is None else env, cwd=Path("/"), timeout=seconds,
-        capture=True, text=False, output_limit=LIMIT, execution_scope=None, journal_binding=None, cleanup=False)
-    _command_capture(label, argv, result, seconds)
-    if endpoint is not None:
-        _COMMANDS[-1].update(originalEndpoint=bound, startMonotonic=started)
-    accepted = result.returncode in codes and time.monotonic() < bound
-    display_log, log_error = None, None
-    if shell_log is not None:
+    failure_sink = None
+    try:
+        if shell_log is not None:
+            failure_sink = _shell_labels_prepare(shell_log[0], shell_log[1])
+        started = time.monotonic()
+        seconds = min(maximum, math.floor(bound - started))
+        need(seconds > 0, "Original root command endpoint exhausted")
+        call = _shell_call_started(seconds) if shell_log is not None else None
         try:
-            display_log = _shell_log_capture(*shell_log, result)
+            result = _OWNER.run_owned(argv, environ=_environment() if env is None else env, cwd=Path("/"), timeout=seconds,
+                capture=True, text=False, output_limit=LIMIT, execution_scope=None, journal_binding=None, cleanup=False)
         except BaseException as error:
-            log_error = error
-        if not accepted or log_error is not None:
-            _shell_command_failure(argv, result, shell_log[1], display_log, log_error)
-        if not accepted:
-            # The settled original command's failure remains primary. Preserve
-            # a later read/retention/interruption error as its explicit cause;
-            # neither branch can resume or claim cleanup/success.
-            raise Refused("Original root command failed or completed late") from log_error
-        if log_error is not None:
-            raise log_error
-        need(time.monotonic() < bound, "Original shell log captured after endpoint")
-    if not accepted and label in {"native-root", "native-user", "observe-unpacked", "observe-p0",
-                                 "observe-upgrade", "observe-duplicate", "observe-remove", "observe-purge"}:
-        # Only these fixed credential-free fixtures may expose bounded DATA
-        # from the SAME returned capture. This is not another read or receipt.
-        diagnostic = {"phase": label, "exitCode": result.returncode, "timeoutSeconds": seconds,
-            "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr),
-            "stdoutPrefix": result.stdout[:1024].decode("utf-8", errors="backslashreplace"),
-            "stderrPrefix": result.stderr[:1024].decode("utf-8", errors="backslashreplace")}
-        sys.stderr.write("Fixture command failure DATA: " + canonical(diagnostic).decode("ascii"))
-    need(accepted, "Original root command failed or completed late")
+            if shell_log is not None:
+                try:
+                    _shell_owner_failure(shell_log[1], error, failure_sink, call)
+                except BaseException:
+                    pass
+            raise  # Same original object; diagnosis supplies no continuation authority.
+        _command_capture(label, argv, result, seconds)
+        if endpoint is not None:
+            _COMMANDS[-1].update(originalEndpoint=bound, startMonotonic=started)
+        accepted = result.returncode in codes and time.monotonic() < bound
+        display_log, log_error = None, None
+        if shell_log is not None:
+            try:
+                display_log = _shell_log_capture(*shell_log, result)
+            except BaseException as error:
+                log_error = error
+            if not accepted or log_error is not None:
+                _shell_command_failure(argv, result, shell_log[1], display_log, log_error)
+            if not accepted:
+                # The settled original command's failure remains primary. Preserve
+                # a later read/retention/interruption error as its explicit cause;
+                # neither branch can resume or claim cleanup/success.
+                raise Refused("Original root command failed or completed late") from log_error
+            if log_error is not None:
+                raise log_error
+            need(time.monotonic() < bound, "Original shell log captured after endpoint")
+        if not accepted and label in {"native-root", "native-user", "observe-unpacked", "observe-p0",
+                                     "observe-upgrade", "observe-duplicate", "observe-remove", "observe-purge"}:
+            # Only these fixed credential-free fixtures may expose bounded DATA
+            # from the SAME returned capture. This is not another read or receipt.
+            diagnostic = {"phase": label, "exitCode": result.returncode, "timeoutSeconds": seconds,
+                "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr),
+                "stdoutPrefix": result.stdout[:1024].decode("utf-8", errors="backslashreplace"),
+                "stderrPrefix": result.stderr[:1024].decode("utf-8", errors="backslashreplace")}
+            sys.stderr.write("Fixture command failure DATA: " + canonical(diagnostic).decode("ascii"))
+        need(accepted, "Original root command failed or completed late")
+    finally:
+        if failure_sink is not None:
+            active_failure = sys.exc_info()[0] is not None
+            try:
+                os.close(failure_sink[0])  # This exact retained original, once; no reopen/unlink.
+            except BaseException:
+                if not active_failure:
+                    raise  # _FAILED remains True; a lost close cannot qualify.
     _FAILED = False
     return result
 
@@ -2839,6 +2966,56 @@ def shell_argv(value, case):
         "--server-args=-screen 0 1280x1024x24 -noreset", *command])
 
 
+def _shell_labels_prepare(value, case):
+    """One root-owned leaf and its original read FD; never an app-writable namespace."""
+    need(case in SHELL_CASES[1:] and _ROOT == root_path(value), "Different fixed shell label route")
+    directory(_ROOT, protected=True)
+    root = identity(_ROOT.lstat())
+    need(root[2:5] == (stat.S_IFDIR | 0o711, 0, 0), "Different protected shell label parent")
+    _xattrs(_ROOT, True)
+    path = _ROOT / ("shell-" + case + "-failure.labels")
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+    try:
+        os.fchown(fd, 0, value["runnerGid"])
+        os.fchmod(fd, 0o620)
+        original = identity(os.fstat(fd))
+        need(original[0] == root[0] and original[2:7] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1, 0)
+             and identity(path.lstat()) == original and identity(_ROOT.lstat())[:6] == root[:6],
+             "Fresh shell label binding differs")
+        need(os.listxattr(fd) == [], "Shell label attributes are not empty")
+        need(identity(os.fstat(fd)) == original, "Fresh shell label changed before launch")
+        return fd, original[:6]
+    except BaseException:
+        try:
+            os.close(fd)
+        except BaseException:
+            pass  # No retry of an ambiguous close; the original refusal stays primary.
+        raise
+
+
+def _shell_label_pair(raw):
+    if type(raw) is not bytes or not 0 < len(raw) <= SHELL_FAILURE_LABEL_LIMIT:
+        return None
+    lines = raw.splitlines(keepends=True)
+    if len(lines) != 2 or lines[0] not in SHELL_FAILURE_STEPS or lines[1] not in SHELL_FAILURE_BOUNDARIES:
+        return None
+    return {"step": lines[0][len(b"MRK_INSTALLED_SHELL_FAILURE_STEP="):-1].decode("ascii"),
+            "boundary": lines[1][len(b"MRK_INSTALLED_SHELL_FAILURE_PHASE="):-1].decode("ascii")}
+
+
+def _shell_labels_read(original):
+    """Only the exact original read FD, after this call's strict typed settlement gate."""
+    fd, binding = original
+    before = identity(os.fstat(fd))
+    need(before[:6] == binding and 0 <= before[6] <= SHELL_FAILURE_LABEL_LIMIT,
+         "Original shell label identity or bound differs")
+    need(os.listxattr(fd) == [], "Original shell label attributes differ")
+    raw = os.read(fd, SHELL_FAILURE_LABEL_LIMIT + 1)  # One attempt; no seek, reopen or suffix retry.
+    need(type(raw) is bytes and len(raw) == before[6] and identity(os.fstat(fd)) == before,
+         "Original shell label read was incomplete or changed")
+    return _shell_label_pair(raw)
+
+
 def _shell_log_prepare(value, case):
     """One original write-only-for-test-group log, never a writable namespace."""
     need(case in SHELL_CASES and _ROOT == root_path(value), "Different original shell log root/case")
@@ -3572,6 +3749,74 @@ def _shell_command_failure(argv, result, case, display_log, log_error):
         pass  # Never replace an original failure, including a log read failure.
 
 
+def _shell_error_data(original, origin):
+    safe_messages = {
+        "Normal window controller endpoint expired",
+        "Normal original returned before controller command",
+        "Normal window controller command bound exhausted",
+        "No original controller command budget remains",
+        "Original normal shell returned before Quit",
+        "Original private shell window did not become visible in the finite observation",
+        "Original normal shell/controller did not settle",
+        "Original shell capture failed/incomplete",
+        "Actual normal capabilities/catalogue or observer completion missing",
+        "owned command failed, timed out, or produced incomplete output",
+        "owned command cleanup could not be confirmed",
+        "owned command executable could not be started",
+        "owned command produced incomplete output",
+        "owned command output exceeds its bound",
+        "owned command exceeded its original deadline",
+        "owned command protocol or original ownership is incomplete",
+        "Original shell error log was replaced or changed",
+        "Original shell error log changed during capture",
+        "Combined shell output exceeds its bound",
+    }
+
+    known_errors = tuple(value for name in ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown")
+                         if isinstance(value := getattr(_OWNER, name, None), type))
+
+    name = type(original).__name__
+    row = {"type": name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other",
+           "origin": origin, "originalProcessFacts": None}
+    # Never call exception formatting: it may contain argv, environment
+    # or other context, or itself raise. Only fixed public messages pass.
+    args = BaseException.args.__get__(original)
+    if type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in safe_messages:
+        row["message"] = args[0]
+    if type(original) in known_errors:
+        # Exact trusted family only; read stored fields, not properties.
+        fields = vars(original)
+        row["originalProcessFacts"] = {key: fields.get(key) if type(fields.get(key)) is bool else None
+                                       for key in ("dispatched", "contained", "cleanup_complete")}
+    return row
+
+
+def _shell_owner_failure(case, error, original, call):
+    """Finite sidecar DATA only; neither exception text nor a new lifetime authority."""
+    try:
+        _shell_call_finished(call, False)
+        labels, reason = None, "owner-finality-unavailable"
+        if type(error) is getattr(_OWNER, "ProcessError", None):
+            fields = vars(error)  # Exact trusted type: stored built-in flags, not properties/causes.
+            if fields.get("contained") is True and fields.get("cleanup_complete") is True:
+                reason = "unavailable"
+                try:
+                    labels = _shell_labels_read(original)
+                except BaseException:
+                    pass
+                if labels is not None:
+                    reason = None
+        facts = _shell_error_data(error, "owner")
+        facts.pop("message", None)  # No exception text in this diagnostic lane.
+        data = {"schemaVersion": 1, "scope": "original-shell-owner-failure-diagnostic-only",
+                "case": case, "phase": "owner-call", "qualified": False, "cleanupEstablished": False,
+                "capture": None, "labels": labels, "labelsReason": reason, "error": facts,
+                "ownerCall": _shell_call_summary(call)}
+        _shell_failure_output(b"MRK_INSTALLED_SHELL_COMMAND_FAILURE=", data)
+    except BaseException:
+        pass  # Diagnosis/clock/format/output failures never replace the active original.
+
+
 def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, error,
                           join_error=None, capture_error=None, display_log=None,
                           controller=None, error_origin="main", resources=None):
@@ -3583,47 +3828,6 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
     operation's original failure.
     """
     try:
-        safe_messages = {
-            "Normal window controller endpoint expired",
-            "Normal original returned before controller command",
-            "Normal window controller command bound exhausted",
-            "No original controller command budget remains",
-            "Original normal shell returned before Quit",
-            "Original private shell window did not become visible in the finite observation",
-            "Original normal shell/controller did not settle",
-            "Original shell capture failed/incomplete",
-            "Actual normal capabilities/catalogue or observer completion missing",
-            "owned command failed, timed out, or produced incomplete output",
-            "owned command cleanup could not be confirmed",
-            "owned command executable could not be started",
-            "owned command produced incomplete output",
-            "owned command output exceeds its bound",
-            "owned command exceeded its original deadline",
-            "owned command protocol or original ownership is incomplete",
-            "Original shell error log was replaced or changed",
-            "Original shell error log changed during capture",
-            "Combined shell output exceeds its bound",
-        }
-
-        known_errors = tuple(value for name in ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown")
-                             if isinstance(value := getattr(_OWNER, name, None), type))
-
-        def error_data(original, origin):
-            name = type(original).__name__
-            row = {"type": name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other",
-                   "origin": origin, "originalProcessFacts": None}
-            # Never call exception formatting: it may contain argv, environment
-            # or other context, or itself raise. Only fixed public messages pass.
-            args = BaseException.args.__get__(original)
-            if type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in safe_messages:
-                row["message"] = args[0]
-            if type(original) in known_errors:
-                # Exact trusted family only; read stored fields, not properties.
-                fields = vars(original)
-                row["originalProcessFacts"] = {key: fields.get(key) if type(fields.get(key)) is bool else None
-                                               for key in ("dispatched", "contained", "cleanup_complete")}
-            return row
-
         errors = [(item, origin) for item, origin in
                   ((error, error_origin), (join_error, "join"), (capture_error, "capture")) if item is not None]
         result = None
@@ -3680,7 +3884,7 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
                             "guard-restore", "guard-check", "guard-state"} else "worker"
                     errors.append((item, label))
             result = holder.get("result")
-        data["errors"] = [error_data(item, origin) for item, origin in errors[:4]]
+        data["errors"] = [_shell_error_data(item, origin) for item, origin in errors[:4]]
         data["errorsTruncated"] = len(errors) > 4
         data["capture"] = _shell_capture_summary(result, argv, display_log if joined else None, normal=True)
         if data["capture"] is not None:

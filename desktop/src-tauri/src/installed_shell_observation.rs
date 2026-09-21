@@ -177,6 +177,62 @@ fn project_path() -> Option<PathBuf> {
     Some(root.join("positive-project"))
 }
 
+// One fixed root-prepared diagnostic leaf. O_PATH permits binding the0711
+// parent without granting directory read permission to the dropped runner.
+// OwnedFd closes once on every Rust return/drop path; no raw FD is exported.
+fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
+    use std::os::unix::fs::MetadataExt;
+    use rustix::fs::{self, Mode, OFlags};
+    let project = project_path()?;
+    let root = project.parent()?;
+    for ancestor in root.ancestors() {
+        let metadata = std::fs::symlink_metadata(ancestor).ok()?;
+        if !metadata.is_dir() || metadata.uid() != 0 || metadata.gid() != 0
+            || metadata.mode() & 0o022 != 0 { return None; }
+    }
+    let parent = fs::open(root, OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty()).ok()?;
+    let before = fs::fstat(&parent).ok()?;
+    if before.st_mode != 0o040711 || before.st_uid != 0 || before.st_gid != 0 { return None; }
+    let leaf = match case {
+        Case::Positive => "shell-positive-failure.labels",
+        Case::Outstanding => "shell-quit-outstanding-failure.labels",
+        Case::ProjectPaths => "shell-project-paths-failure.labels",
+    };
+    let fd = fs::openat(&parent, leaf, OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty()).ok()?;
+    let item = fs::fstat(&fd).ok()?;
+    let group = rustix::process::getegid();
+    let after = fs::fstat(&parent).ok()?;
+    if group.as_raw() == 0 || group != rustix::process::getgid()
+        || item.st_mode != 0o100620 || item.st_uid != 0 || item.st_gid != group.as_raw()
+        || item.st_nlink != 1 || item.st_size != 0 || item.st_dev != before.st_dev
+        || (before.st_dev, before.st_ino, before.st_mode, before.st_uid, before.st_gid)
+            != (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid) { return None; }
+    Some(fd)
+}
+
+const FAILURE_PAIR_LIMIT: usize = 512;
+fn failure_pair(trace: (Step, Boundary)) -> Option<([u8; FAILURE_PAIR_LIMIT], usize)> {
+    let step = trace.0.failure_line();
+    let boundary = trace.1.failure_line();
+    let length = step.len().checked_add(boundary.len())?;
+    let mut bytes = [0_u8; FAILURE_PAIR_LIMIT];
+    bytes.get_mut(..step.len())?.copy_from_slice(step);
+    bytes.get_mut(step.len()..length)?.copy_from_slice(boundary);
+    Some((bytes, length))
+}
+
+fn assert_failure_pair_contract() {
+    // Pure byte contracts only; no open, write, GTK or process work.
+    for trace in [(Step::Bootstrap, Boundary::Bootstrap), (Step::PrepareSave, Boundary::Request),
+        (Step::Paths(PathStep::Settled(10)), Boundary::Settlement), (Step::Exit, Boundary::Exit)] {
+        let expected = [trace.0.failure_line(), trace.1.failure_line()].concat();
+        assert!(failure_pair(trace).is_some_and(|(bytes, length)|
+            length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
+    }
+}
+
 #[derive(Default)]
 struct Picker {
     created: bool, selected: bool, activated: bool, responded: bool, filename: bool,
@@ -832,10 +888,10 @@ fn saved_read_context(r: &Record) -> bool {
 }
 pub(super) struct Observation {
     case: Case, main: ThreadId, end: Instant, project_path: Option<PathBuf>, evidence_path: Option<PathBuf>, failed: AtomicBool,
-    failure_reported: AtomicBool, record: Mutex<Record>,
+    failure_reported: AtomicBool, failure_sink: rustix::fd::OwnedFd, record: Mutex<Record>,
 }
 impl Observation {
-    fn new(case: Case) -> Self {
+    fn new(case: Case, failure_sink: rustix::fd::OwnedFd) -> Self {
         let end = Instant::now() + Duration::from_secs(45);
         let project_path = (case != Case::Outstanding).then(project_path).flatten().map(|path|
             if case == Case::ProjectPaths { path.with_file_name("path-project") } else { path });
@@ -844,7 +900,7 @@ impl Observation {
         Self { case, main: std::thread::current().id(), end,
             failed: AtomicBool::new(case != Case::Outstanding && (project_path.is_none() || evidence_path.is_none())
                 || case == Case::ProjectPaths && paths.fixture.is_none()), project_path, evidence_path,
-            failure_reported: AtomicBool::new(false), record: Mutex::new(Record {
+            failure_reported: AtomicBool::new(false), failure_sink, record: Mutex::new(Record {
                 attached: false, started: false, loaded: false, info: false, methods: 0, catalog: false, environment: false,
                 step: Step::Bootstrap, pending: None, evaluations: 0, trace: (Step::Bootstrap, Boundary::Bootstrap),
                 pickers: std::array::from_fn(|_| Picker::default()), cancel_returned: false, cancelled: false, project: None, selected: false,
@@ -874,6 +930,11 @@ impl Observation {
         if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
         // Two fixed enum labels, outside every record/GTK lock. No paths,
         // opaque identifiers, DTOs, exception bodies or terminal transcript.
+        // One unbuffered attempt before stderr: partial/EINTR/error is not
+        // retried, formatted or allowed to affect the original failure latch.
+        if let Some((bytes, length)) = failure_pair(trace) {
+            if let Some(pair) = bytes.get(..length) { let _ = rustix::io::write(&self.failure_sink, pair); }
+        }
         super::diagnostic(trace.0.failure_line()); super::diagnostic(trace.1.failure_line());
     }
     pub(super) fn attach(&self, supervisor: &Supervisor) -> Result<(), BridgeError> {
@@ -2844,13 +2905,18 @@ pub(crate) fn main() -> std::process::ExitCode {
         super::diagnostic(b"MRK_INSTALLED_SHELL_OBSERVATION=route-refused\n");
         return std::process::ExitCode::FAILURE;
     };
-    let q = Arc::new(Observation::new(case));
+    let Some(failure_sink) = failure_sink(case) else {
+        super::diagnostic(b"MRK_INSTALLED_SHELL_OBSERVATION=route-refused\n");
+        return std::process::ExitCode::FAILURE;
+    };
+    let q = Arc::new(Observation::new(case, failure_sink));
     // This target has no libtest harness. Execute the existing pure contracts
     // and positive configuration-domain contracts before GTK; a failed
     // assertion cannot reach the success report.
     crate::bridge::assert_native_capability_intersection_contract();
     crate::runtime::assert_packaged_shell_allowlist_contract();
     assert_recent_files_suppression_contract();
+    assert_failure_pair_contract();
     if case == Case::Positive {
         crate::asset_session::assert_project_selection_gate_contract();
         crate::asset_session::assert_installed_evidence_gate_contract();
