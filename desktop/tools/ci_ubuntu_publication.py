@@ -2174,25 +2174,45 @@ def shell_package_owner(row, package_files, query, admit):
         return next(iter(canonical_owners))
 
     stdout, stderr = query(sorted(aliases))
-    reported, missing = {}, set()
+    reported, missing, diverted = {}, set(), {}
+    pending = None
     for line in stdout.decode("ascii").splitlines():
+        diversion = re.fullmatch(r"diversion by ([a-z0-9][a-z0-9+.-]+) (from|to): (.+)", line)
+        if diversion:
+            name, direction, path = diversion.groups()
+            if direction == "from":
+                D.need(pending is None and path.startswith("/lib/") and path in aliases and "/usr" + path in aliases
+                       and path not in reported and path not in diverted,
+                       "Shell usr-merge diversion source is unrelated, repeated or conflicting")
+                pending = (name, path)
+            else:
+                D.need(pending is not None and (name, path) == (pending[0], pending[1] + ".usr-is-merged"),
+                       "Shell usr-merge diversion target has no exact paired source")
+                # This is only query metadata. Never follow or admit its target.
+                diverted[pending[1]] = pending[0]
+                pending = None
+            continue
+        D.need(pending is None, "Shell usr-merge diversion pair is incomplete")
         name, separator, path = line.rpartition(": ")
-        D.need(separator and path in aliases and path not in reported
+        D.need(separator and path in aliases and path not in reported and path not in diverted
                and re.fullmatch(r"[a-z0-9][a-z0-9+.-]+(?::amd64)?", name),
                "Shell native ownership query contains an unrelated or duplicate member")
         reported[path] = name
+    D.need(pending is None, "Shell usr-merge diversion pair is incomplete")
     prefix = "dpkg-query: no path found matching pattern "
     for line in stderr.decode("ascii").splitlines():
         path = line.removeprefix(prefix)
-        D.need(line.startswith(prefix) and path in aliases and path not in missing and path not in reported,
+        D.need(line.startswith(prefix) and path in aliases and path not in missing and path not in reported and path not in diverted,
                "Unexpected or conflicting shell ownership query diagnostic")
         missing.add(path)
-    D.need(set(reported) | missing == aliases and all(reported.get(path) == name for path, name in known.items()),
+    D.need(set(reported) | missing | set(diverted) == aliases and all(reported.get(path) == name for path, name in known.items()),
            "Shell native ownership query is incomplete or changed an admitted member")
     for name in sorted(set(reported.values())):
         admit(name)
     D.need(all(path in package_files[name] for path, name in reported.items()) and members() == reported,
            "Shell native file is absent from its own package roster")
+    D.need(all("/usr" + path in reported and reported["/usr" + path].split(":")[0] == name for path, name in diverted.items()),
+           "Shell usr-merge diversion is not bound to its actual admitted supplier")
     canonical_owners = {reported[path] for path in canonical if path in reported}
     D.need(len(canonical_owners) == 1, "Shell canonical provider ownership is missing/ambiguous")
     return next(iter(canonical_owners))

@@ -224,6 +224,63 @@ class ShellPackageOwnershipContracts(unittest.TestCase):
             S.shell_package_owner(row, {"pkgconf-bin": {row["path"]}, "other": {row["path"]}},
                                   lambda _: self.fail("Ambiguous cache must refuse before querying"), lambda _: None)
 
+    def test_usr_merge_pairs_are_only_metadata_bound_to_actual_suppliers(self):
+        # Verbatim hosted command530 DATA. Diversion targets are never queried,
+        # opened, or substituted for the complete ordinary package member list.
+        row = {"path": "/usr/lib/x86_64-linux-gnu/libreadline.so.8.2",
+               "selectedPath": "/usr/lib/x86_64-linux-gnu/libreadline.so.8"}
+        stdout = (b"diversion by libreadline8t64 from: /lib/x86_64-linux-gnu/libreadline.so.8\n"
+                  b"diversion by libreadline8t64 to: /lib/x86_64-linux-gnu/libreadline.so.8.usr-is-merged\n"
+                  b"diversion by libreadline8t64 from: /lib/x86_64-linux-gnu/libreadline.so.8.2\n"
+                  b"diversion by libreadline8t64 to: /lib/x86_64-linux-gnu/libreadline.so.8.2.usr-is-merged\n"
+                  b"libreadline8t64:amd64: /usr/lib/x86_64-linux-gnu/libreadline.so.8\n"
+                  b"libreadline8t64:amd64: /usr/lib/x86_64-linux-gnu/libreadline.so.8.2\n")
+        name = "libreadline8t64:amd64"
+        rosters = {name: {row["path"], row["selectedPath"]}}
+        known, admitted, queried = {}, [], []
+        def admit(package):
+            admitted.append(package)
+            known[package] = rosters[package]
+        def query(aliases):
+            queried.append(aliases)
+            return stdout, b""
+        self.assertEqual(S.shell_package_owner(row, known, query, admit), name)
+        self.assertEqual(admitted, [name])
+        self.assertEqual(known, rosters)
+        self.assertEqual(queried, [["/lib/x86_64-linux-gnu/libreadline.so.8", "/lib/x86_64-linux-gnu/libreadline.so.8.2",
+                                   row["selectedPath"], row["path"]]])
+        self.assertEqual(S.shell_package_owner(row, known, query, admit), name)
+        self.assertEqual(len(queried), 1)
+
+        lines = stdout.splitlines(keepends=True)
+        ordinary_alias = b"libreadline8t64:amd64: /lib/x86_64-linux-gnu/libreadline.so.8\n"
+        cases = (
+            ("local", stdout.replace(b"diversion by libreadline8t64", b"local diversion"), b"", rosters),
+            ("general-target", stdout.replace(b".usr-is-merged\n", b".diverted\n"), b"", rosters),
+            ("unpaired-to", stdout.replace(lines[0], b""), b"", rosters),
+            ("unpaired-from", stdout.replace(lines[1], b""), b"", rosters),
+            ("repeated-pair", b"".join(lines[:2]) + stdout, b"", rosters),
+            ("unrelated", stdout.replace(b": /lib/", b": /lib/unrelated/"), b"", rosters),
+            ("non-lib-source", stdout.replace(b": /lib/", b": /usr/lib/"), b"", rosters),
+            ("diagnostic-package-grammar", stdout.replace(b"diversion by libreadline8t64 ", b"diversion by libreadline8t64:amd64 "), b"", rosters),
+            ("wrong-package", stdout.replace(b"diversion by libreadline8t64", b"diversion by other"), b"", rosters),
+            ("mismatched-pair", stdout.replace(b"diversion by libreadline8t64 to:", b"diversion by other to:", 1), b"", rosters),
+            ("ordinary-before", ordinary_alias + stdout, b"", rosters),
+            ("ordinary-after", stdout + ordinary_alias, b"", rosters),
+            ("missing-conflict", stdout, b"dpkg-query: no path found matching pattern /lib/x86_64-linux-gnu/libreadline.so.8\n", rosters),
+            ("missing-usr-supplier", stdout.replace(lines[4], b""),
+             b"dpkg-query: no path found matching pattern /usr/lib/x86_64-linux-gnu/libreadline.so.8\n", {name: {row["path"]}}),
+            ("false-canonical-owner", stdout.replace(lines[5], lines[5].replace(name.encode(), b"other")), b"",
+             {name: {row["selectedPath"]}, "other": {row["path"]}}),
+            ("incomplete-roster", stdout, b"", {name: {row["selectedPath"]}}),
+            ("diverted-roster-alias", stdout, b"", {name: rosters[name] | {"/lib/x86_64-linux-gnu/libreadline.so.8"}}),
+        )
+        for label, output, error, listed in cases:
+            with self.subTest(case=label), self.assertRaises(S.D.Refused):
+                known = {}
+                S.shell_package_owner(row, known, lambda _: (output, error),
+                                      lambda package: known.update({package: listed[package]}))
+
 
 class InstalledShellCompilerContracts(unittest.TestCase):
     def test_one_build_exact_production_features_and_two_selected_targets(self):
