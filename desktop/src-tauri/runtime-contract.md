@@ -48,6 +48,16 @@ claim a production protected bundle or hostile same-user filesystem protection.
 
 ## Packaged preparation shape (not launch authorization)
 
+The separate [macOS ARM64 conventional payload slice](../macos-payload-inputs/README.md)
+adds one fixed `desktop-macos-payload.yml` route for macOS26/ARM64, not the full
+foundation matrix. It builds an actual ordinary CPython payload, relocates and
+ad-hoc signs its three native files, then uses unchanged `prepare_runtime.py`
+and the existing Darwin ordinary command owner for copied-runtime passive
+smoke. Source authoring is not a native result; successful native smoke is not
+Apple/LLVM licensing acceptance, installed execution custody, Intel/older-macOS
+support, Developer-ID/notarization, or production launch authorization. The
+production runtime and native GUI gates above remain unchanged and disabled.
+
 Future explicitly reviewed packaging maps its prepared directory to
 `resource_dir/runtime`. Source `tauri.conf.json` intentionally has no required
 runtime resource directory and `bundle.active=false`. It does not depend on

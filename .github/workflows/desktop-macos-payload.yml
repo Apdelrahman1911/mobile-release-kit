@@ -1,0 +1,81 @@
+name: Desktop macOS ARM64 payload
+
+on:
+  push:
+    branches: [verify/desktop-macos-payload]
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed commit on verify/desktop-macos-payload (verification only)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-payload-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  payload:
+    name: Conventional CPython / macOS 26 ARM64
+    if: github.ref == 'refs/heads/verify/desktop-macos-payload'
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      MRK_EVENT_AFTER: ${{ github.event.after }}
+      MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
+    steps:
+      - name: Require the exact reviewed disposable-hosted route
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-payload ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-payload.yml@$GITHUB_REF" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == push && "$MRK_EVENT_AFTER" == "$GITHUB_SHA" ]]
+          fi
+      - name: Check out the exact source without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select only the fixed publisher Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Build, relocate, ad-hoc sign and exercise the actual packaged core
+        id: payload
+        timeout-minutes: 32
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/macos_payload.py'
+      - name: Preserve only the bounded payload and original synthetic evidence
+        if: always() && steps.payload.outputs.root != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-macos-payload-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.payload.outputs.root }}/evidence
+            ${{ steps.payload.outputs.root }}/payload.tar
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
+      # A passing upload or partial work-result is never a native pass. Require
+      # the original payload step's success plus evidence/result.json's final
+      # cleanup/accounting facts during RESULT review. There is no retry owner,
+      # post-failure process probe, release workflow or production enablement.

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "target": "aarch64-apple-darwin",
+  "deploymentTarget": "26.0",
+  "sources": [
+    {"id": "cpython", "version": "3.14.7", "root": "Python-3.14.7", "size": 24053924, "sha256": "3b48dac8fb59f62eaa67ac83c1eb12bda1b7a08406dd286e252c11a66be27f81", "url": "https://www.python.org/ftp/python/3.14.7/Python-3.14.7.tar.xz", "authority": "Retained official HTTPS archive pin and reviewed source correspondence; not a signature-verification claim."},
+    {"id": "zlib", "version": "1.3.2", "root": "zlib-1.3.2", "size": 1502830, "sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16", "url": "https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz", "authority": "Retained official HTTPS archive pin and reviewed source correspondence; not a signature-verification claim."},
+    {"id": "openssl", "version": "3.5.8", "root": "openssl-3.5.8", "size": 53213818, "sha256": "a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2", "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz", "authority": "Retained exact archive with successful official-key GPG verification; future acquisition must match these complete bytes."}
+  ],
+  "ca": {"path": "github-ca.pem", "size": 240216, "sha256": "9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"},
+  "notices": {
+    "01-CPython-3.14.7-LICENSE.txt": "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231",
+    "02-CPython-3.14.7-THIRD-PARTY.rst": "cd6f471c0bfdb099efefc25ddff9b3df8bf62e10428987f1f05e6f2f9e35d563",
+    "03-HACL-MIT.txt": "998ce04fb8ad9dedb0bc1b44938f8c3dcf1089780fa105ce1c8c30fb5554d78c",
+    "04-HACL-KaRaMeL-copyrights.txt": "a3d1e6ff83a3f5304286ac5799c37c67ed7d81357cd8e833c3f1d1dc55460242",
+    "05-HACL-Apache-2.0.txt": "c5accbbd8546e94c34aed24afe689a617627d18eed5a6c48277e48db57c23851",
+    "06-Expat-2.8.2-COPYING.txt": "31b15de82aa19a845156169a17a5488bf597e561b2c318d159ed583139b25e87",
+    "16-OpenSSL-3.5.8.txt": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a",
+    "20-zlib-1.3.2.txt": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2",
+    "CA-PROVENANCE.txt": "fdf9b47fcf3a7ac052b5db5d6687ce5a7cff6b20270afd8a62b0cd4b9d289fea",
+    "LICENSE.certifi": "e93716da6b9c0d5a4a1df60fe695b370f0695603d21f6f83f053e42cfc10caf7",
+    "LICENSE.MPL-2.0.txt": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5"
+  }
+}
