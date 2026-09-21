@@ -172,6 +172,44 @@ def transport_data(work, change=None):
 
 
 class ShellPackageOwnershipContracts(unittest.TestCase):
+    def test_declared_roster_keeps_members_not_usr_merge_directory_destinations(self):
+        # Verbatim hosted command597 DATA, not a local package query.
+        raw = (b"/.\n/lib\ndiverted by base-files to: /lib.usr-is-merged\n/usr\n/usr/lib\n"
+               b"/usr/lib/x86_64-linux-gnu\n/usr/lib/x86_64-linux-gnu/libunwind-coredump.so.0.0.0\n"
+               b"/usr/lib/x86_64-linux-gnu/libunwind-ptrace.so.0.0.0\n"
+               b"/usr/lib/x86_64-linux-gnu/libunwind-x86_64.so.8.0.1\n"
+               b"/usr/lib/x86_64-linux-gnu/libunwind.so.8.0.1\n/usr/share\n/usr/share/doc\n"
+               b"/usr/share/doc/libunwind8\n/usr/share/doc/libunwind8/changelog.Debian.gz\n"
+               b"/usr/share/doc/libunwind8/copyright\n/usr/lib/x86_64-linux-gnu/libunwind-coredump.so.0\n"
+               b"/usr/lib/x86_64-linux-gnu/libunwind-ptrace.so.0\n"
+               b"/usr/lib/x86_64-linux-gnu/libunwind-x86_64.so.8\n/usr/lib/x86_64-linux-gnu/libunwind.so.8\n")
+        annotation = b"diverted by base-files to: /lib.usr-is-merged\n"
+        ordinary = raw.replace(annotation, b"")
+        declared = set(ordinary.decode("ascii").splitlines())
+        self.assertEqual(S.shell_package_members(raw, b""), declared)
+        self.assertEqual(S.shell_package_members(ordinary, b""), declared)
+        self.assertNotIn("/lib.usr-is-merged", declared)
+        # All fixed top-level directory spellings use the same narrow metadata
+        # rule. They do not add runtime/library search roots.
+        for alias in ("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"):
+            record = (alias + "\ndiverted by base-files to: " + alias + ".usr-is-merged\n").encode()
+            self.assertEqual(S.shell_package_members(record, b""), {alias})
+        cases = (
+            (b"", b""), (ordinary, b"unexpected diagnostic\n"),
+            (b"/entry\n" * 32769, b""), (b"relative\n", b""), (b"/usr/../lib\n", b""),
+            (annotation + ordinary, b""), (raw.replace(b"/lib\n", b"/lib\n/usr\n", 1), b""),
+            (raw.replace(annotation, annotation * 2), b""),
+            (raw + b"/lib\n" + annotation, b""),
+            (raw.replace(b"base-files", b"other"), b""),
+            (raw.replace(b".usr-is-merged", b".diverted"), b""),
+            (raw.replace(b"diverted by base-files", b"locally diverted"), b""),
+            (b"/etc\ndiverted by base-files to: /etc.usr-is-merged\n", b""),
+            (b"/lib/example.so\ndiverted by base-files to: /lib/example.so.usr-is-merged\n", b""),
+        )
+        for output, error in cases:
+            with self.subTest(output=output[:128], error=error), self.assertRaises(S.D.Refused):
+                S.shell_package_members(output, error)
+
     def test_split_link_provider_and_missing_alternative_retain_exact_suppliers(self):
         # Actual hosted dpkg output, never a local dpkg/process invocation.
         row = {"path": "/usr/bin/pkgconf", "selectedPath": "/usr/bin/pkg-config"}

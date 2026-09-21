@@ -2139,6 +2139,28 @@ def shell_private_search(records, libraries):
     return sorted(result, key=lambda row: (row["requester"], row["path"]))
 
 
+def shell_package_members(stdout, stderr):
+    """Declared members, not the destinations of dpkg's directory annotations."""
+    lines = stdout.decode("utf-8").splitlines()
+    D.need(stderr == b"" and 0 < len(lines) <= 32768, "Shell native package member roster differs")
+    members, annotated, previous = set(), set(), None
+    for line in lines:
+        if line.startswith("/"):
+            D.need(".." not in Path(line).parts, "Shell native package member roster differs")
+            members.add(line)
+            previous = line
+        else:
+            D.need(previous in {"/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32"}
+                   and previous not in annotated
+                   and line == "diverted by base-files to: " + previous + ".usr-is-merged",
+                   "Shell native package has unsupported or repeated directory diversion metadata")
+            # Keep the original declared directory. This line grants no file or
+            # supplier authority, and its destination is never followed/admitted.
+            annotated.add(previous)
+            previous = None
+    return members
+
+
 def shell_package_owner(row, package_files, query, admit):
     """Keep a selected link's supplier separate from its canonical provider.
 
@@ -2254,15 +2276,12 @@ def shell_native_inputs(check, work, environment):
                "Actual shell native package tuple differs")
         listing = check.command("shell-package-files-" + str(counter), ["/usr/bin/dpkg-query", "-L", name],
                                 environment, work, timeout=15, limit=1 << 20)
-        paths = listing.stdout.decode("utf-8").splitlines()
-        D.need(listing.stderr == b"" and 0 < len(paths) <= 32768
-               and all(path.startswith("/") and ".." not in Path(path).parts for path in paths),
-               "Shell native package member roster differs")
+        paths = shell_package_members(listing.stdout, listing.stderr)
         packages[name] = {"binaryPackage": values[0], "version": values[2], "architecture": values[3],
                           "sourcePackage": values[4], "sourceVersion": values[5], "queryArgv": argv,
                           "querySha256": hashlib.sha256(result.stdout).hexdigest(),
                           "memberQuerySha256": hashlib.sha256(listing.stdout).hexdigest()}
-        package_files[name] = set(paths)
+        package_files[name] = paths
 
     def owner(row):
         nonlocal counter
