@@ -12,7 +12,7 @@ fn hosted_source() -> Result<&'static str> {
     for (name, expected) in [
         ("MRK_DESKTOP_HOSTED_CHECKS", "windows-installed-native-v1"),
         ("GITHUB_ACTIONS", "true"), ("RUNNER_ENVIRONMENT", "github-hosted"),
-        ("RUNNER_OS", "Windows"), ("RUNNER_ARCH", "X64"), ("ImageOS", "win25"),
+        ("RUNNER_OS", "Windows"), ("RUNNER_ARCH", "X64"), ("ImageOS", "win25-vs2026"),
         ("GITHUB_RUN_ATTEMPT", "1"), ("GITHUB_SHA", source),
     ] {
         require_fact(std::env::var(name).as_deref() == Ok(expected))?;

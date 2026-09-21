@@ -8622,7 +8622,7 @@ def windows_installed_binding() -> dict:
     e = os.environ
     require(sys.platform == "win32" and sys.maxsize == 2**63 - 1 and sys.version.split()[0] == PYTHON
             and e.get("GITHUB_ACTIONS") == "true" and e.get("RUNNER_ENVIRONMENT") == "github-hosted"
-            and e.get("RUNNER_OS") == "Windows" and e.get("RUNNER_ARCH") == "X64" and e.get("ImageOS") == "win25"
+            and e.get("RUNNER_OS") == "Windows" and e.get("RUNNER_ARCH") == "X64" and e.get("ImageOS") == "win25-vs2026"
             and e.get("GITHUB_JOB") == "windows-installed-native" and e.get("GITHUB_RUN_ATTEMPT") == "1"
             and e.get("MRK_DESKTOP_HOSTED_CHECKS") == WINDOWS_INSTALLED_SCOPE,
             "Windows native scope requires its fixed disposable X64 hosted job")
@@ -8870,7 +8870,7 @@ def windows_installed_phase(name: str, scope: str) -> None:
         artifact = read_bounded_json(root / "compiled-test.json", 64 << 10)
         require(artifact == windows_installed_artifact(context), "Windows native original executable changed")
         environment.update(MRK_DESKTOP_HOSTED_CHECKS=WINDOWS_INSTALLED_SCOPE, GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
-            RUNNER_OS="Windows", RUNNER_ARCH="X64", ImageOS="win25", GITHUB_RUN_ATTEMPT="1")
+            RUNNER_OS="Windows", RUNNER_ARCH="X64", ImageOS=context["imageOS"], GITHUB_RUN_ATTEMPT="1")
         with (root / "inert.stdout").open("x", encoding="utf-8") as output, (root / "inert.stderr").open("x", encoding="utf-8") as diagnostics:
             run([artifact["path"], "--skip", WINDOWS_INSTALLED_TEST, "--test-threads=1"], check="windows-installed-inert-contracts",
                 cwd=root, env=environment, timeout=60, output=output, diagnostics=diagnostics)

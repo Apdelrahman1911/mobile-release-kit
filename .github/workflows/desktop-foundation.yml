@@ -509,7 +509,7 @@ jobs:
     if: >-
       github.ref == 'refs/heads/verify/desktop-windows-installed-native' &&
       (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.scope == 'windows-installed-native'))
-    runs-on: windows-2025
+    runs-on: windows-2025-vs2026
     timeout-minutes: 35
     env:
       MRK_DESKTOP_PLATFORM: windows
@@ -523,14 +523,29 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           set -euo pipefail
-          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Windows && "$RUNNER_ARCH" == X64 ]]
-          [[ "$ImageOS" == win25 && "$GITHUB_RUN_ATTEMPT" == 1 ]]
-          [[ "$GITHUB_REF" == refs/heads/verify/desktop-windows-installed-native ]]
-          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
-            [[ "$MRK_DESKTOP_DISPATCH_SCOPE" == windows-installed-native && "$MRK_DESKTOP_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          [[ "${RUNNER_ENVIRONMENT:-}" == github-hosted && "${RUNNER_OS:-}" == Windows && "${RUNNER_ARCH:-}" == X64 ]] || {
+            printf '%s\n' 'MRK_WINDOWS_INSTALLED_ROUTE_REFUSED=runner' >&2; exit 1;
+          }
+          [[ "${ImageOS:-}" == win25-vs2026 ]] || {
+            printf '%s\n' 'MRK_WINDOWS_INSTALLED_ROUTE_REFUSED=image' >&2; exit 1;
+          }
+          [[ "${GITHUB_RUN_ATTEMPT:-}" == 1 ]] || {
+            printf '%s\n' 'MRK_WINDOWS_INSTALLED_ROUTE_REFUSED=attempt' >&2; exit 1;
+          }
+          [[ "${GITHUB_REF:-}" == refs/heads/verify/desktop-windows-installed-native ]] || {
+            printf '%s\n' 'MRK_WINDOWS_INSTALLED_ROUTE_REFUSED=ref' >&2; exit 1;
+          }
+          [[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ && "${GITHUB_WORKFLOW_SHA:-}" == "${GITHUB_SHA:-}" ]] || {
+            printf '%s\n' 'MRK_WINDOWS_INSTALLED_ROUTE_REFUSED=source' >&2; exit 1;
+          }
+          if [[ "${GITHUB_EVENT_NAME:-}" == workflow_dispatch ]]; then
+            [[ "${MRK_DESKTOP_DISPATCH_SCOPE:-}" == windows-installed-native && "${MRK_DESKTOP_EXPECTED_SHA:-}" == "${GITHUB_SHA:-}" ]] || {
+              printf '%s\n' 'MRK_WINDOWS_INSTALLED_ROUTE_REFUSED=dispatch' >&2; exit 1;
+            }
           else
-            [[ "$GITHUB_EVENT_NAME" == push ]]
+            [[ "${GITHUB_EVENT_NAME:-}" == push ]] || {
+              printf '%s\n' 'MRK_WINDOWS_INSTALLED_ROUTE_REFUSED=event' >&2; exit 1;
+            }
           fi
       - name: Check out exact candidate without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
