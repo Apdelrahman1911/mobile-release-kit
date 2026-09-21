@@ -1,0 +1,9 @@
+#!/bin/sh
+# Standard Installer invokes this root script after unpacking Scripts, not a
+# destination payload. No executable selection, PATH lookup or Python as root.
+set -eu
+umask 077
+[ "${3:-}" = / ] || exit 1
+case "$0" in /*/postinstall) scripts=${0%/*} ;; *) exit 1 ;; esac
+cd -P "$scripts"
+exec ./mrk-macos-install "$PWD/input"

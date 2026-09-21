@@ -21,6 +21,21 @@ fn main() {
     // here and thereby silently promote unreviewed runtime bytes to authority.
     anchor("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256");
     anchor("MRK_BUNDLED_PROTOCOL_SHA256");
+    anchor("MRK_MACOS_INSTALL_INVENTORY_SHA256");
+    println!("cargo:rerun-if-env-changed=MRK_MACOS_INSTALL_SOURCE_COMMIT");
+    match env::var("MRK_MACOS_INSTALL_SOURCE_COMMIT") {
+        Ok(value) => {
+            if value.len() != 40 || !value.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
+                panic!("MRK_MACOS_INSTALL_SOURCE_COMMIT must be an explicit lowercase source commit");
+            }
+            println!("cargo:rustc-env=MRK_MACOS_INSTALL_SOURCE_COMMIT={value}");
+        }
+        Err(_) if cfg!(feature = "macos-installed-installer") => panic!("Installer builds require the explicit source commit"),
+        Err(_) => {},
+    }
+    if cfg!(feature = "macos-installed-installer-fixture") && cfg!(feature = "desktop-shell") {
+        panic!("The fixed Installer fixture cannot be combined with the application shell");
+    }
     // The two synthetic TLS manifests are explicit inputs to the SAME libtest
     // artifact. Neither is discovered or promoted to authority by this build.
     anchor("MRK_GITHUB_TLS_INPUTS_SHA256");

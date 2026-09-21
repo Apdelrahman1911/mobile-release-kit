@@ -8,10 +8,10 @@ use serde_json::{json, Value};
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, ChildStderr, ChildStdin, ChildStdout},
     sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot, watch}, task::JoinHandle};
 #[cfg(any(all(unix, feature = "development-runtime", debug_assertions),
-    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")), feature = "desktop-shell",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
 use {std::process::Stdio, tokio::process::Command};
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::{CloseOutcome, ConfigurationRuntimeSlots};
 use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, ConfigEditStatus, CoreReason,
     EditAvailability, EditDomain, EditProjection, Effect, Journal, NativeEditReason as Reason, NativeFinality, Phase,
@@ -245,17 +245,17 @@ struct Resources {
     acquisition: Option<JoinHandle<()>>, acquisition_joined: bool, child: Option<Child>,
     inspection_started: bool, acquisition_started: bool,
     inspection_join_failed: bool, acquisition_join_failed: bool,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     configuration: Option<Arc<Mutex<ConfigurationRuntimeSlots>>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     configuration_settlement: Option<JoinHandle<CloseOutcome>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     configuration_settlement_started: bool,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     configuration_settlement_joined: bool,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     configuration_settlement_failed: bool,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     configuration_settlement_outcome: Option<CloseOutcome>,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     write_end: Option<WriteEnd>, out_end: Option<ReadEnd>, err_end: Option<ReadEnd>,
@@ -452,7 +452,7 @@ impl Inner {
         if a.cleanup_start.is_some() { return None; }
         phase_deadline(a.review_end, a.phase_end, a.projection.apply_submitted)
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     fn configuration_claim_clear(&self, r: &Registry, owner: &Arc<Session>, now: Instant) -> bool {
         let Some(a) = r.active.as_ref() else { return false; };
         ConfigurationClaim {
@@ -689,7 +689,7 @@ impl EditOwner {
             startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(frame_rx),
                 // Pure allocation BEFORE this Session is admitted or any
                 // original worker is registered/released. No passive custody.
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 configuration: configuration_installed_selected(domain, self.inner.runtime.configuration_edit_profile_available())
                     .then(|| Arc::new(Mutex::new(ConfigurationRuntimeSlots::new()))),
                 ..Resources::default() }),
@@ -1334,7 +1334,7 @@ async fn watchdog(inner: Arc<Inner>, owner: Arc<Session>) {
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn configuration_worker_lost(book: &Resources) {
     // ONLY after this original worker returned JoinError. A watchdog endpoint
     // never borrows/closes the ledger out from under inspection/acquisition.
@@ -1346,7 +1346,7 @@ fn configuration_worker_lost(book: &Resources) {
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn transfer_configuration(book: &Resources, inner: &Inner, owner: &Arc<Session>) -> Result<(), BridgeError> {
     let (inspection, acquisition) = startup_workers(book);
     if !inspection.started || !inspection.positive() || acquisition.started || !acquisition.positive() {
@@ -1363,7 +1363,7 @@ fn transfer_configuration(book: &Resources, inner: &Inner, owner: &Arc<Session>)
     slots.transfer_once().map_err(|_| edit_unknown())
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn acquire_configuration_installed(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mutex<ConfigurationRuntimeSlots>>, end: Instant) {
     if !configuration_installed_selected(owner.domain, inner.runtime.configuration_edit_profile_available()) {
         inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
@@ -1396,6 +1396,10 @@ fn acquire_configuration_installed(inner: &Inner, owner: &Arc<Session>, native: 
         command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
             .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        if crate::runtime::macos_installed_environment(&mut command).is_err() {
+            inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now()); return;
+        }
         let mut startup = match owner.startup.lock() {
             Ok(startup) => startup,
             Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
@@ -1553,7 +1557,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     }
     let endpoint = match endpoint { Some(end) => end, None => return };
     let runtime = inner.runtime.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let configuration = {
         let selected = configuration_installed_selected(owner.domain, runtime.configuration_edit_profile_available());
         if selected != book.configuration.is_some() {
@@ -1568,14 +1572,14 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     book.inspection_started = true;
     book.inspection = Some(tokio::task::spawn_blocking(move || {
         if enter.blocking_recv().is_err() { return Err(edit_unknown()); }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         let result = if let Some(native) = configuration {
             match native.lock() {
                 Ok(mut originals) => runtime.resolve_configuration_installed(&mut originals, endpoint, &stop),
                 Err(_) => Err(edit_unknown()),
             }
         } else { runtime.resolve_edit(endpoint) };
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         let result = { let _ = stop; runtime.resolve_edit(endpoint) };
         #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
         schedule.inspected(result.is_ok());
@@ -1592,7 +1596,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
         }
         Err(_) => {
             book.inspection_join_failed = true;
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             configuration_worker_lost(&book);
             owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
         }
@@ -1610,9 +1614,9 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     // The caller supplies the original registry Arc; there is only this one
     // acquisition site. Survivors never call start_original or resolve/spawn.
     let startup_inner = inner.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let configuration = book.configuration.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if configuration.is_some() && transfer_configuration(&book, inner, owner).is_err() {
         inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
         return;
@@ -1621,7 +1625,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     book.acquisition_started = true;
     book.acquisition = Some(tokio::task::spawn_blocking(move || {
         if enter.blocking_recv().is_err() { return; }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if let Some(native) = configuration {
             // The worker's inspection return is DATA only. The original slots,
             // not these paths, supply the separately prepared one-use claim.
@@ -1641,9 +1645,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Session>) {
 
 fn configuration_settled(book: &Resources, inner: &Inner, owner: &Session) -> bool {
     let selected = configuration_installed_selected(owner.domain, inner.runtime.configuration_edit_profile_available());
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { let _ = book; !selected }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         if !selected {
             return book.configuration.is_none() && !book.configuration_settlement_started
@@ -1658,9 +1662,9 @@ fn configuration_settled(book: &Resources, inner: &Inner, owner: &Session) -> bo
 }
 
 async fn settle_configuration_originals(book: &mut Resources, inner: &Inner, owner: &Arc<Session>) {
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { let _ = (book, inner, owner); }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
         let selected = configuration_installed_selected(owner.domain, inner.runtime.configuration_edit_profile_available());
         let Some(native) = book.configuration.clone() else {
@@ -1744,7 +1748,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
             Ok(_) => { book.inspection_joined = true; book.inspection.take(); },
             Err(_) => {
                 book.inspection_join_failed = true;
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 configuration_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id);
             },
@@ -1756,7 +1760,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
             Ok(()) => { book.acquisition_joined = true; book.acquisition.take(); },
             Err(_) => {
                 book.acquisition_join_failed = true;
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 configuration_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst);
                 inner.unknown(&owner.id);

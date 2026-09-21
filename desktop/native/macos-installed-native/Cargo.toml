@@ -1,0 +1,10 @@
+[package]
+name = "mrk-macos-installed-native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+[build-dependencies]
+cc = "=1.4.6"

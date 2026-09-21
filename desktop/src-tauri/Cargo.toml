@@ -22,6 +22,11 @@ name = "mrk-runtime-publish"
 path = "src/bin/runtime_publish.rs"
 required-features = ["ubuntu-runtime-publisher"]
 
+[[bin]]
+name = "mrk-macos-install"
+path = "src/bin/macos_install.rs"
+required-features = ["macos-installed-installer"]
+
 [[test]]
 name = "session-gtk-qualification"
 path = "tests/session_gtk_qualification.rs"
@@ -41,6 +46,9 @@ custom-protocol = ["tauri/custom-protocol"]
 development-runtime = []
 # Selects the standalone privileged publisher, not any execution qualification.
 ubuntu-runtime-publisher = []
+macos-installed-installer = []
+# Separate fixed seven-case package only; absent from ordinary Installer/app.
+macos-installed-installer-fixture = ["macos-installed-installer"]
 
 [dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }
@@ -53,6 +61,11 @@ rfd = { version = "=0.15.4", optional = true, default-features = false, features
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "=0.30.1", default-features = false, features = ["fs"] }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+# Read Darwin's actual per-descriptor mount flags; no mount operation is used.
+nix = { version = "=0.30.1", default-features = false, features = ["fs", "mount", "user"] }
+mrk-macos-installed-native = { path = "../native/macos-installed-native" }
 
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dev-dependencies]
 nix = { version = "=0.30.1", default-features = false, features = ["time"] }

@@ -9,18 +9,18 @@
 //! retained; late positive settlement cannot restore successful admission.
 use std::{collections::BTreeMap, future::pending, process::ExitStatus, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, AtomicU64, Ordering}}, time::{Duration, Instant}};
 #[cfg(any(all(feature = "development-runtime", debug_assertions),
-    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
 use std::process::Stdio;
 use serde_json::Value;
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::Child, sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore}, task::JoinHandle};
 #[cfg(any(all(feature = "development-runtime", debug_assertions),
-    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
 use tokio::process::Command;
 use crate::{error::BridgeError, github_connection_protocol::{self as github_protocol, GitHubReadOutcome},
     protocol::{self, Method}, runtime::{RuntimeConfig, VerifiedRuntime}};
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 use crate::installed_runtime::{CloseOutcome, PassiveInstalledRuntime, PassiveRuntimeSlots};
 
 pub const OPERATION_TIME: Duration = Duration::from_secs(10);
@@ -223,13 +223,13 @@ struct Resources {
     native_snapshots: Vec<installed_native_fixture::ChildObservation>,
     acquisition: Option<JoinHandle<std::io::Result<Child>>>, child: Option<Child>,
     acquisition_return: Option<ManagementJoin>, acquisition_error: Option<tokio::task::JoinError>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     passive: Option<Arc<Mutex<PassiveRuntimeSlots>>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     native_settlement: Option<JoinHandle<CloseOutcome>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     native_return: Option<Result<CloseOutcome, tokio::task::JoinError>>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     native_started: bool,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     failed_writer: Option<JoinHandle<WriteEnd>>, failed_stdout: Option<JoinHandle<ReadEnd>>, failed_stderr: Option<JoinHandle<ReadEnd>>,
@@ -430,7 +430,7 @@ impl Supervisor {
         let owner = Arc::new(Owner {
             key, id, profile, github_receipt, state: Mutex::new(OwnerState::new(endpoint, reply)),
             resources: AsyncMutex::new(Resources {
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 passive: if passive_selected(profile) {
                     Some(Arc::new(Mutex::new(PassiveRuntimeSlots::new())))
                 } else { None },
@@ -709,7 +709,7 @@ impl OriginalBorrow {
     fn positive(self) -> bool { matches!(self.returned, None | Some(ManagementJoin::Returned)) && self.returned() }
 }
 fn passive_selected(profile: Profile) -> bool {
-    cfg!(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", not(all(feature = "development-runtime", debug_assertions))))
+    cfg!(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")), not(all(feature = "development-runtime", debug_assertions))))
         && matches!(profile, Profile::Passive(_))
 }
 fn passive_claim_clear(original: bool, profile: Profile, state: &OwnerState, now: Instant,
@@ -726,13 +726,13 @@ fn passive_never_started_clear(inspection: OriginalBorrow, acquisition: Original
     empty_unstarted_book && inspection.positive() && acquisition.returned.is_none() && acquisition.positive()
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn passive_borrows(resources: &Resources) -> (OriginalBorrow, OriginalBorrow) {
     (OriginalBorrow { returned: resources.inspection_return, handle: resources.inspection.is_some(), error: resources.inspection_error.is_some() },
      OriginalBorrow { returned: resources.acquisition_return, handle: resources.acquisition.is_some(), error: resources.acquisition_error.is_some() })
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn passive_worker_lost(resources: &Resources) {
     // Only called AFTER this original inspection/acquisition/settlement worker
     // returned JoinError. Never race a pending borrower because a clock expired.
@@ -741,7 +741,7 @@ fn passive_worker_lost(resources: &Resources) {
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn transfer_passive(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) -> Result<(), BridgeError> {
     let Some(native) = &resources.passive else {
         return if passive_selected(owner.profile) { Err(BridgeError::cleanup_unknown()) } else { Ok(()) };
@@ -759,14 +759,14 @@ fn transfer_passive(resources: &Resources, inner: &Inner, owner: &Arc<Owner>) ->
     slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 struct PreparedPassiveSpawn<'a> {
     runtime: &'a mut PassiveInstalledRuntime,
     #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
     command: Command,
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 impl<'a> PreparedPassiveSpawn<'a> {
     fn prepare(runtime: &'a mut PassiveInstalledRuntime, end: Instant, stop: &watch::Receiver<bool>) -> std::io::Result<Self> {
         let selected = runtime.prepare_once(end, stop)
@@ -779,6 +779,8 @@ impl<'a> PreparedPassiveSpawn<'a> {
             command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
                 .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            crate::runtime::macos_installed_environment(&mut command)?;
             command
         };
         #[cfg(not(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell"))))]
@@ -790,7 +792,7 @@ impl<'a> PreparedPassiveSpawn<'a> {
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
     not(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))))]
 fn spawn_passive_original(prepared: PreparedPassiveSpawn<'_>) -> std::io::Result<Child> {
     // Unsupported profiles remain unconditional. Only this no-effect stub has
@@ -799,7 +801,7 @@ fn spawn_passive_original(prepared: PreparedPassiveSpawn<'_>) -> std::io::Result
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "packaged runtime execution is not qualified"))
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+#[cfg(all(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")),
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
 fn spawn_passive_original(mut prepared: PreparedPassiveSpawn<'_>) -> std::io::Result<Child> {
     // Opaque creation errors provide NO no-child/pipe-close proof. The claimed
@@ -807,14 +809,14 @@ fn spawn_passive_original(mut prepared: PreparedPassiveSpawn<'_>) -> std::io::Re
     prepared.command.spawn()
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
 fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mutex<PassiveRuntimeSlots>>) -> std::io::Result<Child> {
     let refused = || std::io::Error::new(std::io::ErrorKind::Unsupported, "passive installed custody is unavailable");
     let mut slots = native.lock().map_err(|_| refused())?;
     let runtime = slots.capability().map_err(|_| refused())?;
     let stop = owner.stop.subscribe();
     let prepared = PreparedPassiveSpawn::prepare(runtime, owner.endpoint(), &stop)?;
-    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
     let mut limit = installed_native_fixture::before_claim(inner, owner, &stop)?;
     // All post-lowering ordinary returns, including a failed final claim, leave
     // this body through the one checked restoration below. Its guard also
@@ -828,21 +830,21 @@ fn acquire_passive_original(inner: &Inner, owner: &Arc<Owner>, native: &Arc<Mute
         prepared.runtime.claim_once().map_err(|_| refused())?;
         drop(state); drop(owners);
         let result = spawn_passive_original(prepared); // No await/callback/IO between final claim and creation.
-        #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+        #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
         { *lock(&inner.native_test.creation) = Some((result.is_ok(), result.as_ref().err().and_then(std::io::Error::raw_os_error))); }
         result
     })();
-    #[cfg(all(test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
+    #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "desktop-shell"), not(feature = "ubuntu-runtime-publisher")))]
     if let Some(limit) = &mut limit { limit.restore(); }
     result // Never discard a returned original Child because restoration failed.
 }
 
 async fn settle_passive(resources: &mut Resources, inner: &Inner, owner: &Arc<Owner>) -> bool {
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
     { let _ = (resources, inner, owner); true }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     {
-        #[cfg(all(test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        #[cfg(all(target_os = "linux", test, not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
         if resources.native_observation.is_some() { owner.unknown(inner); return false; }
         let Some(native) = resources.passive.clone() else {
             if passive_selected(owner.profile) { owner.unknown(inner); return false; }
@@ -910,9 +912,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let config = inner.runtime.clone();
     let endpoint = owner.endpoint();
     let profile = owner.profile;
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let inspection_native = resources.passive.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let inspection_stop = owner.stop.subscribe();
     #[cfg(all(test, feature = "development-runtime"))]
     let inspection_gate = inner.test.inspection.clone();
@@ -930,7 +932,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         inspection_gate.wait();
         let runtime = match profile {
             Profile::Passive(_method) => {
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
                 if passive_selected(profile) {
                     let native = inspection_native.ok_or_else(BridgeError::cleanup_unknown)?;
                     let mut originals = native.lock().map_err(|_| BridgeError::cleanup_unknown())?;
@@ -980,7 +982,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         }
         Err(error) => {
             resources.inspection_error = Some(error);
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             passive_worker_lost(&resources);
             owner.unknown(&inner);
             let _ = settle_passive(&mut resources, &inner, &owner).await;
@@ -991,7 +993,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         owner.fail(BridgeError::timeout());
         return ready_after_custody(&mut resources, &inner, &owner, Err(BridgeError::timeout())).await;
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     if let Err(error) = transfer_passive(&resources, &inner, &owner) {
         if error.code == "cleanup_unknown" { owner.unknown(&inner); }
         owner.fail(error.clone());
@@ -1000,9 +1002,9 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     // Blocking startup cannot starve the independent deadline watchdog. Its
     // original result/Child remains in this retained acquisition handle.
     let acquiring_owner = owner.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let acquiring_inner = inner.clone();
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
     let acquisition_native = resources.passive.clone();
     #[cfg(all(test, feature = "development-runtime"))]
     let acquisition_gate = inner.test.acquisition.clone();
@@ -1016,7 +1018,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         // before spawn_original's two final creation checks. No new deadline.
         #[cfg(all(test, feature = "development-runtime"))]
         acquisition_gate.wait();
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
         if passive_selected(acquiring_owner.profile) {
             let Some(native) = acquisition_native else {
                 acquiring_owner.unknown(&acquiring_inner);
@@ -1041,7 +1043,7 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
         }
         Err(error) => {
             resources.acquisition_error = Some(error);
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))]
             passive_worker_lost(&resources);
             owner.unknown(&inner);
             let _ = settle_passive(&mut resources, &inner, &owner).await;

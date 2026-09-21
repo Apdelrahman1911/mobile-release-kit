@@ -50,6 +50,42 @@ pub struct RuntimeConfig { bundle_root: PathBuf,
 #[derive(Debug)]
 pub struct VerifiedRuntime { pub python: PathBuf, pub bootstrap: PathBuf, pub core: PathBuf, pub cwd: PathBuf }
 
+// Explicit compile inputs bind the successor staged payload. Neither a nearby
+// manifest nor environment data at app launch can select or qualify a release.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn macos_bindings() -> bool {
+    COMPILED_TARGET == "aarch64-apple-darwin" && MANIFEST_ANCHOR.is_some_and(sha)
+        && PROTOCOL_ANCHOR == Some(crate::installed_runtime::PROTOCOL_SHA)
+        && cfg!(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) struct PassiveInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) struct ConfigurationInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl PassiveInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("engine_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl ConfigurationInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn macos_installed_environment(command: &mut tokio::process::Command) -> std::io::Result<()> {
+    let uid = mrk_macos_installed_native::real_user()?;
+    command.env("__CF_USER_TEXT_ENCODING", format!("0x{uid:X}:0:0"));
+    Ok(())
+}
+
 // Selection DATA only, never executable custody. Only the fixed Linux shell
 // and its feature-off native tests can select the independently admitted A.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -126,10 +162,24 @@ struct Manifest {
 struct PayloadFile { path: String, sha256: String, size: u64 }
 
 fn unavailable() -> BridgeError { BridgeError::unavailable("The packaged runtime is absent, incompatible, or fails its trusted inventory.") }
-fn installed_passive_method(name: &str) -> bool {
+// Scope DATA, not a release/custody permit. Keep the Mac draft-only surface
+// separate: selecting a real project must not inherit Linux C/P2 services.
+fn macos_installed_passive_method(name: &str) -> bool {
     matches!(name, "capabilities" | "catalog" | "project.snapshot" | "config.validate" | "config.suggest" | "config.preview"
-        | "environment.requirements" | "github.setup.propose" | "release.version.observe"
-        | "metadata.text.observe" | "metadata.text.validate" | "artifacts.candidate.observe")
+        | "environment.requirements" | "github.setup.propose")
+}
+fn linux_installed_passive_method(name: &str) -> bool {
+    macos_installed_passive_method(name) || matches!(name,
+        "release.version.observe" | "metadata.text.observe" | "metadata.text.validate" | "artifacts.candidate.observe")
+}
+fn installed_passive_method(name: &str) -> bool {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    { linux_installed_passive_method(name) }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    { macos_installed_passive_method(name) }
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "macos", target_arch = "aarch64"))))]
+    { let _ = name; false }
 }
 fn deadline(end: Instant) -> Result<(), BridgeError> { if Instant::now() >= end { Err(BridgeError::timeout()) } else { Ok(()) } }
 fn digest(bytes: &[u8]) -> String { hex(&Sha256::digest(bytes)) }
@@ -324,7 +374,9 @@ impl RuntimeConfig {
         { let _ = name; true }
         #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         { installed_passive_method(name) && self.passive_installed_profile().is_ok() }
-        #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))))]
+        #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), target_os = "macos", target_arch = "aarch64"))]
+        { installed_passive_method(name) && self.passive_installed_profile().is_ok() }
+        #[cfg(all(not(all(feature = "development-runtime", debug_assertions)), not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64")))))]
         { let _ = name; false }
     }
     /// Fixed selection DATA for the project-only picker, not an asset session
@@ -334,8 +386,26 @@ impl RuntimeConfig {
         #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
             target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         { self.passive_installed_profile().is_ok() }
-        #[cfg(not(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
-            target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        { self.passive_installed_profile().is_ok() }
+        #[cfg(not(any(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
+            target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
+        { false }
+    }
+    /// Separate P2 selection DATA. A project-only Mac profile is never a
+    /// descendant-path picker permit; keep the existing Linux selection exact.
+    pub(crate) fn project_path_selection_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.project_selection_profile_available() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    /// Separate C picker DATA. The native method intersection is checked again
+    /// by DocumentBinding; neither a Mac project nor an asset fixture grants C.
+    pub(crate) fn evidence_selection_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.project_selection_profile_available() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
         { false }
     }
     pub fn resolve(&self, end: Instant) -> Result<VerifiedRuntime, BridgeError> {
@@ -370,13 +440,35 @@ impl RuntimeConfig {
             }
         }
     }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn passive_installed_profile(&self) -> Result<PassiveInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(PassiveInstalledProfile { _private: () }) } else { Err(unavailable()) }
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub(crate) fn resolve_passive_installed(&self, method: crate::protocol::Method, originals: &mut crate::installed_runtime::PassiveRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        let profile = self.passive_installed_profile()?;
+        if !installed_passive_method(method.name()) { return Err(BridgeError::unavailable("This Mac installed profile supports only the eight passive project/draft/guidance methods.")); }
+        originals.inspect_once(profile, end, stop)
+    }
     /// Availability and original-owner admission use this SAME sealed selector.
     /// No caller path, environment flag, domain argument or passive test permit.
     pub(crate) fn configuration_edit_profile_available(&self) -> bool {
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         { self.configuration_installed_profile().is_ok() }
-        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        { self.configuration_installed_profile().is_ok() }
+        #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
         { false }
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn configuration_installed_profile(&self) -> Result<ConfigurationInstalledProfile, BridgeError> {
+        if macos_bindings() { Ok(ConfigurationInstalledProfile { _private: () }) } else { Err(unavailable()) }
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    pub(crate) fn resolve_configuration_installed(&self, originals: &mut crate::installed_runtime::ConfigurationRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        originals.inspect_once(self.configuration_installed_profile()?, end, stop)
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn configuration_installed_profile(&self) -> Result<ConfigurationInstalledProfile, BridgeError> {
@@ -734,14 +826,34 @@ mod tests {
     fn installed_allowlist_is_exactly_the_read_only_project_draft_guidance_and_saved_services() {
         for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
             "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe", "metadata.text.validate", "artifacts.candidate.observe"] {
-            assert!(installed_passive_method(name));
+            assert!(linux_installed_passive_method(name));
         }
         for name in ["", "unknown", "config.save", "config.apply", "config.initialize", "metadata.text.prepare",
             "metadata.text.apply", "credentials.assess", "artifacts.candidate.observe ", "Artifacts.Candidate.Observe",
             "project.snapshot ", "Config.Validate", "environment.requirements ", "GitHub.Setup.Propose",
             "Release.Version.Observe", "metadata.text.observe ", "Metadata.Text.Validate"] {
-            assert!(!installed_passive_method(name));
+            assert!(!linux_installed_passive_method(name));
         }
+    }
+    #[test]
+    fn macos_installed_allowlist_is_only_the_eight_passive_draft_methods() {
+        for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
+            "environment.requirements", "github.setup.propose"] {
+            assert!(macos_installed_passive_method(name));
+        }
+        for name in ["", "unknown", "config.save", "config.apply", "config.initialize", "credentials.assess",
+            "release.version.observe", "metadata.text.observe", "metadata.text.validate", "metadata.text.prepare",
+            "metadata.text.apply", "artifacts.candidate.observe", "environment.diagnostics", "github.connection.refresh",
+            "project.snapshot ", "Config.Validate", "environment.requirements ", "GitHub.Setup.Propose"] {
+            assert!(!macos_installed_passive_method(name));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_project_scope_does_not_grant_path_or_evidence_pickers() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mac-profile-data-only"));
+        assert!(!runtime.project_path_selection_profile_available());
+        assert!(!runtime.evidence_selection_profile_available());
     }
     #[test]
     fn payload_names_are_portable_and_unambiguous() {
@@ -780,8 +892,10 @@ mod tests {
         assert_eq!(error.code, "runtime_unavailable");
         assert_eq!(error.message, "The passive installed-runtime release and custody profile are not qualified.");
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
-        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")),
+        all(target_os = "macos", target_arch = "aarch64", feature = "desktop-shell", feature = "custom-protocol",
+            not(feature = "development-runtime"), not(feature = "macos-installed-installer"), not(feature = "ubuntu-runtime-publisher")))))]
     #[test]
     fn installed_configuration_selector_is_closed_outside_the_normal_linux_shell() {
         let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-config-path-must-not-be-opened"));

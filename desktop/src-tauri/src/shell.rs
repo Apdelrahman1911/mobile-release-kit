@@ -54,12 +54,12 @@ struct ShellState {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     observation: Option<Arc<installed_observation::Observation>>,
     bridge: Arc<DesktopBridge>, document: DocumentBinding,
-    #[cfg(not(target_os = "linux"))] picker: Arc<AtomicBool>,
-    #[cfg(not(target_os = "linux"))] closing: AtomicBool,
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))] picker: Arc<AtomicBool>,
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))] closing: AtomicBool,
     exit_ready: AtomicBool,
     relay_stop: watch::Sender<bool>,
     relay: AsyncMutex<RelayBook>,
-    #[cfg(target_os = "linux")] exit_observer: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))] exit_observer: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 struct RelayBook { handle: Option<tauri::async_runtime::JoinHandle<()>>, settled: bool }
 
@@ -317,9 +317,9 @@ mod offline_preflight_shell_tests;
 #[path = "android_build_shell_tests.rs"]
 mod android_build_shell_tests;
 fn not_closing(state: &ShellState) -> Result<(), BridgeError> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     { return state.document.not_quitting(); }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
     if state.closing.load(Ordering::SeqCst) {
         return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action."));
@@ -622,11 +622,11 @@ async fn vault_lock(webview: Webview, request: tauri::ipc::Request<'_>, state: S
     asset_window(&webview)?; asset_commands::lock(asset_body(&request)?)?; state.document.lock_session()
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 struct PickerGuard { flag: Arc<AtomicBool>, document: Option<DocumentBinding> }
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl Drop for PickerGuard { fn drop(&mut self) { if let Some(document) = &self.document { document.compatibility_picker_end(); } self.flag.store(false, Ordering::SeqCst); } }
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[tauri::command]
 async fn choose_project(state: State<'_, ShellState>) -> Result<Option<Project>, BridgeError> {
     not_closing(&state)?;
@@ -649,7 +649,7 @@ async fn choose_project(state: State<'_, ShellState>) -> Result<Option<Project>,
     }).await.map_err(|_| BridgeError::new("picker_failed", "The native project picker did not settle normally."))?
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tauri::command]
 async fn choose_project(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Option<Project>, AssetError> {
     fixture_command!(state, Project, observed, AssetError::new(Reason::Unqualified));
@@ -815,7 +815,7 @@ async fn settle_relay(app: &tauri::AppHandle) -> bool {
     book.handle.take(); book.settled = true; true
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
     let (start, enter) = oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
@@ -839,10 +839,10 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tau
     (handle, start)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn request_shutdown(app: &tauri::AppHandle) { app.state::<ShellState>().document.request_quit(app.clone()); }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn request_shutdown(app: &tauri::AppHandle) {
     let state = app.state::<ShellState>();
     // The native picker has no safe cancellation primitive. Keep its original
@@ -898,10 +898,16 @@ fn requires_recent_files_suppression(choice: DialogChoice) -> bool {
     matches!(choice, DialogChoice::File(_) | DialogChoice::Project | DialogChoice::EvidenceFolder | DialogChoice::ProjectPath(_))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", all(target_os = "macos", target_arch = "aarch64"))))]
 pub(crate) async fn run_owned_dialog(_: &tauri::AppHandle, owner: &Arc<OriginalWork>, _: DialogChoice, _: Option<std::path::PathBuf>) -> Result<Option<std::path::PathBuf>, Reason> {
     owner.gui.not_created(Reason::UnsupportedPlatform); Err(Reason::UnsupportedPlatform)
 }
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[path = "shell_macos_dialog.rs"]
+mod owned_macos;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use owned_macos::run_owned_dialog;
 
 #[cfg(target_os = "linux")]
 pub(crate) use owned_gtk::run_owned_dialog;
@@ -1613,7 +1619,13 @@ mod owned_gtk {
 #[derive(Debug)]
 pub struct InitializationFailed;
 
-pub fn run() -> Result<(), InitializationFailed> { run_builder(builder()).map(|_| ()) }
+pub fn run() -> Result<(), InitializationFailed> {
+    // Installer is the only privileged entry. Do not even construct a native
+    // window/document/project picker in a root or incompatible Mac process.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if mrk_macos_installed_native::real_user().is_err() { return Err(InitializationFailed); }
+    run_builder(builder()).map(|_| ())
+}
 
 fn builder() -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default();
@@ -1664,10 +1676,10 @@ fn builder() -> tauri::Builder<tauri::Wry> {
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 observation: observation.clone(),
                 bridge: bridge.clone(), document: document.clone(),
-                #[cfg(not(target_os = "linux"))] picker: Arc::new(AtomicBool::new(false)),
-                #[cfg(not(target_os = "linux"))] closing: AtomicBool::new(false),
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))] picker: Arc::new(AtomicBool::new(false)),
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))] closing: AtomicBool::new(false),
                 exit_ready: AtomicBool::new(false), relay_stop, relay: AsyncMutex::new(RelayBook { handle: None, settled: false }),
-                #[cfg(target_os = "linux")] exit_observer: Mutex::new(None),
+                #[cfg(any(target_os = "linux", target_os = "macos"))] exit_observer: Mutex::new(None),
             });
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             let navigation_fixture = fixture.clone();
@@ -1758,7 +1770,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             let (handle, start) = start_relay(app.handle().clone(), bridge.edits.clone(), document.clone(), stop_receiver);
             book.handle = Some(handle); drop(book);
             let _ = start.send(());
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
                 let mut book = state.exit_observer.lock().map_err(|_| "The original exit observer could not be retained.")?;
                 let (handle, start) = start_exit_observer(app.handle().clone(), document);

@@ -1,4 +1,5 @@
-//! Original, read-only Linux credential custody. No pathname is renderer authority.
+//! Original read-only source custody. Linux credentials and the Mac project-only
+//! probe are separate; no pathname is renderer authority.
 //! The operation retains SourceBook outside its worker. A panic/uncertain close
 //! therefore cannot erase its original acquisition facts or authorize a retry.
 use std::{path::{Path, PathBuf}, sync::Arc};
@@ -607,7 +608,13 @@ pub(crate) use linux::{SourceBook, capture, probe_project, probe_project_path, s
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 pub(crate) use linux::assert_project_path_source_contracts;
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[path = "asset_source_macos.rs"]
+mod macos;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use macos::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
+
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
 mod unsupported {
     use super::*;
     pub(crate) struct SourceBook;
@@ -618,7 +625,7 @@ mod unsupported {
     pub(crate) fn probe_project(_: &mut SourceBook, _: PathBuf, _: &[Arc<OriginWitness>], _: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> { Err(Reason::UnsupportedPlatform) }
     pub(crate) fn probe_project_path(_: &mut SourceBook, _: &RegisteredRoot, _: PathBuf, _: ProjectPathField, _: &mut dyn FnMut() -> bool) -> Result<ProjectPathProbe, Reason> { Err(Reason::UnsupportedPlatform) }
 }
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64"))))]
 pub(crate) use unsupported::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
 
 #[cfg(test)]

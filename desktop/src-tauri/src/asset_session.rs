@@ -26,10 +26,10 @@ const RECORD_METADATA_BYTES: usize = 1024 * 1024;
 // Never inferred from crate presence, a renderer boolean, or R1 DTO passes.
 const NATIVE_QUALIFIED: bool = false;
 
-fn installed_evidence_profile(project_selection: bool, candidate_method: bool) -> bool {
+fn installed_evidence_profile(evidence_selection: bool, candidate_method: bool) -> bool {
     // An advertised development method or broad asset fixture is not authority
     // for this separate installed, documents-only picker.
-    project_selection && candidate_method
+    evidence_selection && candidate_method
 }
 
 fn evidence_selection_gate(state: &DocumentState) -> Result<(), BridgeError> {
@@ -646,18 +646,19 @@ impl DocumentBinding {
     }
     pub(crate) fn project_selection_available(&self) -> bool {
         // Profile/display DATA, never live lifecycle permission. Preserve the
-        // preexisting non-Linux compatibility picker without implying native
-        // owner qualification or availability of any passive core method.
-        self.project_selection_qualified() || cfg!(all(feature = "desktop-shell", not(target_os = "linux")))
+        // preexisting Windows compatibility picker. Mac now uses the retained
+        // original project route and stays closed until its own profile/panel
+        // is qualified; a pathname-only compatibility result is not admission.
+        self.project_selection_qualified() || cfg!(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))
     }
     pub(crate) fn project_path_selection_available(&self) -> bool {
         // Exact installed-profile DATA only. Neither the compatibility picker
         // nor SG1 nor the still-false asset capability qualifies this purpose.
-        self.inner.bridge.installed_project_selection_available()
+        self.inner.bridge.installed_project_path_selection_available()
     }
     fn evidence_qualified(&self) -> bool {
         // Existing fixture permits do NOT authorize the new picker/query route.
-        installed_evidence_profile(self.inner.bridge.installed_project_selection_available(),
+        installed_evidence_profile(self.inner.bridge.installed_evidence_selection_available(),
             self.inner.bridge.supervisor.passive_method_available("artifacts.candidate.observe"))
     }
     fn lock(&self) -> MutexGuard<'_, DocumentState> {
@@ -989,7 +990,7 @@ impl DocumentBinding {
         self.inner.bridge.diagnostics.ensure_idle()?;
         action(&self.inner.bridge)
     }
-    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
     pub(crate) fn compatibility_picker_begin(&self) -> Result<(), BridgeError> {
         let mut state = self.lock();
         self.inner.bridge.diagnostics.context_changed();
@@ -1002,7 +1003,7 @@ impl DocumentBinding {
         if state.compatibility_picker_pending { return Err(BridgeError::new("busy", "A native project picker is already open.")); }
         state.compatibility_picker_pending = true; self.bump(&mut state); Ok(())
     }
-    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
     pub(crate) fn compatibility_picker_end(&self) {
         // This preserves the existing compatibility picker reservation; it is
         // NOT evidence for a qualified macOS/Windows document/GUI owner.
@@ -1010,7 +1011,7 @@ impl DocumentBinding {
         // begin already retired any old consent under this same mutex.
         let mut state = self.lock(); state.compatibility_picker_pending = false; self.bump(&mut state);
     }
-    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
     pub(crate) fn compatibility_picker_publish(&self, path: std::path::PathBuf) -> Result<Project, BridgeError> {
         let state = self.lock();
         if !state.compatibility_picker_pending { return Err(BridgeError::invalid()); }

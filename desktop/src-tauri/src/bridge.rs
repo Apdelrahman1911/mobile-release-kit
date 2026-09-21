@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::{Mutex, atomic::{AtomicU32, Ordering}}};
 #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
 use std::sync::atomic::AtomicU64;
-#[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+#[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
 use std::path::Component;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -58,6 +58,8 @@ pub struct DesktopBridge {
     pub(crate) preflight: crate::offline_preflight_owner::OfflinePreflightOwner,
     pub(crate) android_build: crate::android_build_owner::AndroidBuildOwner,
     installed_project_selection_available: bool,
+    installed_project_path_selection_available: bool,
+    installed_evidence_selection_available: bool,
     projects: Mutex<BTreeMap<String, RegisteredProject>>,
     project_generation: AtomicU32,
     #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
@@ -67,6 +69,8 @@ impl DesktopBridge {
     pub fn new(resource_dir: PathBuf) -> Self {
         let runtime = RuntimeConfig::packaged(resource_dir);
         let installed_project_selection_available = runtime.project_selection_profile_available();
+        let installed_project_path_selection_available = runtime.project_path_selection_profile_available();
+        let installed_evidence_selection_available = runtime.evidence_selection_profile_available();
         Self {
             supervisor: Supervisor::new(runtime.clone()), edits: EditOwner::new(runtime.clone()),
             diagnostics: crate::environment_diagnostics_owner::EnvironmentDiagnosticsOwner::new(runtime.clone()),
@@ -75,12 +79,16 @@ impl DesktopBridge {
             // custody or qualification. The renderer cannot select this profile.
             android_build: crate::android_build_owner::AndroidBuildOwner::new(runtime, crate::android_toolchain::AndroidToolchainProfile::compiled()),
             installed_project_selection_available,
+            installed_project_path_selection_available,
+            installed_evidence_selection_available,
             projects: Mutex::new(BTreeMap::new()), project_generation: AtomicU32::new(1),
             #[cfg(any(feature = "desktop-shell", all(test, debug_assertions, feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
             sequence: AtomicU64::new(1),
         }
     }
     pub(crate) fn installed_project_selection_available(&self) -> bool { self.installed_project_selection_available }
+    pub(crate) fn installed_project_path_selection_available(&self) -> bool { self.installed_project_path_selection_available }
+    pub(crate) fn installed_evidence_selection_available(&self) -> bool { self.installed_evidence_selection_available }
     pub(crate) async fn app_info(&self, document: &crate::asset_session::DocumentBinding) -> AppInfo {
         let result = match document.passive_query(self, Method::Capabilities, json!({})) {
             Ok(query) => query.wait().await, Err(error) => Err(error),
@@ -319,7 +327,7 @@ impl DesktopBridge {
         self.project_generation.store(next_generation, Ordering::SeqCst);
         Ok(project)
     }
-    #[cfg(all(feature = "desktop-shell", not(target_os = "linux")))]
+    #[cfg(all(feature = "desktop-shell", not(any(target_os = "linux", target_os = "macos"))))]
     pub(crate) fn register_picked_project(&self, path: PathBuf) -> Result<Project, BridgeError> {
         self.preflight.ensure_idle()?;
         self.android_build.ensure_idle()?;
