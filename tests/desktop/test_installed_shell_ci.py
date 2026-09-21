@@ -545,8 +545,17 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         observed = closed_project_draft_data(lifecycle)
         result = S.shell_project_draft_observation(observed, lifecycle)
         self.assertEqual(result, observed["projectDraft"])
+        self.assertEqual(result["native"]["methods"], "eight-passive")
         self.assertFalse(result["native"]["mutationActions"])
         self.assertFalse(result["native"]["draft"]["saveAvailable"])
+        guidance = result["native"]["guidance"]
+        self.assertTrue(guidance["draftFormatValid"])
+        self.assertTrue(guidance["draftUnchanged"])
+        self.assertEqual(guidance["requirements"]["roles"], 3)
+        self.assertEqual(guidance["github"]["workflowCount"], 4)
+        self.assertFalse(guidance["github"]["snapshotProvided"])
+        self.assertFalse(guidance["assuranceActions"])
+        self.assertEqual(guidance["releaseReadiness"], "unknown")
         self.assertTrue(result["fixture"]["configAbsent"])
         self.assertTrue(result["fixture"]["gitignoreAbsent"])
         self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding"})
@@ -555,6 +564,9 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         mutations = (
             lambda v: v.pop("projectDraft"), lambda v: v["cases"]["positive"].pop("projectDraft"),
+            lambda v: v["cases"]["positive"]["projectDraft"].update(methods="six-passive"),
+            lambda v: v["cases"]["positive"]["projectDraft"].pop("guidance"),
+            lambda v: v["projectDraft"]["native"].pop("guidance"),
             lambda v: v["cases"]["positive"].update(exitCode=True),
             lambda v: v["cases"]["positive"].update(domAndGtkObserved=1),
             lambda v: v["cases"]["positive"]["projectDraft"]["select"].update(originalsSettled=False),
@@ -574,6 +586,36 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
             observed = closed_project_draft_data(lifecycle); mutate(observed)
             with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError)):
                 S.shell_project_draft_observation(observed, lifecycle)
+
+        def leaves(value, prefix=()):
+            for key, child in value.items():
+                if type(child) is dict:
+                    yield from leaves(child, (*prefix, key))
+                else:
+                    yield (*prefix, key), child
+
+        for path, original in leaves(lifecycle.SHELL_PROJECT_RECEIPT):
+            for mode in ("missing", "changed", "wrong-type"):
+                changed = deepcopy(lifecycle.SHELL_PROJECT_RECEIPT)
+                parent = changed
+                for key in path[:-1]:
+                    parent = parent[key]
+                if mode == "missing":
+                    del parent[path[-1]]
+                elif mode == "wrong-type":
+                    parent[path[-1]] = int(original) if type(original) is bool else True if type(original) is int else None
+                else:
+                    parent[path[-1]] = not original if type(original) is bool else original + 1 if type(original) is int else original + "-other"
+                # Neither a changed native copy nor two mutually agreeing but
+                # invalid copies may replace the strict original receipt.
+                for side in ("case", "native", "both"):
+                    observed = closed_project_draft_data(lifecycle)
+                    if side in {"case", "both"}:
+                        observed["cases"]["positive"]["projectDraft"] = deepcopy(changed)
+                    if side in {"native", "both"}:
+                        observed["projectDraft"]["native"] = deepcopy(changed)
+                    with self.subTest(path=path, mode=mode, side=side), self.assertRaises((S.D.Refused, ValueError)):
+                        S.shell_project_draft_observation(observed, lifecycle)
 
     def test_missing_duplicate_or_mismatched_original_inventory_exports_refuse(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")

@@ -4,6 +4,7 @@
 use std::{ffi::OsStr, io::Write, path::{Path, PathBuf}, sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, Ordering}},
     thread::ThreadId, time::{Duration, Instant}};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tauri::Manager;
 use crate::{bridge::{AppInfo, Project}, error::BridgeError, supervisor::{HeldAppInfo, Supervisor}};
 
@@ -13,7 +14,10 @@ enum Case { Positive, Outstanding }
 enum Step {
     Bootstrap, Environment, ReadEnvironment, Dashboard, ChooseCancel, Cancel, Cancelled, ReadCancelled,
     ChooseSelect, SetProject, SelectProject, Selected, ReadSnapshot, Settings, Suggest, ReadSuggestion,
-    Adopt, ReadDraft, OpenHelp, ReadHelp, CloseHelp, HelpGone, Unset, ReadUnset, Validate, ReadValidation,
+    Adopt, ReadDraft, OpenHelp, ReadHelp, CloseHelp, HelpGone,
+    GuidanceEnvironment, LoadRequirements, ReadRequirements, GitHub, ReadGitHubEmpty, EnterRepository, EnterSha,
+    ReadGitHubInputs, ProposeGitHub, ReadProposal, OpenWorkflows, ReadWorkflows, GuidanceSettings, ReadRetainedDraft,
+    Unset, ReadUnset, Validate, ReadValidation,
     Review, ReadReview, Close, Quit, Exit,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -22,7 +26,17 @@ enum Pending { Dom(Step), Project(Step), Close, Gtk }
 const PROJECT_SOURCE: &str = "plugins { id(\"com.android.application\") }\nandroid { defaultConfig { applicationId = \"org.example.mrk.observed\" } }\n";
 const APP_ID: &str = "org.example.mrk.observed";
 const FIELD: &str = "version.source";
-const METHODS: [&str; 6] = ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview"];
+const METHODS: [&str; 8] = ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
+    "github.setup.propose", "environment.requirements"];
+const TOOLKIT_REPOSITORY: &str = "example/toolkit";
+const TOOLKIT_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const GITHUB_RESOURCE: &str = "4d486fc24ebf24271dbb5227174df7c8f28a530a97011e004da643fdad7fe17c";
+const WORKFLOWS: [(&str, &str, usize); 4] = [
+    ("preflight", ".github/workflows/mobile-preflight.yml", 567),
+    ("candidate", ".github/workflows/mobile-candidate.yml", 1379),
+    ("external-testing", ".github/workflows/mobile-external-testing.yml", 2150),
+    ("production-submit", ".github/workflows/mobile-production-submit.yml", 2881),
+];
 
 // This is the fixed original service's protected sibling, not an environment
 // path or a renderer-selected fixture. It is only passed to GtkFileChooser.
@@ -61,6 +75,16 @@ fn invalid(value: &Value) -> bool {
             && issues[0].get("code").and_then(Value::as_str) == Some("config.invalid"))
         && assurance(value, "schema-policy")
 }
+fn format_valid(value: &Value) -> bool {
+    // Observe the existing core verdict, not another configuration validator.
+    value["valid"].as_bool() == Some(true) && value["state"].as_str() == Some("format-valid")
+        && value["issues"].as_array().is_some_and(Vec::is_empty)
+        && value["requirements"].as_array().is_some_and(|rows| rows.len() <= 128
+            && rows.iter().all(|row| row["state"].as_str() == Some("unknown"))) && assurance(value, "schema-policy")
+}
+fn keys(value: &Value, names: &[&str]) -> bool {
+    value.as_object().is_some_and(|row| row.len() == names.len() && names.iter().all(|name| row.contains_key(*name)))
+}
 fn after_unset(suggested: &Value, actual: &Value) -> bool {
     let (Some(before), Some(after)) = (suggested.as_object(), actual.as_object()) else { return false; };
     before.len() == after.len() && before.iter().all(|(key, value)| {
@@ -86,6 +110,100 @@ impl HelpSample {
     }
 }
 
+fn requirements_display(result: &crate::environment::Requirements) -> Option<Value> {
+    // Serialize the original already-admitted private DTO under its unchanged
+    // limit. Retain displayed comparison DATA only; never expose DTO fields.
+    let raw = crate::edit_protocol::bounded(result, crate::environment::RESPONSE_LIMIT).ok()?;
+    let value = crate::protocol::strict_json(&raw).ok()?;
+    if value["schemaVersion"].as_u64() != Some(1) || value["hostPlatform"].as_str() != Some("linux")
+        || value["context"] != serde_json::json!({"platform":"android","operation":"build"})
+        || value["platformEnabled"].as_bool() != Some(true) || value["state"].as_str() != Some("requirements-only")
+        || value["coverage"].as_str() != Some("toolchain-prerequisites-only")
+        || value["nativeInspection"].as_str() != Some("unavailable") || value["dependencyCompleteness"].as_str() != Some("unknown")
+        || !assurance(&value, "schema-policy") { return None; }
+    let rows = value["requirements"].as_array().filter(|rows| rows.len() == 3)?;
+    let mut displayed = Vec::new();
+    for (index, (row, role)) in rows.iter().zip(["android-jdk", "android-gradle-wrapper", "android-sdk"]).enumerate() {
+        let baseline = &row["baseline"];
+        if row["id"].as_str() != Some(role) || row["presence"].as_str() != Some("unknown")
+            || row["versionState"].as_str() != Some("unknown") || row["inspection"].as_str() != Some("not-run")
+            || baseline["kind"].as_str() != Some(if index == 0 { "workflow-reference" } else { "project-defined" })
+            || !(if index == 0 { baseline["version"].as_str() == Some("21") } else { baseline.get("version") == Some(&Value::Null) })
+            || !["build", "sha256", "maxBytes"].iter().all(|key| baseline.get(*key) == Some(&Value::Null)) { return None; }
+        let help = HelpSample::read(&row["help"])?;
+        if help.values[1] != "required" { return None; }
+        displayed.push(serde_json::json!({"label":help.values[0], "helpLabel":format!("Help: {}", help.values[0]),
+            "help":[help.values[2], help.values[6], format!("Where to find it: {}", help.values[4])], "badges":["Not checked"],
+            "baseline":[if index == 0 { "Workflow reference · not a local compatibility rule" } else { "Defined by your project" },
+                baseline["version"].as_str().unwrap_or("No universal version inferred")]}));
+    }
+    Some(serde_json::json!({"heading":"Build / archive prerequisites", "badges":["Tools not checked","Release readiness unknown"],
+        "host":"Core host: linux", "roles":displayed, "limitations":value["limitations"]}))
+}
+
+struct ProposalSample { display: Value, workflows: Value }
+impl ProposalSample {
+    fn read(value: &Value, draft: &Value) -> Option<Self> {
+        crate::edit_protocol::bounded(value, 256 * 1024).ok()?;
+        let schema = format!("https://raw.githubusercontent.com/{TOOLKIT_REPOSITORY}/{TOOLKIT_SHA}/schemas/project.schema.json");
+        if !keys(value, &["schemaVersion", "state", "validation", "facts", "assurance", "templateSet", "tooling", "workflows", "settings"])
+            || value["schemaVersion"].as_u64() != Some(1) || value["state"].as_str() != Some("proposed")
+            || !format_valid(&value["validation"]) || !assurance(value, "schema-policy")
+            || value["facts"] != serde_json::json!({"githubContacted":false,"repositoryObserved":false,"toolingRefResolved":false,
+                "templateCompatibility":"unknown","comparisonBasis":"caller-supplied-digest-summary","snapshotProvided":false,"applyAvailable":false})
+            || value["templateSet"] != serde_json::json!({"coreVersion":crate::runtime::CORE_VERSION,"resourceVersion":1,"resourceSha256":GITHUB_RESOURCE})
+            || value["tooling"] != serde_json::json!({"repository":TOOLKIT_REPOSITORY,"sha":TOOLKIT_SHA,"schemaReference":schema,"state":"format-only"})
+            || value["settings"]["configPath"].as_str() != Some("release/mobile-release.json")
+            || value["settings"]["sourcePolicy"] != serde_json::json!({"candidateBranch":draft["source"]["candidateBranch"],
+                "productionBranch":draft["source"]["productionBranch"],"basis":"configured-policy"}) { return None; }
+        let rows = value["workflows"].as_array().filter(|rows| rows.len() == WORKFLOWS.len())?;
+        let mut workflows = Vec::new();
+        for (row, (id, path, size)) in rows.iter().zip(WORKFLOWS) {
+            let content = row["content"].as_str()?;
+            let digest = format!("{:x}", Sha256::digest(content.as_bytes()));
+            if !keys(row, &["id", "path", "content", "byteLength", "sha256", "comparison"])
+                || row["id"].as_str() != Some(id) || row["path"].as_str() != Some(path)
+                || content.len() != size || content.encode_utf16().count() > 4096 || row["byteLength"].as_u64() != Some(size as u64)
+                || row["sha256"].as_str() != Some(digest.as_str()) || row["comparison"].as_str() != Some("not-supplied") { return None; }
+            workflows.push(serde_json::json!({"path":path,"comparison":"Not supplied · presence unknown",
+                "metadata":format!("{size} UTF-8 bytes · Core-reported SHA256 {digest}"),"content":content}));
+        }
+        // Only genuine response fields enter these private expected displays.
+        // Fixed surrounding labels are UI disclaimers, not substituted replies.
+        Some(Self { workflows: Value::Array(workflows), display: serde_json::json!({
+            "heading":"Passive proposal — nothing applied by this preview", "badge":"GitHub not contacted",
+            "description":"Complete caller text from the shared core. This preview saves no files and observes no GitHub, Git or Store state. Any separate native operation is reported in Local workflow files.",
+            "facts":[["Toolkit repository",value["tooling"]["repository"]], ["Toolkit commit · format-only",value["tooling"]["sha"]],
+                ["Installed core / resource version",format!("{} / {}", value["templateSet"]["coreVersion"].as_str()?, value["templateSet"]["resourceVersion"].as_u64()?)],
+                ["Shipped resource SHA256 · identity only",value["templateSet"]["resourceSha256"]],
+                ["Remote ref / template compatibility","Not resolved / unknown"], ["Repository / release readiness","Not observed / unknown"],
+                ["Draft assessment","Format-valid only · not saved by this preview"], ["Informational schema reference · not fetched or saved",value["tooling"]["schemaReference"]]],
+            "settings":[["Caller configuration convention · not an observed file",value["settings"]["configPath"]],
+                ["Source basis","Configured policy only · protection unverified"], ["Candidate branch policy",value["settings"]["sourcePolicy"]["candidateBranch"]],
+                ["Production branch policy",value["settings"]["sourcePolicy"]["productionBranch"]]],
+            "scope":["No project code was executed, tools probed, credentials read, files written or workflow dispatched. This is not a full init configuration, metadata skeleton, .gitignore transaction or an Apply plan.",
+                "No comparison summary was supplied; existing workflow presence is unknown. A match is not a verified no-op or an unchanged repository."],
+            "workflowHeading":"Four read-only workflow previews", "workflowDescription":"Selectable text only. Paths and hashes identify proposed content, not existing repository files or permission to overwrite them.",
+            "settingsHeading":"Environment checklist · not configured", "settingsDescription":"Desired policy and unresolved administrator work, not remote API requests. Existing environments, approvals, permissions and values remain unknown.",
+            "localReviewAvailable":false, "remoteAvailable":false
+        }) })
+    }
+}
+
+#[derive(Default)]
+struct Guidance {
+    requirements_called: bool, requirements: Option<Value>, requirements_visible: bool,
+    github_empty: bool, repository_entered: bool, sha_entered: bool, inputs_visible: bool,
+    github_called: bool, proposal: Option<ProposalSample>, proposal_visible: bool, workflows_visible: bool, draft_retained: bool,
+}
+impl Guidance {
+    fn complete(&self) -> bool {
+        self.requirements_called && self.requirements.is_some() && self.requirements_visible && self.github_empty
+            && self.repository_entered && self.sha_entered && self.inputs_visible && self.github_called
+            && self.proposal.is_some() && self.proposal_visible && self.workflows_visible && self.draft_retained
+    }
+}
+
 struct Record {
     attached: bool, started: bool, loaded: bool,
     info: bool, methods: usize, sample: Option<HelpSample>,
@@ -94,7 +212,7 @@ struct Record {
     snapshot: bool, snapshot_visible: bool, suggest_called: bool, suggested: Option<Value>, provenance: Option<Value>,
     provenance_visible: bool, adopted: bool, draft_visible: bool, unset: bool,
     validate_called: bool, validated: bool, validation_visible: bool, review_called: bool, reviewed: bool, review_visible: bool,
-    originals_final: bool,
+    guidance: Guidance, originals_final: bool,
     step: Step, pending: Option<Pending>, evaluations: u16,
     close_prevented: bool, native_id: Option<u32>, activated: bool,
     responded: bool, disposal_response: bool, destroyed: bool, released: bool, gtk_returned: bool,
@@ -114,7 +232,7 @@ impl Observation {
                 snapshot: false, snapshot_visible: false, suggest_called: false, suggested: None, provenance: None,
                 provenance_visible: false, adopted: false, draft_visible: false, unset: false,
                 validate_called: false, validated: false, validation_visible: false, review_called: false, reviewed: false, review_visible: false,
-                originals_final: false,
+                guidance: Guidance::default(), originals_final: false,
                 close_prevented: false, native_id: None, activated: false, responded: false, disposal_response: false,
                 destroyed: false, released: false, gtk_returned: false, relay_joined: false, exit: false, held: None,
             }) }
@@ -215,6 +333,7 @@ impl Observation {
         let Some(mut r) = self.record() else { return; };
         let Some(value) = result.as_ref().ok().filter(|value| value["schemaVersion"].as_u64() == Some(1)
             && value["platformSelectionRequired"].as_bool() == Some(false) && assurance(value, "schema-policy")
+            && format_valid(&value["validation"])
             && value["draft"]["android"]["enabled"].as_bool() == Some(true)
             && value["draft"]["android"]["applicationId"].as_str() == Some(APP_ID)
             && value["draft"]["android"]["identityStatus"].as_str() == Some("unverified")
@@ -234,9 +353,43 @@ impl Observation {
         // sent to the renderer, installed in its reducer, or printed in a log.
         r.suggested = Some(value["draft"].clone()); r.provenance = Some(Value::Array(projected));
     }
+    pub(super) fn requirements_request(&self, body: &Value) {
+        let Some(mut r) = self.record() else { return; };
+        if self.case != Case::Positive || !r.help_gone || !r.adopted || !r.draft_visible || r.guidance.requirements_called
+            || !matches!(r.step, Step::LoadRequirements | Step::ReadRequirements)
+            || !keys(body, &["draft", "platform", "operation"]) || body["platform"].as_str() != Some("android")
+            || body["operation"].as_str() != Some("build")
+            || !r.suggested.as_ref().is_some_and(|draft| body.get("draft") == Some(draft)) { self.fail(); return; }
+        r.guidance.requirements_called = true;
+    }
+    pub(super) fn requirements(&self, result: &Result<crate::environment::Requirements, BridgeError>) {
+        let sample = result.as_ref().ok().and_then(requirements_display);
+        let Some(mut r) = self.record() else { return; };
+        if self.case != Case::Positive || !r.guidance.requirements_called || r.guidance.requirements.is_some() || sample.is_none()
+            || !matches!(r.step, Step::LoadRequirements | Step::ReadRequirements) { self.fail(); return; }
+        r.guidance.requirements = sample;
+    }
+    pub(super) fn github_request(&self, body: &Value) {
+        let Some(mut r) = self.record() else { return; };
+        if self.case != Case::Positive || !r.guidance.requirements_visible || !r.guidance.github_empty
+            || !r.guidance.repository_entered || !r.guidance.sha_entered || !r.guidance.inputs_visible || r.guidance.github_called
+            || !matches!(r.step, Step::ProposeGitHub | Step::ReadProposal)
+            || !keys(body, &["draft", "toolingRepository", "toolingSha", "suppliedSnapshot"])
+            || body["toolingRepository"].as_str() != Some(TOOLKIT_REPOSITORY) || body["toolingSha"].as_str() != Some(TOOLKIT_SHA)
+            || body.get("suppliedSnapshot") != Some(&Value::Null)
+            || !r.suggested.as_ref().is_some_and(|draft| body.get("draft") == Some(draft)) { self.fail(); return; }
+        r.guidance.github_called = true;
+    }
+    pub(super) fn github_proposal(&self, result: &Result<Value, BridgeError>) {
+        let Some(mut r) = self.record() else { return; };
+        let sample = result.as_ref().ok().and_then(|value| r.suggested.as_ref().and_then(|draft| ProposalSample::read(value, draft)));
+        if self.case != Case::Positive || !r.guidance.github_called || r.guidance.proposal.is_some() || sample.is_none()
+            || !matches!(r.step, Step::ProposeGitHub | Step::ReadProposal) { self.fail(); return; }
+        r.guidance.proposal = sample;
+    }
     pub(super) fn validate_request(&self, draft: &Value) {
         let Some(mut r) = self.record() else { return; };
-        if self.case != Case::Positive || !r.unset || r.validate_called || !matches!(r.step, Step::Validate | Step::ReadValidation)
+        if self.case != Case::Positive || !r.unset || !r.guidance.complete() || r.validate_called || !matches!(r.step, Step::Validate | Step::ReadValidation)
             || !r.suggested.as_ref().is_some_and(|suggested| after_unset(suggested, draft)) { self.fail(); return; }
         r.validate_called = true;
     }
@@ -375,6 +528,7 @@ impl Observation {
                     && available.is_some_and(|a| a.len() == METHODS.len() && a.iter().zip([
                         "Read engine capabilities", "Load schema & field help", "Read a static project observation",
                         "Validate a configuration draft", "Suggest an unverified configuration draft", "Review draft changes and field requirements",
+                        "Prepare a GitHub setup preview", "Explain project toolchain requirements",
                     ]).all(|(actual, expected)| actual.as_str() == Some(expected)))
             },
             Step::ReadCancelled => object.len() == 3 && r.cancelled && value["unselected"].as_bool() == Some(true)
@@ -383,10 +537,24 @@ impl Observation {
                 && value["configuration"].as_str() == Some("Not configured") && value["sourceFiles"].as_str() == Some("1 recognized files")
                 && value["name"].as_str() == Some("positive-project"),
             Step::ReadSuggestion => object.len() == 2 && r.suggested.is_some() && r.provenance.as_ref() == value.get("provenance"),
-            Step::ReadDraft => object.len() == 4 && r.adopted && r.suggested.as_ref().is_some_and(|suggested|
+            Step::ReadDraft | Step::ReadRetainedDraft => object.len() == 4 && r.adopted
+                && (step != Step::ReadRetainedDraft || r.guidance.workflows_visible)
+                && r.suggested.as_ref().is_some_and(|suggested|
                 value["source"].as_str() == suggested["version"]["source"].as_str())
                 && value["unsaved"].as_bool() == Some(true) && value["saveAvailable"].as_bool() == Some(false),
-            Step::ReadUnset => object.len() == 4 && r.draft_visible && r.help && r.help_gone
+            Step::ReadRequirements => object.len() == 2 && r.guidance.requirements_called
+                && r.guidance.requirements.as_ref().is_some_and(|display| value.get("display") == Some(display)),
+            Step::ReadGitHubEmpty => object.len() == 3 && r.guidance.requirements_visible && !r.guidance.github_empty
+                && value["inputs"] == serde_json::json!({"repository":"","sha":"","comparison":false,"previewAvailable":false})
+                && r.suggested.as_ref().is_some_and(|draft| value["branches"] == serde_json::json!(
+                    [draft["source"]["candidateBranch"],draft["source"]["productionBranch"]])),
+            Step::ReadGitHubInputs => object.len() == 2 && r.guidance.repository_entered && r.guidance.sha_entered
+                && value["inputs"] == serde_json::json!({"repository":TOOLKIT_REPOSITORY,"sha":TOOLKIT_SHA,"comparison":false,"previewAvailable":true}),
+            Step::ReadProposal => object.len() == 2 && r.guidance.github_called
+                && r.guidance.proposal.as_ref().is_some_and(|sample| value.get("display") == Some(&sample.display)),
+            Step::ReadWorkflows => object.len() == 2 && r.guidance.proposal_visible
+                && r.guidance.proposal.as_ref().is_some_and(|sample| value.get("workflows") == Some(&sample.workflows)),
+            Step::ReadUnset => object.len() == 4 && r.draft_visible && r.help && r.help_gone && r.guidance.complete()
                 && value["unset"].as_bool() == Some(true) && value["unsaved"].as_bool() == Some(true) && value["saveAvailable"].as_bool() == Some(false),
             Step::ReadValidation => object.len() == 4 && r.validated && value["invalid"].as_bool() == Some(true)
                 && value["unsaved"].as_bool() == Some(true) && value["saveAvailable"].as_bool() == Some(false),
@@ -418,7 +586,21 @@ impl Observation {
             Step::OpenHelp => Step::ReadHelp,
             Step::ReadHelp => { r.help = true; Step::CloseHelp },
             Step::CloseHelp => Step::HelpGone,
-            Step::HelpGone => { r.help_gone = true; Step::Unset },
+            Step::HelpGone => { r.help_gone = true; Step::GuidanceEnvironment },
+            Step::GuidanceEnvironment => Step::LoadRequirements,
+            Step::LoadRequirements => Step::ReadRequirements,
+            Step::ReadRequirements => { r.guidance.requirements_visible = true; Step::GitHub },
+            Step::GitHub => Step::ReadGitHubEmpty,
+            Step::ReadGitHubEmpty => { r.guidance.github_empty = true; Step::EnterRepository },
+            Step::EnterRepository => { r.guidance.repository_entered = true; Step::EnterSha },
+            Step::EnterSha => { r.guidance.sha_entered = true; Step::ReadGitHubInputs },
+            Step::ReadGitHubInputs => { r.guidance.inputs_visible = true; Step::ProposeGitHub },
+            Step::ProposeGitHub => Step::ReadProposal,
+            Step::ReadProposal => { r.guidance.proposal_visible = true; Step::OpenWorkflows },
+            Step::OpenWorkflows => Step::ReadWorkflows,
+            Step::ReadWorkflows => { r.guidance.workflows_visible = true; Step::GuidanceSettings },
+            Step::GuidanceSettings => Step::ReadRetainedDraft,
+            Step::ReadRetainedDraft => { r.guidance.draft_retained = true; Step::Unset },
             Step::Unset => Step::ReadUnset,
             Step::ReadUnset => { r.unset = true; Step::Validate },
             Step::Validate => Step::ReadValidation,
@@ -570,13 +752,14 @@ impl Observation {
             && (self.case == Case::Outstanding || r.info && r.sample.is_some() && r.environment && r.help && r.help_gone
                 && r.cancelled && r.pickers[0].settled(false) && r.selected && r.pickers[1].settled(true)
                 && r.snapshot && r.snapshot_visible && r.suggested.is_some() && r.provenance_visible && r.adopted && r.draft_visible
+                && r.guidance.complete()
                 && r.unset && r.validated && r.validation_visible && r.reviewed && r.review_visible && r.originals_final)
     }
     fn positive_report(&self) -> Option<Vec<u8>> {
         let r = self.record()?;
         if self.case != Case::Positive || !r.exit || !r.originals_final { return None; }
         serde_json::to_vec(&serde_json::json!({
-            "schemaVersion":1,"fixture":"android-static-v1","projectGateContract":true,"methods":"six-passive","mutationActions":false,
+            "schemaVersion":1,"fixture":"android-static-v1","projectGateContract":true,"methods":"eight-passive","mutationActions":false,
             "cancel":{"operation":1,"widget":"cancel","guiSettled":r.pickers[0].settled(false),"originalsSettled":r.cancelled,"registered":false},
             "select":{"operation":2,"widget":"select","filenameRead":r.pickers[1].filename,"guiSettled":r.pickers[1].settled(true),"originalsSettled":r.selected,"registered":r.project.is_some()},
             "snapshot":{"config":"missing","androidHint":r.snapshot,"sourceFiles":1},
@@ -584,6 +767,17 @@ impl Observation {
             "field":{"path":FIELD,"catalogHelp":r.help && r.help_gone,"explicitUnset":r.unset},
             "validation":{"valid":false,"issue":"config.invalid"},"review":{"kind":"redacted","required":r.review_visible,"present":false},
             "draft":{"unsaved":r.draft_visible && r.review_visible,"saveAvailable":false},
+            "guidance":{"draftFormatValid":r.suggested.is_some(),"draftUnchanged":r.guidance.draft_retained && r.validate_called && r.review_called,
+                "requirements":{"requestMatched":r.guidance.requirements_called,"resultMatched":r.guidance.requirements.is_some(),
+                    "domMatched":r.guidance.requirements_visible,"context":"android/build","roles":3,"presence":"unknown","version":"unknown",
+                    "inspection":"not-run","nativeInspection":"unavailable","dependencies":"unknown"},
+                "github":{"requestMatched":r.guidance.github_called,"resultMatched":r.guidance.proposal.is_some(),
+                    "domMatched":r.guidance.proposal_visible && r.guidance.workflows_visible,
+                    "explicitInputs":r.guidance.github_empty && r.guidance.repository_entered && r.guidance.sha_entered && r.guidance.inputs_visible,
+                    "browserEdit":"insertText","comparison":"not-supplied","snapshotProvided":false,"workflowCount":4,
+                    "workflowContentMatched":r.guidance.workflows_visible,"resourceMatched":r.guidance.proposal.is_some(),"tooling":"format-only",
+                    "githubContacted":false,"repositoryObserved":false,"toolingRefResolved":false,"templateCompatibility":"unknown","applyAvailable":false},
+                "assuranceActions":false,"releaseReadiness":"unknown"},
             "quit":{"operation":3,"originalsSettled":r.originals_final,"relayJoined":r.relay_joined,"exit":r.exit}
         })).ok().filter(|raw| raw.len() <= 2048)
     }
@@ -591,10 +785,11 @@ impl Observation {
 
 // Fixed synchronous DOM expressions. Click only existing UI controls, wait for
 // later React/effect rendering, and return actual bounded text for comparison.
-// No injected data, invoke, event emission, async Promise, or synthetic receipt.
+// No injected data, invoke, artificial event emission, async Promise or reply.
+// The two fixed text edits use the browser's own editing operation, once each.
 fn script(step: Step) -> Option<String> {
     let body = match step {
-        Step::Environment => r#"
+        Step::Environment | Step::GuidanceEnvironment => r#"
             const b = document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Environment"]');
             if (!b) return {state:'wait'}; if (b.disabled) return {state:'error'};
             b.click(); return {state:'ready'};"#,
@@ -631,7 +826,7 @@ fn script(step: Step) -> Option<String> {
             facts.scrollIntoView({block:'center'}); if (!visible(facts)) return {state:'error'};
             return {state:'ready', configuration:text(document.querySelector('.project-badges .badge')),
                 sourceFiles:text(facts.querySelector('strong')), name:text(document.querySelector('.project-identity h2'))};"#,
-        Step::Settings => r#"
+        Step::Settings | Step::GuidanceSettings => r#"
             const b = document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="Project settings"]');
             if (!b || b.disabled) return {state:'error'};
             b.click(); return {state:'ready'};"#,
@@ -657,7 +852,7 @@ fn script(step: Step) -> Option<String> {
             if (!b || b.disabled || text(b) !== 'Use as an in-memory draft' || document.querySelector('.draft-banner')) return {state:'error'};
             b.scrollIntoView({block:'center'}); if (!visible(b)) return {state:'error'};
             b.click(); return {state:'ready'};"#,
-        Step::ReadDraft => r#"
+        Step::ReadDraft | Step::ReadRetainedDraft => r#"
             const f = field(); if (!f) return {state:'wait'};
             if (document.querySelector('.suggestion-card') || text(f.querySelector('.field-presence')) !== 'Set') return {state:'error'};
             f.scrollIntoView({block:'center'}); if (!visible(f)) return {state:'error'};
@@ -689,6 +884,104 @@ fn script(step: Step) -> Option<String> {
             b.click(); return {state:'ready'};"#,
         Step::HelpGone => r#"
             return {state:document.querySelector('dialog.help-dialog') ? 'wait' : 'ready'};"#,
+        Step::LoadRequirements => r#"
+            if (!selected('Environment')) return {state:'wait'};
+            const controls = document.querySelector('.environment-controls'); if (!controls) return {state:'wait'};
+            const platform = controls.querySelector('#environment-platform'), operation = controls.querySelector('#environment-operation');
+            if (!platform || !operation || platform.disabled || operation.disabled || platform.value !== 'android' || operation.value !== 'build'
+                || document.querySelector('.environment-requirements, dialog')) return {state:'error'};
+            controls.scrollIntoView({block:'center'}); if (!visible(platform) || !visible(operation)) return {state:'error'};
+            const card = controls.closest('section.card');
+            const b = [...card.querySelectorAll('.button-row button')].find(b => text(b) === 'Load draft requirements');
+            if (!b || b.disabled) return {state:'wait'};
+            b.scrollIntoView({block:'center'}); if (!visible(b)) return {state:'error'};
+            b.click(); return {state:'ready'};"#,
+        Step::ReadRequirements => r#"
+            if (!selected('Environment')) return {state:'error'};
+            const list = document.querySelector('.environment-requirements'); if (!list) return {state:'wait'};
+            const card = list.closest('section.card'); if (card.getAttribute('aria-busy') !== 'false') return {state:'wait'};
+            const rows = [...list.querySelectorAll(':scope > article.tool-card')]; if (rows.length !== 3) return {state:'error'};
+            const status = card.querySelector(':scope > .button-row');
+            const roles = rows.map(row => {
+                row.scrollIntoView({block:'center'}); if (!visible(row)) throw 0;
+                const help = row.querySelector('.help-button'); if (!help || help.disabled) throw 0;
+                return {label:text(row.querySelector('h3')), helpLabel:help.getAttribute('aria-label'),
+                    help:[...row.querySelectorAll(':scope > p')].map(text), badges:[...row.querySelectorAll('.button-row .badge')].map(text),
+                    baseline:[...row.querySelectorAll('.environment-baseline > *')].map(text)};
+            });
+            return {state:'ready', display:{heading:text(card.querySelector('h2')), badges:[...status.querySelectorAll('.badge')].map(text),
+                host:text(status.querySelector('.save-note')), roles, limitations:[...card.querySelectorAll(':scope > ul.plain-list > li > span')].map(text)}};"#,
+        Step::GitHub => r#"
+            const b = document.querySelector('nav[aria-label="Workspace navigation"] button[aria-label="GitHub"]');
+            if (!b || b.disabled) return {state:'error'}; b.click(); return {state:'ready'};"#,
+        Step::ReadGitHubEmpty => r#"
+            if (!selected('GitHub') || !document.querySelector('form.github-form')) return {state:'wait'};
+            const g = githubInputs();
+            if (document.querySelector('.github-proposal') || text(g.form.querySelector('.github-draft > strong')) !== 'positive-project · current draft'
+                || text(g.button) !== 'Preview GitHub setup') return {state:'error'};
+            g.form.scrollIntoView({block:'start'}); if (!visible(g.repository) || !visible(g.sha)) return {state:'error'};
+            return {state:'ready', inputs:inputValues(g), branches:[...g.form.querySelectorAll('.github-draft .github-facts dd code')].map(text)};"#,
+        Step::EnterRepository => r#"
+            const g = githubInputs();
+            if (g.repository.value !== '' || g.sha.value !== '' || g.comparison.checked || !g.button.disabled) return {state:'error'};
+            const input = g.repository; input.scrollIntoView({block:'center'}); if (!visible(input)) return {state:'error'};
+            input.focus(); input.select();
+            if (document.activeElement !== input || input.selectionStart !== 0 || input.selectionEnd !== 0
+                || !document.execCommand('insertText', false, 'example/toolkit')) return {state:'error'};
+            return {state:'ready'};"#,
+        Step::EnterSha => r#"
+            const g = githubInputs();
+            if (g.repository.value !== 'example/toolkit' || g.sha.value !== '' || g.comparison.checked || !g.button.disabled) return {state:'error'};
+            const input = g.sha; input.scrollIntoView({block:'center'}); if (!visible(input)) return {state:'error'};
+            input.focus(); input.select();
+            if (document.activeElement !== input || input.selectionStart !== 0 || input.selectionEnd !== 0
+                || !document.execCommand('insertText', false, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')) return {state:'error'};
+            return {state:'ready'};"#,
+        Step::ReadGitHubInputs => r#"
+            const g = githubInputs();
+            if (g.repository.value !== 'example/toolkit' || g.sha.value !== 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' || g.comparison.checked) return {state:'error'};
+            if (g.button.disabled) return {state:'wait'};
+            return {state:'ready', inputs:inputValues(g)};"#,
+        Step::ProposeGitHub => r#"
+            const g = githubInputs();
+            if (g.repository.value !== 'example/toolkit' || g.sha.value !== 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' || g.comparison.checked
+                || g.button.disabled || text(g.button) !== 'Preview GitHub setup' || document.querySelector('.github-proposal')) return {state:'error'};
+            g.button.scrollIntoView({block:'center'}); if (!visible(g.button)) return {state:'error'};
+            g.button.click(); return {state:'ready'};"#,
+        Step::ReadProposal => r#"
+            const g = githubInputs(); const proposal = document.querySelector('.github-proposal');
+            if (!proposal || g.button.disabled) return {state:'wait'};
+            proposal.scrollIntoView({block:'start'}); if (!visible(proposal)) return {state:'error'};
+            const cards = [...proposal.children]; if (cards.length !== 3 || cards.some(card => !card.classList.contains('card'))) return {state:'error'};
+            const facts = card => [...card.querySelectorAll('.github-facts > div')].map(row => [text(row.querySelector('dt')),text(row.querySelector('dd'))]);
+            const local = document.querySelector('button[aria-describedby="github-workflow-start-reason"]');
+            const remote = [...document.querySelectorAll('.github-disabled-actions button')];
+            if (!local || remote.length !== 3) return {state:'error'};
+            return {state:'ready', display:{heading:text(cards[0].querySelector('h2')), badge:text(cards[0].querySelector('.badge')),
+                description:text(cards[0].querySelector('.section-heading p')), facts:facts(cards[0]), settings:facts(cards[2]),
+                scope:[text(cards[0].querySelector('.github-scope-note')),text(cards[1].querySelector('.github-scope-note'))],
+                workflowHeading:text(cards[1].querySelector('h2')), workflowDescription:text(cards[1].querySelector('.section-heading p')),
+                settingsHeading:text(cards[2].querySelector('h2')), settingsDescription:text(cards[2].querySelector('.section-heading p')),
+                localReviewAvailable:!local.disabled, remoteAvailable:remote.some(b => !b.disabled)}};"#,
+        Step::OpenWorkflows => r#"
+            if (!selected('GitHub')) return {state:'error'};
+            const rows = [...document.querySelectorAll('.github-proposal details.github-workflow')];
+            if (rows.length !== 4 || rows.some(row => row.open)) return {state:'error'};
+            for (const row of rows) {
+                const summary = row.querySelector(':scope > summary'); if (!summary) return {state:'error'};
+                summary.scrollIntoView({block:'center'}); if (!visible(summary)) return {state:'error'}; summary.click();
+            }
+            return {state:'ready'};"#,
+        Step::ReadWorkflows => r#"
+            if (!selected('GitHub')) return {state:'error'};
+            const rows = [...document.querySelectorAll('.github-proposal details.github-workflow')];
+            if (rows.length !== 4) return {state:'error'}; if (rows.some(row => !row.open)) return {state:'wait'};
+            return {state:'ready', workflows:rows.map(row => {
+                const pre = row.querySelector('pre'); const path = text(row.querySelector('summary > code'));
+                if (!pre || pre.getAttribute('aria-label') !== 'Read-only proposed content for ' + path) throw 0;
+                pre.scrollIntoView({block:'start'}); if (!visible(pre)) throw 0;
+                return {path, comparison:text(row.querySelector('summary > .badge')), metadata:text(row.querySelector('.github-workflow-meta')), content:text(pre.querySelector('code'))};
+            })};"#,
         Step::Unset => r#"
             const f = field(); const b = f && f.querySelector('.clear-field');
             if (!b || b.disabled || text(b) !== 'Unset' || document.querySelector('dialog')) return {state:'error'};
@@ -733,6 +1026,17 @@ fn script(step: Step) -> Option<String> {
         const text = e => {{ if (!e) throw 0; const t = e.textContent; if (typeof t !== 'string' || t.length > 4096) throw 0; return t; }};
         const visible = e => {{ const r=e.getBoundingClientRect(); const s=getComputedStyle(e); return e.isConnected && r.width>0 && r.height>0 && s.display!=='none' && s.visibility==='visible'; }};
         const selected = label => [...document.querySelectorAll('nav[aria-label="Workspace navigation"] button[aria-current="page"]')].some(b => b.getAttribute('aria-label') === label);
+        const githubInputs = () => {{
+            const forms=document.querySelectorAll('form.github-form');
+            if (!selected('GitHub') || forms.length!==1 || document.querySelector('dialog, .github-assertions')) throw 0;
+            const form=forms[0], repositories=form.querySelectorAll('input#github-toolkit-repository'), shas=form.querySelectorAll('input#github-toolkit-sha');
+            const comparison=form.querySelector('.github-comparison-toggle input[type="checkbox"]'), button=form.querySelector('.github-propose-action button[type="submit"]');
+            if (repositories.length!==1 || shas.length!==1 || !comparison || !button) throw 0;
+            const repository=repositories[0], sha=shas[0];
+            if ([repository,sha].some(input => input.type!=='text' || input.disabled || input.readOnly) || repository.value.length>140 || sha.value.length>40) throw 0;
+            return {{form,repository,sha,comparison,button}};
+        }};
+        const inputValues = g => ({{repository:g.repository.value,sha:g.sha.value,comparison:g.comparison.checked,previewAvailable:!g.button.disabled}});
         const field = () => [...document.querySelectorAll('.form-field')].find(f => f.querySelector('.help-button')?.getAttribute('aria-label') === 'Help: Committed version file');
         const draftState = () => {{
             const banner=document.querySelector('.draft-banner'); const save=document.querySelector('.draft-toolbar button[aria-describedby="draft-save-reason"]');

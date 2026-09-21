@@ -49,7 +49,7 @@ SHELL_PROJECT_SOURCE = (b'plugins { id("com.android.application") }\n'
 SHELL_PROJECT_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_DRAFT="
 SHELL_PROJECT_RECEIPT = {
     "schemaVersion": 1, "fixture": "android-static-v1", "projectGateContract": True,
-    "methods": "six-passive", "mutationActions": False,
+    "methods": "eight-passive", "mutationActions": False,
     "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
     "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
     "snapshot": {"config": "missing", "androidHint": True, "sourceFiles": 1},
@@ -58,6 +58,18 @@ SHELL_PROJECT_RECEIPT = {
     "validation": {"valid": False, "issue": "config.invalid"},
     "review": {"kind": "redacted", "required": True, "present": False},
     "draft": {"unsaved": True, "saveAvailable": False},
+    "guidance": {
+        "draftFormatValid": True, "draftUnchanged": True,
+        "requirements": {"requestMatched": True, "resultMatched": True, "domMatched": True,
+                         "context": "android/build", "roles": 3, "presence": "unknown", "version": "unknown",
+                         "inspection": "not-run", "nativeInspection": "unavailable", "dependencies": "unknown"},
+        "github": {"requestMatched": True, "resultMatched": True, "domMatched": True, "explicitInputs": True,
+                   "browserEdit": "insertText", "comparison": "not-supplied", "snapshotProvided": False,
+                   "workflowCount": 4, "workflowContentMatched": True, "resourceMatched": True,
+                   "tooling": "format-only", "githubContacted": False, "repositoryObserved": False,
+                   "toolingRefResolved": False, "templateCompatibility": "unknown", "applyAvailable": False},
+        "assuranceActions": False, "releaseReadiness": "unknown",
+    },
     "quit": {"operation": 3, "originalsSettled": True, "relayJoined": True, "exit": True},
 }
 OS_SONAMES = {"libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",

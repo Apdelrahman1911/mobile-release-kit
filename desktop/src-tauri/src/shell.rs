@@ -97,9 +97,15 @@ async fn catalog(state: State<'_, ShellState>) -> Result<Value, BridgeError> {
 async fn environment_requirements(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment::Requirements, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?;
-    let args = crate::environment::request(request_body(&request)?)?;
+    let body = request_body(&request)?;
+    let args = crate::environment::request(body)?;
     not_closing(&state)?;
-    state.bridge.environment_requirements(&state.document, args).await
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.requirements_request(body); }
+    let result = state.bridge.environment_requirements(&state.document, args).await;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.requirements(&result); }
+    result
 }
 #[tauri::command]
 async fn start_environment_diagnostics(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::environment_diagnostics_protocol::Status, BridgeError> {
@@ -248,9 +254,15 @@ async fn preview_config(base: Value, draft: Value, state: State<'_, ShellState>)
 #[tauri::command]
 async fn propose_github_setup(request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
-    let input = crate::github_commands::proposal(request_body(&request)?)?;
+    let body = request_body(&request)?;
+    let input = crate::github_commands::proposal(body)?;
     not_closing(&state)?;
-    state.bridge.propose_github_setup(&state.document, input).await
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.github_request(body); }
+    let result = state.bridge.propose_github_setup(&state.document, input).await;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.github_proposal(&result); }
+    result
 }
 
 fn edit_window(webview: &Webview) -> Result<&str, BridgeError> {

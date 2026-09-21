@@ -1144,7 +1144,7 @@ def project_draft_receipt():
     """Expected typed schema DATA, not a native observation or original owner."""
     return {
         "schemaVersion": 1, "fixture": "android-static-v1", "projectGateContract": True,
-        "methods": "six-passive", "mutationActions": False,
+        "methods": "eight-passive", "mutationActions": False,
         "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
         "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
         "snapshot": {"config": "missing", "androidHint": True, "sourceFiles": 1},
@@ -1153,6 +1153,18 @@ def project_draft_receipt():
         "validation": {"valid": False, "issue": "config.invalid"},
         "review": {"kind": "redacted", "required": True, "present": False},
         "draft": {"unsaved": True, "saveAvailable": False},
+        "guidance": {
+            "draftFormatValid": True, "draftUnchanged": True,
+            "requirements": {"requestMatched": True, "resultMatched": True, "domMatched": True,
+                             "context": "android/build", "roles": 3, "presence": "unknown", "version": "unknown",
+                             "inspection": "not-run", "nativeInspection": "unavailable", "dependencies": "unknown"},
+            "github": {"requestMatched": True, "resultMatched": True, "domMatched": True, "explicitInputs": True,
+                       "browserEdit": "insertText", "comparison": "not-supplied", "snapshotProvided": False,
+                       "workflowCount": 4, "workflowContentMatched": True, "resourceMatched": True,
+                       "tooling": "format-only", "githubContacted": False, "repositoryObserved": False,
+                       "toolingRefResolved": False, "templateCompatibility": "unknown", "applyAvailable": False},
+            "assuranceActions": False, "releaseReadiness": "unknown",
+        },
         "quit": {"operation": 3, "originalsSettled": True, "relayJoined": True, "exit": True},
     }
 
@@ -1220,7 +1232,10 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
 
     def test_positive_typed_schema_rejects_each_missing_or_changed_leaf(self):
         expected = project_draft_receipt()
-        self.assertEqual(L.shell_project_receipt(L.canonical(expected)), expected)
+        raw = L.canonical(expected)
+        self.assertLessEqual(len(raw), 2048)
+        self.assertEqual(L.shell_project_receipt(raw), expected)
+        value, outcome, files, mappings = closed_shell_data()
 
         def leaves(value, prefix=()):
             for key, child in value.items():
@@ -1241,10 +1256,28 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     parent[path[-1]] = int(original) if type(original) is bool else True if type(original) is int else None
                 else:
                     parent[path[-1]] = not original if type(original) is bool else original + 1 if type(original) is int else original + "-other"
-                with self.subTest(path=path, mode=mode), self.assertRaises(ValueError):
-                    L.shell_project_receipt(L.canonical(changed))
-        raw = L.canonical(expected)
-        for changed in (b"", b"{}", raw.replace(b'"valid":false', b'"valid":false,"valid":false'),
+                with self.subTest(path=path, mode=mode):
+                    with self.assertRaises(ValueError):
+                        L.shell_project_receipt(L.canonical(changed))
+                    with self.assertRaises(ValueError):
+                        L.shell_result(*positive_capture(changed), "positive", 0, mappings)
+                    # A genuine capture cannot authenticate a changed closed
+                    # copy, including Python-equal boolean/integer leaves.
+                    altered = deepcopy(files)
+                    cases = L.decode(altered["shell-cases.json"])
+                    cases["positive"]["projectDraft"] = changed
+                    altered["shell-cases.json"] = L.canonical(cases)
+                    with patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
+                        L.shell_closed_result(value, outcome, altered)
+        legacy = deepcopy(expected)
+        legacy.pop("guidance")
+        legacy["methods"] = "six-passive"
+        for changed in (b"", b"{}", L.canonical(legacy), L.canonical({**expected, "methods": "six-passive"}),
+                        L.canonical({key: child for key, child in expected.items() if key != "guidance"}),
+                        L.canonical({**expected, "guidance": {}}), L.canonical({**expected, "guidance": []}),
+                        L.canonical({**expected, "guidance": {**expected["guidance"], "untrustedSuccess": True}}),
+                        raw.replace(b'"valid":false', b'"valid":false,"valid":false'),
+                        raw.replace(b'"guidance":{', b'"guidance":{},"guidance":{'),
                         L.canonical({**expected, "message": "ConfigurationError text is not a receipt field"}), raw + b" " * 2048):
             with self.subTest(raw=changed), self.assertRaises(ValueError):
                 L.shell_project_receipt(changed)
@@ -1256,13 +1289,19 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         lines = stdout.splitlines(keepends=True)
         for out, err in ((stdout, b""), (b"", stderr), (stderr, stdout), (stdout + lines[-1], stderr),
                          (b"".join([lines[-1], *lines[:-1]]), stderr), (b"".join([lines[1], lines[0], lines[2]]), stderr),
-                         (lines[0] + lines[-1], stderr), (stdout, stderr + stderr),
+                         (b"".join([lines[0], lines[2], lines[1]]), stderr), (stdout + lines[1], stderr),
+                         (lines[0] + lines[1] + lines[1] + lines[-1], stderr),
+                         (lines[0] + lines[-1], stderr), (lines[0] + lines[-1], stderr + lines[1]),
+                         (stdout, stderr + lines[1]), (stdout, stderr + stderr),
                          (stdout, stderr.replace(b"=available", b"=unavailable"))):
             with self.subTest(stdout=out, stderr=err), self.assertRaises(ValueError):
                 L.shell_result(out, err, "positive", 0, map_data())
         for code in (True, False, 1, -1, None):
             with self.subTest(code=code), self.assertRaises(ValueError):
                 L.shell_result(stdout, stderr, "positive", code, map_data())
+        for case in ("normal", "quit-outstanding"):
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                L.shell_result(stdout, stderr, case, 0, map_data())
 
     def test_fixture_inventory_is_exact_immutable_inert_and_has_no_config_or_ignore(self):
         value = installed_handoff()
@@ -1275,6 +1314,7 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             lambda v: v.update(schemaVersion=True), lambda v: v.update(root="/other/project"),
             lambda v: v.update(absent=[".gitignore"]), lambda v: v["entries"].append(deepcopy(v["entries"][2])),
             lambda v: v["entries"][0].update(children=["app", "release"]),
+            lambda v: v["entries"][0].update(children=[".github", "app"]),
             lambda v: v["entries"][1].update(children=["build.gradle.kts", ".gitignore"]),
             lambda v: v["entries"][2].update(path="app/../build.gradle.kts"),
             lambda v: v["entries"][2].update(sha256="0" * 64), lambda v: v["entries"][2].update(size=True),

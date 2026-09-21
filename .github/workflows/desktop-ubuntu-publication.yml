@@ -60,63 +60,216 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
           dpkg-query -W -f='${Package} ${Version}\n' libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
-      - name: Admit only the exact disposable Ubuntu share-directory mode
+      - name: Prepare only fixed disposable Ubuntu DATA directory modes
         timeout-minutes: 1
         shell: bash
         run: |
           set -euo pipefail
           sudo /usr/bin/python3.12 -I -S -B - <<'PY'
-          import json, os, stat
+          import json, os, re, stat
+
+          # Only these fixed public OS directories may lose group/other write. This is
+          # disposable runner preparation, not recursive repair or runtime admission.
+          PREPARE_DIRS = (
+              '/usr/share', '/etc/gtk-3.0', '/etc/fonts', '/etc/fonts/conf.d',
+              '/usr/share/fontconfig', '/usr/share/fontconfig/conf.avail', '/usr/share/fonts',
+              '/usr/local/share/fonts', '/var/cache/fontconfig',
+              '/usr/share/glib-2.0', '/usr/share/glib-2.0/schemas',
+              '/usr/share/glvnd', '/usr/share/glvnd/egl_vendor.d', '/etc/glvnd', '/etc/glvnd/egl_vendor.d',
+              '/usr/share/drirc.d', '/usr/share/X11', '/usr/share/X11/xkb', '/usr/share/X11/locale',
+              '/usr/share/icons', '/usr/share/icons/Adwaita', '/usr/share/icons/hicolor',
+              '/usr/share/themes', '/usr/share/themes/Adwaita', '/usr/share/mime',
+              '/usr/share/hunspell', '/usr/share/hyphen',
+          )
+          DATA_ROOTS = (
+              '/etc/gtk-3.0', '/etc/fonts', '/usr/share/fontconfig', '/usr/share/fonts',
+              '/usr/local/share/fonts', '/var/cache/fontconfig', '/usr/share/glib-2.0/schemas',
+              '/usr/share/glvnd/egl_vendor.d', '/etc/glvnd/egl_vendor.d', '/usr/share/drirc.d', '/etc/drirc',
+              '/usr/share/X11/xkb', '/usr/share/X11/locale', '/usr/share/icons/Adwaita',
+              '/usr/share/icons/hicolor', '/usr/share/themes/Adwaita', '/usr/share/mime/mime.cache',
+              '/usr/share/hunspell', '/usr/share/hyphen',
+              '/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache',
+              '/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache',
+              '/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache',
+          )
+          SCOPE = 'fixed-shell-data-directory-preparation'
+
           def need(ok, check, observed=None):
               if not ok:
-                  diagnostic = json.dumps({'scope': 'exact-/usr/share-mode', 'failedCheck': check,
-                                           'observed': observed}, sort_keys=True, separators=(',', ':'))
-                  print(diagnostic if len(diagnostic.encode('ascii')) <= 1024
+                  diagnostic = json.dumps({'scope': SCOPE, 'failedCheck': check, 'observed': observed},
+                                          sort_keys=True, separators=(',', ':'))
+                  print(diagnostic if len(diagnostic.encode('ascii')) <= 2048
                         else 'Fixed directory preparation refused; diagnostic bound exceeded.', flush=True)
                   raise SystemExit(70)
+
           def identity(s):
               return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
-          def protected(s, role):
-              need(stat.S_ISDIR(s.st_mode) and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
-                   role + '-policy', record(s))
+
           def record(s):
               return {'dev': s.st_dev, 'ino': s.st_ino, 'uid': s.st_uid, 'gid': s.st_gid,
-                      'mode': format(stat.S_IMODE(s.st_mode), '04o')}
+                      'mode': format(s.st_mode, '06o')}
+
+          def protected(s, path):
+              need(stat.S_ISDIR(s.st_mode) and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
+                   'protected-ancestor', {'path': path, **record(s)})
+
+          def prepare_directory(path):
+              need(path in PREPARE_DIRS, 'fixed-target')
+              flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+              fds, originals = [], []
+
+              def recheck():
+                  for fd, parent, name, expected in originals:
+                      need(identity(os.fstat(fd)) == identity(expected)
+                           == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)), 'original-directory-changed')
+
+              try:
+                  root = os.open('/', flags)
+                  fds.append(root)
+                  before = os.fstat(root)
+                  protected(before, '/')
+                  originals.append((root, None, '/', before))
+                  recheck()
+                  parent, parts, current = root, path.split('/')[1:], ''
+                  for index, name in enumerate(parts):
+                      current += '/' + name
+                      try:
+                          fd = os.open(name, flags, dir_fd=parent)
+                      except FileNotFoundError:
+                          need(path != '/usr/share', 'required-share-directory')
+                          recheck()
+                          return {'path': path, 'absentAt': current}
+                      fds.append(fd)
+                      before = os.fstat(fd)
+                      need(identity(before) == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)),
+                           'directory-name', {'path': current, **record(before)})
+                      if index + 1 == len(parts):
+                          need(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+                               and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777),
+                               'target-policy', {'path': current, **record(before)})
+                          if stat.S_IMODE(before.st_mode) != 0o755:
+                              os.fchmod(fd, 0o755)
+                          after = os.fstat(fd)
+                          need(identity(after) == (before.st_dev, before.st_ino, before.st_mode & ~0o022,
+                                                   before.st_uid, before.st_gid), 'same-object-mode-change')
+                          originals.append((fd, parent, name, after))
+                          recheck()
+                          return {'path': path, 'before': record(before), 'after': record(after)}
+                      protected(before, current)
+                      originals.append((fd, parent, name, before))
+                      parent = fd
+                  need(False, 'missing-directory-target')
+              finally:
+                  failed_close = False
+                  while fds:
+                      fd = fds.pop()
+                      try:
+                          os.close(fd)
+                      except OSError:
+                          failed_close = True
+                  need(not failed_close, 'original-directory-close')
+
+          def metadata_preflight():
+              # Read metadata through original no-follow directory FDs, never file
+              # contents or symlink targets. Discovered names cannot become chmod
+              # targets. Later full byte/ACL/mount admission remains unchanged.
+              flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+              count, unsafe_count, unsafe, fds = 0, 0, [], []
+
+              def bound(fd, parent, name, item):
+                  need(identity(os.fstat(fd)) == identity(item)
+                       == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)),
+                       'metadata-directory-changed')
+
+              def visit(parent, name, path, depth):
+                  nonlocal count, unsafe_count
+                  count += 1
+                  need(count <= 32768 and depth <= 16, 'metadata-entry-depth-bound')
+                  try:
+                      item = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                  except FileNotFoundError:
+                      need(depth == 0, 'metadata-member-disappeared')
+                      return
+                  link, directory = stat.S_ISLNK(item.st_mode), stat.S_ISDIR(item.st_mode)
+                  ordinary = directory or stat.S_ISREG(item.st_mode) or link
+                  safe = (ordinary and item.st_uid == item.st_gid == 0
+                          and (link or not item.st_mode & 0o7022)
+                          and (directory or link or not item.st_mode & 0o111))
+                  if not safe:
+                      unsafe_count += 1
+                      if len(unsafe) < 64:
+                          unsafe.append({'path': path[:512], 'pathTruncated': len(path) > 512, **record(item)})
+                  if not directory:
+                      need(identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == identity(item),
+                           'metadata-entry-changed')
+                      return
+                  fd = os.open(name, flags, dir_fd=parent)
+                  fds.append(fd)
+                  try:
+                      bound(fd, parent, name, item)
+                      children = sorted(os.listdir(fd))
+                      need(len(children) <= 8192 and all(re.fullmatch(r'[A-Za-z0-9_.+@\-]+', child) for child in children),
+                           'metadata-membership-bound-grammar')
+                      for child in children:
+                          visit(fd, child, path + '/' + child, depth + 1)
+                      bound(fd, parent, name, item)
+                      need(sorted(os.listdir(fd)) == children, 'metadata-membership-changed')
+                      bound(fd, parent, name, item)
+                  finally:
+                      fds.pop()  # Retire this original before its sole close attempt.
+                      try:
+                          os.close(fd)
+                      except OSError:
+                          need(False, 'metadata-directory-close')
+
+              for root in DATA_ROOTS:
+                  originals = []
+                  try:
+                      parent = os.open('/', flags)
+                      fds.append(parent)
+                      before = os.fstat(parent)
+                      protected(before, '/')
+                      originals.append((parent, None, '/', before))
+                      bound(parent, None, '/', before)
+                      parts, current = root.split('/')[1:], ''
+                      for name in parts[:-1]:
+                          current += '/' + name
+                          try:
+                              fd = os.open(name, flags, dir_fd=parent)
+                          except FileNotFoundError:
+                              count += 1
+                              need(count <= 32768, 'metadata-entry-depth-bound')
+                              break
+                          fds.append(fd)
+                          before = os.fstat(fd)
+                          protected(before, current)
+                          bound(fd, parent, name, before)
+                          originals.append((fd, parent, name, before))
+                          parent = fd
+                      else:
+                          visit(parent, parts[-1], root, 0)
+                      for fd, parent, name, before in originals:
+                          bound(fd, parent, name, before)
+                  finally:
+                      failed_close = False
+                      while fds:
+                          fd = fds.pop()
+                          try:
+                              os.close(fd)
+                          except OSError:
+                              failed_close = True
+                      need(not failed_close, 'metadata-directory-close')
+              return {'entries': count, 'unsafeCount': unsafe_count, 'unsafe': unsafe,
+                      'unsafeListTruncated': unsafe_count > len(unsafe)}
+
           need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0), 'root-credentials')
-          flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-          root = os.open('/', flags)
-          usr = share = None
-          try:
-              root_before = os.fstat(root)
-              protected(root_before, 'root')
-              need(identity(root_before) == identity(os.stat('/', follow_symlinks=False)), 'root-name')
-              usr = os.open('usr', flags, dir_fd=root)
-              usr_before = os.fstat(usr)
-              protected(usr_before, 'usr')
-              need(identity(usr_before) == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)), 'usr-name')
-              share = os.open('share', flags, dir_fd=usr)
-              before = os.fstat(share)
-              need(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
-                   and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777), 'share-policy', record(before))
-              need(identity(before) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)), 'share-name')
-              # This disposable image also supplies root-owned0777. Remove only
-              # group/other write on this same directory; never recurse or chown.
-              if stat.S_IMODE(before.st_mode) != 0o755:
-                  os.fchmod(share, 0o755)
-              after = os.fstat(share)
-              need(identity(after) == (before.st_dev, before.st_ino, before.st_mode & ~0o022,
-                                       before.st_uid, before.st_gid), 'share-mode-change', record(after))
-              need(identity(after) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)), 'share-name-after')
-              need(identity(root_before) == identity(os.fstat(root)) == identity(os.stat('/', follow_symlinks=False)), 'root-final')
-              need(identity(usr_before) == identity(os.fstat(usr))
-                   == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)), 'usr-final')
-              receipt = json.dumps({'scope': 'exact-/usr/share-mode', 'before': record(before), 'after': record(after)},
-                                   sort_keys=True, separators=(',', ':'))
-              need(len(receipt.encode('ascii')) <= 512, 'receipt-bound')
-              print(receipt, flush=True)
-          finally:
-              for fd in (share, usr, root):
-                  if fd is not None: os.close(fd)
+          prepared = [prepare_directory(path) for path in sorted(PREPARE_DIRS, key=lambda path: (path.count('/'), path))]
+          metadata = metadata_preflight()
+          receipt = json.dumps({'scope': SCOPE, 'prepared': prepared, 'metadata': metadata,
+                                'runtimeAdmission': False}, sort_keys=True, separators=(',', ':'))
+          need(len(receipt.encode('ascii')) <= 65536, 'receipt-bound')
+          print(receipt, flush=True)
+          need(metadata['unsafeCount'] == 0, 'unhandled-unsafe-data-metadata')
           PY
       - name: Prepare a fresh bounded compiler owner
         id: prepare
@@ -142,7 +295,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'e2bb9525e15c68cc79308faa205db1ac5879a8e2a6606c889a328109e433e29f'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '7bf1e2374b522a8d6a3391aa9efc906f9b65953d9462e07dadcf12dc1e1858e4'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
       - name: Retain original compiler evidence and shell outputs
         id: upload
@@ -202,63 +355,216 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
           dpkg-query -W -f='${Package} ${Version}\n' libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
-      - name: Admit only the exact disposable Ubuntu share-directory mode
+      - name: Prepare only fixed disposable Ubuntu DATA directory modes
         timeout-minutes: 1
         shell: bash
         run: |
           set -euo pipefail
           sudo /usr/bin/python3.12 -I -S -B - <<'PY'
-          import json, os, stat
+          import json, os, re, stat
+
+          # Only these fixed public OS directories may lose group/other write. This is
+          # disposable runner preparation, not recursive repair or runtime admission.
+          PREPARE_DIRS = (
+              '/usr/share', '/etc/gtk-3.0', '/etc/fonts', '/etc/fonts/conf.d',
+              '/usr/share/fontconfig', '/usr/share/fontconfig/conf.avail', '/usr/share/fonts',
+              '/usr/local/share/fonts', '/var/cache/fontconfig',
+              '/usr/share/glib-2.0', '/usr/share/glib-2.0/schemas',
+              '/usr/share/glvnd', '/usr/share/glvnd/egl_vendor.d', '/etc/glvnd', '/etc/glvnd/egl_vendor.d',
+              '/usr/share/drirc.d', '/usr/share/X11', '/usr/share/X11/xkb', '/usr/share/X11/locale',
+              '/usr/share/icons', '/usr/share/icons/Adwaita', '/usr/share/icons/hicolor',
+              '/usr/share/themes', '/usr/share/themes/Adwaita', '/usr/share/mime',
+              '/usr/share/hunspell', '/usr/share/hyphen',
+          )
+          DATA_ROOTS = (
+              '/etc/gtk-3.0', '/etc/fonts', '/usr/share/fontconfig', '/usr/share/fonts',
+              '/usr/local/share/fonts', '/var/cache/fontconfig', '/usr/share/glib-2.0/schemas',
+              '/usr/share/glvnd/egl_vendor.d', '/etc/glvnd/egl_vendor.d', '/usr/share/drirc.d', '/etc/drirc',
+              '/usr/share/X11/xkb', '/usr/share/X11/locale', '/usr/share/icons/Adwaita',
+              '/usr/share/icons/hicolor', '/usr/share/themes/Adwaita', '/usr/share/mime/mime.cache',
+              '/usr/share/hunspell', '/usr/share/hyphen',
+              '/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache',
+              '/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache',
+              '/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache',
+          )
+          SCOPE = 'fixed-shell-data-directory-preparation'
+
           def need(ok, check, observed=None):
               if not ok:
-                  diagnostic = json.dumps({'scope': 'exact-/usr/share-mode', 'failedCheck': check,
-                                           'observed': observed}, sort_keys=True, separators=(',', ':'))
-                  print(diagnostic if len(diagnostic.encode('ascii')) <= 1024
+                  diagnostic = json.dumps({'scope': SCOPE, 'failedCheck': check, 'observed': observed},
+                                          sort_keys=True, separators=(',', ':'))
+                  print(diagnostic if len(diagnostic.encode('ascii')) <= 2048
                         else 'Fixed directory preparation refused; diagnostic bound exceeded.', flush=True)
                   raise SystemExit(70)
+
           def identity(s):
               return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
-          def protected(s, role):
-              need(stat.S_ISDIR(s.st_mode) and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
-                   role + '-policy', record(s))
+
           def record(s):
               return {'dev': s.st_dev, 'ino': s.st_ino, 'uid': s.st_uid, 'gid': s.st_gid,
-                      'mode': format(stat.S_IMODE(s.st_mode), '04o')}
+                      'mode': format(s.st_mode, '06o')}
+
+          def protected(s, path):
+              need(stat.S_ISDIR(s.st_mode) and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
+                   'protected-ancestor', {'path': path, **record(s)})
+
+          def prepare_directory(path):
+              need(path in PREPARE_DIRS, 'fixed-target')
+              flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+              fds, originals = [], []
+
+              def recheck():
+                  for fd, parent, name, expected in originals:
+                      need(identity(os.fstat(fd)) == identity(expected)
+                           == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)), 'original-directory-changed')
+
+              try:
+                  root = os.open('/', flags)
+                  fds.append(root)
+                  before = os.fstat(root)
+                  protected(before, '/')
+                  originals.append((root, None, '/', before))
+                  recheck()
+                  parent, parts, current = root, path.split('/')[1:], ''
+                  for index, name in enumerate(parts):
+                      current += '/' + name
+                      try:
+                          fd = os.open(name, flags, dir_fd=parent)
+                      except FileNotFoundError:
+                          need(path != '/usr/share', 'required-share-directory')
+                          recheck()
+                          return {'path': path, 'absentAt': current}
+                      fds.append(fd)
+                      before = os.fstat(fd)
+                      need(identity(before) == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)),
+                           'directory-name', {'path': current, **record(before)})
+                      if index + 1 == len(parts):
+                          need(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+                               and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777),
+                               'target-policy', {'path': current, **record(before)})
+                          if stat.S_IMODE(before.st_mode) != 0o755:
+                              os.fchmod(fd, 0o755)
+                          after = os.fstat(fd)
+                          need(identity(after) == (before.st_dev, before.st_ino, before.st_mode & ~0o022,
+                                                   before.st_uid, before.st_gid), 'same-object-mode-change')
+                          originals.append((fd, parent, name, after))
+                          recheck()
+                          return {'path': path, 'before': record(before), 'after': record(after)}
+                      protected(before, current)
+                      originals.append((fd, parent, name, before))
+                      parent = fd
+                  need(False, 'missing-directory-target')
+              finally:
+                  failed_close = False
+                  while fds:
+                      fd = fds.pop()
+                      try:
+                          os.close(fd)
+                      except OSError:
+                          failed_close = True
+                  need(not failed_close, 'original-directory-close')
+
+          def metadata_preflight():
+              # Read metadata through original no-follow directory FDs, never file
+              # contents or symlink targets. Discovered names cannot become chmod
+              # targets. Later full byte/ACL/mount admission remains unchanged.
+              flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+              count, unsafe_count, unsafe, fds = 0, 0, [], []
+
+              def bound(fd, parent, name, item):
+                  need(identity(os.fstat(fd)) == identity(item)
+                       == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)),
+                       'metadata-directory-changed')
+
+              def visit(parent, name, path, depth):
+                  nonlocal count, unsafe_count
+                  count += 1
+                  need(count <= 32768 and depth <= 16, 'metadata-entry-depth-bound')
+                  try:
+                      item = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                  except FileNotFoundError:
+                      need(depth == 0, 'metadata-member-disappeared')
+                      return
+                  link, directory = stat.S_ISLNK(item.st_mode), stat.S_ISDIR(item.st_mode)
+                  ordinary = directory or stat.S_ISREG(item.st_mode) or link
+                  safe = (ordinary and item.st_uid == item.st_gid == 0
+                          and (link or not item.st_mode & 0o7022)
+                          and (directory or link or not item.st_mode & 0o111))
+                  if not safe:
+                      unsafe_count += 1
+                      if len(unsafe) < 64:
+                          unsafe.append({'path': path[:512], 'pathTruncated': len(path) > 512, **record(item)})
+                  if not directory:
+                      need(identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == identity(item),
+                           'metadata-entry-changed')
+                      return
+                  fd = os.open(name, flags, dir_fd=parent)
+                  fds.append(fd)
+                  try:
+                      bound(fd, parent, name, item)
+                      children = sorted(os.listdir(fd))
+                      need(len(children) <= 8192 and all(re.fullmatch(r'[A-Za-z0-9_.+@\-]+', child) for child in children),
+                           'metadata-membership-bound-grammar')
+                      for child in children:
+                          visit(fd, child, path + '/' + child, depth + 1)
+                      bound(fd, parent, name, item)
+                      need(sorted(os.listdir(fd)) == children, 'metadata-membership-changed')
+                      bound(fd, parent, name, item)
+                  finally:
+                      fds.pop()  # Retire this original before its sole close attempt.
+                      try:
+                          os.close(fd)
+                      except OSError:
+                          need(False, 'metadata-directory-close')
+
+              for root in DATA_ROOTS:
+                  originals = []
+                  try:
+                      parent = os.open('/', flags)
+                      fds.append(parent)
+                      before = os.fstat(parent)
+                      protected(before, '/')
+                      originals.append((parent, None, '/', before))
+                      bound(parent, None, '/', before)
+                      parts, current = root.split('/')[1:], ''
+                      for name in parts[:-1]:
+                          current += '/' + name
+                          try:
+                              fd = os.open(name, flags, dir_fd=parent)
+                          except FileNotFoundError:
+                              count += 1
+                              need(count <= 32768, 'metadata-entry-depth-bound')
+                              break
+                          fds.append(fd)
+                          before = os.fstat(fd)
+                          protected(before, current)
+                          bound(fd, parent, name, before)
+                          originals.append((fd, parent, name, before))
+                          parent = fd
+                      else:
+                          visit(parent, parts[-1], root, 0)
+                      for fd, parent, name, before in originals:
+                          bound(fd, parent, name, before)
+                  finally:
+                      failed_close = False
+                      while fds:
+                          fd = fds.pop()
+                          try:
+                              os.close(fd)
+                          except OSError:
+                              failed_close = True
+                      need(not failed_close, 'metadata-directory-close')
+              return {'entries': count, 'unsafeCount': unsafe_count, 'unsafe': unsafe,
+                      'unsafeListTruncated': unsafe_count > len(unsafe)}
+
           need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0), 'root-credentials')
-          flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-          root = os.open('/', flags)
-          usr = share = None
-          try:
-              root_before = os.fstat(root)
-              protected(root_before, 'root')
-              need(identity(root_before) == identity(os.stat('/', follow_symlinks=False)), 'root-name')
-              usr = os.open('usr', flags, dir_fd=root)
-              usr_before = os.fstat(usr)
-              protected(usr_before, 'usr')
-              need(identity(usr_before) == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)), 'usr-name')
-              share = os.open('share', flags, dir_fd=usr)
-              before = os.fstat(share)
-              need(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
-                   and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777), 'share-policy', record(before))
-              need(identity(before) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)), 'share-name')
-              # This disposable image also supplies root-owned0777. Remove only
-              # group/other write on this same directory; never recurse or chown.
-              if stat.S_IMODE(before.st_mode) != 0o755:
-                  os.fchmod(share, 0o755)
-              after = os.fstat(share)
-              need(identity(after) == (before.st_dev, before.st_ino, before.st_mode & ~0o022,
-                                       before.st_uid, before.st_gid), 'share-mode-change', record(after))
-              need(identity(after) == identity(os.stat('share', dir_fd=usr, follow_symlinks=False)), 'share-name-after')
-              need(identity(root_before) == identity(os.fstat(root)) == identity(os.stat('/', follow_symlinks=False)), 'root-final')
-              need(identity(usr_before) == identity(os.fstat(usr))
-                   == identity(os.stat('usr', dir_fd=root, follow_symlinks=False)), 'usr-final')
-              receipt = json.dumps({'scope': 'exact-/usr/share-mode', 'before': record(before), 'after': record(after)},
-                                   sort_keys=True, separators=(',', ':'))
-              need(len(receipt.encode('ascii')) <= 512, 'receipt-bound')
-              print(receipt, flush=True)
-          finally:
-              for fd in (share, usr, root):
-                  if fd is not None: os.close(fd)
+          prepared = [prepare_directory(path) for path in sorted(PREPARE_DIRS, key=lambda path: (path.count('/'), path))]
+          metadata = metadata_preflight()
+          receipt = json.dumps({'scope': SCOPE, 'prepared': prepared, 'metadata': metadata,
+                                'runtimeAdmission': False}, sort_keys=True, separators=(',', ':'))
+          need(len(receipt.encode('ascii')) <= 65536, 'receipt-bound')
+          print(receipt, flush=True)
+          need(metadata['unsafeCount'] == 0, 'unhandled-unsafe-data-metadata')
           PY
       - name: Prepare a fresh bounded native owner
         id: prepare
@@ -296,7 +602,7 @@ jobs:
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ needs.compile.outputs.shell_artifact_id }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'e2bb9525e15c68cc79308faa205db1ac5879a8e2a6606c889a328109e433e29f'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '7bf1e2374b522a8d6a3391aa9efc906f9b65953d9462e07dadcf12dc1e1858e4'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

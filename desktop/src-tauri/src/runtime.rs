@@ -103,7 +103,8 @@ struct PayloadFile { path: String, sha256: String, size: u64 }
 
 fn unavailable() -> BridgeError { BridgeError::unavailable("The packaged runtime is absent, incompatible, or fails its trusted inventory.") }
 fn installed_passive_method(name: &str) -> bool {
-    matches!(name, "capabilities" | "catalog" | "project.snapshot" | "config.validate" | "config.suggest" | "config.preview")
+    matches!(name, "capabilities" | "catalog" | "project.snapshot" | "config.validate" | "config.suggest" | "config.preview"
+        | "environment.requirements" | "github.setup.propose")
 }
 fn deadline(end: Instant) -> Result<(), BridgeError> { if Instant::now() >= end { Err(BridgeError::timeout()) } else { Ok(()) } }
 fn digest(bytes: &[u8]) -> String { hex(&Sha256::digest(bytes)) }
@@ -329,7 +330,7 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         let profile = self.passive_installed_profile()?;
         if !installed_passive_method(method.name()) {
-            return Err(BridgeError::unavailable("This installed desktop profile supports only capabilities, catalog, project.snapshot, config.validate, config.suggest and config.preview."));
+            return Err(BridgeError::unavailable("This installed desktop profile supports only capabilities, catalog, project.snapshot, config.validate, config.suggest, config.preview, environment.requirements and github.setup.propose."));
         }
         originals.inspect_once(profile, end, stop)
     }
@@ -653,15 +654,17 @@ pub(crate) fn assert_packaged_shell_allowlist_contract() {
     assert!(matches!(runtime.passive_installed, PassiveInstalledSelection::CandidateA));
     let bindings = PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
     assert_eq!(runtime.project_selection_profile_available(), bindings);
-    for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview"] {
+    for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
+        "environment.requirements", "github.setup.propose"] {
         assert_eq!(runtime.passive_method_available(name), bindings);
     }
-    for name in ["environment.requirements", "github.setup.propose", "release.version.observe", "config.save", "unknown"] {
+    for name in ["release.version.observe", "metadata.text.observe", "metadata.text.validate", "credentials.assess",
+        "artifacts.candidate.observe", "config.save", "unknown"] {
         assert!(!runtime.passive_method_available(name));
     }
     let mut originals = crate::installed_runtime::PassiveRuntimeSlots::new();
     let (_sender, stop) = tokio::sync::watch::channel(false);
-    assert!(runtime.resolve_passive_installed(crate::protocol::Method::EnvironmentRequirements, &mut originals, Instant::now(), &stop).is_err());
+    assert!(runtime.resolve_passive_installed(crate::protocol::Method::ReleaseVersionObserve, &mut originals, Instant::now(), &stop).is_err());
     assert!(originals.never_started());
     assert!(runtime.resolve(Instant::now()).is_err());
     assert!(runtime.resolve_edit(Instant::now()).is_err());
@@ -671,12 +674,14 @@ pub(crate) fn assert_packaged_shell_allowlist_contract() {
 mod tests {
     use super::*;
     #[test]
-    fn installed_allowlist_is_exactly_the_read_only_project_draft_services() {
-        for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview"] {
+    fn installed_allowlist_is_exactly_the_read_only_project_draft_and_guidance_services() {
+        for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
+            "environment.requirements", "github.setup.propose"] {
             assert!(installed_passive_method(name));
         }
-        for name in ["", "unknown", "config.save", "config.apply", "config.initialize", "github.setup.propose", "release.version.observe",
-            "environment.requirements", "project.snapshot ", "Config.Validate"] {
+        for name in ["", "unknown", "config.save", "config.apply", "config.initialize", "release.version.observe",
+            "metadata.text.observe", "metadata.text.validate", "credentials.assess", "artifacts.candidate.observe",
+            "project.snapshot ", "Config.Validate", "environment.requirements ", "GitHub.Setup.Propose"] {
             assert!(!installed_passive_method(name));
         }
     }
@@ -749,7 +754,7 @@ mod tests {
         assert!(candidate.resolve(Instant::now()).is_err());
         let mut originals = crate::installed_runtime::PassiveRuntimeSlots::new();
         let (_sender, stop) = tokio::sync::watch::channel(false);
-        assert!(candidate.resolve_passive_installed(crate::protocol::Method::EnvironmentRequirements, &mut originals, Instant::now(), &stop).is_err());
+        assert!(candidate.resolve_passive_installed(crate::protocol::Method::ReleaseVersionObserve, &mut originals, Instant::now(), &stop).is_err());
         assert!(originals.never_started()); // An unselected method cannot begin inspection.
         let profile = candidate.passive_installed_profile();
         assert_eq!(profile.is_ok(), PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR));

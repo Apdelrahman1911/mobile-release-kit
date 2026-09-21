@@ -349,14 +349,17 @@ pub(crate) fn assert_native_capability_intersection_contract() {
             {"method": "config.suggest", "available": false, "reason": "core refusal"},
             {"method": "config.preview", "available": true, "reason": "implemented"},
             {"method": "environment.requirements", "available": true, "reason": "implemented"},
+            {"method": "github.setup.propose", "available": false, "reason": "core refusal"},
+            {"method": "release.version.observe", "available": true, "reason": "implemented"},
             {"method": "future.method", "available": true, "reason": "implemented"}
         ]});
     let result = native_capabilities(input.clone(), |name|
-        matches!(name, "capabilities" | "catalog" | "project.snapshot" | "config.validate" | "config.suggest" | "config.preview"));
+        matches!(name, "capabilities" | "catalog" | "project.snapshot" | "config.validate" | "config.suggest" | "config.preview"
+            | "environment.requirements" | "github.setup.propose"));
     assert_eq!(result["coreVersion"], input["coreVersion"]);
     assert_eq!(result["actions"], input["actions"]);
-    for index in 0..6 { assert_eq!(result["methods"][index], input["methods"][index]); }
-    for index in [6, 7] {
+    for index in 0..8 { assert_eq!(result["methods"][index], input["methods"][index]); }
+    for index in [8, 9] {
         assert_eq!(result["methods"][index]["available"], false);
         assert_eq!(result["methods"][index]["method"], input["methods"][index]["method"]);
         assert_eq!(result["methods"][index]["reason"], "This function is not available in the current desktop runtime profile.");

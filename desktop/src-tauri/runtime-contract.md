@@ -6,9 +6,10 @@ backend, or replacement for the audited CLI's ownership services.
 
 ## Current executable scope
 
-The eight passive renderer commands are `app_info`, `choose_project`,
+The installed passive renderer commands are `app_info`, `choose_project`,
 `project_snapshot {projectId}`, `catalog`, `validate_config {draft}`,
-`suggest_config {hints}`, `preview_config {base, draft}`, and
+`suggest_config {hints}`, `preview_config {base, draft}`,
+`environment_requirements {draft, platform, operation}`, and
 `propose_github_setup {draft, toolingRepository, toolingSha, suppliedSnapshot}`.
 Snapshot and draft validation return the core result without inventing verified
 facts or saving files. Project IDs refer to Rust-held native picker selections;
@@ -30,14 +31,18 @@ manifest/protocol and platform checks remain mandatory, without an environment
 or renderer override. Other platforms/profiles do not gain production launch.
 
 That installed profile admits exactly `capabilities`, `catalog`,
-`project.snapshot`, `config.validate`, `config.suggest` and `config.preview`.
+`project.snapshot`, `config.validate`, `config.suggest`, `config.preview`,
+`environment.requirements` and `github.setup.propose`.
 The native bridge intersects core availability with this allowlist. A separate
 project-only gate uses the existing document/picker/source/registry chain, not
 the closed credential/asset-session grant. `app_info.projectSelection` is
 bounded availability DATA, not live admission; absent/malformed data disables
 the UI action. Snapshots are bounded named observations, not selection-to-query
 custody, saved-base authority or an atomic project snapshot. Drafts do not save.
-Installed-shell/project-flow native acceptance is still pending. These changes
+The two guidance methods use the current draft: prerequisites do not inspect
+installed tools, and workflow proposals do not observe or modify a repository,
+resolve a remote ref, contact GitHub or grant Apply authority.
+Installed-shell/project/guidance native acceptance is still pending. These changes
 do not qualify a standalone installer, general Linux, macOS or Windows. There
 is no source, PATH, ambient-Python, browser-preview or synthetic-result fallback.
 `inspect_bundle_for_packaging` is explicitly **unqualified preparation work**;
