@@ -648,16 +648,19 @@ struct AndroidBuildRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for AndroidBuildRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.android_build_relay_lost(); } }
 }
+#[deny(unused_variables, unused_assignments)]
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
     let mut revisions = edits.subscribe();
     let mut assets = document.subscribe();
     let mut diagnostics = document.environment_diagnostics_subscribe();
     let mut preflight = document.offline_preflight_subscribe();
-    let mut preflight_guard = PreflightRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
+    let preflight_guard = PreflightRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
     let mut android_build = document.android_build_subscribe();
-    let mut android_build_guard = AndroidBuildRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
+    let android_build_guard = AndroidBuildRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
     let (start, enter) = oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
+        let mut preflight_guard = preflight_guard;
+        let mut android_build_guard = android_build_guard;
         if enter.await.is_err() { return; }
         let mut metadata_revision = None;
         let mut diagnostics_revision = None;

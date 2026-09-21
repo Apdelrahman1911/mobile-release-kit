@@ -45,6 +45,7 @@ pub(crate) enum Purpose { Full, Signing, Store }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(test, derive(Debug))]
 pub(crate) enum Reason {
     None, Closed, Unqualified, UnsupportedPlatform, UnsupportedFilesystem,
     UnsupportedFormat, InvalidRequest, Busy, SourceRefused, SourceChanged,

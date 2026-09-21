@@ -155,8 +155,14 @@ fn android_retirement_never_hides_status_stop_or_lends_offline_fixture_authority
 #[test]
 fn android_relay_loss_and_both_quit_backends_keep_originals_in_finality() {
     let relay = section(SHELL, "fn start_relay(", "\nasync fn settle_relay(");
-    for before in ["document.android_build_subscribe()", "let mut android_build_guard = AndroidBuildRelayGuard"] {
-        assert!(relay.find(before).unwrap() < relay.find("tauri::async_runtime::spawn(").unwrap());
+    let spawn = relay.find("tauri::async_runtime::spawn(async move {").unwrap();
+    let enter = relay.find("enter.await").unwrap();
+    for before in ["document.android_build_subscribe()", "let preflight_guard = PreflightRelayGuard", "let android_build_guard = AndroidBuildRelayGuard"] {
+        assert!(relay.find(before).unwrap() < spawn);
+    }
+    for binding in ["let mut preflight_guard = preflight_guard;", "let mut android_build_guard = android_build_guard;"] {
+        let captured = relay.find(binding).unwrap();
+        assert!(spawn < captured && captured < enter);
     }
     assert!(section(SHELL, "impl Drop for AndroidBuildRelayGuard", "\nfn start_relay(").contains("self.document.android_build_relay_lost()"));
     for required in ["android_build_revision != Some(status.status_revision)", "crate::android_build_protocol::EVENT", "document.android_build_relay_lost()",

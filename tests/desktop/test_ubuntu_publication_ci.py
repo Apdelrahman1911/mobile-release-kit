@@ -565,11 +565,11 @@ class PublisherCI(unittest.TestCase):
             (root / "public").mkdir()
             argv = ["/inert-tool"]
             outcome = subprocess.CompletedProcess(argv, 7, b"synthetic output", b"synthetic failure")
-            with patch.object(S.time, "monotonic", return_value=100), patch.object(S.D, "write", wraps=S.D.write):
+            with patch.object(S.time, "monotonic", return_value=100) as clock, patch.object(S.D, "write", wraps=S.D.write):
                 owner = unittest.mock.Mock(return_value=outcome)
                 check = S.Check(root, owner, deadline=120)
                 self.assertEqual(check.end, 120)
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(ValueError, r"failed \(exitCode=7, endpointExpired=False\)"):
                     check.command("failed", argv, {}, root)
                 self.assertEqual(owner.call_count, 1)
                 self.assertEqual((root / "public/failed.stderr").read_bytes(), b"synthetic failure")
@@ -582,6 +582,21 @@ class PublisherCI(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     expired.command("expired", argv, {}, root)
                 self.assertEqual(owner.call_count, 1)
+                def returned_late(*args, **kwargs):
+                    clock.return_value = 121
+                    return subprocess.CompletedProcess(argv, 0, b"synthetic late output", b"")
+                late_owner = unittest.mock.Mock(side_effect=returned_late)
+                late = S.Check(root, late_owner, deadline=120)
+                with self.assertRaisesRegex(ValueError, r"late \(exitCode=0, endpointExpired=True\)"):
+                    late.command("late", argv, {}, root)
+                self.assertEqual(late_owner.call_count, 1)
+                self.assertEqual((root / "public/late.stdout").read_bytes(), b"synthetic late output")
+                self.assertEqual(late.commands[0]["exitCode"], 0)
+                self.assertTrue(late.commands[0]["ordinaryOwnerReturned"])
+                self.assertTrue(late.failed)
+                with self.assertRaises(ValueError):
+                    late.command("late-must-not-launch", argv, {}, root)
+                self.assertEqual(late_owner.call_count, 1)
 
     def test_compiler_hardlink_exports_fresh_verified_data_only(self):
         with tempfile.TemporaryDirectory(prefix="mrk-publisher-copy-data-") as name:

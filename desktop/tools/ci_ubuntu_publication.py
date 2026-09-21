@@ -894,7 +894,9 @@ class Check:
             D.write(self.root / "public" / (label + "." + suffix), raw)
         self.commands.append({"phase": label, "argv": argv, "exitCode": result.returncode,
                               "timeoutSeconds": remaining, "ordinaryOwnerReturned": True})
-        D.need(result.returncode in codes and time.monotonic() < self.end, "Original command failed or finished late: " + label)
+        on_time = time.monotonic() < self.end
+        D.need(result.returncode in codes and on_time, "Original command failed or finished late: " + label
+               + f" (exitCode={result.returncode}, endpointExpired={not on_time})")
         self.failed = False
         return result
 
@@ -2662,10 +2664,10 @@ def verify_installed_shell_compile():
         own_generated("desktop/node_modules")
         npm_tree = shell_generated_tree(source / "desktop/node_modules", links=True)
         source_check("acquired")
-        native, native_bindings = shell_native_inputs(check, work, environment)
         desktop = source / "desktop"
         check.command("typescript-no-emit", [node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"],
                       environment, desktop, timeout=60)
+        native, native_bindings = shell_native_inputs(check, work, environment)
         check.command("vite-assets", [node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
                       str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
                       environment, desktop, timeout=90)

@@ -615,6 +615,17 @@ impl Observation {
         let step = {
             let Some(mut r) = self.record() else { return; };
             if !r.attached || !r.loaded || r.pending.is_some() { return; }
+            if r.step == Step::Bootstrap {
+                // Observe the same owners after start_relay returned and its
+                // barrier opened. Teardown may legitimately report document loss.
+                let state = app.state::<super::ShellState>();
+                match (state.bridge.preflight.original_for_test().observed_document_lost_for_test(),
+                       state.bridge.android_build.original_for_test().observed_document_lost_for_test()) {
+                    (Some(false), Some(false)) => {},
+                    (Some(true), _) | (_, Some(true)) => { self.fail(); return; },
+                    _ => return, // No absent/busy/unknown observation becomes false.
+                }
+            }
             if r.step == Step::Bootstrap && self.case == Case::Positive {
                 if !r.info || !r.catalog { return; }
                 r.step = Step::Environment;

@@ -669,6 +669,11 @@ impl SavedCommandOwner {
         } else if !r.last.as_ref().is_some_and(|last| last.operation_id == operation && last.owner_generation == generation) { return Err(self.inner.domain.invalid_owner()); }
         drop(r); self.status(gate)
     }
+    #[cfg(test)]
+    pub(crate) fn observed_document_lost_for_test(&self) -> Option<bool> {
+        // Original startup DATA only; no reconciliation, mutation or blocking.
+        self.inner.registry.try_lock().ok().map(|registry| registry.document_lost)
+    }
     pub(crate) fn document_lost(&self) {
         let mut r = self.inner.lock(); if r.document_lost { return; } r.document_lost = true;
         self.inner.retire_prepared(&mut r, Reason::DocumentLost);
