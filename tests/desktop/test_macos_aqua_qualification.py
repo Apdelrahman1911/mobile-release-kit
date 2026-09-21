@@ -3,6 +3,7 @@
 No core owner is imported, no command/native fixture is run, and no candidate
 process or filesystem readback is substituted for required hosted Aqua cases.
 """
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 import importlib.util
@@ -76,7 +77,127 @@ class InertFixtures:
         return {"inertTestOnly": True}
 
 
+@contextmanager
+def inert_created_directory(gid=GID):
+    """Every filesystem entry is replaced; tokens cannot name real FDs."""
+    fixtures = M.Fixtures(BINDING, UID, GID)
+    parent, token = object(), object()
+    state = SimpleNamespace(
+        info=dict(st_dev=7, st_ino=100, st_mode=stat.S_IFDIR | 0o700,
+                  st_uid=UID, st_gid=gid, st_nlink=2, st_size=4096,
+                  st_mtime_ns=100, st_ctime_ns=100),
+        named_changes={}, events=[])
+
+    def opened(name, directory_parent, *, directory):
+        assert name == "fresh" and directory_parent is parent and directory
+        fixtures.fds.add(token)
+        state.events.append("open")
+        return token
+
+    def info(fd):
+        assert fd is token
+        return SimpleNamespace(**state.info)
+
+    def named(name, *, dir_fd, follow_symlinks):
+        assert name == "fresh" and dir_fd is parent and follow_symlinks is False
+        state.events.append("named")
+        return SimpleNamespace(**{**state.info, **state.named_changes})
+
+    def chown(fd, uid, group):
+        assert fd is token and uid == -1 and group == GID
+        state.events.append("chown")
+        state.info.update(st_gid=group, st_ctime_ns=101)
+
+    def chmod(fd, mode):
+        assert fd is token and mode == 0o755 and state.info["st_gid"] == GID
+        state.events.append("chmod")
+        state.info.update(st_mode=stat.S_IFDIR | mode, st_ctime_ns=102)
+
+    with patch.object(M.os, "mkdir") as mkdir, \
+            patch.object(fixtures, "_open", side_effect=opened) as opening, \
+            patch.object(M.os, "stat", side_effect=named), \
+            patch.object(M.os, "fstat", side_effect=info), \
+            patch.object(M.os, "fchown", side_effect=chown) as changing_group, \
+            patch.object(M.os, "fchmod", side_effect=chmod) as changing_mode:
+        yield SimpleNamespace(fixtures=fixtures, parent=parent, token=token, state=state,
+                              mkdir=mkdir, opening=opening, chown=changing_group, chmod=changing_mode)
+
+
 class AquaDataTests(unittest.TestCase):
+    def test_new_directory_group_normalization_precedes_widening(self):
+        for gid in (GID, 0):
+            for mode in (0o700, 0o755):
+                with self.subTest(gid=gid, mode=mode), inert_created_directory(gid) as f:
+                    self.assertIs(f.fixtures._mkdir(f.parent, "fresh", mode), f.token)
+                    f.mkdir.assert_called_once_with("fresh", 0o700, dir_fd=f.parent)
+                    self.assertEqual(f.fixtures.fds, {f.token})
+                    self.assertEqual(f.chown.call_count, int(gid != GID))
+                    self.assertEqual(f.chmod.call_count, int(mode != 0o700))
+                    events = ["open", "named"] + (["chown"] if gid != GID else []) + ["named"]
+                    if mode != 0o700:
+                        events += ["chmod", "named"]
+                    self.assertEqual(f.state.events, events)
+                    self.assertEqual(f.state.info["st_gid"], GID)
+
+    def test_new_directory_refuses_collision_and_untrusted_precheck(self):
+        original = FileExistsError("occupied")
+        with inert_created_directory(0) as f:
+            f.mkdir.side_effect = original
+            with self.assertRaises(FileExistsError) as caught:
+                f.fixtures._mkdir(f.parent, "fresh", 0o755)
+            self.assertIs(caught.exception, original)
+            f.opening.assert_not_called()
+            f.chown.assert_not_called()
+            f.chmod.assert_not_called()
+            self.assertEqual(f.fixtures.fds, set())
+        for where, changes in (("info", {"st_uid": 0}),
+                               ("info", {"st_mode": stat.S_IFDIR | 0o755}),
+                               ("info", {"st_mode": stat.S_IFLNK | 0o700}),
+                               ("named_changes", {"st_ino": 101}),
+                               ("named_changes", {"st_ctime_ns": 101})):
+            with self.subTest(where=where, changes=changes), inert_created_directory(0) as f:
+                getattr(f.state, where).update(changes)
+                with self.assertRaisesRegex(M.Refused, "^fixture-created-directory-custody$"):
+                    f.fixtures._mkdir(f.parent, "fresh", 0o755)
+                f.chown.assert_not_called()
+                f.chmod.assert_not_called()
+                self.assertEqual(f.fixtures.fds, {f.token})
+
+    def test_new_directory_failed_normalization_retains_original_close(self):
+        original = PermissionError("group change refused")
+        with inert_created_directory(0) as f:
+            f.chown.side_effect = original
+            with self.assertRaises(PermissionError) as caught:
+                f.fixtures._mkdir(f.parent, "fresh", 0o755)
+            self.assertIs(caught.exception, original)
+            f.chown.assert_called_once_with(f.token, -1, GID)
+            f.chmod.assert_not_called()
+            self.assertEqual(f.fixtures.fds, {f.token})
+            with patch.object(M.os, "close") as close:
+                f.fixtures.close()
+                f.fixtures.close()
+                close.assert_called_once_with(f.token)
+                self.assertEqual(f.fixtures.fds, set())
+
+    def test_new_directory_postcheck_refuses_group_identity_and_namespace_changes(self):
+        for where, changes in (("info", {}),  # Successful return but unchanged group.
+                               ("info", {"st_gid": GID, "st_dev": 8}),
+                               ("info", {"st_gid": GID, "st_ino": 101}),
+                               ("info", {"st_gid": GID, "st_uid": 0}),
+                               ("info", {"st_gid": GID, "st_mode": stat.S_IFDIR | 0o755}),
+                               ("named_changes", {"st_ino": 101})):
+            with self.subTest(where=where, changes=changes), inert_created_directory(0) as f:
+                def change(*_):
+                    if where == "named_changes":
+                        f.state.info["st_gid"] = GID
+                    getattr(f.state, where).update(changes)
+                f.chown.side_effect = change
+                with self.assertRaises(M.Refused):
+                    f.fixtures._mkdir(f.parent, "fresh", 0o755)
+                f.chown.assert_called_once_with(f.token, -1, GID)
+                f.chmod.assert_not_called()
+                self.assertEqual(f.fixtures.fds, {f.token})
+
     def test_literal_data_and_protocol_distinctions(self):
         self.assertEqual((len(M.CONFIG), M.digest(M.CONFIG)), (684, "0c47aaffe3971b122f21ebddf8070ab29014c4b7c79a56e23335ed110f1e6acc"))
         self.assertEqual((len(M.VERSION), len(M.IGNORE_PREFIX), len(M.IGNORE_RULES), len(M.STALE)), (34, 40, 208, 26))
