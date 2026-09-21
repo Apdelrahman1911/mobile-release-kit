@@ -496,6 +496,119 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                 self.assertEqual(filesystem.chmods, [])
                 self.assertEqual(original.xattrs[DEFAULT_ACL], bare)
 
+    def test_share_default_refusal_shape_is_bounded_private_and_never_adds_authority(self):
+        def entry(tag, permissions=7, principal=0xffffffff):
+            return (tag.to_bytes(2, "little") + permissions.to_bytes(2, "little")
+                    + principal.to_bytes(4, "little"))
+
+        header = b"\x02\0\0\0"
+        named = header + b"".join((entry(1), entry(2, principal=0x11223344),
+                                   entry(4), entry(16), entry(32)))
+        expected_named = [["user-object", 7, "undefined"], ["user", 7, "defined"],
+                          ["group-object", 7, "undefined"], ["mask", 7, "undefined"],
+                          ["other", 7, "undefined"]]
+        maximum_entries = [["user-object", 7, "undefined"],
+                           *[["user", 7, "defined"] for _ in range(12)],
+                           ["group-object", 7, "undefined"], ["mask", 7, "undefined"],
+                           ["other", 7, "undefined"]]
+        maximum = header + entry(1) + b"".join(entry(2, principal=0x11223344 + i)
+                                              for i in range(12)) + entry(4) + entry(16) + entry(32)
+        odd_entries = [["unknown", "invalid", "defined"], ["group", 5, "undefined"]]
+        odd = header + entry(64, 128, 0x55667788) + entry(8, 5)
+        # "complete" describes only this bounded structural transcription,
+        # never ACL validity or permission to remove even an all-seven named ACL.
+        cases = (
+            (named, 44, True, True, 5, expected_named, True, None),
+            (maximum, 132, True, True, 16, maximum_entries, True, None),
+            (maximum + entry(32), 140, True, True, 17, maximum_entries, False, "entry-bound"),
+            (odd, 20, True, True, 2, odd_entries, True, None),
+            (header, 4, True, True, 0, [], True, None),
+            (b"", 0, None, False, None, [], False, "header-short"),
+            (header + b"x", 5, True, False, None, [], False, "entry-alignment"),
+            (b"\x03" + named[1:], 44, False, True, 5, [], False, "version"),
+            (b"private-default-marker" + b"x" * 65516, None, None, False, None, [], False, "byte-bound"),
+            (bytearray(named), None, None, False, None, [], False, "not-bytes"),
+            ("private-default-marker", None, None, False, None, [], False, "not-bytes"),
+            (None, None, None, False, None, [], False, "not-bytes"),
+        )
+        for value, length, version, aligned, count, entries, complete, reason in cases:
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.node("/usr/share")
+            original.st_mode = stat.S_IFDIR | 0o777
+            original.xattrs[DEFAULT_ACL] = value
+            before = vars(filesystem.snapshot(original)).copy()
+            with self.subTest(reason=reason, count=count, type=type(value).__name__):
+                rows = self.refused(self.run_inline(filesystem))
+                observed = rows[-1]["observed"]
+                self.assertEqual(rows[-1]["failedCheck"], "guarded-xattr")
+                self.assertEqual((observed["path"], observed["attribute"], observed["phase"], observed["result"]),
+                                 ("/usr/share", DEFAULT_ACL, "share-default-before", "present"))
+                self.assertEqual(observed["defaultAclShape"], {
+                    "byteLength": length, "version2": version, "aligned": aligned, "entryCount": count,
+                    "entries": entries, "complete": complete, "reason": reason,
+                })
+                self.assertFalse(observed["bindingUnknown"] or observed["cleanupUnknown"])
+                self.assertIs(observed["complete"], False)
+                self.assertNotIn("defaultAclRemoval", rows[-1])
+                self.assertEqual([call[3] for call in filesystem.xattr_calls if call[1] == "/usr/share"],
+                                 [ACCESS_ACL, DEFAULT_ACL])
+                self.assertEqual(filesystem.xattr_removals, [])
+                self.assertEqual(filesystem.chmods, [])
+                self.assertEqual(filesystem.chowns, [])
+                self.assertEqual(vars(filesystem.snapshot(original)), before)
+                self.assertEqual(original.xattrs[DEFAULT_ACL], value)
+                text = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+                for private in ("private-default-marker", "287454020", "1432778632", "11223344", "55667788", "ffffffff"):
+                    self.assertNotIn(private, text)
+                bounded = {**rows[-1], "defaultAclRemoval": {"attempted": True, "established": False},
+                           "cleanupUnknown": True}
+                bounded["observed"] = {**observed, "original": [2**64 - 1] * 9}
+                self.assertLessEqual(len(json.dumps(bounded, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
+
+        for change in ("binding", "close"):
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.node("/usr/share")
+            original.st_mode = stat.S_IFDIR | 0o777
+            original.xattrs[DEFAULT_ACL] = named
+            before = list(vars(filesystem.snapshot(original)).values())
+
+            def hook(operation, path, count):
+                if path == "/usr/share":
+                    if change == "binding" and operation == "getxattr" and count == 2:
+                        original.st_ctime_ns += 1
+                    if change == "close" and operation == "close" and count == 1:
+                        raise OSError(errno.EIO, "private-close-marker")
+
+            filesystem.hook = hook
+            with self.subTest(change=change):
+                rows = self.refused(self.run_inline(filesystem))
+                observed = rows[-1]["observed"]
+                self.assertEqual(observed["result"], "present")
+                self.assertEqual(observed["original"], before)
+                self.assertEqual(observed["defaultAclShape"]["entries"], expected_named)
+                self.assertEqual(observed["bindingUnknown"], change == "binding")
+                self.assertEqual(observed["cleanupUnknown"], change == "close")
+                self.assertEqual(filesystem.xattr_removals, [])
+                self.assertEqual(filesystem.chmods, [])
+                self.assertNotIn("private-close-marker", json.dumps(rows))
+
+        for path, attribute in (("/usr/share", ACCESS_ACL), ("/etc/fonts", DEFAULT_ACL)):
+            filesystem = DirectoryMetadataOS()
+            filesystem.node(path).xattrs[attribute] = named
+            with self.subTest(off_target=path, attribute=attribute):
+                rows = self.refused(self.run_inline(filesystem))
+                self.assertNotIn("defaultAclShape", json.dumps(rows))
+                self.assertEqual(filesystem.xattr_removals, [])
+        for value in (None, *UNIVERSAL_DEFAULT_ACLS):
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.node("/usr/share")
+            original.st_mode = stat.S_IFDIR | 0o777
+            if value is not None:
+                original.xattrs[DEFAULT_ACL] = value
+            result = self.run_inline(filesystem)
+            self.assertIsNone(result[2])
+            self.assertNotIn("defaultAclShape", json.dumps(result[1]))
+
     def test_share_default_access_authority_and_unknown_queries_block_removal(self):
         cases = [(ACCESS_ACL, b""), (ACCESS_ACL, b"private-access-marker")]
         cases += [(attribute, OSError(number, "private-xattr-error"))

@@ -118,6 +118,12 @@ jobs:
                           _first_removal_refusal['cleanupUnknown'] = True
                       payload = {**_first_removal_refusal, 'defaultAclRemoval': dict(DEFAULT_ACL_REMOVAL)}
                   diagnostic = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+                  if (len(diagnostic.encode('ascii')) > 2048 and isinstance(payload['observed'], dict)
+                          and 'defaultAclShape' in payload['observed']):
+                      # An optional structure summary must never displace the first refusal.
+                      payload = {**payload, 'observed': {key: value for key, value in payload['observed'].items()
+                                                        if key != 'defaultAclShape'}}
+                      diagnostic = json.dumps(payload, sort_keys=True, separators=(',', ':'))
                   if len(diagnostic.encode('ascii')) > 2048 and DEFAULT_ACL_REMOVAL['attempted']:
                       diagnostic = json.dumps({**payload, 'observed': None, 'truncated': True},
                                               sort_keys=True, separators=(',', ':'))
@@ -260,6 +266,44 @@ jobs:
               need(name == 'share' and [entry[3] for entry in ancestors] == ['/', '/usr']
                    and ancestors[-1][0] == parent, 'fixed-share-default-target')
 
+              def default_acl_shape(value):
+                  # Structural decoding only; no semantic ACL validity or removal authority.
+                  shape = {'byteLength': None, 'version2': None, 'aligned': False,
+                           'entryCount': None, 'entries': [], 'complete': False, 'reason': None}
+                  if type(value) is not bytes:
+                      shape['reason'] = 'not-bytes'
+                      return shape
+                  length = len(value)
+                  if length > 65536:
+                      shape['reason'] = 'byte-bound'
+                      return shape
+                  shape['byteLength'] = length
+                  if length < 4:
+                      shape['reason'] = 'header-short'
+                      return shape
+                  shape['version2'] = int.from_bytes(value[:4], 'little') == 2
+                  shape['aligned'] = (length - 4) % 8 == 0
+                  if shape['aligned']:
+                      shape['entryCount'] = (length - 4) // 8
+                  if not shape['aligned']:
+                      shape['reason'] = 'entry-alignment'
+                      return shape
+                  if not shape['version2']:
+                      shape['reason'] = 'version'
+                      return shape
+                  labels = {1: 'user-object', 2: 'user', 4: 'group-object',
+                            8: 'group', 16: 'mask', 32: 'other'}
+                  for offset in range(4, 4 + min(shape['entryCount'], 16) * 8, 8):
+                      tag = int.from_bytes(value[offset:offset + 2], 'little')
+                      permissions = int.from_bytes(value[offset + 2:offset + 4], 'little')
+                      undefined = int.from_bytes(value[offset + 4:offset + 8], 'little') == 0xffffffff
+                      shape['entries'].append([labels.get(tag, 'unknown'),
+                                               permissions if permissions <= 7 else 'invalid',
+                                               'undefined' if undefined else 'defined'])
+                  shape['complete'] = shape['entryCount'] <= 16
+                  shape['reason'] = None if shape['complete'] else 'entry-bound'
+                  return shape
+
               def failure(attribute, phase, *, result='binding-unproven', number=None,
                           probe=False, unknown=True, truncated=False):
                   return XattrFailure('/usr/share', before, phase, attribute=attribute,
@@ -308,7 +352,9 @@ jobs:
                       if not allowed:
                           error = failure(attribute, phase, result='present', probe=True, unknown=False,
                                           truncated=type(value) is not bytes or len(value) > 65536)
-                      del value  # Never retain or print attribute bytes, size or principals.
+                          if permit_universal and attribute == default:
+                              error.observed['defaultAclShape'] = default_acl_shape(value)
+                      del value  # Never retain or print raw attribute bytes or principal IDs.
                   bound, number, first = binding(item, phase)
                   if error is not None:
                       error.observed['bindingUnknown'] = not bound
@@ -987,6 +1033,12 @@ jobs:
                           _first_removal_refusal['cleanupUnknown'] = True
                       payload = {**_first_removal_refusal, 'defaultAclRemoval': dict(DEFAULT_ACL_REMOVAL)}
                   diagnostic = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+                  if (len(diagnostic.encode('ascii')) > 2048 and isinstance(payload['observed'], dict)
+                          and 'defaultAclShape' in payload['observed']):
+                      # An optional structure summary must never displace the first refusal.
+                      payload = {**payload, 'observed': {key: value for key, value in payload['observed'].items()
+                                                        if key != 'defaultAclShape'}}
+                      diagnostic = json.dumps(payload, sort_keys=True, separators=(',', ':'))
                   if len(diagnostic.encode('ascii')) > 2048 and DEFAULT_ACL_REMOVAL['attempted']:
                       diagnostic = json.dumps({**payload, 'observed': None, 'truncated': True},
                                               sort_keys=True, separators=(',', ':'))
@@ -1129,6 +1181,44 @@ jobs:
               need(name == 'share' and [entry[3] for entry in ancestors] == ['/', '/usr']
                    and ancestors[-1][0] == parent, 'fixed-share-default-target')
 
+              def default_acl_shape(value):
+                  # Structural decoding only; no semantic ACL validity or removal authority.
+                  shape = {'byteLength': None, 'version2': None, 'aligned': False,
+                           'entryCount': None, 'entries': [], 'complete': False, 'reason': None}
+                  if type(value) is not bytes:
+                      shape['reason'] = 'not-bytes'
+                      return shape
+                  length = len(value)
+                  if length > 65536:
+                      shape['reason'] = 'byte-bound'
+                      return shape
+                  shape['byteLength'] = length
+                  if length < 4:
+                      shape['reason'] = 'header-short'
+                      return shape
+                  shape['version2'] = int.from_bytes(value[:4], 'little') == 2
+                  shape['aligned'] = (length - 4) % 8 == 0
+                  if shape['aligned']:
+                      shape['entryCount'] = (length - 4) // 8
+                  if not shape['aligned']:
+                      shape['reason'] = 'entry-alignment'
+                      return shape
+                  if not shape['version2']:
+                      shape['reason'] = 'version'
+                      return shape
+                  labels = {1: 'user-object', 2: 'user', 4: 'group-object',
+                            8: 'group', 16: 'mask', 32: 'other'}
+                  for offset in range(4, 4 + min(shape['entryCount'], 16) * 8, 8):
+                      tag = int.from_bytes(value[offset:offset + 2], 'little')
+                      permissions = int.from_bytes(value[offset + 2:offset + 4], 'little')
+                      undefined = int.from_bytes(value[offset + 4:offset + 8], 'little') == 0xffffffff
+                      shape['entries'].append([labels.get(tag, 'unknown'),
+                                               permissions if permissions <= 7 else 'invalid',
+                                               'undefined' if undefined else 'defined'])
+                  shape['complete'] = shape['entryCount'] <= 16
+                  shape['reason'] = None if shape['complete'] else 'entry-bound'
+                  return shape
+
               def failure(attribute, phase, *, result='binding-unproven', number=None,
                           probe=False, unknown=True, truncated=False):
                   return XattrFailure('/usr/share', before, phase, attribute=attribute,
@@ -1177,7 +1267,9 @@ jobs:
                       if not allowed:
                           error = failure(attribute, phase, result='present', probe=True, unknown=False,
                                           truncated=type(value) is not bytes or len(value) > 65536)
-                      del value  # Never retain or print attribute bytes, size or principals.
+                          if permit_universal and attribute == default:
+                              error.observed['defaultAclShape'] = default_acl_shape(value)
+                      del value  # Never retain or print raw attribute bytes or principal IDs.
                   bound, number, first = binding(item, phase)
                   if error is not None:
                       error.observed['bindingUnknown'] = not bound
