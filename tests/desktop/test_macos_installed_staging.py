@@ -353,6 +353,63 @@ class MacInstalledData(unittest.TestCase):
             with self.assertRaises(TOOL.Refused):
                 TOOL.select_installer_log(bad, binding)
 
+    def test_acl_failure_diagnostic_is_finite_and_cannot_be_a_result(self):
+        binding = TOOL.installer_log_binding(log_args())
+        marker = b"MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role=input-directory;phase=acl-entry-present;result=1;call=0;errno=0;freeCall=0;freeErrno=0\n"
+        selected, detail = TOOL.select_installer_log(b"PackageKit: " + marker, binding)
+        self.assertEqual(selected, b"PackageKit: " + marker)
+        self.assertEqual(detail["markerCounts"]["acl-diagnostic"], 1)
+        self.assertEqual(detail["resultMarkerState"], "missing")
+        self.assertEqual(detail["markerCounts"]["ordinary-result"], 0)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.installer_record(selected)
+        for bad in (b"prefix" + marker, marker.replace(b"input-directory", b"arbitrary-path"),
+                    marker.replace(b"acl-entry-present", b"unknown-api"), marker.replace(b"errno=0;", b"errno=private;"),
+                    marker.replace(b"result=1;", b"result=123456789012;"), marker[:-1] + b";extra=private\n"):
+            with self.subTest(marker=bad), self.assertRaises(TOOL.Refused):
+                TOOL.select_installer_log(bad, binding)
+        native = (Path(__file__).absolute().parents[2] / "desktop/native/macos-installed-native/src/lib.rs").read_text(encoding="utf-8")
+        installer = (Path(__file__).absolute().parents[2] / "desktop/src-tauri/src/bin/macos_install.rs").read_text(encoding="utf-8")
+        phases = TOOL.re.findall(r'\d+ => "([a-z-]+)"', native.split("let name = match phase {", 1)[1].split("};", 1)[0]) + ["ffi-output"]
+        roles = TOOL.re.findall(r'=> "([a-z-]+)"', installer.split("impl AclRole {", 1)[1].split("fn acl_diagnostic", 1)[0])
+        for role in roles:
+            for phase in phases:
+                row = marker.replace(b"input-directory", role.encode()).replace(b"acl-entry-present", phase.encode())
+                self.assertLessEqual(len(row), 512)
+                self.assertEqual(TOOL.select_installer_log(row, binding)[1]["markerCounts"]["acl-diagnostic"], 1)
+        self.assertEqual((len(roles), len(phases)), (6, 13))
+        self.assertIn("if line.len() <= 512", installer)
+        self.assertIn("let _ = std::io::Write::write_all", installer)
+
+    def test_acl_probe_gate_is_early_nonroot_and_keeps_original_statuses(self):
+        root = Path(__file__).absolute().parents[2]
+        workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
+        marker = "      - name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive"
+        gate = workflow.split(marker, 1)[1].split("      - name: Download only the exact accepted M archive", 1)[0]
+        self.assertLess(workflow.index(marker), workflow.index("      - name: Build only the normal ARM64 bundled-asset shell"))
+        self.assertIn("desktop/native/macos-installed-native/src/native.m desktop/native/macos-installed-native/tests/acl_probe.m", gate)
+        self.assertIn('/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC "$MRK_MACOS_WORK/acl-probe"', gate)
+        self.assertIn('[[ "$(/usr/bin/id -u)" != 0', gate)
+        self.assertEqual(gate.count('=("${PIPESTATUS[@]}")'), 2)
+        self.assertIn('if [[ ${probe_status[0]} != 0 ]]; then exit "${probe_status[0]}"; fi', gate)
+        self.assertIn('compile_status_saved=$?', gate)
+        self.assertLess(gate.index('if [[ ${compile_status[0]} != 0 ]]; then exit "${compile_status[0]}"; fi'),
+                        gate.index('[[ ${compile_status[1]} == 0 && $compile_status_saved == 0 ]]'))
+        self.assertIn("binary_identity=$(/usr/bin/stat -f '%d:%i:%u:%g:%p:%l:%z:%m:%c'", gate)
+        self.assertIn("directory_identity=$(/usr/bin/stat -f '%d:%i:%u:%g:%p'", gate)
+        self.assertLess(gate.index('== "$binary_identity"'), gate.index('/bin/rm -- "$MRK_MACOS_WORK/acl-probe"'))
+        self.assertLess(gate.index('== "$directory_identity"'), gate.index('/bin/rmdir -- "$MRK_MACOS_WORK/acl-probe-data"'))
+        self.assertLess(gate.index('> "$MRK_MACOS_WORK/native-acl-probe.status"'), gate.index('/bin/rm -- "$MRK_MACOS_WORK/acl-probe"'))
+        self.assertIn('/bin/rmdir -- "$MRK_MACOS_WORK/acl-probe-data"', gate)
+        self.assertEqual(gate.count("/usr/bin/tail -c 131072"), 2)
+        self.assertNotIn("sudo", gate)
+        self.assertNotIn("native-api-link.dylib", workflow)
+        probe = (root / "desktop/native/macos-installed-native/tests/acl_probe.m").read_text(encoding="utf-8")
+        for value in ("fresh-file-no-acl", "fresh-directory-no-acl", "explicit-empty-no-ace", "real-ace-refused", "invalid-fd-refused"):
+            self.assertIn(value, probe)
+        self.assertIn("completed == 6 && cleaned && timely()", probe)
+        self.assertLess(probe.index("fflush(stdout)"), probe.index("return ok && timely() ? 0 : 1;"))
+
     def test_installer_log_failures_and_cli_never_manufacture_settlement(self):
         args = log_args()
         tail = b"before\n"

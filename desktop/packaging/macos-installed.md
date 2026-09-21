@@ -36,6 +36,39 @@ features. The root manifest/lock, package, target and exact two tests are retain
 Both ABI tests, all seven Installer cases and ordinary installation/readback
 still need successful execution. This is not installed-app/Aqua qualification.
 
+## Explicit Darwin no-ACL observation and early primitive probe
+
+The original run35653635077/1 reached native fixture setup but reported the
+unbound diagnostic `setupError=acl-refused`; all five selected regressions ran,
+while the seven fixture cases and ordinary installation/readback did not. The
+exact failed object/API/errno is not known. No installed/Aqua pass is claimed.
+
+Pinned Apple Libc contracts show that `acl_get_fd_np` can return NULL/ENOENT for
+a valid descriptor with **no ACL**, not only an acquisition failure. The shared
+shim now uses one same-FD `fstatx_np`, requires complete consistent ordinary
+stat properties, and explicitly queries ACL presence. Presence is zero/nonzero,
+not necessarily1. Every call failure refuses; no errno is accepted as absence.
+Present ACLs keep Darwin's valid-first-entry rule: an actual ACE always refuses.
+SDK sentinels are not owned ACLs. Actual errno0, fallback errors, first failure and
+separate single-free errors remain distinguishable; no descriptor is duplicated.
+
+A fixed nonroot macOS26/ARM64 APFS probe replaces the previous throwaway link-only
+check before the shell build. It exercises the actual shim on fresh no-ACL file
+and directory, zero-entry ACL, a real synthetic ACE, and raw-native EBADF (never
+an invalid Rust borrow or manufactured close). Only its own three exclusive
+entries may be changed/retired; original close/cleanup errors fail. Native compile
+and probe statuses/logs remain separate, source-bound and bounded. The five
+existing regressions still cover their separate contracts. Probe success is not
+Installer/Aqua acceptance; native execution of this correction is still required.
+
+Failure-only `MRK_MACOS_INSTALL_ACL_DIAGNOSTIC` records carry finite object role,
+API phase, return/error and free-error scalars (maximum512 bytes). No pathname,
+ACL content, environment or account information is written. Diagnostic output is
+non-panicking and cannot bypass original finalization. Collector selection stays
+unbound; the unchanged strict client-result/readback requirement remains a
+**separate unresolved result-channel obligation**. No log promotion or pending
+staging receipt can satisfy it. System/source ACLs and modes are never normalized.
+
 ## Deliberately small product surface
 
 - macOS **26.x, ARM64**, normal `desktop-shell,custom-protocol`, no

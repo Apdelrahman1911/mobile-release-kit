@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 #include <Block.h>
 #include <sys/acl.h>
+#include <sys/stat.h>
 #include <sys/attr.h>
 #include <sys/vnode.h>
 #include <sys/utsname.h>
@@ -29,20 +30,66 @@ int mrk_user(uint32_t *uid) {
     int platform = mrk_platform(); if (platform) return platform;
     *uid = getuid(); return 0;
 }
-int mrk_acl_empty(int fd) {
-    acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
-    if (!acl) return errno ? errno : EIO;
-    // Darwin differs from Linux: zero means an entry WAS returned; a valid
-    // empty ACL reports -1/EINVAL for ACL_FIRST_ENTRY. Never admit an ACE by
-    // interpreting Darwin's success as Linux's end-of-list convention.
-    int saved = 0;
-    if (acl_valid(acl)) saved = errno ? errno : EIO;
-    else {
-        acl_entry_t entry; errno = 0;
-        int found = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
-        saved = found == 0 ? EPERM : found == -1 && errno == EINVAL ? 0 : (errno ? errno : EIO);
+// Closed first-party diagnostic ABI, shared with Rust and the fixed probe.
+// 1 allocation; 2 snapshot; 3/4/5 owner/group/mode completeness; 6 presence;
+// 7 conversion; 8 object; 9 validation; 10 first entry; 11 ACE; 12 free.
+// Values are saved observations, not accepted-error or ownership capabilities.
+static int mrk_acl_failure(int at, int returned, int observed_errno,
+                           int *phase, int *call_result, int *native_errno) {
+    *phase = at; *call_result = returned; *native_errno = observed_errno;
+    return observed_errno ? observed_errno : EIO;
+}
+int mrk_acl_empty(int fd, int *phase, int *call_result, int *native_errno,
+                  int *free_result, int *free_errno) {
+    if (!phase || !call_result || !native_errno || !free_result || !free_errno) return EINVAL;
+    *phase = *call_result = *native_errno = *free_result = *free_errno = 0;
+    errno = 0;
+    filesec_t fsec = filesec_init();
+    if (!fsec) return mrk_acl_failure(1, 0, errno, phase, call_result, native_errno);
+    acl_t acl = NULL; int owned_acl = 0, saved = 0, rc = 0, observed_errno = 0;
+    struct stat snapshot = {0}; uid_t owner = 0; gid_t group = 0; mode_t mode = 0; int present = 0;
+    // acl_get_fd_np collapses a genuinely absent ACL to NULL/ENOENT. Observe
+    // successful same-FD snapshot + explicit presence instead, never errno alone.
+    errno = 0; rc = fstatx_np(fd, &snapshot, fsec); observed_errno = errno;
+    if (rc != 0) { saved = mrk_acl_failure(2, rc, observed_errno, phase, call_result, native_errno); goto done; }
+    // A fresh but unpopulated filesec is not proof of absence, including after
+    // libc allocation/early-out paths. All three ordinary properties must exist.
+    errno = 0; rc = filesec_get_property(fsec, FILESEC_OWNER, &owner); observed_errno = errno;
+    if (rc != 0 || owner != snapshot.st_uid) { saved = mrk_acl_failure(3, rc, rc ? observed_errno : 0, phase, call_result, native_errno); goto done; }
+    errno = 0; rc = filesec_get_property(fsec, FILESEC_GROUP, &group); observed_errno = errno;
+    if (rc != 0 || group != snapshot.st_gid) { saved = mrk_acl_failure(4, rc, rc ? observed_errno : 0, phase, call_result, native_errno); goto done; }
+    errno = 0; rc = filesec_get_property(fsec, FILESEC_MODE, &mode); observed_errno = errno;
+    if (rc != 0 || mode != snapshot.st_mode) { saved = mrk_acl_failure(5, rc, rc ? observed_errno : 0, phase, call_result, native_errno); goto done; }
+    errno = 0; rc = filesec_query_property(fsec, FILESEC_ACL, &present); observed_errno = errno;
+    if (rc != 0) { saved = mrk_acl_failure(6, rc, observed_errno, phase, call_result, native_errno); goto done; }
+    if (!present) goto done; // Successful, complete snapshot: there is no ACL.
+    // Presence is a zero/nonzero flag, not necessarily the integer1 on Darwin.
+    errno = 0; rc = filesec_get_property(fsec, FILESEC_ACL, &acl); observed_errno = errno;
+    if (rc != 0) { saved = mrk_acl_failure(7, rc, observed_errno, phase, call_result, native_errno); goto done; }
+    if (!acl || (void *)acl == _FILESEC_REMOVE_ACL || (void *)acl == _FILESEC_UNSET_PROPERTY) {
+        saved = mrk_acl_failure(8, 0, 0, phase, call_result, native_errno); goto done;
     }
-    if (acl_free(acl)) return errno ? errno : EIO;
+    owned_acl = 1;
+    errno = 0; rc = acl_valid(acl); observed_errno = errno;
+    if (rc != 0) { saved = mrk_acl_failure(9, rc, observed_errno, phase, call_result, native_errno); goto done; }
+    acl_entry_t entry;
+    errno = 0; rc = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry); observed_errno = errno;
+    // Darwin success0 means an ACE exists. Only -1/EINVAL on a valid ACL is
+    // an empty first entry. Principal, rights and inheritance never allow an ACE.
+    if (rc == 0) { *phase = 11; *call_result = 0; *native_errno = 0; saved = EPERM; }
+    else if (!(rc == -1 && observed_errno == EINVAL)) {
+        saved = mrk_acl_failure(10, rc, observed_errno, phase, call_result, native_errno);
+    }
+done:
+    if (owned_acl) {
+        errno = 0; rc = acl_free(acl); observed_errno = errno;
+        if (rc != 0) {
+            *free_result = rc; *free_errno = observed_errno;
+            if (!saved) (void)mrk_acl_failure(12, rc, observed_errno, phase, call_result, native_errno);
+            saved = observed_errno ? observed_errno : EIO; // Free failure vetoes even an otherwise empty ACL.
+        }
+    }
+    filesec_free(fsec); // Exactly once; void API must actually return. No FD ownership transfer.
     return saved;
 }
 int mrk_no_xattrs(int fd) {

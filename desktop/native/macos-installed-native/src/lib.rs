@@ -7,7 +7,8 @@ use std::{ffi::{c_char, c_int, c_void, CString}, io, marker::PhantomData,
 unsafe extern "C" {
     fn mrk_platform() -> c_int;
     fn mrk_user(uid: *mut u32) -> c_int;
-    fn mrk_acl_empty(fd: c_int) -> c_int;
+    fn mrk_acl_empty(fd: c_int, phase: *mut c_int, call_result: *mut c_int, native_errno: *mut c_int,
+        free_result: *mut c_int, free_errno: *mut c_int) -> c_int;
     fn mrk_no_xattrs(fd: c_int) -> c_int;
     fn mrk_entries(fd: c_int, bytes: *mut u8, capacity: usize, used: *mut usize) -> c_int;
     fn mrk_sync(fd: c_int, file: c_int) -> c_int;
@@ -33,9 +34,43 @@ pub fn real_user() -> io::Result<u32> {
     // SAFETY: fixed writable result cell; the shim validates the actual kernel/user.
     result(unsafe { mrk_user(&mut uid) })?; Ok(uid)
 }
+/// Finite diagnostics from the same original ACL observation, not another query.
+/// The actual errno (including0) stays separate from the returned fallback code.
+pub struct AclFailure {
+    pub phase: &'static str,
+    pub call_result: i32,
+    pub native_errno: i32,
+    pub free_result: i32,
+    pub free_errno: i32,
+    pub refusal_code: Option<i32>,
+    error: io::Error,
+}
+impl AclFailure { pub fn into_io_error(self) -> io::Error { self.error } }
+pub fn empty_acl_observed(fd: BorrowedFd<'_>) -> Result<(), AclFailure> {
+    let (mut phase, mut returned, mut observed_errno, mut freed, mut free_errno) = (0, 0, 0, 0, 0);
+    // SAFETY: borrowed live FD and five distinct writable scalar cells. No
+    // descriptor acquisition/consumption; native temporaries retire in that call.
+    let code = unsafe { mrk_acl_empty(fd.as_raw_fd(), &mut phase, &mut returned, &mut observed_errno, &mut freed, &mut free_errno) };
+    let name = match phase {
+        1 => "filesec-allocation", 2 => "fstatx-snapshot", 3 => "snapshot-owner", 4 => "snapshot-group", 5 => "snapshot-mode",
+        6 => "acl-presence", 7 => "acl-conversion", 8 => "acl-object", 9 => "acl-validation", 10 => "acl-first-entry",
+        11 => "acl-entry-present", 12 => "acl-free", _ => "ffi-output",
+    };
+    if code == 0 && (phase, returned, observed_errno, freed, free_errno) == (0, 0, 0, 0, 0) { return Ok(()); }
+    let consistent = code > 0 && phase >= 1 && phase <= 12 && observed_errno >= 0 && free_errno >= 0
+        && (freed != 0 || free_errno == 0) && (phase != 12 || freed != 0)
+        && (phase != 11 || (returned == 0 && observed_errno == 0));
+    if consistent {
+        Err(AclFailure { phase: name, call_result: returned, native_errno: observed_errno, free_result: freed, free_errno,
+            refusal_code: Some(code), error: io::Error::from_raw_os_error(code) })
+    } else {
+        // Inconsistent FFI output is never accepted or described as a real errno.
+        Err(AclFailure { phase: "ffi-output", call_result: 0, native_errno: 0, free_result: 0, free_errno: 0,
+            refusal_code: None, error: io::ErrorKind::InvalidData.into() })
+    }
+}
 pub fn empty_acl(fd: BorrowedFd<'_>) -> io::Result<()> {
-    // SAFETY: borrowed live descriptor; no ownership transfer or new descriptor.
-    result(unsafe { mrk_acl_empty(fd.as_raw_fd()) })
+    empty_acl_observed(fd).map_err(AclFailure::into_io_error)
 }
 pub fn no_xattrs(fd: BorrowedFd<'_>) -> io::Result<()> {
     // SAFETY: borrowed live descriptor, metadata only.

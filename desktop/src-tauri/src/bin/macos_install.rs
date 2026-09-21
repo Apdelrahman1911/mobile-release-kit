@@ -73,6 +73,24 @@ mod installer {
             else if unknown { "unknown-retained" } else { "refused-staging-retained" };
         FinalResult { state, reason, exit: if complete { 0 } else if published { 20 } else { 1 }, deadline_met }
     }
+    #[derive(Clone, Copy)]
+    enum AclRole { InputDirectory, InputInventory, SystemRoot, SystemLibrary, SystemSupport, Other }
+    impl AclRole {
+        fn name(self) -> &'static str { match self {
+            Self::InputDirectory => "input-directory", Self::InputInventory => "input-inventory", Self::SystemRoot => "system-root",
+            Self::SystemLibrary => "system-library", Self::SystemSupport => "system-support", Self::Other => "other-protected-object",
+        } }
+    }
+    fn acl_diagnostic(role: AclRole, failure: &native::AclFailure) {
+        // Failure-only, finite scalar diagnostics. This is not a receipt or
+        // evidence of finality. A failed/broken stderr must not panic past closes.
+        let line = format!("MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role={};phase={};result={};call={};errno={};freeCall={};freeErrno={}\n",
+            role.name(), failure.phase, failure.refusal_code.unwrap_or(0), failure.call_result, failure.native_errno,
+            failure.free_result, failure.free_errno);
+        if line.len() <= 512 {
+            let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), line.as_bytes());
+        }
+    }
     fn flags(directory: bool) -> OFlag { OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC
         | if directory { OFlag::O_DIRECTORY } else { OFlag::empty() } }
     impl Install {
@@ -135,6 +153,9 @@ mod installer {
             check(actual == named && if exact { actual == expected } else { expected.same_object(actual) }, "original-correspondence")
         }
         fn protected(&self, n: usize, directory: bool, mode: Option<u32>) -> Result<()> {
+            self.protected_as(n, directory, mode, AclRole::Other)
+        }
+        fn protected_as(&self, n: usize, directory: bool, mode: Option<u32>, role: AclRole) -> Result<()> {
             let fd = self.fd(n)?; let s = stat::fstat(fd).map_err(|_| "stat-refused")?;
             let kind = if directory { SFlag::S_IFDIR } else { SFlag::S_IFREG };
             // Existing system ancestors may have a non-wheel root-owned group.
@@ -145,7 +166,9 @@ mod installer {
             let fs = statfs::fstatfs(fd).map_err(|_| "mount-refused")?;
             check(fs.filesystem_type_name() == "apfs" && fs.flags().contains(MntFlags::MNT_LOCAL)
                 && !fs.flags().intersects(MntFlags::MNT_UNION | MntFlags::MNT_AUTOMOUNTED | MntFlags::MNT_IGNORE_OWNERSHIP), "mount-refused")?;
-            native::empty_acl(fd.as_fd()).map_err(|_| "acl-refused")
+            native::empty_acl_observed(fd.as_fd()).map_err(|failure| {
+                acl_diagnostic(role, &failure); "acl-refused"
+            })
         }
         fn persist(&mut self, n: usize, file: bool) -> Result<()> {
             self.clock()?;
@@ -356,11 +379,11 @@ mod installer {
             // Installer's fully extracted scripts resource is input DATA. Its
             // protected subtree has no remaining extraction/copy writer. Root
             // administrators/Installer itself are trusted, not concurrent foes.
-            self.protected(input, true, Some(0o555))?;
+            self.protected_as(input, true, Some(0o555), AclRole::InputDirectory)?;
             native::no_xattrs(self.fd(input)?.as_fd()).map_err(|_| "input-attributes")?;
             let expected_input: BTreeSet<String> = ["app", "runtime", "install-inventory.json"].into_iter().map(str::to_owned).collect();
             check(self.roster(input)?.keys().cloned().collect::<BTreeSet<_>>() == expected_input, "input-exact-roster")?;
-            let manifest = self.open(Some(input), "install-inventory.json", false)?; self.protected(manifest, false, Some(0o444))?;
+            let manifest = self.open(Some(input), "install-inventory.json", false)?; self.protected_as(manifest, false, Some(0o444), AclRole::InputInventory)?;
             native::no_xattrs(self.fd(manifest)?.as_fd()).map_err(|_| "inventory-attributes")?;
             let size = u64::try_from(self.identity(manifest)?.size).map_err(|_| "inventory-size")?;
             let (digest, bytes) = self.read(manifest, size, true)?;
@@ -374,9 +397,9 @@ mod installer {
             Ok((input, inventory))
         }
         fn support_root(&mut self) -> Result<usize> {
-            let root = self.open(None, "/", true)?; self.protected(root, true, None)?;
-            let library = self.open(Some(root), "Library", true)?; self.protected(library, true, None)?;
-            let support = self.open(Some(library), "Application Support", true)?; self.protected(support, true, None)?;
+            let root = self.open(None, "/", true)?; self.protected_as(root, true, None, AclRole::SystemRoot)?;
+            let library = self.open(Some(root), "Library", true)?; self.protected_as(library, true, None, AclRole::SystemLibrary)?;
+            let support = self.open(Some(library), "Application Support", true)?; self.protected_as(support, true, None, AclRole::SystemSupport)?;
             Ok(support)
         }
         fn install(&mut self, source: &str) -> Result<()> {

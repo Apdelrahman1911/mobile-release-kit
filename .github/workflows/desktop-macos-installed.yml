@@ -90,7 +90,8 @@ jobs:
                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
                    "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
                    "reusedRun": "35602474108/1", "reusedArtifactId": "10639324707",
-                   "scope": "engineering-compile-five-regressions-fixed-fixture-package-install-only", "fixedFixtureCases": 7,
+                   "scope": "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only", "fixedFixtureCases": 7,
+                   "aclPrimitiveCases": 6,
                    "selectedRegressionGroups": [2, 1, 2], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
                    "actualAquaSaveGate": "pending"}
           data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
@@ -154,24 +155,110 @@ jobs:
             --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
             --original-package "$MRK_MACOS_WORK/PackageFormat-original.pkg" > "$MRK_MACOS_WORK/package-format-audit.json"
           # Only inert archive bytes were checked. Never run this exit97 hook.
-      - name: Fail fast on the selected SDK public native API compile and link
+      - name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive
         timeout-minutes: 2
         shell: bash
         run: |
           set -euo pipefail
           set -o noclobber
-          [[ ! -e "$MRK_MACOS_WORK/native-api-link.dylib" && ! -L "$MRK_MACOS_WORK/native-api-link.dylib" ]]
+          umask 077
+          [[ "$(/usr/bin/id -u)" != 0 && "$GITHUB_SHA" == "$MRK_MACOS_INSTALL_SOURCE_COMMIT" ]]
+          [[ ! -e "$MRK_MACOS_WORK/acl-probe" && ! -L "$MRK_MACOS_WORK/acl-probe" ]]
+          # Two reviewed translation units, one compile/link product. No root,
+          # application, interpreter build, GUI, network or general scenario runner.
           set +e
           /usr/bin/xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=26.0 -fno-objc-arc -fblocks \
-            -dynamiclib desktop/native/macos-installed-native/src/native.m -framework AppKit -framework Foundation \
-            -o "$MRK_MACOS_WORK/native-api-link.dylib" > "$MRK_MACOS_WORK/native-api-link.log" 2>&1
-          status=$?
+            desktop/native/macos-installed-native/src/native.m desktop/native/macos-installed-native/tests/acl_probe.m \
+            -framework AppKit -framework Foundation -o "$MRK_MACOS_WORK/acl-probe" 2>&1 \
+            | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/native-acl-compile.log"
+          compile_status=("${PIPESTATUS[@]}")
+          printf '%s\n' "${compile_status[*]}" > "$MRK_MACOS_WORK/native-acl-compile.status"
+          compile_status_saved=$?
           set -e
-          printf '%s\n' "$status" > "$MRK_MACOS_WORK/native-api-link.status"
-          [[ $status == 0 ]]
-          # Never load/execute this link-only output. It cannot qualify the app.
-          [[ -f "$MRK_MACOS_WORK/native-api-link.dylib" && ! -L "$MRK_MACOS_WORK/native-api-link.dylib" && -O "$MRK_MACOS_WORK/native-api-link.dylib" ]]
-          /bin/rm -- "$MRK_MACOS_WORK/native-api-link.dylib"
+          [[ ${#compile_status[@]} == 2 ]]
+          if [[ ${compile_status[0]} != 0 ]]; then exit "${compile_status[0]}"; fi
+          [[ ${compile_status[1]} == 0 && $compile_status_saved == 0 ]]
+          [[ -f "$MRK_MACOS_WORK/acl-probe" && ! -L "$MRK_MACOS_WORK/acl-probe" && -O "$MRK_MACOS_WORK/acl-probe" ]]
+          binary_identity=$(/usr/bin/stat -f '%d:%i:%u:%g:%p:%l:%z:%m:%c' "$MRK_MACOS_WORK/acl-probe")
+          [[ -n "$binary_identity" ]]
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/acl-probe-data"
+          [[ -d "$MRK_MACOS_WORK/acl-probe-data" && ! -L "$MRK_MACOS_WORK/acl-probe-data" && -O "$MRK_MACOS_WORK/acl-probe-data" ]]
+          # Children legitimately change directory size/timestamps/link count.
+          # Device/inode/type/owner/group/mode remain the original identity.
+          directory_identity=$(/usr/bin/stat -f '%d:%i:%u:%g:%p' "$MRK_MACOS_WORK/acl-probe-data")
+          [[ -n "$directory_identity" ]]
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC "$MRK_MACOS_WORK/acl-probe" "$MRK_MACOS_WORK/acl-probe-data" 2>&1 \
+            | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/native-acl-probe.log"
+          probe_status=("${PIPESTATUS[@]}")
+          printf '%s\n' "${probe_status[*]}" > "$MRK_MACOS_WORK/native-acl-probe.status"
+          probe_status_saved=$?
+          # The completed one-shot probe owns no worker. Retire its known
+          # executable now; on failure retain any unresolved fixture originals.
+          binary_cleanup=1
+          if [[ -f "$MRK_MACOS_WORK/acl-probe" && ! -L "$MRK_MACOS_WORK/acl-probe" && -O "$MRK_MACOS_WORK/acl-probe" ]] &&
+             [[ "$(/usr/bin/stat -f '%d:%i:%u:%g:%p:%l:%z:%m:%c' "$MRK_MACOS_WORK/acl-probe")" == "$binary_identity" ]]; then
+            /bin/rm -- "$MRK_MACOS_WORK/acl-probe"
+            binary_cleanup=$?
+          fi
+          directory_cleanup=not-attempted
+          if [[ ${#probe_status[@]} == 2 && ${probe_status[0]} == 0 && ${probe_status[1]} == 0 ]]; then
+            directory_cleanup=1
+            if [[ -d "$MRK_MACOS_WORK/acl-probe-data" && ! -L "$MRK_MACOS_WORK/acl-probe-data" && -O "$MRK_MACOS_WORK/acl-probe-data" ]] &&
+               [[ "$(/usr/bin/stat -f '%d:%i:%u:%g:%p' "$MRK_MACOS_WORK/acl-probe-data")" == "$directory_identity" ]]; then
+              /bin/rmdir -- "$MRK_MACOS_WORK/acl-probe-data"
+              directory_cleanup=$?
+            fi
+          fi
+          printf '%s %s\n' "$binary_cleanup" "$directory_cleanup" > "$MRK_MACOS_WORK/native-acl-cleanup.status"
+          cleanup_status_saved=$?
+          set -e
+          [[ ${#probe_status[@]} == 2 ]]
+          if [[ ${probe_status[0]} != 0 ]]; then exit "${probe_status[0]}"; fi
+          [[ ${probe_status[1]} == 0 && $probe_status_saved == 0 && $cleanup_status_saved == 0 && $binary_cleanup == 0 && $directory_cleanup == 0 ]]
+          "$MRK_PYTHON" -I -S -B - <<'PYDATA'
+          import hashlib, json, os, re, stat
+          root = os.environ["MRK_MACOS_WORK"]
+          def read(name, limit):
+              fd = os.open(os.path.join(root, name), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit: raise ValueError("ACL probe output refused")
+                  body = os.read(fd, limit + 1)
+                  after = os.fstat(fd)
+                  sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+                  if sig(before) != sig(after) or len(body) != before.st_size: raise ValueError("ACL probe output changed")
+                  return body
+              finally: os.close(fd)
+          logs = {}
+          for name in ("native-acl-compile", "native-acl-probe"):
+              if read(name + ".status", 32) != b"0 0\n": raise ValueError("original ACL pipeline failed")
+              body = read(name + ".log", 131072)
+              logs[name] = {"bytes":len(body), "sha256":hashlib.sha256(body).hexdigest(), "pipelineStatuses":[0,0], "retention":"bounded-original-tail"}
+          if read("native-acl-cleanup.status", 64) != b"0 0\n": raise ValueError("ACL cleanup unresolved")
+          names = ["parent-no-ace", "fresh-file-no-acl", "fresh-directory-no-acl", "explicit-empty-no-ace", "real-ace-refused", "invalid-fd-refused"]
+          lines = read("native-acl-probe.log", 131072).decode("utf-8", "strict").splitlines()
+          if len(lines) != len(names) + 1: raise ValueError("ACL probe output count")
+          for name, line in zip(names, lines):
+              if not re.fullmatch(r"MRK_ACL_PROBE_CASE=" + re.escape(name) + r";ok=1;phase=[0-9]{1,2};result=[0-9]{1,10};call=-?[0-9]{1,10};errno=[0-9]{1,10};freeCall=0;freeErrno=0", line):
+                  raise ValueError("ACL probe exact case missing")
+          if lines[-1] != "MRK_ACL_PROBE_FINAL=cases=6;cleanup=1;passed=1": raise ValueError("ACL probe finality missing")
+          source_paths = ("desktop/native/macos-installed-native/src/native.m", "desktop/native/macos-installed-native/tests/acl_probe.m")
+          hashes = {}
+          for path in source_paths:
+              with open(path, "rb") as stream: body = stream.read(131073)
+              if len(body) > 131072: raise ValueError("ACL source bound")
+              hashes[path] = hashlib.sha256(body).hexdigest()
+          value = {"schemaVersion":1, "source":os.environ["GITHUB_SHA"], "workflowSource":os.environ["GITHUB_WORKFLOW_SHA"],
+                   "runId":os.environ["GITHUB_RUN_ID"], "runAttempt":os.environ["GITHUB_RUN_ATTEMPT"],
+                   "nativeSourceSha256":hashes, "cases":names, "logs":logs, "cleanup":"checked-original-closes-fixed-entry-retirement",
+                   "qualification":"native-acl-primitive-only-not-Installer-runtime-Aqua-or-Save"}
+          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 16384: raise ValueError("ACL result bound")
+          fd = os.open(os.path.join(root, "native-acl-probe-result.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          with os.fdopen(fd, "wb") as stream:
+              stream.write(data); stream.flush(); os.fsync(stream.fileno())
+          PYDATA
       - name: Download only the exact accepted M archive (no rebuild or fallback)
         timeout-minutes: 3
         shell: bash
@@ -549,8 +636,12 @@ jobs:
             ${{ steps.work.outputs.root }}/package-format-xar.status
             ${{ steps.work.outputs.root }}/package-format-audit.json
             ${{ steps.work.outputs.root }}/package-format-final/PackageFormat.pkg
-            ${{ steps.work.outputs.root }}/native-api-link.log
-            ${{ steps.work.outputs.root }}/native-api-link.status
+            ${{ steps.work.outputs.root }}/native-acl-compile.log
+            ${{ steps.work.outputs.root }}/native-acl-compile.status
+            ${{ steps.work.outputs.root }}/native-acl-probe.log
+            ${{ steps.work.outputs.root }}/native-acl-probe.status
+            ${{ steps.work.outputs.root }}/native-acl-cleanup.status
+            ${{ steps.work.outputs.root }}/native-acl-probe-result.json
             ${{ steps.work.outputs.root }}/runtime-result.json
             ${{ steps.work.outputs.root }}/app-result.json
             ${{ steps.work.outputs.root }}/input-result.json
