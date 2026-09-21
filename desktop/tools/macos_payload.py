@@ -70,11 +70,13 @@ def state(value: os.stat_result) -> tuple[int, ...]:
             value.st_size, value.st_mtime_ns, value.st_ctime_ns)
 
 
-def read_stream(path: Path, limit: int, consume, poll=lambda: None) -> dict:
+def read_stream(path: Path, limit: int, consume, poll=lambda: None, *, expected_links: int = 1) -> dict:
     """One original descriptor, bounded chunks, and unchanged named input."""
+    require(type(expected_links) is int and expected_links >= 1, "input-link-count")
     before = path.lstat()
-    require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
-            and 0 <= before.st_size <= limit, "regular-input")
+    require(stat.S_ISREG(before.st_mode), "regular-input-kind")
+    require(before.st_nlink == expected_links, "regular-input-links")
+    require(0 <= before.st_size <= limit, "regular-input-size")
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
         require(state(os.fstat(fd)) == state(before), "input-open-changed")
@@ -367,13 +369,42 @@ def load_inputs(source: Path) -> dict:
     return value
 
 
-def protected_file(path: Path, poll=lambda: None) -> dict:
+def protected_file(path: Path, poll=lambda: None, *, observe=lambda _: None) -> dict:
     selected = path.resolve(strict=True)
-    for parent in (selected, *selected.parents):
-        value = parent.lstat()
+    nodes = (selected, *selected.parents)
+    require(len(str(path)) <= 1024 and len(nodes) <= 32
+            and all(len(str(node)) <= 1024 for node in nodes), "tool-path-bound")
+    originals = []
+    for node in nodes:
+        poll()
+        originals.append((node, node.lstat()))
+    facts = {"requestedPath": str(path), "resolvedPath": str(selected), "nodes": [
+        {"path": str(node), "device": value.st_dev, "inode": value.st_ino,
+         "mode": value.st_mode, "uid": value.st_uid, "links": value.st_nlink,
+         "size": value.st_size, "mtimeNs": value.st_mtime_ns, "ctimeNs": value.st_ctime_ns,
+         "regular": stat.S_ISREG(value.st_mode), "directory": stat.S_ISDIR(value.st_mode)}
+        for node, value in originals]}
+    require(len(canonical(facts)) <= 65536, "tool-facts-bound")
+    # Preserve actual predicate facts before a possible admission/read refusal.
+    # These are fixed public system paths, not environment or exception dumps.
+    observe(facts)
+    for parent, value in originals:
         require(value.st_uid == 0 and not value.st_mode & 0o022
                 and (stat.S_ISREG(value.st_mode) if parent == selected else stat.S_ISDIR(value.st_mode)), "tool-ownership")
-    return {"path": str(selected), **file_digest(selected, poll)}
+    original = originals[0][1]
+    require(original.st_nlink >= 1, "tool-link-count")
+    # Only this administratively trusted read-only route admits root-managed
+    # hard links. Private source/copy/inventory callers retain exact count one.
+    row = read_stream(selected, FILE_LIMIT, lambda _: None, poll, expected_links=original.st_nlink)
+    require(state(selected.lstat()) == state(original), "tool-input-changed")
+    return {"path": str(selected), "linkCount": original.st_nlink, **row}
+
+
+def inspect_protected(job: Job, role: str, path: Path) -> dict:
+    require(re.fullmatch(r"[a-z0-9-]{1,64}", role), "tool-role")
+    job.phase = "inspect-" + role
+    return protected_file(path, job.clock.check,
+        observe=lambda facts: job.save("protected-" + role + ".json", {"role": role, **facts}))
 
 
 def source_binding(job: Job, git: str) -> None:
@@ -395,20 +426,21 @@ def source_binding(job: Job, git: str) -> None:
 def prepare_tools(job: Job) -> dict:
     require(not os.path.lexists(PREFIX) and CLT.is_dir(), "compiler-prefix-or-clt")
     env = job.build_environment
-    tools, identities = {}, {"xcrun": protected_file(Path("/usr/bin/xcrun"), job.clock.check)}
+    tools, identities = {}, {"xcrun": inspect_protected(job, "xcrun", Path("/usr/bin/xcrun"))}
     sdk_raw = job.run("sdk-selection", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"], env=env, cap=30)
     sdk = Path(sdk_raw.decode("utf-8").strip()).resolve(strict=True)
     require(sdk.is_relative_to(CLT / "SDKs") and sdk.name.startswith("MacOSX") and sdk.name.endswith(".sdk"), "sdk-selection")
     tool_names = ("clang", "ld", "ar", "ranlib", "make", "otool", "install_name_tool", "codesign")
     for name in tool_names:
         raw = job.run("select-" + name.replace("_", "-"), ["/usr/bin/xcrun", "--find", name], env=env, cap=30)
+        job.phase = "inspect-" + name.replace("_", "-")
         selected = Path(raw.decode("utf-8").strip()).resolve(strict=True)
         require(selected.is_relative_to(CLT / "usr/bin") or selected.parent == Path("/usr/bin"), "tool-origin")
-        identities[name] = protected_file(selected, job.clock.check)
+        identities[name] = inspect_protected(job, name.replace("_", "-"), selected)
         tools[name] = str(selected)
     for name in ("sh", "perl", "curl", "git"):
         path = Path("/bin/sh") if name == "sh" else Path("/usr/bin") / name
-        identities[name] = protected_file(path, job.clock.check)
+        identities[name] = inspect_protected(job, name, path)
         tools[name] = str(path)
     tools["sdk"] = str(sdk)
     tools["clangVersion"] = job.run("clang-version", [tools["clang"], "--version"], env=env, cap=30).decode("utf-8")
@@ -418,13 +450,13 @@ def prepare_tools(job: Job) -> dict:
     # Actual selected metadata/inputs, not a broad SDK census or a claim that
     # all files in the Apple installation have been independently audited.
     compiler_inputs = []
-    for path in (resource / "lib/darwin/libclang_rt.osx.a", resource / "include/stddef.h",
+    for index, path in enumerate((resource / "lib/darwin/libclang_rt.osx.a", resource / "include/stddef.h",
                  resource / "include/stdarg.h", resource / "include/stdint.h", sdk / "SDKSettings.json",
                  sdk / "usr/include/ffi/ffi.h", sdk / "usr/include/ffi/ffitarget.h",
-                 sdk / "usr/lib/libSystem.tbd", sdk / "usr/lib/libffi.tbd"):
-        job.phase = "compiler-input-" + path.name
+                 sdk / "usr/lib/libSystem.tbd", sdk / "usr/lib/libffi.tbd")):
+        job.phase = f"inspect-compiler-input-{index}"
         require(path.resolve(strict=True).is_relative_to(CLT), "compiler-input-origin")
-        compiler_inputs.append(protected_file(path, job.clock.check))
+        compiler_inputs.append(inspect_protected(job, f"compiler-input-{index}", path))
     job.build_environment.update(SDKROOT=str(sdk), CC=tools["clang"], AR=tools["ar"], RANLIB=tools["ranlib"],
         LD=tools["ld"], CFLAGS=f"-arch arm64 -O2 -g0 -isysroot {sdk}", CPPFLAGS=f"-isysroot {sdk}",
         LDFLAGS=f"-arch arm64 -isysroot {sdk} -Wl,-headerpad_max_install_names",

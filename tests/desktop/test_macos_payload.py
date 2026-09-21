@@ -183,6 +183,66 @@ class MacOSPayloadDataTests(unittest.TestCase):
                 self.assertEqual(observed.call_count, 1)
             with self.assertRaises(payload.Refused):
                 payload.read_stream(source, 64, lambda _: source.write_bytes(b"changed and longer\n"))
+            source.write_bytes(b"INERT\n")
+            alias = source.with_name("second-name")
+            alias.hardlink_to(source)
+            with self.assertRaisesRegex(payload.Refused, "regular-input-links"):
+                payload.file_digest(source)
+            expected = {"size": 6, "sha256": hashlib.sha256(b"INERT\n").hexdigest()}
+            self.assertEqual(payload.read_stream(source, 64, lambda _: None, expected_links=2), expected)
+            for invalid_count in (None, True, 0):
+                with self.subTest(invalid_count=invalid_count), self.assertRaisesRegex(payload.Refused, "input-link-count"):
+                    payload.read_stream(source, 64, lambda _: None, expected_links=invalid_count)
+            with self.assertRaisesRegex(payload.Refused, "input-read-changed"):
+                payload.read_stream(source, 64, lambda _: alias.unlink(), expected_links=2)
+
+    def test_protected_tool_links_require_root_leaf_ancestors_and_record_facts(self):
+        # Stat/path doubles only: no Linux fixture is declared a trusted Apple
+        # tool, and the real protected-file reader never accesses these names.
+        values = dict(st_dev=1, st_ino=2, st_mode=stat.S_IFREG | 0o755, st_uid=0,
+                      st_nlink=2, st_size=6, st_mtime_ns=3, st_ctime_ns=4)
+        original = SimpleNamespace(**values)
+        root_value = SimpleNamespace(**dict(values, st_ino=1, st_mode=stat.S_IFDIR | 0o755))
+        root, leaf = Mock(), Mock()
+        root.__str__ = Mock(return_value="/")
+        root.lstat.return_value = root_value
+        leaf.__str__ = Mock(return_value="/inert-root-owned-tool")
+        leaf.resolve.return_value, leaf.parents = leaf, (root,)
+        leaf.lstat.return_value = original
+        row = {"size": 6, "sha256": hashlib.sha256(b"INERT\n").hexdigest()}
+        observed = []
+        with patch.object(payload, "read_stream", return_value=row) as read:
+            result = payload.protected_file(leaf, observe=observed.append)
+            self.assertEqual(result, {"path": str(leaf), "linkCount": 2, **row})
+            self.assertEqual(read.call_args.kwargs, {"expected_links": 2})
+            self.assertEqual(observed[0]["nodes"][0]["links"], 2)
+            self.assertEqual(observed[0]["nodes"][0]["uid"], 0)
+            for bad_leaf, bad_root in (
+                    (SimpleNamespace(**dict(values, st_uid=1001)), root_value),
+                    (SimpleNamespace(**dict(values, st_mode=stat.S_IFREG | 0o775)), root_value),
+                    (SimpleNamespace(**dict(values, st_mode=stat.S_IFDIR | 0o755)), root_value),
+                    (original, SimpleNamespace(**dict(vars(root_value), st_uid=1001))),
+                    (original, SimpleNamespace(**dict(vars(root_value), st_mode=stat.S_IFDIR | 0o777)))):
+                with self.subTest(leaf=bad_leaf, root=bad_root):
+                    leaf.lstat.return_value, root.lstat.return_value = bad_leaf, bad_root
+                    read.reset_mock()
+                    observed.clear()
+                    with self.assertRaisesRegex(payload.Refused, "tool-ownership"):
+                        payload.protected_file(leaf, observe=observed.append)
+                    read.assert_not_called()
+                    self.assertEqual(len(observed), 1)
+            root.lstat.return_value = root_value
+            leaf.lstat.side_effect = (original, SimpleNamespace(**dict(values, st_nlink=3)))
+            with self.assertRaisesRegex(payload.Refused, "tool-input-changed"):
+                payload.protected_file(leaf)
+            leaf.lstat.side_effect = None
+            leaf.lstat.return_value = SimpleNamespace(**dict(values, st_uid=1001))
+            job = SimpleNamespace(phase="new", clock=SimpleNamespace(check=Mock()), save=Mock())
+            with self.assertRaisesRegex(payload.Refused, "tool-ownership"):
+                payload.inspect_protected(job, "git", leaf)
+            self.assertEqual(job.phase, "inspect-git")
+            self.assertEqual(job.save.call_args.args[0], "protected-git.json")
+            self.assertEqual(job.save.call_args.args[1]["nodes"][0]["uid"], 1001)
 
     def test_pinned_archive_bytes_are_used_and_original_timestamps_survive(self):
         with tempfile.TemporaryDirectory(prefix="mrk-macos-payload-data-") as name:
