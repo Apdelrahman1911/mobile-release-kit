@@ -48,10 +48,11 @@ int mrk_no_xattrs(int fd) {
     return count < 0 ? (errno ? errno : EIO) : count == 0 ? 0 : EPERM;
 }
 int mrk_entries(int fd, uint8_t *out, size_t capacity, size_t *used) {
-    _Alignas(struct dirent) char block[65536]; off_t base = 0;
+    _Alignas(struct dirent) char block[65536]; long base = 0;
     if (!out || !used || capacity != sizeof(block)) return EINVAL;
     *used = 0;
-    ssize_t count = getdirentries64(fd, block, sizeof(block), &base);
+    _Static_assert(sizeof(((struct dirent *)0)->d_ino) == sizeof(uint64_t), "fixed Darwin inode64 layout required");
+    int count = getdirentries(fd, block, sizeof(block), &base);
     if (count < 0) return errno ? errno : EIO;
     size_t offset = 0;
     while (offset < (size_t)count) {
