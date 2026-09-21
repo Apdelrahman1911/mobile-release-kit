@@ -1,17 +1,17 @@
 # Mac installed project/draft/Save — engineering SOURCE draft
 
-**Integrated engineering SOURCE draft; native build/install/Aqua/Save remain unrun.**
+**Integrated engineering draft; installation/Aqua/Save remain unverified.**
 The reviewed Mac SOURCE02 was composed onto Linux V commit
 `18eaffcfb62d0bc9a256c448f1a1c025db0ca1ee` using 28 exact source copies plus the
 contextual `shell.rs` union, retaining V's diagnostics and N's Mac owner wiring.
-Only this document and the Mac workflow change afterward for scheduling below.
-The eight accepted A-scope owner/runtime files remain unchanged. Accepted DATA01
-and the affected-only DATA03 parser results are reused, not native qualification.
-The four B1/C1/C2 regressions below still need their first hosted execution.
+Subsequent native API and Installer compile corrections are recorded below.
+Accepted DATA01 and the affected-only DATA03 parser results are reused for their
+unchanged exercised closures, not as native qualification.
+The five selected regressions below require a complete successful hosted gate.
 Do not push the verification branch or use these commands before separate
 actual-source/command review; integration is not proof that this revision works.
 
-## 2026-09-21 supported-directory-API correction (native result pending)
+## 2026-09-21 supported-directory-API and command corrections
 
 The first normal Mac compile failed because getdirentries64 was undeclared. Its
 reviewed successor compiled but the SDK deliberately rejected getdirentries at
@@ -25,8 +25,16 @@ The same job first compiles/links the changed native shim using the selected
 CLT SDK, without loading it, so header/link errors fail before the full build.
 The sole task-owned link output is retired immediately after a successful check.
 A new same-C-decoder regression joins the existing native group, making the
-future selection **2+1+2 = five** (older four-test descriptions below are
-historical). This source does not establish SDK/link/native or installation success.
+selection **2+1+2 = five**. Run35637529386/1 at
+`2e71e54e7855595a7d2201695f64bee5f681ad7c` passed the SDK compile/link check,
+normal app build/sign, two dialog regressions and the Installer finalizer test.
+The checked native permission conversion resolved the earlier Installer compile
+failure. The run then failed before the two native ABI tests: Cargo rejected
+`--no-default-features` for the non-workspace path dependency. Its command now
+omits only that feature-selection flag; the native crate declares no default
+features. The root manifest/lock, package, target and exact two tests are retained.
+Both ABI tests, all seven Installer cases and ordinary installation/readback
+still need successful execution. This is not installed-app/Aqua qualification.
 
 ## Deliberately small product surface
 
@@ -237,8 +245,8 @@ checkout retains no credentials. There is no release/Store or payload rebuild.
 The same job records actual Rust/Cargo, selected CLT SDK/compiler, Node and
 stager-Python versions with source/run bindings. It makes one normal app build,
 then binds the completed frontend, signed app and unchanged runtime into one
-install inventory. Before either privileged package invocation, it runs the four
-existing regressions below as nonroot, grouped **2+1+1**, using the same locked
+install inventory. Before either privileged package invocation, it runs the five
+existing regressions below as nonroot, grouped **2+1+2**, using the same locked
 dependency graph, release profile, ARM64 target and build bindings/target cache.
 Only selected libtest artifacts are additionally compiled; no second ordinary
 app or interpreter build is scheduled. The native ABI package is selected from
@@ -246,7 +254,7 @@ the parent manifest/lock, not from a new standalone dependency resolution.
 
 Each invocation retains at most a 128-KiB log tail and the original Cargo/tee/tail
 statuses. The gate requires exactly the selected successful test names and
-executed counts 2/1/1, with zero failed/ignored/measured tests; zero matches is a
+executed counts 2/1/2, with zero failed/ignored/measured tests; zero matches is a
 failure. `--exact` receives the full names **after Cargo's `--`**, never a module
 prefix. The original commands must all succeed; a successful logger cannot mask
 a Cargo failure. Fixed seven-case and ordinary standard Installer packages,
@@ -270,7 +278,7 @@ nonroot host; its bounded logging and count/name checks are mandatory:
 ```sh
 cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --release --no-default-features --features desktop-shell,custom-protocol --target aarch64-apple-darwin --lib -- --exact --test-threads=1 --color=never --format=pretty shell::owned_macos::tests::native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal shell::owned_macos::tests::response_mapping_preserves_other_and_missing_facts_poison_dispatch
 cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --release --no-default-features --features macos-installed-installer --target aarch64-apple-darwin --bin mrk-macos-install -- --exact --test-threads=1 --color=never --format=pretty installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error
-cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --release --no-default-features --target aarch64-apple-darwin --package mrk-macos-installed-native --lib -- --exact --test-threads=1 --color=never --format=pretty tests::only_explicit_user_appkit_responses_can_be_accept_or_decline
+cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --release --target aarch64-apple-darwin --package mrk-macos-installed-native --lib -- --exact --test-threads=1 --color=never --format=pretty tests::only_explicit_user_appkit_responses_can_be_accept_or_decline tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches
 ```
 
 The existing `runtime::tests::macos_*` and `asset_source::macos::tests::*`

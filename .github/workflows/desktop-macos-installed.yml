@@ -230,7 +230,7 @@ jobs:
             --target aarch64-apple-darwin --bin mrk-macos-install -- --exact --test-threads=1 --color=never --format=pretty \
             installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error
           run_focused native-abi-regression cargo test --manifest-path desktop/src-tauri/Cargo.toml \
-            --locked --release --no-default-features --target aarch64-apple-darwin \
+            --locked --release --target aarch64-apple-darwin \
             --package mrk-macos-installed-native --lib -- --exact --test-threads=1 --color=never --format=pretty \
             tests::only_explicit_user_appkit_responses_can_be_accept_or_decline \
             tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches
