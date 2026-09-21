@@ -1162,6 +1162,16 @@ def project_draft_receipt():
                       "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
                       "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
         "quit": {"operation": 3, "originalsSettled": True, "relayJoined": True, "exit": True},
+        "guidance": {
+            "draftUnchanged": True,
+            "requirements": {"requestResultDomMatched": True, "context": "android/build", "roles": 3,
+                             "presence": "unknown", "version": "unknown", "inspection": "not-run",
+                             "nativeInspection": "unavailable", "dependencies": "unknown"},
+            "github": {"requestResultDomMatched": True, "explicitInputs": True, "browserEdit": "insertText",
+                       "comparison": "not-supplied", "workflowCount": 4, "tooling": "format-only", "githubContacted": False,
+                       "repositoryObserved": False, "toolingRefResolved": False, "templateCompatibility": "unknown", "applyAvailable": False},
+            "assuranceActions": False, "releaseReadiness": "unknown",
+        },
     }
 
 
@@ -1257,6 +1267,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
     def test_positive_typed_schema_rejects_each_missing_or_changed_leaf(self):
         expected = project_draft_receipt()
         raw = L.canonical(expected)
+        self.assertEqual(len(raw), 2029)  # The one receipt includes its trailing newline.
+        self.assertTrue(raw.endswith(b"\n"))
         self.assertLessEqual(len(raw), 2048)
         self.assertEqual(L.shell_project_receipt(raw), expected)
         value, outcome, files, mappings = closed_shell_data()
@@ -1296,13 +1308,19 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         legacy = deepcopy(expected)
         legacy.pop("save")
         legacy.update(schemaVersion=1, fixture="android-static-v1", guidance={"draftUnchanged": True})
+        save_only = {key: child for key, child in expected.items() if key != "guidance"}
+        guidance_only = {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals"}}
         for changed in (b"", b"{}", L.canonical(legacy), L.canonical({**expected, "methods": "six-passive"}),
+                        L.canonical(save_only), L.canonical(guidance_only),
                         L.canonical({key: child for key, child in expected.items() if key != "save"}),
                         L.canonical({**expected, "save": {}}), L.canonical({**expected, "save": []}),
                         L.canonical({**expected, "save": {**expected["save"], "untrustedSuccess": True}}),
                         L.canonical({**expected, "guidance": {"draftUnchanged": True}}),
+                        L.canonical({**expected, "guidance": {}}), L.canonical({**expected, "guidance": []}),
+                        L.canonical({**expected, "guidance": {**expected["guidance"], "github": None}}),
                         raw.replace(b'"fresh":true', b'"fresh":true,"fresh":true'),
                         raw.replace(b'"save":{', b'"save":{},"save":{'),
+                        raw.replace(b'"guidance":{', b'"guidance":{},"guidance":{'),
                         L.canonical({**expected, "message": "ConfigurationError text is not a receipt field"}), raw + b" " * 2048):
             with self.subTest(raw=changed), self.assertRaises(ValueError):
                 L.shell_project_receipt(changed)
@@ -1438,7 +1456,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertNotEqual(result["projectDraft"]["fixture"]["before"], result["projectDraft"]["fixture"]["after"])
         self.assertEqual(result["cases"]["normal"]["domAndGtkObserved"], False)
         self.assertEqual(len(result["cases"]["quit-outstanding"]["maps"]), 1)
-        for change in ("missing-before", "missing-after", "different-after", "coerced-case", "missing-receipt", "wrong-argv"):
+        for change in ("missing-before", "missing-after", "different-after", "coerced-case", "missing-receipt",
+                       "case-save-only", "stdout-save-only", "case-guidance-only", "stdout-guidance-only", "wrong-argv"):
             changed, current = deepcopy(files), deepcopy(outcome)
             if change.startswith("missing-") and change != "missing-receipt":
                 changed.pop("shell-positive-project-" + change.removeprefix("missing-") + ".json")
@@ -1450,6 +1469,14 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                 changed["shell-cases.json"] = L.canonical(altered)
             elif change == "missing-receipt":
                 changed["shell-positive.stdout"] = b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n"
+            elif change.startswith(("case-", "stdout-")):
+                omitted = {"guidance"} if change.endswith("save-only") else {"save", "readback", "noop", "originals"}
+                partial = {key: child for key, child in project_draft_receipt().items() if key not in omitted}
+                if change.startswith("case-"):
+                    altered = L.decode(changed["shell-cases.json"]); altered["positive"]["projectDraft"] = partial
+                    changed["shell-cases.json"] = L.canonical(altered)
+                else:
+                    changed["shell-positive.stdout"] = positive_capture(partial)[0]
             else:
                 current["commands"][1]["argv"][-1] = "quit-outstanding"
             with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=expected), self.assertRaises((ValueError, KeyError)):

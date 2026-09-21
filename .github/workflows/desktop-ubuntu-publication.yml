@@ -80,6 +80,7 @@ jobs:
               '/usr/share/icons', '/usr/share/icons/Adwaita', '/usr/share/icons/hicolor',
               '/usr/share/themes', '/usr/share/themes/Adwaita', '/usr/share/mime',
               '/usr/share/hunspell', '/usr/share/hyphen',
+              '/usr/share/byobu', '/usr/share/byobu/pixmaps',
           )
           DATA_ROOTS = (
               ('/etc/gtk-3.0', 'directory'), ('/etc/fonts', 'directory'),
@@ -95,6 +96,7 @@ jobs:
               ('/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache', 'file'),
               ('/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache', 'file'),
               ('/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache', 'file'),
+              ('/usr/share/byobu/pixmaps/byobu.svg', 'file'),
           )
           SCOPE = 'fixed-shell-data-directory-preparation'
 
@@ -610,7 +612,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'b4c650a0f05926e7c0794bb09570af579bdb7b9a2855ba3b484f9d4e54a40bf6'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '5cd3c529bc65fc19dff519115a14201c8f63ac346e35581cddcf995efeee5cfe'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
       - name: Retain original compiler evidence and shell outputs
         id: upload
@@ -690,6 +692,7 @@ jobs:
               '/usr/share/icons', '/usr/share/icons/Adwaita', '/usr/share/icons/hicolor',
               '/usr/share/themes', '/usr/share/themes/Adwaita', '/usr/share/mime',
               '/usr/share/hunspell', '/usr/share/hyphen',
+              '/usr/share/byobu', '/usr/share/byobu/pixmaps',
           )
           DATA_ROOTS = (
               ('/etc/gtk-3.0', 'directory'), ('/etc/fonts', 'directory'),
@@ -705,6 +708,7 @@ jobs:
               ('/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache', 'file'),
               ('/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache', 'file'),
               ('/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache', 'file'),
+              ('/usr/share/byobu/pixmaps/byobu.svg', 'file'),
           )
           SCOPE = 'fixed-shell-data-directory-preparation'
 
@@ -1232,7 +1236,7 @@ jobs:
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ needs.compile.outputs.shell_artifact_id }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'b4c650a0f05926e7c0794bb09570af579bdb7b9a2855ba3b484f9d4e54a40bf6'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '5cd3c529bc65fc19dff519115a14201c8f63ac346e35581cddcf995efeee5cfe'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

@@ -558,7 +558,20 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         self.assertEqual(result["native"]["noop"]["nativeReason"], "shutdown")
         self.assertEqual(result["native"]["originals"]["runtimeSettlementJoined"], 2)
         self.assertTrue(result["native"]["readback"]["fresh"])
-        self.assertNotIn("guidance", result["native"])  # G's actions are not replayed by Save.
+        guidance = result["native"]["guidance"]
+        self.assertTrue(guidance["draftUnchanged"])
+        self.assertTrue(guidance["requirements"]["requestResultDomMatched"])
+        self.assertEqual(guidance["requirements"]["context"], "android/build")
+        self.assertEqual(guidance["requirements"]["roles"], 3)
+        self.assertTrue(guidance["github"]["requestResultDomMatched"] and guidance["github"]["explicitInputs"])
+        self.assertEqual(guidance["github"]["browserEdit"], "insertText")
+        self.assertEqual(guidance["github"]["workflowCount"], 4)
+        self.assertFalse(guidance["assuranceActions"])
+        self.assertEqual(guidance["releaseReadiness"], "unknown")
+        encoded = lifecycle.canonical(result["native"])
+        self.assertTrue(encoded.endswith(b"\n"))
+        self.assertEqual(len(encoded), 2029)
+        self.assertLessEqual(len(encoded), 2048)
         self.assertTrue(result["fixture"]["savedOutputsMatched"])
         self.assertTrue(result["fixture"]["hintUnchanged"])
         self.assertNotEqual(result["fixture"]["before"], result["fixture"]["after"])
@@ -597,6 +610,23 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
             observed = closed_project_draft_data(lifecycle); mutate(observed)
             with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError)):
                 S.shell_project_draft_observation(observed, lifecycle)
+
+        expected = lifecycle.SHELL_PROJECT_RECEIPT
+        variants = {
+            "save-only": {key: child for key, child in expected.items() if key != "guidance"},
+            "guidance-only": {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals"}},
+            "partial-guidance": {**expected, "guidance": {"draftUnchanged": True}},
+            "wrong-guidance-type": {**expected, "guidance": []},
+        }
+        for name, partial in variants.items():
+            for side in ("case", "native", "both"):
+                observed = closed_project_draft_data(lifecycle)
+                if side in {"case", "both"}:
+                    observed["cases"]["positive"]["projectDraft"] = deepcopy(partial)
+                if side in {"native", "both"}:
+                    observed["projectDraft"]["native"] = deepcopy(partial)
+                with self.subTest(shape=name, side=side), self.assertRaises((S.D.Refused, ValueError)):
+                    S.shell_project_draft_observation(observed, lifecycle)
 
         def leaves(value, prefix=()):
             for key, child in (value.items() if type(value) is dict else enumerate(value)):

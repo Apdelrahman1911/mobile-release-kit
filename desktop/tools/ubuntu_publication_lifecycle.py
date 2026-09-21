@@ -111,6 +111,16 @@ SHELL_PROJECT_RECEIPT = {
                   "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
                   "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
     "quit": {"operation": 3, "originalsSettled": True, "relayJoined": True, "exit": True},
+    "guidance": {
+        "draftUnchanged": True,
+        "requirements": {"requestResultDomMatched": True, "context": "android/build", "roles": 3,
+                         "presence": "unknown", "version": "unknown", "inspection": "not-run",
+                         "nativeInspection": "unavailable", "dependencies": "unknown"},
+        "github": {"requestResultDomMatched": True, "explicitInputs": True, "browserEdit": "insertText",
+                   "comparison": "not-supplied", "workflowCount": 4, "tooling": "format-only", "githubContacted": False,
+                   "repositoryObserved": False, "toolingRefResolved": False, "templateCompatibility": "unknown", "applyAvailable": False},
+        "assuranceActions": False, "releaseReadiness": "unknown",
+    },
 }
 OS_SONAMES = {"libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
               "libpthread.so.0", "librt.so.1", "libutil.so.1", "libgcc_s.so.1"}

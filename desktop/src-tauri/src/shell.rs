@@ -101,8 +101,10 @@ async fn environment_requirements(webview: Webview, request: tauri::ipc::Request
     let args = crate::environment::request(body)?;
     not_closing(&state)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.unexpected(); }
+    if let Some(q) = &state.observation { q.requirements_request(body); }
     let result = state.bridge.environment_requirements(&state.document, args).await;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.requirements(&result); }
     result
 }
 #[tauri::command]
@@ -255,8 +257,10 @@ async fn propose_github_setup(request: tauri::ipc::Request<'_>, state: State<'_,
     let input = crate::github_commands::proposal(body)?;
     not_closing(&state)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.unexpected(); }
+    if let Some(q) = &state.observation { q.github_request(body); }
     let result = state.bridge.propose_github_setup(&state.document, input).await;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.github_proposal(&result); }
     result
 }
 

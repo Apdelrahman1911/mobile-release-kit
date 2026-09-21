@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github/workflows/desktop-ubuntu-publication.yml"
+BYOBU_ICON = "/usr/share/byobu/pixmaps/byobu.svg"
 PREPARE = (
     "/usr/share", "/etc/gtk-3.0", "/etc/fonts", "/etc/fonts/conf.d",
     "/usr/share/fontconfig", "/usr/share/fontconfig/conf.avail", "/usr/share/fonts",
@@ -26,6 +27,7 @@ PREPARE = (
     "/usr/share/icons", "/usr/share/icons/Adwaita", "/usr/share/icons/hicolor",
     "/usr/share/themes", "/usr/share/themes/Adwaita", "/usr/share/mime",
     "/usr/share/hunspell", "/usr/share/hyphen",
+    "/usr/share/byobu", "/usr/share/byobu/pixmaps",
 )
 DATA = (
     "/etc/gtk-3.0", "/etc/fonts", "/usr/share/fontconfig", "/usr/share/fonts",
@@ -37,8 +39,12 @@ DATA = (
     "/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache",
     "/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache",
     "/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache",
+    BYOBU_ICON,
 )
-FILES = {"/etc/drirc", "/usr/share/mime/mime.cache", *DATA[-3:]}
+FILES = {"/etc/drirc", "/usr/share/mime/mime.cache", BYOBU_ICON,
+         "/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache",
+         "/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache",
+         "/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache"}
 FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 META_FLAGS = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -353,7 +359,10 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                 tree = ast.parse(source.read_bytes())
                 actual_roots = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
                                     and any(isinstance(target, ast.Name) and target.id == "SHELL_DATA_ROOTS" for target in node.targets))
-                self.assertEqual(expected_roots, actual_roots)
+                # Preparation handles only this observed file-link endpoint in
+                # addition to the unchanged runtime DATA selection. Never grant
+                # either Byobu directory recursive DATA scope.
+                self.assertEqual(expected_roots, (*actual_roots, (BYOBU_ICON, "file")))
                 self.assertEqual(len(rows), 2)
                 diagnostic = self.closure((namespace, rows, error))
                 self.assertEqual([diagnostic[key] for key in ("selectedCount", "examinedCount", "externalCount", "unsafeCount")], [0, 0, 0, 0])
@@ -369,6 +378,52 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                 for row in receipt["prepared"]:
                     self.assertEqual(row["before"]["mode"], format(stat.S_IFDIR | mode, "06o"))
                     self.assertEqual(row["after"], {**row["before"], "mode": "040755"})
+
+    def test_observed_byobu_icon_normalizes_only_three_fixed_nodes_without_sibling_effects(self):
+        selected = "/usr/share/icons/hicolor/scalable/apps/byobu.svg"
+        directories = ("/usr/share/byobu", "/usr/share/byobu/pixmaps")
+        for case in ("present", "no-selection", "broken-selection"):
+            filesystem = DirectoryMetadataOS()
+            for path in directories:
+                filesystem.node(path).st_mode = stat.S_IFDIR | 0o777
+            icon = filesystem.node(BYOBU_ICON)
+            icon.st_mode, icon.st_size = stat.S_IFREG | 0o777, 16221
+            originals = {path: filesystem.snapshot(filesystem.node(path)) for path in (*directories, BYOBU_ICON)}
+            siblings = ("/usr/share/byobu/helper.sh", "/usr/share/byobu/pixmaps/other.svg")
+            for path in siblings:
+                filesystem.add(path, stat.S_IFREG | 0o777)
+            if case != "no-selection":
+                filesystem.link(selected, "../../../../byobu/pixmaps/byobu.svg")
+            if case != "present":
+                filesystem.remove(BYOBU_ICON)
+            with self.subTest(case=case):
+                result = self.run_inline(filesystem)
+                diagnostic = self.closure(result, refused=case == "broken-selection")
+                expected = {path: 0o755 for path in directories}
+                if case == "present":
+                    expected[BYOBU_ICON] = 0o644
+                self.assertEqual({path: mode for path, _, mode in filesystem.chmods}, expected)
+                self.assertEqual(len(filesystem.chmods), len(expected))
+                self.assertEqual(filesystem.chowns, [])
+                for path, mode in expected.items():
+                    before, after = originals[path], filesystem.snapshot(filesystem.node(path))
+                    wanted = vars(before).copy()
+                    wanted.update(st_mode=stat.S_IFMT(before.st_mode) | mode, st_ctime_ns=after.st_ctime_ns)
+                    self.assertEqual(vars(after), wanted)
+                    self.assertEqual(mode & ~stat.S_IMODE(before.st_mode), 0)
+                for path in siblings:
+                    self.assertFalse(any(observed == path for _, observed in filesystem.calls))
+                    self.assertEqual(stat.S_IMODE(filesystem.node(path).st_mode), 0o777)
+                self.assertFalse(any(path in directories for path, _ in filesystem.reads))
+                self.assertEqual(diagnostic["selectedCount"], int(case != "no-selection"))
+                if case == "broken-selection":
+                    self.assertFalse(diagnostic["complete"] or diagnostic["safe"])
+                    self.assertEqual(diagnostic["records"][0]["error"], "unresolved-entry")
+                else:
+                    self.assertTrue(diagnostic["complete"] and diagnostic["safe"])
+                    self.assertEqual(diagnostic["unsafeCount"], 0)
+                if case != "present":
+                    self.assertNotIn("byobu.svg", filesystem.node(directories[1]).children)
 
     def test_only_exact_root_staff_local_fonts_can_normalize_group(self):
         path = "/usr/local/share/fonts"
