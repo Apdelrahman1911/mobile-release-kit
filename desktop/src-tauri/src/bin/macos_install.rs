@@ -162,6 +162,8 @@ mod installer {
         }
         fn directory(&mut self, parent: usize, name: &str, fresh: bool, mode: u32) -> Result<usize> {
             self.clock()?; check((component(name) || name == paths::APP_NAME) && self.creations.len() < 4096, "directory-bound")?;
+            let permissions = Mode::from_bits(mode.try_into().map_err(|_| "created-directory-mode")?)
+                .ok_or("created-directory-mode")?;
             let effect = self.creations.len();
             self.creations.push(Creation { parent, name: name.into(), state: "attempting", identity: None });
             match stat::mkdirat(self.fd(parent)?, name, Mode::from_bits_truncate(0o700)) {
@@ -176,7 +178,7 @@ mod installer {
                 check(self.identity(n)?.gid == 0 && self.identity(n)?.mode & 0o0077 == 0, "created-directory-protection")?;
                 // Normalize only our newly created, protected original. Existing
                 // ancestors NEVER enter this branch, regardless of their mode.
-                stat::fchmod(self.fd(n)?, Mode::from_bits_truncate(mode)).map_err(|_| "created-directory-mode")?;
+                stat::fchmod(self.fd(n)?, permissions).map_err(|_| "created-directory-mode")?;
                 self.originals[n].identity = Some(Identity::of(&stat::fstat(self.fd(n)?).map_err(|_| "created-directory-stat")?));
                 self.creations[effect].identity = Some(self.identity(n)?);
             }
