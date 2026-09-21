@@ -11,9 +11,10 @@ import hashlib
 import importlib.util
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import stat
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -206,6 +207,143 @@ class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
             self.assertEqual(archive.read_bytes(), raw)
             self.assertTrue((runtime / "python/LICENSE.txt").is_file())
             self.assertFalse((runtime / "manifest.json").exists())
+
+    def test_fixed_system_curl_role_preserves_checked_hash_and_generic_policy(self):
+        # These Windows names/stat results and >one-chunk bytes are inert DATA.
+        # Exercise real role/path/hash/state predicates, not a Windows tool.
+        system_root = r"C:\Windows"
+        fixed = PureWindowsPath(system_root) / "System32" / "curl.exe"
+        content = b"INERT fixed-System32 curl DATA; never executed.\n" + b"x" * (64 * 1024)
+        case = self
+
+        def exercise(changes=None, *, refused=False, before_open=False, no_metadata=False, generic=None):
+            changes = {} if changes is None else changes
+            selected = PureWindowsPath(changes.get("path", fixed))
+            common = {"st_dev": 7, "st_ino": 13, "st_nlink": changes.get("links", 2),
+                      "st_size": len(content), "st_mtime_ns": 10000, "st_birthtime_ns": 2000,
+                      "st_file_attributes": 0x20, "st_reparse_tag": 0}
+            named = SimpleNamespace(**{**common, "st_mode": stat.S_IFREG | 0o777, "st_ctime_ns": 2000,
+                                       **changes.get("named", {})})
+            opened = SimpleNamespace(**{**common, "st_mode": stat.S_IFREG | 0o666, "st_ctime_ns": 3000,
+                                        **changes.get("opened", {})})
+            after = SimpleNamespace(**{**vars(opened), **changes.get("after", {})})
+            last = SimpleNamespace(**{**vars(named), **changes.get("last", {})})
+            calls = {"open": 0, "leaf": 0, "parent": 0, "fstat": 0, "bytes": 0, "reads": []}
+
+            class Stream(io.BytesIO):
+                def fileno(self):
+                    case.assertFalse(self.closed)
+                    return 73
+
+                def read(self, size=-1):
+                    case.assertGreater(size, 0)
+                    case.assertLessEqual(size, 64 * 1024)
+                    calls["reads"].append(size)
+                    if changes.get("read_error"):
+                        raise OSError("INERT read boundary refusal")
+                    block = super().read(size)
+                    calls["bytes"] += len(block)
+                    return block
+
+            stream = Stream(changes.get("body", content))
+
+            class NamedPath:
+                def __init__(self, value):
+                    self.value = value
+
+                def __str__(self):
+                    return str(self.value)
+
+                @property
+                def parents(self):
+                    return tuple(NamedPath(parent) for parent in self.value.parents)
+
+                def lstat(self):
+                    if self.value == selected:
+                        calls["leaf"] += 1
+                        if calls["leaf"] > 1:
+                            case.assertFalse(stream.closed)
+                        return named if calls["leaf"] == 1 else last
+                    calls["parent"] += 1
+                    later = calls["parent"] > len(selected.parents)
+                    if later:
+                        case.assertFalse(stream.closed)
+                    altered = changes.get("parent_after" if later else "parent", {}) if self.value == selected.parent else {}
+                    return SimpleNamespace(**{"st_mode": stat.S_IFDIR | 0o777,
+                                              "st_file_attributes": 0x10, "st_reparse_tag": 0, **altered})
+
+                def open(self, mode):
+                    case.assertEqual(self.value, selected)
+                    case.assertEqual(mode, "rb")
+                    calls["open"] += 1
+                    case.assertEqual(calls["open"], 1)
+                    return stream
+
+            def descriptor(fd):
+                case.assertEqual(fd, 73)
+                case.assertFalse(stream.closed)
+                calls["fstat"] += 1
+                case.assertLessEqual(calls["fstat"], 2)
+                return opened if calls["fstat"] == 1 else after
+
+            root_value = changes.get("root", system_root)
+            environment = {} if root_value is None else {"SystemRoot": root_value}
+            reader = foundation.windows_payload_curl_sha256 if generic is None else generic
+            try:
+                with patch.object(foundation, "os", SimpleNamespace(name="nt", environ=environment, fstat=descriptor)), \
+                        patch.object(payload.runtime_preparation, "os", SimpleNamespace(name="nt")), \
+                        patch.object(foundation, "windows_payload_module", return_value=payload), \
+                        patch.object(foundation, "run", side_effect=AssertionError("Curl DATA must not run a tool")):
+                    if refused:
+                        label = "Windows fixed System32 curl" if generic is None else "ordinary, single-link"
+                        with self.assertRaisesRegex(foundation.CheckFailure, label):
+                            reader(NamedPath(selected))
+                    else:
+                        self.assertEqual(reader(NamedPath(selected)), hashlib.sha256(content).hexdigest())
+                        self.assertEqual((calls["open"], calls["leaf"], calls["fstat"]), (1, 2, 2))
+                        self.assertEqual(calls["parent"], 2 * len(selected.parents))
+                        self.assertGreaterEqual(len(calls["reads"]), 2)
+                if before_open:
+                    self.assertEqual((calls["open"], calls["fstat"], calls["reads"]), (0, 0, []))
+                if no_metadata:
+                    self.assertEqual((calls["leaf"], calls["parent"]), (0, 0))
+                self.assertLessEqual(calls["bytes"], max(0, named.st_size + 1))
+                if calls["open"]:
+                    self.assertTrue(stream.closed)
+            finally:
+                # Only this in-memory fixture is ours; unopened fixtures need no
+                # product cleanup, and an opened descriptor had to close above.
+                stream.close()
+
+        for links in (1, 2, 1024):
+            with self.subTest(accepted_links=links):
+                exercise({"links": links})
+        for root in (None, "", "Windows", r"C:Windows", r"\Windows", r"\\host\share\Windows",
+                     r"\\?\C:\Windows", r"C:\Windows\..\Other", r"C:\OtherWindows", system_root + "\0"):
+            with self.subTest(root=root):
+                exercise({"root": root}, refused=True, before_open=True, no_metadata=True)
+        for wrong in (r"C:\Windows\SysWOW64\curl.exe", r"C:\Windows\System32\other.exe",
+                      r"C:\Windows\System32\curl.exe:other", r"C:\Windows\System32\..\System32\curl.exe"):
+            with self.subTest(path=wrong):
+                exercise({"path": wrong}, refused=True, before_open=True, no_metadata=True)
+        for changed in ({"links": 0}, {"links": -1}, {"links": 1025}, {"links": True},
+                        {"named": {"st_size": 0}}, {"named": {"st_size": 16 * 1024 * 1024 + 1}},
+                        {"named": {"st_mode": stat.S_IFDIR | 0o777}},
+                        {"named": {"st_file_attributes": 0x420}}, {"named": {"st_reparse_tag": 1}},
+                        {"parent": {"st_mode": stat.S_IFREG | 0o777}},
+                        {"parent": {"st_file_attributes": 0x410}}, {"parent": {"st_reparse_tag": 1}}):
+            with self.subTest(before_open=changed):
+                exercise(changed, refused=True, before_open=True)
+        for changed in ({"opened": {"st_ino": 14}}, {"opened": {"st_birthtime_ns": 2001}},
+                        {"after": {"st_ctime_ns": 3001}}, {"after": {"st_nlink": 3}},
+                        {"last": {"st_ino": 14}}, {"last": {"st_file_attributes": 0x420}},
+                        {"parent_after": {"st_reparse_tag": 1}}, {"body": content[:-1]},
+                        {"body": content + b"x"}, {"read_error": True}):
+            with self.subTest(drift=tuple(changed)):
+                exercise(changed, refused=True)
+        for generic in (foundation.ordinary, foundation.hash_file):
+            with self.subTest(unchanged_generic=generic.__name__):
+                exercise({"links": 2}, refused=True, before_open=True, generic=generic)
 
     def test_ci_scope_is_closed_to_windows_payload_phases_and_platform(self):
         scope = foundation.WINDOWS_PAYLOAD_SCOPE

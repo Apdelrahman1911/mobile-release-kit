@@ -21,7 +21,7 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shlex
 import shutil
@@ -364,6 +364,8 @@ WINDOWS_PAYLOAD_PHASES = frozenset({"prepare", "acquire", "compile", "windows-pa
 WINDOWS_PAYLOAD_WORKFLOW = ".github/workflows/desktop-windows-payload.yml"
 WINDOWS_PAYLOAD_REF = "refs/heads/verify/desktop-windows-payload"
 WINDOWS_PAYLOAD_TEST = "supervisor::hosted_tests::windows_embedded_payload_hosted_contract"
+WINDOWS_PAYLOAD_CURL_MAX_LINKS = 1024
+WINDOWS_PAYLOAD_CURL_MAX_BYTES = 16 * 1024 * 1024
 WINDOWS_PAYLOAD_CASES = (
     "copied-capabilities", "copied-catalog", "copied-probe",
     "poisoned-capabilities", "poisoned-catalog", "poisoned-probe",
@@ -5025,6 +5027,70 @@ def windows_payload_module():
     return module
 
 
+def windows_payload_curl_sha256(path: Path) -> str:
+    """Observe only the fixed hosted System32 tool, never admit linked payloads.
+
+    Stable servicing hardlinks are allowed for this role, not authenticated as
+    servicing provenance. Checked reads are not hostile-writer lifetime custody
+    or an atomic hash-to-exec guarantee for the subsequent pathname invocation.
+    """
+    root_text = os.environ.get("SystemRoot")
+    require(os.name == "nt" and type(root_text) is str and bool(root_text) and "\0" not in root_text,
+            "Windows fixed System32 curl root is unavailable")
+    system_root = PureWindowsPath(root_text)
+    require(system_root.is_absolute() and re.fullmatch(r"[A-Za-z]:", system_root.drive) is not None
+            and ".." not in system_root.parts,
+            "Windows fixed System32 curl requires a local absolute root")
+    require(PureWindowsPath(str(path)) == system_root / "System32" / "curl.exe",
+            "Windows fixed System32 curl path differs")
+    preparation = windows_payload_module().runtime_preparation
+
+    def non_reparse(details) -> bool:
+        attributes = getattr(details, "st_file_attributes", None)
+        tag = getattr(details, "st_reparse_tag", None)
+        return type(attributes) is int and not attributes & 0x400 and type(tag) is int and tag == 0
+
+    def ancestry() -> None:
+        for parent in reversed(path.parents):
+            details = parent.lstat()
+            require(stat.S_ISDIR(details.st_mode) and non_reparse(details),
+                    "Windows fixed System32 curl ancestry differs")
+
+    try:
+        ancestry()
+        before = path.lstat()
+        require(stat.S_ISREG(before.st_mode) and non_reparse(before)
+                and type(before.st_nlink) is int and 1 <= before.st_nlink <= WINDOWS_PAYLOAD_CURL_MAX_LINKS,
+                "Windows fixed System32 curl file metadata differs")
+        require(type(before.st_size) is int and 1 <= before.st_size <= WINDOWS_PAYLOAD_CURL_MAX_BYTES,
+                "Windows fixed System32 curl size is outside its bound")
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            # Only this fixed .exe pathname has the CPython suffix decoration;
+            # preserve raw mode/ChangeTime in both later same-API comparisons.
+            require(stat.S_ISREG(opened.st_mode) and non_reparse(opened)
+                    and preparation._windows_identity(before, before.st_mode & ~0o111)
+                    == preparation._windows_identity(opened, opened.st_mode),
+                    "Windows fixed System32 curl changed before reading")
+            total = 0
+            while total <= before.st_size:
+                chunk = stream.read(min(64 * 1024, before.st_size + 1 - total))
+                if not chunk:
+                    break
+                total += len(chunk)
+                digest.update(chunk)
+            require(total == before.st_size, "Windows fixed System32 curl length changed")
+            require(preparation._state(os.fstat(stream.fileno())) == preparation._state(opened),
+                    "Windows fixed System32 curl descriptor changed")
+            require(preparation._state(path.lstat()) == preparation._state(before),
+                    "Windows fixed System32 curl pathname changed")
+            ancestry()
+    except (OSError, AttributeError):
+        raise CheckFailure("Windows fixed System32 curl metadata or read unavailable") from None
+    return digest.hexdigest()
+
+
 def windows_payload_binding(environment: dict[str, str]) -> dict:
     """Only the exact reviewed route/source/first attempt, never a general CI opt-in."""
     sha, repository = environment.get("GITHUB_SHA", ""), environment.get("GITHUB_REPOSITORY", "")
@@ -5080,8 +5146,7 @@ def prepare_windows_payload(platform: str) -> None:
     require(git is not None and rustup is not None and Path(git).is_absolute() and Path(rustup).is_absolute(),
             "Windows hosted headless tools unavailable")
     curl = Path(os.environ["SystemRoot"]) / "System32/curl.exe"
-    payload.runtime_preparation._root(curl.parent)
-    ordinary(curl)
+    curl_sha256 = windows_payload_curl_sha256(curl)
     environment = clean_environment(root)
     tree = run([git, "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=source, env=environment, timeout=15, capture=True)
     require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "Windows payload tree differs")
@@ -5090,7 +5155,7 @@ def prepare_windows_payload(platform: str) -> None:
     context = {"root": str(root), "source": str(source), "platform": platform, "executionScope": WINDOWS_PAYLOAD_SCOPE,
                **binding, "sourceTree": tree, "image": os.environ["ImageOS"] + "/" + os.environ["ImageVersion"],
                "workflowSha256": hash_file(source / WINDOWS_PAYLOAD_WORKFLOW),
-               "git": git, "rustup": rustup, "curl": str(curl), "curlSha256": hash_file(curl),
+               "git": git, "rustup": rustup, "curl": str(curl), "curlSha256": curl_sha256,
                "python": str(Path(sys.executable).resolve(strict=True)), "toolPythonSha256": hash_file(Path(sys.executable)),
                "sources": fixed_file_inventory(source, WINDOWS_PAYLOAD_SOURCES),
                "coreFiles": fixed_file_inventory(source / "src", core_names)}
@@ -5326,7 +5391,7 @@ def phase_windows_payload(name: str, context: dict) -> None:
         payload = windows_payload_module()
         payload.notice_bytes(source)
         curl = Path(context["curl"])
-        require(hash_file(curl) == context["curlSha256"], "Windows fixed acquisition tool changed")
+        require(windows_payload_curl_sha256(curl) == context["curlSha256"], "Windows fixed acquisition tool changed")
         archive = root / "inputs" / payload.ZIP_NAME
         require(not archive.exists() and not archive.is_symlink(), "Windows acquisition output already exists")
         # No redirect following, retry, index, ambient curlrc/proxy or executable
