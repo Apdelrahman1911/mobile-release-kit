@@ -165,17 +165,48 @@ const IGNORE_BYTES: u32 = 208;
 const IGNORE_LINES: [&str; 7] = [".mobile-release/", ".mobile-release-init-prepare/", ".mobile-release-init/", ".mobile-release-init-cleanup/",
     ".mobile-release-metadata-text-prepare/", ".mobile-release-metadata-text/", ".mobile-release-metadata-text-cleanup/"];
 
-// This is the fixed original service's protected sibling, not an environment
-// path or a renderer-selected fixture. It is only passed to GtkFileChooser.
-fn project_path() -> Option<PathBuf> {
-    let executable = std::env::current_exe().ok()?;
+// Control and synthetic DATA have distinct protected parents. No environment,
+// renderer input or CLI option chooses either root.
+fn control_root_from_executable(executable: &Path) -> Option<PathBuf> {
     if executable.file_name()? != OsStr::new("shell-observer") { return None; }
     let root = executable.parent()?;
     if root.parent()? != Path::new("/var/lib") { return None; }
     let parts: Vec<_> = root.file_name()?.to_str()?.strip_prefix("mrk-ubuntu-native-")?.split('-').collect();
     if parts.len() != 2 || !parts.iter().all(|part| !part.is_empty() && part.len() <= 20
         && !part.starts_with('0') && part.bytes().all(|byte| byte.is_ascii_digit())) { return None; }
-    Some(root.join("positive-project"))
+    let expected = Path::new("/var/lib").join(format!("mrk-ubuntu-native-{}-{}", parts[0], parts[1]));
+    if executable.as_os_str() != expected.join("shell-observer").as_os_str() { return None; }
+    Some(expected)
+}
+fn control_root() -> Option<PathBuf> {
+    control_root_from_executable(&std::env::current_exe().ok()?)
+}
+fn project_path_from_executable(executable: &Path) -> Option<PathBuf> {
+    let control = control_root_from_executable(executable)?;
+    let suffix = control.file_name()?.to_str()?.strip_prefix("mrk-ubuntu-native-")?;
+    Some(Path::new("/var/lib").join(format!("mrk-ubuntu-shell-fixtures-{suffix}")).join("positive-project"))
+}
+fn project_path() -> Option<PathBuf> {
+    project_path_from_executable(&std::env::current_exe().ok()?)
+}
+fn assert_shell_fixture_path_contract() {
+    // Pure path DATA: no filesystem access, GTK or native operation.
+    for ids in ["10-2", "99999999999999999999-99999999999999999999"] {
+        let control = Path::new("/var/lib").join(format!("mrk-ubuntu-native-{ids}"));
+        let executable = control.join("shell-observer");
+        assert_eq!(control_root_from_executable(&executable), Some(control));
+        assert_eq!(project_path_from_executable(&executable),
+            Some(Path::new("/var/lib").join(format!("mrk-ubuntu-shell-fixtures-{ids}")).join("positive-project")));
+    }
+    for path in ["/var/lib/mrk-ubuntu-native-10-2/shell-normal", "/tmp/mrk-ubuntu-native-10-2/shell-observer",
+        "/var/lib/mrk-ubuntu-shell-fixtures-10-2/shell-observer", "/var/lib/mrk-ubuntu-native-0-2/shell-observer",
+        "/var/lib/mrk-ubuntu-native-10-02/shell-observer", "/var/lib/mrk-ubuntu-native-100000000000000000000-2/shell-observer",
+        "/var/lib/mrk-ubuntu-native-10-2-3/shell-observer", "/var/lib/mrk-ubuntu-native-10-x/shell-observer",
+        "/var/lib/mrk-ubuntu-native-10-/shell-observer", "/var/lib/mrk-ubuntu-native-10-2/./shell-observer",
+        "/var//lib/mrk-ubuntu-native-10-2/shell-observer", "var/lib/mrk-ubuntu-native-10-2/shell-observer"] {
+        assert!(control_root_from_executable(Path::new(path)).is_none());
+        assert!(project_path_from_executable(Path::new(path)).is_none());
+    }
 }
 
 // One fixed root-prepared diagnostic leaf. O_PATH permits binding the0711
@@ -184,14 +215,13 @@ fn project_path() -> Option<PathBuf> {
 fn failure_sink(case: Case) -> Option<rustix::fd::OwnedFd> {
     use std::os::unix::fs::MetadataExt;
     use rustix::fs::{self, Mode, OFlags};
-    let project = project_path()?;
-    let root = project.parent()?;
+    let root = control_root()?;
     for ancestor in root.ancestors() {
         let metadata = std::fs::symlink_metadata(ancestor).ok()?;
         if !metadata.is_dir() || metadata.uid() != 0 || metadata.gid() != 0
             || metadata.mode() & 0o022 != 0 { return None; }
     }
-    let parent = fs::open(root, OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+    let parent = fs::open(&root, OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty()).ok()?;
     let before = fs::fstat(&parent).ok()?;
     if before.st_mode != 0o040711 || before.st_uid != 0 || before.st_gid != 0 { return None; }
@@ -379,7 +409,8 @@ impl PathFixture {
         let mut ancestors = Vec::new();
         for path in root.ancestors() {
             let id = fixture_identity(path)?;
-            if id[2] & 0o170000 != 0o040000 || id[2] & 0o022 != 0 || id[3] != 0 || id[4] != 0 { return Err(()); }
+            if id[2] & 0o170000 != 0o040000 || id[2] & 0o022 != 0 || id[3] != 0 || id[4] != 0
+                || (if path == root.as_path() { id[2] != 0o040755 } else { id[2] & 0o005 != 0o005 }) { return Err(()); }
             ancestors.push((path.to_path_buf(),id));
         }
         let mut originals = Vec::new();
@@ -2969,6 +3000,7 @@ pub(crate) fn main() -> std::process::ExitCode {
     assert_recent_files_suppression_contract();
     assert_failure_pair_contract();
     assert_picker_activation_return_contract();
+    assert_shell_fixture_path_contract();
     if case == Case::Positive {
         crate::asset_session::assert_project_selection_gate_contract();
         crate::asset_session::assert_installed_evidence_gate_contract();

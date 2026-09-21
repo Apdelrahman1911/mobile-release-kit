@@ -1113,6 +1113,32 @@ class InstalledProjectPathReceiptContracts(unittest.TestCase):
 
 
 class InstalledFailureLabelSourceContracts(unittest.TestCase):
+    def test_fixture_parent_is_readable_but_diagnostic_parent_stays_control_bound(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        parser = source.split("fn control_root_from_executable(", 1)[1].split("fn control_root()", 1)[0]
+        self.assertIn('executable.file_name()? != OsStr::new("shell-observer")', parser)
+        self.assertIn('root.parent()? != Path::new("/var/lib")', parser)
+        self.assertIn('strip_prefix("mrk-ubuntu-native-")?', parser)
+        self.assertIn("parts.len() != 2", parser); self.assertIn("part.len() <= 20", parser)
+        self.assertIn("!part.starts_with('0')", parser); self.assertIn("byte.is_ascii_digit()", parser)
+        self.assertIn('executable.as_os_str() != expected.join("shell-observer").as_os_str()', parser)
+        derivation = source.split("fn project_path_from_executable(", 1)[1].split("fn assert_shell_fixture_path_contract()", 1)[0]
+        self.assertIn("control_root_from_executable(executable)?", derivation)
+        self.assertIn('join(format!("mrk-ubuntu-shell-fixtures-{suffix}"))', derivation)
+        self.assertIn('join("positive-project")', derivation)
+        self.assertNotIn("std::env::var", parser + derivation)
+        capture = source.split("impl PathFixture {", 1)[1].split("    fn verify(", 1)[0]
+        self.assertIn("path == root.as_path() { id[2] != 0o040755 }", capture)
+        self.assertIn("id[2] & 0o005 != 0o005", capture)
+        self.assertLess(source.index("    assert_shell_fixture_path_contract();"), source.index("let returned = super::run_builder("))
+        # Source correspondence and pure assertion placement are not GTK/native evidence.
+
+    def test_both_lifecycle_workflow_entry_pins_follow_actual_source(self):
+        workflow = (SOURCE / ".github/workflows/desktop-ubuntu-publication.yml").read_text()
+        lifecycle = (SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_bytes()
+        pins = re.findall(r"MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '([0-9a-f]{64})'", workflow)
+        self.assertEqual(pins, [hashlib.sha256(lifecycle).hexdigest()] * 2)
+
     def test_normal_capability_error_literals_match_the_existing_joined_classifier(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         source = (SOURCE / "desktop/src-tauri/src/bridge.rs").read_text()
@@ -1231,7 +1257,8 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
         entry = (SOURCE / "desktop/src-tauri/tests/installed_shell_observation.rs").read_text()
         opener = source.split("fn failure_sink(case: Case)", 1)[1].split("const FAILURE_PAIR_LIMIT", 1)[0]
-        self.assertIn("let project = project_path()?;", opener)
+        self.assertIn("let root = control_root()?;", opener)
+        self.assertNotIn("project_path()", opener)
         self.assertIn("OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC", opener)
         self.assertIn("OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK", opener)
         self.assertNotIn("OFlags::CREATE", opener); self.assertNotIn("OFlags::TRUNC", opener)
