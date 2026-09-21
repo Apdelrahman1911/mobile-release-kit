@@ -103,11 +103,24 @@ jobs:
               ('/usr/share/byobu/pixmaps/byobu.svg', 'file'),
           )
           SCOPE = 'fixed-shell-data-directory-preparation'
+          DEFAULT_ACL_REMOVAL = {'attempted': False, 'established': False}
+          _first_removal_refusal = None
 
           def need(ok, check, observed=None):
+              global _first_removal_refusal
               if not ok:
-                  diagnostic = json.dumps({'scope': SCOPE, 'failedCheck': check, 'observed': observed},
-                                          sort_keys=True, separators=(',', ':'))
+                  payload = {'scope': SCOPE, 'failedCheck': check, 'observed': observed}
+                  if DEFAULT_ACL_REMOVAL['attempted']:
+                      # Retain the first refusal if a later sole-close attempt also fails.
+                      if _first_removal_refusal is None:
+                          _first_removal_refusal = payload
+                      if check.endswith('close'):
+                          _first_removal_refusal['cleanupUnknown'] = True
+                      payload = {**_first_removal_refusal, 'defaultAclRemoval': dict(DEFAULT_ACL_REMOVAL)}
+                  diagnostic = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+                  if len(diagnostic.encode('ascii')) > 2048 and DEFAULT_ACL_REMOVAL['attempted']:
+                      diagnostic = json.dumps({**payload, 'observed': None, 'truncated': True},
+                                              sort_keys=True, separators=(',', ':'))
                   print(diagnostic if len(diagnostic.encode('ascii')) <= 2048
                         else 'Fixed directory preparation refused; diagnostic bound exceeded.', flush=True)
                   raise SystemExit(70)
@@ -236,6 +249,101 @@ jobs:
                    and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
                    'protected-ancestor', {'path': path, **record(s)})
 
+          def prepare_share_default_acl(fd, parent, name, before, ancestors):
+              # Only this final fixed directory may lose one exact universal default ACL.
+              # These are complete Linux version-2 encodings, not a generic ACL parser.
+              universal = (
+                  bytes.fromhex('02000000 01000700ffffffff 04000700ffffffff 20000700ffffffff'),
+                  bytes.fromhex('02000000 01000700ffffffff 04000700ffffffff 10000700ffffffff 20000700ffffffff'),
+              )
+              access, default = 'system.posix_acl_access', 'system.posix_acl_default'
+              need(name == 'share' and [entry[3] for entry in ancestors] == ['/', '/usr']
+                   and ancestors[-1][0] == parent, 'fixed-share-default-target')
+
+              def failure(attribute, phase, *, result='binding-unproven', number=None,
+                          probe=False, unknown=True, truncated=False):
+                  return XattrFailure('/usr/share', before, phase, attribute=attribute,
+                                      result=result, number=number, probe_performed=probe,
+                                      binding_unknown=unknown, truncated=truncated)
+
+              def binding(item, phase):
+                  try:
+                      for original, original_parent, original_name, path, expected in ancestors:
+                          guarded_xattrs(original, original_parent, original_name, path, expected, phase)
+                          if (identity(os.fstat(original)) != identity(expected)
+                                  or identity(os.stat(original_name, dir_fd=original_parent,
+                                                      follow_symlinks=False)) != identity(expected)):
+                              return False, None, None
+                      bound = (identity(os.fstat(fd)) == identity(item)
+                               == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)))
+                      # Same fixed bounded kernel read and immutable mount baseline.
+                      with open('/proc/self/mountinfo', 'rb') as stream:
+                          bound = stream.read((1 << 20) + 1) == MOUNT_RAW and bound
+                      return bound, None, None
+                  except XattrFailure as error:
+                      return False, None, error
+                  except OSError as error:
+                      return False, error.errno, None
+
+              def require_binding(item, phase, attribute):
+                  bound, number, first = binding(item, phase)
+                  if not bound:
+                      raise first or failure(attribute, phase, number=number)
+
+              def query(item, attribute, phase, *, permit_universal=False):
+                  require_binding(item, phase, attribute)
+                  present, error = False, None
+                  try:
+                      value = os.getxattr(fd, attribute)
+                  except OSError as cause:
+                      if cause.errno != errno.ENODATA:
+                          error = failure(attribute, phase, result='errno', number=cause.errno,
+                                          probe=True, unknown=False)
+                  else:
+                      present = True
+                      allowed = (permit_universal and before.st_dev == MOUNT_DEVICE
+                                 and before.st_mode == stat.S_IFDIR | 0o777
+                                 and before.st_uid == before.st_gid == 0
+                                 and type(value) is bytes and value in universal)
+                      if not allowed:
+                          error = failure(attribute, phase, result='present', probe=True, unknown=False,
+                                          truncated=type(value) is not bytes or len(value) > 65536)
+                      del value  # Never retain or print attribute bytes, size or principals.
+                  bound, number, first = binding(item, phase)
+                  if error is not None:
+                      error.observed['bindingUnknown'] = not bound
+                      raise error  # The first query refusal survives later binding failure.
+                  if not bound:
+                      raise first or failure(attribute, phase, number=number, probe=True)
+                  return present
+
+              phase = 'share-default-before'
+              query(before, access, phase)
+              if not query(before, default, phase, permit_universal=True):
+                  return before, 'absent'
+              phase = 'share-default-remove'
+              require_binding(before, phase, default)
+              need(not DEFAULT_ACL_REMOVAL['attempted'], 'share-default-removal-already-attempted')
+              DEFAULT_ACL_REMOVAL['attempted'] = True
+              try:
+                  os.removexattr(fd, 'system.posix_acl_default')  # One attempt, never ENODATA-as-success.
+              except OSError as error:
+                  raise failure(default, phase, result='errno', number=error.errno, probe=True) from None
+              phase = 'share-default-after'
+              try:
+                  provisional = os.fstat(fd)
+              except OSError as error:
+                  raise failure(default, phase, number=error.errno) from None
+              if identity(provisional)[:-1] != identity(before)[:-1]:
+                  raise failure(default, phase)
+              # Only provisional ctime may differ; all postqueries bind this exact snapshot.
+              query(provisional, default, phase)
+              query(provisional, access, phase)
+              require_binding(provisional, phase, default)
+              DEFAULT_ACL_REMOVAL['established'] = True
+              return provisional, 'removed'
+
+
           def prepare_directory(path):
               need(path in PREPARE_DIRS, 'fixed-target')
               flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -278,7 +386,10 @@ jobs:
                           need(before.st_dev == MOUNT_DEVICE and (local_fonts or (stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
                                and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777))),
                                'target-policy', {'path': current, **record(before)})
-                          originals.append((fd, parent, name, current, before))
+                          expected, default_acl = before, None
+                          if path == '/usr/share':
+                              expected, default_acl = prepare_share_default_acl(fd, parent, name, before, originals)
+                          originals.append((fd, parent, name, current, expected))
                           recheck('prepare-before')
                           mount_unchanged()
                           if local_fonts:
@@ -299,7 +410,10 @@ jobs:
                           originals[-1] = (fd, parent, name, current, after)
                           recheck('prepare-after-mode')
                           mount_unchanged()
-                          return {'path': path, 'before': record(before), 'after': record(after)}
+                          result = {'path': path, 'before': record(before), 'after': record(after)}
+                          if default_acl is not None:
+                              result['defaultAcl'] = default_acl
+                          return result
                       protected(before, current)
                       originals.append((fd, parent, name, current, before))
                       guarded_xattrs(fd, parent, name, current, before, 'prepare-before')
@@ -307,6 +421,11 @@ jobs:
                   need(False, 'missing-directory-target')
               except XattrFailure as error:
                   authority_failure = error
+                  raise
+              except OSError as error:
+                  if DEFAULT_ACL_REMOVAL['attempted']:
+                      need(False, 'preparation-os-error', {'path': path,
+                           'errno': error.errno if type(error.errno) is int and 0 <= error.errno <= 4095 else None})
                   raise
               finally:
                   failed_close = False
@@ -720,6 +839,11 @@ jobs:
               need(closure['complete'] and closure['safe'], 'unhandled-data-link-closure', authority_failure)
           except XattrFailure as error:
               need(False, 'guarded-xattr', error.observed)
+          except OSError as error:
+              if DEFAULT_ACL_REMOVAL['attempted']:
+                  need(False, 'preparation-os-error',
+                       {'errno': error.errno if type(error.errno) is int and 0 <= error.errno <= 4095 else None})
+              raise
           PY
       - name: Prepare a fresh bounded compiler owner
         if: github.ref == 'refs/heads/verify/desktop-installed-shell'
@@ -848,11 +972,24 @@ jobs:
               ('/usr/share/byobu/pixmaps/byobu.svg', 'file'),
           )
           SCOPE = 'fixed-shell-data-directory-preparation'
+          DEFAULT_ACL_REMOVAL = {'attempted': False, 'established': False}
+          _first_removal_refusal = None
 
           def need(ok, check, observed=None):
+              global _first_removal_refusal
               if not ok:
-                  diagnostic = json.dumps({'scope': SCOPE, 'failedCheck': check, 'observed': observed},
-                                          sort_keys=True, separators=(',', ':'))
+                  payload = {'scope': SCOPE, 'failedCheck': check, 'observed': observed}
+                  if DEFAULT_ACL_REMOVAL['attempted']:
+                      # Retain the first refusal if a later sole-close attempt also fails.
+                      if _first_removal_refusal is None:
+                          _first_removal_refusal = payload
+                      if check.endswith('close'):
+                          _first_removal_refusal['cleanupUnknown'] = True
+                      payload = {**_first_removal_refusal, 'defaultAclRemoval': dict(DEFAULT_ACL_REMOVAL)}
+                  diagnostic = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+                  if len(diagnostic.encode('ascii')) > 2048 and DEFAULT_ACL_REMOVAL['attempted']:
+                      diagnostic = json.dumps({**payload, 'observed': None, 'truncated': True},
+                                              sort_keys=True, separators=(',', ':'))
                   print(diagnostic if len(diagnostic.encode('ascii')) <= 2048
                         else 'Fixed directory preparation refused; diagnostic bound exceeded.', flush=True)
                   raise SystemExit(70)
@@ -981,6 +1118,101 @@ jobs:
                    and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
                    'protected-ancestor', {'path': path, **record(s)})
 
+          def prepare_share_default_acl(fd, parent, name, before, ancestors):
+              # Only this final fixed directory may lose one exact universal default ACL.
+              # These are complete Linux version-2 encodings, not a generic ACL parser.
+              universal = (
+                  bytes.fromhex('02000000 01000700ffffffff 04000700ffffffff 20000700ffffffff'),
+                  bytes.fromhex('02000000 01000700ffffffff 04000700ffffffff 10000700ffffffff 20000700ffffffff'),
+              )
+              access, default = 'system.posix_acl_access', 'system.posix_acl_default'
+              need(name == 'share' and [entry[3] for entry in ancestors] == ['/', '/usr']
+                   and ancestors[-1][0] == parent, 'fixed-share-default-target')
+
+              def failure(attribute, phase, *, result='binding-unproven', number=None,
+                          probe=False, unknown=True, truncated=False):
+                  return XattrFailure('/usr/share', before, phase, attribute=attribute,
+                                      result=result, number=number, probe_performed=probe,
+                                      binding_unknown=unknown, truncated=truncated)
+
+              def binding(item, phase):
+                  try:
+                      for original, original_parent, original_name, path, expected in ancestors:
+                          guarded_xattrs(original, original_parent, original_name, path, expected, phase)
+                          if (identity(os.fstat(original)) != identity(expected)
+                                  or identity(os.stat(original_name, dir_fd=original_parent,
+                                                      follow_symlinks=False)) != identity(expected)):
+                              return False, None, None
+                      bound = (identity(os.fstat(fd)) == identity(item)
+                               == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)))
+                      # Same fixed bounded kernel read and immutable mount baseline.
+                      with open('/proc/self/mountinfo', 'rb') as stream:
+                          bound = stream.read((1 << 20) + 1) == MOUNT_RAW and bound
+                      return bound, None, None
+                  except XattrFailure as error:
+                      return False, None, error
+                  except OSError as error:
+                      return False, error.errno, None
+
+              def require_binding(item, phase, attribute):
+                  bound, number, first = binding(item, phase)
+                  if not bound:
+                      raise first or failure(attribute, phase, number=number)
+
+              def query(item, attribute, phase, *, permit_universal=False):
+                  require_binding(item, phase, attribute)
+                  present, error = False, None
+                  try:
+                      value = os.getxattr(fd, attribute)
+                  except OSError as cause:
+                      if cause.errno != errno.ENODATA:
+                          error = failure(attribute, phase, result='errno', number=cause.errno,
+                                          probe=True, unknown=False)
+                  else:
+                      present = True
+                      allowed = (permit_universal and before.st_dev == MOUNT_DEVICE
+                                 and before.st_mode == stat.S_IFDIR | 0o777
+                                 and before.st_uid == before.st_gid == 0
+                                 and type(value) is bytes and value in universal)
+                      if not allowed:
+                          error = failure(attribute, phase, result='present', probe=True, unknown=False,
+                                          truncated=type(value) is not bytes or len(value) > 65536)
+                      del value  # Never retain or print attribute bytes, size or principals.
+                  bound, number, first = binding(item, phase)
+                  if error is not None:
+                      error.observed['bindingUnknown'] = not bound
+                      raise error  # The first query refusal survives later binding failure.
+                  if not bound:
+                      raise first or failure(attribute, phase, number=number, probe=True)
+                  return present
+
+              phase = 'share-default-before'
+              query(before, access, phase)
+              if not query(before, default, phase, permit_universal=True):
+                  return before, 'absent'
+              phase = 'share-default-remove'
+              require_binding(before, phase, default)
+              need(not DEFAULT_ACL_REMOVAL['attempted'], 'share-default-removal-already-attempted')
+              DEFAULT_ACL_REMOVAL['attempted'] = True
+              try:
+                  os.removexattr(fd, 'system.posix_acl_default')  # One attempt, never ENODATA-as-success.
+              except OSError as error:
+                  raise failure(default, phase, result='errno', number=error.errno, probe=True) from None
+              phase = 'share-default-after'
+              try:
+                  provisional = os.fstat(fd)
+              except OSError as error:
+                  raise failure(default, phase, number=error.errno) from None
+              if identity(provisional)[:-1] != identity(before)[:-1]:
+                  raise failure(default, phase)
+              # Only provisional ctime may differ; all postqueries bind this exact snapshot.
+              query(provisional, default, phase)
+              query(provisional, access, phase)
+              require_binding(provisional, phase, default)
+              DEFAULT_ACL_REMOVAL['established'] = True
+              return provisional, 'removed'
+
+
           def prepare_directory(path):
               need(path in PREPARE_DIRS, 'fixed-target')
               flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -1023,7 +1255,10 @@ jobs:
                           need(before.st_dev == MOUNT_DEVICE and (local_fonts or (stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
                                and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777))),
                                'target-policy', {'path': current, **record(before)})
-                          originals.append((fd, parent, name, current, before))
+                          expected, default_acl = before, None
+                          if path == '/usr/share':
+                              expected, default_acl = prepare_share_default_acl(fd, parent, name, before, originals)
+                          originals.append((fd, parent, name, current, expected))
                           recheck('prepare-before')
                           mount_unchanged()
                           if local_fonts:
@@ -1044,7 +1279,10 @@ jobs:
                           originals[-1] = (fd, parent, name, current, after)
                           recheck('prepare-after-mode')
                           mount_unchanged()
-                          return {'path': path, 'before': record(before), 'after': record(after)}
+                          result = {'path': path, 'before': record(before), 'after': record(after)}
+                          if default_acl is not None:
+                              result['defaultAcl'] = default_acl
+                          return result
                       protected(before, current)
                       originals.append((fd, parent, name, current, before))
                       guarded_xattrs(fd, parent, name, current, before, 'prepare-before')
@@ -1052,6 +1290,11 @@ jobs:
                   need(False, 'missing-directory-target')
               except XattrFailure as error:
                   authority_failure = error
+                  raise
+              except OSError as error:
+                  if DEFAULT_ACL_REMOVAL['attempted']:
+                      need(False, 'preparation-os-error', {'path': path,
+                           'errno': error.errno if type(error.errno) is int and 0 <= error.errno <= 4095 else None})
                   raise
               finally:
                   failed_close = False
@@ -1465,6 +1708,11 @@ jobs:
               need(closure['complete'] and closure['safe'], 'unhandled-data-link-closure', authority_failure)
           except XattrFailure as error:
               need(False, 'guarded-xattr', error.observed)
+          except OSError as error:
+              if DEFAULT_ACL_REMOVAL['attempted']:
+                  need(False, 'preparation-os-error',
+                       {'errno': error.errno if type(error.errno) is int and 0 <= error.errno <= 4095 else None})
+              raise
           PY
       - name: Prepare a fresh bounded native owner
         id: prepare

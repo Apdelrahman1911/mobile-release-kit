@@ -51,6 +51,10 @@ META_FLAGS = os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC
 ACCESS_ACL = "system.posix_acl_access"
 DEFAULT_ACL = "system.posix_acl_default"
 FILE_CAPABILITY = "security.capability"
+UNIVERSAL_DEFAULT_ACLS = (
+    bytes.fromhex("02000000 01000700ffffffff 04000700ffffffff 20000700ffffffff"),
+    bytes.fromhex("02000000 01000700ffffffff 04000700ffffffff 10000700ffffffff 20000700ffffffff"),
+)
 PREPARER_MARKER = ("          sudo /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent "
                    "/usr/bin/python3.12 -I -S -B - <<'PY'\n")
 
@@ -63,7 +67,7 @@ class DirectoryMetadataOS:
         self.live, self.fd_flags, self.calls, self.listings = {}, {}, {}, {}
         self.opened, self.open_attempts, self.closed, self.reads, self.chmods = [], [], [], [], []
         self.chowns, self.open_details, self.attempt_details, self.close_details, self.link_reads = [], [], [], [], []
-        self.xattr_calls = []
+        self.xattr_calls, self.xattr_removals = [], []
         self.hook = None
         self.uids = self.gids = (0, 0, 0)
         self.mount_raw = b"1 2 0:1 / / rw,relatime - ext4 /dev/mock rw\n"
@@ -202,6 +206,23 @@ class DirectoryMetadataOS:
             raise value
         return value
 
+    def removexattr(self, fd, attribute):
+        # This single disposable-host exception must never become a generic
+        # attribute-removal API, even inside the inert workflow fixture.
+        if type(fd) is not int or fd not in self.live or self.fd_flags[fd] != FLAGS:
+            raise AssertionError("Removal requires the original ordinary directory FD")
+        node = self.live[fd]
+        if (node.path != "/usr/share" or attribute != DEFAULT_ACL
+                or (node.st_uid, node.st_gid, node.st_mode) != (0, 0, stat.S_IFDIR | 0o777)):
+            raise AssertionError("Only the exact original root-owned share default is removable")
+        self.xattr_removals.append((fd, node.path, node.st_ino, attribute))
+        self.call("removexattr", node.path)
+        if attribute not in node.xattrs:
+            raise OSError(errno.ENODATA, "Mock original default disappeared")
+        del node.xattrs[attribute]
+        node.st_ctime_ns += 1
+        self.call("removexattr-after", node.path)
+
     def fchmod(self, fd, mode):
         if self.fd_flags[fd] == META_FLAGS:
             raise AssertionError("Diagnostic metadata originals never authorize effects")
@@ -270,7 +291,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         namespace, output, error = {"__name__": "workflow_directory_preparation"}, io.StringIO(), None
         replacements = {name: forbidden for name in ("lstat", "read", "write", "chmod", "chown", "fchown",
                                                      "mkdir", "rmdir", "unlink", "rename", "symlink", "listxattr", "setxattr", "removexattr")}
-        replacements.update({name: getattr(filesystem, name) for name in ("open", "stat", "fstat", "listdir", "readlink", "getxattr", "fchmod", "fchown", "close")})
+        replacements.update({name: getattr(filesystem, name) for name in ("open", "stat", "fstat", "listdir", "readlink", "getxattr", "removexattr", "fchmod", "fchown", "close")})
         replacements.update(getresuid=lambda: filesystem.uids, getresgid=lambda: filesystem.gids)
         with patch.multiple(os, **replacements), patch.object(builtins, "open", filesystem.open_mounts), redirect_stdout(output):
             try:
@@ -412,6 +433,184 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
             self.assertTrue(observed["bindingUnknown"])
         self.assertLessEqual(len(json.dumps(observed, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
         return observed
+
+    def test_share_default_absence_or_exact_universal_encoding_retains_all_other_authority(self):
+        for value in (None, *UNIVERSAL_DEFAULT_ACLS):
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.node("/usr/share")
+            original.st_mode = stat.S_IFDIR | 0o777
+            before = vars(filesystem.snapshot(original)).copy()
+            if value is not None:
+                original.xattrs[DEFAULT_ACL] = value
+            with self.subTest(encoding_bytes=None if value is None else len(value)):
+                result = self.run_inline(filesystem)
+                self.closure(result)
+                _, rows, _ = result
+                prepared = next(row for row in rows[0]["prepared"] if row["path"] == "/usr/share")
+                self.assertEqual(prepared["defaultAcl"], "absent" if value is None else "removed")
+                self.assertEqual(prepared["before"]["mode"], "040777")
+                self.assertEqual(prepared["after"]["mode"], "040755")
+                self.assertEqual(len(filesystem.xattr_removals), int(value is not None))
+                if value is not None:
+                    fd, path, inode, attribute = filesystem.xattr_removals[0]
+                    self.assertEqual((path, inode, attribute), ("/usr/share", original.st_ino, DEFAULT_ACL))
+                    self.assertIn((fd, path, inode, DEFAULT_ACL, FLAGS), filesystem.xattr_calls)
+                self.assertEqual(filesystem.chmods, [("/usr/share", original.st_ino, 0o755)])
+                self.assertEqual(filesystem.chowns, [])
+                self.assertEqual(original.xattrs, {})
+                after = vars(filesystem.snapshot(original))
+                for key in before.keys() - {"st_mode", "st_ctime_ns"}:
+                    self.assertEqual(after[key], before[key], key)
+                self.assertEqual(after["st_ctime_ns"], before["st_ctime_ns"] + 1 + int(value is not None))
+                self.assertNotIn("ffffffff", json.dumps(rows))
+
+    def test_share_default_nonuniversal_encodings_and_off_target_objects_are_never_removed(self):
+        bare, masked = UNIVERSAL_DEFAULT_ACLS
+        named = bytes.fromhex("02000000 01000700ffffffff 02000700e9030000 04000700ffffffff 10000700ffffffff 20000700ffffffff")
+        values = (b"", b"private-unrecognized-default", bare[:-1], bare + b"\0",
+                  b"\x03" + bare[1:], bare[:6] + b"\x06" + bare[7:],
+                  masked[:22] + b"\x06" + masked[23:], bare[:8] + b"\0" + bare[9:],
+                  named, bytearray(bare), "private-unrecognized-default", None)
+        for index, value in enumerate(values):
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.node("/usr/share")
+            original.st_mode = stat.S_IFDIR | 0o777
+            original.xattrs[DEFAULT_ACL] = value
+            with self.subTest(encoding=index):
+                rows = self.refused(self.run_inline(filesystem))
+                self.assertEqual(filesystem.xattr_removals, [])
+                self.assertEqual(filesystem.chmods, [])
+                self.assertEqual(original.xattrs[DEFAULT_ACL], value)
+                self.assertNotIn("private-unrecognized", json.dumps(rows))
+                self.assertNotIn("defaultAclRemoval", rows[-1])
+        for path, mode, uid, gid in (("/usr/share", 0o755, 0, 0), ("/usr/share", 0o775, 0, 0),
+                                     ("/usr/share", 0o777, 1, 0), ("/usr/share", 0o777, 0, 1),
+                                     ("/etc/fonts", 0o777, 0, 0), ("/usr/share/fonts", 0o755, 0, 0)):
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.node(path)
+            original.st_mode, original.st_uid, original.st_gid = stat.S_IFDIR | mode, uid, gid
+            original.xattrs[DEFAULT_ACL] = bare
+            with self.subTest(path=path, mode=mode, uid=uid, gid=gid):
+                self.refused(self.run_inline(filesystem))
+                self.assertEqual(filesystem.xattr_removals, [])
+                self.assertEqual(filesystem.chmods, [])
+                self.assertEqual(original.xattrs[DEFAULT_ACL], bare)
+
+    def test_share_default_access_authority_and_unknown_queries_block_removal(self):
+        cases = [(ACCESS_ACL, b""), (ACCESS_ACL, b"private-access-marker")]
+        cases += [(attribute, OSError(number, "private-xattr-error"))
+                  for attribute in (ACCESS_ACL, DEFAULT_ACL)
+                  for number in (errno.EACCES, errno.EPERM, errno.EIO, errno.ENOENT, errno.EBADF, errno.EOPNOTSUPP)]
+        for attribute, value in cases:
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.node("/usr/share")
+            original.st_mode = stat.S_IFDIR | 0o777
+            original.xattrs[DEFAULT_ACL] = UNIVERSAL_DEFAULT_ACLS[0]
+            original.xattrs[attribute] = value
+            with self.subTest(attribute=attribute, errno=getattr(value, "errno", None)):
+                rows = self.refused(self.run_inline(filesystem))
+                self.assertEqual(filesystem.xattr_removals, [])
+                self.assertEqual(filesystem.chmods, [])
+                self.assertNotIn("private-", json.dumps(rows))
+                self.assertNotIn("defaultAclRemoval", rows[-1])
+
+    def test_share_default_query_identity_mount_and_ancestor_drift_prevents_the_effect(self):
+        for change in ("name", "state", "mount", "ancestor-mode", "ancestor-access"):
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.node("/usr/share")
+            original.st_mode = stat.S_IFDIR | 0o777
+            original.xattrs[DEFAULT_ACL] = UNIVERSAL_DEFAULT_ACLS[0]
+            fired = False
+
+            def hook(operation, path, _count):
+                nonlocal fired
+                if fired or operation != "getxattr" or path != "/usr/share" or filesystem.xattr_calls[-1][3] != DEFAULT_ACL:
+                    return
+                fired = True
+                if change == "name":
+                    filesystem.add(path, stat.S_IFDIR | 0o777)
+                elif change == "state":
+                    original.st_size += 1
+                elif change == "mount":
+                    filesystem.mount_raw += b"3 1 0:2 / /usr/share rw - ext4 /dev/other rw\n"
+                elif change == "ancestor-mode":
+                    filesystem.node("/usr").st_mode = stat.S_IFDIR | 0o777
+                else:
+                    filesystem.node("/usr").xattrs[ACCESS_ACL] = b""
+
+            filesystem.hook = hook
+            with self.subTest(change=change):
+                self.refused(self.run_inline(filesystem))
+                self.assertTrue(fired)
+                self.assertEqual(filesystem.xattr_removals, [])
+                self.assertEqual(filesystem.chmods, [])
+                self.assertIn(DEFAULT_ACL, original.xattrs)
+
+    def test_share_default_removal_error_and_postcondition_drift_never_retry_or_claim_established(self):
+        changes = ("remove-error", "remove-missing", "default-reappears", "access-appears", "mount")
+        changes += tuple("field:" + key for key in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns"))
+        for change in changes:
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.node("/usr/share")
+            original.st_mode = stat.S_IFDIR | 0o777
+            original.xattrs[DEFAULT_ACL] = UNIVERSAL_DEFAULT_ACLS[0]
+
+            def hook(operation, path, _count):
+                if path != "/usr/share":
+                    return
+                if operation == "removexattr" and change.startswith("remove-"):
+                    raise OSError(errno.EIO if change == "remove-error" else errno.ENODATA, "private-removal-error")
+                if operation != "removexattr-after":
+                    return
+                if change == "default-reappears":
+                    original.xattrs[DEFAULT_ACL] = UNIVERSAL_DEFAULT_ACLS[0]
+                elif change == "access-appears":
+                    original.xattrs[ACCESS_ACL] = b""
+                elif change == "mount":
+                    filesystem.mount_raw += b"3 1 0:2 / /usr/share rw - ext4 /dev/other rw\n"
+                elif change.startswith("field:"):
+                    key = change.split(":", 1)[1]
+                    setattr(original, key, getattr(original, key) + 1)
+
+            filesystem.hook = hook
+            with self.subTest(change=change):
+                rows = self.refused(self.run_inline(filesystem))
+                self.assertEqual(len(filesystem.xattr_removals), 1)
+                self.assertEqual(filesystem.chmods, [])
+                self.assertEqual(rows[-1]["defaultAclRemoval"], {"attempted": True, "established": False})
+                self.assertNotIn("private-removal", json.dumps(rows))
+
+    def test_share_default_established_removal_survives_later_failure_and_first_refusal_survives_close(self):
+        for change in ("mode-error", "mode-drift", "later-default", "close", "post-default-and-close"):
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.node("/usr/share")
+            original.st_mode = stat.S_IFDIR | 0o777
+            original.xattrs[DEFAULT_ACL] = UNIVERSAL_DEFAULT_ACLS[0]
+
+            def hook(operation, path, count):
+                if path == "/usr/share" and operation == "fchmod":
+                    if change == "mode-error":
+                        raise OSError(errno.EIO, "private-mode-error")
+                    if change == "mode-drift":
+                        original.st_mtime_ns += 1
+                    if change == "later-default":
+                        filesystem.node("/usr/share/fonts").xattrs[DEFAULT_ACL] = b""
+                if path == "/usr/share" and operation == "removexattr-after" and change == "post-default-and-close":
+                    original.xattrs[DEFAULT_ACL] = b""
+                if path == "/usr/share" and operation == "close" and count == 1 and change in {"close", "post-default-and-close"}:
+                    raise OSError(errno.EIO, "private-close-error")
+
+            filesystem.hook = hook
+            with self.subTest(change=change):
+                rows = self.refused(self.run_inline(filesystem))
+                self.assertEqual(len(filesystem.xattr_removals), 1)
+                self.assertEqual(rows[-1]["defaultAclRemoval"], {"attempted": True, "established": change != "post-default-and-close"})
+                self.assertNotIn("private-", json.dumps(rows))
+                if change == "post-default-and-close":
+                    self.assertEqual(rows[-1]["failedCheck"], "guarded-xattr")
+                    observed = rows[-1]["observed"]
+                    self.assertEqual((observed["attribute"], observed["result"]), (DEFAULT_ACL, "present"))
+                    self.assertTrue(observed["cleanupUnknown"])
 
     def test_xattr_queries_use_kind_specific_ordinary_fds_in_census_and_link_targets(self):
         filesystem = DirectoryMetadataOS()
