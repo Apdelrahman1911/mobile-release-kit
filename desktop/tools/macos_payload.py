@@ -1035,12 +1035,37 @@ def package(job: Job, inputs: dict, payload: Path) -> dict:
 
 SMOKE = r'''import ctypes, hashlib, json, os, pathlib, resource, ssl, sys, zlib
 from xml.parsers import expat
+def _assert_clean_environment():
+    expected = {'PATH', 'LANG', 'LC_ALL', 'TZ', 'HOME', 'TMPDIR'}
+    actual = set(os.environ)
+    if actual != expected:
+        # Failure-only key names, never values or exception representations.
+        fallback = 'environment-key-mismatch names-unavailable\n'
+        try:
+            missing, extra = sorted(expected - actual), sorted(actual - expected)
+            names = [ascii(name) for name in extra[:8]]
+            shortened = any(len(name) > 64 for name in names)
+            names = [name[:61] + '...' if len(name) > 64 else name for name in names]
+            message = ('environment-key-mismatch missingCount={} extraCount={} '
+                       'extraListTruncated={} extraNameTruncated={} missing=[{}] extra=[{}]\n').format(
+                len(missing), len(extra), len(extra) > 8, shortened,
+                ', '.join(missing), ' | '.join(names))
+            if len(message.encode('ascii')) > 8192:
+                message = fallback
+        except Exception:
+            message = fallback
+        try:
+            sys.stderr.write(message)
+        except Exception:
+            pass  # A diagnostic write cannot replace the original assertion.
+    assert set(os.environ) == {'PATH', 'LANG', 'LC_ALL', 'TZ', 'HOME', 'TMPDIR'}
+
 p = pathlib.Path(sys.argv[1])
 assert sys.version_info[:3] == (3, 14, 7) and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
 assert pathlib.Path(sys.executable) == p / 'python/bin/python3'
 assert sys.prefix == str(p / 'python') and sys.base_prefix == sys.prefix and sys.exec_prefix == sys.prefix
 assert sys._is_gil_enabled() and not sys.flags.optimize
-assert set(os.environ) == {'PATH', 'LANG', 'LC_ALL', 'TZ', 'HOME', 'TMPDIR'}
+_assert_clean_environment()
 assert all(not v or pathlib.Path(v).is_relative_to(p / 'python') for v in sys.path)
 assert hashlib.sha256(b'abc').hexdigest() == 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
 assert zlib.decompress(zlib.compress(b'mrk')) == b'mrk' and ssl.OPENSSL_VERSION.startswith('OpenSSL 3.5.8 ')

@@ -7,6 +7,7 @@ settlement evidence. Execute this file only after SOURCE/COMMAND acceptance.
 from __future__ import annotations
 
 from contextlib import nullcontext
+import ast
 import hashlib
 import importlib.util
 import inspect
@@ -143,7 +144,62 @@ def notice_data(root):
                            job=job, lstat=lstat, overrides=overrides)
 
 
+def smoke_environment_check(environ, stream, **overrides):
+    # Compile only this DATA-only function, never SMOKE's native imports/body.
+    function, = (node for node in ast.parse(payload.SMOKE).body
+                 if isinstance(node, ast.FunctionDef) and node.name == "_assert_clean_environment")
+    namespace = {"os": SimpleNamespace(environ=environ), "sys": SimpleNamespace(stderr=stream), **overrides}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "<smoke-key-check-data>", "exec"), namespace)
+    return namespace["_assert_clean_environment"]
+
+
 class MacOSPayloadDataTests(unittest.TestCase):
+    def test_smoke_environment_key_diagnostic_preserves_assertion_and_redaction(self):
+        class KeysOnly(dict):
+            def __getitem__(self, key):
+                raise AssertionError("Environment values must never be read")
+            get = items = values = __getitem__
+
+        expected = {"PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR"}
+        stream = io.StringIO()
+        smoke_environment_check(KeysOnly.fromkeys(expected, "DO-NOT-REPORT-VALUE"), stream)()
+        self.assertEqual(stream.getvalue(), "")
+        environ = KeysOnly.fromkeys((expected - {"HOME"}) | {"UNEXPECTED_KEY"}, "DO-NOT-REPORT-VALUE")
+        with self.assertRaises(AssertionError):
+            smoke_environment_check(environ, stream)()
+        self.assertEqual(stream.getvalue(), "environment-key-mismatch missingCount=1 extraCount=1 "
+                         "extraListTruncated=False extraNameTruncated=False missing=[HOME] extra=['UNEXPECTED_KEY']\n")
+        self.assertNotIn("DO-NOT-REPORT-VALUE", stream.getvalue())
+        self.assertEqual(set(environ), (expected - {"HOME"}) | {"UNEXPECTED_KEY"})
+
+    def test_smoke_environment_key_diagnostic_bounds_and_ascii_escaping(self):
+        expected = {"PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR"}
+        stream = io.StringIO()
+        with self.assertRaises(AssertionError):
+            smoke_environment_check(dict.fromkeys(expected | {"\u00e9\x1b\n\u2603"}, "PRIVATE"), stream)()
+        self.assertIn("\\xe9\\x1b\\n\\u2603", stream.getvalue())
+        self.assertTrue(all(32 <= ord(char) < 127 for char in stream.getvalue().rstrip("\n")))
+        stream = io.StringIO()
+        extras = {str(n) + "\U0001f642" * 100 for n in range(10)}
+        with self.assertRaises(AssertionError):
+            smoke_environment_check(dict.fromkeys(expected | extras, "PRIVATE"), stream)()
+        message = stream.getvalue()
+        self.assertLessEqual(len(message.encode("ascii")), 8192)
+        self.assertIn("missingCount=0 extraCount=10 extraListTruncated=True extraNameTruncated=True", message)
+        names = message.split(" extra=[", 1)[1].removesuffix("]\n").split(" | ")
+        self.assertEqual(len(names), 8)
+        self.assertTrue(all(len(name.encode("ascii")) == 64 and name.endswith("...") for name in names))
+        self.assertNotIn("PRIVATE", message)
+
+    def test_smoke_environment_key_diagnostic_keeps_assertion_on_formatting_failure(self):
+        environ = dict.fromkeys({"PATH", "LANG", "LC_ALL", "TZ", "HOME", "TMPDIR", "EXTRA"}, "PRIVATE")
+        stream = io.StringIO()
+        with self.assertRaises(AssertionError):
+            smoke_environment_check(environ, stream, ascii=Mock(side_effect=ValueError("DO-NOT-REPORT-ERROR")))()
+        self.assertEqual(stream.getvalue(), "environment-key-mismatch names-unavailable\n")
+        with self.assertRaises(AssertionError):
+            smoke_environment_check(environ, SimpleNamespace(write=Mock(side_effect=OSError("PRIVATE"))))()
+
     def test_deadline_allocation_reserves_original_tail_without_renewal(self):
         self.assertEqual(payload.command_timeout(100, 94.1), 2)
         self.assertEqual(payload.command_timeout(100, 95.1), 1)
