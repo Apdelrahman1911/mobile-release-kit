@@ -1,0 +1,722 @@
+//! Private native facts, not a qualified runtime or a process-creation adapter.
+//!
+//! The caller must register this book inside its ORIGINAL retained Resources before
+//! releasing blocking work. Serialize it under that owner's Mutex; keep it and the
+//! actual workers reachable through STOP, document loss, timeout and settlement.
+//! This crate creates no worker, clock, broker, capability or process. It must not
+//! run on the UI/deadline thread. The production Windows profile remains closed.
+//!
+//! Native output destinations already belong to the pinned book before entry.
+//! Drop never closes a HANDLE; unresolved storage is deliberately not deallocated.
+//! Leaking storage is memory-safety fallback, NOT proof of owner reachability or
+//! settlement. A future Windows owner integration must supply that proof.
+#![cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+#![allow(unsafe_code)] // Small audited boundary; the application still forbids unsafe.
+#![deny(unsafe_op_in_unsafe_fn)]
+
+use std::cell::{Cell, UnsafeCell};
+use std::marker::PhantomPinned;
+use std::mem::{offset_of, size_of, ManuallyDrop};
+use std::pin::Pin;
+use std::ptr::{null, null_mut};
+use std::sync::Arc;
+use windows_sys::Wdk::{Foundation::OBJECT_ATTRIBUTES, Storage::FileSystem as N};
+use windows_sys::Wdk::System::SystemServices as NS;
+use windows_sys::Win32::{Foundation as F, Security as S, Storage::FileSystem as FS};
+use windows_sys::Win32::System::{IO, SystemInformation as SI, Threading as T, WindowsProgramming as WP};
+use windows_sys::Win32::UI::Shell as SH;
+
+mod decode;
+mod security;
+pub use decode::{DirectoryEntry, FileIdentity, Metadata};
+pub use security::{AceFact, GroupFact, SecurityFacts, Sid, TokenFacts, TokenIdentity};
+
+// E_PENDING is the exact scalar value in locked windows-sys 0.61.2
+// Win32/System/Com/Urlmon. No Urlmon/COM function or loader dependency is used.
+const HRESULT_PENDING: i32 = 0x8000000a_u32 as i32;
+const BUFFER: usize = 64 * 1024;
+const MAX_LIVE: usize = 48; // Token originals count, too.
+const MAX_RECORDS: usize = 8256;
+const MAX_FILES: usize = 2048;
+const MAX_ENTRIES: usize = 8192;
+const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+const NAME_UNITS: usize = 8192;
+const MAP_UNITS: usize = 4096;
+type Held<T> = ManuallyDrop<Pin<Box<T>>>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Error { Unavailable, Unsafe, Bounds, State, Unknown }
+pub type Result<T> = std::result::Result<T, Error>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileKind { Directory, File }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthorityScope { AncestorOutsideVersion, ImmutableVersion }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SlotState { Reserved, Acquiring, Owned, NoHandle, Closing, Closed, Unknown }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CloseOutcome { Settled, Unknown }
+
+// The key cannot be constructed or cloned outside the crate. Keeping its Arc
+// prevents an old key from matching a different book after allocator address reuse.
+// It owns NO native handle; dropping it never retires its book's slot.
+pub struct Original { book: Arc<()>, index: usize }
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Kind { Directory, File, ProcessToken, ThreadToken }
+impl From<FileKind> for Kind {
+    fn from(value: FileKind) -> Self {
+        match value { FileKind::Directory => Self::Directory, FileKind::File => Self::File }
+    }
+}
+struct Slot {
+    output: UnsafeCell<F::HANDLE>,
+    state: SlotState,
+    kind: Kind,
+    parent: Option<usize>,
+    name: Vec<u16>,
+    canonical: String,
+    read_bytes: u64,
+    read_ended: bool,
+    directory_ended: bool,
+    _pin: PhantomPinned,
+}
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Phase { Prepared, Entered, Returned, Complete }
+#[derive(Clone, Copy)]
+enum PrivilegeName { ChangeNotify, Shutdown, Undock, IncreaseWorkingSet, TimeZone }
+#[derive(Clone, Copy)]
+enum Call {
+    Architecture, Folder, WindowsDirectory, SystemDirectory, Mapping, DriveType,
+    Open(usize), ProcessToken(usize), ThreadToken(usize), Close(usize),
+    Info(FS::FILE_INFO_BY_HANDLE_CLASS, usize), HandleInfo, FinalName, FileType,
+    VolumeName, VolumeDevice, Streams, Security,
+    Token(S::TOKEN_INFORMATION_CLASS), Privilege(PrivilegeName), Read(usize), Entries,
+}
+#[derive(Clone, Copy, Debug)]
+enum Returned { Boolean(i32, u32), Count(u32, u32), Hresult(i32), Nt(i32), Scalar(u32) }
+#[repr(C, align(8))]
+struct Aligned([u8; BUFFER]);
+struct Arena {
+    call: Call,
+    phase: Cell<Phase>,
+    returned: Cell<Option<Returned>>,
+    input: Vec<u16>,
+    handle: F::HANDLE,
+    output_handle: *mut F::HANDLE,
+    unicode: F::UNICODE_STRING,
+    attributes: OBJECT_ATTRIBUTES,
+    directory: bool,
+    bytes: UnsafeCell<Aligned>,
+    count: UnsafeCell<u32>,
+    iosb: UnsafeCell<IO::IO_STATUS_BLOCK>,
+    _pin: PhantomPinned,
+}
+impl Arena {
+    fn buffer(&self) -> *mut u8 { self.bytes.get().cast::<u8>() }
+    fn returned(&self) -> Result<Returned> { self.returned.get().ok_or(Error::Unknown) }
+}
+struct Complete { arena: Pin<Box<Arena>> }
+impl Complete {
+    fn bytes(&self, length: usize) -> Result<&[u8]> {
+        if self.arena.phase.get() != Phase::Complete { return Err(Error::Unknown); }
+        if length > BUFFER { return Err(Error::Unsafe); }
+        // SAFETY: only definite synchronous completion constructs Complete; the
+        // pinned allocation is still owned, aligned and has BUFFER initialized bytes.
+        Ok(unsafe { std::slice::from_raw_parts(self.arena.buffer(), length) })
+    }
+    fn count(&self) -> Result<usize> {
+        // SAFETY: Complete excludes outstanding writes to this retained output.
+        let value = unsafe { *self.arena.count.get() } as usize;
+        if value > BUFFER { return Err(Error::Unsafe); }
+        Ok(value)
+    }
+    fn nt_bytes(&self) -> Result<&[u8]> {
+        // SAFETY: STATUS_PENDING/contradictory IOSB never becomes Complete.
+        let count = unsafe { (*self.arena.iosb.get()).Information };
+        self.bytes(count)
+    }
+    fn scalar(&self) -> Result<u32> {
+        match self.arena.returned()? {
+            Returned::Scalar(value) | Returned::Count(value, _) => Ok(value), _ => Err(Error::State),
+        }
+    }
+    fn text(&self, capacity: usize, counted: bool) -> Result<String> {
+        let count = if counted { self.scalar()? as usize } else { capacity };
+        if counted && (count == 0 || count >= capacity) { return Err(Error::Unsafe); }
+        decode::terminated(self.bytes(capacity.checked_mul(2).ok_or(Error::Bounds)?)?,
+            if counted { Some(count) } else { None })
+    }
+}
+
+/// Non-cloneable storage book, not runtime authority. Calls are synchronous and
+/// must remain in original retained blocking work; no cancel-by-drop is supported.
+pub struct NativeBook {
+    identity: Arc<()>,
+    slots: Vec<Held<Slot>>,
+    active: Option<Held<Arena>>,
+    unknown: bool,
+    started: bool,
+    retiring: bool,
+    entries: usize,
+    bytes_read: u64,
+    process_token: Option<usize>,
+    user: Option<TokenFacts>,
+    roots_started: bool,
+}
+// SAFETY: actual Windows file/token handles are process-wide. Only ownership of
+// the serialized book moves; no reference to its UnsafeCell outputs escapes.
+// Its pin allocations do not move, and an entered call exclusively borrows the
+// book under the existing owner's Mutex. It is deliberately NOT Sync. Token
+// observations are current-context facts, not a transferable impersonation lease.
+unsafe impl Send for NativeBook {}
+impl Default for NativeBook { fn default() -> Self { Self::new() } }
+impl NativeBook {
+    pub fn new() -> Self {
+        Self { identity: Arc::new(()), slots: Vec::new(), active: None, unknown: false, started: false,
+            retiring: false, entries: 0, bytes_read: 0, process_token: None,
+            user: None, roots_started: false }
+    }
+    fn clear(&self) -> Result<()> {
+        if self.unknown || self.active.is_some() { Err(Error::Unknown) }
+        else if self.retiring { Err(Error::State) } else { Ok(()) }
+    }
+    fn slot(&self, index: usize) -> Result<&Slot> {
+        self.slots.get(index).map(|s| s.as_ref().get_ref()).ok_or(Error::State)
+    }
+    fn slot_mut(&mut self, index: usize) -> Result<&mut Slot> {
+        let slot = self.slots.get_mut(index).ok_or(Error::State)?;
+        // SAFETY: private access changes fields only, never moves a pinned Slot.
+        Ok(unsafe { slot.as_mut().get_unchecked_mut() })
+    }
+    fn index(&self, original: &Original) -> Result<usize> {
+        if !Arc::ptr_eq(&self.identity, &original.book) { return Err(Error::State); }
+        self.slot(original.index)?; Ok(original.index)
+    }
+    fn handle(&self, index: usize) -> Result<F::HANDLE> {
+        let slot = self.slot(index)?;
+        if slot.state != SlotState::Owned || self.active.is_some() { return Err(Error::State); }
+        // SAFETY: Owned is published only after definite output completion; all
+        // borrowers are serialized and no entered operation can be present here.
+        let handle = unsafe { *slot.output.get() };
+        if !valid_handle(handle) { return Err(Error::Unknown); }
+        Ok(handle)
+    }
+    fn reserve(&mut self, kind: Kind, parent: Option<usize>, name: &str, canonical: String) -> Result<Original> {
+        self.clear()?;
+        // A selected path gets one original attempt for this book, including
+        // definite failures and retired originals. Token probes have no path.
+        if matches!(kind, Kind::Directory | Kind::File) && self.slots.iter().any(|s|
+            matches!(s.kind, Kind::Directory | Kind::File) && s.canonical == canonical) {
+            return Err(Error::State);
+        }
+        let live = self.slots.iter().filter(|s| !matches!(s.state, SlotState::NoHandle | SlotState::Closed)).count();
+        if self.slots.len() >= MAX_RECORDS || live >= MAX_LIVE { return Err(Error::Bounds); }
+        if kind == Kind::File && self.slots.iter().filter(|s| s.kind == Kind::File).count() >= MAX_FILES {
+            return Err(Error::Bounds);
+        }
+        if let Some(parent) = parent { self.handle(parent)?; }
+        let mut encoded: Vec<u16> = name.encode_utf16().collect();
+        if encoded.len() > 32766 { return Err(Error::Bounds); }
+        encoded.push(0);
+        self.slots.try_reserve(1).map_err(|_| Error::Bounds)?;
+        let index = self.slots.len();
+        self.slots.push(ManuallyDrop::new(Box::pin(Slot { output: UnsafeCell::new(null_mut()),
+            state: SlotState::Reserved, kind, parent, name: encoded, canonical,
+            read_bytes: 0, read_ended: false, directory_ended: false, _pin: PhantomPinned })));
+        Ok(Original { book: Arc::clone(&self.identity), index })
+    }
+    fn arena(&self) -> Result<&Arena> {
+        self.active.as_ref().map(|a| a.as_ref().get_ref()).ok_or(Error::Unknown)
+    }
+    fn unknown<T>(&mut self) -> Result<T> { self.unknown = true; Err(Error::Unknown) }
+    fn take_complete(&mut self) -> Result<Complete> {
+        self.arena()?.phase.set(Phase::Complete);
+        let frame = self.active.take().ok_or(Error::Unknown)?;
+        Ok(Complete { arena: ManuallyDrop::into_inner(frame) })
+    }
+    fn call(&mut self, call: Call, handle: F::HANDLE, input: Vec<u16>) -> Result<Complete> {
+        // Close may continue other independent known originals after a returned
+        // close failure; no other call may follow Unknown or retirement.
+        if matches!(call, Call::Close(_)) {
+            if self.active.is_some() { return self.unknown(); }
+        } else { self.clear()?; }
+        let mut frame = Box::pin(Arena { call, phase: Cell::new(Phase::Prepared), returned: Cell::new(None),
+            input, handle, output_handle: null_mut(), unicode: F::UNICODE_STRING::default(),
+            attributes: OBJECT_ATTRIBUTES::default(), directory: false,
+            bytes: UnsafeCell::new(Aligned([0; BUFFER])), count: UnsafeCell::new(u32::MAX),
+            iosb: UnsafeCell::new(IO::IO_STATUS_BLOCK { Anonymous: IO::IO_STATUS_BLOCK_0 { Status: F::STATUS_PENDING }, Information: usize::MAX }),
+            _pin: PhantomPinned });
+        // SAFETY: frame is pinned but not entered; initialize its self-referential
+        // input pointers before publishing the arena and before native effects.
+        let setup = unsafe { frame.as_mut().get_unchecked_mut() };
+        if let Call::Open(index) | Call::ProcessToken(index) | Call::ThreadToken(index) = call {
+            let slot = self.slot(index)?;
+            if slot.state != SlotState::Reserved { return Err(Error::State); }
+            setup.output_handle = slot.output.get();
+            if matches!(call, Call::Open(_)) {
+                setup.input = slot.name.clone();
+                setup.directory = slot.kind == Kind::Directory;
+                setup.unicode.Length = u16::try_from((setup.input.len() - 1) * 2).map_err(|_| Error::Bounds)?;
+                setup.unicode.MaximumLength = u16::try_from(setup.input.len() * 2).map_err(|_| Error::Bounds)?;
+                setup.unicode.Buffer = setup.input.as_mut_ptr();
+                setup.attributes.Length = size_of::<OBJECT_ATTRIBUTES>() as u32;
+                setup.attributes.RootDirectory = match slot.parent { Some(parent) => self.handle(parent)?, None => null_mut() };
+                setup.attributes.ObjectName = &setup.unicode;
+                setup.attributes.Attributes = F::OBJ_DONT_REPARSE;
+            }
+        }
+        self.active = Some(ManuallyDrop::new(frame));
+        self.mark_entered(call)?;
+        let frame = self.arena()?;
+        // SAFETY: all arguments/destinations and parents are already registered,
+        // pinned, initialized, bounded and exclusively borrowed. No allocation,
+        // callback or deadline check divides return from scalar capture.
+        let returned = unsafe { invoke(frame) };
+        frame.returned.set(Some(returned));
+        frame.phase.set(Phase::Returned);
+        self.finish(call, returned)
+    }
+    // Inert state transition shared with narrow contract tests; it performs no
+    // native call. The active arena and every output cell already belong to us.
+    fn mark_entered(&mut self, call: Call) -> Result<()> {
+        if self.arena()?.phase.get() != Phase::Prepared { return self.unknown(); }
+        match call {
+            Call::Open(i) | Call::ProcessToken(i) | Call::ThreadToken(i) => {
+                if self.slot(i)?.state != SlotState::Reserved { return self.unknown(); }
+                self.slot_mut(i)?.state = SlotState::Acquiring;
+            }
+            Call::Close(i) => {
+                let attempted = self.arena()?.handle;
+                let slot = self.slot_mut(i)?;
+                if slot.state != SlotState::Owned { return self.unknown(); }
+                // SAFETY: no earlier call is outstanding. Retire BEFORE entry;
+                // the arena holds the one attempted value, never an RAII owner.
+                if unsafe { *slot.output.get() } != attempted { return self.unknown(); }
+                slot.state = SlotState::Closing;
+                unsafe { *slot.output.get() = null_mut(); }
+            }
+            _ => {}
+        }
+        self.started = true;
+        self.arena()?.phase.set(Phase::Entered);
+        Ok(())
+    }
+    fn finish(&mut self, call: Call, returned: Returned) -> Result<Complete> {
+        if self.arena()?.phase.get() != Phase::Returned { return self.unknown(); }
+        if self.unknown && !matches!(call, Call::Close(_)) { return self.unknown(); }
+        if let Call::Close(index) = call {
+            if self.slot(index)?.state != SlotState::Closing { return self.unknown(); }
+            let success = matches!(returned, Returned::Boolean(value, _) if value != 0);
+            self.slot_mut(index)?.state = if success { SlotState::Closed } else { SlotState::Unknown };
+            if !success { self.unknown = true; }
+            let result = self.take_complete()?;
+            return if success { Ok(result) } else { Err(Error::Unknown) };
+        }
+        // NEVER evaluate native output cells before rejecting pending/ambiguous
+        // return classes. In particular FALSE/ERROR_IO_PENDING is not a completed
+        // ReadFile failure, and stale IOSB is not an acquisition failure receipt.
+        if matches!(returned, Returned::Nt(F::STATUS_PENDING)
+            | Returned::Boolean(0, F::ERROR_IO_PENDING)
+            | Returned::Count(0, F::ERROR_IO_PENDING)
+            | Returned::Hresult(HRESULT_PENDING)) { return self.unknown(); }
+        if let Returned::Nt(status) = returned {
+            if status != F::STATUS_SUCCESS && (status as u32 >> 30) != 3 { return self.unknown(); }
+        }
+        if let Call::Open(index) = call {
+            if self.slot(index)?.state != SlotState::Acquiring { return self.unknown(); }
+            let status = match returned { Returned::Nt(value) => value, _ => return self.unknown() };
+            // SAFETY: only a definite non-PENDING NT status reaches these reads.
+            let handle = unsafe { *self.slot(index)?.output.get() };
+            if status != F::STATUS_SUCCESS {
+                if !handle.is_null() { return self.unknown(); }
+                self.slot_mut(index)?.state = SlotState::NoHandle;
+                let _complete = self.take_complete()?;
+                return Err(Error::Unavailable);
+            }
+            let frame = self.arena()?;
+            // SAFETY: STATUS_SUCCESS completes the create; contradictory IOSB is
+            // nevertheless retained as Unknown, never offered for ordinary close.
+            let (io, info) = unsafe { ((*frame.iosb.get()).Anonymous.Status, (*frame.iosb.get()).Information) };
+            if !valid_handle(handle) || io != F::STATUS_SUCCESS || info != WP::FILE_OPENED as usize
+                || self.duplicate_live(index, handle) { return self.unknown(); }
+            self.slot_mut(index)?.state = SlotState::Owned;
+        } else if let Call::ProcessToken(index) | Call::ThreadToken(index) = call {
+            if self.slot(index)?.state != SlotState::Acquiring { return self.unknown(); }
+            let (value, _) = match returned { Returned::Boolean(v, e) => (v, e), _ => return self.unknown() };
+            // SAFETY: synchronous completed BOOL token call, excluding IO_PENDING.
+            let handle = unsafe { *self.slot(index)?.output.get() };
+            if value != 0 {
+                if !valid_handle(handle) || self.duplicate_live(index, handle) { return self.unknown(); }
+                self.slot_mut(index)?.state = SlotState::Owned;
+            } else {
+                if !handle.is_null() { return self.unknown(); }
+                self.slot_mut(index)?.state = SlotState::NoHandle;
+            }
+            // The caller must distinguish precise ERROR_NO_TOKEN from every
+            // other returned FALSE; successful thread tokens remain owned too.
+            return self.take_complete();
+        } else if let Returned::Nt(status) = returned {
+            if status != F::STATUS_SUCCESS {
+                let _complete = self.take_complete()?; return Err(Error::Unavailable);
+            }
+            let frame = self.arena()?;
+            // SAFETY: query returned SUCCESS; IOSB must corroborate completion.
+            if unsafe { (*frame.iosb.get()).Anonymous.Status } != F::STATUS_SUCCESS { return self.unknown(); }
+        }
+        let failed = match returned {
+            Returned::Boolean(0, error) => !(matches!(call, Call::Entries) && error == F::ERROR_NO_MORE_FILES),
+            Returned::Count(0, _) => true,
+            Returned::Hresult(value) => value != F::S_OK,
+            _ => false,
+        };
+        let result = self.take_complete()?;
+        if failed { Err(Error::Unavailable) } else { Ok(result) }
+    }
+    fn duplicate_live(&self, index: usize, handle: F::HANDLE) -> bool {
+        self.slots.iter().enumerate().any(|(i, s)| i != index && s.state == SlotState::Owned
+            // SAFETY: no other output destination can be entered simultaneously;
+            // these Owned originals have definite acquisition completion.
+            && unsafe { *s.output.get() == handle })
+    }
+    fn original_call(&mut self, index: usize, call: Call) -> Result<Complete> {
+        let handle = self.handle(index)?; self.call(call, handle, Vec::new())
+    }
+    fn noninherited(&mut self, index: usize) -> Result<()> {
+        let result = self.original_call(index, Call::HandleInfo)?;
+        if decode::u32_at(result.bytes(4)?, 0)? & F::HANDLE_FLAG_INHERIT != 0 { return Err(Error::Unsafe); }
+        Ok(())
+    }
+    /// Call only after the actual worker has returned, never because a clock
+    /// expired while a borrower might still run. It cannot manufacture NoHandle.
+    pub fn mark_interrupted(&mut self) { self.unknown = true; }
+    pub fn state(&self, original: &Original) -> Result<SlotState> { Ok(self.slot(self.index(original)?)?.state) }
+    pub fn is_unknown(&self) -> bool { self.unknown || self.active.is_some() }
+    pub fn never_started(&self) -> bool { !self.started && self.slots.is_empty() && self.active.is_none() && !self.unknown && !self.retiring && !self.roots_started && self.user.is_none() }
+    pub fn close_once(&mut self, original: &Original) -> Result<()> {
+        let index = self.index(original)?; self.close_index(index)
+    }
+    fn close_index(&mut self, index: usize) -> Result<()> {
+        if self.active.is_some() { return self.unknown(); }
+        let state = self.slot(index)?.state;
+        if state == SlotState::Reserved { self.slot_mut(index)?.state = SlotState::NoHandle; return Ok(()); }
+        if state != SlotState::Owned { return Err(Error::State); }
+        if self.slots.iter().any(|s| s.parent == Some(index) && !matches!(s.state, SlotState::NoHandle | SlotState::Closed)) {
+            return Err(Error::State); // no native close attempted; dependency is live
+        }
+        let handle = self.handle(index)?;
+        self.call(Call::Close(index), handle, Vec::new()).map(|_| ())
+    }
+    pub fn settle_once(&mut self) -> CloseOutcome {
+        if self.retiring { self.unknown = true; return CloseOutcome::Unknown; }
+        self.retiring = true;
+        if self.active.is_some() { self.unknown = true; return CloseOutcome::Unknown; }
+        for index in (0..self.slots.len()).rev() {
+            let state = match self.slot(index) { Ok(s) => s.state, Err(_) => { self.unknown = true; continue; } };
+            if matches!(state, SlotState::NoHandle | SlotState::Closed) { continue; }
+            if self.close_index(index).is_err() { self.unknown = true; }
+        }
+        if self.settled() { CloseOutcome::Settled } else { CloseOutcome::Unknown }
+    }
+    pub fn settled(&self) -> bool {
+        self.retiring && !self.unknown && self.active.is_none()
+            && self.slots.iter().all(|s| matches!(s.state, SlotState::NoHandle | SlotState::Closed))
+    }
+}
+impl Drop for NativeBook {
+    fn drop(&mut self) {
+        // No CloseHandle in Drop, ever. Unknown entered arena may reference any
+        // parent/output cell. ManuallyDrop preserves those exact heap allocations.
+        if self.active.is_some() { return; }
+        for slot in &mut self.slots {
+            if matches!(slot.state, SlotState::NoHandle | SlotState::Closed) {
+                // SAFETY: this slot cannot be referenced by outstanding native IO,
+                // owns no live/uncertain handle and is destroyed exactly once.
+                unsafe { ManuallyDrop::drop(slot); }
+            }
+        }
+    }
+}
+fn valid_handle(value: F::HANDLE) -> bool { !value.is_null() && value != F::INVALID_HANDLE_VALUE }
+fn wide(value: &str) -> Vec<u16> { value.encode_utf16().chain(std::iter::once(0)).collect() }
+fn boolean(value: i32) -> Returned {
+    // SAFETY: GetLastError is captured immediately on the same invoking thread;
+    // no allocation/native operation/callback intervenes after a failed call.
+    Returned::Boolean(value, if value == 0 { unsafe { F::GetLastError() } } else { 0 })
+}
+fn counted(value: u32) -> Returned {
+    // SAFETY: same immediate, thread-local error-capture rule as boolean().
+    Returned::Count(value, if value == 0 { unsafe { F::GetLastError() } } else { 0 })
+}
+unsafe fn invoke(a: &Arena) -> Returned {
+    // SAFETY: call() owns/pins and exclusively retains every input/output before
+    // entry. These are locked SDK declarations. No callback or asynchronous mode
+    // is requested; unexpected pending results still retain every allocation.
+    unsafe {
+        match a.call {
+            Call::Architecture => boolean(T::IsWow64Process2(T::GetCurrentProcess(), a.buffer().cast(), a.buffer().add(2).cast())),
+            Call::Folder => Returned::Hresult(SH::SHGetFolderPathW(null_mut(), SH::CSIDL_PROGRAM_FILES as i32, null_mut(), SH::SHGFP_TYPE_CURRENT as u32, a.buffer().cast())),
+            Call::WindowsDirectory => counted(SI::GetSystemWindowsDirectoryW(a.buffer().cast(), NAME_UNITS as u32)),
+            Call::SystemDirectory => counted(SI::GetSystemDirectoryW(a.buffer().cast(), NAME_UNITS as u32)),
+            Call::Mapping => counted(FS::QueryDosDeviceW(a.input.as_ptr(), a.buffer().cast(), MAP_UNITS as u32)),
+            Call::DriveType => Returned::Scalar(FS::GetDriveTypeW(a.input.as_ptr())),
+            Call::Open(_) => Returned::Nt(N::NtCreateFile(a.output_handle,
+                FS::SYNCHRONIZE | FS::READ_CONTROL | FS::FILE_READ_ATTRIBUTES |
+                    if a.directory { FS::FILE_LIST_DIRECTORY | FS::FILE_TRAVERSE } else { FS::FILE_READ_DATA },
+                &a.attributes, a.iosb.get(), null(), 0, FS::FILE_SHARE_READ, N::FILE_OPEN,
+                N::FILE_SYNCHRONOUS_IO_NONALERT | if a.directory { N::FILE_DIRECTORY_FILE } else { N::FILE_NON_DIRECTORY_FILE }, null(), 0)),
+            Call::ProcessToken(_) => boolean(T::OpenProcessToken(T::GetCurrentProcess(), S::TOKEN_QUERY, a.output_handle)),
+            Call::ThreadToken(_) => boolean(T::OpenThreadToken(T::GetCurrentThread(), S::TOKEN_QUERY, 1, a.output_handle)),
+            Call::Close(_) => boolean(F::CloseHandle(a.handle)),
+            Call::HandleInfo => boolean(F::GetHandleInformation(a.handle, a.buffer().cast())),
+            Call::Info(class, size) => boolean(FS::GetFileInformationByHandleEx(a.handle, class, a.buffer().cast(), size as u32)),
+            Call::FinalName => counted(FS::GetFinalPathNameByHandleW(a.handle, a.buffer().cast(), NAME_UNITS as u32, FS::FILE_NAME_NORMALIZED | FS::VOLUME_NAME_NT)),
+            Call::FileType => Returned::Scalar(FS::GetFileType(a.handle)),
+            Call::VolumeName => boolean(FS::GetVolumeInformationByHandleW(a.handle, null_mut(), 0, null_mut(), null_mut(), null_mut(), a.buffer().cast(), 261)),
+            Call::VolumeDevice => Returned::Nt(N::NtQueryVolumeInformationFile(a.handle, a.iosb.get(), a.buffer().cast(), size_of::<NS::FILE_FS_DEVICE_INFORMATION>() as u32, N::FileFsDeviceInformation)),
+            Call::Streams => Returned::Nt(N::NtQueryInformationFile(a.handle, a.iosb.get(), a.buffer().cast(), BUFFER as u32, N::FileStreamInformation)),
+            Call::Security => boolean(S::GetKernelObjectSecurity(a.handle, S::OWNER_SECURITY_INFORMATION | S::DACL_SECURITY_INFORMATION, a.buffer().cast(), BUFFER as u32, a.count.get())),
+            Call::Token(class) => boolean(S::GetTokenInformation(a.handle, class, a.buffer().cast(), BUFFER as u32, a.count.get())),
+            Call::Privilege(name) => boolean(S::LookupPrivilegeValueW(null(), match name {
+                PrivilegeName::ChangeNotify => S::SE_CHANGE_NOTIFY_NAME,
+                PrivilegeName::Shutdown => S::SE_SHUTDOWN_NAME,
+                PrivilegeName::Undock => S::SE_UNDOCK_NAME,
+                PrivilegeName::IncreaseWorkingSet => S::SE_INC_WORKING_SET_NAME,
+                PrivilegeName::TimeZone => S::SE_TIME_ZONE_NAME,
+            }, a.buffer().cast())),
+            Call::Read(count) => boolean(FS::ReadFile(a.handle, a.buffer(), count as u32, a.count.get(), null_mut())),
+            Call::Entries => boolean(FS::GetFileInformationByHandleEx(a.handle, FS::FileIdExtdDirectoryInfo, a.buffer().cast(), BUFFER as u32)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LocationKind { ProgramFiles, Windows, System }
+pub struct KnownLocation { book: Arc<()>, kind: LocationKind, path: String, drive: String, device: String, components: Vec<String> }
+impl KnownLocation {
+    pub fn path(&self) -> &str { &self.path }
+    pub fn components(&self) -> &[String] { &self.components }
+}
+pub struct KnownLocations { pub program_files: KnownLocation, pub windows: KnownLocation, pub system: KnownLocation }
+impl NativeBook {
+    fn location(&mut self, kind: LocationKind) -> Result<KnownLocation> {
+        let (call, capacity, counted) = match kind {
+            LocationKind::ProgramFiles => (Call::Folder, F::MAX_PATH as usize, false),
+            LocationKind::Windows => (Call::WindowsDirectory, NAME_UNITS, true),
+            LocationKind::System => (Call::SystemDirectory, NAME_UNITS, true),
+        };
+        let path = self.call(call, null_mut(), Vec::new())?.text(capacity, counted)?;
+        let (drive, components) = decode::dos_location(&path)?;
+        let device = self.mapping(&drive)?;
+        Ok(KnownLocation { book: Arc::clone(&self.identity), kind, path, drive, device, components })
+    }
+    fn mapping(&mut self, drive: &str) -> Result<String> {
+        if drive.len() != 2 || !drive.as_bytes()[0].is_ascii_alphabetic() || drive.as_bytes()[1] != b':' { return Err(Error::Unsafe); }
+        let root = format!("{drive}\\");
+        if self.call(Call::DriveType, null_mut(), wide(&root))?.scalar()? != WP::DRIVE_FIXED { return Err(Error::Unsafe); }
+        let result = self.call(Call::Mapping, null_mut(), wide(drive))?;
+        let count = result.scalar()? as usize;
+        if count < 2 || count > MAP_UNITS { return Err(Error::Unsafe); }
+        decode::mapping(result.bytes(count * 2)?)
+    }
+    pub fn known_locations_once(&mut self) -> Result<KnownLocations> {
+        self.clear()?;
+        if self.user.is_none() || self.roots_started { return Err(Error::State); }
+        self.roots_started = true;
+        Ok(KnownLocations { program_files: self.location(LocationKind::ProgramFiles)?,
+            windows: self.location(LocationKind::Windows)?, system: self.location(LocationKind::System)? })
+    }
+    pub fn recheck_location(&mut self, location: &KnownLocation) -> Result<()> {
+        self.clear()?;
+        if !Arc::ptr_eq(&self.identity, &location.book) { return Err(Error::State); }
+        let now = self.location(location.kind)?;
+        if now.path != location.path || now.drive != location.drive || now.device != location.device { return Err(Error::Unsafe); }
+        Ok(())
+    }
+    /// Opens only the volume from this book's actual OS discovery. This creates
+    /// an original, not a protected-root capability; inspect its ACL/identity too.
+    pub fn open_volume(&mut self, location: &KnownLocation) -> Result<Original> {
+        self.clear()?;
+        if !Arc::ptr_eq(&self.identity, &location.book) || self.user.is_none() { return Err(Error::State); }
+        if self.mapping(&location.drive)? != location.device { return Err(Error::Unsafe); }
+        let name = format!("{}\\", location.device);
+        let original = self.reserve(Kind::Directory, None, &name, name.clone())?;
+        self.call(Call::Open(original.index), null_mut(), Vec::new())?;
+        self.noninherited(original.index)?;
+        self.local_ntfs(&original)?;
+        self.recheck_location(location)?;
+        Ok(original)
+    }
+    pub fn open_child(&mut self, parent: &Original, name: &str, kind: FileKind) -> Result<Original> {
+        self.clear()?;
+        let index = self.index(parent)?;
+        let parent = self.slot(index)?;
+        if parent.kind != Kind::Directory || !decode::component(name) { return Err(Error::Unsafe); }
+        let canonical = format!("{}{}{}", parent.canonical, if parent.canonical.ends_with('\\') { "" } else { "\\" }, name);
+        if canonical.encode_utf16().count() >= NAME_UNITS { return Err(Error::Bounds); }
+        let original = self.reserve(kind.into(), Some(index), name, canonical)?;
+        self.call(Call::Open(original.index), null_mut(), Vec::new())?;
+        self.noninherited(original.index)?; Ok(original)
+    }
+    pub fn local_ntfs(&mut self, original: &Original) -> Result<()> {
+        self.clear()?; let index = self.index(original)?;
+        let name = self.original_call(index, Call::VolumeName)?.text(261, false)?;
+        if name != "NTFS" { return Err(Error::Unsafe); }
+        let result = self.original_call(index, Call::VolumeDevice)?;
+        let bytes = result.nt_bytes()?;
+        if bytes.len() != size_of::<NS::FILE_FS_DEVICE_INFORMATION>()
+            || decode::u32_at(bytes, offset_of!(NS::FILE_FS_DEVICE_INFORMATION, DeviceType))? != FS::FILE_DEVICE_DISK
+            || decode::u32_at(bytes, offset_of!(NS::FILE_FS_DEVICE_INFORMATION, Characteristics))? & NS::FILE_REMOTE_DEVICE != 0 { return Err(Error::Unsafe); }
+        Ok(())
+    }
+    pub fn metadata(&mut self, original: &Original) -> Result<Metadata> {
+        self.clear()?; let index = self.index(original)?;
+        let kind = match self.slot(index)?.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
+        if self.original_call(index, Call::FileType)?.scalar()? != FS::FILE_TYPE_DISK { return Err(Error::Unsafe); }
+        let basic = self.original_call(index, Call::Info(FS::FileBasicInfo, size_of::<FS::FILE_BASIC_INFO>()))?;
+        let standard = self.original_call(index, Call::Info(FS::FileStandardInfo, size_of::<FS::FILE_STANDARD_INFO>()))?;
+        let tag = self.original_call(index, Call::Info(FS::FileAttributeTagInfo, size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>()))?;
+        let id = self.original_call(index, Call::Info(FS::FileIdInfo, size_of::<FS::FILE_ID_INFO>()))?;
+        let facts = decode::metadata(kind, basic.bytes(size_of::<FS::FILE_BASIC_INFO>())?,
+            standard.bytes(size_of::<FS::FILE_STANDARD_INFO>())?, tag.bytes(size_of::<FS::FILE_ATTRIBUTE_TAG_INFO>())?, id.bytes(size_of::<FS::FILE_ID_INFO>())?)?;
+        if kind == FileKind::Directory {
+            let case = self.original_call(index, Call::Info(FS::FileCaseSensitiveInfo, size_of::<FS::FILE_CASE_SENSITIVE_INFO>()))?;
+            if decode::u32_at(case.bytes(4)?, 0)? != 0 { return Err(Error::Unsafe); }
+        }
+        let name = self.original_call(index, Call::FinalName)?.text(NAME_UNITS, true)?;
+        if name != self.slot(index)?.canonical { return Err(Error::Unsafe); }
+        Ok(facts)
+    }
+    pub fn security(&mut self, original: &Original, scope: AuthorityScope) -> Result<SecurityFacts> {
+        self.clear()?; let index = self.index(original)?;
+        let kind = match self.slot(index)?.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
+        let result = self.original_call(index, Call::Security)?;
+        security::descriptor(result.bytes(result.count()?)?, kind, scope)
+    }
+    pub fn no_alternate_streams(&mut self, original: &Original) -> Result<()> {
+        self.clear()?; let index = self.index(original)?;
+        let kind = match self.slot(index)?.kind { Kind::Directory => FileKind::Directory, Kind::File => FileKind::File, _ => return Err(Error::State) };
+        let result = self.original_call(index, Call::Streams)?;
+        decode::streams(result.nt_bytes()?, kind)
+    }
+    /// One sequential bounded batch on the ORIGINAL directory. Never restart.
+    /// None means actual ERROR_NO_MORE_FILES, not an empty/malformed batch.
+    pub fn next_entries(&mut self, original: &Original) -> Result<Option<Vec<DirectoryEntry>>> {
+        self.clear()?; let index = self.index(original)?;
+        if self.slot(index)?.kind != Kind::Directory || self.slot(index)?.directory_ended { return Err(Error::State); }
+        // At the exact limit allow an EOF observation, but a single over-limit
+        // batch exhausts this entire book, not just the current directory.
+        if self.entries > MAX_ENTRIES { return Err(Error::Bounds); }
+        // A failed/ambiguous query or decoder refusal cannot be retried on an
+        // unknown cursor. Only a fully accepted nonterminal batch permits next.
+        self.slot_mut(index)?.directory_ended = true;
+        let result = self.original_call(index, Call::Entries)?;
+        if matches!(result.arena.returned()?, Returned::Boolean(0, F::ERROR_NO_MORE_FILES)) {
+            self.slot_mut(index)?.directory_ended = true; return Ok(None);
+        }
+        let entries = decode::directory(result.bytes(BUFFER)?)?;
+        self.entries = self.entries.checked_add(entries.len()).ok_or(Error::Bounds)?;
+        if self.entries > MAX_ENTRIES { return Err(Error::Bounds); }
+        self.slot_mut(index)?.directory_ended = false;
+        Ok(Some(entries))
+    }
+    /// No seek/reopen/retry. Empty bytes are definite successful ReadFile EOF.
+    /// Hashing/full inventory and expected size remain the caller's retained work.
+    pub fn read_next(&mut self, original: &Original, count: usize) -> Result<Vec<u8>> {
+        self.clear()?; let index = self.index(original)?;
+        if count == 0 || count > BUFFER { return Err(Error::Bounds); }
+        if self.slot(index)?.kind != Kind::File || self.slot(index)?.read_ended { return Err(Error::State); }
+        let prior = self.slot(index)?.read_bytes;
+        if self.bytes_read > MAX_TOTAL_BYTES || prior > MAX_FILE_BYTES { return Err(Error::Bounds); }
+        // One extra byte can distinguish exact-limit EOF from excess content;
+        // it is never returned as accepted data. After excess, no other original
+        // can continue past the global budget. No seek or second source is used.
+        let remaining = (MAX_TOTAL_BYTES - self.bytes_read).min(MAX_FILE_BYTES - prior);
+        let request = count.min(remaining.min(BUFFER as u64 - 1) as usize + 1);
+        self.slot_mut(index)?.read_ended = true; // an error never authorizes retry
+        let result = self.original_call(index, Call::Read(request))?;
+        let consumed = result.count()?;
+        if consumed > request { return Err(Error::Unsafe); }
+        self.bytes_read = self.bytes_read.checked_add(consumed as u64).ok_or(Error::Bounds)?;
+        if self.bytes_read > MAX_TOTAL_BYTES { return Err(Error::Bounds); }
+        let slot = self.slot_mut(index)?;
+        slot.read_bytes = slot.read_bytes.checked_add(consumed as u64).ok_or(Error::Bounds)?;
+        if slot.read_bytes > MAX_FILE_BYTES { return Err(Error::Bounds); }
+        slot.read_ended = consumed == 0;
+        Ok(result.bytes(consumed)?.to_vec())
+    }
+    fn absent_thread_token(&mut self) -> Result<()> {
+        let key = self.reserve(Kind::ThreadToken, None, "", String::new())?;
+        let result = self.call(Call::ThreadToken(key.index), null_mut(), Vec::new())?;
+        match result.arena.returned()? {
+            Returned::Boolean(0, F::ERROR_NO_TOKEN) if self.slot(key.index)?.state == SlotState::NoHandle => Ok(()),
+            _ => Err(Error::Unsafe), // any acquired impersonation token stays owned
+        }
+    }
+    fn token(&mut self, index: usize, class: S::TOKEN_INFORMATION_CLASS) -> Result<Complete> {
+        self.original_call(index, Call::Token(class))
+    }
+    fn collect_user(&mut self, index: usize) -> Result<TokenFacts> {
+        self.absent_thread_token()?;
+        let before = self.token(index, S::TokenStatistics)?;
+        let initial = security::statistics(before.bytes(before.count()?)?)?;
+        let mut allowed = [0u64; 5];
+        for (i, name) in [PrivilegeName::ChangeNotify, PrivilegeName::Shutdown, PrivilegeName::Undock,
+            PrivilegeName::IncreaseWorkingSet, PrivilegeName::TimeZone].into_iter().enumerate() {
+            let result = self.call(Call::Privilege(name), null_mut(), Vec::new())?;
+            let luid = decode::u64_at(result.bytes(size_of::<F::LUID>())?, 0)?;
+            if luid == 0 || allowed[..i].contains(&luid) { return Err(Error::Unsafe); }
+            allowed[i] = luid;
+        }
+        let mut scalar = |class| -> Result<u32> {
+            let result = self.token(index, class)?;
+            let count = result.count()?;
+            if count != 4 { return Err(Error::Unsafe); }
+            decode::u32_at(result.bytes(count)?, 0)
+        };
+        let token_type = scalar(S::TokenType)?;
+        let elevated = scalar(S::TokenElevation)?;
+        let elevation_type = scalar(S::TokenElevationType)?;
+        let ui_access = scalar(S::TokenUIAccess)?;
+        let virtualization = scalar(S::TokenVirtualizationEnabled)?;
+        let user = self.token(index, S::TokenUser)?;
+        let integrity = self.token(index, S::TokenIntegrityLevel)?;
+        let groups = self.token(index, S::TokenGroups)?;
+        let privileges = self.token(index, S::TokenPrivileges)?;
+        let facts = security::token_facts(initial, token_type, elevated, elevation_type, ui_access, virtualization,
+            user.bytes(user.count()?)?, integrity.bytes(integrity.count()?)?,
+            groups.bytes(groups.count()?)?, privileges.bytes(privileges.count()?)?, &allowed)?;
+        let after = self.token(index, S::TokenStatistics)?;
+        if security::statistics(after.bytes(after.count()?)?)? != initial { return Err(Error::Unsafe); }
+        self.absent_thread_token()?;
+        Ok(facts)
+    }
+    pub fn observe_user_once(&mut self) -> Result<&TokenFacts> {
+        self.clear()?;
+        if self.process_token.is_some() || self.user.is_some() { return Err(Error::State); }
+        let arch = self.call(Call::Architecture, null_mut(), Vec::new())?;
+        if decode::u16_at(arch.bytes(4)?, 0)? != SI::IMAGE_FILE_MACHINE_UNKNOWN
+            || decode::u16_at(arch.bytes(4)?, 2)? != SI::IMAGE_FILE_MACHINE_AMD64 { return Err(Error::Unsafe); }
+        let original = self.reserve(Kind::ProcessToken, None, "", String::new())?;
+        self.process_token = Some(original.index); // no second primary-token open
+        let opened = self.call(Call::ProcessToken(original.index), null_mut(), Vec::new())?;
+        if !matches!(opened.arena.returned()?, Returned::Boolean(v, _) if v != 0) { return Err(Error::Unavailable); }
+        self.noninherited(original.index)?;
+        self.user = Some(self.collect_user(original.index)?);
+        self.user.as_ref().ok_or(Error::State)
+    }
+    /// Reobserve the calling context and SAME original token before the future
+    /// owner prepares a launch. No cached boolean or borrowed pseudo-handle proves
+    /// non-impersonation on another executor. No IO may follow the final owner claim.
+    pub fn recheck_user(&mut self) -> Result<()> {
+        self.clear()?;
+        let index = self.process_token.ok_or(Error::State)?;
+        let facts = self.collect_user(index)?;
+        if self.user.as_ref() != Some(&facts) { return Err(Error::Unsafe); }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod hosted_tests;
