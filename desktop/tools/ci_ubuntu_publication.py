@@ -3115,6 +3115,14 @@ def shell_project_draft_observation(observed, lifecycle):
     return {"native": receipt, "fixture": fixture}
 
 
+def shell_handoff_bytes(request, deadline):
+    """Keep the original transport cap and endpoint as distinct refusals."""
+    raw = D.canonical(request)
+    D.need(len(raw) <= 1 << 20, "Shell handoff exceeds original byte bound (bytes=" + str(len(raw)) + ", limit=1048576)")
+    D.need(time.monotonic() < deadline, "Original shell handoff endpoint expired")
+    return raw
+
+
 def verify_installed_shell():
     """One installed connection gate; reuse U, not its entire lifecycle again."""
     D.need(os.environ.get("MRK_INSTALLED_SHELL_CASE") == "observe", "Only the fixed shell observation job is accepted")
@@ -3146,6 +3154,9 @@ def verify_installed_shell():
 
         source_check("before")
         policy = installed_shell_os_inputs(check, work, native, compiler, old_compiler)
+        check.phase = "shell-handoff"
+        lifecycle = local("ubuntu_publication_lifecycle")
+        policy = lifecycle.compact_shell_loader_policy(policy, compiler)
         # Compile-only dependency/unit evidence stays in its already admitted
         # original artifact. The root service receives only the relevant typed
         # projection, plus the full original record's content binding.
@@ -3163,11 +3174,9 @@ def verify_installed_shell():
         request = {"sourceSha": sha, "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
             "deadline": deadline, "runnerUid": os.getuid(), "runnerGid": os.getgid(), "source": str(source), "taskRoot": str(root),
             "library": library, "packages": packages, "compilerRecords": old_compiler, "shell": shell}
-        raw = D.canonical(request)
-        D.need(len(raw) <= 1 << 20 and time.monotonic() < deadline, "Shell handoff exceeds original bound/endpoint")
+        raw = shell_handoff_bytes(request, deadline)
         path = work / "lifecycle-handoff.json"
         pin = D.write(path, raw)
-        lifecycle = local("ubuntu_publication_lifecycle")
         argv = lifecycle.service_argv(path, pin["sha256"], entry_sha)
         client = check.command("root-shell-connection", argv,
             {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", "HOME": str(work / "home")},

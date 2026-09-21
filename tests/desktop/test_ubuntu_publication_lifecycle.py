@@ -87,18 +87,31 @@ def inert_stat(ino, mode, *, size=0, uid=0, gid=0, stamp=0):
                            st_nlink=2 if stat.S_ISDIR(mode) else 1, st_size=size, st_mtime_ns=stamp, st_ctime_ns=stamp)
 
 
-def shell_loader_data():
+def shell_loader_data(*, compact=True):
     """Inert closed-observation DATA, not native execution or host receipts."""
     value = installed_handoff()
     value.pop("installed")
-    libraries, bindings = {}, {}
+    libraries, bindings, os_files = {}, {}, {}
+
+    def file(path, inode, mode=0o644):
+        return {"path": path, "selectedPath": path, "size": 4, "sha256": "a" * 64, "links": [], "ancestry": {},
+                "identity": [os.makedev(8, 2), inode, stat.S_IFREG | mode, 1, 4, 0, 0]}
+
+    def executable(row, *, script=False):
+        portable = {key: row[key] for key in ("path", "selectedPath", "size", "sha256")}
+        return {"file": {**portable, "mode": stat.S_IMODE(row["identity"][2]), "identity": list(row["identity"])},
+                "package": "libc6", **({"interpreter": "/bin/sh"} if script else {"elf": {"needed": []}})}
+
+    def compiled(rows):
+        return {name: {**deepcopy(row), "file": {key: part for key, part in row["file"].items() if key != "identity"}}
+                for name, row in rows.items()}
+
     names = sorted({"libc.so.6", "libm.so.6", "ld-linux-x86-64.so.2", *L.PRIVATE_SONAMES, "libpxbackend-1.0.so"})
     for index, name in enumerate(names):
         path = "/usr/lib/x86_64-linux-gnu/" + ("libproxy/" if name == "libpxbackend-1.0.so" else "") + name
-        row = {"path": path, "selectedPath": path, "size": 4, "sha256": "a" * 64,
-               "identity": [os.makedev(8, 2), index + 1, stat.S_IFREG | 0o644, 1, 4, 0, 0]}
-        libraries[name] = {"file": row}
-        bindings[path] = row
+        row = file(path, index + 1)
+        libraries[name] = executable(row)
+        bindings[path] = os_files[path] = row
     tiers = {directory + "/glibc-hwcaps/" + tier: False for directory in L.DEFAULT_LIBRARY_DIRS for tier in L.HWCAPS}
     for path in tiers:
         bindings[path] = {"absent": True}
@@ -106,10 +119,10 @@ def shell_loader_data():
     for name in globals_:
         for directory in L.DEFAULT_LIBRARY_DIRS:
             path = directory + "/" + name
-            bindings[path] = ({**libraries[name]["file"], "selectedPath": path}
+            bindings[path] = ({**os_files[libraries[name]["file"]["selectedPath"]], "selectedPath": path}
                               if directory in L.DEFAULT_LIBRARY_DIRS[:2] else {"absent": True})
     alias = "/lib64/ld-linux-x86-64.so.2"
-    bindings[alias] = {**libraries["ld-linux-x86-64.so.2"]["file"], "selectedPath": alias}
+    bindings[alias] = os_files[alias] = {**os_files[libraries["ld-linux-x86-64.so.2"]["file"]["selectedPath"]], "selectedPath": alias}
     module_root = "/usr/lib/x86_64-linux-gnu/gio/modules"
     bindings[module_root] = {"directory": [1, 2, stat.S_IFDIR | 0o755, 0, 0]}
     roots = {module_root: {"binding": bindings[module_root], "children": ["giomodule.cache", "libinert.so"]}}
@@ -124,12 +137,29 @@ def shell_loader_data():
         leaf, raw = "shell-root-data-" + str(index) + ".json", L.canonical({"inert": index})
         files[leaf] = raw
         records.append({"path": leaf, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
-    graph = {"moduleRoots": {module_root: {"present": True, "modules": ["libinert.so"]}},
-             "modules": {module_root + "/libinert.so": {}}, "privateSearch": search, "runtime": {}}
-    policy = {"osNames": names, "libraries": libraries, "packages": {"libc6": {"binaryPackage": "libc6:amd64", "version": "2.39-0ubuntu8.8"}},
+    programs, modules, scripts = {}, {}, {}
+    for index, (path, rows, script) in enumerate((("/usr/bin/inert-tool", programs, False),
+            (module_root + "/libinert.so", modules, False), ("/usr/bin/inert-wrapper", scripts, True))):
+        row = file(path, 40 + index, 0o755)
+        os_files[path] = bindings[path] = row
+        rows[path] = executable(row, script=script)
+    packages = {"libc6": {"binaryPackage": "libc6:amd64", "version": "2.39-0ubuntu8.8"}}
+    graph = {"manifestSha256": L.M, "protocolSha256": L.Q, "outputs": {"normal": {}, "observer": {}},
+             "moduleRoots": {module_root: {"present": True, "modules": ["libinert.so"]}},
+             "sharedObjects": compiled(libraries), "programs": compiled(programs), "scripts": compiled(scripts),
+             "modules": compiled(modules), "osPackages": deepcopy(packages),
+             "osFiles": {path: {**{key: row[key] for key in ("path", "selectedPath", "size", "sha256")},
+                                "mode": stat.S_IMODE(row["identity"][2])} for path, row in os_files.items()},
+             "privateSearch": search, "runtime": {},
+             "runtimeObjects": sorted(L.PRIVATE_SONAMES | {"libc.so.6", "libm.so.6", "ld-linux-x86-64.so.2"})}
+    policy = {"osNames": names, "libraries": libraries, "programs": programs, "modules": modules, "scripts": scripts,
+              "packages": packages, "osFiles": os_files, "loader": os_files[alias],
+              "ldconfig": file("/usr/sbin/ldconfig.real", 50, 0o755), "cache": file("/etc/ld.so.cache", 51),
               "moduleRoots": roots, "runtimeData": {**summary, "records": [
-                  {**row, "path": "shell-consumer-data-" + str(index) + ".json"} for index, row in enumerate(records)]}, "graph": graph}
-    value["shell"] = {"loaderPolicy": policy}
+                  {**row, "path": "shell-consumer-data-" + str(index) + ".json"} for index, row in enumerate(records)]},
+              "graph": graph, "externalPrerequisites": "inert DATA fixture"}
+    value["shell"] = {"loaderPolicy": policy, "binaries": {"normal": {}, "observer": {}}}
+    value["compilerRecords"]["nativeInputs"] = {"outputs": {"libtest": {"objects": names}}, "sharedObjects": compiled(libraries)}
     entry = {"scope": {}, "namespaces": {}, "bindings": deepcopy(bindings), "diagnostics": L.loader_diagnostics(diagnostic_data()),
              "cacheRows": [], "entryObjects": names, "globalObjects": globals_, "hwcapsTiers": tiers,
              "moduleRoots": roots, "privateSearch": search, "runtimeData": {**summary, "records": records},
@@ -144,7 +174,8 @@ def shell_loader_data():
             row = {"path": path, "size": 5, "sha256": "d" * 64,
                    "identity": [os.makedev(8, 2), 20 + index, stat.S_IFREG | 0o444, 1, 5, 0, 0]}
             final["bindings"][path] = row
-            graph["runtime"][relative] = {"file": row}
+            graph["runtime"][relative] = {"file": row, "elf": {
+                "soname": None if role == "python" else role, "runpath": "$ORIGIN/../lib" if role == "python" else "$ORIGIN"}}
             paths = [path]
         else:
             row = libraries[role]["file"]
@@ -158,13 +189,109 @@ def shell_loader_data():
             "privateObjects": sorted(L.PRIVATE_SONAMES), "shadowedCacheRows": [],
             "shadowedDefaultNames": [directory + "/" + tier + name for directory in L.DEFAULT_LIBRARY_DIRS
                 for tier in ("", *("glibc-hwcaps/" + tier + "/" for tier in L.HWCAPS)) for name in sorted(L.PRIVATE_SONAMES)]})})
+    raw = L.canonical(graph)
+    value["shell"]["compiler"] = {"nativeRecord": {"path": "shell-native.json", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}}
+    if compact:
+        value["shell"]["loaderPolicy"] = L.compact_shell_loader_policy(policy, value["shell"]["compiler"])
     return value, files, expected
 
 
 class LifecycleData(unittest.TestCase):
+    def test_compact_shell_policy_is_exact_lossless_and_independent_of_wire_inputs(self):
+        value, _, _ = shell_loader_data(compact=False)
+        full, compiler = value["shell"]["loaderPolicy"], value["shell"]["compiler"]
+        original = L.canonical(value)
+        compact = L.compact_shell_loader_policy(full, compiler)
+        self.assertEqual(set(compact), {"schemaVersion", "graph", "osFiles", "moduleRoots", "runtimeData", "loader",
+                                        "ldconfig", "cache", "osNames", "externalPrerequisites"})
+        self.assertEqual(compact["schemaVersion"], 1)
+        self.assertEqual(L.canonical(value), original)
+        graph = L.canonical(compact["graph"])
+        self.assertEqual(compiler["nativeRecord"], {"path": "shell-native.json", "size": len(graph), "sha256": hashlib.sha256(graph).hexdigest()})
+        wire = L.canonical(compact)
+        first = L.expand_shell_loader_policy(compact, compiler)
+        second = L.expand_shell_loader_policy(compact, compiler)
+        self.assertEqual(L.canonical(first), L.canonical(full))
+        first["graph"]["osPackages"]["libc6"]["version"] = "changed view only"
+        first["packages"]["libc6"]["version"] = "changed reconstructed copy"
+        first["libraries"]["libc.so.6"]["file"]["identity"][1] += 1
+        first["osFiles"]["/lib64/ld-linux-x86-64.so.2"]["identity"][1] += 1
+        first["moduleRoots"][next(iter(first["moduleRoots"]))]["children"].clear()
+        first["runtimeData"]["records"][0]["sha256"] = "f" * 64
+        self.assertEqual(L.canonical(compact), wire)
+        self.assertEqual(L.canonical(second), L.canonical(full))
+        compact["cache"]["identity"][1] += 1
+        self.assertEqual(L.canonical(value), original)  # The producer's compact copy is independent too.
+
+    def test_compact_shell_policy_refuses_each_omitted_mismatch_and_legacy_or_malformed_wire(self):
+        value, _, _ = shell_loader_data(compact=False)
+        full, compiler = value["shell"]["loaderPolicy"], value["shell"]["compiler"]
+        compact = L.compact_shell_loader_policy(full, compiler)
+        for kind in ("libraries", "programs", "modules", "scripts", "packages"):
+            changed = deepcopy(full)
+            row = next(iter(changed[kind].values()))
+            if kind == "packages":
+                row["version"] = "different"
+            else:
+                row["file"]["size"] = float(row["file"]["size"])  # Python == alone would miss this.
+            with self.subTest(omitted=kind), self.assertRaisesRegex(ValueError, "reconstruction differs"):
+                L.compact_shell_loader_policy(changed, compiler)
+        malformed = [None, {}, deepcopy(full)]
+        malformed += [{**compact, "schemaVersion": version} for version in (True, 0, 2, "1", None)]
+        malformed += [{key: row for key, row in compact.items() if key != missing} for missing in compact]
+        malformed += [{**compact, key: {}} for key in (*L.SHELL_LOADER_OMITTED, "extra")]
+        for index, current in enumerate(malformed):
+            with self.subTest(shape=index), self.assertRaises(ValueError):
+                L.expand_shell_loader_policy(current, compiler)
+        for key, changed in (("size", True), ("size", compiler["nativeRecord"]["size"] + 1), ("sha256", "f" * 64)):
+            bad = deepcopy(compiler); bad["nativeRecord"][key] = changed
+            with self.subTest(binding=key, value=changed), self.assertRaises(ValueError):
+                L.expand_shell_loader_policy(compact, bad)
+        for change in ("graph", "current-bytes", "current-identity", "generic-identity", "current-roster"):
+            bad = deepcopy(compact)
+            if change == "graph":
+                bad["graph"]["extra"] = "not the original compiler graph"
+            elif change == "current-bytes":
+                bad["osFiles"]["/lib64/ld-linux-x86-64.so.2"]["sha256"] = "f" * 64
+            elif change == "current-identity":
+                bad["osFiles"]["/lib64/ld-linux-x86-64.so.2"]["identity"].pop()
+            elif change == "generic-identity":
+                bad["osFiles"]["/lib64/ld-linux-x86-64.so.2"]["identity"][3:3] = [0, 0]
+            else:
+                bad["osFiles"].pop("/lib64/ld-linux-x86-64.so.2")
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                L.expand_shell_loader_policy(bad, compiler)
+
+    def test_compact_shell_consumers_keep_original_inputs_and_do_not_change_installed_policy(self):
+        value, files, expected = shell_loader_data()
+        original = L.canonical(value)
+        with patch.object(L, "_mount_scope", side_effect=RuntimeError("inert stop before native binding")), \
+             patch.object(L, "command") as command, self.assertRaisesRegex(RuntimeError, "inert stop"):
+            L._shell_loader_start(value, {})
+        command.assert_not_called()
+        self.assertEqual(L.canonical(value), original)
+        entry = L.decode(files["loader-entry.json"])
+        final = L.decode(files["loader-final.json"])
+        published = {path: deepcopy(row["file"]) for path, row in value["shell"]["loaderPolicy"]["graph"]["runtime"].items()}
+        for profile in ("shell", "installed"):
+            current = deepcopy(value)
+            if profile == "installed":
+                shell = current.pop("shell")
+                current["installed"] = {"case": "positive", "loaderPolicy": L.expand_shell_loader_policy(shell["loaderPolicy"], shell["compiler"])}
+            before = L.canonical(current)
+            with self.subTest(profile=profile), patch.object(L, "_tree", return_value=published), \
+                 patch.object(L, "_loader_binding", side_effect=lambda path, *a, **kw: deepcopy(final["bindings"].get(str(path), {"absent": True}))), \
+                 patch.object(L, "_installed_loader_check"), patch.object(L, "_retain"), \
+                 patch.object(L, "expand_shell_loader_policy", wraps=L.expand_shell_loader_policy) as expand:
+                self.assertEqual(L._installed_payload(current, deepcopy(entry), published), expected)
+                self.assertEqual(expand.call_count, int(profile == "shell"))
+            self.assertEqual(L.canonical(current), before)
+
     def test_shell_closed_loader_reconciles_interval_search_data_and_actual_aliases(self):
         value, files, expected = shell_loader_data()
+        original = L.canonical(value)
         self.assertEqual(L.shell_closed_loader(value, files), expected)
+        self.assertEqual(L.canonical(value), original)
         for case in ("late-data", "changed-binding", "missing-hwcaps", "private-shadow", "wrong-map", "wrong-private-bytes", "changed-data", "changed-consumer"):
             current = deepcopy(value)
             changed = dict(files)

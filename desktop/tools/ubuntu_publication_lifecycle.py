@@ -7,6 +7,7 @@ No accounts, namespace/mount changes, general commands, retry or published-runti
 """
 from __future__ import annotations
 
+from copy import deepcopy
 import errno
 import fcntl
 import hashlib
@@ -1706,15 +1707,74 @@ def shell_data_snapshot(bind_path):
             "moduleSelections": selections, "eglLibraries": egl, "details": details}
 
 
+SHELL_LOADER_RETAINED = ("graph", "osFiles", "moduleRoots", "runtimeData", "loader", "ldconfig", "cache", "osNames", "externalPrerequisites")
+SHELL_LOADER_OMITTED = ("libraries", "programs", "modules", "scripts", "packages")
+
+
+def expand_shell_loader_policy(compact, compiler):
+    """One lossless wire version; return a private view, never expand inputs.json."""
+    need(type(compact) is dict and set(compact) == {"schemaVersion", *SHELL_LOADER_RETAINED},
+         "Fixed compact shell loader policy fields differ")
+    need(type(compact["schemaVersion"]) is int and compact["schemaVersion"] == 1,
+         "Unsupported compact shell loader policy version")
+    need(all(type(compact[key]) is dict for key in SHELL_LOADER_RETAINED if key not in {"osNames", "externalPrerequisites"})
+         and type(compact["osNames"]) is list and type(compact["externalPrerequisites"]) is str,
+         "Compact shell loader policy shape differs")
+    pin = compiler.get("nativeRecord") if type(compiler) is dict else None
+    need(type(pin) is dict and set(pin) == {"path", "size", "sha256"}
+         and type(pin["size"]) is int and pin["size"] > 0 and type(pin["sha256"]) is str,
+         "Original shell native graph binding is missing")
+    raw = canonical(compact["graph"])
+    need(len(raw) == pin["size"] and hashlib.sha256(raw).hexdigest() == pin["sha256"],
+         "Shell native graph lost its original compiler binding")
+    policy = deepcopy({key: compact[key] for key in SHELL_LOADER_RETAINED})
+    graph = policy["graph"]
+    need(all(type(graph.get(key)) is dict for key in ("osFiles", "sharedObjects", "programs", "modules", "scripts", "osPackages"))
+         and set(policy["osFiles"]) == set(graph["osFiles"]), "Compact shell native reconstruction roster differs")
+    for selected, row in policy["osFiles"].items():
+        # protected_host_file/D.state and _loader_binding/_data_identity both
+        # use these seven fields, not the separate nine-field lifecycle identity.
+        need(type(row) is dict and {"path", "selectedPath", "size", "sha256", "identity"} <= set(row)
+             and row["selectedPath"] == selected and type(row["identity"]) is list and len(row["identity"]) == 7
+             and all(type(part) is int for part in row["identity"]), "Compact shell current file identity differs")
+        portable = {key: row[key] for key in ("path", "selectedPath", "size", "sha256")}
+        portable["mode"] = stat.S_IMODE(row["identity"][2])
+        need(canonical(portable) == canonical(graph["osFiles"][selected]),
+             "Compact shell current file differs from its compiler")
+    for kind, source in (("libraries", "sharedObjects"), ("programs", "programs"), ("modules", "modules"), ("scripts", "scripts")):
+        policy[kind] = {}
+        for name, original in graph[source].items():
+            fields = {"file", "package", "interpreter" if kind == "scripts" else "elf"}
+            need(type(original) is dict and set(original) == fields and type(original["file"]) is dict
+                 and set(original["file"]) == {"path", "selectedPath", "size", "sha256", "mode"},
+                 "Compact shell executable reconstruction shape differs")
+            selected = original["file"]["selectedPath"]
+            need(type(selected) is str and selected in policy["osFiles"]
+                 and canonical(original["file"]) == canonical(graph["osFiles"][selected]),
+                 "Compact shell executable lost its current file binding")
+            row = deepcopy(original)
+            row["file"]["identity"] = list(policy["osFiles"][selected]["identity"])
+            policy[kind][name] = row
+    policy["packages"] = deepcopy(graph["osPackages"])
+    return policy
+
+
+def compact_shell_loader_policy(policy, compiler):
+    """Omit duplicates only after comparison with the fully checked VM policy."""
+    need(type(policy) is dict and set(policy) == {*SHELL_LOADER_RETAINED, *SHELL_LOADER_OMITTED},
+         "Fixed full shell loader policy fields differ")
+    compact = {"schemaVersion": 1, **{key: policy[key] for key in SHELL_LOADER_RETAINED}}
+    expanded = expand_shell_loader_policy(compact, compiler)
+    need(canonical(expanded) == canonical(policy), "Compact shell loader reconstruction differs from the checked original")
+    return deepcopy(compact)
+
+
 def _shell_loader_start(value, namespaces):
     """Separate GTK/WebKit entry policy; never widens the feature-off J gate."""
     shell, old = value["shell"], value["compilerRecords"]["nativeInputs"]
-    policy, compiler = shell["loaderPolicy"], shell["compiler"]
+    policy = expand_shell_loader_policy(shell["loaderPolicy"], shell["compiler"])
     graph = policy["graph"]
-    raw = canonical(graph)
-    need(len(raw) == compiler["nativeRecord"]["size"]
-         and hashlib.sha256(raw).hexdigest() == compiler["nativeRecord"]["sha256"]
-         and graph["manifestSha256"] == M and graph["protocolSha256"] == Q
+    need(graph["manifestSha256"] == M and graph["protocolSha256"] == Q
          and set(graph["outputs"]) == set(shell["binaries"]), "Shell native graph lost its original compiler binding")
     names = policy["osNames"]
     need(type(names) is list and names == sorted(set(names)) and 1 <= len(names) <= 256
@@ -1878,7 +1938,9 @@ def _installed_payload(value, proof, original):
     profile = value["shell"] if "shell" in value else value["installed"]
     need(("shell" in value or profile["case"] == "positive") and _tree(PREFIX / M, M, published=True) == original,
          "Positive published A changed before payload admission")
-    graph = profile["loaderPolicy"]["graph"]
+    policy = (expand_shell_loader_policy(profile["loaderPolicy"], profile["compiler"])
+              if "shell" in value else profile["loaderPolicy"])
+    graph = policy["graph"]
     fixed = {"python/bin/python3": (None, "$ORIGIN/../lib"), "python/lib/libssl.so.3": ("libssl.so.3", "$ORIGIN"),
              "python/lib/libcrypto.so.3": ("libcrypto.so.3", "$ORIGIN")}
     need(set(graph["runtime"]) == set(fixed) and graph["runtimeObjects"] == sorted(PRIVATE_SONAMES | {"libc.so.6", "libm.so.6", "ld-linux-x86-64.so.2"}),
@@ -1902,7 +1964,7 @@ def _installed_payload(value, proof, original):
         need(binding.get("absent") is True, "Private A startup/hwcaps/OS override exists")
         proof["bindings"][str(path)] = binding
     for name in ("ld-linux-x86-64.so.2", "libc.so.6", "libm.so.6"):
-        admitted = profile["loaderPolicy"]["libraries"][name]["file"]
+        admitted = policy["libraries"][name]["file"]
         paths = [prefix + name for prefix in ("/lib/x86_64-linux-gnu/", "/usr/lib/x86_64-linux-gnu/")]
         if name == "ld-linux-x86-64.so.2":
             paths.append("/lib64/" + name)
@@ -2866,7 +2928,7 @@ def installed_closed_result(value, outcome, raw_files):
 
 def shell_closed_loader(value, raw_files):
     """Reconcile retained originals; never query a possibly live GUI process."""
-    policy = value["shell"]["loaderPolicy"]
+    policy = expand_shell_loader_policy(value["shell"]["loaderPolicy"], value["shell"]["compiler"])
     entry, final = (decode(raw_files["loader-" + phase + ".json"], LIMIT) for phase in ("entry", "final"))
     for key in ("scope", "namespaces", "diagnostics", "cacheRows", "entryObjects", "globalObjects", "hwcapsTiers",
                 "moduleRoots", "privateSearch", "runtimeData", "externalPrerequisites"):

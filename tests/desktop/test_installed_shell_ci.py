@@ -1,5 +1,6 @@
 """Inert shell compiler/transport contracts; no compiler, GUI or process launch."""
 from copy import deepcopy
+import ast
 import hashlib
 import importlib.util
 import json
@@ -675,6 +676,49 @@ class InstalledShellCompilerContracts(unittest.TestCase):
                 (root / "font.ttf").chmod(0o755)
                 with self.assertRaises(ValueError):
                     lifecycle.shell_data_snapshot(binding)
+
+    def test_shell_handoff_keeps_exact_byte_bound_and_separate_endpoint_refusal(self):
+        limit = 1 << 20
+        overhead = len(S.D.canonical({"data": ""}))
+        for size in (limit - 1, limit):
+            request = {"data": "x" * (size - overhead)}
+            with self.subTest(size=size), patch.object(S.time, "monotonic", return_value=10.0) as clock:
+                self.assertEqual(S.shell_handoff_bytes(request, 11.0), S.D.canonical(request))
+                self.assertEqual(len(S.shell_handoff_bytes(request, 11.0)), size)
+                self.assertEqual(clock.call_count, 2)
+        with patch.object(S.time, "monotonic", return_value=12.0) as clock, self.assertRaises(S.D.Refused) as refused:
+            S.shell_handoff_bytes({"data": "x" * (limit + 1 - overhead)}, 11.0)
+        self.assertEqual(str(refused.exception), "Shell handoff exceeds original byte bound (bytes=1048577, limit=1048576)")
+        clock.assert_not_called()  # A byte refusal makes no claim about an unobserved endpoint.
+        for now in (11.0, 12.0):
+            with self.subTest(now=now), patch.object(S.time, "monotonic", return_value=now), \
+                 self.assertRaisesRegex(S.D.Refused, "^Original shell handoff endpoint expired$"):
+                S.shell_handoff_bytes({"data": "never print request contents"}, 11.0)
+
+    def test_shell_handoff_phase_and_compaction_precede_only_the_shell_service(self):
+        tree = ast.parse((SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text())
+        entry = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "verify_installed_shell")
+        calls = [node for node in ast.walk(entry) if isinstance(node, ast.Call)]
+
+        def line(name):
+            rows = [node.lineno for node in calls if (isinstance(node.func, ast.Name) and node.func.id == name
+                    or isinstance(node.func, ast.Attribute) and node.func.attr == name)]
+            self.assertEqual(len(rows), 1, name)
+            return rows[0]
+
+        phases = [node.lineno for node in ast.walk(entry) if isinstance(node, ast.Assign)
+                  and any(isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name)
+                          and target.value.id == "check" and target.attr == "phase" for target in node.targets)
+                  and isinstance(node.value, ast.Constant) and node.value.value == "shell-handoff"]
+        self.assertEqual(len(phases), 1)
+        self.assertLess(line("installed_shell_os_inputs"), phases[0])
+        self.assertLess(phases[0], line("compact_shell_loader_policy"))
+        self.assertLess(line("compact_shell_loader_policy"), line("shell_handoff_bytes"))
+        self.assertLess(line("shell_handoff_bytes"), line("service_argv"))
+        installed = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "verify_installed")
+        self.assertFalse(any(isinstance(node, ast.Call) and (isinstance(node.func, ast.Name) and node.func.id == "shell_handoff_bytes"
+                             or isinstance(node.func, ast.Attribute) and node.func.attr == "compact_shell_loader_policy")
+                             for node in ast.walk(installed)))
 
 
 def closed_project_draft_data(lifecycle):
