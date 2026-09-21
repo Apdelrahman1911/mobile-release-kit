@@ -31,7 +31,7 @@ function SaveReview({ view, catalog }: { view: PreparedConfigView; catalog: Cata
   </div>;
 }
 
-function ApplyConfirmation({ view, binding, allowed, onCancel, onConfirm }: { view: PreparedConfigView; binding: EditApplyBinding; allowed: boolean; onCancel: () => void; onConfirm: () => void }) {
+function ApplyConfirmation({ view, binding, projectPath, allowed, onCancel, onConfirm }: { view: PreparedConfigView; binding: EditApplyBinding; projectPath: string | null; allowed: boolean; onCancel: () => void; onConfirm: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const checkboxId = useId();
@@ -41,6 +41,7 @@ function ApplyConfirmation({ view, binding, allowed, onCancel, onConfirm }: { vi
   return <dialog ref={dialog} className="save-confirm-dialog" aria-labelledby={titleId} onCancel={onCancel}>
     <div className="dialog-content"><span className="eyebrow">EXPLICIT NATIVE REVIEW</span><h2 id={titleId}>{noOp ? 'Confirm the no-op plan?' : 'Apply this configuration save?'}</h2>
       <p>This confirms submitted draft revision {binding.draftRevision}, not any later edits. {noOp ? 'The native owner must recheck and settle before no changes can be confirmed.' : 'These two fixed destinations are the complete plan. No release, workflow or metadata-file setup is included.'}</p>
+      <p className="save-project-path">Project folder: {projectPath ? <code>{projectPath}</code> : 'Not available — this review cannot be applied.'}</p>
       <SaveFiles view={view} />
       {view.createReleaseDirectory && <p>The missing <code>release</code> directory is included.</p>}
       {view.rewritesConfigFormatting && <p className="review-caution">The existing JSON document is replaced with core formatting.</p>}
@@ -92,6 +93,7 @@ export function ConfigSave({ state, projects, catalog, selectedId, detailed, onC
     <div className={`notice notice-${notice?.tone === 'danger' ? 'danger' : notice?.tone === 'warning' ? 'warning' : 'info'}`} role={notice?.tone === 'danger' ? 'alert' : 'status'} aria-live="polite"><Icon name="shield" size={18} /><div><p>{notice?.detail ?? reason ?? 'Configuration-only saving is available. Prepare a draft’s native review below; this capability alone performs no write.'}</p>{notice?.code && <span className="error-code">{notice.code}</span>}</div></div>
     {owner && !owned && <p className="review-caution">This is a read-only native session summary. Its tokens do not attach authority or mark the current draft saved.</p>}
     {owner && project?.lastSave?.sessionId === owner.sessionId && project.lastSave.resultingBaselineGeneration === null && <p className="review-caution">That completed operation describes an older submitted revision. Your newer draft and baseline were kept unchanged.</p>}
+    {showReview && project && <p className="save-project-path save-note">Reviewing the project currently at <code>{project.project.path}</code>. Save checks this folder when the review opens; selecting it earlier does not lock it.</p>}
     {showReview && owner?.prepared && <SaveReview view={owner.prepared.view} catalog={catalog} />}
     {owner && (terminal || owner.phase === 'finalizing') && <dl className="save-outcome-facts" aria-label="Independent native outcome facts"><div><dt>Transaction effect</dt><dd>{owner.coreOutcome?.effect ?? 'Not reported'}</dd></div><div><dt>Journal</dt><dd>{owner.coreOutcome?.journal ?? 'Not reported'}</dd></div><div><dt>Core resources</dt><dd>{owner.coreOutcome?.resources ?? 'Not reported'}</dd></div><div><dt>Native finality</dt><dd>{owner.nativeFinality}{owner.lateSettled ? ' · late settlement recorded' : ''}</dd></div></dl>}
     <div className="button-row save-actions">
@@ -101,6 +103,6 @@ export function ConfigSave({ state, projects, catalog, selectedId, detailed, onC
       {state.mode === 'native' && <button type="button" className="button small secondary" disabled={state.readPending} onClick={onCheck}><Icon name="refresh" size={15} className={state.readPending ? 'spin' : ''} />{state.readPending ? 'Checking status…' : 'Check native status'}</button>}
     </div>
     {showReview && !terminal && <p className="save-note">Editing this draft before Apply invalidates this review and closes its session. Newer edits after submission remain in memory. The native absolute lifetime is nonrenewable; a timer or status read never grants more authority.</p>}
-    {confirmation && owner?.prepared && <ApplyConfirmation view={owner.prepared.view} binding={confirmation} allowed={canApplyEdit(state, project, confirmation)} onCancel={() => setConfirmation(null)} onConfirm={() => { onApply(confirmation); setConfirmation(null); }} />}
+    {confirmation && owner?.prepared && <ApplyConfirmation view={owner.prepared.view} binding={confirmation} projectPath={project?.project.path ?? null} allowed={canApplyEdit(state, project, confirmation)} onCancel={() => setConfirmation(null)} onConfirm={() => { onApply(confirmation); setConfirmation(null); }} />}
   </section>;
 }

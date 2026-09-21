@@ -3,9 +3,12 @@
 This source is a **configuration-only create/save building block**, not an
 enabled passive API or a shipping/platform qualification. The ordinary desktop
 API and disposable read-only engine still reject `config.save`,
-`project.initialize` and `assets.import`. Packaged-runtime and Windows mutation
-gates are unchanged. Native-owner, UI and hosted filesystem verification remain
-separate prerequisites; inert tests are not that evidence.
+`project.initialize` and `assets.import`. A separate configuration-only installed
+Linux x86-64 profile now connects this adapter to the existing native edit owner;
+its installed Save observation is still pending. The general packaged resolver,
+other edit domains and Windows mutation gates remain closed. Native-owner, UI
+and hosted filesystem verification are separate prerequisites; inert tests are
+not that evidence.
 
 ## Fixed scope and original authority
 
@@ -36,6 +39,13 @@ namespace checks, and immutable raw/ancestor revision rechecks. The adapter
 does not reopen paths or populate a new workspace parent map. Every later scope
 uses the **same original `RootedRevision` object**. No lock spans UI editing or
 review, and original-child finality cannot be reconstructed by another process.
+
+The picker registers a pathname, not continuous write custody. Open checks the
+project currently at that path and creates the fresh original `InitRootLease`.
+Prepare and Apply retain that same lease/revision; a prior snapshot or matching
+expected configuration is not inode authority. The UI shows the submitted
+project path in review and confirmation. A folder replaced before Open can be a
+different admissible project; after Open, original lease/revision checks govern.
 
 ## Preparation, bounds and review
 

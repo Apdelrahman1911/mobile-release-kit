@@ -60,7 +60,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
           dpkg-query -W -f='${Package} ${Version}\n' libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
-      - name: Prepare only fixed disposable Ubuntu DATA directory modes
+      - name: Prepare only fixed disposable Ubuntu DATA modes
         timeout-minutes: 1
         shell: bash
         run: |
@@ -68,8 +68,8 @@ jobs:
           sudo /usr/bin/python3.12 -I -S -B - <<'PY'
           import json, os, re, stat
 
-          # Only these fixed public OS directories may lose group/other write. This is
-          # disposable runner preparation, not recursive repair or runtime admission.
+          # Only fixed public OS DATA scopes may lose permission bits. This is disposable
+          # runner preparation, never runtime admission or arbitrary filesystem repair.
           PREPARE_DIRS = (
               '/usr/share', '/etc/gtk-3.0', '/etc/fonts', '/etc/fonts/conf.d',
               '/usr/share/fontconfig', '/usr/share/fontconfig/conf.avail', '/usr/share/fonts',
@@ -82,15 +82,19 @@ jobs:
               '/usr/share/hunspell', '/usr/share/hyphen',
           )
           DATA_ROOTS = (
-              '/etc/gtk-3.0', '/etc/fonts', '/usr/share/fontconfig', '/usr/share/fonts',
-              '/usr/local/share/fonts', '/var/cache/fontconfig', '/usr/share/glib-2.0/schemas',
-              '/usr/share/glvnd/egl_vendor.d', '/etc/glvnd/egl_vendor.d', '/usr/share/drirc.d', '/etc/drirc',
-              '/usr/share/X11/xkb', '/usr/share/X11/locale', '/usr/share/icons/Adwaita',
-              '/usr/share/icons/hicolor', '/usr/share/themes/Adwaita', '/usr/share/mime/mime.cache',
-              '/usr/share/hunspell', '/usr/share/hyphen',
-              '/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache',
-              '/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache',
-              '/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache',
+              ('/etc/gtk-3.0', 'directory'), ('/etc/fonts', 'directory'),
+              ('/usr/share/fontconfig', 'directory'), ('/usr/share/fonts', 'directory'),
+              ('/usr/local/share/fonts', 'directory'), ('/var/cache/fontconfig', 'directory'),
+              ('/usr/share/glib-2.0/schemas', 'directory'),
+              ('/usr/share/glvnd/egl_vendor.d', 'directory'), ('/etc/glvnd/egl_vendor.d', 'directory'),
+              ('/usr/share/drirc.d', 'directory'), ('/etc/drirc', 'file'),
+              ('/usr/share/X11/xkb', 'directory'), ('/usr/share/X11/locale', 'directory'),
+              ('/usr/share/icons/Adwaita', 'directory'), ('/usr/share/icons/hicolor', 'directory'),
+              ('/usr/share/themes/Adwaita', 'directory'), ('/usr/share/mime/mime.cache', 'file'),
+              ('/usr/share/hunspell', 'directory'), ('/usr/share/hyphen', 'directory'),
+              ('/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache', 'file'),
+              ('/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache', 'file'),
+              ('/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache', 'file'),
           )
           SCOPE = 'fixed-shell-data-directory-preparation'
 
@@ -103,14 +107,70 @@ jobs:
                   raise SystemExit(70)
 
           def identity(s):
-              return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
+              return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid,
+                      s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 
           def record(s):
               return {'dev': s.st_dev, 'ino': s.st_ino, 'uid': s.st_uid, 'gid': s.st_gid,
-                      'mode': format(s.st_mode, '06o')}
+                      'mode': format(s.st_mode, '06o'), 'nlink': s.st_nlink, 'size': s.st_size}
+
+          def changed_only(before, after, mode, gid):
+              # chmod/chown may change ctime, never identity, link count, size or mtime.
+              expected = list(identity(before))
+              expected[2], expected[4], expected[-1] = stat.S_IFMT(before.st_mode) | mode, gid, after.st_ctime_ns
+              return identity(after) == tuple(expected)
+
+          def mount_table():
+              # The only content read in this preparer is fixed kernel mount metadata.
+              with open('/proc/self/mountinfo', 'rb') as stream:
+                  raw = stream.read((1 << 20) + 1)
+              need(0 < len(raw) <= 1 << 20 and raw.endswith(b'\n') and b'\0' not in raw,
+                   'mount-metadata-bound')
+              return raw
+
+          def mount_scope(raw, device):
+              roots, ids, points = [], set(), set()
+              for line in raw.decode('ascii').splitlines():
+                  fields = line.split(' ')
+                  need(len(ids) < 4096 and all(fields) and fields.count('-') == 1, 'mount-grammar-bound')
+                  at = fields.index('-')
+                  need(at >= 6 and len(fields) == at + 4 and re.fullmatch(r'[1-9][0-9]{0,9}', fields[0])
+                       and fields[0] not in ids and re.fullmatch(r'[1-9][0-9]{0,9}', fields[1])
+                       and re.fullmatch(r'[0-9]{1,10}:[0-9]{1,10}', fields[2])
+                       and fields[5].split(',')[0] in {'ro', 'rw'}, 'mount-identity-options')
+                  ids.add(fields[0])
+                  decoded = []
+                  for path in fields[3:5]:
+                      need(path.startswith('/') and re.fullmatch(r'(?:[^\\\x00-\x20]|\\(?:040|011|012|134))+', path),
+                           'mount-path-escape')
+                      decoded.append(re.sub(r'\\(040|011|012|134)', lambda found: chr(int(found[1], 8)), path))
+                  points.add(decoded[1])
+                  tags = set()
+                  for option in fields[6:at]:
+                      tag, separator, number = option.partition(':')
+                      need(tag not in tags and ((tag == 'unbindable' and not separator)
+                           or (tag in {'shared', 'master', 'propagate_from'} and re.fullmatch(r'[1-9][0-9]{0,9}', number))),
+                           'mount-propagation-or-idmap')
+                      tags.add(tag)
+                  if decoded[1] == '/':
+                      need(decoded[0] == '/' and fields[at + 1] in {'ext4', 'xfs'}
+                           and tuple(int(part) for part in fields[2].split(':')) == (os.major(device), os.minor(device)),
+                           'mount-root-device-filesystem')
+                      roots.append(int(fields[0]))
+              need(len(roots) == 1, 'mount-root-ambiguous')
+              # No mount may intercept a fixed target or a traversable DATA descendant.
+              for target, subtree in [*((path, False) for path in PREPARE_DIRS),
+                                      *((path, kind == 'directory') for path, kind in DATA_ROOTS)]:
+                  need(not any(point != '/' and (target == point or target.startswith(point + '/')
+                               or subtree and point.startswith(target + '/')) for point in points),
+                       'mounted-data-target', {'path': target})
+
+          def mount_unchanged():
+              need(mount_table() == MOUNT_RAW, 'mount-table-changed')
 
           def protected(s, path):
-              need(stat.S_ISDIR(s.st_mode) and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
+              need(stat.S_ISDIR(s.st_mode) and s.st_dev == MOUNT_DEVICE
+                   and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
                    'protected-ancestor', {'path': path, **record(s)})
 
           def prepare_directory(path):
@@ -150,20 +210,28 @@ jobs:
                           local_fonts = (path == '/usr/local/share/fonts' and stat.S_ISDIR(before.st_mode)
                                          and before.st_uid == 0 and before.st_gid == 50
                                          and stat.S_IMODE(before.st_mode) == 0o2775)
-                          need(local_fonts or (stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
-                               and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777)),
+                          need(before.st_dev == MOUNT_DEVICE and (local_fonts or (stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+                               and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777))),
                                'target-policy', {'path': current, **record(before)})
                           originals.append((fd, parent, name, before))
                           recheck()
+                          mount_unchanged()
                           if local_fonts:
                               os.fchown(fd, -1, 0)
+                              grouped = os.fstat(fd)
+                              need(changed_only(before, grouped, stat.S_IMODE(before.st_mode), 0),
+                                   'same-object-group-change')
+                              originals[-1] = (fd, parent, name, grouped)
+                              recheck()
+                              mount_unchanged()
                           if stat.S_IMODE(before.st_mode) != 0o755:
                               os.fchmod(fd, 0o755)
                           after = os.fstat(fd)
-                          need(identity(after) == (before.st_dev, before.st_ino, stat.S_IFDIR | 0o755, 0, 0),
+                          need(changed_only(before, after, 0o755, 0),
                                'same-object-mode-change')
                           originals[-1] = (fd, parent, name, after)
                           recheck()
+                          mount_unchanged()
                           return {'path': path, 'before': record(before), 'after': record(after)}
                       protected(before, current)
                       originals.append((fd, parent, name, before))
@@ -179,20 +247,45 @@ jobs:
                           failed_close = True
                   need(not failed_close, 'original-directory-close')
 
-          def metadata_preflight():
-              # Read metadata through original no-follow directory FDs, never file
-              # contents or symlink targets. Discovered names cannot become chmod
-              # targets. Later full byte/ACL/mount admission remains unchanged.
+          def metadata_preflight(*, normalize=False):
+              # Two finite passes: first diagnose unsupported objects without descendant
+              # effects; only a fully supported scope may enter the removing-only pass.
               flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-              count, unsafe_count, unsafe, fds = 0, 0, [], []
+              file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+              count, unsafe_count, unsupported_count, changed_count = 0, 0, 0, 0
+              unsafe, changed, fds, originals = [], [], [], []
 
               def bound(fd, parent, name, item):
                   need(identity(os.fstat(fd)) == identity(item)
                        == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)),
-                       'metadata-directory-changed')
+                       'metadata-original-changed')
 
-              def visit(parent, name, path, depth):
-                  nonlocal count, unsafe_count
+              def recheck():
+                  for fd, parent, name, item in originals:
+                      bound(fd, parent, name, item)
+
+              def tighten(fd, parent, name, path, item, mode):
+                  nonlocal changed_count
+                  for ancestor, _, _, before in originals[:-1]:
+                      protected(before, path)
+                      protected(os.fstat(ancestor), path)
+                  recheck()
+                  need(mode & ~stat.S_IMODE(item.st_mode) == 0, 'data-permission-addition')
+                  mount_unchanged()
+                  os.fchmod(fd, mode)
+                  after = os.fstat(fd)
+                  need(changed_only(item, after, mode, 0), 'same-data-object-mode-change')
+                  originals[-1] = (fd, parent, name, after)
+                  recheck()
+                  mount_unchanged()
+                  changed_count += 1
+                  if len(changed) < 64:
+                      changed.append({'path': path[:512], 'pathTruncated': len(path) > 512,
+                                      'before': record(item), 'after': record(after)})
+                  return after
+
+              def visit(parent, name, path, depth, root_kind):
+                  nonlocal count, unsafe_count, unsupported_count
                   count += 1
                   need(count <= 32768 and depth <= 16, 'metadata-entry-depth-bound')
                   try:
@@ -200,39 +293,58 @@ jobs:
                   except FileNotFoundError:
                       need(depth == 0, 'metadata-member-disappeared')
                       return
-                  link, directory = stat.S_ISLNK(item.st_mode), stat.S_ISDIR(item.st_mode)
-                  ordinary = directory or stat.S_ISREG(item.st_mode) or link
-                  safe = (ordinary and item.st_uid == item.st_gid == 0
+                  link, directory, regular = stat.S_ISLNK(item.st_mode), stat.S_ISDIR(item.st_mode), stat.S_ISREG(item.st_mode)
+                  need(item.st_dev == MOUNT_DEVICE, 'metadata-device', {'path': path[:512], **record(item)})
+                  if depth == 0:
+                      need(directory if root_kind == 'directory' else regular or link,
+                           'data-root-kind', {'path': path, **record(item)})
+                  owned = item.st_uid == item.st_gid == 0
+                  single = directory or item.st_nlink == 1
+                  safe = (owned and single and (directory or regular or link)
                           and (link or not item.st_mode & 0o7022)
                           and (directory or link or not item.st_mode & 0o111))
-                  if not safe:
-                      unsafe_count += 1
-                      if len(unsafe) < 64:
-                          unsafe.append({'path': path[:512], 'pathTruncated': len(path) > 512, **record(item)})
-                  if not directory:
-                      need(identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == identity(item),
-                           'metadata-entry-changed')
-                      return
-                  fd = os.open(name, flags, dir_fd=parent)
-                  fds.append(fd)
+                  mode = stat.S_IMODE(item.st_mode)
+                  repairable = owned and single and (directory and mode in (0o775, 0o777)
+                      or regular and mode in (0o644, 0o664, 0o666, 0o555, 0o755, 0o775, 0o777))
+                  if normalize:
+                      need(safe or repairable, 'unsupported-data-before-effect', {'path': path[:512], **record(item)})
+                  fd = None
                   try:
-                      bound(fd, parent, name, item)
+                      if directory or normalize and not safe and repairable:
+                          fd = os.open(name, flags if directory else file_flags, dir_fd=parent)
+                          fds.append(fd)
+                          originals.append((fd, parent, name, item))
+                          bound(fd, parent, name, item)
+                          if normalize and not safe:
+                              item = tighten(fd, parent, name, path, item, 0o755 if directory else mode & ~0o133)
+                              safe = True  # Exact same-object postcondition above, not an inferred repair.
+                      if not safe:
+                          unsafe_count += 1
+                          unsupported_count += int(not repairable)
+                          if len(unsafe) < 64:
+                              unsafe.append({'path': path[:512], 'pathTruncated': len(path) > 512, **record(item)})
+                      if not directory:
+                          need(identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == identity(item),
+                               'metadata-entry-changed')
+                          return
                       children = sorted(os.listdir(fd))
-                      need(len(children) <= 8192 and all(re.fullmatch(r'[A-Za-z0-9_.+@\-]+', child) for child in children),
+                      need(len(children) <= 8192 and all(child not in {'.', '..'} and re.fullmatch(r'[A-Za-z0-9_.+@\-]+', child) for child in children),
                            'metadata-membership-bound-grammar')
                       for child in children:
-                          visit(fd, child, path + '/' + child, depth + 1)
+                          visit(fd, child, path + '/' + child, depth + 1, root_kind)
                       bound(fd, parent, name, item)
                       need(sorted(os.listdir(fd)) == children, 'metadata-membership-changed')
-                      bound(fd, parent, name, item)
+                      recheck()
                   finally:
-                      fds.pop()  # Retire this original before its sole close attempt.
-                      try:
-                          os.close(fd)
-                      except OSError:
-                          need(False, 'metadata-directory-close')
+                      if fd is not None:
+                          originals.pop()
+                          fds.pop()  # Retire this original before its sole close attempt.
+                          try:
+                              os.close(fd)
+                          except OSError:
+                              need(False, 'metadata-original-close')
 
-              for root in DATA_ROOTS:
+              for root, root_kind in DATA_ROOTS:
                   originals = []
                   try:
                       parent = os.open('/', flags)
@@ -257,9 +369,8 @@ jobs:
                           originals.append((fd, parent, name, before))
                           parent = fd
                       else:
-                          visit(parent, parts[-1], root, 0)
-                      for fd, parent, name, before in originals:
-                          bound(fd, parent, name, before)
+                          visit(parent, parts[-1], root, 0, root_kind)
+                      recheck()
                   finally:
                       failed_close = False
                       while fds:
@@ -268,13 +379,20 @@ jobs:
                               os.close(fd)
                           except OSError:
                               failed_close = True
-                      need(not failed_close, 'metadata-directory-close')
+                      need(not failed_close, 'metadata-original-close')
               return {'entries': count, 'unsafeCount': unsafe_count, 'unsafe': unsafe,
-                      'unsafeListTruncated': unsafe_count > len(unsafe)}
+                      'unsafeListTruncated': unsafe_count > len(unsafe), 'unsupportedCount': unsupported_count,
+                      'changedCount': changed_count, 'changed': changed, 'changedListTruncated': changed_count > len(changed)}
 
           need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0), 'root-credentials')
+          MOUNT_RAW = mount_table()
+          MOUNT_DEVICE = os.stat('/', follow_symlinks=False).st_dev
+          mount_scope(MOUNT_RAW, MOUNT_DEVICE)
           prepared = [prepare_directory(path) for path in sorted(PREPARE_DIRS, key=lambda path: (path.count('/'), path))]
           metadata = metadata_preflight()
+          if metadata['unsupportedCount'] == 0 and metadata['unsafeCount']:
+              metadata = metadata_preflight(normalize=True)
+          mount_unchanged()
           receipt = json.dumps({'scope': SCOPE, 'prepared': prepared, 'metadata': metadata,
                                 'runtimeAdmission': False}, sort_keys=True, separators=(',', ':'))
           need(len(receipt.encode('ascii')) <= 65536, 'receipt-bound')
@@ -305,7 +423,7 @@ jobs:
           MRK_UBUNTU_PUBLICATION_PREPARATION_SHA256: ${{ steps.prepare.outputs.preparation_sha256 }}
           MRK_UBUNTU_PUBLICATION_DEADLINE: ${{ steps.prepare.outputs.deadline }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '7bf1e2374b522a8d6a3391aa9efc906f9b65953d9462e07dadcf12dc1e1858e4'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'b4c650a0f05926e7c0794bb09570af579bdb7b9a2855ba3b484f9d4e54a40bf6'
         run: /usr/bin/python3.12 -I -S -B desktop/tools/ci_ubuntu_publication.py installed-shell-compile
       - name: Retain original compiler evidence and shell outputs
         id: upload
@@ -365,7 +483,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
           dpkg-query -W -f='${Package} ${Version}\n' libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev xvfb xauth xdotool dbus-daemon dbus-bin bubblewrap xdg-dbus-proxy
-      - name: Prepare only fixed disposable Ubuntu DATA directory modes
+      - name: Prepare only fixed disposable Ubuntu DATA modes
         timeout-minutes: 1
         shell: bash
         run: |
@@ -373,8 +491,8 @@ jobs:
           sudo /usr/bin/python3.12 -I -S -B - <<'PY'
           import json, os, re, stat
 
-          # Only these fixed public OS directories may lose group/other write. This is
-          # disposable runner preparation, not recursive repair or runtime admission.
+          # Only fixed public OS DATA scopes may lose permission bits. This is disposable
+          # runner preparation, never runtime admission or arbitrary filesystem repair.
           PREPARE_DIRS = (
               '/usr/share', '/etc/gtk-3.0', '/etc/fonts', '/etc/fonts/conf.d',
               '/usr/share/fontconfig', '/usr/share/fontconfig/conf.avail', '/usr/share/fonts',
@@ -387,15 +505,19 @@ jobs:
               '/usr/share/hunspell', '/usr/share/hyphen',
           )
           DATA_ROOTS = (
-              '/etc/gtk-3.0', '/etc/fonts', '/usr/share/fontconfig', '/usr/share/fonts',
-              '/usr/local/share/fonts', '/var/cache/fontconfig', '/usr/share/glib-2.0/schemas',
-              '/usr/share/glvnd/egl_vendor.d', '/etc/glvnd/egl_vendor.d', '/usr/share/drirc.d', '/etc/drirc',
-              '/usr/share/X11/xkb', '/usr/share/X11/locale', '/usr/share/icons/Adwaita',
-              '/usr/share/icons/hicolor', '/usr/share/themes/Adwaita', '/usr/share/mime/mime.cache',
-              '/usr/share/hunspell', '/usr/share/hyphen',
-              '/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache',
-              '/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache',
-              '/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache',
+              ('/etc/gtk-3.0', 'directory'), ('/etc/fonts', 'directory'),
+              ('/usr/share/fontconfig', 'directory'), ('/usr/share/fonts', 'directory'),
+              ('/usr/local/share/fonts', 'directory'), ('/var/cache/fontconfig', 'directory'),
+              ('/usr/share/glib-2.0/schemas', 'directory'),
+              ('/usr/share/glvnd/egl_vendor.d', 'directory'), ('/etc/glvnd/egl_vendor.d', 'directory'),
+              ('/usr/share/drirc.d', 'directory'), ('/etc/drirc', 'file'),
+              ('/usr/share/X11/xkb', 'directory'), ('/usr/share/X11/locale', 'directory'),
+              ('/usr/share/icons/Adwaita', 'directory'), ('/usr/share/icons/hicolor', 'directory'),
+              ('/usr/share/themes/Adwaita', 'directory'), ('/usr/share/mime/mime.cache', 'file'),
+              ('/usr/share/hunspell', 'directory'), ('/usr/share/hyphen', 'directory'),
+              ('/usr/lib/x86_64-linux-gnu/gio/modules/giomodule.cache', 'file'),
+              ('/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache', 'file'),
+              ('/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache', 'file'),
           )
           SCOPE = 'fixed-shell-data-directory-preparation'
 
@@ -408,14 +530,70 @@ jobs:
                   raise SystemExit(70)
 
           def identity(s):
-              return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid)
+              return (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid,
+                      s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 
           def record(s):
               return {'dev': s.st_dev, 'ino': s.st_ino, 'uid': s.st_uid, 'gid': s.st_gid,
-                      'mode': format(s.st_mode, '06o')}
+                      'mode': format(s.st_mode, '06o'), 'nlink': s.st_nlink, 'size': s.st_size}
+
+          def changed_only(before, after, mode, gid):
+              # chmod/chown may change ctime, never identity, link count, size or mtime.
+              expected = list(identity(before))
+              expected[2], expected[4], expected[-1] = stat.S_IFMT(before.st_mode) | mode, gid, after.st_ctime_ns
+              return identity(after) == tuple(expected)
+
+          def mount_table():
+              # The only content read in this preparer is fixed kernel mount metadata.
+              with open('/proc/self/mountinfo', 'rb') as stream:
+                  raw = stream.read((1 << 20) + 1)
+              need(0 < len(raw) <= 1 << 20 and raw.endswith(b'\n') and b'\0' not in raw,
+                   'mount-metadata-bound')
+              return raw
+
+          def mount_scope(raw, device):
+              roots, ids, points = [], set(), set()
+              for line in raw.decode('ascii').splitlines():
+                  fields = line.split(' ')
+                  need(len(ids) < 4096 and all(fields) and fields.count('-') == 1, 'mount-grammar-bound')
+                  at = fields.index('-')
+                  need(at >= 6 and len(fields) == at + 4 and re.fullmatch(r'[1-9][0-9]{0,9}', fields[0])
+                       and fields[0] not in ids and re.fullmatch(r'[1-9][0-9]{0,9}', fields[1])
+                       and re.fullmatch(r'[0-9]{1,10}:[0-9]{1,10}', fields[2])
+                       and fields[5].split(',')[0] in {'ro', 'rw'}, 'mount-identity-options')
+                  ids.add(fields[0])
+                  decoded = []
+                  for path in fields[3:5]:
+                      need(path.startswith('/') and re.fullmatch(r'(?:[^\\\x00-\x20]|\\(?:040|011|012|134))+', path),
+                           'mount-path-escape')
+                      decoded.append(re.sub(r'\\(040|011|012|134)', lambda found: chr(int(found[1], 8)), path))
+                  points.add(decoded[1])
+                  tags = set()
+                  for option in fields[6:at]:
+                      tag, separator, number = option.partition(':')
+                      need(tag not in tags and ((tag == 'unbindable' and not separator)
+                           or (tag in {'shared', 'master', 'propagate_from'} and re.fullmatch(r'[1-9][0-9]{0,9}', number))),
+                           'mount-propagation-or-idmap')
+                      tags.add(tag)
+                  if decoded[1] == '/':
+                      need(decoded[0] == '/' and fields[at + 1] in {'ext4', 'xfs'}
+                           and tuple(int(part) for part in fields[2].split(':')) == (os.major(device), os.minor(device)),
+                           'mount-root-device-filesystem')
+                      roots.append(int(fields[0]))
+              need(len(roots) == 1, 'mount-root-ambiguous')
+              # No mount may intercept a fixed target or a traversable DATA descendant.
+              for target, subtree in [*((path, False) for path in PREPARE_DIRS),
+                                      *((path, kind == 'directory') for path, kind in DATA_ROOTS)]:
+                  need(not any(point != '/' and (target == point or target.startswith(point + '/')
+                               or subtree and point.startswith(target + '/')) for point in points),
+                       'mounted-data-target', {'path': target})
+
+          def mount_unchanged():
+              need(mount_table() == MOUNT_RAW, 'mount-table-changed')
 
           def protected(s, path):
-              need(stat.S_ISDIR(s.st_mode) and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
+              need(stat.S_ISDIR(s.st_mode) and s.st_dev == MOUNT_DEVICE
+                   and s.st_uid == s.st_gid == 0 and not s.st_mode & 0o7022,
                    'protected-ancestor', {'path': path, **record(s)})
 
           def prepare_directory(path):
@@ -455,20 +633,28 @@ jobs:
                           local_fonts = (path == '/usr/local/share/fonts' and stat.S_ISDIR(before.st_mode)
                                          and before.st_uid == 0 and before.st_gid == 50
                                          and stat.S_IMODE(before.st_mode) == 0o2775)
-                          need(local_fonts or (stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
-                               and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777)),
+                          need(before.st_dev == MOUNT_DEVICE and (local_fonts or (stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+                               and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777))),
                                'target-policy', {'path': current, **record(before)})
                           originals.append((fd, parent, name, before))
                           recheck()
+                          mount_unchanged()
                           if local_fonts:
                               os.fchown(fd, -1, 0)
+                              grouped = os.fstat(fd)
+                              need(changed_only(before, grouped, stat.S_IMODE(before.st_mode), 0),
+                                   'same-object-group-change')
+                              originals[-1] = (fd, parent, name, grouped)
+                              recheck()
+                              mount_unchanged()
                           if stat.S_IMODE(before.st_mode) != 0o755:
                               os.fchmod(fd, 0o755)
                           after = os.fstat(fd)
-                          need(identity(after) == (before.st_dev, before.st_ino, stat.S_IFDIR | 0o755, 0, 0),
+                          need(changed_only(before, after, 0o755, 0),
                                'same-object-mode-change')
                           originals[-1] = (fd, parent, name, after)
                           recheck()
+                          mount_unchanged()
                           return {'path': path, 'before': record(before), 'after': record(after)}
                       protected(before, current)
                       originals.append((fd, parent, name, before))
@@ -484,20 +670,45 @@ jobs:
                           failed_close = True
                   need(not failed_close, 'original-directory-close')
 
-          def metadata_preflight():
-              # Read metadata through original no-follow directory FDs, never file
-              # contents or symlink targets. Discovered names cannot become chmod
-              # targets. Later full byte/ACL/mount admission remains unchanged.
+          def metadata_preflight(*, normalize=False):
+              # Two finite passes: first diagnose unsupported objects without descendant
+              # effects; only a fully supported scope may enter the removing-only pass.
               flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-              count, unsafe_count, unsafe, fds = 0, 0, [], []
+              file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+              count, unsafe_count, unsupported_count, changed_count = 0, 0, 0, 0
+              unsafe, changed, fds, originals = [], [], [], []
 
               def bound(fd, parent, name, item):
                   need(identity(os.fstat(fd)) == identity(item)
                        == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)),
-                       'metadata-directory-changed')
+                       'metadata-original-changed')
 
-              def visit(parent, name, path, depth):
-                  nonlocal count, unsafe_count
+              def recheck():
+                  for fd, parent, name, item in originals:
+                      bound(fd, parent, name, item)
+
+              def tighten(fd, parent, name, path, item, mode):
+                  nonlocal changed_count
+                  for ancestor, _, _, before in originals[:-1]:
+                      protected(before, path)
+                      protected(os.fstat(ancestor), path)
+                  recheck()
+                  need(mode & ~stat.S_IMODE(item.st_mode) == 0, 'data-permission-addition')
+                  mount_unchanged()
+                  os.fchmod(fd, mode)
+                  after = os.fstat(fd)
+                  need(changed_only(item, after, mode, 0), 'same-data-object-mode-change')
+                  originals[-1] = (fd, parent, name, after)
+                  recheck()
+                  mount_unchanged()
+                  changed_count += 1
+                  if len(changed) < 64:
+                      changed.append({'path': path[:512], 'pathTruncated': len(path) > 512,
+                                      'before': record(item), 'after': record(after)})
+                  return after
+
+              def visit(parent, name, path, depth, root_kind):
+                  nonlocal count, unsafe_count, unsupported_count
                   count += 1
                   need(count <= 32768 and depth <= 16, 'metadata-entry-depth-bound')
                   try:
@@ -505,39 +716,58 @@ jobs:
                   except FileNotFoundError:
                       need(depth == 0, 'metadata-member-disappeared')
                       return
-                  link, directory = stat.S_ISLNK(item.st_mode), stat.S_ISDIR(item.st_mode)
-                  ordinary = directory or stat.S_ISREG(item.st_mode) or link
-                  safe = (ordinary and item.st_uid == item.st_gid == 0
+                  link, directory, regular = stat.S_ISLNK(item.st_mode), stat.S_ISDIR(item.st_mode), stat.S_ISREG(item.st_mode)
+                  need(item.st_dev == MOUNT_DEVICE, 'metadata-device', {'path': path[:512], **record(item)})
+                  if depth == 0:
+                      need(directory if root_kind == 'directory' else regular or link,
+                           'data-root-kind', {'path': path, **record(item)})
+                  owned = item.st_uid == item.st_gid == 0
+                  single = directory or item.st_nlink == 1
+                  safe = (owned and single and (directory or regular or link)
                           and (link or not item.st_mode & 0o7022)
                           and (directory or link or not item.st_mode & 0o111))
-                  if not safe:
-                      unsafe_count += 1
-                      if len(unsafe) < 64:
-                          unsafe.append({'path': path[:512], 'pathTruncated': len(path) > 512, **record(item)})
-                  if not directory:
-                      need(identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == identity(item),
-                           'metadata-entry-changed')
-                      return
-                  fd = os.open(name, flags, dir_fd=parent)
-                  fds.append(fd)
+                  mode = stat.S_IMODE(item.st_mode)
+                  repairable = owned and single and (directory and mode in (0o775, 0o777)
+                      or regular and mode in (0o644, 0o664, 0o666, 0o555, 0o755, 0o775, 0o777))
+                  if normalize:
+                      need(safe or repairable, 'unsupported-data-before-effect', {'path': path[:512], **record(item)})
+                  fd = None
                   try:
-                      bound(fd, parent, name, item)
+                      if directory or normalize and not safe and repairable:
+                          fd = os.open(name, flags if directory else file_flags, dir_fd=parent)
+                          fds.append(fd)
+                          originals.append((fd, parent, name, item))
+                          bound(fd, parent, name, item)
+                          if normalize and not safe:
+                              item = tighten(fd, parent, name, path, item, 0o755 if directory else mode & ~0o133)
+                              safe = True  # Exact same-object postcondition above, not an inferred repair.
+                      if not safe:
+                          unsafe_count += 1
+                          unsupported_count += int(not repairable)
+                          if len(unsafe) < 64:
+                              unsafe.append({'path': path[:512], 'pathTruncated': len(path) > 512, **record(item)})
+                      if not directory:
+                          need(identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) == identity(item),
+                               'metadata-entry-changed')
+                          return
                       children = sorted(os.listdir(fd))
-                      need(len(children) <= 8192 and all(re.fullmatch(r'[A-Za-z0-9_.+@\-]+', child) for child in children),
+                      need(len(children) <= 8192 and all(child not in {'.', '..'} and re.fullmatch(r'[A-Za-z0-9_.+@\-]+', child) for child in children),
                            'metadata-membership-bound-grammar')
                       for child in children:
-                          visit(fd, child, path + '/' + child, depth + 1)
+                          visit(fd, child, path + '/' + child, depth + 1, root_kind)
                       bound(fd, parent, name, item)
                       need(sorted(os.listdir(fd)) == children, 'metadata-membership-changed')
-                      bound(fd, parent, name, item)
+                      recheck()
                   finally:
-                      fds.pop()  # Retire this original before its sole close attempt.
-                      try:
-                          os.close(fd)
-                      except OSError:
-                          need(False, 'metadata-directory-close')
+                      if fd is not None:
+                          originals.pop()
+                          fds.pop()  # Retire this original before its sole close attempt.
+                          try:
+                              os.close(fd)
+                          except OSError:
+                              need(False, 'metadata-original-close')
 
-              for root in DATA_ROOTS:
+              for root, root_kind in DATA_ROOTS:
                   originals = []
                   try:
                       parent = os.open('/', flags)
@@ -562,9 +792,8 @@ jobs:
                           originals.append((fd, parent, name, before))
                           parent = fd
                       else:
-                          visit(parent, parts[-1], root, 0)
-                      for fd, parent, name, before in originals:
-                          bound(fd, parent, name, before)
+                          visit(parent, parts[-1], root, 0, root_kind)
+                      recheck()
                   finally:
                       failed_close = False
                       while fds:
@@ -573,13 +802,20 @@ jobs:
                               os.close(fd)
                           except OSError:
                               failed_close = True
-                      need(not failed_close, 'metadata-directory-close')
+                      need(not failed_close, 'metadata-original-close')
               return {'entries': count, 'unsafeCount': unsafe_count, 'unsafe': unsafe,
-                      'unsafeListTruncated': unsafe_count > len(unsafe)}
+                      'unsafeListTruncated': unsafe_count > len(unsafe), 'unsupportedCount': unsupported_count,
+                      'changedCount': changed_count, 'changed': changed, 'changedListTruncated': changed_count > len(changed)}
 
           need(os.getresuid() == (0, 0, 0) and os.getresgid() == (0, 0, 0), 'root-credentials')
+          MOUNT_RAW = mount_table()
+          MOUNT_DEVICE = os.stat('/', follow_symlinks=False).st_dev
+          mount_scope(MOUNT_RAW, MOUNT_DEVICE)
           prepared = [prepare_directory(path) for path in sorted(PREPARE_DIRS, key=lambda path: (path.count('/'), path))]
           metadata = metadata_preflight()
+          if metadata['unsupportedCount'] == 0 and metadata['unsafeCount']:
+              metadata = metadata_preflight(normalize=True)
+          mount_unchanged()
           receipt = json.dumps({'scope': SCOPE, 'prepared': prepared, 'metadata': metadata,
                                 'runtimeAdmission': False}, sort_keys=True, separators=(',', ':'))
           need(len(receipt.encode('ascii')) <= 65536, 'receipt-bound')
@@ -622,7 +858,7 @@ jobs:
           MRK_INSTALLED_SHELL_ARTIFACT_ID: ${{ needs.compile.outputs.shell_artifact_id }}
           MRK_INSTALLED_SHELL_PRODUCER_ATTEMPT: ${{ needs.compile.outputs.shell_producer_attempt }}
           # Exact independently reviewed shell lifecycle; not product qualification.
-          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: '7bf1e2374b522a8d6a3391aa9efc906f9b65953d9462e07dadcf12dc1e1858e4'
+          MRK_UBUNTU_LIFECYCLE_ENTRY_SHA256: 'b4c650a0f05926e7c0794bb09570af579bdb7b9a2855ba3b484f9d4e54a40bf6'
           MRK_UBUNTU_LIFECYCLE_BOOTSTRAP: |
             import hashlib, os, re, stat, sys
             from pathlib import Path

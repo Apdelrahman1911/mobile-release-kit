@@ -3,8 +3,8 @@
 //! This is NOT executable runtime qualification. In particular, a compiled
 //! manifest, equal hashes, and retained descriptors cannot prove the external
 //! fresh-inode installer / immutable published-version / interpreter-loader
-//! contracts. The fixed passive selector still requires those independently
-//! established contracts; other production execution profiles remain closed.
+//! contracts. The fixed passive and configuration selectors still require
+//! those independently established contracts; other production profiles stay closed.
 //!
 //! The Android retained path keeps the SAME originals until its saved-command
 //! owner's actual inspection/acquisition/child/IO/native-settlement joins. Legacy
@@ -63,7 +63,8 @@ pub(crate) enum AdmissionFailure {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Phase { New, Inspecting, InspectedOnly, PassivePreparing, PassivePrepared, Retained, Auditing, Refused, Settling, Settled, Unknown }
+enum Phase { New, Inspecting, InspectedOnly, PassivePreparing, PassivePrepared, ConfigurationPreparing, ConfigurationPrepared,
+    Retained, Auditing, Refused, Settling, Settled, Unknown }
 
 #[must_use]
 #[derive(Debug)]
@@ -94,6 +95,7 @@ impl CustodyObservation {
         match self.phase {
             Phase::New => "new", Phase::Inspecting => "inspecting",
             Phase::PassivePreparing => "passivePreparing", Phase::PassivePrepared => "passivePrepared",
+            Phase::ConfigurationPreparing => "configurationPreparing", Phase::ConfigurationPrepared => "configurationPrepared",
             Phase::InspectedOnly => "inspectedOnly", Phase::Retained => "retained", Phase::Auditing => "auditing", Phase::Refused => "refused",
             Phase::Settling => "settling", Phase::Settled => "settled", Phase::Unknown => "unknown",
         }
@@ -313,7 +315,7 @@ impl OriginalDescriptorBook {
     /// EINTR/EBADF and a missing close return are unknown, not retry permission.
     pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
         self.settlement_started = true; // Absorbing: even empty/positive settlement disables transfer.
-        if matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing) { self.mark_interrupted(); }
+        if matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing) { self.mark_interrupted(); }
         if !self.unknown { self.phase = Phase::Settling; }
         for index in (0..self.records.len()).rev() {
             let _ = self.close_one(SlotId(index)); // Continue every independent known original.
@@ -349,7 +351,7 @@ impl OriginalDescriptorBook {
     }
 
     fn begin(&mut self, operation: Operation, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
-        if !matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::Retained | Phase::Auditing)
+        if !matches!(self.phase, Phase::Inspecting | Phase::PassivePreparing | Phase::ConfigurationPreparing | Phase::Retained | Phase::Auditing)
             || self.unknown || self.interrupted || self.settlement_started {
             return Err(AdmissionFailure::LedgerInvariant);
         }
@@ -547,6 +549,32 @@ impl InstalledRuntimeCustody {
         self.book.phase = Phase::PassivePreparing;
         Ok(())
     }
+    fn inspect_configuration_once(&mut self, profile: &crate::runtime::ConfigurationInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
+        if self.retain_android || self.book.budget.is_some() || self.book.phase != Phase::New
+            || self.book.settlement_started || self.book.interrupted || self.transferred {
+            return Err(AdmissionFailure::AlreadyUsed);
+        }
+        self.book.phase = Phase::Inspecting;
+        let result = self.book.inspect_configuration_platform(profile, end, stop).and_then(|_| self.inspect_inner(end, stop));
+        match result {
+            Ok(()) => { self.book.operation = Operation::Idle; self.book.phase = Phase::InspectedOnly; Ok(()) },
+            Err(failure) => {
+                // Unlike legacy inspection-only refusal, the configuration
+                // borrower NEVER settles the ledger. Its original join comes
+                // first; even refused partials stay in the registered slots.
+                self.book.refuse(failure);
+                Err(failure)
+            },
+        }
+    }
+    fn start_configuration_preparation(&mut self) -> AdmissionResult<()> {
+        if !self.transferred || self.retain_android || self.book.budget.is_some() || !self.inspected_originals_ready() {
+            return Err(AdmissionFailure::TransferUnavailable);
+        }
+        self.book.phase = Phase::ConfigurationPreparing;
+        Ok(())
+    }
 }
 
 /// Move the whole original ledger, once. No syscall, await, allocation, callback
@@ -730,6 +758,132 @@ impl PassiveRuntimeSlots {
             (Some(original), None) => Some(original.observation()),
             (None, Some(runtime)) => Some(runtime.original.observation()),
             _ => None,
+        }
+    }
+}
+
+/// Configuration-domain storage INSIDE the existing EditOwner. These are the
+/// original inspection/acquisition slots, not a passive capability or another
+/// owner. Workers borrow the same ledger, including all refused partials.
+pub(crate) struct ConfigurationRuntimeSlots {
+    inspection: Option<InstalledRuntimeCustody>,
+    profile: Option<crate::runtime::ConfigurationInstalledProfile>,
+    selection: Option<crate::runtime::VerifiedRuntime>,
+    acquisition: Option<ConfigurationInstalledRuntime>,
+    inspection_started: bool,
+    settlement_started: bool,
+}
+
+pub(crate) struct ConfigurationInstalledRuntime {
+    original: InstalledRuntimeCustody,
+    profile: crate::runtime::ConfigurationInstalledProfile,
+    selection: crate::runtime::VerifiedRuntime,
+    claimed: bool,
+}
+
+fn configuration_claim_ready(phase: Phase, transferred: bool, originals_ready: bool, claimed: bool) -> bool {
+    phase == Phase::ConfigurationPrepared && transferred && originals_ready && !claimed
+}
+
+impl ConfigurationInstalledRuntime {
+    pub(crate) fn prepare_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<&crate::runtime::VerifiedRuntime> {
+        if self.claimed { return Err(AdmissionFailure::TransferUnavailable); }
+        self.original.start_configuration_preparation()?;
+        let result = (|| {
+            self.original.book.inspect_configuration_platform(&self.profile, end, stop)?;
+            self.original.book.check_launch_thread(end, stop)?; // THIS original acquisition worker's thread.
+            self.original.book.check_names(end, stop)?;
+            self.original.book.begin(Operation::Idle, end, stop)?;
+            if !self.original.retained_originals_ready() { return Err(AdmissionFailure::LedgerInvariant); }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => { self.original.book.phase = Phase::ConfigurationPrepared; Ok(&self.selection) },
+            Err(failure) => { self.original.book.refuse(failure); Err(failure) },
+        }
+    }
+    /// Pure one-use transition, called only under the existing EditOwner
+    /// registry after all native preparation and Command allocation returned.
+    pub(crate) fn claim_once(&mut self) -> AdmissionResult<()> {
+        if !configuration_claim_ready(self.original.book.phase, self.original.transferred,
+            self.original.retained_originals_ready(), self.claimed) { return Err(AdmissionFailure::TransferUnavailable); }
+        self.claimed = true;
+        Ok(())
+    }
+}
+
+impl ConfigurationRuntimeSlots {
+    pub(crate) fn new() -> Self {
+        Self { inspection: Some(InstalledRuntimeCustody::new()), profile: None, selection: None,
+            acquisition: None, inspection_started: false, settlement_started: false }
+    }
+    pub(crate) fn never_started(&self) -> bool {
+        !self.inspection_started && !self.settlement_started && self.profile.is_none() && self.selection.is_none()
+            && self.acquisition.is_none() && self.inspection.as_ref().is_some_and(|original|
+                original.book.phase == Phase::New && original.book.records.is_empty()
+                && !original.book.unknown && !original.book.interrupted && !original.book.settlement_started)
+    }
+    pub(crate) fn inspect_once(&mut self, profile: crate::runtime::ConfigurationInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> Result<crate::runtime::VerifiedRuntime, crate::error::BridgeError> {
+        use crate::error::BridgeError;
+        if !self.never_started() { return Err(BridgeError::cleanup_unknown()); }
+        self.selection = Some(profile.selection()?);
+        self.profile = Some(profile);
+        self.inspection_started = true;
+        let profile = self.profile.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+        let original = self.inspection.as_mut().ok_or_else(BridgeError::cleanup_unknown)?;
+        original.inspect_configuration_once(profile, end, stop)
+            .map_err(|_| BridgeError::unavailable("The configuration installed runtime failed original-custody inspection."))?;
+        let data = self.selection.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+        Ok(crate::runtime::VerifiedRuntime { python: data.python.clone(), bootstrap: data.bootstrap.clone(),
+            core: data.core.clone(), cwd: data.cwd.clone() }) // DATA only, never original custody.
+    }
+    pub(crate) fn transfer_once(&mut self) -> AdmissionResult<()> {
+        if self.acquisition.is_some() { return Err(AdmissionFailure::DestinationOccupied); }
+        if !self.inspection_started || self.settlement_started || self.profile.is_none() || self.selection.is_none()
+            || !self.inspection.as_ref().is_some_and(InstalledRuntimeCustody::transfer_ready) {
+            return Err(AdmissionFailure::TransferUnavailable);
+        }
+        let profile = self.profile.take().ok_or(AdmissionFailure::LedgerInvariant)?;
+        let selection = self.selection.take().ok_or(AdmissionFailure::LedgerInvariant)?;
+        let Some(mut original) = self.inspection.take() else {
+            self.profile = Some(profile); self.selection = Some(selection);
+            return Err(AdmissionFailure::LedgerInvariant);
+        };
+        original.transferred = true;
+        self.acquisition = Some(ConfigurationInstalledRuntime { original, profile, selection, claimed: false });
+        Ok(()) // Whole original move: no IO, allocation, callback or fallible step after take.
+    }
+    pub(crate) fn capability(&mut self) -> AdmissionResult<&mut ConfigurationInstalledRuntime> {
+        if self.settlement_started { return Err(AdmissionFailure::TransferUnavailable); }
+        self.acquisition.as_mut().ok_or(AdmissionFailure::TransferUnavailable)
+    }
+    pub(crate) fn no_child_effect(&self) -> bool {
+        match (&self.inspection, &self.acquisition) {
+            (Some(_), None) => true,
+            (None, Some(runtime)) => !runtime.claimed,
+            _ => false,
+        } // No OS spawn-error or missing-child shortcut can create this fact.
+    }
+    pub(crate) fn mark_interrupted(&mut self) {
+        if let Some(original) = &mut self.inspection { original.mark_interrupted(); }
+        if let Some(runtime) = &mut self.acquisition { runtime.original.mark_interrupted(); }
+    }
+    pub(crate) fn settle_originals(&mut self) -> CloseOutcome {
+        if self.settlement_started { return CloseOutcome::Unknown; }
+        self.settlement_started = true;
+        let outcome = match (&mut self.inspection, &mut self.acquisition) {
+            (Some(original), None) => original.settle_originals(),
+            (None, Some(runtime)) => runtime.original.settle_originals(),
+            _ => CloseOutcome::Unknown,
+        };
+        if outcome == CloseOutcome::Settled && self.settled() { CloseOutcome::Settled } else { CloseOutcome::Unknown }
+    }
+    pub(crate) fn settled(&self) -> bool {
+        self.settlement_started && match (&self.inspection, &self.acquisition) {
+            (Some(original), None) => original.settled(),
+            (None, Some(runtime)) => runtime.original.settled(),
+            _ => false,
         }
     }
 }
@@ -1025,6 +1179,17 @@ impl OriginalDescriptorBook {
             return Err(AdmissionFailure::UnsupportedPlatform);
         }
         Ok(()) // Narrow passive candidate only; the shared GA6.8/Azure ABI rule is unchanged.
+    }
+
+    fn inspect_configuration_platform(&mut self, profile: &crate::runtime::ConfigurationInstalledProfile,
+        end: Instant, stop: &watch::Receiver<bool>) -> AdmissionResult<()> {
+        self.begin(Operation::Kernel, end, stop)?;
+        let actual = rustix::system::uname();
+        self.operation = Operation::Idle;
+        if !profile.accepts_platform(actual.sysname().to_bytes(), actual.machine().to_bytes(), actual.release().to_bytes()) {
+            return Err(AdmissionFailure::UnsupportedPlatform);
+        }
+        Ok(())
     }
 
     fn inspect_namespace_controls(&mut self, root: SlotId, credentials: Credentials,
@@ -1842,6 +2007,14 @@ pub(crate) fn ubuntu_2404(bytes: &[u8]) -> AdmissionResult<()> {
 }
 
 #[cfg(test)]
+pub(crate) fn assert_installed_configuration_slots_contract() {
+    pure_tests::empty_configuration_slots_preserve_the_same_original_and_settle_only_once();
+    pure_tests::refused_configuration_partials_remain_in_original_slots_for_consuming_settlement();
+    pure_tests::configuration_preparation_and_lost_workers_cannot_restore_capability_or_positive_close();
+    pure_tests::configuration_claim_data_requires_its_own_preparation_and_is_one_use();
+}
+
+#[cfg(test)]
 mod pure_tests {
     use super::*;
 
@@ -2161,6 +2334,75 @@ mod pure_tests {
         assert!(book.interrupted && book.unknown && book.settlement_started);
         assert_eq!(book.observation().records(), 0);
         assert_eq!(book.observation().positive_closes(), 0);
+    }
+    #[test]
+    fn installed_configuration_slots_contract_is_inert() { assert_installed_configuration_slots_contract(); }
+
+    pub(super) fn empty_configuration_slots_preserve_the_same_original_and_settle_only_once() {
+        // Actual empty storage only. No selected profile, native inspection,
+        // synthetic descriptor, executable capability or close syscall.
+        let mut slots = ConfigurationRuntimeSlots::new();
+        let original = slots.inspection.as_ref().map(std::ptr::from_ref);
+        assert!(slots.never_started() && slots.no_child_effect() && !slots.settled());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.inspection.as_ref().map(std::ptr::from_ref), original);
+        assert!(slots.acquisition.is_none() && slots.profile.is_none() && slots.selection.is_none());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Settled);
+        assert!(slots.settled() && !slots.never_started());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(slots.inspection.as_ref().map(std::ptr::from_ref), original);
+        assert_eq!(slots.inspection.as_ref().unwrap().observation().positive_closes(), 0);
+    }
+    pub(super) fn refused_configuration_partials_remain_in_original_slots_for_consuming_settlement() {
+        let mut slots = ConfigurationRuntimeSlots::new();
+        let original = slots.inspection.as_mut().unwrap();
+        // Negative pre-effect state only: arm but NEVER open/receive a handle.
+        // Refusal cannot turn an unreturned native acquisition into no-handle.
+        let pending = original.book.arm(Purpose::Payload).unwrap();
+        original.book.refuse(AdmissionFailure::Stopped);
+        assert_eq!(original.observation().phase(), "refused");
+        assert_eq!(original.observation().pending_acquisitions(), 1);
+        assert!(!original.book.settlement_started && !original.settled());
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown); // No retry/replacement pass.
+        let original = slots.inspection.as_ref().unwrap();
+        assert_eq!(original.book.records[pending.0].acquisition, Acquisition::Attempted);
+        assert_eq!(original.observation().positive_closes(), 0);
+        assert_eq!(original.observation().pending_acquisitions(), 1);
+        assert!(!slots.settled());
+    }
+    pub(super) fn configuration_preparation_and_lost_workers_cannot_restore_capability_or_positive_close() {
+        let mut uninspected = InstalledRuntimeCustody::new();
+        assert_eq!(uninspected.start_configuration_preparation(), Err(AdmissionFailure::TransferUnavailable));
+        assert_eq!(uninspected.settle_originals(), CloseOutcome::Settled); // Empty only.
+        assert_eq!(uninspected.start_configuration_preparation(), Err(AdmissionFailure::TransferUnavailable));
+        let mut slots = ConfigurationRuntimeSlots::new();
+        slots.mark_interrupted();
+        assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+        assert_eq!(slots.settle_originals(), CloseOutcome::Unknown);
+        assert!(!slots.settled() && !slots.never_started());
+        let mut pending = OriginalDescriptorBook::new();
+        pending.phase = Phase::ConfigurationPreparing; // Negative pending DATA, no successful native body.
+        assert_eq!(pending.settle_originals(), CloseOutcome::Unknown);
+        pending.refuse(AdmissionFailure::Stopped);
+        assert_eq!(pending.observation().phase(), "unknown");
+        assert_eq!(pending.observation().positive_closes(), 0);
+    }
+    pub(super) fn configuration_claim_data_requires_its_own_preparation_and_is_one_use() {
+        // Test the real predicate as DATA, never mint an installed profile,
+        // transferred original or capability from synthetic successful facts.
+        for phase in [Phase::New, Phase::Inspecting, Phase::InspectedOnly, Phase::PassivePreparing, Phase::PassivePrepared,
+            Phase::ConfigurationPreparing, Phase::ConfigurationPrepared, Phase::Retained, Phase::Auditing,
+            Phase::Refused, Phase::Settling, Phase::Settled, Phase::Unknown] {
+            for transferred in [false, true] { for ready in [false, true] { for claimed in [false, true] {
+                assert_eq!(configuration_claim_ready(phase, transferred, ready, claimed),
+                    phase == Phase::ConfigurationPrepared && transferred && ready && !claimed);
+            } } }
+        }
+        assert!(!configuration_claim_ready(Phase::ConfigurationPrepared, true, true, true));
+        assert!(!configuration_claim_ready(Phase::PassivePrepared, true, true, false));
     }
 }
 

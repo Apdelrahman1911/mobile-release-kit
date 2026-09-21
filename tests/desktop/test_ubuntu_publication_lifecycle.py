@@ -1143,28 +1143,24 @@ class LifecycleData(unittest.TestCase):
 def project_draft_receipt():
     """Expected typed schema DATA, not a native observation or original owner."""
     return {
-        "schemaVersion": 1, "fixture": "android-static-v1", "projectGateContract": True,
-        "methods": "eight-passive", "mutationActions": False,
+        "schemaVersion": 2, "fixture": "android-config-save-v1", "projectGateContract": True,
+        "methods": "eight-passive", "passiveActions": False,
         "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
         "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
-        "snapshot": {"config": "missing", "androidHint": True, "sourceFiles": 1},
+        "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 1},
         "suggestion": {"coreProvenance": True, "explicitAdoption": True},
-        "field": {"path": "version.source", "catalogHelp": True, "explicitUnset": True},
-        "validation": {"valid": False, "issue": "config.invalid"},
-        "review": {"kind": "redacted", "required": True, "present": False},
-        "draft": {"unsaved": True, "saveAvailable": False},
-        "guidance": {
-            "draftFormatValid": True, "draftUnchanged": True,
-            "requirements": {"requestMatched": True, "resultMatched": True, "domMatched": True,
-                             "context": "android/build", "roles": 3, "presence": "unknown", "version": "unknown",
-                             "inspection": "not-run", "nativeInspection": "unavailable", "dependencies": "unknown"},
-            "github": {"requestMatched": True, "resultMatched": True, "domMatched": True, "explicitInputs": True,
-                       "browserEdit": "insertText", "comparison": "not-supplied", "snapshotProvided": False,
-                       "workflowCount": 4, "workflowContentMatched": True, "resourceMatched": True,
-                       "tooling": "format-only", "githubContacted": False, "repositoryObserved": False,
-                       "toolingRefResolved": False, "templateCompatibility": "unknown", "applyAvailable": False},
-            "assuranceActions": False, "releaseReadiness": "unknown",
-        },
+        "save": {"capability": True, "requests": {"open": 2, "prepare": 2, "apply": 1, "close": 0},
+                 "bindingsMatched": True, "draftRevisions": [1, 1], "baselineGenerations": [1, 2],
+                 "reviewMatched": True, "confirmation": {"opened": 2, "keepReviewing": True, "applyBeforeAck": 0, "acknowledged": True},
+                 "outcome": ["committed", "clean", "settled", "none"], "nativeFinality": "settled",
+                 "savedVisible": True, "baselineAdvanced": True},
+        "readback": {"fresh": True, "domMatched": True, "draftMatched": True, "size": 692,
+                     "sha256": "4b3a5aaa718b018101ee0fcd0e612285be8a1b93cab20c5ff15e8d441069b917"},
+        "noop": {"reviewMatched": True, "apply": 0, "quitOutstanding": True,
+                 "outcome": ["not_started", "not_created", "settled", "cancelled"], "nativeReason": "shutdown"},
+        "originals": {"sessions": 2, "writerFrames": [3, 2], "stdoutFrames": [3, 3],
+                      "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
+                      "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
         "quit": {"operation": 3, "originalsSettled": True, "relayJoined": True, "exit": True},
     }
 
@@ -1176,16 +1172,25 @@ def positive_capture(receipt=None):
             b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n")
 
 
-def project_fixture_data(value):
+def project_fixture_data(value, *, saved=False):
     source = (b'plugins { id("com.android.application") }\n'
               b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
-    return {"schemaVersion": 1, "fixture": "android-static-v1", "root": str(L.root_path(value) / "positive-project"),
-            "entries": [
-                {"path": ".", "kind": "directory", "identity": [1, 100, stat.S_IFDIR | 0o555, 0, 0, 3, 4096, 11, 11], "children": ["app"]},
-                {"path": "app", "kind": "directory", "identity": [1, 101, stat.S_IFDIR | 0o555, 0, 0, 2, 4096, 11, 11], "children": ["build.gradle.kts"]},
-                {"path": "app/build.gradle.kts", "kind": "file", "identity": [1, 102, stat.S_IFREG | 0o444, 0, 0, 1, len(source), 11, 11],
-                 "size": len(source), "sha256": hashlib.sha256(source).hexdigest()},
-            ], "absent": [".gitignore", "release/mobile-release.json"]}
+    uid, gid = value["runnerUid"], value["runnerGid"]
+    stamp = 22 if saved else 11
+    rows = [{"path": ".", "kind": "directory", "identity": [1, 100, stat.S_IFDIR | 0o700, uid, gid, 4 if saved else 3, 4096, stamp, stamp],
+             "children": [".gitignore", "app", "release"] if saved else ["app"]},
+            {"path": "app", "kind": "directory", "identity": [1, 101, stat.S_IFDIR | 0o555, 0, 0, 2, 4096, 11, 11], "children": ["build.gradle.kts"]}]
+    if saved:
+        rows.append({"path": "release", "kind": "directory", "identity": [1, 103, stat.S_IFDIR | 0o755, uid, gid, 2, 4096, 22, 22],
+                     "children": ["mobile-release.json"]})
+    rows.append({"path": "app/build.gradle.kts", "kind": "file", "identity": [1, 102, stat.S_IFREG | 0o444, 0, 0, 1, len(source), 11, 11],
+                 "size": len(source), "sha256": hashlib.sha256(source).hexdigest()})
+    if saved:
+        for index, (relative, data) in enumerate((("release/mobile-release.json", L.SHELL_PROJECT_CONFIG), (".gitignore", L.SHELL_PROJECT_IGNORE))):
+            rows.append({"path": relative, "kind": "file", "identity": [1, 104 + index, stat.S_IFREG | 0o600, uid, gid, 1, len(data), 22, 22],
+                         "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    return {"schemaVersion": 2, "fixture": "android-config-save-v1", "root": str(L.root_path(value) / "positive-project"),
+            "saved": saved, "entries": rows, "absent": [] if saved else [".gitignore", "release"]}
 
 
 def closed_shell_data():
@@ -1205,8 +1210,8 @@ def closed_shell_data():
         files["shell-" + case + ".stdout"], files["shell-" + case + ".stderr"] = stdout, stderr
         commands.append({"phase": "shell-" + case, "argv": L.shell_argv(value, case), "exitCode": 0})
     files["shell-cases.json"] = L.canonical(cases)
-    fixture = L.canonical(project_fixture_data(value))
-    files["shell-positive-project-before.json"] = files["shell-positive-project-after.json"] = fixture
+    files["shell-positive-project-before.json"] = L.canonical(project_fixture_data(value))
+    files["shell-positive-project-after.json"] = L.canonical(project_fixture_data(value, saved=True))
     keys = [{"phase": "key", "exitCode": 0, "stdout": "", "stderr": "",
              "argv": L._drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key])} for key in ("ctrl+q", "alt+o")]
     files["shell-normal-control.json"] = L.canonical({"joined": True, "inputs": 2, "workerGuardState": "RESTORED",
@@ -1220,6 +1225,25 @@ def closed_shell_data():
 
 
 class ProjectDraftLifecycleContracts(unittest.TestCase):
+    def test_fixed_saved_bytes_are_derived_from_actual_pure_core_and_wire_order(self):
+        # Import the actual in-memory functions only when this focused DATA
+        # check is explicitly run. No lease, filesystem fixture, bootstrap or
+        # native transaction is constructed. Production lifecycle imports none.
+        from mobile_release.api._preview import suggest_config
+        from mobile_release.config_payloads import prepare_edit_ignore, serialize_config_data
+        proposed = suggest_config({"platforms": ["android"], "androidApplicationId": "org.example.mrk.observed"})
+        self.assertTrue(proposed["validation"]["valid"])
+        # serde_json::Value uses its default sorted-key Map; the fixed native
+        # Prepare serializes that genuine renderer draft to the Python adapter.
+        wire_draft = json.loads(json.dumps(proposed["draft"], sort_keys=True))
+        self.assertEqual(serialize_config_data(wire_draft), L.SHELL_PROJECT_CONFIG)
+        self.assertEqual(len(L.SHELL_PROJECT_CONFIG), L.SHELL_PROJECT_RECEIPT["readback"]["size"])
+        self.assertEqual(hashlib.sha256(L.SHELL_PROJECT_CONFIG).hexdigest(), L.SHELL_PROJECT_RECEIPT["readback"]["sha256"])
+        ignored, additions = prepare_edit_ignore(b"")
+        self.assertEqual(ignored, L.SHELL_PROJECT_IGNORE)
+        self.assertEqual(len(additions), 7)
+        self.assertEqual(prepare_edit_ignore(ignored), (ignored, ()))
+
     def test_shell_fixture_roster_fits_the_unchanged_root_evidence_cap(self):
         value, _, _, _ = closed_shell_data()
         roster = L.public_files(value)
@@ -1238,8 +1262,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         value, outcome, files, mappings = closed_shell_data()
 
         def leaves(value, prefix=()):
-            for key, child in value.items():
-                if type(child) is dict:
+            for key, child in (value.items() if type(value) is dict else enumerate(value)):
+                if type(child) in (dict, list):
                     yield from leaves(child, (*prefix, key))
                 else:
                     yield (*prefix, key), child
@@ -1270,14 +1294,15 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     with patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
                         L.shell_closed_result(value, outcome, altered)
         legacy = deepcopy(expected)
-        legacy.pop("guidance")
-        legacy["methods"] = "six-passive"
+        legacy.pop("save")
+        legacy.update(schemaVersion=1, fixture="android-static-v1", guidance={"draftUnchanged": True})
         for changed in (b"", b"{}", L.canonical(legacy), L.canonical({**expected, "methods": "six-passive"}),
-                        L.canonical({key: child for key, child in expected.items() if key != "guidance"}),
-                        L.canonical({**expected, "guidance": {}}), L.canonical({**expected, "guidance": []}),
-                        L.canonical({**expected, "guidance": {**expected["guidance"], "untrustedSuccess": True}}),
-                        raw.replace(b'"valid":false', b'"valid":false,"valid":false'),
-                        raw.replace(b'"guidance":{', b'"guidance":{},"guidance":{'),
+                        L.canonical({key: child for key, child in expected.items() if key != "save"}),
+                        L.canonical({**expected, "save": {}}), L.canonical({**expected, "save": []}),
+                        L.canonical({**expected, "save": {**expected["save"], "untrustedSuccess": True}}),
+                        L.canonical({**expected, "guidance": {"draftUnchanged": True}}),
+                        raw.replace(b'"fresh":true', b'"fresh":true,"fresh":true'),
+                        raw.replace(b'"save":{', b'"save":{},"save":{'),
                         L.canonical({**expected, "message": "ConfigurationError text is not a receipt field"}), raw + b" " * 2048):
             with self.subTest(raw=changed), self.assertRaises(ValueError):
                 L.shell_project_receipt(changed)
@@ -1303,48 +1328,92 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             with self.subTest(case=case), self.assertRaises(ValueError):
                 L.shell_result(stdout, stderr, case, 0, map_data())
 
-    def test_fixture_inventory_is_exact_immutable_inert_and_has_no_config_or_ignore(self):
+    def test_fixture_inventory_allows_only_exact_saved_outputs_and_preserves_original_hint(self):
         value = installed_handoff()
         original = project_fixture_data(value)
-        raw = L.canonical(original)
-        result = L.shell_project_fixture(value, raw, raw)
-        self.assertEqual(result, {"fixture": "android-static-v1", "unchanged": True, "configAbsent": True, "gitignoreAbsent": True,
-            "entryCount": 3, "sourceBytes": original["entries"][2]["size"], "inventoryBytes": len(raw), "inventorySha256": hashlib.sha256(raw).hexdigest()})
+        saved = project_fixture_data(value, saved=True)
+        raw, after_raw = L.canonical(original), L.canonical(saved)
+        result = L.shell_project_fixture(value, raw, after_raw)
+        self.assertTrue(all(result[key] for key in ("rootRetained", "hintUnchanged", "savedOutputsMatched", "noUnexpectedEntries", "noPendingState")))
+        self.assertEqual(result["fixture"], "android-config-save-v1")
+        self.assertEqual(result["entryCount"], 6)
+        self.assertEqual(result["sourceBytes"], original["entries"][2]["size"])
+        self.assertEqual(result["releaseMode"], 0o755)
+        for phase, encoded in (("before", raw), ("after", after_raw)):
+            self.assertEqual(result[phase], {"size": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()})
+        for key, expected in (("config", L.SHELL_PROJECT_CONFIG), ("gitignore", L.SHELL_PROJECT_IGNORE)):
+            self.assertEqual(result[key], {"size": len(expected), "sha256": hashlib.sha256(expected).hexdigest(), "mode": 0o600})
         mutations = (
             lambda v: v.update(schemaVersion=True), lambda v: v.update(root="/other/project"),
-            lambda v: v.update(absent=[".gitignore"]), lambda v: v["entries"].append(deepcopy(v["entries"][2])),
-            lambda v: v["entries"][0].update(children=["app", "release"]),
-            lambda v: v["entries"][0].update(children=[".github", "app"]),
+            lambda v: v.update(saved=1), lambda v: v.update(absent=[".gitignore"]),
+            lambda v: v["entries"].append(deepcopy(v["entries"][-1])),
+            lambda v: v["entries"][0].update(children=[".gitignore", ".mobile-release-init", "app", "release"]),
+            lambda v: v["entries"][0].update(children=[".github", ".gitignore", "app", "release"]),
             lambda v: v["entries"][1].update(children=["build.gradle.kts", ".gitignore"]),
-            lambda v: v["entries"][2].update(path="app/../build.gradle.kts"),
-            lambda v: v["entries"][2].update(sha256="0" * 64), lambda v: v["entries"][2].update(size=True),
-            lambda v: v["entries"][2]["identity"].__setitem__(2, stat.S_IFLNK | 0o444),
-            lambda v: v["entries"][2]["identity"].__setitem__(2, stat.S_IFREG | 0o555),
-            lambda v: v["entries"][2]["identity"].__setitem__(2, stat.S_IFREG | 0o666),
-            lambda v: v["entries"][2]["identity"].__setitem__(3, 1000),
-            lambda v: v["entries"][2]["identity"].__setitem__(5, 2),
-            lambda v: v["entries"][2]["identity"].__setitem__(1, True),
+            lambda v: v["entries"][2].update(children=["mobile-release.json", "unexpected"]),
+            lambda v: v["entries"][3].update(path="app/../build.gradle.kts"),
+            lambda v: v["entries"][3].update(sha256="0" * 64), lambda v: v["entries"][3].update(size=True),
+            lambda v: v["entries"][3]["identity"].__setitem__(2, stat.S_IFLNK | 0o444),
+            lambda v: v["entries"][3]["identity"].__setitem__(2, stat.S_IFREG | 0o555),
+            lambda v: v["entries"][3]["identity"].__setitem__(2, stat.S_IFREG | 0o666),
+            lambda v: v["entries"][3]["identity"].__setitem__(3, 1000),
+            lambda v: v["entries"][3]["identity"].__setitem__(5, 2),
+            lambda v: v["entries"][3]["identity"].__setitem__(1, True),
+            lambda v: v["entries"][3]["identity"].__setitem__(8, 99),
+            lambda v: v["entries"][0]["identity"].__setitem__(1, 999),
+            lambda v: v["entries"][1]["identity"].__setitem__(1, 999),
+            lambda v: v["entries"][2]["identity"].__setitem__(2, stat.S_IFDIR | 0o700),
+            lambda v: v["entries"][4]["identity"].__setitem__(2, stat.S_IFREG | 0o644),
+            lambda v: v["entries"][4]["identity"].__setitem__(3, 0),
+            lambda v: v["entries"][4].update(sha256="f" * 64),
+            lambda v: v["entries"][5].update(sha256="f" * 64),
+            lambda v: v["entries"][5]["identity"].__setitem__(0, 2),
+            lambda v: v["entries"][5]["identity"].__setitem__(1, v["entries"][4]["identity"][1]),
         )
         for mutate in mutations:
-            changed = deepcopy(original); mutate(changed); encoded = L.canonical(changed)
-            with self.subTest(mutate=mutate):
+            changed = deepcopy(saved); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                L.shell_project_fixture(value, raw, L.canonical(changed))
+        for before, after in ((raw, raw), (after_raw, after_raw), (after_raw, raw),
+                              (b"{}", after_raw), (raw, b"[]"), (json.dumps(original, indent=2).encode(), after_raw),
+                              (raw, after_raw + b" " * 8192)):
+            with self.subTest(before=before, after=after), self.assertRaises(ValueError):
+                L.shell_project_fixture(value, before, after)
+
+    def test_actual_inventory_observes_only_fixed_nodes_and_refuses_changed_or_pending_data(self):
+        value = installed_handoff(); root = L.root_path(value); project = root / "positive-project"
+        for saved in (False, True):
+            fixture = project_fixture_data(value, saved=saved)
+            by_path = {project if row["path"] == "." else project / row["path"]: row for row in fixture["entries"]}
+            def file_stat(path):
+                value = by_path[path]["identity"]
+                return SimpleNamespace(**dict(zip(("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"), value)))
+            def scan(path):
+                context = Mock()
+                context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=name) for name in by_path[path]["children"]))
+                context.__exit__ = Mock(return_value=False)
+                return context
+            def read_data(path, limit):
+                row = by_path[path]
+                return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
+            with self.subTest(saved=saved), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
+                 patch.object(Path, "lstat", file_stat), patch.object(L.os, "scandir", side_effect=scan), \
+                 patch.object(L, "record", side_effect=read_data) as reads, patch.object(L, "_absent") as absent:
+                self.assertEqual(L._shell_project_inventory(value, saved=saved), fixture)
+                self.assertEqual(reads.call_count, 3 if saved else 1)
+                self.assertEqual([call.args[0] for call in absent.call_args_list], [] if saved else [project / ".gitignore", project / "release"])
+                reads.reset_mock()
+                by_path[project]["children"].append(".mobile-release-init")
                 with self.assertRaises(ValueError):
-                    L.shell_project_fixture(value, raw, encoded)
-                with self.assertRaises(ValueError):
-                    L.shell_project_fixture(value, encoded, encoded)
-        changed = deepcopy(original); changed["entries"][2]["identity"][8] += 1
-        with self.assertRaises(ValueError):
-            L.shell_project_fixture(value, raw, L.canonical(changed))
-        for encoded in (b"{}", b"[]", json.dumps(original, indent=2).encode(), raw + b" " * 8192):
-            with self.assertRaises(ValueError):
-                L.shell_project_fixture(value, encoded, encoded)
+                    L._shell_project_inventory(value, saved=saved)
+                reads.assert_not_called()  # Never inspect an unadmitted journal.
 
     def test_prepare_creates_only_one_positive_fixture_without_running_anything(self):
         value = installed_handoff(); root = L.root_path(value)
         for case in L.SHELL_CASES:
             writer = Mock()
             with self.subTest(case=case), patch.object(L, "_ROOT", root), patch.object(L, "_D", SimpleNamespace(write=writer)), \
-                 patch.object(Path, "mkdir") as mkdir, patch.object(L.os, "chown"), patch.object(L.os, "chmod") as chmod, \
+                 patch.object(Path, "mkdir") as mkdir, patch.object(L.os, "chown") as chown, patch.object(L.os, "chmod") as chmod, \
                  patch.object(L, "_absent"), patch.object(L, "_retain") as retain, \
                  patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)) as inventory:
                 L._shell_prepare(value, case)
@@ -1353,7 +1422,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                 self.assertEqual(mkdir.call_count, 10 if case == "positive" else 8)
                 if case == "positive":
                     self.assertEqual(fixture_writes[0].args[1:], (L.SHELL_PROJECT_SOURCE, 0o444))
-                    self.assertEqual([call.args for call in chmod.call_args_list], [(root / "positive-project/app", 0o555), (root / "positive-project", 0o555)])
+                    self.assertEqual([call.args for call in chmod.call_args_list], [(root / "positive-project/app", 0o555)])
+                    self.assertIn((root / "positive-project", value["runnerUid"], value["runnerGid"]), [call.args for call in chown.call_args_list])
                     inventory.assert_called_once_with(value)
                     retain.assert_called_once_with("shell-positive-project-before.json", L.canonical(project_fixture_data(value)))
                 else:
@@ -1364,7 +1434,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         with patch.object(L, "shell_closed_loader", return_value=expected):
             result = L.shell_closed_result(value, outcome, files)
         self.assertEqual(result["projectDraft"]["native"], project_draft_receipt())
-        self.assertTrue(result["projectDraft"]["fixture"]["unchanged"])
+        self.assertTrue(result["projectDraft"]["fixture"]["savedOutputsMatched"])
+        self.assertNotEqual(result["projectDraft"]["fixture"]["before"], result["projectDraft"]["fixture"]["after"])
         self.assertEqual(result["cases"]["normal"]["domAndGtkObserved"], False)
         self.assertEqual(len(result["cases"]["quit-outstanding"]["maps"]), 1)
         for change in ("missing-before", "missing-after", "different-after", "coerced-case", "missing-receipt", "wrong-argv"):

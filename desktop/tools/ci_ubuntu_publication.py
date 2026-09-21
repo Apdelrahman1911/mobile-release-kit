@@ -3011,23 +3011,39 @@ def shell_project_draft_observation(observed, lifecycle):
     receipt = lifecycle.shell_project_receipt(D.canonical(positive["projectDraft"]))
     D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed positive native receipt correspondence differs")
     fixture = combined["fixture"]
-    D.need(type(fixture) is dict and set(fixture) == {"fixture", "unchanged", "configAbsent", "gitignoreAbsent", "entryCount",
-                                                   "sourceBytes", "inventoryBytes", "inventorySha256"}
-           and fixture["fixture"] == "android-static-v1" and fixture["unchanged"] is True
-           and fixture["configAbsent"] is True and fixture["gitignoreAbsent"] is True
-           and type(fixture["entryCount"]) is int and fixture["entryCount"] == 3
+    D.need(type(fixture) is dict and set(fixture) == {"fixture", "rootRetained", "hintUnchanged", "savedOutputsMatched",
+                                                   "noUnexpectedEntries", "noPendingState", "entryCount", "sourceBytes",
+                                                   "releaseMode", "config", "gitignore", "before", "after"}
+           and fixture["fixture"] == "android-config-save-v1"
+           and all(fixture[key] is True for key in ("rootRetained", "hintUnchanged", "savedOutputsMatched", "noUnexpectedEntries", "noPendingState"))
+           and type(fixture["entryCount"]) is int and fixture["entryCount"] == 6
            and type(fixture["sourceBytes"]) is int and fixture["sourceBytes"] == len(lifecycle.SHELL_PROJECT_SOURCE)
-           and type(fixture["inventoryBytes"]) is int and 0 < fixture["inventoryBytes"] <= 8192
-           and type(fixture["inventorySha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", fixture["inventorySha256"]) is not None,
-           "Closed positive fixture inventory or absence DATA differs")
+           and type(fixture["releaseMode"]) is int and fixture["releaseMode"] == 0o755,
+           "Closed positive Save fixture inventory DATA differs")
+    for key, expected in (("config", lifecycle.SHELL_PROJECT_CONFIG), ("gitignore", lifecycle.SHELL_PROJECT_IGNORE)):
+        pin = fixture[key]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256", "mode"}
+               and type(pin["size"]) is int and pin["size"] == len(expected)
+               and pin["sha256"] == hashlib.sha256(expected).hexdigest()
+               and type(pin["mode"]) is int and pin["mode"] == 0o600, "Closed positive persisted-output DATA differs")
+    D.need(receipt["readback"]["size"] == fixture["config"]["size"]
+           and receipt["readback"]["sha256"] == fixture["config"]["sha256"],
+           "Native fresh readback differs from the outer persisted configuration")
     # Both hashes must be the two original root captures already copied only
-    # after StopPost/client finality. No reopened source, replay or new query.
+    # after StopPost/client finality. Save changes the inventory: before/after
+    # have SEPARATE pins, not the former read-only fixture's shared digest.
     for phase in ("before", "after"):
+        pin = fixture[phase]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"}
+               and type(pin["size"]) is int and 0 < pin["size"] <= 8192
+               and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+               "Closed positive before/after inventory pin differs")
         name = "lifecycle-shell-positive-project-" + phase + ".json"
         matches = [row for row in files if type(row) is dict and row.get("path") == name]
         D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
-               and type(matches[0]["size"]) is int and matches[0]["size"] == fixture["inventoryBytes"]
-               and matches[0]["sha256"] == fixture["inventorySha256"], "Original positive before/after export pin differs")
+               and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"]
+               and matches[0]["sha256"] == pin["sha256"], "Original positive before/after export pin differs")
+    D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Save fixture incorrectly claims an unchanged inventory")
     return {"native": receipt, "fixture": fixture}
 
 

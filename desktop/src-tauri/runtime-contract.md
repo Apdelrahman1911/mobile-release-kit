@@ -14,8 +14,9 @@ The installed passive renderer commands are `app_info`, `choose_project`,
 Snapshot and draft validation return the core result without inventing verified
 facts or saving files. Project IDs refer to Rust-held native picker selections;
 renderer-provided roots/executables/command lines/method names are not admitted.
-There are also five closed configuration-edit commands and four fixed GitHub
-connection commands, described below; their native qualification gates remain
+There are also five finite configuration-edit commands and four fixed GitHub
+connection commands, described below. Configuration editing has a separate
+installed Linux profile; the GitHub connection qualification gate remains
 disabled. There are no generic shell,
 filesystem, opener, build, Store, credential, or recovery commands/plugins.
 The sole local webview denies remote/new-window navigation.
@@ -38,11 +39,19 @@ project-only gate uses the existing document/picker/source/registry chain, not
 the closed credential/asset-session grant. `app_info.projectSelection` is
 bounded availability DATA, not live admission; absent/malformed data disables
 the UI action. Snapshots are bounded named observations, not selection-to-query
-custody, saved-base authority or an atomic project snapshot. Drafts do not save.
+custody, saved-base authority or an atomic project snapshot. Draft edits alone
+do not save; the separate native review/confirmation flow is required.
 The two guidance methods use the current draft: prerequisites do not inspect
 installed tools, and workflow proposals do not observe or modify a repository,
 resolve a remote ref, contact GitHub or grant Apply authority.
-Installed-shell/project/guidance native acceptance is still pending. These changes
+Configuration saving separately uses the existing `EditOwner`, a sealed
+configuration-only installed-A selector and its own original runtime ledger.
+Passive queries never grant write authority. Inspection and acquisition workers
+are registered before effects; the final one-use claim is serialized against
+the same original session/document, STOP and deadlines. Custody remains retained
+through review and Apply, and settles only after original borrowers/child IO
+return; its original settlement worker must also join before final success.
+Installed-shell/project/guidance/Save native acceptance is still pending. These changes
 do not qualify a standalone installer, general Linux, macOS or Windows. There
 is no source, PATH, ambient-Python, browser-preview or synthetic-result fallback.
 `inspect_bundle_for_packaging` is explicitly **unqualified preparation work**;
@@ -331,6 +340,9 @@ lease uses short common-lock scopes, never a lock across human review. Both
 initialization and build-input pending namespaces are checked. Original bytes,
 inodes and ancestor bindings cannot be replaced by renderer snapshots; a complete
 no-op preserves bytes and identity. See the exact [core adapter contract](../../docs/desktop-configuration-edit.md).
+Selection itself retains a pathname. Open establishes fresh lease custody over
+the project then at that displayed path; Prepare/Apply use the same lease. This
+does not claim continuous picker-to-Save inode custody.
 
 Active phases have 30-second deadlines, human review an absolute 15-minute
 lifetime, and cleanup one 10-second allowance. The sole stdin writer's EOF is
@@ -348,7 +360,9 @@ cleanup or assumed rollback is provided. Unsaved newer renderer drafts are not
 replaced by an older successful save, and native quit confirmation remains
 independent of renderer state.
 
-`NATIVE_EDIT_QUALIFIED` stays false. The ignored hosted fixture has only a private
+`NATIVE_EDIT_QUALIFIED` stays false. Only the exact installed Linux configuration
+profile adds its separate original-owned route; workflow/metadata Save and the
+general resolver remain closed. The ignored hosted fixture has only a private
 test-build authorization after its fixed environment/source/root checks; it
 cannot enable production constructors. Core inert tests, three initial actual-
 owner cases, compilation, or a passing negative fault assertion alone cannot

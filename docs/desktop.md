@@ -25,8 +25,10 @@ draft-based Environment prerequisites and read-only GitHub workflow proposals.
 Prerequisites do not inspect tools; proposals do not read or write repository
 files, verify remote refs or contact GitHub. The installed-shell and
 project/draft/guidance native checks are still pending; this is not general Linux
-or production qualification. Saving, credentials, tools, network
-and Store actions remain unavailable on that path. Trusted development builds
+or production qualification. A separate configuration-only installed Save route
+now uses the existing edit owner, full two-file review, explicit confirmation and
+original runtime settlement. Its installed native check is also pending.
+Credentials, tools, network and Store actions remain unavailable on that path. Trusted development builds
 remain a separate explicit mode, never a fallback. Android still needs a compatible JDK/Android SDK and
 project Gradle wrapper. iOS native work requires macOS/Xcode locally or on a
 protected hosted macOS runner. The desktop does not make these SDK requirements
@@ -35,10 +37,11 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 ## Foundation capabilities
 
 This table describes implemented surfaces, not a grant to execute them. The
-installed path above admits only its eight passive core methods and the separate
-project-only picker; the UI shows an explicit reason for unavailable actions.
+installed path above admits its eight passive core methods, the separate
+project-only picker and configuration-only edit profile; the UI shows an explicit
+reason for unavailable actions.
 Choosing a project does not enable the credential/asset session. Draft changes
-stay in memory, with no configuration or ignore-file writes.
+stay in memory until a separately reviewed and confirmed native Save.
 
 | Surface | Foundation behavior | What this does not prove |
 | --- | --- | --- |
@@ -46,7 +49,7 @@ stay in memory, with no configuration or ignore-file writes.
 | Static snapshot | Bounded recognized text-file hints and configuration observations on supported POSIX filesystems | An atomic snapshot, Git source authority, successful build, signing or Store state |
 | Saved release version | Explicit Dashboard read of the saved configuration's version file, using the same parser and version/build policy as core builds | A version from an unsaved draft, Git commit proof, artifact comparison, full preflight or release readiness |
 | Configuration | Guided in-memory drafts with core-owned schema/policy validation and contextual help | Saving a file, checking path existence, approving an app identity or release readiness |
-| Configuration save implementation (disabled) | Separate native owner, exact two-file preview/apply contract, guided confirmation and original-outcome handling | Enabled saving, native window/process qualification, general project initialization or Windows file transactions |
+| Configuration save implementation (installed verification pending) | Existing separate native owner, fixed Linux installed profile, exact two-file preview/apply contract, guided confirmation and original-outcome handling | General packaged/native qualification, project initialization, workflow or metadata Save, or Windows file transactions |
 | GitHub setup proposal | Guided toolkit pin inputs, core-generated read-only workflow previews, contextual help and environment/credential-name checklist | GitHub login/contact, repository observation, compatibility verification, file writes, secret provisioning or workflow dispatch |
 | Public locale text | Saved-config-derived named observations, in-memory drafts, shared core validation and contextual help | Private review/TestFlight access, whole-metadata validation, translation, Store acceptance or writes |
 | Public locale text save implementation (disabled) | Separate metadata domain, complete one-locale file review and original one-use typed Save | Enabled saving, native transaction/process qualification, screenshot editing, locale deletion or packaged-runtime readiness |
@@ -169,8 +172,8 @@ Typed saving does **not** expand this passive method list. Configuration's separ
 finite owner and core transaction contract are documented in
 [configuration editing](desktop-configuration-edit.md) and the
 [Rust bridge contract](../desktop/src-tauri/runtime-contract.md#separately-gated-finite-configuration-edit).
-The new guided Save flow remains unavailable until native and runtime
-qualification gates are satisfied. Preparing an unchanged configuration can
+The guided Save flow is available only through its narrow profile and original
+native admission; installed verification is not yet complete. Preparing an unchanged configuration can
 still require an explicit ignore-file update; only a native reviewed plan can
 declare a complete no-op. Known committed files, cleanup status and recovery
 requirements are shown separately, never collapsed into a generic “Saved.”
@@ -218,7 +221,7 @@ observation; they are not file custody, build consent or release-readiness evide
 This read does not match a build Prepare snapshot or implement a build Start
 recheck. Retry is explicit, and retiring a UI result does not cancel or
 claim settlement of its native owner. Browser preview never fabricates a read.
-This saved-version method is not part of the installed six-method profile,
+This saved-version method is not part of the installed eight-method passive profile,
 and Windows observation remains unavailable. The card reports real
 runtime/platform unavailability rather than using ambient Python.
 
@@ -564,12 +567,13 @@ standalone distribution**:
 - `prepare_runtime.py` includes both the passive and configuration bootstraps
   plus the core ZIP in the complete inventory. Preparing these files does not
   authorize either entry point to run.
-- The Linux installed-runtime inspection module has a deliberately narrow
-  first scope: Ubuntu 24.04 x86_64 GNU, GA Linux 6.8, and a single original local
-  ext4/XFS root mount with protected immutable installation names. It retains
-  original descriptor custody, refuses unknown namespace/mount/permission
-  observations, and records explicit close results. It is **not connected to
-  engine launch** and cannot manufacture an executable qualified runtime.
+- The Linux installed-runtime inspection module retains original descriptor
+  custody, refuses unknown namespace/mount/permission observations and records
+  consuming close results. Separate fixed installed-A selectors connect the
+  eight-method passive profile and configuration edit owner on the exact
+  reviewed Linux x86_64 GNU host profile (including its pinned kernel). This is
+  not general Ubuntu/Linux qualification or permission to use an arbitrary
+  manifest, host or engine; installed shell/Save verification remains pending.
 
 Supply provenance, accepted redistribution notices, real native custody,
 loader/import behavior, installer publication and clean-install checks remain

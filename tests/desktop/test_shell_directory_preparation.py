@@ -1,5 +1,7 @@
 """Actual workflow Python over inert OS metadata; no real permission changes."""
 from contextlib import redirect_stdout
+import ast
+import builtins
 import errno
 import io
 import json
@@ -38,6 +40,7 @@ DATA = (
 )
 FILES = {"/etc/drirc", "/usr/share/mime/mime.cache", *DATA[-3:]}
 FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 
 
 class DirectoryMetadataOS:
@@ -50,6 +53,8 @@ class DirectoryMetadataOS:
         self.chowns = []
         self.hook = None
         self.uids = self.gids = (0, 0, 0)
+        self.mount_raw = b"1 2 0:1 / / rw,relatime - ext4 /dev/mock rw\n"
+        self.mount_reads, self.mount_closes = 0, 0
         for path in PREPARE:
             self.add(path)
         for path in DATA:
@@ -58,7 +63,8 @@ class DirectoryMetadataOS:
     def make(self, path, mode, uid=0, gid=0):
         self.sequence += 1
         return SimpleNamespace(path=path, st_dev=1, st_ino=self.sequence, st_mode=mode,
-                               st_uid=uid, st_gid=gid, children={})
+                               st_uid=uid, st_gid=gid, st_nlink=2 if stat.S_ISDIR(mode) else 1,
+                               st_size=0, st_mtime_ns=1, st_ctime_ns=1, children={})
 
     def node(self, path):
         node = self.root
@@ -104,13 +110,13 @@ class DirectoryMetadataOS:
         return "/" if parent is None else self.live[parent].path.rstrip("/") + "/" + name
 
     def open(self, name, flags, *, dir_fd=None):
-        if flags != FLAGS:
-            raise AssertionError("Directory opens require the exact no-follow flags")
+        if flags not in (FLAGS, FILE_FLAGS):
+            raise AssertionError("Only exact directory/regular no-follow flags are admitted")
         path = self.path(name, dir_fd)
         self.open_attempts.append(path)
         self.call("open", path)
         node = self.selected(name, dir_fd)
-        if not stat.S_ISDIR(node.st_mode):
+        if not (stat.S_ISDIR(node.st_mode) if flags == FLAGS else stat.S_ISREG(node.st_mode)):
             raise OSError(errno.ELOOP if stat.S_ISLNK(node.st_mode) else errno.ENOTDIR, "Not a direct mock directory")
         fd = self.next_fd
         self.next_fd += 1
@@ -121,7 +127,8 @@ class DirectoryMetadataOS:
 
     @staticmethod
     def snapshot(node):
-        return SimpleNamespace(**{key: getattr(node, key) for key in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid")})
+        return SimpleNamespace(**{key: getattr(node, key) for key in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid",
+                                                                     "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")})
 
     def fstat(self, fd):
         node = self.live[fd]
@@ -147,6 +154,7 @@ class DirectoryMetadataOS:
         self.call("fchmod", node.path)
         self.chmods.append((node.path, node.st_ino, mode))
         node.st_mode = stat.S_IFMT(node.st_mode) | mode
+        node.st_ctime_ns += 1
 
     def fchown(self, fd, uid, gid):
         node = self.live[fd]
@@ -155,6 +163,28 @@ class DirectoryMetadataOS:
             raise AssertionError("Only the fixed group normalization is admitted")
         self.chowns.append((node.path, node.st_ino, uid, gid))
         node.st_gid = gid
+        node.st_ctime_ns += 1
+
+    def open_mounts(self, path, mode):
+        if path != "/proc/self/mountinfo" or mode != "rb":
+            raise AssertionError("Only literal bounded kernel mount metadata may be read")
+        self.mount_reads += 1
+        self.call("mount-read", path)
+        parent = self
+
+        class MountReader(io.BytesIO):
+            def read(self, size=-1):
+                if size != (1 << 20) + 1:
+                    raise AssertionError("Mount read must retain the exact original bound")
+                return super().read(size)
+
+            def close(self):
+                if not self.closed:
+                    parent.mount_closes += 1
+                    parent.call("mount-close", path)
+                super().close()
+
+        return MountReader(self.mount_raw)
 
     def close(self, fd):
         # A failed mocked close is not successful-close evidence. Record the
@@ -185,7 +215,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                                                      "mkdir", "rmdir", "unlink", "rename", "symlink")}
         replacements.update({name: getattr(filesystem, name) for name in ("open", "stat", "fstat", "listdir", "fchmod", "fchown", "close")})
         replacements.update(getresuid=lambda: filesystem.uids, getresgid=lambda: filesystem.gids)
-        with patch.multiple(os, **replacements), redirect_stdout(output):
+        with patch.multiple(os, **replacements), patch.object(builtins, "open", filesystem.open_mounts), redirect_stdout(output):
             try:
                 # Execute the actual inline imports and top-level entry, not
                 # selected AST functions with a fabricated dependency namespace.
@@ -195,6 +225,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         self.assertEqual(filesystem.live, {})
         self.assertEqual(sorted(filesystem.closed), filesystem.opened)
         self.assertLessEqual(filesystem.peak, 24)
+        self.assertEqual(filesystem.mount_reads, filesystem.mount_closes)
         rows = [json.loads(line) for line in output.getvalue().splitlines()]
         return namespace, rows, error
 
@@ -217,7 +248,13 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                 self.assertIs(namespace["json"], json)
                 self.assertIs(namespace["re"], re)
                 self.assertEqual(namespace["PREPARE_DIRS"], PREPARE)
-                self.assertEqual(namespace["DATA_ROOTS"], DATA)
+                expected_roots = tuple((path, "file" if path in FILES else "directory") for path in DATA)
+                self.assertEqual(namespace["DATA_ROOTS"], expected_roots)
+                source = WORKFLOW.parents[2] / "desktop/tools/ubuntu_publication_lifecycle.py"
+                tree = ast.parse(source.read_bytes())
+                actual_roots = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
+                                    and any(isinstance(target, ast.Name) and target.id == "SHELL_DATA_ROOTS" for target in node.targets))
+                self.assertEqual(expected_roots, actual_roots)
                 self.assertEqual(len(rows), 1)
                 receipt = rows[0]
                 self.assertFalse(receipt["runtimeAdmission"])
@@ -258,9 +295,12 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                     self.assertEqual(observed["after"], {**observed["before"], "mode": "040755", "gid": 0})
                 else:
                     self.refused(result)
-                if change in {"exact", "replacement"}:
+                if change == "exact":
                     self.assertEqual(filesystem.chowns, [(selected, original.st_ino, -1, 0)])
                     self.assertEqual(filesystem.chmods, [(selected, original.st_ino, 0o755)])
+                elif change == "replacement":
+                    self.assertEqual(filesystem.chowns, [(selected, original.st_ino, -1, 0)])
+                    self.assertEqual(filesystem.chmods, [])
                 else:
                     self.assertEqual(filesystem.chowns, [])
                     self.assertEqual(filesystem.chmods, [])
@@ -378,7 +418,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                     self.assertTrue(reads)
                     self.assertEqual(set(reads), {original.st_ino})
 
-    def test_unhandled_metadata_is_bounded_and_never_added_to_chmod_roster(self):
+    def test_unsupported_metadata_refuses_before_descendant_normalization(self):
         filesystem = DirectoryMetadataOS()
         for index in range(70):
             mode, uid = ((stat.S_IFREG | 0o666, 0), (stat.S_IFREG | 0o555, 0), (stat.S_IFIFO | 0o644, 0),
@@ -400,6 +440,147 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(rows[0], sort_keys=True, separators=(",", ":")).encode("ascii")), 65536)
         self.assertEqual(rows[1]["failedCheck"], "unhandled-unsafe-data-metadata")
         self.assertEqual(filesystem.chmods, [])
+
+    def test_fixed_data_descendants_lose_only_write_and_execute_bits(self):
+        filesystem = DirectoryMetadataOS()
+        root = "/usr/share/fonts/nested"
+        filesystem.add(root, stat.S_IFDIR | 0o777)
+        filesystem.add(root + "/read-only", stat.S_IFDIR | 0o555)
+        expected = {root: 0o755}
+        for mode in (0o644, 0o664, 0o666, 0o555, 0o755, 0o775, 0o777):
+            path = root + "/file-" + oct(mode)
+            filesystem.add(path, stat.S_IFREG | mode)
+            if mode != 0o644:
+                expected[path] = mode & ~0o133
+        for index in range(70):
+            path = root + "/more-" + str(index)
+            filesystem.add(path, stat.S_IFREG | 0o777)
+            expected[path] = 0o644
+        outside = "/usr/share/not-shell-data.sh"
+        filesystem.add(outside, stat.S_IFREG | 0o777)
+        alias = root + "/alias.ttf"
+        filesystem.add(alias, stat.S_IFLNK | 0o777)
+        originals = {path: filesystem.snapshot(filesystem.node(path)) for path in expected}
+        _, rows, error = self.run_inline(filesystem)
+        self.assertIsNone(error)
+        self.assertEqual({path: mode for path, _, mode in filesystem.chmods}, expected)
+        self.assertEqual(len(filesystem.chmods), len(expected))
+        for path, mode in expected.items():
+            item, before = filesystem.node(path), originals[path]
+            self.assertEqual(item.st_ino, before.st_ino)
+            self.assertEqual((item.st_size, item.st_mtime_ns), (before.st_size, before.st_mtime_ns))
+            self.assertEqual(stat.S_IMODE(item.st_mode), mode)
+            self.assertEqual(mode & ~stat.S_IMODE(before.st_mode), 0)
+        self.assertEqual(stat.S_IMODE(filesystem.node(root + "/read-only").st_mode), 0o555)
+        self.assertEqual(stat.S_IMODE(filesystem.node(outside).st_mode), 0o777)
+        self.assertNotIn(outside, filesystem.open_attempts)
+        self.assertNotIn(alias, filesystem.open_attempts)
+        metadata = rows[0]["metadata"]
+        self.assertEqual(metadata["unsafeCount"], 0)
+        self.assertEqual(metadata["unsupportedCount"], 0)
+        self.assertEqual(metadata["changedCount"], len(expected))
+        self.assertEqual(len(metadata["changed"]), 64)
+        self.assertTrue(metadata["changedListTruncated"])
+        self.assertFalse(rows[0]["runtimeAdmission"])
+        self.assertEqual(filesystem.chowns, [])
+
+    def test_typed_roots_owners_hardlinks_and_special_modes_cannot_expand_effects(self):
+        for path in sorted(FILES):
+            filesystem = DirectoryMetadataOS()
+            filesystem.add(path)
+            filesystem.add(path + "/not-admitted", stat.S_IFREG | 0o777)
+            with self.subTest(file_root=path):
+                rows = self.refused(self.run_inline(filesystem))
+                self.assertEqual(rows[-1]["failedCheck"], "data-root-kind")
+                self.assertNotIn(path + "/not-admitted", filesystem.open_attempts)
+                self.assertEqual(filesystem.chmods, [])
+        for change in ("uid", "gid", "hardlink", "symlink-hardlink", "special", "setuid", "unknown-mode", "device"):
+            filesystem = DirectoryMetadataOS()
+            item = filesystem.add("/usr/share/fonts/not-admitted", stat.S_IFREG | 0o777)
+            if change in {"uid", "gid"}:
+                setattr(item, "st_" + change, 1)
+            elif change in {"hardlink", "symlink-hardlink"}:
+                item.st_nlink = 2
+                if change == "symlink-hardlink":
+                    item.st_mode = stat.S_IFLNK | 0o777
+            elif change == "special":
+                item.st_mode = stat.S_IFIFO | 0o644
+            elif change == "setuid":
+                item.st_mode |= 0o4000
+            elif change == "unknown-mode":
+                item.st_mode = stat.S_IFREG | 0o606
+            else:
+                item.st_dev = 2
+            with self.subTest(change=change):
+                self.refused(self.run_inline(filesystem))
+                self.assertEqual(filesystem.chmods, [])
+
+    def test_original_regular_metadata_and_ancestry_are_checked_around_effects(self):
+        path = "/usr/share/fonts/changed.ttf"
+        for change in ("before-open-link", "original-name", "hardlink", "size", "mtime", "ctime", "ancestor", "after-name", "after-size", "close"):
+            filesystem = DirectoryMetadataOS()
+            original = filesystem.add(path, stat.S_IFREG | 0o777)
+
+            def hook(operation, current, count):
+                if current == path and count == 1:
+                    if change == "before-open-link" and operation == "open":
+                        filesystem.add(path, stat.S_IFLNK | 0o777)
+                    if operation == "fstat":
+                        if change == "original-name":
+                            filesystem.add(path, stat.S_IFREG | 0o777)
+                        elif change in {"hardlink", "size", "mtime", "ctime"}:
+                            attr = {"hardlink": "st_nlink", "size": "st_size", "mtime": "st_mtime_ns", "ctime": "st_ctime_ns"}[change]
+                            setattr(original, attr, getattr(original, attr) + 1)
+                        elif change == "ancestor":
+                            filesystem.add("/usr/share/fonts")
+                    if operation == "fchmod":
+                        if change == "after-name":
+                            filesystem.add(path, stat.S_IFREG | 0o777)
+                        elif change == "after-size":
+                            original.st_size += 1
+                    if operation == "close" and change == "close":
+                        raise OSError(errno.EIO, "Mock original file-close uncertainty")
+
+            filesystem.hook = hook
+            with self.subTest(change=change):
+                self.refused(self.run_inline(filesystem))
+                if change in {"after-name", "after-size", "close"}:
+                    self.assertEqual(filesystem.chmods, [(path, original.st_ino, 0o644)])
+                else:
+                    self.assertEqual(filesystem.chmods, [])
+                if change == "after-name":
+                    self.assertEqual(filesystem.node(path).st_mode, stat.S_IFREG | 0o777)
+
+    def test_kernel_mount_baseline_excludes_aliases_and_is_never_refreshed(self):
+        cases = {
+            "ancestor": b"3 1 0:1 /other /usr rw - ext4 /dev/mock rw\n",
+            "same-device-bind": b"3 1 0:1 /other /usr/share/fonts/nested rw - ext4 /dev/mock rw\n",
+            "file-bind": b"3 1 0:1 /other /etc/drirc rw - ext4 /dev/mock rw\n",
+            "duplicate-root": b"3 1 0:1 / / rw - ext4 /dev/mock rw\n",
+            "idmap": b"3 1 0:1 /other /elsewhere rw idmapped:1 - ext4 /dev/mock rw\n",
+            "escape": b"3 1 0:1 /other /bad\\041name rw - ext4 /dev/mock rw\n",
+        }
+        for change in (*cases, "device", "filesystem", "oversize", "before-effect", "after-effect"):
+            filesystem = DirectoryMetadataOS()
+            filesystem.node("/etc/fonts").st_mode = stat.S_IFDIR | 0o777
+            if change in cases:
+                filesystem.mount_raw += cases[change]
+            elif change == "device":
+                filesystem.mount_raw = filesystem.mount_raw.replace(b"0:1", b"0:2")
+            elif change == "filesystem":
+                filesystem.mount_raw = filesystem.mount_raw.replace(b"ext4", b"overlay")
+            elif change == "oversize":
+                filesystem.mount_raw += b"x" * (1 << 20)
+
+            def hook(operation, path, count):
+                if (change == "before-effect" and operation == "mount-read" and count == 2
+                    or change == "after-effect" and operation == "fchmod" and count == 1):
+                    filesystem.mount_raw += b"3 1 0:1 /other /elsewhere rw - ext4 /dev/mock rw\n"
+
+            filesystem.hook = hook
+            with self.subTest(change=change):
+                self.refused(self.run_inline(filesystem))
+                self.assertEqual(len(filesystem.chmods), 1 if change == "after-effect" else 0)
 
     def test_metadata_membership_depth_and_total_entry_bounds_close_all_fds(self):
         for change in ("members", "grammar", "depth", "entries"):

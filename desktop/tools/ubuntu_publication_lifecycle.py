@@ -46,30 +46,70 @@ SHELL_CASES = ("normal", "positive", "quit-outstanding")
 SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
 SHELL_PROJECT_SOURCE = (b'plugins { id("com.android.application") }\n'
                         b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
+# Fixed synthetic output DATA, not a second configuration serializer. The
+# focused contract compares these bytes with the actual pure core suggestion
+# and payload builders after the native Value wire's sorted-key round trip.
+# Keeping DATA here avoids executing extra core modules in the root lifecycle.
+SHELL_PROJECT_CONFIG = b'''{
+  "android": {
+    "applicationId": "org.example.mrk.observed",
+    "enabled": true,
+    "identityStatus": "unverified"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "androidLocales": [
+      "en-US"
+    ],
+    "iosLocales": [],
+    "root": "release/store"
+  },
+  "projectChecks": {
+    "androidArtifact": [],
+    "iosArtifact": [],
+    "preflight": []
+  },
+  "schemaVersion": 1,
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "main"
+  },
+  "version": {
+    "buildKey": "BUILD_NUMBER",
+    "nameKey": "VERSION_NAME",
+    "source": "release/version.properties"
+  }
+}
+'''
+SHELL_PROJECT_IGNORE = (b".mobile-release/\n.mobile-release-init-prepare/\n.mobile-release-init/\n"
+                        b".mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n"
+                        b".mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n")
 SHELL_PROJECT_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_DRAFT="
 SHELL_PROJECT_RECEIPT = {
-    "schemaVersion": 1, "fixture": "android-static-v1", "projectGateContract": True,
-    "methods": "eight-passive", "mutationActions": False,
+    "schemaVersion": 2, "fixture": "android-config-save-v1", "projectGateContract": True,
+    "methods": "eight-passive", "passiveActions": False,
     "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
     "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
-    "snapshot": {"config": "missing", "androidHint": True, "sourceFiles": 1},
+    "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 1},
     "suggestion": {"coreProvenance": True, "explicitAdoption": True},
-    "field": {"path": "version.source", "catalogHelp": True, "explicitUnset": True},
-    "validation": {"valid": False, "issue": "config.invalid"},
-    "review": {"kind": "redacted", "required": True, "present": False},
-    "draft": {"unsaved": True, "saveAvailable": False},
-    "guidance": {
-        "draftFormatValid": True, "draftUnchanged": True,
-        "requirements": {"requestMatched": True, "resultMatched": True, "domMatched": True,
-                         "context": "android/build", "roles": 3, "presence": "unknown", "version": "unknown",
-                         "inspection": "not-run", "nativeInspection": "unavailable", "dependencies": "unknown"},
-        "github": {"requestMatched": True, "resultMatched": True, "domMatched": True, "explicitInputs": True,
-                   "browserEdit": "insertText", "comparison": "not-supplied", "snapshotProvided": False,
-                   "workflowCount": 4, "workflowContentMatched": True, "resourceMatched": True,
-                   "tooling": "format-only", "githubContacted": False, "repositoryObserved": False,
-                   "toolingRefResolved": False, "templateCompatibility": "unknown", "applyAvailable": False},
-        "assuranceActions": False, "releaseReadiness": "unknown",
-    },
+    "save": {"capability": True, "requests": {"open": 2, "prepare": 2, "apply": 1, "close": 0},
+             "bindingsMatched": True, "draftRevisions": [1, 1], "baselineGenerations": [1, 2],
+             "reviewMatched": True, "confirmation": {"opened": 2, "keepReviewing": True, "applyBeforeAck": 0, "acknowledged": True},
+             "outcome": ["committed", "clean", "settled", "none"], "nativeFinality": "settled",
+             "savedVisible": True, "baselineAdvanced": True},
+    "readback": {"fresh": True, "domMatched": True, "draftMatched": True, "size": 692,
+                 "sha256": "4b3a5aaa718b018101ee0fcd0e612285be8a1b93cab20c5ff15e8d441069b917"},
+    "noop": {"reviewMatched": True, "apply": 0, "quitOutstanding": True,
+             "outcome": ["not_started", "not_created", "settled", "cancelled"], "nativeReason": "shutdown"},
+    "originals": {"sessions": 2, "writerFrames": [3, 2], "stdoutFrames": [3, 3],
+                  "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
+                  "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
     "quit": {"operation": 3, "originalsSettled": True, "relayJoined": True, "exit": True},
 }
 OS_SONAMES = {"libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
@@ -2189,17 +2229,28 @@ def shell_argv(value, case):
         "--error-file=/dev/stderr", "--server-args=-screen 0 1280x1024x24 -noreset", *command])
 
 
-def _shell_project_inventory(value):
-    """Three fixed inert nodes only; ordinary GUI caches are outside this tree."""
-    need(_ROOT == root_path(value), "Positive fixture differs from the original service root")
+def _shell_project_inventory(value, *, saved=False):
+    """Fixed fixture only, before launch or AFTER original exit and finality.
+
+    This never repairs/removes a pending transaction or scans an unexpected
+    subtree. Ordinary GUI caches are outside the project. Failed/Unknown work
+    cannot reach the saved observation through the original shell-result gate.
+    """
+    need(_ROOT == root_path(value) and type(saved) is bool, "Positive fixture differs from the original service root or phase")
     root = _ROOT / "positive-project"
-    rows = []
-    for relative, expected in ((".", ["app"]), ("app", ["build.gradle.kts"])):
+    directory(root.parent, protected=True)
+    owner = (value["runnerUid"], value["runnerGid"])
+    directories = [(".", [".gitignore", "app", "release"] if saved else ["app"], 0o700, owner),
+                   ("app", ["build.gradle.kts"], 0o555, (0, 0))]
+    if saved:
+        directories.append(("release", ["mobile-release.json"], 0o755, owner))
+    rows, original_directories = [], []
+    for relative, expected, mode, owners in directories:
         path = root if relative == "." else root / relative
-        directory(path, protected=True)
+        directory(path)
         before = path.lstat()
-        need(stat.S_IMODE(before.st_mode) == 0o555 and before.st_uid == before.st_gid == 0,
-             "Positive fixture directory is not the fixed root-owned read-only node")
+        need(stat.S_IMODE(before.st_mode) == mode and (before.st_uid, before.st_gid) == owners,
+             "Positive fixture directory ownership or mode differs")
         children = []
         with os.scandir(path) as entries:
             for entry in entries:
@@ -2207,45 +2258,83 @@ def _shell_project_inventory(value):
                 children.append(entry.name)
         need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Positive fixture directory changed")
         rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
-    source = protected_record(root / "app/build.gradle.kts", len(SHELL_PROJECT_SOURCE))
-    need(source["size"] == len(SHELL_PROJECT_SOURCE) and source["sha256"] == hashlib.sha256(SHELL_PROJECT_SOURCE).hexdigest()
-         and stat.S_IMODE(source["identity"][2]) == 0o444, "Positive fixture source bytes or non-executable mode differ")
-    rows.append({**source, "path": "app/build.gradle.kts", "kind": "file"})
-    for relative in (".gitignore", "release/mobile-release.json"):
+        original_directories.append((path, identity(before)))
+    files = [("app/build.gradle.kts", SHELL_PROJECT_SOURCE, 0o444, (0, 0))]
+    if saved:
+        files.extend((("release/mobile-release.json", SHELL_PROJECT_CONFIG, 0o600, owner),
+                      (".gitignore", SHELL_PROJECT_IGNORE, 0o600, owner)))
+    for relative, expected, mode, owners in files:
+        path = root / relative
+        before = path.lstat()
+        need(stat.S_IMODE(before.st_mode) == mode and (before.st_uid, before.st_gid) == owners,
+             "Positive fixture file ownership or mode differs")
+        observed = record(path, len(expected))
+        need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest()
+             and identity(path.lstat()) == identity(before), "Positive fixture file bytes or identity differ")
+        rows.append({**observed, "path": relative, "kind": "file", "identity": list(identity(before))})
+    absent = [] if saved else [".gitignore", "release"]
+    for relative in absent:
         _absent(root / relative)
-    return {"schemaVersion": 1, "fixture": "android-static-v1", "root": str(root), "entries": rows,
-            "absent": [".gitignore", "release/mobile-release.json"]}
+    need(all(identity(path.lstat()) == original for path, original in original_directories),
+         "Positive fixture parent changed during its bounded inventory")
+    return {"schemaVersion": 2, "fixture": "android-config-save-v1", "root": str(root), "saved": saved,
+            "entries": rows, "absent": absent}
 
 
 def shell_project_fixture(value, before_raw, after_raw):
     """Closed DATA correspondence, never permission to inspect possible-live work."""
     before, after = decode(before_raw, 8192), decode(after_raw, 8192)
-    need(type(before) is dict and set(before) == {"schemaVersion", "fixture", "root", "entries", "absent"}
-         and canonical(before) == before_raw == after_raw == canonical(after)
-         and type(before["schemaVersion"]) is int and before["schemaVersion"] == 1
-         and before["fixture"] == "android-static-v1" and before["root"] == str(root_path(value) / "positive-project")
-         and before["absent"] == [".gitignore", "release/mobile-release.json"], "Positive fixture inventory changed or is incomplete")
-    rows = before["entries"]
-    need(type(rows) is list and len(rows) == 3, "Positive fixture node roster differs")
-    for index, (relative, mode) in enumerate(((".", stat.S_IFDIR | 0o555), ("app", stat.S_IFDIR | 0o555),
-                                              ("app/build.gradle.kts", stat.S_IFREG | 0o444))):
-        row = rows[index]
-        wanted = {"path", "kind", "identity", "children"} if index < 2 else {"path", "kind", "identity", "size", "sha256"}
-        need(type(row) is dict and set(row) == wanted and row["path"] == relative
-             and row["kind"] == ("directory" if index < 2 else "file"), "Positive fixture node kind/path differs")
-        original = row["identity"]
-        need(type(original) is list and len(original) == 9 and all(type(number) is int and 0 <= number < 1 << 64 for number in original)
-             and original[0] > 0 and original[1] > 0 and original[2] == mode and original[3] == original[4] == 0
-             and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Positive fixture original identity differs")
-        if index < 2:
-            need(row["children"] == (["app"] if index == 0 else ["build.gradle.kts"]), "Positive fixture has an extra or missing child")
-        else:
-            need(original[5] == 1 and original[6] == len(SHELL_PROJECT_SOURCE) and type(row["size"]) is int
-                 and row["size"] == len(SHELL_PROJECT_SOURCE) and row["sha256"] == hashlib.sha256(SHELL_PROJECT_SOURCE).hexdigest(),
-                 "Positive fixture source is not the fixed non-executable DATA")
-    return {"fixture": "android-static-v1", "unchanged": True, "configAbsent": True, "gitignoreAbsent": True,
-            "entryCount": 3, "sourceBytes": len(SHELL_PROJECT_SOURCE), "inventoryBytes": len(before_raw),
-            "inventorySha256": hashlib.sha256(before_raw).hexdigest()}
+    owner = (value["runnerUid"], value["runnerGid"])
+    inventories = []
+    for document, raw, saved in ((before, before_raw, False), (after, after_raw, True)):
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "saved", "entries", "absent"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 2
+             and document["fixture"] == "android-config-save-v1" and document["saved"] is saved
+             and document["root"] == str(root_path(value) / "positive-project")
+             and document["absent"] == ([] if saved else [".gitignore", "release"]), "Positive fixture inventory is incomplete or out of phase")
+        roster = [(".", stat.S_IFDIR | 0o700, owner, [".gitignore", "app", "release"] if saved else ["app"]),
+                  ("app", stat.S_IFDIR | 0o555, (0, 0), ["build.gradle.kts"])]
+        if saved:
+            roster.append(("release", stat.S_IFDIR | 0o755, owner, ["mobile-release.json"]))
+        roster.append(("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), SHELL_PROJECT_SOURCE))
+        if saved:
+            roster.extend((("release/mobile-release.json", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_CONFIG),
+                           (".gitignore", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_IGNORE)))
+        rows = document["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Positive fixture node roster differs")
+        observed = {}
+        for row, (relative, mode, owners, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            wanted = {"path", "kind", "identity", "children"} if is_directory else {"path", "kind", "identity", "size", "sha256"}
+            need(type(row) is dict and set(row) == wanted and row["path"] == relative
+                 and row["kind"] == ("directory" if is_directory else "file"), "Positive fixture node kind/path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(number) is int and 0 <= number < 1 << 64 for number in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owners
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Positive fixture original identity differs")
+            if is_directory:
+                need(row["children"] == expected, "Positive fixture has an unexpected child or pending transaction")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Positive fixture source or saved output does not match exact expected DATA")
+            observed[relative] = row
+        need(all(row["identity"][0] == observed["."]["identity"][0] for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Positive fixture node aliases or cross-device entries differ")
+        inventories.append(observed)
+    first, last = inventories
+    # The config transaction necessarily changes root timestamps/size/link count,
+    # not its dev/inode/type/mode/ownership. The unrelated hint is exact in full.
+    need(first["."]["identity"][:5] == last["."]["identity"][:5]
+         and all(first[name] == last[name] for name in ("app", "app/build.gradle.kts")),
+         "Positive fixture root was replaced or its unrelated hint changed")
+    return {"fixture": "android-config-save-v1", "rootRetained": True, "hintUnchanged": True,
+            "savedOutputsMatched": True, "noUnexpectedEntries": True, "noPendingState": True,
+            "entryCount": 6, "sourceBytes": len(SHELL_PROJECT_SOURCE), "releaseMode": 0o755,
+            "config": {"size": len(SHELL_PROJECT_CONFIG), "sha256": hashlib.sha256(SHELL_PROJECT_CONFIG).hexdigest(), "mode": 0o600},
+            "gitignore": {"size": len(SHELL_PROJECT_IGNORE), "sha256": hashlib.sha256(SHELL_PROJECT_IGNORE).hexdigest(), "mode": 0o600},
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
 def shell_project_receipt(raw):
@@ -2280,10 +2369,10 @@ def _shell_prepare(value, case):
         project.mkdir(mode=0o700)
         (project / "app").mkdir(mode=0o700)
         _D.write(project / "app/build.gradle.kts", SHELL_PROJECT_SOURCE, 0o444)
-        # Root creates the exact inert source. Directories need search bits;
-        # no source file is executable or writable by the nonroot GUI process.
+        # Only this original fixture root is app-writable. The inert source and
+        # its directory remain root-owned/read-only; Save must not change them.
         os.chmod(project / "app", 0o555)
-        os.chmod(project, 0o555)
+        os.chown(project, value["runnerUid"], value["runnerGid"])
         _retain("shell-positive-project-before.json", canonical(_shell_project_inventory(value)))
     return environment
 
@@ -2593,7 +2682,7 @@ def unit_start():
                 result = command("shell-" + case, shell_argv(value, case), maximum=60, env=environment)
                 cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected)
                 if case == "positive":
-                    after = canonical(_shell_project_inventory(value))
+                    after = canonical(_shell_project_inventory(value, saved=True))
                     _retain("shell-positive-project-after.json", after)
                     shell_project_fixture(value, read(_ROOT / "public/shell-positive-project-before.json", 8192), after)
         need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during shell observations")

@@ -101,10 +101,8 @@ async fn environment_requirements(webview: Webview, request: tauri::ipc::Request
     let args = crate::environment::request(body)?;
     not_closing(&state)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.requirements_request(body); }
+    if let Some(q) = &state.observation { q.unexpected(); }
     let result = state.bridge.environment_requirements(&state.document, args).await;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.requirements(&result); }
     result
 }
 #[tauri::command]
@@ -215,7 +213,10 @@ async fn artifact_evidence_cancel(webview: Webview, request: tauri::ipc::Request
 async fn project_snapshot(project_id: String, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    let observed_project = project_id.clone();
+    let observed_project = {
+        if let Some(q) = &state.observation { q.snapshot_request(&project_id); }
+        project_id.clone()
+    };
     let result = state.bridge.project_snapshot(&state.document, project_id).await;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if let Some(q) = &state.observation { q.snapshot(&observed_project, &result); }
@@ -225,10 +226,8 @@ async fn project_snapshot(project_id: String, state: State<'_, ShellState>) -> R
 async fn validate_config(draft: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.validate_request(&draft); }
+    if let Some(q) = &state.observation { q.unexpected(); }
     let result = state.bridge.validate_config(&state.document, draft).await;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.validation(&result); }
     result
 }
 #[tauri::command]
@@ -245,10 +244,8 @@ async fn suggest_config(hints: Value, state: State<'_, ShellState>) -> Result<Va
 async fn preview_config(base: Value, draft: Value, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.review_request(&base, &draft); }
+    if let Some(q) = &state.observation { q.unexpected(); }
     let result = state.bridge.preview_config(&state.document, base, draft).await;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.review(&result); }
     result
 }
 #[tauri::command]
@@ -258,10 +255,8 @@ async fn propose_github_setup(request: tauri::ipc::Request<'_>, state: State<'_,
     let input = crate::github_commands::proposal(body)?;
     not_closing(&state)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.github_request(body); }
+    if let Some(q) = &state.observation { q.unexpected(); }
     let result = state.bridge.propose_github_setup(&state.document, input).await;
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    if let Some(q) = &state.observation { q.github_proposal(&result); }
     result
 }
 
@@ -318,29 +313,46 @@ async fn open_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, st
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::open(request_body(&request)?)?;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.open_request(&args.project_id); }
     // The same real document gate checks quit and retires saved consent/STOP
     // before checking idle. An outer idle-only gate would skip retirement.
-    state.document.configuration_edit_admit(|bridge| bridge.open_config_edit(window, args.project_id))
+    let result = state.document.configuration_edit_admit(|bridge| bridge.open_config_edit(window, args.project_id));
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.open_result(&result, &state.bridge.edits); }
+    result
 }
 #[tauri::command]
 async fn prepare_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::prepare(request_body(&request)?)?;
-    state.document.configuration_edit_admit(|bridge| bridge.edits.prepare(window, args))
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.prepare_request(&args); }
+    let result = state.document.configuration_edit_admit(|bridge| bridge.edits.prepare(window, args));
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.prepare_result(&result, &state.bridge.edits); }
+    result
 }
 #[tauri::command]
 async fn apply_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::apply(request_body(&request)?)?;
-    state.document.configuration_edit_admit(|bridge| bridge.edits.apply(window, &args.session_id, &args.plan_token))
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.apply_request(&args.session_id, &args.plan_token); }
+    let result = state.document.configuration_edit_admit(|bridge| bridge.edits.apply(window, &args.session_id, &args.plan_token));
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.apply_result(&result, &state.bridge.edits); }
+    result
 }
 #[tauri::command]
 async fn close_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
     let args = edit_commands::close(request_body(&request)?)?;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let Some(q) = &state.observation { q.close_request(); }
     // The original document may stop during quit. Document loss already sends
     // STOP from native lifecycle handling; later renderers have status only.
     state.bridge.edits.close(window, &args.session_id)
@@ -353,6 +365,8 @@ async fn config_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, 
         edit_commands::status(request_body(&request)?)?;
         state.bridge.edits.status()
     }.await;
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if let (Some(q), Ok(status)) = (&state.observation, &result) { q.edit_status(status, &state.bridge.edits); }
     fixture_result!(observed, edit, &result);
     result
 }
@@ -649,12 +663,16 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut android_build_relay_failed = false;
         loop {
             if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; return; }
-            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.tick(&app); }
             // status() releases its native locks before any renderer callback.
             // Events are best effort: the UI subscribes then fetches status and
             // orders both by native revision, never by arrival time.
-            if let Ok(status) = edits.status() { let _ = app.emit_to(MAIN_WINDOW, EDIT_EVENT, &status); }
+            if let Ok(status) = edits.status() {
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.edit_status(&status, &edits); }
+                let _ = app.emit_to(MAIN_WINDOW, EDIT_EVENT, &status);
+            }
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.tick(&app); }
             if let Ok(status) = edits.workflow_status() { let _ = app.emit_to(MAIN_WINDOW, WORKFLOW_EDIT_EVENT, &status); }
             // Public before/after text can be large. Emit metadata only when
             // original owner state changes, not on each 100ms observer tick.
@@ -1622,7 +1640,7 @@ fn run_builder(builder: tauri::Builder<tauri::Wry>) -> Result<LoopReturn, Initia
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if matches!(event, tauri::RunEvent::Exit) {
             let state = app.state::<ShellState>();
-            if let Some(q) = &state.observation { q.actual_exit(state.exit_ready.load(Ordering::SeqCst), &state.document); }
+            if let Some(q) = &state.observation { q.actual_exit(state.exit_ready.load(Ordering::SeqCst), &state.document, &state.bridge.edits); }
         }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if matches!(event, tauri::RunEvent::Exit) {

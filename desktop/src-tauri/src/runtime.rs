@@ -85,6 +85,30 @@ impl PassiveInstalledProfile {
     }
 }
 
+// Separate configuration-only selection DATA. A passive candidate/profile is
+// not edit authority, and the feature-off native passive fixture cannot mint
+// this value. The original EditOwner still owes custody and a one-use claim.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) struct ConfigurationInstalledProfile { _private: () }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+impl ConfigurationInstalledProfile {
+    fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        // Same independently admitted A, not a new supplier/loader profile.
+        PassiveInstalledProfile::bindings_match(target, manifest, protocol)
+    }
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return Err(unavailable()); }
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions")
+            .join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("config_edit_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
+    }
+    pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
+        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+    }
+}
+
 /// Packaging inspection is NOT admission to execution or a native-custody proof.
 pub struct BundleInspection { pub files: usize, pub target: String }
 
@@ -344,6 +368,30 @@ impl RuntimeConfig {
                 Ok(PassiveInstalledProfile { _private: () })
             }
         }
+    }
+    /// Availability and original-owner admission use this SAME sealed selector.
+    /// No caller path, environment flag, domain argument or passive test permit.
+    pub(crate) fn configuration_edit_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        { self.configuration_installed_profile().is_ok() }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        { false }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn configuration_installed_profile(&self) -> Result<ConfigurationInstalledProfile, BridgeError> {
+        #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+        if ConfigurationInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+            return Ok(ConfigurationInstalledProfile { _private: () });
+        }
+        Err(BridgeError::unavailable("The configuration installed-runtime release and custody profile are not qualified."))
+    }
+    /// Only the original configuration owner's registered worker may borrow
+    /// these slots. The result is path DATA; it cannot spawn or carry custody.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn resolve_configuration_installed(&self, originals: &mut crate::installed_runtime::ConfigurationRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        let profile = self.configuration_installed_profile()?; // Refuse other builds before inspection.
+        originals.inspect_once(profile, end, stop)
     }
     /// Separate fixed entry point for the finite configuration owner. Never
     /// dispatch stateful work through the passive engine or its supervisor.
@@ -654,6 +702,7 @@ pub(crate) fn assert_packaged_shell_allowlist_contract() {
     assert!(matches!(runtime.passive_installed, PassiveInstalledSelection::CandidateA));
     let bindings = PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
     assert_eq!(runtime.project_selection_profile_available(), bindings);
+    assert_eq!(runtime.configuration_edit_profile_available(), bindings);
     for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
         "environment.requirements", "github.setup.propose"] {
         assert_eq!(runtime.passive_method_available(name), bindings);
@@ -668,6 +717,13 @@ pub(crate) fn assert_packaged_shell_allowlist_contract() {
     assert!(originals.never_started());
     assert!(runtime.resolve(Instant::now()).is_err());
     assert!(runtime.resolve_edit(Instant::now()).is_err());
+}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+pub(crate) fn assert_installed_configuration_profile_contract() {
+    tests::configuration_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor();
+    tests::installed_configuration_data_is_fixed_and_stopped_inspection_owes_original_settlement();
 }
 
 #[cfg(test)]
@@ -722,6 +778,70 @@ mod tests {
         assert_eq!(error.code, "runtime_unavailable");
         assert_eq!(error.message, "The passive installed-runtime release and custody profile are not qualified.");
     }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
+    #[test]
+    fn installed_configuration_selector_is_closed_outside_the_normal_linux_shell() {
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-config-path-must-not-be-opened"));
+        assert!(!runtime.configuration_edit_profile_available());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            let mut slots = crate::installed_runtime::ConfigurationRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(false);
+            assert!(runtime.resolve_configuration_installed(&mut slots, Instant::now(), &stop).is_err());
+            assert!(slots.never_started() && !slots.settled()); // Selector refusal before ANY inspection.
+            assert!(slots.capability().is_err());
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[test]
+    fn configuration_candidate_bindings_data_contract() { configuration_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(super) fn configuration_candidate_bindings_are_exactly_a_not_an_arbitrary_anchor() {
+        let (target, manifest, protocol) = (PassiveInstalledProfile::TARGET, PassiveInstalledProfile::MANIFEST, PassiveInstalledProfile::PROTOCOL);
+        assert!(ConfigurationInstalledProfile::bindings_match(target, Some(manifest), Some(protocol)));
+        let wrong = "0".repeat(64);
+        for (target, manifest, protocol) in [
+            ("aarch64-unknown-linux-gnu", Some(manifest), Some(protocol)), (target, None, Some(protocol)),
+            (target, Some(manifest), None), (target, Some(wrong.as_str()), Some(protocol)), (target, Some(manifest), Some(wrong.as_str())),
+        ] { assert!(!ConfigurationInstalledProfile::bindings_match(target, manifest, protocol)); }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    #[test]
+    fn installed_configuration_profile_contract_is_inert() { assert_installed_configuration_profile_contract(); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    pub(super) fn installed_configuration_data_is_fixed_and_stopped_inspection_owes_original_settlement() {
+        // Even in the selected shell this test performs NO uname/open/close or
+        // child work: sticky STOP refuses before the first native checkpoint.
+        let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-config-data-only"));
+        let profile = runtime.configuration_installed_profile();
+        assert_eq!(runtime.configuration_edit_profile_available(), profile.is_ok());
+        assert_eq!(profile.is_ok(), ConfigurationInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR));
+        if let Ok(profile) = profile {
+            let data = profile.selection().unwrap();
+            let root = PathBuf::from("/var/lib/mobile-release-kit/versions").join(PassiveInstalledProfile::TARGET).join(PassiveInstalledProfile::MANIFEST);
+            assert_eq!(data.python, root.join("python/bin/python3"));
+            assert_eq!(data.bootstrap, root.join("config_edit_bootstrap.py"));
+            assert_eq!(data.core, root.join("core.zip")); assert_eq!(data.cwd, root);
+            assert!(profile.accepts_platform(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
+            for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1021-azure", b"6.17.0-1022-azure-custom"] {
+                assert!(!profile.accepts_platform(b"Linux", b"x86_64", release));
+            }
+            assert!(!profile.accepts_platform(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
+            assert!(!profile.accepts_platform(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
+            let mut slots = crate::installed_runtime::ConfigurationRuntimeSlots::new();
+            let (_sender, stop) = tokio::sync::watch::channel(true);
+            assert!(runtime.resolve_configuration_installed(&mut slots, Instant::now() + std::time::Duration::from_secs(1), &stop).is_err());
+            assert!(!slots.never_started() && !slots.settled() && slots.no_child_effect());
+            assert!(slots.transfer_once().is_err() && slots.capability().is_err());
+            assert_eq!(slots.settle_originals(), crate::installed_runtime::CloseOutcome::Settled); // Empty; not a native close witness.
+            assert!(slots.settled() && slots.capability().is_err());
+        }
+        assert!(runtime.resolve(Instant::now()).is_err());
+        assert!(runtime.resolve_edit(Instant::now()).is_err());
+    }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[test]
     fn passive_candidate_bindings_are_exact_data_not_digest_shape() {
@@ -748,12 +868,17 @@ mod tests {
         let candidate = RuntimeConfig::installed_passive_candidate_a();
         assert!(matches!(candidate.passive_installed, PassiveInstalledSelection::CandidateA));
         assert!(!candidate.project_selection_profile_available());
+        assert!(!candidate.configuration_edit_profile_available());
         let packaged = RuntimeConfig::packaged(PathBuf::from("/inert-passive-candidate-path"));
         assert!(matches!(packaged.passive_installed, PassiveInstalledSelection::Closed));
         assert!(packaged.passive_installed_profile().is_err());
         assert!(candidate.resolve(Instant::now()).is_err());
+        assert!(candidate.resolve_edit(Instant::now()).is_err());
+        let mut configuration = crate::installed_runtime::ConfigurationRuntimeSlots::new();
         let mut originals = crate::installed_runtime::PassiveRuntimeSlots::new();
         let (_sender, stop) = tokio::sync::watch::channel(false);
+        assert!(candidate.resolve_configuration_installed(&mut configuration, Instant::now(), &stop).is_err());
+        assert!(configuration.never_started()); // Passive candidate never acquires configuration authority.
         assert!(candidate.resolve_passive_installed(crate::protocol::Method::ReleaseVersionObserve, &mut originals, Instant::now(), &stop).is_err());
         assert!(originals.never_started()); // An unselected method cannot begin inspection.
         let profile = candidate.passive_installed_profile();

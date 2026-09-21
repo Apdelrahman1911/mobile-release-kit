@@ -524,8 +524,12 @@ class InstalledShellCompilerContracts(unittest.TestCase):
 def closed_project_draft_data(lifecycle):
     """Synthetic closed-result schema DATA only; no native/finality claim."""
     receipt = deepcopy(lifecycle.SHELL_PROJECT_RECEIPT)
-    fixture = {"fixture": "android-static-v1", "unchanged": True, "configAbsent": True, "gitignoreAbsent": True,
-               "entryCount": 3, "sourceBytes": len(lifecycle.SHELL_PROJECT_SOURCE), "inventoryBytes": 512, "inventorySha256": "a" * 64}
+    fixture = {"fixture": "android-config-save-v1", "rootRetained": True, "hintUnchanged": True,
+               "savedOutputsMatched": True, "noUnexpectedEntries": True, "noPendingState": True,
+               "entryCount": 6, "sourceBytes": len(lifecycle.SHELL_PROJECT_SOURCE), "releaseMode": 0o755,
+               "config": {"size": len(lifecycle.SHELL_PROJECT_CONFIG), "sha256": hashlib.sha256(lifecycle.SHELL_PROJECT_CONFIG).hexdigest(), "mode": 0o600},
+               "gitignore": {"size": len(lifecycle.SHELL_PROJECT_IGNORE), "sha256": hashlib.sha256(lifecycle.SHELL_PROJECT_IGNORE).hexdigest(), "mode": 0o600},
+               "before": {"size": 512, "sha256": "a" * 64}, "after": {"size": 1024, "sha256": "b" * 64}}
     return {"state": "normal-shell-installed-runtime-connection-observed", "productQualified": False,
             "packageLifecycleQualified": False, "shellPackageBuilt": False,
             "cases": {
@@ -535,7 +539,7 @@ def closed_project_draft_data(lifecycle):
                 "quit-outstanding": {"case": "quit-outstanding", "exitCode": 0, "bootstrapReturned": False,
                                      "domAndGtkObserved": True, "maps": [[{"DATA": True}]]},
             }, "projectDraft": {"native": deepcopy(receipt), "fixture": fixture},
-            "files": [{"path": "lifecycle-shell-positive-project-" + phase + ".json", "size": 512, "sha256": "a" * 64}
+            "files": [{"path": "lifecycle-shell-positive-project-" + phase + ".json", **fixture[phase]}
                       for phase in ("before", "after")]}
 
 
@@ -546,18 +550,18 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         result = S.shell_project_draft_observation(observed, lifecycle)
         self.assertEqual(result, observed["projectDraft"])
         self.assertEqual(result["native"]["methods"], "eight-passive")
-        self.assertFalse(result["native"]["mutationActions"])
-        self.assertFalse(result["native"]["draft"]["saveAvailable"])
-        guidance = result["native"]["guidance"]
-        self.assertTrue(guidance["draftFormatValid"])
-        self.assertTrue(guidance["draftUnchanged"])
-        self.assertEqual(guidance["requirements"]["roles"], 3)
-        self.assertEqual(guidance["github"]["workflowCount"], 4)
-        self.assertFalse(guidance["github"]["snapshotProvided"])
-        self.assertFalse(guidance["assuranceActions"])
-        self.assertEqual(guidance["releaseReadiness"], "unknown")
-        self.assertTrue(result["fixture"]["configAbsent"])
-        self.assertTrue(result["fixture"]["gitignoreAbsent"])
+        self.assertFalse(result["native"]["passiveActions"])
+        self.assertEqual(result["native"]["save"]["requests"], {"open": 2, "prepare": 2, "apply": 1, "close": 0})
+        self.assertTrue(result["native"]["save"]["confirmation"]["keepReviewing"])
+        self.assertEqual(result["native"]["save"]["outcome"], ["committed", "clean", "settled", "none"])
+        self.assertEqual(result["native"]["noop"]["outcome"], ["not_started", "not_created", "settled", "cancelled"])
+        self.assertEqual(result["native"]["noop"]["nativeReason"], "shutdown")
+        self.assertEqual(result["native"]["originals"]["runtimeSettlementJoined"], 2)
+        self.assertTrue(result["native"]["readback"]["fresh"])
+        self.assertNotIn("guidance", result["native"])  # G's actions are not replayed by Save.
+        self.assertTrue(result["fixture"]["savedOutputsMatched"])
+        self.assertTrue(result["fixture"]["hintUnchanged"])
+        self.assertNotEqual(result["fixture"]["before"], result["fixture"]["after"])
         self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding"})
 
     def test_rejects_legacy_partial_mistyped_or_relabelled_positive_receipts(self):
@@ -565,20 +569,27 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         mutations = (
             lambda v: v.pop("projectDraft"), lambda v: v["cases"]["positive"].pop("projectDraft"),
             lambda v: v["cases"]["positive"]["projectDraft"].update(methods="six-passive"),
-            lambda v: v["cases"]["positive"]["projectDraft"].pop("guidance"),
-            lambda v: v["projectDraft"]["native"].pop("guidance"),
+            lambda v: v["cases"]["positive"]["projectDraft"].pop("save"),
+            lambda v: v["projectDraft"]["native"].pop("originals"),
+            lambda v: v["projectDraft"]["native"].update(guidance={"draftUnchanged": True}),
             lambda v: v["cases"]["positive"].update(exitCode=True),
             lambda v: v["cases"]["positive"].update(domAndGtkObserved=1),
             lambda v: v["cases"]["positive"]["projectDraft"]["select"].update(originalsSettled=False),
             lambda v: v["cases"]["positive"]["projectDraft"]["quit"].update(relayJoined=False),
             lambda v: v["projectDraft"]["native"]["cancel"].update(originalsSettled=1),
-            lambda v: v["projectDraft"]["fixture"].update(unchanged=1),
-            lambda v: v["projectDraft"]["fixture"].update(configAbsent=False),
-            lambda v: v["projectDraft"]["fixture"].update(gitignoreAbsent=False),
+            lambda v: v["projectDraft"]["fixture"].update(rootRetained=1),
+            lambda v: v["projectDraft"]["fixture"].update(hintUnchanged=False),
+            lambda v: v["projectDraft"]["fixture"].update(savedOutputsMatched=False),
+            lambda v: v["projectDraft"]["fixture"].update(noUnexpectedEntries=False),
+            lambda v: v["projectDraft"]["fixture"].update(noPendingState=False),
+            lambda v: v["projectDraft"]["fixture"].update(configAbsent=True),
             lambda v: v["projectDraft"]["fixture"].update(entryCount=True),
             lambda v: v["projectDraft"]["fixture"].update(sourceBytes=0),
-            lambda v: v["projectDraft"]["fixture"].update(inventoryBytes=8193),
-            lambda v: v["projectDraft"]["fixture"].update(inventorySha256="unbound"),
+            lambda v: v["projectDraft"]["fixture"].update(releaseMode=0o700),
+            lambda v: v["projectDraft"]["fixture"]["config"].update(sha256="f" * 64),
+            lambda v: v["projectDraft"]["fixture"]["gitignore"].update(mode=0o644),
+            lambda v: v["projectDraft"]["fixture"]["before"].update(size=8193),
+            lambda v: v["projectDraft"]["fixture"]["after"].update(sha256="unbound"),
             lambda v: v.update(productQualified=True), lambda v: v.update(packageLifecycleQualified=True),
             lambda v: v.update(shellPackageBuilt=True), lambda v: v.update(state="project-draft-qualified"),
         )
@@ -588,8 +599,8 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
                 S.shell_project_draft_observation(observed, lifecycle)
 
         def leaves(value, prefix=()):
-            for key, child in value.items():
-                if type(child) is dict:
+            for key, child in (value.items() if type(value) is dict else enumerate(value)):
+                if type(child) in (dict, list):
                     yield from leaves(child, (*prefix, key))
                 else:
                     yield (*prefix, key), child
@@ -621,9 +632,10 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         for mutate in (
             lambda v: v["files"].pop(), lambda v: v["files"].append(deepcopy(v["files"][0])),
-            lambda v: v["files"][1].update(sha256="b" * 64), lambda v: v["files"][0].update(size=513),
+            lambda v: v["files"][1].update(sha256="c" * 64), lambda v: v["files"][0].update(size=513),
             lambda v: v["files"][1].update(size=True), lambda v: v["files"][1].update(path="unbound-after.json"),
             lambda v: v["files"][0].update(extra=True),
+            lambda v: v["projectDraft"]["fixture"].update(after=deepcopy(v["projectDraft"]["fixture"]["before"])),
         ):
             observed = closed_project_draft_data(lifecycle); mutate(observed)
             with self.subTest(mutate=mutate), self.assertRaises(S.D.Refused):

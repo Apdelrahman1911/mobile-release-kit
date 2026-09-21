@@ -1,14 +1,18 @@
 //! One retained finite native owner, separate from disposable passive queries.
 //!
-//! Source qualification is NOT enablement. Both this admission gate and the
-//! packaged spawn gate remain closed. No Windows edit backend is admitted.
+//! Installed configuration Save has its own fixed original-custody profile.
+//! General edit qualification stays closed; no Windows edit backend is admitted.
 use std::{collections::BTreeSet, future::{Future, pending}, path::PathBuf, pin::Pin, process::ExitStatus,
     sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use serde_json::{json, Value};
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, ChildStderr, ChildStdin, ChildStdout},
-    sync::{Mutex as AsyncMutex, Notify, mpsc, watch}, task::JoinHandle};
-#[cfg(all(unix, feature = "development-runtime", debug_assertions))]
+    sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot, watch}, task::JoinHandle};
+#[cfg(any(all(unix, feature = "development-runtime", debug_assertions),
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu", feature = "desktop-shell",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
 use {std::process::Stdio, tokio::process::Command};
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+use crate::installed_runtime::{CloseOutcome, ConfigurationRuntimeSlots};
 use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, ConfigEditStatus, CoreReason,
     EditAvailability, EditDomain, EditProjection, Effect, Journal, NativeEditReason as Reason, NativeFinality, Phase,
     PrepareConfigEdit, Prepared, ResourceState}, github_workflow_edit_protocol::{self as workflow_wire, PrepareWorkflowEdit, WorkflowEditStatus},
@@ -29,6 +33,9 @@ fn qualified(domain: EditDomain, configuration_fixture: bool) -> bool {
         EditDomain::GitHubWorkflows => NATIVE_WORKFLOW_EDIT_QUALIFIED,
         EditDomain::MetadataText => NATIVE_METADATA_TEXT_EDIT_QUALIFIED,
     }
+}
+fn configuration_installed_selected(domain: EditDomain, profile_available: bool) -> bool {
+    domain == EditDomain::Configuration && profile_available
 }
 fn capability_reason(domain: EditDomain, active: Option<EditDomain>, stopping: bool, disabled: bool,
     domain_qualified: bool, document_live: bool) -> EditAvailability {
@@ -188,6 +195,9 @@ struct Registry {
     generation: String, loss_generation: String, window: Option<String>, document_bound: bool, document_lost: bool,
     revision: u32, exhausted: bool, stopping: bool, disabled: bool,
     active: Option<ActiveOwner>, last: Option<EditProjection>, blocked_projects: BTreeSet<String>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    installed_final: Option<InstalledConfigFinality>,
 }
 struct ActiveOwner {
     session: Arc<Session>, projection: EditProjection, review_end: Instant, phase_end: Option<Instant>,
@@ -233,7 +243,20 @@ struct Session {
 struct Resources {
     inspection: Option<JoinHandle<Result<VerifiedRuntime, BridgeError>>>, inspection_joined: bool,
     acquisition: Option<JoinHandle<()>>, acquisition_joined: bool, child: Option<Child>,
+    inspection_started: bool, acquisition_started: bool,
     inspection_join_failed: bool, acquisition_join_failed: bool,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    configuration: Option<Arc<Mutex<ConfigurationRuntimeSlots>>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    configuration_settlement: Option<JoinHandle<CloseOutcome>>,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    configuration_settlement_started: bool,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    configuration_settlement_joined: bool,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    configuration_settlement_failed: bool,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    configuration_settlement_outcome: Option<CloseOutcome>,
     writer: Option<JoinHandle<WriteEnd>>, stdout: Option<JoinHandle<ReadEnd>>, stderr: Option<JoinHandle<ReadEnd>>,
     write_end: Option<WriteEnd>, out_end: Option<ReadEnd>, err_end: Option<ReadEnd>,
     write_join_failed: bool, out_join_failed: bool, err_join_failed: bool,
@@ -243,6 +266,61 @@ struct Resources {
 }
 struct WriteEnd { frames: usize, closed: bool, failed: bool }
 struct ReadEnd { frames: usize, bytes: usize, eof: bool, closed: bool, failed: bool }
+
+/// Read-only, bounded observation of THIS original Session's completed work.
+/// No handles, authority, additional history or replacement cleanup controller.
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[derive(Clone)]
+pub(crate) struct InstalledConfigFinality {
+    pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) owner_generation: String,
+    pub(crate) writer_frames: usize, pub(crate) stdout_frames: usize,
+    pub(crate) inspection_joined: bool, pub(crate) acquisition_joined: bool, pub(crate) child_waited_success: bool,
+    pub(crate) stdin_closed: bool, pub(crate) stdout_eof_closed: bool, pub(crate) stderr_eof_closed: bool,
+    pub(crate) io_joined: bool, pub(crate) driver_joined: bool, pub(crate) watchdog_joined: bool, pub(crate) manager_joined: bool,
+    pub(crate) runtime_ledger_settled: bool, pub(crate) runtime_settlement_joined: bool,
+}
+
+// Decision DATA from actual original slots/joins, never a replacement receipt.
+#[derive(Clone, Copy)]
+struct OriginalWorker { started: bool, joined: bool, failed: bool, handle: bool }
+impl OriginalWorker {
+    fn returned(self) -> bool {
+        matches!((self.started, self.joined, self.failed, self.handle),
+            (false, false, false, false) | (true, true, false, false) | (true, false, true, true))
+    }
+    fn positive(self) -> bool { self.returned() && !self.failed }
+}
+fn startup_workers(book: &Resources) -> (OriginalWorker, OriginalWorker) {
+    (OriginalWorker { started: book.inspection_started, joined: book.inspection_joined,
+        failed: book.inspection_join_failed, handle: book.inspection.is_some() },
+     OriginalWorker { started: book.acquisition_started, joined: book.acquisition_joined,
+        failed: book.acquisition_join_failed, handle: book.acquisition.is_some() })
+}
+fn consumer_returned(handle: bool, result: bool, failed: bool) -> bool {
+    matches!((handle, result, failed), (false, true, false) | (true, false, true))
+}
+fn no_child_before_claim(startup: &Startup, child_present: bool, unclaimed: bool) -> bool {
+    unclaimed && !startup.attempted && !startup.returned && !startup.failed && startup.child.is_none() && !child_present
+}
+fn configuration_completion_clear(settlement: OriginalWorker, closed: bool, same_ledger_settled: bool) -> bool {
+    settlement.started && settlement.positive() && closed && same_ledger_settled
+}
+fn configuration_settlement_pending(settlement: OriginalWorker) -> bool {
+    settlement.started && !settlement.joined && !settlement.failed
+}
+
+#[derive(Clone, Copy)]
+struct ConfigurationClaim {
+    selected: bool, same_original: bool, same_identity: bool, document_live: bool,
+    opening: bool, stopping: bool, disabled: bool, stopped: bool, end: Option<Instant>,
+}
+impl ConfigurationClaim {
+    fn clear(self, now: Instant) -> bool {
+        self.selected && self.same_original && self.same_identity && self.document_live && self.opening
+            && !self.stopping && !self.disabled && !self.stopped && self.end.is_some_and(|end| now < end)
+    }
+}
 
 fn nonce() -> Result<String, BridgeError> {
     let mut bytes = [0u8; 16];
@@ -257,8 +335,10 @@ fn invalid_owner() -> BridgeError { BridgeError::new("invalid_edit_owner", "This
 
 impl Inner {
     fn hosted_qualified(&self, domain: EditDomain) -> bool {
-        // No production/environment bypass. Only the ignored hosted fixture's
-        // descendant module can set this private, per-owner test authorization.
+        // Same sealed selector for configuration availability and admission.
+        // Neither a global flag nor a passive candidate authorizes this branch.
+        if configuration_installed_selected(domain, self.runtime.configuration_edit_profile_available()) { return true; }
+        // Separately gated, existing per-owner development-fixture permissions.
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if domain == EditDomain::GitHubWorkflows
             && self.fixture_workflow.lock().is_ok_and(|permit| permit.as_ref().is_some_and(|permit| permit.owns(self))) { return true; }
@@ -372,6 +452,21 @@ impl Inner {
         if a.cleanup_start.is_some() { return None; }
         phase_deadline(a.review_end, a.phase_end, a.projection.apply_submitted)
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn configuration_claim_clear(&self, r: &Registry, owner: &Arc<Session>, now: Instant) -> bool {
+        let Some(a) = r.active.as_ref() else { return false; };
+        ConfigurationClaim {
+            selected: configuration_installed_selected(owner.domain, self.runtime.configuration_edit_profile_available()),
+            same_original: Arc::ptr_eq(&a.session, owner),
+            same_identity: a.projection.domain == EditDomain::Configuration && a.projection.session_id == owner.id
+                && a.projection.owner_generation == r.generation,
+            document_live: r.window.is_some() && r.document_bound && !r.document_lost,
+            opening: a.projection.phase == Phase::Opening && !a.opened && !a.prepared && !a.terminal && !a.unknown
+                && a.claimed_seq == 0 && !a.projection.apply_submitted && a.cleanup_start.is_none(),
+            stopping: r.stopping, disabled: r.disabled || r.exhausted || self.poisoned.load(Ordering::SeqCst),
+            stopped: *owner.stop.borrow(), end: phase_deadline(a.review_end, a.phase_end, a.projection.apply_submitted),
+        }.clear(now)
+    }
     fn expire_locked(&self, r: &mut Registry, id: &str, now: Instant) {
         let expired = r.active.as_ref().filter(|a| a.session.id == id && a.cleanup_start.is_none()).and_then(|a| {
             expired_phase(a.review_end, a.phase_end, a.projection.apply_submitted, now)
@@ -422,10 +517,25 @@ impl EditOwner {
             #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
             fixture_next_schedule: Mutex::new(None),
             registry: Mutex::new(Registry { generation, loss_generation, window: None, document_bound: false, document_lost: false,
-                revision: 0, exhausted: false, stopping: false, disabled, active: None, last: None, blocked_projects: BTreeSet::new() }) }) }
+                revision: 0, exhausted: false, stopping: false, disabled, active: None, last: None, blocked_projects: BTreeSet::new(),
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+                    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                installed_final: None,
+            }) }) }
     }
     pub fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
     pub fn status(&self) -> Result<ConfigEditStatus, BridgeError> { self.inner.snapshot(&self.inner.lock()) }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn installed_observation_final(&self, session_id: &str) -> Option<InstalledConfigFinality> {
+        let r = self.inner.lock();
+        let last = r.last.as_ref()?;
+        let facts = r.installed_final.as_ref()?;
+        (last.domain == EditDomain::Configuration && last.session_id == session_id && facts.session_id == session_id
+            && facts.project_id == last.project_id && facts.owner_generation == last.owner_generation
+            && last.phase == Phase::Final && last.native_finality == NativeFinality::Settled && !last.late_settled)
+            .then(|| facts.clone())
+    }
     pub(crate) fn workflow_status(&self) -> Result<WorkflowEditStatus, BridgeError> { self.inner.workflow_snapshot(&self.inner.lock()) }
     pub(crate) fn metadata_text_status(&self) -> Result<MetadataTextEditStatus, BridgeError> { self.inner.metadata_text_snapshot(&self.inner.lock()) }
     pub fn stopping(&self) -> bool { self.inner.lock().stopping }
@@ -576,7 +686,13 @@ impl EditOwner {
             fixture_watchdog_loss: AtomicBool::new(false),
             #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
             fixture_schedule: self.inner.fixture_next_schedule.lock().map_err(|_| edit_unknown())?.take().unwrap_or_default(),
-            startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(frame_rx), ..Resources::default() }),
+            startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(frame_rx),
+                // Pure allocation BEFORE this Session is admitted or any
+                // original worker is registered/released. No passive custody.
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                configuration: configuration_installed_selected(domain, self.inner.runtime.configuration_edit_profile_available())
+                    .then(|| Arc::new(Mutex::new(ConfigurationRuntimeSlots::new()))),
+                ..Resources::default() }),
             input: Arc::new(AsyncMutex::new(Pipe::default())), output: Arc::new(AsyncMutex::new(Pipe::default())),
             error: Arc::new(AsyncMutex::new(Pipe::default())), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None),
             manager: AsyncMutex::new(None), observer: AsyncMutex::new(None) });
@@ -1218,6 +1334,102 @@ async fn watchdog(inner: Arc<Inner>, owner: Arc<Session>) {
     }
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn configuration_worker_lost(book: &Resources) {
+    // ONLY after this original worker returned JoinError. A watchdog endpoint
+    // never borrows/closes the ledger out from under inspection/acquisition.
+    if let Some(native) = &book.configuration {
+        match native.lock() {
+            Ok(mut slots) => slots.mark_interrupted(),
+            Err(error) => error.into_inner().mark_interrupted(),
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn transfer_configuration(book: &Resources, inner: &Inner, owner: &Arc<Session>) -> Result<(), BridgeError> {
+    let (inspection, acquisition) = startup_workers(book);
+    if !inspection.started || !inspection.positive() || acquisition.started || !acquisition.positive() {
+        return Err(edit_unknown());
+    }
+    let native = book.configuration.as_ref().ok_or_else(edit_unknown)?;
+    let mut slots = native.try_lock().map_err(|_| edit_unknown())?;
+    let mut r = inner.lock();
+    let now = Instant::now();
+    inner.expire_locked(&mut r, &owner.id, now);
+    if !inner.configuration_claim_clear(&r, owner, now) { return Err(invalid_owner()); }
+    // Exact active Arc, document generation and STOP/deadline share the SAME
+    // registry race as this whole-ledger move. No native work or allocation.
+    slots.transfer_once().map_err(|_| edit_unknown())
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+fn acquire_configuration_installed(inner: &Inner, owner: &Arc<Session>, native: &Arc<Mutex<ConfigurationRuntimeSlots>>, end: Instant) {
+    if !configuration_installed_selected(owner.domain, inner.runtime.configuration_edit_profile_available()) {
+        inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
+        return;
+    }
+    #[cfg(not(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"))))]
+    {
+        let _ = (native, end);
+        inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
+        return; // No feature-off/development/publisher path even prepares or claims.
+    }
+    #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher")))]
+    {
+        let mut slots = match native.lock() {
+            Ok(slots) => slots,
+            Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
+        };
+        let runtime = match slots.capability() {
+            Ok(runtime) => runtime,
+            Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
+        };
+        let stop = owner.stop.subscribe();
+        let selected = match runtime.prepare_once(end, &stop) {
+            Ok(selected) => selected,
+            Err(_) => { inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now()); return; },
+        };
+        // Fixed config bootstrap/default domain only; no caller arguments,
+        // environment or cwd. Complete ALL native work and allocations first.
+        let mut command = Command::new(&selected.python);
+        command.args(["-I", "-S", "-B"]).arg(&selected.bootstrap).arg(&selected.core)
+            .current_dir(&selected.cwd).env_clear().env("LC_ALL", "C").env("LANG", "C")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
+        let mut startup = match owner.startup.lock() {
+            Ok(startup) => startup,
+            Err(_) => { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; },
+        };
+        if startup.attempted || startup.returned || startup.failed || startup.child.is_some() {
+            owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+        }
+        let mut r = inner.lock();
+        let now = Instant::now();
+        inner.expire_locked(&mut r, &owner.id, now);
+        if !inner.configuration_claim_clear(&r, owner, now) {
+            drop(r);
+            inner.trigger(&owner.id, Reason::Cancelled, Instant::now());
+            return;
+        }
+        if runtime.claim_once().is_err() {
+            drop(r);
+            owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+        }
+        startup.attempted = true;
+        drop(r);
+        match command.spawn() { // No intervening callback, await or IO after the consumed claim.
+            Ok(child) => { startup.child = Some(child); startup.returned = true; },
+            Err(_) => {
+                startup.failed = true; // Opaque creation error is NEVER no-child/close evidence.
+                owner.resource_unknown.store(true, Ordering::SeqCst);
+                drop(startup);
+                inner.trigger(&owner.id, Reason::SpawnFailed, Instant::now());
+                inner.unknown(&owner.id);
+            },
+        }
+    }
+}
+
 fn spawn_original(runtime: VerifiedRuntime, inner: &Inner, owner: &Session) {
     let workflow_allowed = NATIVE_WORKFLOW_EDIT_QUALIFIED;
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1341,14 +1553,35 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     }
     let endpoint = match endpoint { Some(end) => end, None => return };
     let runtime = inner.runtime.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let configuration = {
+        let selected = configuration_installed_selected(owner.domain, runtime.configuration_edit_profile_available());
+        if selected != book.configuration.is_some() {
+            owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+        }
+        book.configuration.clone()
+    };
+    let stop = owner.stop.subscribe();
     #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
     let schedule = owner.fixture_schedule.clone();
+    let (release, enter) = oneshot::channel();
+    book.inspection_started = true;
     book.inspection = Some(tokio::task::spawn_blocking(move || {
-        let result = runtime.resolve_edit(endpoint);
+        if enter.blocking_recv().is_err() { return Err(edit_unknown()); }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        let result = if let Some(native) = configuration {
+            match native.lock() {
+                Ok(mut originals) => runtime.resolve_configuration_installed(&mut originals, endpoint, &stop),
+                Err(_) => Err(edit_unknown()),
+            }
+        } else { runtime.resolve_edit(endpoint) };
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        let result = { let _ = stop; runtime.resolve_edit(endpoint) };
         #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
         schedule.inspected(result.is_ok());
         result
     }));
+    let _ = release.send(()); // Original handle is registered BEFORE the first inspection effect.
     let inspected = join_with_clock(&mut book.inspection, inner, owner).await;
     let runtime = match inspected {
         Ok(result) => {
@@ -1357,7 +1590,12 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
             inner.expire(&owner.id, Instant::now());
             match result { Ok(runtime) => runtime, Err(_) => { inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now()); return; } }
         }
-        Err(_) => { book.inspection_join_failed = true; owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return; }
+        Err(_) => {
+            book.inspection_join_failed = true;
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            configuration_worker_lost(&book);
+            owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+        }
     };
     let now = Instant::now();
     inner.expire(&owner.id, now);
@@ -1372,12 +1610,128 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
     // The caller supplies the original registry Arc; there is only this one
     // acquisition site. Survivors never call start_original or resolve/spawn.
     let startup_inner = inner.clone();
-    book.acquisition = Some(tokio::task::spawn_blocking(move || spawn_original(runtime, &startup_inner, &startup_owner)));
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let configuration = book.configuration.clone();
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    if configuration.is_some() && transfer_configuration(&book, inner, owner).is_err() {
+        inner.trigger(&owner.id, Reason::RuntimeUnavailable, Instant::now());
+        return;
+    }
+    let (release, enter) = oneshot::channel();
+    book.acquisition_started = true;
+    book.acquisition = Some(tokio::task::spawn_blocking(move || {
+        if enter.blocking_recv().is_err() { return; }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if let Some(native) = configuration {
+            // The worker's inspection return is DATA only. The original slots,
+            // not these paths, supply the separately prepared one-use claim.
+            drop(runtime);
+            acquire_configuration_installed(&startup_inner, &startup_owner, &native, endpoint);
+            return;
+        }
+        spawn_original(runtime, &startup_inner, &startup_owner)
+    }));
+    let _ = release.send(()); // Register original acquisition before preparation/creation.
 }
 
 async fn drive(inner: Arc<Inner>, owner: Arc<Session>) {
     start_original(&inner, &owner).await;
     continue_original(inner, owner, true).await;
+}
+
+fn configuration_settled(book: &Resources, inner: &Inner, owner: &Session) -> bool {
+    let selected = configuration_installed_selected(owner.domain, inner.runtime.configuration_edit_profile_available());
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { let _ = book; !selected }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        if !selected {
+            return book.configuration.is_none() && !book.configuration_settlement_started
+                && book.configuration_settlement.is_none();
+        }
+        configuration_completion_clear(OriginalWorker {
+            started: book.configuration_settlement_started, joined: book.configuration_settlement_joined,
+            failed: book.configuration_settlement_failed, handle: book.configuration_settlement.is_some(),
+        }, book.configuration_settlement_outcome == Some(CloseOutcome::Settled),
+            book.configuration.as_ref().is_some_and(|native| native.try_lock().is_ok_and(|slots| slots.settled())))
+    }
+}
+
+async fn settle_configuration_originals(book: &mut Resources, inner: &Inner, owner: &Arc<Session>) {
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    { let _ = (book, inner, owner); }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    {
+        let selected = configuration_installed_selected(owner.domain, inner.runtime.configuration_edit_profile_available());
+        let Some(native) = book.configuration.clone() else {
+            if selected { owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); }
+            return;
+        };
+        if !book.configuration_settlement_started {
+            let (inspection, acquisition) = startup_workers(book);
+            let consumers_returned = || {
+                let slots = match native.try_lock() {
+                    Ok(slots) => slots,
+                    Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return false,
+                };
+                let startup = match owner.startup.try_lock() {
+                    Ok(startup) => startup,
+                    Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => return false,
+                };
+                let io_returned = consumer_returned(book.writer.is_some(), book.write_end.is_some(), book.write_join_failed)
+                    && consumer_returned(book.stdout.is_some(), book.out_end.is_some(), book.out_join_failed)
+                    && consumer_returned(book.stderr.is_some(), book.err_end.is_some(), book.err_join_failed);
+                io_returned && startup.child.is_none() && if book.child.is_some() {
+                    book.waited.is_some() && !book.wait_failed
+                } else {
+                    no_child_before_claim(&startup, false, slots.no_child_effect())
+                }
+            };
+            if !selected || !inspection.returned() || !acquisition.returned() || !consumers_returned() {
+                // In particular, a missing Child after an opaque spawn error is
+                // NOT no-child proof. Retain custody/Unknown, never close underneath
+                // an unreturned borrower/consumer or create a replacement cleanup.
+                owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+            }
+            let closing = native.clone();
+            let (release, enter) = oneshot::channel();
+            book.configuration_settlement_started = true;
+            book.configuration_settlement = Some(tokio::task::spawn_blocking(move || {
+                if enter.blocking_recv().is_err() { return CloseOutcome::Unknown; }
+                match closing.lock() {
+                    Ok(mut slots) => slots.settle_originals(),
+                    Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots.settle_originals() },
+                }
+            }));
+            let _ = release.send(()); // Original consuming close worker registered before ANY close.
+        }
+        // A surviving original continuation may arrive while this SAME closer
+        // still holds the native mutex. Never reinspect its borrowed ledger or
+        // demand try_lock success: join its registered handle directly.
+        if configuration_settlement_pending(OriginalWorker {
+            started: book.configuration_settlement_started, joined: book.configuration_settlement_joined,
+            failed: book.configuration_settlement_failed, handle: book.configuration_settlement.is_some(),
+        }) {
+            if book.configuration_settlement.is_none() {
+                owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); return;
+            }
+            match join_with_clock(&mut book.configuration_settlement, inner, owner).await {
+                Ok(outcome) => {
+                    book.configuration_settlement_joined = true;
+                    book.configuration_settlement_outcome = Some(outcome);
+                    book.configuration_settlement.take();
+                },
+                Err(_) => {
+                    book.configuration_settlement_failed = true; // Retain the failed handle; never repoll/retry.
+                    configuration_worker_lost(book);
+                    owner.resource_unknown.store(true, Ordering::SeqCst);
+                },
+            }
+        }
+        if !configuration_settled(book, inner, owner) { inner.unknown(&owner.id); }
+    }
 }
 
 async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_driver: bool) {
@@ -1388,7 +1742,12 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
     if book.inspection.is_some() && !book.inspection_joined && !book.inspection_join_failed {
         match join_with_clock(&mut book.inspection, &inner, &owner).await {
             Ok(_) => { book.inspection_joined = true; book.inspection.take(); },
-            Err(_) => { book.inspection_join_failed = true; owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id); },
+            Err(_) => {
+                book.inspection_join_failed = true;
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                configuration_worker_lost(&book);
+                owner.resource_unknown.store(true, Ordering::SeqCst); inner.unknown(&owner.id);
+            },
         }
         // Even a late verified runtime is only data here: never spawn from it.
     }
@@ -1397,6 +1756,8 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
             Ok(()) => { book.acquisition_joined = true; book.acquisition.take(); },
             Err(_) => {
                 book.acquisition_join_failed = true;
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                configuration_worker_lost(&book);
                 owner.resource_unknown.store(true, Ordering::SeqCst);
                 inner.unknown(&owner.id);
             },
@@ -1523,6 +1884,10 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
         // endpoint continue; no sibling abort or replacement owner is created.
     }
     if child_expected { require_terminal(&inner, &owner); }
+    // Retain installed originals throughout Open/Prepare/Review/Apply and all
+    // actual child wait/IO consumers. The existing driver/continuation joins the
+    // one registered settlement; elapsed time never starts independent closes.
+    settle_configuration_originals(&mut book, &inner, &owner).await;
 }
 
 struct ManagerGuard { inner: Arc<Inner>, owner: Arc<Session>, completed: bool }
@@ -1655,6 +2020,9 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         pending::<()>().await;
         return;
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+        not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    let mut installed_observed = None;
     let settled = {
         let mut book = owner.resources.lock().await;
         book.manager_joined = true;
@@ -1662,8 +2030,8 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             Ok(startup) => startup,
             Err(error) => { owner.resource_unknown.store(true, Ordering::SeqCst); error.into_inner() }
         };
-        let startup_settled = book.inspection.is_none() && book.acquisition.is_none()
-            && !book.inspection_join_failed && !book.acquisition_join_failed && !startup.failed
+        let (inspection, acquisition) = startup_workers(&book);
+        let startup_settled = inspection.positive() && acquisition.positive() && !startup.failed
             && (!startup.attempted || startup.returned && book.acquisition_joined);
         let io_joined = book.writer.is_none() && book.stdout.is_none() && book.stderr.is_none()
             && !book.write_join_failed && !book.out_join_failed && !book.err_join_failed
@@ -1674,9 +2042,28 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                 && book.out_end.as_ref().is_some_and(|end| end.eof && end.closed)
                 && book.err_end.as_ref().is_some_and(|end| end.eof && end.closed)
         } else { book.child.is_none() && startup.child.is_none() };
-        startup_settled && io_joined && child_settled && book.driver_joined && book.watchdog_joined
+        let runtime_settled = configuration_settled(&book, &inner, &owner);
+        let settled = startup_settled && io_joined && child_settled && runtime_settled && book.driver_joined && book.watchdog_joined
             && !owner.driver_join_failed.load(Ordering::SeqCst) && !owner.watchdog_join_failed.load(Ordering::SeqCst)
-            && !owner.resource_unknown.load(Ordering::SeqCst)
+            && !owner.resource_unknown.load(Ordering::SeqCst);
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if settled && configuration_installed_selected(owner.domain, inner.runtime.configuration_edit_profile_available()) && startup.returned {
+            if let (Some(write), Some(out), Some(err)) = (&book.write_end, &book.out_end, &book.err_end) {
+                if !write.failed && !out.failed && !err.failed && err.bytes == 0 {
+                    installed_observed = Some(InstalledConfigFinality {
+                        session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
+                        writer_frames: write.frames, stdout_frames: out.frames,
+                        inspection_joined: book.inspection_joined, acquisition_joined: book.acquisition_joined,
+                        child_waited_success: book.waited.as_ref().is_some_and(ExitStatus::success) && !book.wait_failed,
+                        stdin_closed: write.closed, stdout_eof_closed: out.eof && out.closed, stderr_eof_closed: err.eof && err.closed,
+                        io_joined, driver_joined: book.driver_joined, watchdog_joined: book.watchdog_joined, manager_joined: book.manager_joined,
+                        runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.configuration_settlement_joined,
+                    });
+                }
+            }
+        }
+        settled
     };
     if !settled {
         inner.unknown(&owner.id);
@@ -1685,11 +2072,11 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         return;
     }
     let mut r = inner.lock();
-    let Some(a) = r.active.as_ref().filter(|a| a.session.id == owner.id) else { guard.completed = true; return; };
+    let Some(a) = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.session, &owner)) else { guard.completed = true; return; };
     let expired = a.cleanup_start.is_some_and(|start| Instant::now() >= start + FINALIZATION);
     if expired && !a.unknown { drop(r); inner.unknown(&owner.id); r = inner.lock(); }
     if let Some(mut a) = r.active.take() {
-        if a.session.id != owner.id { r.active = Some(a); guard.completed = true; return; }
+        if !Arc::ptr_eq(&a.session, &owner) { r.active = Some(a); guard.completed = true; return; }
         if a.projection.core_outcome.as_ref().is_some_and(|core| core.journal == Journal::RecoveryRequired) {
             // IDs only, bounded by the native 64-project picker registry. No
             // retained private history or guessed recovery controller.
@@ -1704,6 +2091,20 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             a.projection.phase = Phase::Final;
             a.projection.native_finality = NativeFinality::Settled;
         }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
+            not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            // Freeze the actual original resource facts at the SAME atomic
+            // retirement as the correlated projection; never derive them from
+            // a renderer DTO or infer ledger joins from child/process absence.
+            r.installed_final = if !a.unknown {
+                installed_observed.map(|mut facts| {
+                    facts.project_id = a.projection.project_id.clone();
+                    facts.owner_generation = a.projection.owner_generation.clone();
+                    facts
+                })
+            } else { None };
+        }
         r.last = Some(a.projection); // Atomic active -> one terminal projection.
         inner.bump(&mut r);
     }
@@ -1713,6 +2114,105 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
 #[cfg(all(test, feature = "development-runtime"))]
 #[path = "edit_hosted_tests.rs"]
 mod hosted_tests;
+
+// The installed-shell target has harness=false: its explicit, reviewed main
+// must invoke this contract rather than count merely compiled #[test] bodies.
+#[cfg(test)]
+pub(crate) fn assert_installed_configuration_owner_contract() {
+    installed_configuration_data_tests::contract();
+}
+
+#[cfg(test)]
+mod installed_configuration_data_tests {
+    use super::*;
+
+    pub(super) fn contract() {
+        installed_configuration_selection_never_opens_other_edit_domains_or_global_flags();
+        installed_configuration_claim_refuses_stop_late_inspection_loss_quit_and_wrong_original();
+        only_actual_returned_original_borrowers_permit_settlement_and_loss_never_qualifies();
+        no_child_after_an_attempt_or_consumed_claim_is_never_inferred_from_an_empty_slot();
+        installed_finality_requires_the_original_settlement_join_and_same_ledger_close();
+    }
+    #[test]
+    fn installed_configuration_owner_contract_is_inert() { assert_installed_configuration_owner_contract(); }
+
+    fn installed_configuration_selection_never_opens_other_edit_domains_or_global_flags() {
+        assert!(!NATIVE_EDIT_QUALIFIED && !NATIVE_WORKFLOW_EDIT_QUALIFIED && !NATIVE_METADATA_TEXT_EDIT_QUALIFIED);
+        for domain in [EditDomain::Configuration, EditDomain::GitHubWorkflows, EditDomain::MetadataText] {
+            for available in [false, true] {
+                assert_eq!(configuration_installed_selected(domain, available), domain == EditDomain::Configuration && available);
+            }
+            assert!(!qualified(domain, false));
+            assert_eq!(qualified(domain, true), domain == EditDomain::Configuration);
+        }
+        let session = "00000000000000000000000000000001";
+        assert!(request_bytes(EditDomain::Configuration, session, 0, "open", json!({"root":"/inert/project"})).is_ok());
+        assert!(request_bytes(EditDomain::Configuration, session, 0, "open",
+            json!({"root":"/inert/project","registeredIdentity":{"device":1,"inode":2}})).is_err());
+    }
+
+    fn installed_configuration_claim_refuses_stop_late_inspection_loss_quit_and_wrong_original() {
+        // Pure facts fed to the production predicate. No registry/session,
+        // native task, selector or executable capability is fabricated.
+        let now = Instant::now();
+        let ready = ConfigurationClaim { selected: true, same_original: true, same_identity: true, document_live: true,
+            opening: true, stopping: false, disabled: false, stopped: false, end: Some(now + ACTIVE) };
+        assert!(ready.clear(now));
+        for closed in [ConfigurationClaim { selected: false, ..ready }, ConfigurationClaim { same_original: false, ..ready },
+            ConfigurationClaim { same_identity: false, ..ready }, ConfigurationClaim { document_live: false, ..ready },
+            ConfigurationClaim { opening: false, ..ready }, ConfigurationClaim { stopping: true, ..ready },
+            ConfigurationClaim { disabled: true, ..ready }, ConfigurationClaim { stopped: true, ..ready },
+            ConfigurationClaim { end: None, ..ready }, ConfigurationClaim { end: Some(now), ..ready }] {
+            assert!(!closed.clear(now));
+            assert!(!closed.clear(now + ACTIVE)); // Late DATA cannot renew or reverse admission.
+        }
+        assert!(!ready.clear(now + ACTIVE));
+    }
+
+    fn only_actual_returned_original_borrowers_permit_settlement_and_loss_never_qualifies() {
+        for started in [false, true] { for joined in [false, true] { for failed in [false, true] { for handle in [false, true] {
+            let worker = OriginalWorker { started, joined, failed, handle };
+            let absent = !started && !joined && !failed && !handle;
+            let returned = started && joined && !failed && !handle;
+            let lost = started && !joined && failed && handle;
+            assert_eq!(worker.returned(), absent || returned || lost);
+            assert_eq!(worker.positive(), absent || returned);
+        } } } }
+        for handle in [false, true] { for result in [false, true] { for failed in [false, true] {
+            assert_eq!(consumer_returned(handle, result, failed), (!handle && result && !failed) || (handle && !result && failed));
+        } } }
+        assert!(!consumer_returned(false, false, false)); // Absence is not an IO join/EOF/close receipt.
+    }
+
+    fn no_child_after_an_attempt_or_consumed_claim_is_never_inferred_from_an_empty_slot() {
+        let startup = Startup::default(); // ZERO child/native acquisition in this inert check.
+        assert!(no_child_before_claim(&startup, false, true));
+        assert!(!no_child_before_claim(&startup, true, true));
+        assert!(!no_child_before_claim(&startup, false, false));
+        for state in [Startup { attempted: true, ..Startup::default() }, Startup { returned: true, ..Startup::default() },
+            Startup { failed: true, ..Startup::default() }] {
+            assert!(!no_child_before_claim(&state, false, true));
+        }
+    }
+
+    fn installed_finality_requires_the_original_settlement_join_and_same_ledger_close() {
+        for started in [false, true] { for joined in [false, true] { for failed in [false, true] { for handle in [false, true] {
+            let worker = OriginalWorker { started, joined, failed, handle };
+            assert_eq!(configuration_settlement_pending(worker), started && !joined && !failed);
+            for closed in [false, true] { for ledger in [false, true] {
+                assert_eq!(configuration_completion_clear(worker, closed, ledger),
+                    started && joined && !failed && !handle && closed && ledger);
+            } }
+        } } } }
+        // Management loss cannot discard a pending original settlement join.
+        // Even with the ledger borrowed by its closer, continuation chooses the
+        // retained handle, not a new native borrow/close or positive finality.
+        let pending = OriginalWorker { started: true, joined: false, failed: false, handle: true };
+        assert!(configuration_settlement_pending(pending));
+        assert!(!configuration_completion_clear(pending, true, true));
+        assert!(!configuration_settlement_pending(OriginalWorker { failed: true, ..pending }));
+    }
+}
 
 #[cfg(test)]
 mod clock_tests {
