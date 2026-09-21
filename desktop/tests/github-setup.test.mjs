@@ -3,6 +3,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import resource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
+import credentialGuide from '../../src/mobile_release/api/data/credential-guide-v1.json' with { type: 'json' };
+import connectionGuide from '../../src/mobile_release/api/data/github-connection-v1.json' with { type: 'json' };
+import metadataGuide from '../../src/mobile_release/api/data/metadata-text-help-v1.json' with { type: 'json' };
 import { createNativeApi } from '../src/bridge.ts';
 import { GitHubSetupController, githubSetupStartReason, githubSnapshotFromInputs } from '../src/githubSetupController.ts';
 import { GITHUB_WORKFLOWS, githubSetupError, githubSetupRequestFits, githubSetupResultMatches, parseCatalogGitHubSetup, parseGitHubSetupHelp, parseGitHubSetupResult } from '../src/githubSetupProtocol.ts';
@@ -76,7 +79,12 @@ function invalid(snapshotProvided = false) {
 }
 
 function catalog() {
-  return { schemaVersion: 1, schema: {}, fields: [], credentials: [], metadata: null, githubSetup: structuredClone(resource.help), assurance: { ...assurance } };
+  // Match the current core's complete top-level wire shape, not the older
+  // seven-key fixture. Guide bodies are the actual bundled public resources;
+  // unrelated catalogue values remain inert, not a core-execution claim.
+  return { schemaVersion: 1, schema: {}, fields: [], credentials: [], credentialGuide: structuredClone(credentialGuide),
+    githubSetup: structuredClone(resource.help), githubConnection: structuredClone(connectionGuide), metadataText: structuredClone(metadataGuide),
+    metadata: null, assurance: { ...assurance } };
 }
 
 function deferred() {
@@ -394,6 +402,31 @@ test('core help is available before draft/pin validation and has exact input/gui
   assert.equal(parseCatalogGitHubSetup(missing), null);
 });
 
+test('catalog envelope preserves exact admission for all known additive guide combinations', () => {
+  const guides = ['credentialGuide', 'githubConnection', 'metadataText'];
+  for (let mask = 0; mask < 8; mask += 1) {
+    const input = catalog();
+    guides.forEach((key, index) => { if (!(mask & (1 << index))) delete input[key]; });
+    assert.deepEqual(parseCatalogGitHubSetup(input), resource.help);
+    // Unavailable optional help must not hide valid mandatory Setup help.
+    for (const key of guides) if (Object.hasOwn(input, key)) input[key] = null;
+    assert.deepEqual(parseCatalogGitHubSetup(input), resource.help);
+  }
+  for (const key of ['schemaVersion', 'schema', 'fields', 'credentials', 'metadata', 'githubSetup', 'assurance']) {
+    const input = catalog(); delete input[key];
+    assert.equal(parseCatalogGitHubSetup(input), null, key);
+  }
+  assert.equal(parseCatalogGitHubSetup({ ...catalog(), schemaVersion: 2 }), null);
+  assert.equal(parseCatalogGitHubSetup({ ...catalog(), futureGuide: null }), null);
+  const hidden = catalog(); Object.defineProperty(hidden, 'metadataText', { enumerable: false });
+  assert.equal(parseCatalogGitHubSetup(hidden), null);
+  let reads = 0;
+  const accessor = catalog();
+  Object.defineProperty(accessor, 'metadataText', { enumerable: true, get() { reads += 1; return metadataGuide; } });
+  assert.equal(parseCatalogGitHubSetup(accessor), null);
+  assert.equal(reads, 0);
+});
+
 test('help uses UTF-8 byte limits and plain text without ASCII controls or lone surrogates', () => {
   for (const [key, max] of [['label', 96], ['what', 1024], ['why', 1024], ['where', 1024], ['format', 1024], ['failure', 1024]]) {
     const help = structuredClone(resource.help); help.inputs[0][key] = '🌱'.repeat(max / 4);
@@ -431,6 +464,29 @@ test('native bridge sends only the fixed command/arguments and validates catalog
   assert.equal('applyGitHubSetup' in native, false);
   assert.equal('authenticateGitHub' in native, false);
   assert.equal('dispatchGitHub' in native, false);
+});
+
+test('native catalog keeps optional guide failures independent from GitHub setup', async () => {
+  const guides = ['credentialGuide', 'githubConnection', 'metadataText'];
+  let reply = catalog(); let calls = 0;
+  const native = createNativeApi('native', async (command, args) => {
+    assert.equal(command, 'catalog'); assert.equal(args, undefined); calls += 1;
+    return reply;
+  });
+  const current = await native.catalog();
+  assert.deepEqual(current.githubSetup, resource.help);
+  for (const key of guides) assert.deepEqual(current[key], reply[key]);
+  for (const unavailable of guides) {
+    for (const state of ['absent', 'null', 'malformed']) {
+      reply = catalog();
+      if (state === 'absent') delete reply[unavailable];
+      else reply[unavailable] = state === 'null' ? null : { ...reply[unavailable], schemaVersion: 2 };
+      const result = await native.catalog();
+      assert.deepEqual(result.githubSetup, resource.help);
+      for (const key of guides) assert.deepEqual(result[key], key === unavailable ? null : reply[key]);
+    }
+  }
+  assert.equal(calls, 10);
 });
 
 test('native response correlation is not rebound by caller or invocation argument mutation', async () => {
