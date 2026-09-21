@@ -2328,7 +2328,8 @@ def shell_native_inputs(check, work, environment):
         check.phase = "shell-native-provider:" + path
         elf = shell_elf_record(D.read(Path(row["path"]), MAX_BINARY), role="provider", selected=path)
         D.need(elf["soname"] == name and (elf["interpreter"] is None or name in {"ld-linux-x86-64.so.2", "libc.so.6"}),
-               "Shell provider SONAME/interpreter differs")
+               "Shell provider SONAME/interpreter differs: "
+               f"sonameMatches={elf['soname'] == name}, interpreterPresent={elf['interpreter'] is not None}")
         libraries[name] = {"file": shell_file_projection(row), "elf": elf, "package": owner(row)}
         edges(path, elf)
     loader = host("/lib64/ld-linux-x86-64.so.2")
