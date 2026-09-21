@@ -90,8 +90,8 @@ jobs:
                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
                    "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
                    "reusedRun": "35602474108/1", "reusedArtifactId": "10639324707",
-                   "scope": "engineering-compile-four-regressions-fixed-fixture-package-install-only", "fixedFixtureCases": 7,
-                   "selectedRegressionGroups": [2, 1, 1], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
+                   "scope": "engineering-compile-five-regressions-fixed-fixture-package-install-only", "fixedFixtureCases": 7,
+                   "selectedRegressionGroups": [2, 1, 2], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
                    "actualAquaSaveGate": "pending"}
           data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
           if len(data) > 65536: raise ValueError("source/tool binding size refused")
@@ -104,6 +104,24 @@ jobs:
               os.fsync(fd)
           finally: os.close(fd)
           PY
+      - name: Fail fast on the selected SDK public native API compile and link
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          [[ ! -e "$MRK_MACOS_WORK/native-api-link.dylib" && ! -L "$MRK_MACOS_WORK/native-api-link.dylib" ]]
+          set +e
+          /usr/bin/xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=26.0 -fno-objc-arc -fblocks \
+            -dynamiclib desktop/native/macos-installed-native/src/native.m -framework AppKit -framework Foundation \
+            -o "$MRK_MACOS_WORK/native-api-link.dylib" > "$MRK_MACOS_WORK/native-api-link.log" 2>&1
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/native-api-link.status"
+          [[ $status == 0 ]]
+          # Never load/execute this link-only output. It cannot qualify the app.
+          [[ -f "$MRK_MACOS_WORK/native-api-link.dylib" && ! -L "$MRK_MACOS_WORK/native-api-link.dylib" && -O "$MRK_MACOS_WORK/native-api-link.dylib" ]]
+          /bin/rm -- "$MRK_MACOS_WORK/native-api-link.dylib"
       - name: Download only the exact accepted M archive (no rebuild or fallback)
         timeout-minutes: 3
         shell: bash
@@ -177,7 +195,7 @@ jobs:
           # This second digest only binds the already-completed output of this
           # authorized build into its one-shot installer; it grants no runtime,
           # GUI, distribution, update or arbitrary adjacent-file authority.
-      - name: Run only the four reviewed nonroot regressions (exact groups 2, 1, 1)
+      - name: Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)
         timeout-minutes: 12
         shell: bash
         run: |
@@ -214,7 +232,8 @@ jobs:
           run_focused native-abi-regression cargo test --manifest-path desktop/src-tauri/Cargo.toml \
             --locked --release --no-default-features --target aarch64-apple-darwin \
             --package mrk-macos-installed-native --lib -- --exact --test-threads=1 --color=never --format=pretty \
-            tests::only_explicit_user_appkit_responses_can_be_accept_or_decline
+            tests::only_explicit_user_appkit_responses_can_be_accept_or_decline \
+            tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches
           "$MRK_PYTHON" -I -S -B - <<'PY'
           import hashlib, json, os, re, stat
           root = os.environ["MRK_MACOS_WORK"]
@@ -222,7 +241,8 @@ jobs:
               "dialog-regressions": ["shell::owned_macos::tests::native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal",
                                      "shell::owned_macos::tests::response_mapping_preserves_other_and_missing_facts_poison_dispatch"],
               "installer-finalizer-regression": ["installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error"],
-              "native-abi-regression": ["tests::only_explicit_user_appkit_responses_can_be_accept_or_decline"],
+              "native-abi-regression": ["tests::only_explicit_user_appkit_responses_can_be_accept_or_decline",
+                                        "tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches"],
           }
           def read(name, limit):
               fd = os.open(os.path.join(root, name), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -251,7 +271,7 @@ jobs:
                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
                    "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
                    "inventorySha256": os.environ["MRK_MACOS_INSTALL_INVENTORY_SHA256"], "groups": results,
-                   "scope": "four-selected-regressions-only-not-Installer-or-Aqua-qualification"}
+                   "scope": "five-selected-regressions-only-not-Installer-or-Aqua-qualification"}
           fd = os.open(os.path.join(root, "focused-regressions.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
           with os.fdopen(fd, "wb") as stream:
               stream.write(json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n")
@@ -356,6 +376,8 @@ jobs:
           name: desktop-macos-installed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.work.outputs.root }}/source-binding.json
+            ${{ steps.work.outputs.root }}/native-api-link.log
+            ${{ steps.work.outputs.root }}/native-api-link.status
             ${{ steps.work.outputs.root }}/runtime-result.json
             ${{ steps.work.outputs.root }}/app-result.json
             ${{ steps.work.outputs.root }}/input-result.json

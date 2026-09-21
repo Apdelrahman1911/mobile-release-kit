@@ -2,6 +2,8 @@
 #import <Foundation/Foundation.h>
 #include <Block.h>
 #include <sys/acl.h>
+#include <sys/attr.h>
+#include <sys/vnode.h>
 #include <sys/utsname.h>
 #include <sys/sysctl.h>
 #include <sys/xattr.h>
@@ -47,29 +49,68 @@ int mrk_no_xattrs(int fd) {
     ssize_t count = flistxattr(fd, NULL, 0, 0);
     return count < 0 ? (errno ? errno : EIO) : count == 0 ? 0 : EPERM;
 }
+// Public bulk attributes are four-byte packed, NOT a padded C struct.
+// The same pure decoder is exercised by the native crate's cfg(test) FFI.
+#define MRK_DIRECTORY_ATTRS (ATTR_CMN_NAME | ATTR_CMN_OBJTYPE | ATTR_CMN_FILEID | ATTR_CMN_RETURNED_ATTRS)
+_Static_assert(sizeof(attribute_set_t) == 20 && sizeof(attrreference_t) == 8
+               && sizeof(fsobj_type_t) == 4 && sizeof(uint64_t) == 8,
+               "fixed public Darwin bulk-attribute field widths required");
+int mrk_decode_directory_entries(const uint8_t *block, size_t bytes, int count,
+                                 uint8_t *out, size_t capacity, size_t *used) {
+    if (!used) return EINVAL;
+    *used = 0;
+    const size_t name_field = sizeof(uint32_t) + sizeof(attribute_set_t);
+    const size_t type_field = name_field + sizeof(attrreference_t);
+    const size_t inode_field = type_field + sizeof(fsobj_type_t);
+    const size_t fixed = inode_field + sizeof(uint64_t);
+    if (!block || !out || bytes > 65536 || capacity > 65536 || count < 0
+        || (size_t)count > bytes / fixed) return EINVAL;
+    size_t offset = 0, written = 0;
+    for (int n = 0; n < count; ++n) {
+        if (bytes - offset < sizeof(uint32_t)) return EIO;
+        uint32_t length; memcpy(&length, block + offset, sizeof(length));
+        if (length < fixed + 2 || length % 4 || length > bytes - offset) return EIO;
+        const uint8_t *entry = block + offset;
+        attribute_set_t actual; memcpy(&actual, entry + sizeof(uint32_t), sizeof(actual));
+        if (actual.commonattr != MRK_DIRECTORY_ATTRS || actual.volattr || actual.dirattr
+            || actual.fileattr || actual.forkattr) return EIO;
+        attrreference_t name; fsobj_type_t kind; uint64_t inode;
+        memcpy(&name, entry + name_field, sizeof(name));
+        memcpy(&kind, entry + type_field, sizeof(kind));
+        memcpy(&inode, entry + inode_field, sizeof(inode));
+        if (name.attr_dataoffset < (int32_t)(fixed - name_field)
+            || (uint32_t)name.attr_dataoffset > length - name_field
+            || name.attr_length < 2 || name.attr_length > 256 || !inode
+            || (kind != VREG && kind != VDIR)) return EIO;
+        // attr_dataoffset is relative to the name reference itself.
+        size_t name_at = name_field + (uint32_t)name.attr_dataoffset;
+        if (name.attr_length > length - name_at) return EIO;
+        uint16_t name_length = (uint16_t)(name.attr_length - 1);
+        const uint8_t *text = entry + name_at;
+        if (text[name_length] || memchr(text, 0, name_length) || memchr(text, '/', name_length)) return EIO;
+        if (capacity - written < 11 || name_length > capacity - written - 11) return EOVERFLOW;
+        memcpy(out + written, &inode, sizeof(inode));
+        out[written + 8] = kind == VDIR ? DT_DIR : DT_REG;
+        memcpy(out + written + 9, &name_length, sizeof(name_length));
+        memcpy(out + written + 11, text, name_length);
+        written += 11 + name_length;
+        offset += length;
+    }
+    // Unused native-buffer tail is not a record. Never publish partial success.
+    *used = written;
+    return 0;
+}
 int mrk_entries(int fd, uint8_t *out, size_t capacity, size_t *used) {
-    _Alignas(struct dirent) char block[65536]; long base = 0;
+    uint8_t block[65536] = {0};
     if (!out || !used || capacity != sizeof(block)) return EINVAL;
     *used = 0;
-    _Static_assert(sizeof(((struct dirent *)0)->d_ino) == sizeof(uint64_t), "fixed Darwin inode64 layout required");
-    int count = getdirentries(fd, block, sizeof(block), &base);
+    struct attrlist request = { .bitmapcount = ATTR_BIT_MAP_COUNT,
+                               .commonattr = MRK_DIRECTORY_ATTRS };
+    // Same original borrowed FD/cursor. No dup, DIR allocation, reopen,
+    // private inode symbol, ABI override, retry, rewind or extra close owner.
+    int count = getattrlistbulk(fd, &request, block, sizeof(block), 0);
     if (count < 0) return errno ? errno : EIO;
-    size_t offset = 0;
-    while (offset < (size_t)count) {
-        if ((size_t)count - offset < offsetof(struct dirent, d_name) + 1) return EIO;
-        struct dirent *entry = (struct dirent *)(block + offset);
-        size_t header = offsetof(struct dirent, d_name);
-        if (entry->d_reclen < header + 1 || entry->d_reclen > (size_t)count - offset
-            || entry->d_namlen == 0 || entry->d_namlen > 255 || header + entry->d_namlen >= entry->d_reclen
-            || entry->d_name[entry->d_namlen] || memchr(entry->d_name, 0, entry->d_namlen)) return EIO;
-        size_t next = *used + 11 + entry->d_namlen;
-        if (next > capacity) return EOVERFLOW;
-        uint64_t inode = entry->d_ino; uint16_t length = entry->d_namlen;
-        memcpy(out + *used, &inode, 8); out[*used + 8] = entry->d_type;
-        memcpy(out + *used + 9, &length, 2); memcpy(out + *used + 11, entry->d_name, length);
-        *used = next; offset += entry->d_reclen;
-    }
-    return 0;
+    return mrk_decode_directory_entries(block, sizeof(block), count, out, capacity, used);
 }
 int mrk_sync(int fd, int file) {
     if (fsync(fd)) return errno ? errno : EIO;

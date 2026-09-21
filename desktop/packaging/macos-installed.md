@@ -11,6 +11,23 @@ The four B1/C1/C2 regressions below still need their first hosted execution.
 Do not push the verification branch or use these commands before separate
 actual-source/command review; integration is not proof that this revision works.
 
+## 2026-09-21 supported-directory-API correction (native result pending)
+
+The first normal Mac compile failed because getdirentries64 was undeclared. Its
+reviewed successor compiled but the SDK deliberately rejected getdirentries at
+link with64-bit inodes. Neither run reached Installer or native regressions.
+The successor uses public getattrlistbulk on the same borrowed original FD and
+cursor, with a strict4-byte-packed returned-attribute decoder and unchanged
+full64-bit inode/type/name output. Missing/extra attributes, malformed batches
+and unsupported kinds refuse; no entry is skipped or partially accepted.
+No private declaration, inode ABI override, DIR/dup ownership or close is added.
+The same job first compiles/links the changed native shim using the selected
+CLT SDK, without loading it, so header/link errors fail before the full build.
+The sole task-owned link output is retired immediately after a successful check.
+A new same-C-decoder regression joins the existing native group, making the
+future selection **2+1+2 = five** (older four-test descriptions below are
+historical). This source does not establish SDK/link/native or installation success.
+
 ## Deliberately small product surface
 
 - macOS **26.x, ARM64**, normal `desktop-shell,custom-protocol`, no

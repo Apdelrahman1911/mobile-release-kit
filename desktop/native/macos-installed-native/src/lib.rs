@@ -19,6 +19,8 @@ unsafe extern "C" {
     fn mrk_panel_release(panel: *mut c_void) -> c_int;
     fn mrk_main_thread() -> c_int;
     #[cfg(test)]
+    fn mrk_decode_directory_entries(block: *const u8, bytes: usize, count: c_int, out: *mut u8, capacity: usize, used: *mut usize) -> c_int;
+    #[cfg(test)]
     fn mrk_panel_response(kind: c_int, code: i64, programmatic: c_int) -> c_int;
 }
 fn result(code: c_int) -> io::Result<()> { if code == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(code)) } }
@@ -137,6 +139,77 @@ impl Panel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches() {
+        // Literal public Darwin packed DATA: length, returned attributes,
+        // name reference, object type, full64-bit FILEID, name and padding.
+        // In particular FILEID starts at offset36, not a C-struct offset40.
+        fn record(kind: u32, inode: u64, name: &[u8]) -> Vec<u8> {
+            let length = (44 + name.len() + 1 + 3) & !3;
+            let mut bytes = vec![0; length];
+            bytes[0..4].copy_from_slice(&(length as u32).to_ne_bytes());
+            bytes[4..8].copy_from_slice(&0x8200_0009u32.to_ne_bytes());
+            bytes[24..28].copy_from_slice(&20i32.to_ne_bytes());
+            bytes[28..32].copy_from_slice(&((name.len() + 1) as u32).to_ne_bytes());
+            bytes[32..36].copy_from_slice(&kind.to_ne_bytes());
+            bytes[36..44].copy_from_slice(&inode.to_ne_bytes());
+            bytes[44..44 + name.len()].copy_from_slice(name);
+            bytes
+        }
+        fn decode(bytes: &[u8], count: i32, capacity: usize) -> (i32, usize, Vec<u8>) {
+            let mut output = vec![0u8; 65536];
+            let mut used = usize::MAX;
+            // SAFETY: live input/output allocations, capacities no larger
+            // than their actual allocations. This pure parser opens nothing.
+            let code = unsafe { mrk_decode_directory_entries(bytes.as_ptr(), bytes.len(), count,
+                output.as_mut_ptr(), capacity, &mut used) };
+            assert!(used <= output.len());
+            output.truncate(used);
+            (code, used, output)
+        }
+        let directory = record(2, 0x1_0000_0001, b"dir");
+        let file = record(1, 0x2_0000_0002, b"file");
+        assert_eq!(file.len(), 52); // Legal4-byte final short-fit, not mandatory8.
+        let mut block = [directory.clone(), file.clone()].concat();
+        let mut expected = Vec::new();
+        for (inode, kind, name) in [(0x1_0000_0001u64, 4u8, b"dir".as_slice()),
+                                    (0x2_0000_0002u64, 8u8, b"file".as_slice())] {
+            expected.extend_from_slice(&inode.to_ne_bytes()); expected.push(kind);
+            expected.extend_from_slice(&(name.len() as u16).to_ne_bytes()); expected.extend_from_slice(name);
+        }
+        assert_eq!(decode(&block, 2, 65536), (0, expected.len(), expected.clone()));
+        block.resize(65536, 0); // Native API returns count, not filled byte length.
+        assert_eq!(decode(&block, 2, 65536), (0, expected.len(), expected));
+        assert_eq!(decode(&block, 0, 65536), (0, 0, Vec::new()));
+        // Extra legal alignment padding after the name remains outside attr_length.
+        let mut padded = file.clone(); padded.resize(56, 0); padded[..4].copy_from_slice(&56u32.to_ne_bytes());
+        assert_eq!(decode(&padded, 1, 65536).0, 0);
+        for (bytes, count, capacity) in [(&directory[..directory.len()-1], 1, 65536),
+            (&directory[..], -1, 65536), (&directory[..], 2, 65536),
+            (&directory[..], i32::MAX, 65536), (&directory[..], 1, 13)] {
+            let (code, used, _) = decode(bytes, count, capacity);
+            assert_ne!(code, 0); assert_eq!(used, 0);
+        }
+        let mutations: &[(usize, &[u8])] = &[
+            (0, &0u32.to_ne_bytes()), (0, &47u32.to_ne_bytes()), (0, &65536u32.to_ne_bytes()),
+            (4, &0x8000_0001u32.to_ne_bytes()), (4, &0x8200_000bu32.to_ne_bytes()),
+            (8, &1u32.to_ne_bytes()), (12, &1u32.to_ne_bytes()),
+            (16, &1u32.to_ne_bytes()), (20, &1u32.to_ne_bytes()),
+            (24, &(-1i32).to_ne_bytes()), (24, &4i32.to_ne_bytes()), (24, &i32::MAX.to_ne_bytes()),
+            (28, &1u32.to_ne_bytes()), (28, &257u32.to_ne_bytes()), (28, &256u32.to_ne_bytes()),
+            (32, &5u32.to_ne_bytes()), (36, &0u64.to_ne_bytes()),
+            (44, b"/"), (45, b"\0"), (47, b"x"),
+        ];
+        for &(offset, replacement) in mutations {
+            let mut invalid = directory.clone();
+            invalid[offset..offset + replacement.len()].copy_from_slice(replacement);
+            // One good prefix cannot turn a malformed second record into a
+            // partial successful inventory (used must remain zero).
+            let batch = [file.clone(), invalid].concat();
+            let (code, used, _) = decode(&batch, 2, 65536);
+            assert_ne!(code, 0, "offset={offset}"); assert_eq!(used, 0);
+        }
+    }
     #[test]
     fn only_explicit_user_appkit_responses_can_be_accept_or_decline() {
         // Calls the SAME pure C classifier used by the real completion. These
