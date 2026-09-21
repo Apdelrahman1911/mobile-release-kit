@@ -88,24 +88,29 @@ def synthetic_pins(raw, notice, members):
 
 class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
     def test_native_origin_rules_bind_expat_and_system_images(self):
-        # Select the actual pure origin rules, not the whole native module or a
-        # copied predicate. PureWindowsPath supplies Windows lexical operations
-        # only; no supplier import, native API or host sys.modules mutation.
+        # Select the actual pure origin/required-image rules and diagnostics,
+        # not the whole native module or copied predicates. PureWindowsPath is
+        # lexical only; no supplier import, native API or sys.modules mutation.
         source = SOURCE / "tests/native_desktop_payload_windows.py"
         with source.open("rb") as stream:
             raw = stream.read(65537)
         self.assertLessEqual(len(raw), 65536)
         tree = ast.parse(raw, filename=str(source))
         selected = []
-        for name in ("PATH_CHARS", "PAYLOAD_IMAGES", "SYSTEM_IMAGES"):
+        for name in ("SCOPE", "STAGE", "PATH_CHARS", "PAYLOAD_IMAGES", "EXTENSIONS",
+                     "REQUIRED_PAYLOAD_IMAGES", "SYSTEM_IMAGES"):
             matches = [node for node in tree.body if isinstance(node, ast.Assign)
                        and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)]
             self.assertEqual(len(matches), 1)
             self.assertEqual(len(matches[0].targets), 1)
             value = matches[0].value
-            if name == "PATH_CHARS":
+            if name in {"SCOPE", "STAGE", "PATH_CHARS"}:
                 self.assertIsInstance(value, ast.Constant)
-                self.assertIs(type(value.value), int)
+                self.assertIs(type(value.value), int if name == "PATH_CHARS" else str)
+            elif name == "EXTENSIONS":
+                self.assertIsInstance(value, ast.Tuple)
+                self.assertTrue(all(isinstance(item, ast.Constant) and type(item.value) is str
+                                    for item in value.elts))
             else:
                 self.assertIsInstance(value, ast.Call)
                 self.assertIsInstance(value.func, ast.Name)
@@ -113,10 +118,18 @@ class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
                 self.assertEqual(len(value.args), 1)
                 self.assertEqual(value.keywords, [])
                 self.assertIsInstance(value.args[0], ast.Set)
+                items = value.args[0].elts
+                if name == "REQUIRED_PAYLOAD_IMAGES":
+                    self.assertIsInstance(items[-1], ast.Starred)
+                    expansion = ast.parse('(name + ".pyd" for name in EXTENSIONS)', mode="eval").body
+                    self.assertEqual(ast.dump(items[-1].value), ast.dump(expansion))
+                    items = items[:-1]
                 self.assertTrue(all(isinstance(item, ast.Constant) and type(item.value) is str
-                                    for item in value.args[0].elts))
+                                    for item in items))
             selected.append(matches[0])
         for name, kind in (("ProbeFailure", ast.ClassDef), ("require", ast.FunctionDef),
+                           ("failure_diagnostic", ast.FunctionDef), ("canonical", ast.FunctionDef),
+                           ("require_loaded_payload_images", ast.FunctionDef),
                            ("path_key", ast.FunctionDef), ("require_imported_module_origins", ast.FunctionDef),
                            ("require_system_image_origin", ast.FunctionDef)):
             matches = [node for node in tree.body if getattr(node, "name", None) == name]
@@ -124,7 +137,7 @@ class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
             self.assertIsInstance(matches[0], kind)
             self.assertEqual(matches[0].decorator_list, [])
             selected.append(matches[0])
-        namespace = {"re": re, "sys": sys, "Path": PureWindowsPath}
+        namespace = {"re": re, "sys": sys, "json": json, "Path": PureWindowsPath}
         exec(compile(ast.Module(body=selected, type_ignores=[]),
                      "<windows-probe-origin-rules-data>", "exec", dont_inherit=True), namespace)
         check, failure = namespace["require_imported_module_origins"], namespace["ProbeFailure"]
@@ -293,6 +306,68 @@ class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
                 with self.assertRaises(failure) as raised:
                     check_system(path, system_directory)
                 self.assertEqual((raised.exception.code, raised.exception.module), (code, module))
+
+        required, allowed = namespace["REQUIRED_PAYLOAD_IMAGES"], namespace["PAYLOAD_IMAGES"]
+        self.assertEqual(required, frozenset({
+            "_bz2.pyd", "_ctypes.pyd", "_decimal.pyd", "_elementtree.pyd", "_hashlib.pyd", "_lzma.pyd",
+            "_socket.pyd", "_sqlite3.pyd", "_ssl.pyd", "_uuid.pyd", "_zoneinfo.pyd", "_zstd.pyd",
+            "libcrypto-3.dll", "libffi-8.dll", "libssl-3.dll", "pyexpat.pyd", "python.exe",
+            "python314.dll", "select.pyd", "sqlite3.dll", "unicodedata.pyd", "vcruntime140.dll",
+        }))
+        self.assertEqual(required, {"python.exe", "python314.dll", "vcruntime140.dll", "libffi-8.dll",
+                                   "libcrypto-3.dll", "libssl-3.dll", "sqlite3.dll",
+                                   *(name + ".pyd" for name in namespace["EXTENSIONS"])})
+        self.assertEqual((len(required), len(allowed), len(namespace["EXTENSIONS"])), (22, 33, 15))
+        self.assertLess(required, allowed)
+        self.assertNotIn("vcruntime140_1.dll", required)
+        self.assertIn("vcruntime140_1.dll", allowed)
+        check_required = namespace["require_loaded_payload_images"]
+        for seen in (set(required), set(allowed)):
+            original = seen.copy()
+            self.assertIsNone(check_required(seen))
+            self.assertEqual(seen, original)
+
+        namespace["STAGE"] = "loaded-images"
+        diagnostic = namespace["failure_diagnostic"]
+        envelope = {"scope": namespace["SCOPE"], "status": "failed", "stage": "loaded-images"}
+        missing_cases = [(name,) for name in sorted(required)]
+        missing_cases.extend([("_ssl.pyd", "python.exe", "libffi-8.dll"), tuple(sorted(required))])
+        for missing in missing_cases:
+            for reverse in (False, True):
+                with self.subTest(missing_images=missing, reverse=reverse):
+                    # This helper cannot let extras satisfy required names. The
+                    # native loop still rejects unlisted/wrong-origin images first.
+                    values = required - set(missing) | {"vcruntime140_1.dll", "unknown.dll", "R:/inert/private.dll"}
+                    seen = set(sorted(values, reverse=reverse))
+                    original = seen.copy()
+                    with self.assertRaises(failure) as raised:
+                        check_required(seen)
+                    error = raised.exception
+                    self.assertEqual((error.code, error.module), ("required_images_missing", None))
+                    self.assertEqual(error.missing_images, tuple(sorted(missing)))
+                    record = diagnostic(error)
+                    self.assertEqual(record, {**envelope, "code": "required_images_missing", "module": None,
+                                              "missingImages": sorted(missing)})
+                    raw = namespace["canonical"](record) + b"\n"
+                    self.assertEqual(json.loads(raw), record)
+                    self.assertLess(len(raw), 1024)
+                    if len(missing) == 22:
+                        self.assertEqual(len(raw), 475)
+                    self.assertEqual(seen, original)
+        for error, code, module in (
+            (failure("system_image_origin", "imm32.dll", missing_images=("python.exe",)),
+             "system_image_origin", "imm32.dll"),
+            (failure("system_image_unlisted", "R:/inert/private.dll"), "system_image_unlisted", None),
+            (ValueError("INERT exception text must not be emitted"), "probe_exception", None),
+        ):
+            self.assertEqual(diagnostic(error), {**envelope, "code": code, "module": module})
+        # Only bounded literal required names may be retained as missing detail.
+        for details in (None, [], "python.exe", ("unknown.dll",), ("python.exe", []), ("python.exe",) * 23):
+            error = failure("required_images_missing", missing_images=details)
+            self.assertEqual(error.missing_images, ())
+            self.assertNotIn("missingImages", diagnostic(error))
+        error = failure("required_images_missing", missing_images=("python.exe", "_ssl.pyd", "python.exe"))
+        self.assertEqual(diagnostic(error)["missingImages"], ["_ssl.pyd", "python.exe"])
 
     def test_native_dependency_versions_use_exact_cpython_layout(self):
         # Read the native probe only as bounded DATA. Never import or execute

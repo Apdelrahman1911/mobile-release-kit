@@ -42,6 +42,12 @@ EXTENSIONS = (
     "_bz2", "_ctypes", "_decimal", "_elementtree", "_hashlib", "_lzma", "_socket", "_sqlite3",
     "_ssl", "_uuid", "_zoneinfo", "_zstd", "pyexpat", "select", "unicodedata",
 )
+# Selected normal-import closure, not the complete bundled/allowed roster.
+# vcruntime140_1.dll serves unselected _wmi.pyd; if present it is still checked.
+REQUIRED_PAYLOAD_IMAGES = frozenset({
+    "python.exe", "python314.dll", "vcruntime140.dll", "libffi-8.dll",
+    "libcrypto-3.dll", "libssl-3.dll", "sqlite3.dll", *(name + ".pyd" for name in EXTENSIONS),
+})
 
 # Prospective finite source policy, NOT a measured dynamic-closure claim.
 # First group: exact normal imports from the33 supplier PE images. Second:
@@ -66,15 +72,35 @@ SYSTEM_IMAGES = frozenset({
 
 
 class ProbeFailure(ValueError):
-    def __init__(self, code: str, module: str | None = None):
+    def __init__(self, code: str, module: str | None = None, *, missing_images: tuple[str, ...] = ()):
         self.code = code
         self.module = module if module is not None and re.fullmatch(r"[a-z0-9_.-]{1,128}", module) else None
+        self.missing_images = ()
+        if (code == "required_images_missing" and type(missing_images) is tuple
+                and 0 < len(missing_images) <= len(REQUIRED_PAYLOAD_IMAGES)
+                and all(type(name) is str and name in REQUIRED_PAYLOAD_IMAGES for name in missing_images)):
+            self.missing_images = tuple(sorted(set(missing_images)))
         super().__init__(code)
+
+
+def failure_diagnostic(error: BaseException) -> dict:
+    diagnostic = {"scope": SCOPE, "status": "failed", "stage": STAGE,
+                  "code": error.code if isinstance(error, ProbeFailure) else "probe_exception",
+                  "module": error.module if isinstance(error, ProbeFailure) else None}
+    if isinstance(error, ProbeFailure) and error.missing_images:
+        diagnostic["missingImages"] = list(error.missing_images)
+    return diagnostic
 
 
 def require(value: bool, code: str, module: str | None = None) -> None:
     if not value:
         raise ProbeFailure(code, module)
+
+
+def require_loaded_payload_images(seen: set[str]) -> None:
+    missing = tuple(sorted(REQUIRED_PAYLOAD_IMAGES - seen))
+    if missing:
+        raise ProbeFailure("required_images_missing", missing_images=missing)
 
 
 def require_dependency_versions(openssl_version, sqlite_version) -> None:
@@ -362,9 +388,7 @@ def loaded_images(python: Path, entries: dict) -> tuple[str, list[dict]]:
             total += fact["size"]
             require(total <= TOTAL_IMAGE_BYTES, "image_byte_bound")
             images.append({"name": leaf, "path": path, "origin": origin, **fact})
-        require({"python.exe", "python314.dll", "vcruntime140.dll", "vcruntime140_1.dll", "libffi-8.dll",
-                 "libcrypto-3.dll", "libssl-3.dll", "sqlite3.dll", *(name + ".pyd" for name in EXTENSIONS)} <= seen,
-                "required_images_missing")
+        require_loaded_payload_images(seen)
         require(snapshot() == before, "loaded_images_changed")
         return system_directory, sorted(images, key=lambda item: item["name"])
     finally:
@@ -464,9 +488,7 @@ if __name__ == "__main__":
         status = main()
     except BaseException as error:
         status = 70
-        diagnostic = {"scope": SCOPE, "status": "failed", "stage": STAGE,
-                      "code": error.code if isinstance(error, ProbeFailure) else "probe_exception",
-                      "module": error.module if isinstance(error, ProbeFailure) else None}
+        diagnostic = failure_diagnostic(error)
         try:
             os.write(2, canonical(diagnostic) + b"\n")
         except BaseException:
