@@ -442,7 +442,8 @@ class LifecycleData(unittest.TestCase):
         value.pop("installed")
         value["shell"] = {}
         for case in ("complete", "start-return-error", "input-error", "unjoined", "early-return",
-                     "controller-deadline", "command-bound", "final-result-failure", "diagnostic-write-error"):
+                     "controller-deadline", "command-bound", "final-result-failure", "diagnostic-write-error",
+                     "log-error", "input-and-log-error", "worker-error", "guard-unknown", "missing-result"):
             events, originals, retained, now, focused = [], [], {}, [100.0], [31]
             clock_calls, searches = [0], [0]
             primary = RuntimeError("inert controller failure; context must not be exported")
@@ -455,6 +456,12 @@ class LifecycleData(unittest.TestCase):
                         b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n", b""))
                     if case in ("early-return", "final-result-failure"):
                         holder["result"] = subprocess.CompletedProcess(argv, 127, b"", b"synthetic native startup refusal\n")
+                    if case == "worker-error":
+                        holder["errors"] = [primary]
+                    if case == "guard-unknown":
+                        holder["guardState"] = "UNKNOWN"
+                    if case == "missing-result":
+                        holder.pop("result")
                 def start(self):
                     events.append("start")
                     if case == "start-return-error":
@@ -473,7 +480,7 @@ class LifecycleData(unittest.TestCase):
             def owned(argv, **options):
                 args = argv[argv.index("/usr/bin/xdotool") + 1:]
                 events.append(args[0])
-                if case in ("input-error", "diagnostic-write-error"):
+                if case in ("input-error", "diagnostic-write-error", "input-and-log-error"):
                     raise primary
                 output = b""
                 if args[0] == "search":
@@ -488,24 +495,32 @@ class LifecycleData(unittest.TestCase):
                 elif args[0] == "getwindowfocus":
                     output = str(focused[0]).encode() + b"\n"
                 return subprocess.CompletedProcess(argv, 0, output, b"")
+            def log_capture(*args):
+                self.assertTrue(originals[0].joined)
+                self.assertEqual(args[:3], (value, "normal", "original-log-binding"))
+                events.append("log-capture")
+                if case in ("log-error", "input-and-log-error"):
+                    raise OSError("inert log retention failure")
+                return b"inert original display diagnostic\n"
             with self.subTest(case=case), patch.multiple(L, _ROOT=L.root_path(value), _END=value["deadline"],
                     _FAILED=False, _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=owned)), \
                  patch.object(L.threading, "Thread", Original), patch.object(L.time, "monotonic", side_effect=clock), \
                  patch.object(L.time, "sleep", side_effect=sleep), patch.object(L, "_shell_window_pid"), \
+                 patch.object(L, "_shell_log_capture", side_effect=log_capture) as log, \
                  patch.object(L, "_retain", side_effect=lambda name, raw: retained.update({name: raw})), \
                  patch.object(L.sys, "stderr", new_callable=io.StringIO) as diagnostic:
                 if case == "diagnostic-write-error":
                     diagnostic.write = Mock(side_effect=OSError("synthetic diagnostic output failure"))
                 if case == "complete":
-                    result = L._shell_normal(value, L.shell_environment(value, "normal"), expected)
+                    result = L._shell_normal(value, L.shell_environment(value, "normal"), expected, "original-log-binding")
                     self.assertTrue(result["bootstrapReturned"])
                     control = L.decode(retained["shell-normal-control.json"])
                     self.assertEqual([row["argv"][-1] for row in control["commands"] if row["phase"] == "key"], ["ctrl+q", "alt+o"])
                     self.assertFalse(L._FAILED)
                     self.assertEqual(diagnostic.getvalue(), "")
                 else:
-                    with self.assertRaises((ValueError, RuntimeError)) as raised:
-                        L._shell_normal(value, L.shell_environment(value, "normal"), expected)
+                    with self.assertRaises((ValueError, RuntimeError, OSError)) as raised:
+                        L._shell_normal(value, L.shell_environment(value, "normal"), expected, "original-log-binding")
                     self.assertTrue(L._FAILED)
                     if case == "diagnostic-write-error":
                         self.assertIs(raised.exception, primary)
@@ -532,18 +547,22 @@ class LifecycleData(unittest.TestCase):
                         elif case == "unjoined":
                             self.assertIsNone(observed["capture"])
                             self.assertIsNone(observed["workerGuardState"])
-                        elif case == "input-error":
+                        elif case in ("input-error", "input-and-log-error", "worker-error"):
                             self.assertIs(raised.exception, primary)
                             self.assertNotIn("context must not be exported", lines[0])
+                        if case not in ("unjoined", "worker-error", "guard-unknown", "missing-result", "log-error", "input-and-log-error"):
+                            self.assertEqual(observed["capture"]["display"]["head"], "inert original display diagnostic\n")
                 self.assertEqual(len(originals), 1)
                 self.assertEqual(events.count("join"), 1)
+                self.assertEqual(log.call_count, int(case not in ("unjoined", "worker-error", "guard-unknown", "missing-result")))
 
     def test_normal_failure_diagnostic_is_bounded_joined_only_and_non_authoritative(self):
         argv = ["/inert/original"]
         original = subprocess.CompletedProcess(argv, 127, b"\x1b" * 1000, b"\x00" * 8192)
         holder = {"result": original, "guardState": "RESTORED", "errors": []}
         error = RuntimeError("private argv and environment must not be exported")
-        options = dict(joined=True, stage="initial-window", inputs=0, commands=[], error=error)
+        display = b"\x00" * 8192
+        options = dict(joined=True, stage="initial-window", inputs=0, commands=[], error=error, display_log=display)
         def observe(value=holder, **changes):
             with patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
                 L._shell_normal_failure(value, argv, **dict(options, **changes))
@@ -559,8 +578,8 @@ class LifecycleData(unittest.TestCase):
         observed = observe()
         self.assertFalse(observed["qualified"])
         self.assertFalse(observed["cleanupEstablished"])
-        for name in ("stdout", "stderr"):
-            raw = getattr(original, name)
+        for name in ("stdout", "stderr", "display"):
+            raw = display if name == "display" else getattr(original, name)
             row = observed["capture"][name]
             self.assertEqual(row["size"], len(raw))
             self.assertEqual(row["sha256"], hashlib.sha256(raw).hexdigest())
@@ -588,6 +607,125 @@ class LifecycleData(unittest.TestCase):
         with patch.object(L.sys, "stderr", SimpleNamespace(write=Mock(side_effect=OSError("synthetic write failure")))) as stream:
             L._shell_normal_failure(holder, argv, **options)
             self.assertEqual(stream.write.call_count, 1)
+
+    def test_shell_display_route_precreates_one_protected_log_and_never_widens_file_limits(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        root = L.root_path(value)
+        node = needrestart_stat(stat.S_IFREG | 0o620)
+        node.st_gid = value["runnerGid"]
+        source = ast.parse((SOURCE / "desktop/tools/ci_ubuntu_publication.py").read_text())
+        roster = next(item.value for item in source.body if isinstance(item, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "SHELL_PROGRAMS" for target in item.targets))
+        self.assertEqual(sum(isinstance(item, ast.Constant) and item.value == "/usr/bin/prlimit" for item in roster.elts), 1)
+        for case in L.SHELL_CASES:
+            argv = L.shell_argv(value, case)
+            at = argv.index("/usr/bin/prlimit")
+            self.assertEqual(argv[at:at + 4], ["/usr/bin/prlimit", "--fsize=2097152:2097152", "--", "/usr/bin/dbus-run-session"])
+            self.assertIn("--error-file=" + str(root / ("shell-" + case + "-xvfb.log")), argv)
+            self.assertNotIn("--error-file=/dev/stderr", argv)
+            self.assertEqual(argv[:at], L._drop(value, []))
+        for bounds in ((-1, -1), (L.LIMIT, L.LIMIT), (L.LIMIT * 2, L.LIMIT * 3), (L.LIMIT - 1, -1), (-1, L.LIMIT - 1)):
+            accepted = all(number == -1 or number >= L.LIMIT for number in bounds)
+            with self.subTest(bounds=bounds), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
+                 patch.object(L.resource, "getrlimit", return_value=bounds) as limits, \
+                 patch.object(L.resource, "setrlimit") as change_limits, \
+                 patch.object(L.os, "open", return_value=41) as opening, \
+                 patch.object(L.os, "fchown") as owner, patch.object(L.os, "fchmod") as mode, \
+                 patch.object(L.os, "fsync"), patch.object(L.os, "fstat", return_value=node), \
+                 patch.object(L.os, "close") as closing, patch.object(Path, "lstat", return_value=node), patch.object(L, "_xattrs"):
+                if accepted:
+                    self.assertEqual(L._shell_log_prepare(value, "normal"), L.identity(node)[:6])
+                    opening.assert_called_once_with(root / "shell-normal-xvfb.log",
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                    owner.assert_called_once_with(41, 0, value["runnerGid"])
+                    mode.assert_called_once_with(41, 0o620)
+                    closing.assert_called_once_with(41)
+                else:
+                    with self.assertRaises(ValueError): L._shell_log_prepare(value, "normal")
+                    opening.assert_not_called(); closing.assert_not_called()
+                limits.assert_called_once_with(L.resource.RLIMIT_FSIZE)
+                change_limits.assert_not_called()
+        # An exclusive-creation conflict never authorizes reopening or repair.
+        with patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
+             patch.object(L.resource, "getrlimit", return_value=(-1, -1)), \
+             patch.object(L.os, "open", side_effect=FileExistsError("inert conflict")) as opening, \
+             patch.object(L.os, "close") as closing, patch.object(L.os, "unlink") as removing:
+            with self.assertRaises(FileExistsError): L._shell_log_prepare(value, "normal")
+            self.assertEqual(opening.call_count, 1); closing.assert_not_called(); removing.assert_not_called()
+
+    def test_shell_display_capture_requires_bound_original_and_complete_combined_bytes(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        root = L.root_path(value)
+        node = needrestart_stat(stat.S_IFREG | 0o620, size=6); node.st_gid = value["runnerGid"]
+        initial = L.identity(node)[:6]
+        argv = L.shell_argv(value, "positive")
+        for case in ("complete", "nonzero", "wrong-result", "wrong-mode", "wrong-inode", "wrong-owner", "wrong-group",
+                     "hardlink", "changed-after", "combined-bound", "read-error", "retain-error"):
+            before, after = deepcopy(node), deepcopy(node)
+            raw = b"inert\n"
+            result = subprocess.CompletedProcess(argv, 2 if case == "nonzero" else 0, b"a", b"b")
+            if case == "wrong-result": result.args = ["/different/original"]
+            changes = {"wrong-mode": ("st_mode", stat.S_IFLNK | 0o777), "wrong-inode": ("st_ino", 99),
+                       "wrong-owner": ("st_uid", 99), "wrong-group": ("st_gid", 99), "hardlink": ("st_nlink", 2)}
+            if case in changes: setattr(before, *changes[case])
+            if case == "changed-after": after.st_mtime_ns += 1
+            if case == "combined-bound": raw = b"x" * (L.LIMIT - 1)
+            with self.subTest(case=case), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
+                 patch.object(Path, "lstat", side_effect=[before, after]), patch.object(L, "_xattrs"), \
+                 patch.object(L, "read", return_value=raw) as reading, patch.object(L, "_retain") as retain:
+                if case == "read-error": reading.side_effect = OSError("inert read/close refusal")
+                if case == "retain-error": retain.side_effect = OSError("inert retention failure")
+                if case in ("complete", "nonzero"):
+                    self.assertEqual(L._shell_log_capture(value, "positive", initial, result), raw)
+                    reading.assert_called_once_with(root / "shell-positive-xvfb.log", L.LIMIT)
+                    retain.assert_called_once_with("shell-positive-xvfb.stderr", raw)
+                else:
+                    with self.assertRaises((ValueError, OSError)): L._shell_log_capture(value, "positive", initial, result)
+                    if case in changes or case == "wrong-result": reading.assert_not_called()
+                    if case != "retain-error": retain.assert_not_called()
+
+    def test_shell_command_log_finality_and_primary_failure_are_preserved(self):
+        value = installed_handoff(); value.pop("installed"); value["shell"] = {}
+        argv = L.shell_argv(value, "positive")
+        for case in ("complete", "owner-error", "bad-result", "nonzero", "log-error", "nonzero-log-error", "diagnostic-error", "wrong-route"):
+            primary, events = OSError("inert original log failure"), []
+            result = subprocess.CompletedProcess(argv, 2 if case in ("nonzero", "nonzero-log-error", "diagnostic-error") else 0, b"", b"")
+            if case == "bad-result": result.args = ["/other/original"]
+            def run(*args, **options):
+                events.append("owner")
+                if case == "owner-error": raise primary
+                return result
+            def capture(*args):
+                self.assertEqual(events, ["owner", "stdout", "stderr"])
+                events.append("log")
+                if case in ("log-error", "nonzero-log-error"): raise primary
+                return b"inert display output\n"
+            with self.subTest(case=case), patch.multiple(L, _ROOT=L.root_path(value), _END=value["deadline"], _FAILED=False,
+                    _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=run)), patch.object(L, "_root_ids"), \
+                 patch.object(L.time, "monotonic", return_value=100.0), \
+                 patch.object(L, "_retain", side_effect=lambda name, raw: events.append(name.rsplit(".", 1)[1])), \
+                 patch.object(L, "_shell_log_capture", side_effect=capture) as log, \
+                 patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                if case == "diagnostic-error": stream.write = Mock(side_effect=OSError("inert diagnostic error"))
+                arguments = dict(maximum=60, shell_log=(value, "normal" if case == "wrong-route" else "positive", "original-log-binding"))
+                if case == "complete":
+                    self.assertIs(L.command("shell-positive", argv, **arguments), result)
+                    self.assertFalse(L._FAILED)
+                else:
+                    with self.assertRaises((ValueError, OSError)) as raised: L.command("shell-positive", argv, **arguments)
+                    if case in ("owner-error", "log-error"): self.assertIs(raised.exception, primary)
+                    if case == "nonzero-log-error":
+                        self.assertEqual(str(raised.exception), "Original root command failed or completed late")
+                        self.assertIs(raised.exception.__cause__, primary)
+                    if case != "wrong-route": self.assertTrue(L._FAILED)
+                self.assertEqual(log.call_count, int(case not in ("owner-error", "bad-result", "wrong-route")))
+                if case == "nonzero":
+                    raw = stream.getvalue().encode("ascii")
+                    self.assertLessEqual(len(raw), 32768)
+                    diagnostic = json.loads(raw.split(b"=", 1)[1])
+                    self.assertEqual(diagnostic["capture"]["exitCode"], 2)
+                    self.assertEqual(diagnostic["capture"]["display"]["head"], "inert display output\n")
+                    self.assertFalse(diagnostic["qualified"])
 
     def test_version_store_prefixes_bind_exact_application_children(self):
         app = Path("/var/lib/mobile-release-kit")
@@ -1510,6 +1648,7 @@ def closed_shell_data():
     for case, (stdout, stderr) in captures.items():
         cases[case] = L.shell_result(stdout, stderr, case, 0, expected)
         files["shell-" + case + ".stdout"], files["shell-" + case + ".stderr"] = stdout, stderr
+        files["shell-" + case + "-xvfb.stderr"] = b"inert original display output\n"
         commands.append({"phase": "shell-" + case, "argv": L.shell_argv(value, case), "exitCode": 0})
     files["shell-cases.json"] = L.canonical(cases)
     files["shell-positive-project-before.json"] = L.canonical(project_fixture_data(value))
@@ -1551,7 +1690,9 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         roster = L.public_files(value)
         self.assertEqual({name for name in roster if name.startswith("shell-positive-project-")},
                          {"shell-positive-project-before.json", "shell-positive-project-after.json"})
-        self.assertEqual(len(roster), 74)
+        self.assertEqual({name for name in roster if name.endswith("-xvfb.stderr")},
+                         {"shell-" + case + "-xvfb.stderr" for case in L.SHELL_CASES})
+        self.assertEqual(len(roster), 77)
         self.assertLessEqual(len(roster), 128)
         for case in ("positive", "refuse-writable", "refuse-pth"):
             self.assertFalse(any(name.startswith("shell-positive-project-") for name in L.public_files(installed_handoff(case))))
@@ -1724,9 +1865,11 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             writer = Mock()
             with self.subTest(case=case), patch.object(L, "_ROOT", root), patch.object(L, "_D", SimpleNamespace(write=writer)), \
                  patch.object(Path, "mkdir") as mkdir, patch.object(L.os, "chown") as chown, patch.object(L.os, "chmod") as chmod, \
+                 patch.object(L, "_shell_log_prepare", return_value="original-log-binding") as log, \
                  patch.object(L, "_absent"), patch.object(L, "_retain") as retain, \
                  patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)) as inventory:
-                L._shell_prepare(value, case)
+                self.assertEqual(L._shell_prepare(value, case), (L.shell_environment(value, case), "original-log-binding"))
+                log.assert_called_once_with(value, case)
                 fixture_writes = [call for call in writer.call_args_list if call.args[0] == root / "positive-project/app/build.gradle.kts"]
                 self.assertEqual(len(fixture_writes), int(case == "positive"))
                 self.assertEqual(mkdir.call_count, 10 if case == "positive" else 8)
@@ -1749,9 +1892,16 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(result["cases"]["normal"]["domAndGtkObserved"], False)
         self.assertEqual(len(result["cases"]["quit-outstanding"]["maps"]), 1)
         for change in ("missing-before", "missing-after", "different-after", "coerced-case", "missing-receipt",
-                       "case-save-only", "stdout-save-only", "case-guidance-only", "stdout-guidance-only", "wrong-argv"):
+                       "case-save-only", "stdout-save-only", "case-guidance-only", "stdout-guidance-only", "wrong-argv",
+                       "no-display-log", "display-type", "combined-output"):
             changed, current = deepcopy(files), deepcopy(outcome)
-            if change.startswith("missing-") and change != "missing-receipt":
+            if change == "no-display-log":
+                changed.pop("shell-positive-xvfb.stderr")
+            elif change == "display-type":
+                changed["shell-positive-xvfb.stderr"] = "not original bytes"
+            elif change == "combined-output":
+                changed["shell-positive-xvfb.stderr"] = b"x" * L.LIMIT
+            elif change.startswith("missing-") and change != "missing-receipt":
                 changed.pop("shell-positive-project-" + change.removeprefix("missing-") + ".json")
             elif change == "different-after":
                 altered = L.decode(changed["shell-positive-project-after.json"]); altered["entries"][0]["identity"][1] += 1

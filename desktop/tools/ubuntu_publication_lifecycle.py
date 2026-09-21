@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import re
+import resource
 import stat
 import subprocess
 import sys
@@ -640,11 +641,15 @@ def _command_capture(label, argv, result, seconds):
     _COMMANDS.append({"phase": label, "argv": argv, "exitCode": result.returncode, "timeoutSeconds": seconds})
 
 
-def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None):
+def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None, shell_log=None):
     global _FAILED, _PHASE
     _PHASE = label
     need(not _FAILED and _OWNER is not None, "Prior root command failed or owner missing")
     _root_ids()
+    if shell_log is not None:
+        need(type(shell_log) is tuple and len(shell_log) == 3
+             and shell_log[1] in SHELL_CASES[1:] and label == "shell-" + shell_log[1]
+             and argv == shell_argv(shell_log[0], shell_log[1]), "Different fixed shell log route")
     # The fixed overlap configure may only SHORTEN this original endpoint.
     need(endpoint is None or type(endpoint) in {int, float} and math.isfinite(endpoint), "Fixed finite command cap required")
     bound = _END if endpoint is None else min(_END, endpoint)
@@ -658,6 +663,22 @@ def command(label, argv, *, maximum=120, codes=(0,), env=None, endpoint=None):
     if endpoint is not None:
         _COMMANDS[-1].update(originalEndpoint=bound, startMonotonic=started)
     accepted = result.returncode in codes and time.monotonic() < bound
+    display_log, log_error = None, None
+    if shell_log is not None:
+        try:
+            display_log = _shell_log_capture(*shell_log, result)
+        except BaseException as error:
+            log_error = error
+        if not accepted or log_error is not None:
+            _shell_command_failure(argv, result, shell_log[1], display_log, log_error)
+        if not accepted:
+            # The settled original command's failure remains primary. Preserve
+            # a later read/retention/interruption error as its explicit cause;
+            # neither branch can resume or claim cleanup/success.
+            raise Refused("Original root command failed or completed late") from log_error
+        if log_error is not None:
+            raise log_error
+        need(time.monotonic() < bound, "Original shell log captured after endpoint")
     if not accepted and label in {"native-root", "native-user", "observe-unpacked", "observe-p0",
                                  "observe-upgrade", "observe-duplicate", "observe-remove", "observe-purge"}:
         # Only these fixed credential-free fixtures may expose bounded DATA
@@ -1225,6 +1246,7 @@ def public_files(value):
         return fixed | {"loader-entry.json", "loader-final.json", "loader-runtime.json", "shell-cases.json",
                         "shell-normal-control.json", "shell-positive-project-before.json", "shell-positive-project-after.json",
                         "published-before-upgrade.txt", "mutation-denials.txt"} \
+            | {"shell-" + case + "-xvfb.stderr" for case in SHELL_CASES} \
             | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
     installed = value.get("installed")
     if installed is not None:
@@ -2318,10 +2340,58 @@ def shell_argv(value, case):
     command = [str(root_path(value) / ("shell-normal" if case == "normal" else "shell-observer"))]
     if case != "normal":
         command.append(case)
-    return _drop(value, ["/usr/bin/dbus-run-session", "--dbus-daemon=/usr/bin/dbus-daemon",
+    return _drop(value, ["/usr/bin/prlimit", "--fsize=" + str(LIMIT) + ":" + str(LIMIT), "--",
+        "/usr/bin/dbus-run-session", "--dbus-daemon=/usr/bin/dbus-daemon",
         "--config-file=" + str(root_path(value) / ("shell-" + case + "-bus.conf")), "--",
         "/usr/bin/xvfb-run", "--server-num=99", "--auth-file=" + environment["XAUTHORITY"],
-        "--error-file=/dev/stderr", "--server-args=-screen 0 1280x1024x24 -noreset", *command])
+        "--error-file=" + str(root_path(value) / ("shell-" + case + "-xvfb.log")),
+        "--server-args=-screen 0 1280x1024x24 -noreset", *command])
+
+
+def _shell_log_prepare(value, case):
+    """One original write-only-for-test-group log, never a writable namespace."""
+    need(case in SHELL_CASES and _ROOT == root_path(value), "Different original shell log root/case")
+    bounds = resource.getrlimit(resource.RLIMIT_FSIZE)
+    need(type(bounds) is tuple and len(bounds) == 2
+         and all(type(bound) is int and (bound == resource.RLIM_INFINITY or bound >= LIMIT) for bound in bounds),
+         "Inherited file bound is stricter than the fixed shell profile")
+    directory(_ROOT, protected=True)
+    path = _ROOT / ("shell-" + case + "-xvfb.log")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        os.fchown(fd, 0, value["runnerGid"])
+        os.fchmod(fd, 0o620)
+        os.fsync(fd)
+        original = identity(os.fstat(fd))
+    finally:
+        os.close(fd)
+    need(original[2:6] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1) and original[6] == 0
+         and identity(path.lstat()) == original, "Fresh shell error log differs")
+    _xattrs(path, False)
+    need(identity(path.lstat()) == original, "Original shell error log changed before launch")
+    return original[:6]
+
+
+def _shell_log_capture(value, case, original, result):
+    """Caller owns a genuine settled return; normal additionally joins its worker."""
+    need(case in SHELL_CASES and _ROOT == root_path(value)
+         and type(original) is tuple and len(original) == 6
+         and all(type(number) is int for number in original)
+         and original[2:] == (stat.S_IFREG | 0o620, 0, value["runnerGid"], 1),
+         "Original shell log binding differs")
+    need(type(result) is subprocess.CompletedProcess and result.args == shell_argv(value, case)
+         and type(result.returncode) is int and type(result.stdout) is bytes and type(result.stderr) is bytes
+         and len(result.stdout) + len(result.stderr) <= LIMIT, "Original shell log result incomplete")
+    path = _ROOT / ("shell-" + case + "-xvfb.log")
+    directory(_ROOT, protected=True)
+    before = path.lstat()
+    need(identity(before)[:6] == original, "Original shell error log was replaced or changed")
+    _xattrs(path, False)
+    raw = read(path, LIMIT)
+    need(identity(path.lstat()) == identity(before), "Original shell error log changed during capture")
+    need(len(result.stdout) + len(result.stderr) + len(raw) <= LIMIT, "Combined shell output exceeds its bound")
+    _retain("shell-" + case + "-xvfb.stderr", raw)
+    return raw
 
 
 def _shell_project_inventory(value, *, saved=False):
@@ -2442,6 +2512,7 @@ def shell_project_receipt(raw):
 
 def _shell_prepare(value, case):
     base, environment = _ROOT / ("gui-" + case), shell_environment(value, case)
+    log_binding = _shell_log_prepare(value, case)
     for path in (base, *(base / name for name in ("home", "tmp", "runtime", "config", "cache", "data", "empty-config"))):
         path.mkdir(mode=0o700)
         os.chown(path, value["runnerUid"], value["runnerGid"])
@@ -2469,7 +2540,7 @@ def _shell_prepare(value, case):
         os.chmod(project / "app", 0o555)
         os.chown(project, value["runnerUid"], value["runnerGid"])
         _retain("shell-positive-project-before.json", canonical(_shell_project_inventory(value)))
-    return environment
+    return environment, log_binding
 
 
 def shell_result(stdout, stderr, case, code, expected):
@@ -2534,8 +2605,53 @@ def _shell_window_pid(value, pid):
          and os.readlink(proc / "exe") == str(_ROOT / "shell-normal"), "Window does not report this task's original normal executable")
 
 
+def _shell_capture_summary(result, argv, display_log=None):
+    if not (type(result) is subprocess.CompletedProcess and result.args == argv
+            and type(result.returncode) is int and type(result.stdout) is bytes
+            and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= LIMIT):
+        return None
+    captured = {"exitCode": result.returncode}
+    streams = [("stdout", result.stdout, 256, 256), ("stderr", result.stderr, 1024, 2048)]
+    if type(display_log) is bytes and len(result.stdout) + len(result.stderr) + len(display_log) <= LIMIT:
+        streams.append(("display", display_log, 1024, 2048))
+    for name, raw, head, tail in streams:
+        prefix, suffix = raw[:head], raw[max(head, len(raw) - tail):]
+        captured[name] = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                          "head": prefix.decode("utf-8", "replace"), "tail": suffix.decode("utf-8", "replace"),
+                          "truncated": len(prefix) + len(suffix) < len(raw)}
+    return captured
+
+
+def _shell_failure_output(marker, data):
+    # Includes JSON escaping and all metadata; never unbounded terminal text.
+    raw = marker + canonical(data)
+    if len(raw) > 32768:
+        for row in (data["capture"] or {}).values():
+            if type(row) is dict:
+                row.pop("head", None)
+                row.pop("tail", None)
+                row["truncated"] = row["size"] != 0
+        raw = marker + canonical(data)
+    if len(raw) <= 32768:
+        sys.stderr.write(raw.decode("ascii"))
+        sys.stderr.flush()
+
+
+def _shell_command_failure(argv, result, case, display_log, log_error):
+    """Original returned synthetic observer DATA, not another read or verdict."""
+    try:
+        name = None if log_error is None else type(log_error).__name__
+        data = {"schemaVersion": 1, "scope": "original-shell-command-failure-diagnostic-only",
+                "case": case, "qualified": False, "cleanupEstablished": False,
+                "logErrorType": name if name is None or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other",
+                "capture": _shell_capture_summary(result, argv, display_log)}
+        _shell_failure_output(b"MRK_INSTALLED_SHELL_COMMAND_FAILURE=", data)
+    except BaseException:
+        pass  # Never replace an original failure, including a log read failure.
+
+
 def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, error,
-                          join_error=None, capture_error=None):
+                          join_error=None, capture_error=None, display_log=None):
     """Best-effort diagnosis from original memory, never finality or read authority.
 
     A failed service cannot export its private files. Its existing stderr can
@@ -2559,6 +2675,9 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
             "owned command executable could not be started",
             "owned command produced incomplete output",
             "owned command output exceeds its bound",
+            "Original shell error log was replaced or changed",
+            "Original shell error log changed during capture",
+            "Combined shell output exceeds its bound",
         }
 
         def error_data(original):
@@ -2588,35 +2707,13 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
             result = holder.get("result")
         data["errors"] = [error_data(item) for item in errors[:4]]
         data["errorsTruncated"] = len(errors) > 4
-        if (type(result) is subprocess.CompletedProcess and result.args == argv
-                and type(result.returncode) is int and type(result.stdout) is bytes
-                and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= LIMIT):
-            captured = {"exitCode": result.returncode}
-            for name, raw, head, tail in (("stdout", result.stdout, 256, 256),
-                                          ("stderr", result.stderr, 1024, 2048)):
-                prefix, suffix = raw[:head], raw[max(head, len(raw) - tail):]
-                captured[name] = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
-                                  "head": prefix.decode("utf-8", "replace"), "tail": suffix.decode("utf-8", "replace"),
-                                  "truncated": len(prefix) + len(suffix) < len(raw)}
-            data["capture"] = captured
-        marker = b"MRK_INSTALLED_SHELL_FAILURE="
-        raw = marker + canonical(data)
-        if len(raw) > 32768:
-            # JSON escaping counts toward the complete output cap too.
-            for row in (data["capture"] or {}).values():
-                if type(row) is dict:
-                    row.pop("head", None)
-                    row.pop("tail", None)
-                    row["truncated"] = row["size"] != 0
-            raw = marker + canonical(data)
-        if len(raw) <= 32768:
-            sys.stderr.write(raw.decode("ascii"))
-            sys.stderr.flush()
+        data["capture"] = _shell_capture_summary(result, argv, display_log if joined else None)
+        _shell_failure_output(b"MRK_INSTALLED_SHELL_FAILURE=", data)
     except BaseException:
         pass  # A diagnostic is not authority to replace the original error.
 
 
-def _shell_normal(value, environment, expected):
+def _shell_normal(value, environment, expected, log_binding):
     global _FAILED, _PHASE
     need(not _FAILED, "Prior shell/root failure")
     _FAILED, _PHASE = True, "shell-normal"
@@ -2628,6 +2725,7 @@ def _shell_normal(value, environment, expected):
     worker = threading.Thread(target=_overlap_worker, args=(holder, argv, environment, seconds),
                               name="mrk-installed-shell-normal", daemon=False)
     failure, join_error, capture_error, joined, inputs = None, None, None, False, 0
+    display_log = None
     stage, diagnostic_attempted = "start", False
 
     def diagnose(error):
@@ -2635,7 +2733,7 @@ def _shell_normal(value, environment, expected):
         if not diagnostic_attempted:
             diagnostic_attempted = True
             _shell_normal_failure(holder, argv, joined=joined, stage=stage, inputs=inputs, commands=commands,
-                                  error=error, join_error=join_error, capture_error=capture_error)
+                                  error=error, join_error=join_error, capture_error=capture_error, display_log=display_log)
 
     def xdo(label, args, *, codes=(0,)):
         need(time.monotonic() < end, "Normal window controller endpoint expired")
@@ -2726,6 +2824,8 @@ def _shell_normal(value, environment, expected):
         if joined and "result" in holder:
             try:
                 _command_capture("shell-normal", argv, holder["result"], seconds)
+                if holder.get("guardState") == "RESTORED" and holder.get("errors") == []:
+                    display_log = _shell_log_capture(value, "normal", log_binding, holder["result"])
             except BaseException as error:
                 capture_error = error
     errors = (failure, join_error, capture_error, *(holder.get("errors", []) if joined else []))
@@ -2743,7 +2843,7 @@ def _shell_normal(value, environment, expected):
         for error in errors:
             if error is not None:
                 raise error
-        need(joined and inputs == 2 and holder.get("guardState") == "RESTORED" and "result" in holder
+        need(joined and inputs == 2 and holder.get("guardState") == "RESTORED" and "result" in holder and display_log is not None
              and time.monotonic() < _END, "Original normal shell/controller did not settle")
         result = holder["result"]
         observed = shell_result(result.stdout, result.stderr, "normal", result.returncode, expected)
@@ -2877,11 +2977,12 @@ def unit_start():
         original = observations["p0"]["published"]["P0"]
         expected = _installed_payload(value, loader, original)
         for case in SHELL_CASES:
-            environment = _shell_prepare(value, case)
+            environment, log_binding = _shell_prepare(value, case)
             if case == "normal":
-                cases[case] = _shell_normal(value, environment, expected)
+                cases[case] = _shell_normal(value, environment, expected, log_binding)
             else:
-                result = command("shell-" + case, shell_argv(value, case), maximum=60, env=environment)
+                result = command("shell-" + case, shell_argv(value, case), maximum=60, env=environment,
+                                 shell_log=(value, case, log_binding))
                 cases[case] = shell_result(result.stdout, result.stderr, case, result.returncode, expected)
                 if case == "positive":
                     after = canonical(_shell_project_inventory(value, saved=True))
@@ -3147,6 +3248,9 @@ def shell_closed_result(value, outcome, raw_files):
     for case in SHELL_CASES:
         phase = "shell-" + case
         need(commands[phase]["argv"] == shell_argv(value, case), "Closed original shell argv differs")
+        streams = [raw_files[phase + suffix] for suffix in (".stdout", ".stderr", "-xvfb.stderr")]
+        need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
+             "Closed original shell combined output differs")
         result = shell_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected)
         need(canonical(result) == canonical(cases[case]) if case == "positive" else result == cases[case],
              "Closed original shell capture differs")

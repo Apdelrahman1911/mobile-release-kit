@@ -76,7 +76,7 @@ SHELL_RUNPATH_DIRECTORIES = {path: [runpath] for path, (_, runpath) in SHELL_RUN
 # account for the loader's /lib usr-merge spelling, without admitting either
 # directory as a source of a new provider.
 SHELL_RUNPATH_DIRECTORIES[SHELL_LIBRARY_ROOT + "/libLLVM.so.20.1"] = ["/usr/lib/lib", "/lib/lib"]
-SHELL_PROGRAMS = (*SHELL_WEBKIT_PROGRAMS, "/usr/bin/Xvfb", "/usr/bin/xdotool", "/usr/bin/xauth",
+SHELL_PROGRAMS = (*SHELL_WEBKIT_PROGRAMS, "/usr/bin/Xvfb", "/usr/bin/xdotool", "/usr/bin/xauth", "/usr/bin/prlimit",
     "/usr/bin/xkbcomp", "/usr/bin/dbus-daemon", "/usr/bin/dbus-run-session", "/bin/sh",
     *("/usr/bin/" + name for name in ("stty", "awk", "getopt", "mcookie", "fmt", "cat", "rm", "mktemp", "touch")),
     SHELL_LIBRARY_ROOT + "/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner")
