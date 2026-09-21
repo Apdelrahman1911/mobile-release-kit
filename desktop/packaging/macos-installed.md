@@ -1,17 +1,17 @@
 # Mac installed project/draft/Save — engineering SOURCE draft
 
-**Integrated engineering SOURCE draft; native build/install/Aqua/Save remain unrun.**
+**Integrated engineering draft; installation/Aqua/Save remain unverified.**
 The reviewed Mac SOURCE02 was composed onto Linux V commit
 `18eaffcfb62d0bc9a256c448f1a1c025db0ca1ee` using 28 exact source copies plus the
 contextual `shell.rs` union, retaining V's diagnostics and N's Mac owner wiring.
-Only this document and the Mac workflow change afterward for scheduling below.
-The eight accepted A-scope owner/runtime files remain unchanged. Accepted DATA01
-and the affected-only DATA03 parser results are reused, not native qualification.
-The four B1/C1/C2 regressions below still need their first hosted execution.
+Subsequent native API and Installer compile corrections are recorded below.
+Accepted DATA01 and the affected-only DATA03 parser results are reused for their
+unchanged exercised closures, not as native qualification.
+The five selected regressions below require a complete successful hosted gate.
 Do not push the verification branch or use these commands before separate
 actual-source/command review; integration is not proof that this revision works.
 
-## 2026-09-21 supported-directory-API correction (native result pending)
+## 2026-09-21 supported-directory-API and command corrections
 
 The first normal Mac compile failed because getdirentries64 was undeclared. Its
 reviewed successor compiled but the SDK deliberately rejected getdirentries at
@@ -25,8 +25,51 @@ The same job first compiles/links the changed native shim using the selected
 CLT SDK, without loading it, so header/link errors fail before the full build.
 The sole task-owned link output is retired immediately after a successful check.
 A new same-C-decoder regression joins the existing native group, making the
-future selection **2+1+2 = five** (older four-test descriptions below are
-historical). This source does not establish SDK/link/native or installation success.
+selection **2+1+2 = five**. Run35637529386/1 at
+`2e71e54e7855595a7d2201695f64bee5f681ad7c` passed the SDK compile/link check,
+normal app build/sign, two dialog regressions and the Installer finalizer test.
+The checked native permission conversion resolved the earlier Installer compile
+failure. The run then failed before the two native ABI tests: Cargo rejected
+`--no-default-features` for the non-workspace path dependency. Its command now
+omits only that feature-selection flag; the native crate declares no default
+features. The root manifest/lock, package, target and exact two tests are retained.
+Both ABI tests, all seven Installer cases and ordinary installation/readback
+still need successful execution. This is not installed-app/Aqua qualification.
+
+## Explicit Darwin no-ACL observation and early primitive probe
+
+The original run35653635077/1 reached native fixture setup but reported the
+unbound diagnostic `setupError=acl-refused`; all five selected regressions ran,
+while the seven fixture cases and ordinary installation/readback did not. The
+exact failed object/API/errno is not known. No installed/Aqua pass is claimed.
+
+Pinned Apple Libc contracts show that `acl_get_fd_np` can return NULL/ENOENT for
+a valid descriptor with **no ACL**, not only an acquisition failure. The shared
+shim now uses one same-FD `fstatx_np`, requires complete consistent ordinary
+stat properties, and explicitly queries ACL presence. Presence is zero/nonzero,
+not necessarily1. Every call failure refuses; no errno is accepted as absence.
+Present ACLs keep Darwin's valid-first-entry rule: an actual ACE always refuses.
+SDK sentinels are not owned ACLs. Actual errno0, fallback errors, first failure and
+separate single-free errors remain distinguishable; no descriptor is duplicated.
+
+A fixed nonroot macOS26/ARM64 APFS probe replaces the previous throwaway link-only
+check before the shell build. It exercises the actual shim on fresh no-ACL file
+and directory, zero-entry ACL, a real synthetic ACE, and raw-native EBADF (never
+an invalid Rust borrow or manufactured close). Only its own three exclusive
+entries may be changed/retired; original close/cleanup errors fail. Native compile
+and probe statuses/logs remain separate, source-bound and bounded. The five
+existing regressions still cover their separate contracts. Probe success is not
+Installer/Aqua acceptance; native execution of this correction is still required.
+
+Failure-only `MRK_MACOS_INSTALL_ACL_DIAGNOSTIC` records carry finite object role,
+API phase, return/error and free-error scalars (maximum512 bytes). No pathname,
+ACL content, environment or account information is written. Diagnostic output is
+non-panicking and cannot bypass original finalization. Collector selection stays
+unbound; the protected final-result transport below is a separate channel, not
+promotion of a log or pending staging receipt. System/source ACLs and modes are
+never normalized. Run35659557286/1 passed its six original ACL probe controls and
+five focused regressions, then failed fixture setup; it is not Installer success.
+The changed transport/created-directory path still needs its own native evidence.
 
 ## Deliberately small product surface
 
@@ -60,13 +103,29 @@ make an unavailable profile pass. A user-writable copy or App Translocation
 cannot select the installed runtime by its executable pathname.
 
 `mrk-macos-install` is a one-shot **standard Installer** postinstall program.
-`pkgbuild --nopayload` supplies only a Scripts archive: input DATA, the fixed
-native installer and a fixed shell entry. There is no final-destination payload.
-The DATA auditor reads the package's XAR and CPIO bytes without extracting or
-executing them, demands a complete root:wheel roster/modes, rejects all links
-and specials, and rejects a Payload member. If PackageKit/pkgbuild does not
-preserve that precise archive policy on the selected host, stop and review the
-observed mismatch—never skip the audit or run Python as root to normalize it.
+`pkgbuild --nopayload` first supplies a retained original scripts-only package:
+input DATA, the fixed native installer and a fixed shell entry. Its Scripts
+archive may retain the ordinary packager's UID/GID despite `--ownership recommended`.
+The nonroot DATA preparation checks that exact owner, complete bytes/modes/roster
+and fixed package identity, then copies only the unchanged decoded `PackageInfo`
+bytes into fresh parts. Native macOS tar creates gzip odc Scripts with numeric
+UID0/GID0 overrides from the original fresh scripts tree; native xar assembles a
+separate fresh package. No source chown, privileged preparation, custom archive
+serializer, XML rewriting or final-destination payload is involved.
+Tar writes the guarded new regular `Scripts` file in its already private parts
+directory, not stdout: BSD tar pads stdout even when compressed, which the strict
+gzip audit correctly rejects. The native file writer has no other producer.
+
+Preparation is **not** final acceptance. The final DATA audit rechecks the
+original, requires byte-identical PackageInfo, exactly PackageInfo/Scripts XAR
+members and the complete root:wheel CPIO bytes/modes/roster before Installer.
+It rejects links, specials, missing/duplicate roots, extra members and changed
+contents. A tiny inert packaging-only probe runs before expensive compilation;
+neither its success nor its `exit97` hook is an Installer or GUI qualification.
+If the native format or ownership fails, retain the originals and review the
+fixed package-refusal diagnostic—never skip the audit, retry over outputs or
+run Python as root to normalize them. Actual native verification remains a
+separate evidence gate, not a claim made by this preparation route.
 
 The Installer:
 
@@ -78,6 +137,11 @@ The Installer:
    Existing system ancestors may have a different root-owned group but must be
    non-group/world-writable with empty ACLs. Product ancestors are root:wheel
    0755; a random, fresh `.install-…` staging directory is root:wheel 0700.
+   Darwin-created directories can inherit an admitted non-wheel parent's group.
+   Only a fresh root-uid/private original is normalized to0:0; checked original
+   clock/name/FD custody precedes fchown, and failure/expiry prevents chmod.
+   Both identity books refresh only after exact normalized named/FD comparison.
+   Existing directories and the private-file creation policy are unchanged.
 3. Copies with exclusive files, one process and no copy subprocesses. It hashes,
    explicitly closes, reopens only for readback of the same created inode,
    checks every file and complete directory roster, and seals staged directories
@@ -92,8 +156,9 @@ The Installer:
    repaired, overwritten, rolled back or deleted.
 5. Labels durable publication receipts as **pending final closes**. Only after
    closing every original descriptor and sampling the **same original deadline**
-   can `MRK_MACOS_INSTALL_RESULT` report `installed`. Equality is late; actual
-   positive closes stay Closed. The post-native persistence/forward-close gates
+   can the immutable installation DTO report `installed`; overall success also
+   requires the protected export below. Equality is late; actual positive closes
+   stay Closed. The post-native persistence/forward-close gates
    and final classifier preserve the first error; a final unknown close has its
    own fixed reason. Exit 20 is retained published-but-incomplete, never success.
    Timeout/unknown retains staging and any published object. This source has no
@@ -102,6 +167,83 @@ The Installer:
 The 120-second Installer admission clock is not an extension of any application
 clock and cannot preempt a blocked kernel syscall. Unknown must remain Unknown;
 process absence or a standard Installer exit alone cannot prove native finality.
+
+## Installer entry and bounded diagnostics
+
+The fixed package hook admits only its existing absolute `.../postinstall`
+spelling and exact `./postinstall`, with target `/`. Both use physical `cd -P`
+and replace the shell with the same `./mrk-macos-install "$PWD/input"`; they
+cannot select another tool or destination. Literal stderr phase/refusal markers
+show entry, target, invocation spelling, physical-directory selection and the
+pre-exec boundary. They expose no raw arguments, working directory or environment,
+and do not claim that exec completed. The relative spelling is a robustness
+correction: error112 in run35646922068 did not establish its actual argv0/CWD.
+
+The existing nonroot DATA stager can record a cursor immediately before Installer
+and one diagnostic snapshot after its original return. It reads only physical
+`/private/var/log/install.log`: same root-owned single-link file identity,
+unchanged preceding4096-byte anchor, complete LF boundaries, at most1MiB of new
+bytes,128KiB per line and256KiB of selected raw project-anchored lines. Cursor
+JSON is bounded to16KiB and capture JSON to256KiB before output; selected bytes
+and status scalars are bounded before the explicit artifact upload. Unrelated
+neighboring lines are counted/hashed as part of the interval, never retained.
+Each selected line keeps its original interval offset and hash. Missing access,
+rotation, caps, incomplete/rewritten data or read/close/write uncertainty is
+explicitly unknown, with no retry, alternate log source or permission change.
+An output write/close failure can leave an unconfirmed task-owned file; preserve
+it as unknown, not as a complete capture.
+
+Original Installer status is saved before collection, including on failure;
+its nonzero exit is propagated unchanged. Cursor/capture statuses remain separate.
+No status is fabricated after timeout/cancellation. Log growth is recorded, and
+reopened metadata is not continuous original-FD custody. Selected lines are
+**project-correlated diagnostics, not authenticated PackageKit PID attribution**.
+Opposite/duplicate result markers remain mixed/ambiguous; even one marker remains
+unbound. No diagnostic capture, client-output marker or tail substitutes for the
+protected result export, source/inventory/manifest checks, fixture readback,
+ordinary readback or Aqua gates. Historical failed runs remain failed.
+
+### Protected same-invocation result transport
+
+The Installer client need not forward its child script's stdout. Successful
+ordinary and fixture entries therefore export their unchanged settled final DTO
+to exactly one root-owned file directly below `/Library/Application Support`:
+`MobileReleaseKit-InstallerResult-v1-{ordinary|fixture}-{source40}-{inventory64}-{manifest64}.json`.
+There is no alternate pathname, environment override, privileged Python reader,
+log fallback or general IPC service.
+
+Only original success starts export. A dedicated book owns at most four original
+FDs, separate from the settled installation: three protected parents and one
+exclusive0600 writer. The new root-uid private writer may inherit its parent's
+group, then only that original is normalized to0:0/0444. Occupied names refuse;
+no adoption, replacement, repair, retry or deletion occurs. JSON is closed,
+UTF-8 and at most65536 bytes including LF. Full sealed leaf identity/size,
+actual empty ACL/no-xattrs, file fsync+F_FULLFSYNC, one checked writer close,
+parent persistence, stable protected ancestry and reverse original closes must
+all pass. Ordinary export retains `Install.end`; the fixture captures one10s
+export-only endpoint after its aggregate settles, before serialization. A final
+post-close clock veto remains mandatory; no fallible stdout follows success.
+Export failure changes original ordinary0 to20 or fixture0 to1; partial effects
+and any installed objects are retained. Old nonzero outcomes never export.
+
+Before each original Installer invocation, the nonroot stager admits only ENOENT
+for this exact expected name, through checked protected parent originals. The
+workflow saves the original Installer status before diagnostics, preserves an
+original failure unchanged and checks status-write success separately. Required
+`--installer-status` is exactly `0` plus LF in the original task-owner0600 file
+under its private0700 work parent. This is saved same-run evidence, not a claim
+of crash-durable journaling. Nonroot export readback requires one original
+regular/single-link0:0/0444 file, exact expected bindings and all leaf/parent
+closes before accepting DATA. Existing ordinary/seven-case validators and
+complete installed roster/byte/mode proofs remain unchanged.
+
+The wrapper intentionally says `pending-original-export-finalization`: a file
+cannot certify its own later sync, close or timeout. Neither presence nor this
+old-success DTO independently establishes finality. Qualification also requires
+the original successful Installer return and reviewed producer finalization,
+plus checked readback and installed-tree evidence. Observation JSON retains the
+inner DTO and bounded export identity/hash with that explicit finality basis.
+This source change is not itself native Installer or Aqua qualification.
 
 ## Fixed seven-case Installer fixture — separate package, not a runner
 
@@ -237,8 +379,8 @@ checkout retains no credentials. There is no release/Store or payload rebuild.
 The same job records actual Rust/Cargo, selected CLT SDK/compiler, Node and
 stager-Python versions with source/run bindings. It makes one normal app build,
 then binds the completed frontend, signed app and unchanged runtime into one
-install inventory. Before either privileged package invocation, it runs the four
-existing regressions below as nonroot, grouped **2+1+1**, using the same locked
+install inventory. Before either privileged package invocation, it runs the five
+existing regressions below as nonroot, grouped **2+1+2**, using the same locked
 dependency graph, release profile, ARM64 target and build bindings/target cache.
 Only selected libtest artifacts are additionally compiled; no second ordinary
 app or interpreter build is scheduled. The native ABI package is selected from
@@ -246,7 +388,7 @@ the parent manifest/lock, not from a new standalone dependency resolution.
 
 Each invocation retains at most a 128-KiB log tail and the original Cargo/tee/tail
 statuses. The gate requires exactly the selected successful test names and
-executed counts 2/1/1, with zero failed/ignored/measured tests; zero matches is a
+executed counts 2/1/2, with zero failed/ignored/measured tests; zero matches is a
 failure. `--exact` receives the full names **after Cargo's `--`**, never a module
 prefix. The original commands must all succeed; a successful logger cannot mask
 a Cargo failure. Fixed seven-case and ordinary standard Installer packages,
@@ -270,7 +412,7 @@ nonroot host; its bounded logging and count/name checks are mandatory:
 ```sh
 cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --release --no-default-features --features desktop-shell,custom-protocol --target aarch64-apple-darwin --lib -- --exact --test-threads=1 --color=never --format=pretty shell::owned_macos::tests::native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal shell::owned_macos::tests::response_mapping_preserves_other_and_missing_facts_poison_dispatch
 cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --release --no-default-features --features macos-installed-installer --target aarch64-apple-darwin --bin mrk-macos-install -- --exact --test-threads=1 --color=never --format=pretty installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error
-cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --release --no-default-features --target aarch64-apple-darwin --package mrk-macos-installed-native --lib -- --exact --test-threads=1 --color=never --format=pretty tests::only_explicit_user_appkit_responses_can_be_accept_or_decline
+cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --release --target aarch64-apple-darwin --package mrk-macos-installed-native --lib -- --exact --test-threads=1 --color=never --format=pretty tests::only_explicit_user_appkit_responses_can_be_accept_or_decline tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches
 ```
 
 The existing `runtime::tests::macos_*` and `asset_source::macos::tests::*`

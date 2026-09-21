@@ -7,8 +7,62 @@ use mrk_macos_installed_native::{self as native, Panel, PanelKind, PanelResponse
 
 type NativeResult = Result<(), ()>;
 type DialogOutcome = Result<Option<PathBuf>, Reason>;
-struct OriginalPanel { id: u32, panel: Option<Panel> }
+struct OriginalPanel {
+    id: u32, panel: Option<Panel>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    observed_call: std::sync::Weak<GuiCall>,
+}
 thread_local! { static PANEL: RefCell<Option<OriginalPanel>> = const { RefCell::new(None) }; }
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+pub(super) mod observation {
+    use super::*;
+    pub(crate) use native::PanelAction;
+
+    pub(crate) struct ObservedPanel {
+        pub(crate) id: u32,
+        pub(crate) native: native::PanelObservation,
+        /// Read-only sample, not an action permit or a settlement receipt.
+        pub(crate) action_allowed: bool,
+    }
+    fn original(entry: &OriginalPanel) -> Result<(Arc<GuiCall>, Arc<OriginalWork>), ()> {
+        let call = entry.observed_call.upgrade().ok_or(())?;
+        let owner = call.owner().ok_or(())?;
+        if owner.id != entry.id || !Arc::ptr_eq(&owner.gui, &call) { return Err(()); }
+        Ok((call, owner))
+    }
+    fn allowed(call: &GuiCall, owner: &OriginalWork) -> Result<bool, ()> {
+        let facts = call.facts().ok_or(())?;
+        Ok(!owner.interrupted() && facts.dispatched && facts.created && facts.showing && !facts.constructing
+            && !facts.not_created && facts.refusal.is_none() && !facts.response && !facts.close_queued
+            && !facts.destroyed && !facts.close_ack && !facts.release_queued && !facts.released)
+    }
+    pub(crate) fn observed_panel() -> Result<Option<ObservedPanel>, ()> {
+        if !native::main_thread() { return Err(()); }
+        PANEL.with(|book| {
+            let mut book = book.try_borrow_mut().map_err(|_| ())?;
+            let Some(entry) = book.as_mut() else { return Ok(None); };
+            let (call, owner) = original(entry)?;
+            let action_allowed = allowed(&call, &owner)?;
+            let native = entry.panel.as_mut().ok_or(())?.installed_observation().map_err(|_| ())?;
+            Ok(Some(ObservedPanel { id: entry.id, native, action_allowed }))
+        })
+    }
+    pub(crate) fn observe_panel_action(id: u32, action: PanelAction<'_>) -> Result<bool, ()> {
+        if !native::main_thread() { return Err(()); }
+        PANEL.with(|book| {
+            let mut book = book.try_borrow_mut().map_err(|_| ())?;
+            let entry = book.as_mut().filter(|entry| entry.id == id).ok_or(())?;
+            let (call, owner) = original(entry)?;
+            if !allowed(&call, &owner)? || owner.interrupted() { return Err(()); }
+            // No GuiFacts lock across AppKit. The same native completion and
+            // production tick retain response admission/close/release custody.
+            entry.panel.as_mut().ok_or(())?.installed_action(action).map_err(|_| ())
+        })
+    }
+}
 
 // Retained by the original coordinating task, independent of GuiCall's first
 // user-facing refusal. A later known return cannot erase cleanup uncertainty.
@@ -45,7 +99,11 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind) -> NativeResult {
         if book.is_some() { return Err(Reason::Busy); }
         let panel = Panel::reserve().map_err(|_| Reason::SourceRefused)?;
         // Store the exact original before constructing/presenting any panel.
-        *book = Some(OriginalPanel { id: owner.id, panel: Some(panel) }); Ok(())
+        *book = Some(OriginalPanel { id: owner.id, panel: Some(panel),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            observed_call: Arc::downgrade(call),
+        }); Ok(())
     });
     if let Err(reason) = reserved {
         if let Some(mut facts) = call.facts() { facts.constructing = false; } else { return uncertain(call); }
@@ -86,6 +144,9 @@ fn tick(call: &Arc<GuiCall>, id: u32, quit: bool) -> NativeResult {
                 Ok(PanelState::Responded { response, path }) => {
                     let first = call.facts().ok_or(())?.response == false;
                     if first {
+                        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+                            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+                        call.record_installed_native_response(id, response_kind(response), path.as_deref())?;
                         let admitted = call.begin_response(response_kind(response), quit);
                         if admitted == Some(true) && !quit {
                             call.selected_path(path.ok_or(Reason::SourceRefused).and_then(|path| {

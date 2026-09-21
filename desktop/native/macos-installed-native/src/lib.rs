@@ -1,13 +1,16 @@
 //! Small Darwin ABI boundary, not an operation owner or an execution permit.
 //! The application retains its original slots/tasks and supplies every deadline.
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(feature = "installed-observation", not(debug_assertions)))]
+compile_error!("installed observation controls require debug assertions in an explicit instrumented build");
 use std::{ffi::{c_char, c_int, c_void, CString}, io, marker::PhantomData,
     os::fd::{AsRawFd, BorrowedFd}, path::PathBuf, ptr::NonNull, rc::Rc};
 
 unsafe extern "C" {
     fn mrk_platform() -> c_int;
     fn mrk_user(uid: *mut u32) -> c_int;
-    fn mrk_acl_empty(fd: c_int) -> c_int;
+    fn mrk_acl_empty(fd: c_int, phase: *mut c_int, call_result: *mut c_int, native_errno: *mut c_int,
+        free_result: *mut c_int, free_errno: *mut c_int) -> c_int;
     fn mrk_no_xattrs(fd: c_int) -> c_int;
     fn mrk_entries(fd: c_int, bytes: *mut u8, capacity: usize, used: *mut usize) -> c_int;
     fn mrk_sync(fd: c_int, file: c_int) -> c_int;
@@ -33,9 +36,43 @@ pub fn real_user() -> io::Result<u32> {
     // SAFETY: fixed writable result cell; the shim validates the actual kernel/user.
     result(unsafe { mrk_user(&mut uid) })?; Ok(uid)
 }
+/// Finite diagnostics from the same original ACL observation, not another query.
+/// The actual errno (including0) stays separate from the returned fallback code.
+pub struct AclFailure {
+    pub phase: &'static str,
+    pub call_result: i32,
+    pub native_errno: i32,
+    pub free_result: i32,
+    pub free_errno: i32,
+    pub refusal_code: Option<i32>,
+    error: io::Error,
+}
+impl AclFailure { pub fn into_io_error(self) -> io::Error { self.error } }
+pub fn empty_acl_observed(fd: BorrowedFd<'_>) -> Result<(), AclFailure> {
+    let (mut phase, mut returned, mut observed_errno, mut freed, mut free_errno) = (0, 0, 0, 0, 0);
+    // SAFETY: borrowed live FD and five distinct writable scalar cells. No
+    // descriptor acquisition/consumption; native temporaries retire in that call.
+    let code = unsafe { mrk_acl_empty(fd.as_raw_fd(), &mut phase, &mut returned, &mut observed_errno, &mut freed, &mut free_errno) };
+    let name = match phase {
+        1 => "filesec-allocation", 2 => "fstatx-snapshot", 3 => "snapshot-owner", 4 => "snapshot-group", 5 => "snapshot-mode",
+        6 => "acl-presence", 7 => "acl-conversion", 8 => "acl-object", 9 => "acl-validation", 10 => "acl-first-entry",
+        11 => "acl-entry-present", 12 => "acl-free", _ => "ffi-output",
+    };
+    if code == 0 && (phase, returned, observed_errno, freed, free_errno) == (0, 0, 0, 0, 0) { return Ok(()); }
+    let consistent = code > 0 && phase >= 1 && phase <= 12 && observed_errno >= 0 && free_errno >= 0
+        && (freed != 0 || free_errno == 0) && (phase != 12 || freed != 0)
+        && (phase != 11 || (returned == 0 && observed_errno == 0));
+    if consistent {
+        Err(AclFailure { phase: name, call_result: returned, native_errno: observed_errno, free_result: freed, free_errno,
+            refusal_code: Some(code), error: io::Error::from_raw_os_error(code) })
+    } else {
+        // Inconsistent FFI output is never accepted or described as a real errno.
+        Err(AclFailure { phase: "ffi-output", call_result: 0, native_errno: 0, free_result: 0, free_errno: 0,
+            refusal_code: None, error: io::ErrorKind::InvalidData.into() })
+    }
+}
 pub fn empty_acl(fd: BorrowedFd<'_>) -> io::Result<()> {
-    // SAFETY: borrowed live descriptor; no ownership transfer or new descriptor.
-    result(unsafe { mrk_acl_empty(fd.as_raw_fd()) })
+    empty_acl_observed(fd).map_err(AclFailure::into_io_error)
 }
 pub fn no_xattrs(fd: BorrowedFd<'_>) -> io::Result<()> {
     // SAFETY: borrowed live descriptor, metadata only.
@@ -133,6 +170,105 @@ impl Panel {
         // returned, dismissal is observed and our exact references can retire.
         if unsafe { mrk_panel_release(self.original.as_ptr()) } == 0 { Ok(()) }
         else { self.unknown = true; Err(self) } // Never dereference a failed-release original again.
+    }
+}
+
+// The integration target's cfg(test) does not reach this dependency. Explicit
+// nondefault feature forwarding selects BOTH this Rust seam and the C controls.
+#[cfg(feature = "installed-observation")]
+pub use observation::{PanelAction, PanelObservation};
+#[cfg(feature = "installed-observation")]
+mod observation {
+    use super::*;
+    use std::path::Path;
+
+    pub enum PanelAction<'a> {
+        ProjectCancel,
+        /// A caller-prebound synthetic directory, once per original panel.
+        /// Navigation returning is NOT evidence that Open selected this path.
+        ProjectDirectory(&'a Path),
+        ProjectOpen,
+        QuitCancel,
+        QuitConfirm,
+    }
+    pub struct PanelObservation {
+        pub kind: PanelKind,
+        pub started: bool,
+        pub attached: bool,
+        pub directory_bound: bool,
+        pub directory_returned: bool,
+        pub directory_ready: bool,
+        pub action_attempted: bool,
+        pub action_returned: bool,
+        pub callback_returned: bool,
+        pub response: Option<PanelResponse>,
+        /// Only the original native completion writes this selected path.
+        pub selected: Option<PathBuf>,
+        pub close_attempted: bool,
+        pub dismissed: bool,
+        pub closed: bool,
+    }
+    unsafe extern "C" {
+        fn mrk_panel_observe(panel: *mut c_void, kind: *mut c_int, flags: *mut u32,
+            response: *mut c_int, path: *mut u8, capacity: usize) -> c_int;
+        fn mrk_panel_observe_action(panel: *mut c_void, action: c_int, directory: *const c_char) -> c_int;
+    }
+    impl Panel {
+        pub fn installed_observation(&mut self) -> io::Result<PanelObservation> {
+            self.usable()?;
+            let mut kind = 0; let mut flags = 0; let mut response = 0; let mut path = [0u8; 4097];
+            // SAFETY: same retained main-thread original and exact writable
+            // DATA cells. Unlike poll, this neither consumes nor adds a fact.
+            let status = unsafe { mrk_panel_observe(self.original.as_ptr(), &mut kind, &mut flags,
+                &mut response, path.as_mut_ptr(), path.len()) };
+            if let Err(error) = result(status) { self.unknown = true; return Err(error); }
+            let parsed = (|| {
+                let kind = match kind { 1 => PanelKind::Project, 2 => PanelKind::Quit,
+                    _ => return Err(io::Error::from(io::ErrorKind::InvalidData)) };
+                if flags & !0xfff != 0 { return Err(io::ErrorKind::InvalidData.into()); }
+                let end = path.iter().position(|byte| *byte == 0).ok_or(io::ErrorKind::InvalidData)?;
+                let selected = if end == 0 { None } else { std::str::from_utf8(&path[..end]).ok().map(PathBuf::from) };
+                let response = if flags & 128 != 0 { Some(panel_response(response)?) } else { None };
+                Ok(PanelObservation { kind, started: flags & 1 != 0, attached: flags & 2 != 0,
+                    directory_bound: flags & 4 != 0, directory_returned: flags & 8 != 0,
+                    directory_ready: flags & 16 != 0, action_attempted: flags & 32 != 0,
+                    action_returned: flags & 64 != 0, callback_returned: flags & 256 != 0,
+                    response, selected, close_attempted: flags & 512 != 0,
+                    dismissed: flags & 1024 != 0, closed: flags & 2048 != 0 })
+            })();
+            if parsed.is_err() { self.unknown = true; } parsed
+        }
+        /// false means a not-yet-ready sheet/directory/button was observed
+        /// BEFORE any action. true means only the actual action call returned;
+        /// the real callback and original coordinator still own all outcomes.
+        pub fn installed_action(&mut self, action: PanelAction<'_>) -> io::Result<bool> {
+            self.usable()?;
+            let (code, directory) = match action {
+                PanelAction::ProjectCancel => (1, None),
+                PanelAction::ProjectDirectory(path) => {
+                    let text = path.to_str().ok_or(io::ErrorKind::InvalidInput)?;
+                    if !path.is_absolute() || text.len() > 4096 || text.split('/').skip(1)
+                        .any(|part| part.is_empty() || part == "." || part == "..") {
+                        return Err(io::ErrorKind::InvalidInput.into());
+                    }
+                    (2, Some(CString::new(text).map_err(|_| io::ErrorKind::InvalidInput)?))
+                }
+                PanelAction::ProjectOpen => (3, None),
+                PanelAction::QuitCancel => (4, None),
+                PanelAction::QuitConfirm => (5, None),
+            };
+            // SAFETY: same retained main-thread original; optional bounded
+            // CString lives through the call and is copied once by the shim.
+            let status = unsafe { mrk_panel_observe_action(self.original.as_ptr(), code,
+                directory.as_ref().map_or(std::ptr::null(), |path| path.as_ptr())) };
+            match result(status) {
+                Ok(()) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+                // These native refusals promise no action was attempted.
+                Err(error) if matches!(error.kind(), io::ErrorKind::InvalidInput | io::ErrorKind::PermissionDenied) => Err(error),
+                Err(error) => { self.unknown = true; Err(error) }
+            }
+        }
     }
 }
 

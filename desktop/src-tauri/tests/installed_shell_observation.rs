@@ -2,8 +2,8 @@
 #![forbid(unsafe_code)]
 #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
-    target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
-compile_error!("installed-shell observation requires debug test + desktop-shell + custom-protocol on Linux x86_64 GNU, without development-runtime or publisher");
+    any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))))]
+compile_error!("installed-shell observation requires debug test + desktop-shell + custom-protocol on Linux x86_64 GNU or observed Mac ARM64, without development-runtime, publisher or installer");
 #[path = "../src/error.rs"] mod error;
 #[path = "../src/protocol.rs"] mod protocol;
 #[path = "../src/environment.rs"] mod environment;
@@ -18,7 +18,12 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/android_toolchain.rs"] mod android_toolchain;
 #[path = "../src/saved_command_owner.rs"] mod saved_command_owner;
 #[path = "../src/runtime.rs"] mod runtime;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[path = "../src/installed_runtime.rs"] mod installed_runtime;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[path = "../src/installed_runtime_macos.rs"] mod installed_runtime;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[path = "../src/macos_install_paths.rs"] mod macos_install_paths;
 #[path = "../src/supervisor.rs"] mod supervisor;
 #[path = "../src/bridge.rs"] mod bridge;
 #[path = "../src/document_lifetime.rs"] mod document_lifetime;

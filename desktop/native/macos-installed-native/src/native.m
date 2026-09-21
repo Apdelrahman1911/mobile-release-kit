@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 #include <Block.h>
 #include <sys/acl.h>
+#include <sys/stat.h>
 #include <sys/attr.h>
 #include <sys/vnode.h>
 #include <sys/utsname.h>
@@ -29,20 +30,66 @@ int mrk_user(uint32_t *uid) {
     int platform = mrk_platform(); if (platform) return platform;
     *uid = getuid(); return 0;
 }
-int mrk_acl_empty(int fd) {
-    acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
-    if (!acl) return errno ? errno : EIO;
-    // Darwin differs from Linux: zero means an entry WAS returned; a valid
-    // empty ACL reports -1/EINVAL for ACL_FIRST_ENTRY. Never admit an ACE by
-    // interpreting Darwin's success as Linux's end-of-list convention.
-    int saved = 0;
-    if (acl_valid(acl)) saved = errno ? errno : EIO;
-    else {
-        acl_entry_t entry; errno = 0;
-        int found = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
-        saved = found == 0 ? EPERM : found == -1 && errno == EINVAL ? 0 : (errno ? errno : EIO);
+// Closed first-party diagnostic ABI, shared with Rust and the fixed probe.
+// 1 allocation; 2 snapshot; 3/4/5 owner/group/mode completeness; 6 presence;
+// 7 conversion; 8 object; 9 validation; 10 first entry; 11 ACE; 12 free.
+// Values are saved observations, not accepted-error or ownership capabilities.
+static int mrk_acl_failure(int at, int returned, int observed_errno,
+                           int *phase, int *call_result, int *native_errno) {
+    *phase = at; *call_result = returned; *native_errno = observed_errno;
+    return observed_errno ? observed_errno : EIO;
+}
+int mrk_acl_empty(int fd, int *phase, int *call_result, int *native_errno,
+                  int *free_result, int *free_errno) {
+    if (!phase || !call_result || !native_errno || !free_result || !free_errno) return EINVAL;
+    *phase = *call_result = *native_errno = *free_result = *free_errno = 0;
+    errno = 0;
+    filesec_t fsec = filesec_init();
+    if (!fsec) return mrk_acl_failure(1, 0, errno, phase, call_result, native_errno);
+    acl_t acl = NULL; int owned_acl = 0, saved = 0, rc = 0, observed_errno = 0;
+    struct stat snapshot = {0}; uid_t owner = 0; gid_t group = 0; mode_t mode = 0; int present = 0;
+    // acl_get_fd_np collapses a genuinely absent ACL to NULL/ENOENT. Observe
+    // successful same-FD snapshot + explicit presence instead, never errno alone.
+    errno = 0; rc = fstatx_np(fd, &snapshot, fsec); observed_errno = errno;
+    if (rc != 0) { saved = mrk_acl_failure(2, rc, observed_errno, phase, call_result, native_errno); goto done; }
+    // A fresh but unpopulated filesec is not proof of absence, including after
+    // libc allocation/early-out paths. All three ordinary properties must exist.
+    errno = 0; rc = filesec_get_property(fsec, FILESEC_OWNER, &owner); observed_errno = errno;
+    if (rc != 0 || owner != snapshot.st_uid) { saved = mrk_acl_failure(3, rc, rc ? observed_errno : 0, phase, call_result, native_errno); goto done; }
+    errno = 0; rc = filesec_get_property(fsec, FILESEC_GROUP, &group); observed_errno = errno;
+    if (rc != 0 || group != snapshot.st_gid) { saved = mrk_acl_failure(4, rc, rc ? observed_errno : 0, phase, call_result, native_errno); goto done; }
+    errno = 0; rc = filesec_get_property(fsec, FILESEC_MODE, &mode); observed_errno = errno;
+    if (rc != 0 || mode != snapshot.st_mode) { saved = mrk_acl_failure(5, rc, rc ? observed_errno : 0, phase, call_result, native_errno); goto done; }
+    errno = 0; rc = filesec_query_property(fsec, FILESEC_ACL, &present); observed_errno = errno;
+    if (rc != 0) { saved = mrk_acl_failure(6, rc, observed_errno, phase, call_result, native_errno); goto done; }
+    if (!present) goto done; // Successful, complete snapshot: there is no ACL.
+    // Presence is a zero/nonzero flag, not necessarily the integer1 on Darwin.
+    errno = 0; rc = filesec_get_property(fsec, FILESEC_ACL, &acl); observed_errno = errno;
+    if (rc != 0) { saved = mrk_acl_failure(7, rc, observed_errno, phase, call_result, native_errno); goto done; }
+    if (!acl || (void *)acl == _FILESEC_REMOVE_ACL || (void *)acl == _FILESEC_UNSET_PROPERTY) {
+        saved = mrk_acl_failure(8, 0, 0, phase, call_result, native_errno); goto done;
     }
-    if (acl_free(acl)) return errno ? errno : EIO;
+    owned_acl = 1;
+    errno = 0; rc = acl_valid(acl); observed_errno = errno;
+    if (rc != 0) { saved = mrk_acl_failure(9, rc, observed_errno, phase, call_result, native_errno); goto done; }
+    acl_entry_t entry;
+    errno = 0; rc = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry); observed_errno = errno;
+    // Darwin success0 means an ACE exists. Only -1/EINVAL on a valid ACL is
+    // an empty first entry. Principal, rights and inheritance never allow an ACE.
+    if (rc == 0) { *phase = 11; *call_result = 0; *native_errno = 0; saved = EPERM; }
+    else if (!(rc == -1 && observed_errno == EINVAL)) {
+        saved = mrk_acl_failure(10, rc, observed_errno, phase, call_result, native_errno);
+    }
+done:
+    if (owned_acl) {
+        errno = 0; rc = acl_free(acl); observed_errno = errno;
+        if (rc != 0) {
+            *free_result = rc; *free_errno = observed_errno;
+            if (!saved) (void)mrk_acl_failure(12, rc, observed_errno, phase, call_result, native_errno);
+            saved = observed_errno ? observed_errno : EIO; // Free failure vetoes even an otherwise empty ACL.
+        }
+    }
+    filesec_free(fsec); // Exactly once; void API must actually return. No FD ownership transfer.
     return saved;
 }
 int mrk_no_xattrs(int fd) {
@@ -146,6 +193,11 @@ int mrk_panel_response(int kind, int64_t code, int programmatic) {
     BOOL attempted, started, responded, reported, callbackActive, closeAttempted, closed, unknown;
     int kind, response;
     char selected[4097];
+#ifdef MRK_INSTALLED_OBSERVATION
+    // Instrumentation only; never callback/cleanup/selection authority.
+    BOOL observationDirectoryReturned, observationActionAttempted, observationActionReturned;
+    char observationDirectory[4097];
+#endif
 }
 @end
 @implementation MRKInstalledPanel
@@ -255,3 +307,81 @@ int mrk_panel_release(void *opaque) {
         [s->parent release]; s->parent = nil; [s release]; return 0;
     } @catch (NSException *e) { (void)e; return EIO; }
 }
+
+#ifdef MRK_INSTALLED_OBSERVATION
+// No separate window lookup: both directions must refer to the parent and
+// exact retained sheet captured by the original production start call.
+static BOOL mrk_observation_attached(MRKInstalledPanel *s) {
+    return s->parent && s->window && [s->parent attachedSheet] == s->window
+        && [s->window sheetParent] == s->parent && [s->window isVisible];
+}
+static BOOL mrk_observation_directory_ready(MRKInstalledPanel *s) {
+    if (s->kind != 1 || !s->window || !s->observationDirectoryReturned || !s->observationDirectory[0]) return NO;
+    NSURL *url = [(NSOpenPanel *)s->window directoryURL];
+    const char *path = url && [url isFileURL] ? [url fileSystemRepresentation] : NULL;
+    return path && strnlen(path, sizeof(s->observationDirectory)) < sizeof(s->observationDirectory)
+        && strcmp(path, s->observationDirectory) == 0;
+}
+int mrk_panel_observe(void *opaque, int *kind, uint32_t *flags, int *response, uint8_t *path, size_t capacity) {
+    if (!pthread_main_np() || !opaque || !kind || !flags || !response || !path || capacity != 4097) return EINVAL;
+    MRKInstalledPanel *s = opaque;
+    if (s->unknown) return EIO;
+    @try {
+        // Closed twelve-bit ABI with the Rust PanelObservation decoder. Reads
+        // do not set reported, manufacture completion, or authorize retirement.
+        *kind = s->kind; *response = s->response;
+        *flags = (s->started ? 1u : 0u) | (mrk_observation_attached(s) ? 2u : 0u)
+            | (s->observationDirectory[0] ? 4u : 0u) | (s->observationDirectoryReturned ? 8u : 0u)
+            | (mrk_observation_directory_ready(s) ? 16u : 0u) | (s->observationActionAttempted ? 32u : 0u)
+            | (s->observationActionReturned ? 64u : 0u) | (s->responded ? 128u : 0u)
+            | (s->responded && !s->callbackActive ? 256u : 0u) | (s->closeAttempted ? 512u : 0u)
+            | (s->window && ![s->window isVisible] && ![s->window sheetParent] ? 1024u : 0u)
+            | (s->closed ? 2048u : 0u);
+        memcpy(path, s->selected, sizeof(s->selected)); return 0;
+    } @catch (NSException *e) { (void)e; s->unknown = YES; return EIO; }
+}
+int mrk_panel_observe_action(void *opaque, int action, const char *directory) {
+    if (!pthread_main_np() || !opaque || action < 1 || action > 5 || ((action == 2) != (directory != NULL))) return EINVAL;
+    MRKInstalledPanel *s = opaque;
+    if (s->unknown) return EIO;
+    if (!s->started || !s->window || !s->parent || !s->completion || s->responded || s->callbackActive
+        || s->closeAttempted || s->closed || s->observationActionAttempted) return EPERM;
+    if ((action <= 3 && s->kind != 1) || (action >= 4 && s->kind != 2)) return EPERM;
+    @try {
+        // EAGAIN is only pre-action readiness, never permission to repeat an
+        // attempted action. The caller's original endpoint is not renewed.
+        if (!mrk_observation_attached(s)) return EAGAIN;
+        if (action == 2) {
+            if (s->observationDirectory[0]) return EPERM;
+            size_t length = strnlen(directory, sizeof(s->observationDirectory));
+            if (length == 0 || length >= sizeof(s->observationDirectory) || directory[0] != '/') return EINVAL;
+            NSString *text = [NSString stringWithUTF8String:directory];
+            NSURL *url = text ? [NSURL fileURLWithPath:text isDirectory:YES] : nil;
+            if (!url) return EINVAL;
+            memcpy(s->observationDirectory, directory, length + 1);
+            [(NSOpenPanel *)s->window setDirectoryURL:url];
+            s->observationDirectoryReturned = YES; return 0;
+        }
+        if (action == 3) {
+            if (!s->observationDirectory[0] || !s->observationDirectoryReturned) return EPERM;
+            if (!mrk_observation_directory_ready(s)) return EAGAIN;
+        }
+        NSButton *button = nil;
+        if (action >= 4) {
+            NSArray<NSButton *> *buttons = [s->alert buttons];
+            if (!s->alert || [buttons count] != 2) return EPERM;
+            button = [buttons objectAtIndex:action == 4 ? 0 : 1];
+            if ([button window] != s->window) return EPERM;
+            if (![button isEnabled] || [button isHidden]) return EAGAIN;
+        }
+        s->observationActionAttempted = YES;
+        if (action == 1) [(NSOpenPanel *)s->window cancel:nil];
+        else if (action == 3) [(NSOpenPanel *)s->window ok:nil];
+        else [button performClick:nil];
+        s->observationActionReturned = YES;
+        // No call of s->completion, endSheet:, close_once or selected-path
+        // mutation. Only AppKit's original completion supplies the outcome.
+        return 0;
+    } @catch (NSException *e) { (void)e; s->unknown = YES; return EIO; }
+}
+#endif

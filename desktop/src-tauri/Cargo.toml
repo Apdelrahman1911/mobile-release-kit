@@ -49,6 +49,8 @@ ubuntu-runtime-publisher = []
 macos-installed-installer = []
 # Separate fixed seven-case package only; absent from ordinary Installer/app.
 macos-installed-installer-fixture = ["macos-installed-installer"]
+# Explicit engineering observer controls; absent from every shipping profile.
+macos-installed-observation = ["mrk-macos-installed-native/installed-observation"]
 
 [dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }

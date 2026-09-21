@@ -90,7 +90,8 @@ jobs:
                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
                    "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
                    "reusedRun": "35602474108/1", "reusedArtifactId": "10639324707",
-                   "scope": "engineering-compile-five-regressions-fixed-fixture-package-install-only", "fixedFixtureCases": 7,
+                   "scope": "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only", "fixedFixtureCases": 7,
+                   "aclPrimitiveCases": 6,
                    "selectedRegressionGroups": [2, 1, 2], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
                    "actualAquaSaveGate": "pending"}
           data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
@@ -104,24 +105,160 @@ jobs:
               os.fsync(fd)
           finally: os.close(fd)
           PY
-      - name: Fail fast on the selected SDK public native API compile and link
+      - name: Fail fast on native Scripts ownership and package format (never Installer)
         timeout-minutes: 2
         shell: bash
         run: |
           set -euo pipefail
           set -o noclobber
-          [[ ! -e "$MRK_MACOS_WORK/native-api-link.dylib" && ! -L "$MRK_MACOS_WORK/native-api-link.dylib" ]]
+          umask 077
+          [[ "$(/usr/bin/id -u)" != 0 ]]
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py package-format-input \
+            --output "$MRK_MACOS_WORK/package-format-scripts" > "$MRK_MACOS_WORK/package-format-input.json"
+          [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]]
+          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \
+            --identifier dev.mobile-release-kit.desktop.installed --version 0.1.0 \
+            --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package \
+            --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/PackageFormat-original.pkg" \
+            --output "$MRK_MACOS_WORK/package-format-parts" > "$MRK_MACOS_WORK/package-format-prepare.json"
+          # Native tools only write fresh outputs as this nonroot account.
+          # Preparation is not final0:0 acceptance; preserve the original pkg.
+          # BSD tar pads stdout even when compressed; use the fresh private file.
+          [[ ! -e "$MRK_MACOS_WORK/package-format-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-format-parts/Scripts" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/package-format-scripts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/package-format-parts/Scripts" --format=odc --uid=0 --gid=0 \
+              --no-acls --no-xattrs --no-fflags --no-mac-metadata .
+          )
+          tar_status=$?
+          set -e
+          printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-format-tar.status"
+          [[ $tar_status == 0 ]]
+          # xar is not a streaming/O_EXCL tool: reserve its private output parent.
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-format-final"
+          [[ ! -e "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" && ! -L "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/package-format-parts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
+              --compression=none PackageInfo Scripts
+          )
+          xar_status=$?
+          set -e
+          printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-format-xar.status"
+          [[ $xar_status == 0 ]]
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
+            --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
+            --original-package "$MRK_MACOS_WORK/PackageFormat-original.pkg" > "$MRK_MACOS_WORK/package-format-audit.json"
+          # Only inert archive bytes were checked. Never run this exit97 hook.
+      - name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(/usr/bin/id -u)" != 0 && "$GITHUB_SHA" == "$MRK_MACOS_INSTALL_SOURCE_COMMIT" ]]
+          [[ ! -e "$MRK_MACOS_WORK/acl-probe" && ! -L "$MRK_MACOS_WORK/acl-probe" ]]
+          # Two reviewed translation units, one compile/link product. No root,
+          # application, interpreter build, GUI, network or general scenario runner.
           set +e
           /usr/bin/xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=26.0 -fno-objc-arc -fblocks \
-            -dynamiclib desktop/native/macos-installed-native/src/native.m -framework AppKit -framework Foundation \
-            -o "$MRK_MACOS_WORK/native-api-link.dylib" > "$MRK_MACOS_WORK/native-api-link.log" 2>&1
-          status=$?
+            desktop/native/macos-installed-native/src/native.m desktop/native/macos-installed-native/tests/acl_probe.m \
+            -framework AppKit -framework Foundation -o "$MRK_MACOS_WORK/acl-probe" 2>&1 \
+            | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/native-acl-compile.log"
+          compile_status=("${PIPESTATUS[@]}")
+          printf '%s\n' "${compile_status[*]}" > "$MRK_MACOS_WORK/native-acl-compile.status"
+          compile_status_saved=$?
           set -e
-          printf '%s\n' "$status" > "$MRK_MACOS_WORK/native-api-link.status"
-          [[ $status == 0 ]]
-          # Never load/execute this link-only output. It cannot qualify the app.
-          [[ -f "$MRK_MACOS_WORK/native-api-link.dylib" && ! -L "$MRK_MACOS_WORK/native-api-link.dylib" && -O "$MRK_MACOS_WORK/native-api-link.dylib" ]]
-          /bin/rm -- "$MRK_MACOS_WORK/native-api-link.dylib"
+          [[ ${#compile_status[@]} == 2 ]]
+          if [[ ${compile_status[0]} != 0 ]]; then exit "${compile_status[0]}"; fi
+          [[ ${compile_status[1]} == 0 && $compile_status_saved == 0 ]]
+          [[ -f "$MRK_MACOS_WORK/acl-probe" && ! -L "$MRK_MACOS_WORK/acl-probe" && -O "$MRK_MACOS_WORK/acl-probe" ]]
+          binary_identity=$(/usr/bin/stat -f '%d:%i:%u:%g:%p:%l:%z:%m:%c' "$MRK_MACOS_WORK/acl-probe")
+          [[ -n "$binary_identity" ]]
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/acl-probe-data"
+          [[ -d "$MRK_MACOS_WORK/acl-probe-data" && ! -L "$MRK_MACOS_WORK/acl-probe-data" && -O "$MRK_MACOS_WORK/acl-probe-data" ]]
+          # Children legitimately change directory size/timestamps/link count.
+          # Device/inode/type/owner/group/mode remain the original identity.
+          directory_identity=$(/usr/bin/stat -f '%d:%i:%u:%g:%p' "$MRK_MACOS_WORK/acl-probe-data")
+          [[ -n "$directory_identity" ]]
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC "$MRK_MACOS_WORK/acl-probe" "$MRK_MACOS_WORK/acl-probe-data" 2>&1 \
+            | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/native-acl-probe.log"
+          probe_status=("${PIPESTATUS[@]}")
+          printf '%s\n' "${probe_status[*]}" > "$MRK_MACOS_WORK/native-acl-probe.status"
+          probe_status_saved=$?
+          # The completed one-shot probe owns no worker. Retire its known
+          # executable now; on failure retain any unresolved fixture originals.
+          binary_cleanup=1
+          if [[ -f "$MRK_MACOS_WORK/acl-probe" && ! -L "$MRK_MACOS_WORK/acl-probe" && -O "$MRK_MACOS_WORK/acl-probe" ]] &&
+             [[ "$(/usr/bin/stat -f '%d:%i:%u:%g:%p:%l:%z:%m:%c' "$MRK_MACOS_WORK/acl-probe")" == "$binary_identity" ]]; then
+            /bin/rm -- "$MRK_MACOS_WORK/acl-probe"
+            binary_cleanup=$?
+          fi
+          directory_cleanup=not-attempted
+          if [[ ${#probe_status[@]} == 2 && ${probe_status[0]} == 0 && ${probe_status[1]} == 0 ]]; then
+            directory_cleanup=1
+            if [[ -d "$MRK_MACOS_WORK/acl-probe-data" && ! -L "$MRK_MACOS_WORK/acl-probe-data" && -O "$MRK_MACOS_WORK/acl-probe-data" ]] &&
+               [[ "$(/usr/bin/stat -f '%d:%i:%u:%g:%p' "$MRK_MACOS_WORK/acl-probe-data")" == "$directory_identity" ]]; then
+              /bin/rmdir -- "$MRK_MACOS_WORK/acl-probe-data"
+              directory_cleanup=$?
+            fi
+          fi
+          printf '%s %s\n' "$binary_cleanup" "$directory_cleanup" > "$MRK_MACOS_WORK/native-acl-cleanup.status"
+          cleanup_status_saved=$?
+          set -e
+          [[ ${#probe_status[@]} == 2 ]]
+          if [[ ${probe_status[0]} != 0 ]]; then exit "${probe_status[0]}"; fi
+          [[ ${probe_status[1]} == 0 && $probe_status_saved == 0 && $cleanup_status_saved == 0 && $binary_cleanup == 0 && $directory_cleanup == 0 ]]
+          "$MRK_PYTHON" -I -S -B - <<'PYDATA'
+          import hashlib, json, os, re, stat
+          root = os.environ["MRK_MACOS_WORK"]
+          def read(name, limit):
+              fd = os.open(os.path.join(root, name), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit: raise ValueError("ACL probe output refused")
+                  body = os.read(fd, limit + 1)
+                  after = os.fstat(fd)
+                  sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+                  if sig(before) != sig(after) or len(body) != before.st_size: raise ValueError("ACL probe output changed")
+                  return body
+              finally: os.close(fd)
+          logs = {}
+          for name in ("native-acl-compile", "native-acl-probe"):
+              if read(name + ".status", 32) != b"0 0\n": raise ValueError("original ACL pipeline failed")
+              body = read(name + ".log", 131072)
+              logs[name] = {"bytes":len(body), "sha256":hashlib.sha256(body).hexdigest(), "pipelineStatuses":[0,0], "retention":"bounded-original-tail"}
+          if read("native-acl-cleanup.status", 64) != b"0 0\n": raise ValueError("ACL cleanup unresolved")
+          names = ["parent-no-ace", "fresh-file-no-acl", "fresh-directory-no-acl", "explicit-empty-no-ace", "real-ace-refused", "invalid-fd-refused"]
+          lines = read("native-acl-probe.log", 131072).decode("utf-8", "strict").splitlines()
+          if len(lines) != len(names) + 1: raise ValueError("ACL probe output count")
+          for name, line in zip(names, lines):
+              if not re.fullmatch(r"MRK_ACL_PROBE_CASE=" + re.escape(name) + r";ok=1;phase=[0-9]{1,2};result=[0-9]{1,10};call=-?[0-9]{1,10};errno=[0-9]{1,10};freeCall=0;freeErrno=0", line):
+                  raise ValueError("ACL probe exact case missing")
+          if lines[-1] != "MRK_ACL_PROBE_FINAL=cases=6;cleanup=1;passed=1": raise ValueError("ACL probe finality missing")
+          source_paths = ("desktop/native/macos-installed-native/src/native.m", "desktop/native/macos-installed-native/tests/acl_probe.m")
+          hashes = {}
+          for path in source_paths:
+              with open(path, "rb") as stream: body = stream.read(131073)
+              if len(body) > 131072: raise ValueError("ACL source bound")
+              hashes[path] = hashlib.sha256(body).hexdigest()
+          value = {"schemaVersion":1, "source":os.environ["GITHUB_SHA"], "workflowSource":os.environ["GITHUB_WORKFLOW_SHA"],
+                   "runId":os.environ["GITHUB_RUN_ID"], "runAttempt":os.environ["GITHUB_RUN_ATTEMPT"],
+                   "nativeSourceSha256":hashes, "cases":names, "logs":logs, "cleanup":"checked-original-closes-fixed-entry-retirement",
+                   "qualification":"native-acl-primitive-only-not-Installer-runtime-Aqua-or-Save"}
+          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 16384: raise ValueError("ACL result bound")
+          fd = os.open(os.path.join(root, "native-acl-probe-result.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          with os.fdopen(fd, "wb") as stream:
+              stream.write(data); stream.flush(); os.fsync(stream.fileno())
+          PYDATA
       - name: Download only the exact accepted M archive (no rebuild or fallback)
         timeout-minutes: 3
         shell: bash
@@ -230,7 +367,7 @@ jobs:
             --target aarch64-apple-darwin --bin mrk-macos-install -- --exact --test-threads=1 --color=never --format=pretty \
             installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error
           run_focused native-abi-regression cargo test --manifest-path desktop/src-tauri/Cargo.toml \
-            --locked --release --no-default-features --target aarch64-apple-darwin \
+            --locked --release --target aarch64-apple-darwin \
             --package mrk-macos-installed-native --lib -- --exact --test-threads=1 --color=never --format=pretty \
             tests::only_explicit_user_appkit_responses_can_be_accept_or_decline \
             tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches
@@ -296,20 +433,81 @@ jobs:
             --input "$MRK_MACOS_WORK/input" --installer "$installer" \
             --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/scripts-fixture" > "$MRK_MACOS_WORK/scripts-fixture-result.json"
+          [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" ]]
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts-fixture" \
             --identifier dev.mobile-release-kit.desktop.installed-fixture --version 0.1.0 \
-            --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture.pkg"
+            --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg"
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --fixture \
+            --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" \
+            --output "$MRK_MACOS_WORK/package-fixture-parts" > "$MRK_MACOS_WORK/package-fixture-prepare.json"
+          # Native tools only write fresh outputs as this nonroot account.
+          # Preparation is not final0:0 acceptance; preserve the original pkg.
+          # BSD tar pads stdout even when compressed; use the fresh private file.
+          [[ ! -e "$MRK_MACOS_WORK/package-fixture-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-fixture-parts/Scripts" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/scripts-fixture" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/package-fixture-parts/Scripts" --format=odc --uid=0 --gid=0 \
+              --no-acls --no-xattrs --no-fflags --no-mac-metadata .
+          )
+          tar_status=$?
+          set -e
+          printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-fixture-tar.status"
+          [[ $tar_status == 0 ]]
+          # xar is not a streaming/O_EXCL tool: reserve its private output parent.
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-fixture-final"
+          [[ ! -e "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" && ! -L "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/package-fixture-parts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" \
+              --compression=none PackageInfo Scripts
+          )
+          xar_status=$?
+          set -e
+          printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-fixture-xar.status"
+          [[ $xar_status == 0 ]]
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package --fixture \
-            --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture.pkg" \
-            > "$MRK_MACOS_WORK/package-fixture-audit.json"
+            --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" \
+            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"
       - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector
         timeout-minutes: 18
         shell: bash
         run: |
           set -euo pipefail
           set -o noclobber
-          sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture.pkg" -target / -dumplog -verboseR \
+          umask 077
+          diagnostic=(--fixture --package "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg"
+            --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256"
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py check-installer-result-absent --fixture \
+            --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-cursor "${diagnostic[@]}" \
+            > "$MRK_MACOS_WORK/installer-fixture-log-cursor.json"
+          cursor_status=$?
+          printf '%s\n' "$cursor_status" > "$MRK_MACOS_WORK/installer-fixture-log-cursor.status"
+          cursor_status_saved=$?
+          sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" -target / -dumplog -verboseR \
             > "$MRK_MACOS_WORK/installer-fixture-output.txt" 2>&1
+          installer_status=$?
+          printf '%s\n' "$installer_status" > "$MRK_MACOS_WORK/installer-fixture-output.status"
+          installer_status_saved=$?
+          # Read only the fixed bounded log interval, also after Installer failure.
+          # The selected raw lines are unbound diagnostics, never readback input.
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-capture "${diagnostic[@]}" \
+            --cursor "$MRK_MACOS_WORK/installer-fixture-log-cursor.json" \
+            --selected-output "$MRK_MACOS_WORK/installer-fixture-log-selected.txt" > "$MRK_MACOS_WORK/installer-fixture-log-capture.json"
+          capture_status=$?
+          printf '%s\n' "$capture_status" > "$MRK_MACOS_WORK/installer-fixture-log-capture.status"
+          capture_status_saved=$?
+          set -e
+          if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi
+          [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]]
+          # Unknown diagnostics do not replace the independent Installer-status/export readback gate.
           # Setup and each fixed case retain their own original120s endpoint.
           # Any unexpected native failure/Unknown stops subsequent cases. No retry.
       - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged
@@ -321,7 +519,7 @@ jobs:
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py observe-installer-fixture \
             --input "$MRK_MACOS_WORK/input" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
-            --installer-output "$MRK_MACOS_WORK/installer-fixture-output.txt" > "$MRK_MACOS_WORK/installer-fixture-observation.json"
+            --installer-status "$MRK_MACOS_WORK/installer-fixture-output.status" > "$MRK_MACOS_WORK/installer-fixture-observation.json"
           # Deterministic collisions and reported policy faults are not genuine
           # concurrent races, OS EIO/power-loss, native close failure or Aqua/Save.
       - name: Build the fixed one-shot root Installer and scripts-only package
@@ -342,20 +540,81 @@ jobs:
             --input "$MRK_MACOS_WORK/input" --installer "$installer" \
             --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/scripts" > "$MRK_MACOS_WORK/scripts-result.json"
+          [[ ! -e "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" && ! -L "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" ]]
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/scripts" \
             --identifier dev.mobile-release-kit.desktop.installed --version 0.1.0 \
-            --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit.pkg"
+            --install-location / --ownership recommended "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg"
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package \
+            --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" \
+            --output "$MRK_MACOS_WORK/package-parts" > "$MRK_MACOS_WORK/package-prepare.json"
+          # Native tools only write fresh outputs as this nonroot account.
+          # Preparation is not final0:0 acceptance; preserve the original pkg.
+          # BSD tar pads stdout even when compressed; use the fresh private file.
+          [[ ! -e "$MRK_MACOS_WORK/package-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-parts/Scripts" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/scripts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/package-parts/Scripts" --format=odc --uid=0 --gid=0 \
+              --no-acls --no-xattrs --no-fflags --no-mac-metadata .
+          )
+          tar_status=$?
+          set -e
+          printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-tar.status"
+          [[ $tar_status == 0 ]]
+          # xar is not a streaming/O_EXCL tool: reserve its private output parent.
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-final"
+          [[ ! -e "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" && ! -L "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" ]]
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/package-parts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" \
+              --compression=none PackageInfo Scripts
+          )
+          xar_status=$?
+          set -e
+          printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-xar.status"
+          [[ $xar_status == 0 ]]
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package \
-            --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/MobileReleaseKit.pkg" \
-            > "$MRK_MACOS_WORK/package-audit.json"
+            --scripts "$MRK_MACOS_WORK/scripts" --package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" \
+            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-original.pkg" > "$MRK_MACOS_WORK/package-audit.json"
       - name: Standard Installer only is privileged; never execute the app or Python as root
         timeout-minutes: 5
         shell: bash
         run: |
           set -euo pipefail
           set -o noclobber
-          sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/MobileReleaseKit.pkg" -target / -dumplog -verboseR \
+          umask 077
+          diagnostic=(--package "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg"
+            --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256"
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT")
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py check-installer-result-absent \
+            --expected-source "$MRK_EXPECTED_SHA" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
+            --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-cursor "${diagnostic[@]}" \
+            > "$MRK_MACOS_WORK/installer-log-cursor.json"
+          cursor_status=$?
+          printf '%s\n' "$cursor_status" > "$MRK_MACOS_WORK/installer-log-cursor.status"
+          cursor_status_saved=$?
+          sudo -- /usr/sbin/installer -pkg "$MRK_MACOS_WORK/package-final/MobileReleaseKit.pkg" -target / -dumplog -verboseR \
             > "$MRK_MACOS_WORK/installer-output.txt" 2>&1
+          installer_status=$?
+          printf '%s\n' "$installer_status" > "$MRK_MACOS_WORK/installer-output.status"
+          installer_status_saved=$?
+          # Read only the fixed bounded log interval, also after Installer failure.
+          # The selected raw lines are unbound diagnostics, never readback input.
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py installer-log-capture "${diagnostic[@]}" \
+            --cursor "$MRK_MACOS_WORK/installer-log-cursor.json" \
+            --selected-output "$MRK_MACOS_WORK/installer-log-selected.txt" > "$MRK_MACOS_WORK/installer-log-capture.json"
+          capture_status=$?
+          printf '%s\n' "$capture_status" > "$MRK_MACOS_WORK/installer-log-capture.status"
+          capture_status_saved=$?
+          set -e
+          if [[ "$installer_status" != 0 ]]; then exit "$installer_status"; fi
+          [[ "$installer_status_saved" == 0 && "$cursor_status_saved" == 0 && "$capture_status_saved" == 0 ]]
+          # Unknown diagnostics do not replace the independent Installer-status/export readback gate.
           # A collision, partial publication, unknown close or timeout fails
           # here. Keep originals; no uninstall, rollback, retries or repair.
       - name: Nonroot byte/mode readback, not a headless GUI substitute
@@ -367,7 +626,7 @@ jobs:
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py observe-installation \
             --input "$MRK_MACOS_WORK/input" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" \
             --expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256" --expected-source "$MRK_EXPECTED_SHA" \
-            --installer-output "$MRK_MACOS_WORK/installer-output.txt" > "$MRK_MACOS_WORK/installation-observation.json"
+            --installer-status "$MRK_MACOS_WORK/installer-output.status" > "$MRK_MACOS_WORK/installation-observation.json"
           printf '%s\n' 'Engineering installation only. Actual installed runtime, Aqua project/Quit, and Save gates remain unverified.'
       - name: Preserve bounded originals; upload success is never GUI/native acceptance
         if: always() && steps.work.outputs.root != ''
@@ -376,8 +635,19 @@ jobs:
           name: desktop-macos-installed-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.work.outputs.root }}/source-binding.json
-            ${{ steps.work.outputs.root }}/native-api-link.log
-            ${{ steps.work.outputs.root }}/native-api-link.status
+            ${{ steps.work.outputs.root }}/package-format-input.json
+            ${{ steps.work.outputs.root }}/PackageFormat-original.pkg
+            ${{ steps.work.outputs.root }}/package-format-prepare.json
+            ${{ steps.work.outputs.root }}/package-format-tar.status
+            ${{ steps.work.outputs.root }}/package-format-xar.status
+            ${{ steps.work.outputs.root }}/package-format-audit.json
+            ${{ steps.work.outputs.root }}/package-format-final/PackageFormat.pkg
+            ${{ steps.work.outputs.root }}/native-acl-compile.log
+            ${{ steps.work.outputs.root }}/native-acl-compile.status
+            ${{ steps.work.outputs.root }}/native-acl-probe.log
+            ${{ steps.work.outputs.root }}/native-acl-probe.status
+            ${{ steps.work.outputs.root }}/native-acl-cleanup.status
+            ${{ steps.work.outputs.root }}/native-acl-probe-result.json
             ${{ steps.work.outputs.root }}/runtime-result.json
             ${{ steps.work.outputs.root }}/app-result.json
             ${{ steps.work.outputs.root }}/input-result.json
@@ -391,13 +661,33 @@ jobs:
             ${{ steps.work.outputs.root }}/scripts-fixture-result.json
             ${{ steps.work.outputs.root }}/package-fixture-audit.json
             ${{ steps.work.outputs.root }}/installer-fixture-output.txt
+            ${{ steps.work.outputs.root }}/installer-fixture-output.status
+            ${{ steps.work.outputs.root }}/installer-fixture-log-cursor.json
+            ${{ steps.work.outputs.root }}/installer-fixture-log-cursor.status
+            ${{ steps.work.outputs.root }}/installer-fixture-log-capture.json
+            ${{ steps.work.outputs.root }}/installer-fixture-log-capture.status
+            ${{ steps.work.outputs.root }}/installer-fixture-log-selected.txt
             ${{ steps.work.outputs.root }}/installer-fixture-observation.json
-            ${{ steps.work.outputs.root }}/MobileReleaseKit-InstallerFixture.pkg
+            ${{ steps.work.outputs.root }}/MobileReleaseKit-InstallerFixture-original.pkg
+            ${{ steps.work.outputs.root }}/package-fixture-prepare.json
+            ${{ steps.work.outputs.root }}/package-fixture-tar.status
+            ${{ steps.work.outputs.root }}/package-fixture-xar.status
+            ${{ steps.work.outputs.root }}/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg
             ${{ steps.work.outputs.root }}/scripts-result.json
             ${{ steps.work.outputs.root }}/package-audit.json
             ${{ steps.work.outputs.root }}/installation-observation.json
             ${{ steps.work.outputs.root }}/installer-output.txt
-            ${{ steps.work.outputs.root }}/MobileReleaseKit.pkg
+            ${{ steps.work.outputs.root }}/installer-output.status
+            ${{ steps.work.outputs.root }}/installer-log-cursor.json
+            ${{ steps.work.outputs.root }}/installer-log-cursor.status
+            ${{ steps.work.outputs.root }}/installer-log-capture.json
+            ${{ steps.work.outputs.root }}/installer-log-capture.status
+            ${{ steps.work.outputs.root }}/installer-log-selected.txt
+            ${{ steps.work.outputs.root }}/MobileReleaseKit-original.pkg
+            ${{ steps.work.outputs.root }}/package-prepare.json
+            ${{ steps.work.outputs.root }}/package-tar.status
+            ${{ steps.work.outputs.root }}/package-xar.status
+            ${{ steps.work.outputs.root }}/package-final/MobileReleaseKit.pkg
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

@@ -51,6 +51,13 @@ mod installer {
     fn check(ok: bool, why: &'static str) -> Result<()> { if ok { Ok(()) } else { Err(why) } }
     fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
     fn component(value: &str) -> bool { value.is_ascii() && value.len() <= 255 && safe_payload_path(value) && !value.contains('/') }
+    fn created_directory_private(id: Identity) -> bool {
+        id.mode & 0o170000 == 0o040000 && id.uid == 0 && id.mode & 0o7077 == 0
+    }
+    fn created_directory_normalized(before: Identity, actual: Identity, named: Identity, mode: u32) -> bool {
+        created_directory_private(before) && actual == named && before.dev == actual.dev && before.ino == actual.ino
+            && actual.mode == (0o040000 | mode) && actual.uid == 0 && actual.gid == 0
+    }
     // Consumes only the result of the SAME original one-use close. The inert
     // regression feeds this recorder DATA, never a fake/invalid descriptor.
     fn record_close_result(original: &mut Original, result: Option<nix::Result<()>>) -> bool {
@@ -73,8 +80,228 @@ mod installer {
             else if unknown { "unknown-retained" } else { "refused-staging-retained" };
         FinalResult { state, reason, exit: if complete { 0 } else if published { 20 } else { 1 }, deadline_met }
     }
+    #[derive(Clone, Copy)]
+    enum AclRole { InputDirectory, InputInventory, SystemRoot, SystemLibrary, SystemSupport, Other }
+    impl AclRole {
+        fn name(self) -> &'static str { match self {
+            Self::InputDirectory => "input-directory", Self::InputInventory => "input-inventory", Self::SystemRoot => "system-root",
+            Self::SystemLibrary => "system-library", Self::SystemSupport => "system-support", Self::Other => "other-protected-object",
+        } }
+    }
+    fn acl_diagnostic(role: AclRole, failure: &native::AclFailure) {
+        // Failure-only, finite scalar diagnostics. This is not a receipt or
+        // evidence of finality. A failed/broken stderr must not panic past closes.
+        let line = format!("MRK_MACOS_INSTALL_ACL_DIAGNOSTIC=role={};phase={};result={};call={};errno={};freeCall={};freeErrno={}\n",
+            role.name(), failure.phase, failure.refusal_code.unwrap_or(0), failure.call_result, failure.native_errno,
+            failure.free_result, failure.free_errno);
+        if line.len() <= 512 {
+            let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), line.as_bytes());
+        }
+    }
     fn flags(directory: bool) -> OFlag { OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC
         | if directory { OFlag::O_DIRECTORY } else { OFlag::empty() } }
+    const EXPORT_LIMIT: usize = 65536;
+    #[cfg(not(feature = "macos-installed-installer-fixture"))]
+    const EXPORT_KIND: &str = "ordinary";
+    #[cfg(feature = "macos-installed-installer-fixture")]
+    const EXPORT_KIND: &str = "fixture";
+    fn export_name(kind: &str, source: &str, inventory: &str, manifest: &str) -> Result<String> {
+        check(matches!(kind, "ordinary" | "fixture") && source.len() == 40
+            && source.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) && sha(inventory) && sha(manifest), "export-binding")?;
+        let name = format!("MobileReleaseKit-InstallerResult-v1-{kind}-{source}-{inventory}-{manifest}.json");
+        check(component(&name), "export-name")?; Ok(name)
+    }
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ExportDocument<'a> { schema_version: u32, kind: &'a str, source_commit: &'a str,
+        inventory_sha256: &'a str, runtime_manifest_sha256: &'a str, transport_state: &'a str, result: &'a serde_json::Value }
+    struct ExportBytes(Vec<u8>);
+    impl std::io::Write for ExportBytes {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if !self.0.len().checked_add(bytes.len()).is_some_and(|n| n < EXPORT_LIMIT) {
+                return Err(std::io::Error::other("bounded Installer export"));
+            }
+            self.0.extend_from_slice(bytes); Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    fn export_write_progress(written: usize, total: usize, returned: nix::Result<usize>) -> Result<usize> {
+        let count = returned.map_err(|_| "export-write-refused")?;
+        check(total <= EXPORT_LIMIT && written < total && count > 0 && count <= total - written, "export-write-progress")?;
+        written.checked_add(count).ok_or("export-write-progress")
+    }
+    fn export_final(result: Result<()>, settled: bool, unknown: bool, end: Instant, after_closes: Instant) -> Result<()> {
+        result?; check(settled && !unknown, "export-close-unknown")?; check(after_closes < end, "export-deadline")
+    }
+    // Exactly four original descriptors, entirely separate from Install's
+    // immutable completed books. No new installation, retry, cleanup or clock.
+    struct Export { originals: Vec<Original>, end: Instant, unknown: bool }
+    impl Export {
+        fn new(end: Instant) -> Self { Self { originals: Vec::with_capacity(4), end, unknown: false } }
+        fn clock(&self) -> Result<()> { check(!self.unknown && Instant::now() < self.end, "export-deadline-or-unknown") }
+        fn fd(&self, n: usize) -> Result<&OwnedFd> { self.originals.get(n).and_then(|r| r.fd.as_ref()).ok_or("export-original-missing") }
+        fn reserve(&mut self, parent: Option<usize>, name: &str, role: Role) -> Result<usize> {
+            self.clock()?; check(self.originals.len() < 4, "export-original-bound")?;
+            let n = self.originals.len(); self.originals.push(Original { fd:None, state:State::Reserved, role,
+                parent, name:name.into(), identity:None }); Ok(n)
+        }
+        fn named(&self, n: usize) -> Result<Identity> {
+            self.clock()?; let original = &self.originals[n];
+            let actual = if let Some(parent) = original.parent {
+                stat::fstatat(self.fd(parent)?, original.name.as_str(), AtFlags::AT_SYMLINK_NOFOLLOW)
+            } else { stat::lstat(Path::new("/")) }.map_err(|_| "export-named-refused")?;
+            self.clock()?; Ok(Identity::of(&actual))
+        }
+        fn observed(&self, n: usize) -> Result<Identity> {
+            self.clock()?; let actual = stat::fstat(self.fd(n)?).map_err(|_| "export-stat-refused")?;
+            self.clock()?; Ok(Identity::of(&actual))
+        }
+        fn adopt(&mut self, n: usize, opened: nix::Result<OwnedFd>) -> Result<()> {
+            // Custody precedes even a late-return veto. An unsuccessful O_EXCL
+            // may still have an effect; no unknown/partial filename is reused.
+            match opened {
+                Ok(fd) => { self.originals[n].fd = Some(fd); self.originals[n].state = State::Owned; }
+                Err(_) => { self.originals[n].state = State::NoHandle; return Err("export-open-refused"); }
+            }
+            self.clock()
+        }
+        fn correspondence(&self, n: usize, exact: bool) -> Result<()> {
+            let original = self.originals[n].identity.ok_or("export-identity-missing")?;
+            let actual = self.observed(n)?; let named = self.named(n)?;
+            check(if exact { actual == named && original == actual } else {
+                original.same_object(actual) && original.mode == actual.mode
+                    && actual.same_object(named) && actual.mode == named.mode
+            }, "export-original-correspondence")
+        }
+        fn protected(&self, n: usize, directory: bool, mode: Option<u32>, role: AclRole) -> Result<()> {
+            let id = self.observed(n)?;
+            check(id.mode & 0o170000 == if directory { 0o040000 } else { 0o100000 }
+                && id.uid == 0 && id.mode & 0o7022 == 0 && (directory || id.links == 1)
+                && mode.is_none_or(|mode| id.gid == 0 && id.mode & 0o7777 == mode), "export-protection-refused")?;
+            self.clock()?; let fs = statfs::fstatfs(self.fd(n)?).map_err(|_| "export-mount-refused")?; self.clock()?;
+            check(fs.filesystem_type_name() == "apfs" && fs.flags().contains(MntFlags::MNT_LOCAL)
+                && !fs.flags().intersects(MntFlags::MNT_UNION | MntFlags::MNT_AUTOMOUNTED | MntFlags::MNT_IGNORE_OWNERSHIP), "export-mount-refused")?;
+            self.clock()?; native::empty_acl_observed(self.fd(n)?.as_fd()).map_err(|failure| {
+                acl_diagnostic(role, &failure); "export-acl-refused"
+            })?; self.clock()
+        }
+        fn directory(&mut self, parent: Option<usize>, name: &str, role: AclRole) -> Result<usize> {
+            let n = self.reserve(parent, name, Role::Reader)?;
+            let before = self.named(n)?; check(before.mode & 0o170000 == 0o040000, "export-parent-type")?;
+            self.originals[n].identity = Some(before); self.clock()?; self.originals[n].state = State::Acquiring;
+            let opened = if let Some(parent) = parent { fcntl::openat(self.fd(parent)?, name, flags(true), Mode::empty()) }
+                else { fcntl::open(Path::new("/"), flags(true), Mode::empty()) };
+            self.adopt(n, opened)?; self.correspondence(n, false)?; self.protected(n, true, None, role)?; Ok(n)
+        }
+        fn close(&mut self, n: usize) -> bool {
+            let original = &mut self.originals[n];
+            match original.state {
+                State::Reserved => original.state = State::NoHandle,
+                State::Owned => {
+                    original.state = State::Closing;
+                    let result = original.fd.take().map(unistd::close);
+                    if !record_close_result(original, result) { self.unknown = true; }
+                }
+                State::Closed | State::NoHandle => {}, _ => self.unknown = true,
+            }
+            !self.unknown
+        }
+        fn persist(&self, n: usize, file: bool) -> Result<()> {
+            self.clock()?; native::sync(self.fd(n)?.as_fd(), file).map_err(|_| "export-persistence-refused")?; self.clock()
+        }
+        fn write(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
+            self.clock()?; check(!bytes.is_empty() && bytes.len() <= EXPORT_LIMIT, "export-byte-bound")?;
+            let root = self.directory(None, "/", AclRole::SystemRoot)?;
+            let library = self.directory(Some(root), "Library", AclRole::SystemLibrary)?;
+            let support = self.directory(Some(library), "Application Support", AclRole::SystemSupport)?;
+            let n = self.reserve(Some(support), name, Role::ReceiptWriter)?;
+            self.clock()?; self.originals[n].state = State::Acquiring;
+            let opened = fcntl::openat(self.fd(support)?, name, OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL
+                | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK, Mode::from_bits_truncate(0o600));
+            self.adopt(n, opened)?;
+            let original = self.observed(n)?;
+            // Darwin may inherit the protected parent's group. Bind this fresh
+            // private original first; only its later normalization requires0:0.
+            check(original.mode == 0o100600 && original.uid == 0 && original.links == 1 && original.size == 0,
+                "export-private-original")?;
+            self.originals[n].identity = Some(original);
+            self.correspondence(n, true)?; self.protected(n, false, None, AclRole::Other)?;
+            let mut written = 0;
+            while written < bytes.len() {
+                self.clock()?; let actual = unistd::write(self.fd(n)?, &bytes[written..]);
+                written = export_write_progress(written, bytes.len(), actual)?; self.clock()?;
+            }
+            let before_seal = self.observed(n)?;
+            check(original.same_object(before_seal) && before_seal.mode == original.mode && before_seal.links == 1
+                && before_seal.size == bytes.len() as i64 && before_seal == self.named(n)?, "export-written-size-or-identity")?;
+            self.clock()?; unistd::fchown(self.fd(n)?, Some(unistd::Uid::from_raw(0)), Some(unistd::Gid::from_raw(0)))
+                .map_err(|_| "export-owner")?; self.clock()?;
+            stat::fchmod(self.fd(n)?, Mode::from_bits_truncate(0o444)).map_err(|_| "export-mode")?; self.clock()?;
+            self.protected(n, false, Some(0o444), AclRole::Other)?;
+            native::no_xattrs(self.fd(n)?.as_fd()).map_err(|_| "export-attributes")?; self.clock()?;
+            let sealed = self.observed(n)?;
+            check(sealed.dev == original.dev && sealed.ino == original.ino && sealed.mode == 0o100444 && sealed.uid == 0 && sealed.gid == 0
+                && sealed.links == 1 && sealed.size == bytes.len() as i64, "export-sealed-size-or-identity")?;
+            self.originals[n].identity = Some(sealed); self.correspondence(n, true)?;
+            self.persist(n, true)?; self.correspondence(n, true)?;
+            check(self.close(n), "export-writer-close-unknown")?; self.clock()?;
+            self.persist(support, false)?;
+            check(self.named(n)? == sealed, "export-closed-leaf-correspondence")?;
+            for (n, role) in [(root, AclRole::SystemRoot), (library, AclRole::SystemLibrary), (support, AclRole::SystemSupport)] {
+                self.protected(n, true, None, role)?; self.correspondence(n, false)?;
+            }
+            Ok(())
+        }
+        fn finish(&mut self, mut result: Result<()>) -> Result<()> {
+            // Close each original once in reverse order even after failure or
+            // expiry. Preserve the first error; ambiguous close is absorbing.
+            for n in (0..self.originals.len()).rev() {
+                if !self.close(n) && result.is_ok() { result = Err("export-close-unknown"); }
+            }
+            let settled = self.originals.iter().all(|r| r.fd.is_none() && matches!(r.state, State::Closed | State::NoHandle));
+            export_final(result, settled, self.unknown, self.end, Instant::now())
+        }
+    }
+    fn export_result(result: &serde_json::Value, end: Instant) -> Result<()> {
+        let mut export = Export::new(end);
+        let operation = (|| {
+            export.clock()?;
+            let source = option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").ok_or("export-source-binding")?;
+            let inventory = option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256").ok_or("export-inventory-binding")?;
+            let manifest = option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256").ok_or("export-manifest-binding")?;
+            let name = export_name(EXPORT_KIND, source, inventory, manifest)?;
+            let document = ExportDocument { schema_version:1, kind:EXPORT_KIND, source_commit:source,
+                inventory_sha256:inventory, runtime_manifest_sha256:manifest,
+                transport_state:"pending-original-export-finalization", result };
+            let mut bytes = ExportBytes(Vec::with_capacity(EXPORT_LIMIT));
+            serde_json::to_writer(&mut bytes, &document).map_err(|_| "export-json-bound")?;
+            bytes.0.push(b'\n'); export.clock()?;
+            export.write(&name, &bytes.0)
+        })();
+        export.finish(operation)
+    }
+    fn export_failure_diagnostic(reason: &'static str) {
+        // Best effort, finite non-authoritative failure only. Never an operation
+        // after a successful export finality/deadline decision.
+        let _ = std::io::Write::write_all(&mut std::io::stderr().lock(),
+            format!("MRK_MACOS_INSTALL_EXPORT_REFUSED={reason}\n").as_bytes());
+    }
+    fn transport_exit(original_exit: i32, exported: Result<()>) -> i32 {
+        if original_exit != 0 { original_exit } else if exported.is_ok() { 0 }
+        else if cfg!(feature = "macos-installed-installer-fixture") { 1 } else { 20 }
+    }
+    fn finish_transport(record: &serde_json::Value, original_exit: i32, end: Instant) -> i32 {
+        let exported = if original_exit == 0 { export_result(record, end) } else { Err("original-installation-failed") };
+        let exit = transport_exit(original_exit, exported);
+        if exit != 0 {
+            if original_exit == 0 { if let Err(reason) = exported { export_failure_diagnostic(reason); } }
+            let marker = if EXPORT_KIND == "fixture" { "MRK_MACOS_INSTALL_FIXTURE_RESULT" } else { "MRK_MACOS_INSTALL_RESULT" };
+            // Preserve failure diagnostics, but never depend on Installer
+            // forwarding them and never perform stdout work after success.
+            let _ = std::io::Write::write_all(&mut std::io::stdout().lock(), format!("{marker}={record}\n").as_bytes());
+        }
+        exit
+    }
     impl Install {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
@@ -135,6 +362,9 @@ mod installer {
             check(actual == named && if exact { actual == expected } else { expected.same_object(actual) }, "original-correspondence")
         }
         fn protected(&self, n: usize, directory: bool, mode: Option<u32>) -> Result<()> {
+            self.protected_as(n, directory, mode, AclRole::Other)
+        }
+        fn protected_as(&self, n: usize, directory: bool, mode: Option<u32>, role: AclRole) -> Result<()> {
             let fd = self.fd(n)?; let s = stat::fstat(fd).map_err(|_| "stat-refused")?;
             let kind = if directory { SFlag::S_IFDIR } else { SFlag::S_IFREG };
             // Existing system ancestors may have a non-wheel root-owned group.
@@ -145,7 +375,9 @@ mod installer {
             let fs = statfs::fstatfs(fd).map_err(|_| "mount-refused")?;
             check(fs.filesystem_type_name() == "apfs" && fs.flags().contains(MntFlags::MNT_LOCAL)
                 && !fs.flags().intersects(MntFlags::MNT_UNION | MntFlags::MNT_AUTOMOUNTED | MntFlags::MNT_IGNORE_OWNERSHIP), "mount-refused")?;
-            native::empty_acl(fd.as_fd()).map_err(|_| "acl-refused")
+            native::empty_acl_observed(fd.as_fd()).map_err(|failure| {
+                acl_diagnostic(role, &failure); "acl-refused"
+            })
         }
         fn persist(&mut self, n: usize, file: bool) -> Result<()> {
             self.clock()?;
@@ -162,6 +394,8 @@ mod installer {
         }
         fn directory(&mut self, parent: usize, name: &str, fresh: bool, mode: u32) -> Result<usize> {
             self.clock()?; check((component(name) || name == paths::APP_NAME) && self.creations.len() < 4096, "directory-bound")?;
+            let permissions = Mode::from_bits(mode.try_into().map_err(|_| "created-directory-mode")?)
+                .ok_or("created-directory-mode")?;
             let effect = self.creations.len();
             self.creations.push(Creation { parent, name: name.into(), state: "attempting", identity: None });
             match stat::mkdirat(self.fd(parent)?, name, Mode::from_bits_truncate(0o700)) {
@@ -173,14 +407,22 @@ mod installer {
             self.creations[effect].identity = Some(self.identity(n)?);
             if self.creations[effect].state == "created" {
                 self.protected(n, true, None)?;
-                check(self.identity(n)?.gid == 0 && self.identity(n)?.mode & 0o0077 == 0, "created-directory-protection")?;
-                // Normalize only our newly created, protected original. Existing
-                // ancestors NEVER enter this branch, regardless of their mode.
-                stat::fchmod(self.fd(n)?, Mode::from_bits_truncate(mode)).map_err(|_| "created-directory-mode")?;
-                self.originals[n].identity = Some(Identity::of(&stat::fstat(self.fd(n)?).map_err(|_| "created-directory-stat")?));
-                self.creations[effect].identity = Some(self.identity(n)?);
+                let before = self.identity(n)?;
+                check(created_directory_private(before), "created-directory-protection")?;
+                // Darwin inherits the protected parent's group. Normalize only
+                // our newly created private original, never an existing object.
+                self.check_name(n, true)?; self.clock()?;
+                unistd::fchown(self.fd(n)?, Some(unistd::Uid::from_raw(0)), Some(unistd::Gid::from_raw(0)))
+                    .map_err(|_| "created-directory-owner")?;
+                self.clock()?; // A failed/late original ownership call cannot reach chmod.
+                stat::fchmod(self.fd(n)?, permissions).map_err(|_| "created-directory-mode")?; self.clock()?;
+                let actual = Identity::of(&stat::fstat(self.fd(n)?).map_err(|_| "created-directory-stat")?); self.clock()?;
+                let named = Identity::of(&self.named(Some(parent), name).map_err(|_| "created-directory-name")?); self.clock()?;
+                check(created_directory_normalized(before, actual, named, mode), "created-directory-normalized-identity")?;
+                self.originals[n].identity = Some(actual);
+                self.creations[effect].identity = Some(actual);
             }
-            self.protected(n, true, Some(mode))?;
+            self.protected(n, true, Some(mode))?; self.check_name(n, true)?;
             native::no_xattrs(self.fd(n)?.as_fd()).map_err(|_| "directory-attributes")?;
             self.persist(parent, false)?; Ok(n)
         }
@@ -354,11 +596,11 @@ mod installer {
             // Installer's fully extracted scripts resource is input DATA. Its
             // protected subtree has no remaining extraction/copy writer. Root
             // administrators/Installer itself are trusted, not concurrent foes.
-            self.protected(input, true, Some(0o555))?;
+            self.protected_as(input, true, Some(0o555), AclRole::InputDirectory)?;
             native::no_xattrs(self.fd(input)?.as_fd()).map_err(|_| "input-attributes")?;
             let expected_input: BTreeSet<String> = ["app", "runtime", "install-inventory.json"].into_iter().map(str::to_owned).collect();
             check(self.roster(input)?.keys().cloned().collect::<BTreeSet<_>>() == expected_input, "input-exact-roster")?;
-            let manifest = self.open(Some(input), "install-inventory.json", false)?; self.protected(manifest, false, Some(0o444))?;
+            let manifest = self.open(Some(input), "install-inventory.json", false)?; self.protected_as(manifest, false, Some(0o444), AclRole::InputInventory)?;
             native::no_xattrs(self.fd(manifest)?.as_fd()).map_err(|_| "inventory-attributes")?;
             let size = u64::try_from(self.identity(manifest)?.size).map_err(|_| "inventory-size")?;
             let (digest, bytes) = self.read(manifest, size, true)?;
@@ -372,9 +614,9 @@ mod installer {
             Ok((input, inventory))
         }
         fn support_root(&mut self) -> Result<usize> {
-            let root = self.open(None, "/", true)?; self.protected(root, true, None)?;
-            let library = self.open(Some(root), "Library", true)?; self.protected(library, true, None)?;
-            let support = self.open(Some(library), "Application Support", true)?; self.protected(support, true, None)?;
+            let root = self.open(None, "/", true)?; self.protected_as(root, true, None, AclRole::SystemRoot)?;
+            let library = self.open(Some(root), "Library", true)?; self.protected_as(library, true, None, AclRole::SystemLibrary)?;
+            let support = self.open(Some(library), "Application Support", true)?; self.protected_as(support, true, None, AclRole::SystemSupport)?;
             Ok(support)
         }
         fn install(&mut self, source: &str) -> Result<()> {
@@ -458,8 +700,7 @@ mod installer {
         let args: Vec<String> = std::env::args().collect();
         let result = if args.len() == 2 { install.install(&args[1]) } else { Err("fixed-scripts-input-required") };
         let final_result = install.finish(result);
-        println!("MRK_MACOS_INSTALL_RESULT={}", install.result_record(&final_result));
-        final_result.exit
+        finish_transport(&install.result_record(&final_result), final_result.exit, install.end)
     }
     #[cfg(feature = "macos-installed-installer-fixture")]
     pub(super) fn run() -> i32 { fixture::run() }
@@ -684,13 +925,16 @@ mod installer {
                 } else { passed = false; }
             }
             passed = passed && records.len() == CASES.len() && originals.iter().all(Install::originals_settled);
-            println!("MRK_MACOS_INSTALL_FIXTURE_RESULT={}",serde_json::json!({"schemaVersion":1,"sourceCommit":source_commit,
+            // A successful aggregate uses one export-only endpoint;
+            // original setup/case clocks and books are never renewed.
+            let export_end = Instant::now() + Duration::from_secs(10);
+            let record = serde_json::json!({"schemaVersion":1,"sourceCommit":source_commit,
                 "inventorySha256":option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256"),"runtimeManifestSha256":option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),
                 "fixtureBase":base,"setupError":setup_result.err(),"setupOriginalsSettled":setup_settled,"setupDeadlineMet":setup_timely,
                 "inertCloseDeadlinePolicyTable":table,"fixedCasesComplete":records.len() == CASES.len(),"passed":passed,"cases":records,
                 "genuineConcurrentRaceObserved":false,"nativeCloseFailureInjected":false,"applicationLaunched":false,"guiSaveQualified":false,
-                "qualification":"native-installer-collisions-and-injected-policy-only"}));
-            if passed { 0 } else { 1 }
+                "qualification":"native-installer-collisions-and-injected-policy-only"});
+            finish_transport(&record, if passed { 0 } else { 1 }, export_end)
         }
     }
 
@@ -722,7 +966,41 @@ mod installer {
             if (earlier.state,earlier.reason,earlier.exit) != ("unknown-retained",Some("first-copy-refusal"),1) { return false; }
             if closed.state != State::Closed { return false; } // Unrelated positive close remains positive.
         }
-        !record_close_result(&mut unknown, Some(Ok(()))) && unknown.state == State::Unknown
+        if record_close_result(&mut unknown, Some(Ok(()))) || unknown.state != State::Unknown { return false; }
+        // DATA-only normalization of a fresh private inherited-group original.
+        // Existing objects never enter this branch; no native ownership is mocked.
+        let inherited = Identity { dev:1, ino:2, mode:0o040700, uid:0, gid:80, links:2, size:0,
+            mtime:0, mtime_ns:0, ctime:0, ctime_ns:0 };
+        let normalized = Identity { mode:0o040755, gid:0, ctime:1, ..inherited };
+        if !created_directory_private(inherited) || !created_directory_normalized(inherited, normalized, normalized, 0o755) { return false; }
+        for invalid in [Identity { uid:501, ..inherited }, Identity { mode:0o040770, ..inherited }, Identity { mode:0o100700, ..inherited }] {
+            if created_directory_private(invalid) || created_directory_normalized(invalid, normalized, normalized, 0o755) { return false; }
+        }
+        for changed in [Identity { ino:3, ..normalized }, Identity { gid:80, ..normalized }, Identity { mode:0o040777, ..normalized }] {
+            if created_directory_normalized(inherited, changed, changed, 0o755)
+                || created_directory_normalized(inherited, normalized, changed, 0o755) { return false; }
+        }
+        // DATA-only export progress/finality cases. These are not native EIO,
+        // ambiguous-close, filesystem-persistence or Installer observations.
+        if export_write_progress(0, 9, Ok(4)) != Ok(4) || export_write_progress(4, 9, Ok(5)) != Ok(9)
+            || export_write_progress(0, 9, Ok(0)).is_ok() || export_write_progress(4, 9, Ok(6)).is_ok()
+            || export_write_progress(0, 9, Err(Errno::EIO)) != Err("export-write-refused") { return false; }
+        if export_final(Ok(()), true, false, end, before) != Ok(())
+            || export_final(Ok(()), true, false, end, end) != Err("export-deadline")
+            || export_final(Ok(()), false, true, end, end) != Err("export-close-unknown")
+            || export_final(Err("original-write-failure"), false, true, end, end) != Err("original-write-failure") { return false; }
+        for original_exit in [1, 20] {
+            if transport_exit(original_exit, Ok(())) != original_exit
+                || transport_exit(original_exit, Err("export-close-unknown")) != original_exit { return false; }
+        }
+        if transport_exit(0, Ok(())) != 0 || transport_exit(0, Err("export-close-unknown")) == 0 { return false; }
+        let source = "a".repeat(40); let digest = "b".repeat(64);
+        if export_name("ordinary", &source, &digest, &digest).is_err() || export_name("fixture", &source, &digest, &digest).is_err()
+            || export_name("other", &source, &digest, &digest).is_ok() || export_name("ordinary", "A", &digest, &digest).is_ok() { return false; }
+        let mut bounded = ExportBytes(Vec::with_capacity(EXPORT_LIMIT));
+        if std::io::Write::write_all(&mut bounded, &vec![b'x'; EXPORT_LIMIT - 1]).is_err()
+            || std::io::Write::write_all(&mut bounded, b"x").is_ok() { return false; }
+        closed.state == State::Closed && unknown.state == State::Unknown
     }
     #[cfg(test)]
     mod tests {

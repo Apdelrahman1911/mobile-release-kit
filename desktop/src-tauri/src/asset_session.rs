@@ -186,7 +186,12 @@ impl OriginalWork {
             gui: Arc::new(GuiCall { owner: owner.clone(), document, facts: Mutex::new(GuiFacts { dispatched: false, constructing: false,
                 created: false, showing: false, response: false, accepted: false, declined: false, accepted_at: None,
                 destroyed: false, released: !gui_needed, not_created: !gui_needed, close_queued: false, close_ack: false, release_queued: false,
-                selected: None, refusal: None }), wake: Notify::new() }) })
+                selected: None, refusal: None }), wake: Notify::new(),
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+                    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                    target_os = "macos", target_arch = "aarch64"))]
+                installed_native_response_witness: Mutex::new(None),
+            }) })
     }
     pub(crate) fn stopped(&self) -> bool { self.stop.load(Ordering::SeqCst) }
     fn stop(&self) { self.stop.store(true, Ordering::SeqCst); self.wake.notify_one(); self.gui.wake.notify_one(); }
@@ -262,7 +267,23 @@ impl OriginalWork {
 }
 // Not object ownership: shell.rs retains the actual GTK object on its original
 // main thread. These receipts never authorize replacement/Drop-as-settlement.
-pub(crate) struct GuiCall { owner: Weak<OriginalWork>, document: Weak<Inner>, facts: Mutex<GuiFacts>, pub(crate) wake: Notify }
+pub(crate) struct GuiCall {
+    owner: Weak<OriginalWork>, document: Weak<Inner>, facts: Mutex<GuiFacts>, pub(crate) wake: Notify,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_arch = "aarch64"))]
+    installed_native_response_witness: Mutex<Option<InstalledNativeResponseWitness>>,
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+    target_os = "macos", target_arch = "aarch64"))]
+#[derive(Clone)]
+pub(crate) struct InstalledNativeResponseWitness {
+    pub(crate) operation_id: u32,
+    pub(crate) response: NativeResponse,
+    pub(crate) selected: Option<std::path::PathBuf>,
+    pub(crate) callback_returned: bool,
+}
 pub(crate) struct GuiFacts {
     pub(crate) dispatched: bool, pub(crate) constructing: bool,
     pub(crate) created: bool, pub(crate) showing: bool, pub(crate) response: bool, pub(crate) accepted: bool, pub(crate) declined: bool,
@@ -279,6 +300,31 @@ fn project_path_gui_settled(facts: &GuiFacts, selected: bool) -> bool {
             else { facts.declined && !facts.accepted && facts.accepted_at.is_none() })
 }
 impl GuiCall {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_arch = "aarch64"))]
+    pub(crate) fn record_installed_native_response(self: &Arc<Self>, id: u32, response: NativeResponse,
+        selected: Option<&std::path::Path>) -> Result<(), ()> {
+        let owner = self.owner().ok_or(())?;
+        if owner.id != id || !Arc::ptr_eq(&owner.gui, self) { return Err(()); }
+        let mut witness = self.installed_native_response_witness.lock().map_err(|_| ())?;
+        if witness.is_some() { return Err(()); } // First real response is immutable.
+        // Sole caller is the original main-thread PanelState::Responded tick.
+        // Both mrk_panel_poll state-1 branches require !callbackActive, and no
+        // native work occurs after the completion clears that final flag.
+        // Its path is already bounded to 4096 bytes by the original native poll.
+        *witness = Some(InstalledNativeResponseWitness { operation_id: id, response,
+            selected: selected.map(std::path::Path::to_path_buf), callback_returned: true });
+        Ok(())
+    }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_arch = "aarch64"))]
+    pub(crate) fn installed_native_response(&self) -> Result<Option<InstalledNativeResponseWitness>, ()> {
+        // This data stays with the same original call, not a global panel
+        // history. Read before replacing its slot; it grants no settlement.
+        self.installed_native_response_witness.lock().map(|witness| witness.clone()).map_err(|_| ())
+    }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     pub(crate) fn fixture_context(&self) -> Option<Arc<Qualification>> { self.owner()?.fixture() }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -2615,6 +2661,213 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     // the original relay before setting exit_ready. No task self-join, inline
     // GTK dispatch or body-ended flag is substituted for those joins.
 }
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+    target_os = "macos", target_arch = "aarch64"))]
+mod installed_macos_observation {
+    use super::*;
+    pub(crate) struct ProjectWitness {
+        document: Weak<Inner>, owner: Weak<OriginalWork>, project: Project,
+        generation: u32, root: asset_source::RegisteredRoot, edit: crate::edit_owner::InstalledMacDocumentWitness,
+    }
+    pub(crate) struct PickerWitness {
+        document: Weak<Inner>, owner: Weak<OriginalWork>, generation: u32,
+        edit: crate::edit_owner::InstalledMacDocumentWitness,
+    }
+    // These observations neither reconcile/publish the document nor acquire a
+    // source or GUI owner. The ordinary relay and coordinators own all joins.
+    fn quiet(state: &DocumentState) -> bool {
+        !state.unknown && !state.exhausted && !state.retiring && !state.session && !state.lock_pending
+            && !state.compatibility_picker_pending && state.context.is_none() && state.records.is_empty()
+            && state.assignments.is_empty() && !state.github.native_work_pending() && state.github.material_settled()
+            && state.github.registration().is_none() && state.evidence.epoch == 0
+            && state.evidence.selection.is_none() && state.evidence.operation.is_none() && state.evidence.result.is_none()
+    }
+    fn live(state: &DocumentState) -> bool {
+        quiet(state) && state.lifetime.original_bound() && !state.lost_observed && !state.stopping
+            && !state.quit_pending && !state.quit_accepted && !state.evidence.revoked
+    }
+    fn same_document(document: &Arc<Inner>, witness: &Weak<Inner>) -> bool {
+        witness.upgrade().is_some_and(|original| Arc::ptr_eq(document, &original))
+    }
+    fn original_call(document: &Arc<Inner>, owner: &Arc<OriginalWork>) -> bool {
+        same_document(document, &owner.gui.document)
+            && owner.gui.owner().is_some_and(|original| Arc::ptr_eq(owner, &original))
+    }
+    fn project_slot(slot: &Slot) -> bool {
+        slot.operation == Operation::ChooseProject && slot.source == SourceState::NotRun
+            && slot.context.is_none() && slot.target.is_none() && slot.candidate.is_none() && slot.selection.is_none()
+            && slot.assessment.is_none() && slot.preview.is_none() && slot.assessment_context_revision.is_none()
+            && slot.staged.is_none() && slot.kind.is_none() && slot.result_record.is_none() && slot.retired_payload.is_none()
+            && slot.evidence.is_none() && slot.project_path.is_none() && slot.path_result.is_none()
+    }
+    fn settled_slot(slot: &Slot) -> bool {
+        project_slot(slot) && slot.phase == Phase::Idle && slot.settlement == Settlement::Known && slot.error.is_none()
+    }
+    fn completed(document: &Arc<Inner>, owner: &Arc<OriginalWork>, response: NativeResponse,
+        probed: bool, quit: bool) -> Option<InstalledNativeResponseWitness> {
+        if !original_call(document, owner) || !owner.ended.load(Ordering::SeqCst) || !owner.resources_settled()
+            || !owner.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Returned && book.handle.is_none())
+            || !owner.child.try_lock().is_ok_and(|book| book.handle.is_none()
+                && book.receipt == if probed { JoinReceipt::Returned } else { JoinReceipt::New })
+            || !owner.source.try_lock().is_ok_and(|book| if probed { !book.not_started() && book.settled() } else { book.not_started() }) {
+            return None;
+        }
+        let witness = owner.gui.installed_native_response().ok()??;
+        if witness.operation_id != owner.id || witness.response != response || !witness.callback_returned
+            || !owner.gui.facts().is_some_and(|facts| facts.dispatched && facts.created && !facts.constructing
+                && !facts.showing && !facts.not_created && facts.response && facts.refusal.is_none()
+                && facts.accepted == (response == NativeResponse::Accept)
+                // Production records genuine Project Cancel only in the
+                // original response witness, not GuiFacts.declined.
+                && facts.declined == (quit && response == NativeResponse::Decline)
+                && facts.accepted_at.is_some() == (response == NativeResponse::Accept)
+                && facts.selected.is_none() && facts.destroyed && facts.close_queued && facts.close_ack
+                && facts.release_queued && facts.released) { return None; }
+        Some(witness)
+    }
+    fn same_project(left: &Project, right: &Project) -> bool {
+        left.id == right.id && left.name == right.name && left.path == right.path
+    }
+    impl DocumentBinding {
+        fn macos_registered(&self, witness: &ProjectWitness) -> bool {
+            // Call only under this actual document's admission mutex.
+            let Ok(roster) = self.inner.bridge.native_roster() else { return false; };
+            let Ok((generation, root)) = self.inner.bridge.native_project(&witness.project.id) else { return false; };
+            roster.generation == witness.generation && generation == witness.generation && roster.roots.len() == 1
+                && root == witness.root && roster.roots[0] == witness.root
+                && root.path.to_str() == Some(witness.project.path.as_str())
+        }
+        fn macos_selected(&self, state: &DocumentState, witness: &ProjectWitness) -> bool {
+            let (Some(slot), Some(owner)) = (&state.slot, witness.owner.upgrade()) else { return false; };
+            same_document(&self.inner, &witness.document) && Arc::ptr_eq(&slot.owner, &owner)
+                && settled_slot(slot) && slot.project.as_ref().is_some_and(|project| same_project(project, &witness.project))
+                && self.macos_registered(witness)
+                && completed(&self.inner, &owner, NativeResponse::Accept, true, false)
+                    .is_some_and(|response| response.selected.as_deref() == Some(witness.root.path.as_path()))
+        }
+        fn macos_project_loss(&self, state: &DocumentState, witness: &ProjectWitness) -> bool {
+            quiet(state) && state.lost_observed && !state.lifetime.original_bound() && state.evidence.revoked
+                && self.macos_selected(state, witness) && assets_can_exit_locked(state)
+                && state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::DocumentLost
+                    && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard)
+                && self.inner.bridge.edits.installed_macos_document_lost(&witness.edit) && self.inner.bridge.edits.can_exit()
+        }
+        fn macos_picker_loss(&self, state: &DocumentState, witness: &PickerWitness) -> bool {
+            let (Some(slot), Some(owner)) = (&state.slot, witness.owner.upgrade()) else { return false; };
+            quiet(state) && state.lost_observed && !state.lifetime.original_bound() && state.evidence.revoked
+                && same_document(&self.inner, &witness.document) && Arc::ptr_eq(&slot.owner, &owner)
+                && settled_slot(slot) && slot.project.is_none() && slot.reason == Reason::DocumentLost
+                && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.review_end.is_none() && slot.discard
+                && assets_can_exit_locked(state)
+                && completed(&self.inner, &owner, NativeResponse::Other, false, false)
+                    .is_some_and(|response| response.selected.is_none())
+                && self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == witness.generation && roster.roots.is_empty())
+                && self.inner.bridge.edits.installed_macos_document_lost(&witness.edit) && self.inner.bridge.edits.can_exit()
+        }
+        pub(crate) fn installed_macos_live(&self) -> bool {
+            let Ok(state) = self.inner.state.try_lock() else { return false; };
+            // Bootstrap is the actual WK/edit binding, not availability of
+            // Android, preflight or another unsupported service/profile.
+            live(&state) && state.next_operation == 0 && state.slot.is_none() && state.quit.is_none()
+                && self.inner.bridge.edits.installed_macos_document().is_some()
+                && self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == 1 && roster.roots.is_empty())
+        }
+        pub(crate) fn installed_macos_cancelled(&self, id: u32) -> Option<InstalledNativeResponseWitness> {
+            let state = self.inner.state.try_lock().ok()?; let slot = state.slot.as_ref()?;
+            if !live(&state) || state.next_operation != id || state.quit.is_some() || slot.owner.id != id
+                || !settled_slot(slot) || slot.project.is_some() || slot.reason != Reason::UserCancelled
+                || !slot.owner.stopped() || slot.cleanup_end.is_none() || slot.review_end.is_some() || !slot.discard
+                || self.inner.bridge.edits.installed_macos_document().is_none() || !self.inner.bridge.edits.can_exit()
+                || !self.inner.bridge.native_roster().is_ok_and(|roster| roster.generation == 1 && roster.roots.is_empty()) { return None; }
+            let response = completed(&self.inner, &slot.owner, NativeResponse::Decline, false, false)?;
+            response.selected.is_none().then_some(response)
+        }
+        pub(crate) fn installed_macos_project(&self, id: u32) -> Option<(Project, ProjectWitness, InstalledNativeResponseWitness)> {
+            let state = self.inner.state.try_lock().ok()?; let slot = state.slot.as_ref()?;
+            if !live(&state) || state.next_operation != id || state.quit.is_some() || slot.owner.id != id
+                || !settled_slot(slot) || slot.reason != Reason::None || slot.owner.stopped()
+                || slot.cleanup_end.is_some() || slot.discard || !self.inner.bridge.edits.can_exit() { return None; }
+            let project = slot.project.as_ref()?;
+            let response = completed(&self.inner, &slot.owner, NativeResponse::Accept, true, false)?;
+            let (generation, root) = self.inner.bridge.native_project(&project.id).ok()?;
+            if generation != 2 || response.selected.as_deref() != Some(root.path.as_path()) { return None; }
+            let witness = ProjectWitness { document: Arc::downgrade(&self.inner), owner: Arc::downgrade(&slot.owner),
+                project: project.clone(), generation, root, edit: self.inner.bridge.edits.installed_macos_document()? };
+            self.macos_registered(&witness).then(|| (project.clone(), witness, response))
+        }
+        pub(crate) fn installed_macos_picker_pending(&self, id: u32) -> Option<PickerWitness> {
+            let state = self.inner.state.try_lock().ok()?; let slot = state.slot.as_ref()?; let owner = &slot.owner;
+            if !live(&state) || state.next_operation != id || state.quit.is_some() || owner.id != id || !project_slot(slot)
+                || slot.phase != Phase::Picking || slot.settlement != Settlement::Pending || slot.reason != Reason::None
+                || slot.error.is_some() || slot.project.is_some() || slot.cleanup_end.is_some() || slot.review_end.is_some() || slot.discard
+                || owner.stopped() || owner.endpoint().is_some() || owner.ended.load(Ordering::SeqCst) || !original_call(&self.inner, owner)
+                || !owner.coordinator.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::Pending && book.handle.is_some())
+                || !owner.child.try_lock().is_ok_and(|book| book.receipt == JoinReceipt::New && book.handle.is_none())
+                || !owner.source.try_lock().is_ok_and(|book| book.not_started())
+                || owner.gui.installed_native_response().ok()?.is_some()
+                || !owner.gui.facts().is_some_and(|facts| facts.dispatched && facts.created && !facts.constructing
+                    && facts.showing && !facts.response && !facts.accepted && !facts.declined && facts.accepted_at.is_none()
+                    && facts.refusal.is_none() && facts.selected.is_none() && !facts.not_created && !facts.destroyed
+                    && !facts.close_queued && !facts.close_ack && !facts.release_queued && !facts.released)
+                || !self.inner.bridge.edits.can_exit() { return None; }
+            let roster = self.inner.bridge.native_roster().ok()?;
+            if roster.generation != 1 || !roster.roots.is_empty() { return None; }
+            Some(PickerWitness { document: Arc::downgrade(&self.inner), owner: Arc::downgrade(owner), generation: roster.generation,
+                edit: self.inner.bridge.edits.installed_macos_document()? })
+        }
+        pub(crate) fn installed_macos_quit_cancelled(&self, id: u32, project: &ProjectWitness) -> Option<InstalledNativeResponseWitness> {
+            let state = self.inner.state.try_lock().ok()?; let quit = state.quit.as_ref()?;
+            if !live(&state) || state.next_operation != id || quit.id != id || !quit.stopped() || quit.endpoint().is_some()
+                || state.quit_cleanup_end.is_some() || !self.macos_selected(&state, project)
+                || !state.slot.as_ref().is_some_and(|slot| slot.owner.id < id && slot.reason == Reason::None
+                    && !slot.owner.stopped() && slot.cleanup_end.is_none() && !slot.discard)
+                || !self.inner.bridge.edits.installed_macos_document_live(&project.edit) { return None; }
+            let response = completed(&self.inner, quit, NativeResponse::Decline, false, true)?;
+            response.selected.is_none().then_some(response)
+        }
+        pub(crate) fn installed_macos_picker_lost(&self, witness: &PickerWitness) -> bool {
+            self.inner.state.try_lock().is_ok_and(|state| self.macos_picker_loss(&state, witness))
+        }
+        pub(crate) fn installed_macos_project_lost(&self, witness: &ProjectWitness) -> bool {
+            self.inner.state.try_lock().is_ok_and(|state| self.macos_project_loss(&state, witness))
+        }
+        pub(crate) fn installed_macos_final(&self, id: u32, project: Option<&ProjectWitness>, picker: Option<&PickerWitness>, lost: bool) -> bool {
+            let Ok(state) = self.inner.state.try_lock() else { return false; }; let Some(quit) = &state.quit else { return false; };
+            // quit_pending is a UI admission flag. The normal exit observer
+            // may join this quit before the relay clears that flag; ORIGINAL
+            // positive joins/resources below, not flag timing, prove finality.
+            if !quiet(&state) || !state.stopping || !state.quit_accepted || state.next_operation != id || quit.id != id
+                || state.quit_cleanup_end.is_none() || !quit.stopped() || !assets_can_exit_locked(&state)
+                || !state.slot.as_ref().is_some_and(|slot| slot.owner.id < id)
+                || !state.evidence.revoked
+                || !completed(&self.inner, quit, NativeResponse::Accept, false, true).is_some_and(|response| response.selected.is_none()) { return false; }
+            let original = match (project, picker, lost) {
+                (Some(project), None, false) => state.lifetime.original_bound() && !state.lost_observed
+                    && self.macos_selected(&state, project) && self.inner.bridge.edits.installed_macos_document_live(&project.edit)
+                    && state.slot.as_ref().is_some_and(|slot| slot.reason == Reason::Shutdown
+                        && slot.owner.stopped() && slot.cleanup_end.is_some() && slot.discard),
+                (Some(project), None, true) => self.macos_project_loss(&state, project),
+                (None, Some(picker), true) => self.macos_picker_loss(&state, picker),
+                _ => false,
+            };
+            original && !self.inner.bridge.supervisor.disabled() && !self.inner.bridge.edits.disabled()
+                && !self.inner.bridge.diagnostics.disabled() && !self.inner.bridge.preflight.disabled() && !self.inner.bridge.android_build.disabled()
+                && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
+                && self.inner.bridge.preflight.can_exit() && self.inner.bridge.android_build.can_exit()
+        }
+        pub(crate) fn installed_macos_safe_quit(&self) -> bool {
+            // Existing ordinary admission only; never reset Unknown/STOP,
+            // create consent, retry a retained panel or replace an owner.
+            self.inner.state.try_lock().is_ok_and(|state| quit_question_admitted(&state))
+        }
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+    target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness};
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),

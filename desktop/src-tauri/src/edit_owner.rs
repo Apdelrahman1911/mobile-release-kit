@@ -196,7 +196,9 @@ struct Registry {
     revision: u32, exhausted: bool, stopping: bool, disabled: bool,
     active: Option<ActiveOwner>, last: Option<EditProjection>, blocked_projects: BTreeSet<String>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-        not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        not(feature = "ubuntu-runtime-publisher"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     installed_final: Option<InstalledConfigFinality>,
 }
 struct ActiveOwner {
@@ -233,6 +235,10 @@ struct Session {
     fixture_watchdog_loss: AtomicBool,
     #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
     fixture_schedule: Arc<hosted_tests::Schedule>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_arch = "aarch64"))]
+    installed_macos_pending: Mutex<installed_macos_observation::PendingReview>,
     resource_unknown: AtomicBool, startup: Mutex<Startup>, resources: AsyncMutex<Resources>,
     input: Arc<AsyncMutex<Pipe<ChildStdin>>>, output: Arc<AsyncMutex<Pipe<ChildStdout>>>,
     error: Arc<AsyncMutex<Pipe<ChildStderr>>>, driver: AsyncMutex<Option<JoinHandle<()>>>,
@@ -270,9 +276,13 @@ struct ReadEnd { frames: usize, bytes: usize, eof: bool, closed: bool, failed: b
 /// Read-only, bounded observation of THIS original Session's completed work.
 /// No handles, authority, additional history or replacement cleanup controller.
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    not(feature = "ubuntu-runtime-publisher"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
 #[derive(Clone)]
 pub(crate) struct InstalledConfigFinality {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation"))]
+    original: std::sync::Weak<Session>,
     pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) owner_generation: String,
     pub(crate) writer_frames: usize, pub(crate) stdout_frames: usize,
     pub(crate) inspection_joined: bool, pub(crate) acquisition_joined: bool, pub(crate) child_waited_success: bool,
@@ -280,6 +290,191 @@ pub(crate) struct InstalledConfigFinality {
     pub(crate) io_joined: bool, pub(crate) driver_joined: bool, pub(crate) watchdog_joined: bool, pub(crate) manager_joined: bool,
     pub(crate) runtime_ledger_settled: bool, pub(crate) runtime_settlement_joined: bool,
 }
+
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+    target_os = "macos", target_arch = "aarch64"))]
+mod installed_macos_observation {
+    use super::*;
+    pub(crate) struct DocumentWitness { original: std::sync::Weak<Inner>, generation: String, tombstone: String }
+    pub(crate) struct ReviewWitness {
+        document: DocumentWitness, session: Arc<Session>, project_id: String,
+        revision: String, plan: String, counters: (u32, u32), review_end: Instant,
+    }
+    // One original-driver snapshot, never handles or another custody owner.
+    // Only a benign Wake can reactivate it; every later non-Wake event retires.
+    #[derive(Default)]
+    pub(super) struct PendingReview { first: Option<PendingSnapshot>, live: bool, retired: bool }
+    struct PendingSnapshot {
+        generation: String, tombstone: String, project_id: String, revision: String, plan: String,
+        counters: (u32, u32), review_end: Instant, originals: PendingOriginals,
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct PendingOriginals {
+        startup_returned: bool, setup_joined: bool, child_outstanding: bool,
+        io_outstanding: bool, configuration_outstanding: bool, tasks_outstanding: bool,
+    }
+    impl PendingOriginals {
+        fn capture(owner: &Session, book: &Resources) -> Option<Self> {
+            let startup = owner.startup.try_lock().ok()?;
+            let facts = Self {
+                startup_returned: startup.attempted && startup.returned && !startup.failed && startup.child.is_none()
+                    && *owner.pipes.borrow() == PipeAcquisition::Available,
+                setup_joined: book.inspection_started && book.acquisition_started && book.inspection_joined && book.acquisition_joined
+                    && book.inspection.is_none() && book.acquisition.is_none() && !book.inspection_join_failed && !book.acquisition_join_failed,
+                child_outstanding: book.child.is_some() && book.waited.is_none() && !book.wait_failed && !book.force_attempted,
+                io_outstanding: book.writer.is_some() && book.stdout.is_some() && book.stderr.is_some() && book.frames.is_some()
+                    && book.write_end.is_none() && book.out_end.is_none() && book.err_end.is_none()
+                    && !book.write_join_failed && !book.out_join_failed && !book.err_join_failed,
+                configuration_outstanding: book.configuration.as_ref().is_some_and(|native|
+                    native.try_lock().is_ok_and(|slots| !slots.settled() && !slots.no_child_effect()))
+                    && !book.configuration_settlement_started && book.configuration_settlement.is_none()
+                    && !book.configuration_settlement_joined && !book.configuration_settlement_failed
+                    && book.configuration_settlement_outcome.is_none(),
+                tasks_outstanding: !book.driver_joined && !book.watchdog_joined && !book.manager_joined,
+            };
+            (facts.startup_returned && facts.setup_joined && facts.child_outstanding
+                && facts.io_outstanding && facts.configuration_outstanding && facts.tasks_outstanding).then_some(facts)
+        }
+    }
+    impl PendingSnapshot {
+        fn matches(&self, r: &Registry, a: &ActiveOwner) -> bool {
+            self.generation == r.generation && self.tombstone == r.loss_generation && self.project_id == a.projection.project_id
+                && a.projection.revision() == Some(self.revision.as_str()) && a.projection.plan_token() == Some(self.plan.as_str())
+                && a.prepare_counters == Some(self.counters) && a.review_end == self.review_end
+        }
+    }
+    fn owner_pending(owner: &Session) -> bool {
+        !owner.driver_done.load(Ordering::SeqCst) && !owner.resource_unknown.load(Ordering::SeqCst)
+            && !owner.driver_joined.load(Ordering::SeqCst) && !owner.watchdog_joined.load(Ordering::SeqCst)
+            && !owner.driver_join_failed.load(Ordering::SeqCst) && !owner.watchdog_join_failed.load(Ordering::SeqCst)
+            && !owner.manager_join_failed.load(Ordering::SeqCst) && !owner.force_due.load(Ordering::SeqCst) && !*owner.stop.borrow()
+    }
+    pub(super) fn retire(owner: &Session) {
+        // Poison is absorbing as well: getters never recover a poisoned slot.
+        let mut pending = owner.installed_macos_pending.lock().unwrap_or_else(|error| error.into_inner());
+        pending.live = false; pending.retired = true;
+    }
+    pub(super) fn returned(owner: &Session, wake_only: bool) {
+        let Ok(mut pending) = owner.installed_macos_pending.lock() else { return; };
+        pending.live = false;
+        if !wake_only && pending.first.is_some() { pending.retired = true; }
+    }
+    pub(super) struct DriverScope(Arc<Session>);
+    impl DriverScope { pub(super) fn new(owner: &Arc<Session>) -> Self { Self(owner.clone()) } }
+    impl Drop for DriverScope { fn drop(&mut self) { retire(&self.0); } }
+    pub(super) fn publish(inner: &Inner, owner: &Arc<Session>, book: &Resources, original_driver: bool) {
+        if !original_driver || !owner_pending(owner) { retire(owner); return; }
+        // Same existing Resources -> Registry order as accept_frame. Nothing
+        // holding observation ever takes Registry/Resources or awaits.
+        let r = inner.lock();
+        let Some(a) = r.active.as_ref().filter(|a| Arc::ptr_eq(&a.session, owner)) else { retire(owner); return; };
+        if !reviewing_state(inner, &r, a) { returned(owner, false); return; }
+        let Some(originals) = PendingOriginals::capture(owner, book) else { retire(owner); return; };
+        let (Some(revision), Some(plan), Some(counters)) = (a.projection.revision(), a.projection.plan_token(), a.prepare_counters)
+            else { retire(owner); return; };
+        let Ok(mut pending) = owner.installed_macos_pending.lock() else { return; };
+        if pending.retired { return; }
+        if let Some(first) = &pending.first {
+            if !first.matches(&r, a) || first.originals != originals {
+                pending.live = false; pending.retired = true; return;
+            }
+        } else {
+            pending.first = Some(PendingSnapshot { generation: r.generation.clone(), tombstone: r.loss_generation.clone(),
+                project_id: a.projection.project_id.clone(), revision: revision.to_owned(), plan: plan.to_owned(),
+                counters, review_end: a.review_end, originals });
+        }
+        pending.live = owner_pending(owner);
+        if !pending.live { pending.retired = true; }
+    }
+    fn healthy(inner: &Inner, r: &Registry) -> bool {
+        !inner.poisoned.load(Ordering::SeqCst) && !r.disabled && !r.exhausted && r.blocked_projects.is_empty()
+            && r.window.as_deref() == Some("main") && r.document_bound
+    }
+    fn document(inner: &Arc<Inner>, r: &Registry) -> Option<DocumentWitness> {
+        (healthy(inner, r) && !r.document_lost && !r.stopping).then(|| DocumentWitness {
+            original: Arc::downgrade(inner), generation: r.generation.clone(), tombstone: r.loss_generation.clone() })
+    }
+    fn same_document(inner: &Arc<Inner>, witness: &DocumentWitness) -> bool {
+        witness.original.upgrade().is_some_and(|original| Arc::ptr_eq(inner, &original))
+    }
+    fn original_pending(r: &Registry, a: &ActiveOwner) -> bool {
+        // Read-only: never contend for the driver's long-held resource book,
+        // borrow startup/native handles, or publish a replacement observation.
+        let Ok(pending) = a.session.installed_macos_pending.try_lock() else { return false; };
+        pending.live && !pending.retired && pending.first.as_ref().is_some_and(|first| first.matches(r, a))
+            && owner_pending(&a.session)
+    }
+    fn reviewing_state(inner: &Inner, r: &Registry, a: &ActiveOwner) -> bool {
+        healthy(inner, r) && !r.document_lost && !r.stopping
+            && a.session.domain == EditDomain::Configuration && a.projection.domain == EditDomain::Configuration
+            && a.projection.session_id == a.session.id && a.projection.owner_generation == r.generation
+            && a.projection.phase == Phase::Reviewing && a.opened && a.prepared && !a.terminal && !a.unknown
+            && a.claimed_seq == 1 && a.phase_end.is_none() && a.cleanup_start.is_none()
+            && !a.projection.apply_submitted && a.projection.core_outcome.is_none()
+            && a.projection.native_reason == Reason::None && a.projection.native_finality == NativeFinality::Pending
+            && !a.projection.late_settled && Instant::now() < a.review_end
+    }
+    fn reviewing(inner: &Inner, r: &Registry, a: &ActiveOwner) -> bool {
+        reviewing_state(inner, r, a) && original_pending(r, a)
+    }
+    impl EditOwner {
+        pub(crate) fn installed_macos_document(&self) -> Option<DocumentWitness> {
+            document(&self.inner, &self.inner.lock())
+        }
+        pub(crate) fn installed_macos_document_live(&self, witness: &DocumentWitness) -> bool {
+            let r = self.inner.lock();
+            same_document(&self.inner, witness) && healthy(&self.inner, &r) && !r.document_lost
+                && r.generation == witness.generation && r.loss_generation == witness.tombstone
+        }
+        pub(crate) fn installed_macos_document_lost(&self, witness: &DocumentWitness) -> bool {
+            let r = self.inner.lock();
+            // This is the ORIGINAL preallocated absorbing swap, not merely a
+            // non-live projection or a new document generation after reload.
+            same_document(&self.inner, witness) && healthy(&self.inner, &r) && r.document_lost
+                && witness.generation != witness.tombstone && r.generation == witness.tombstone
+                && r.loss_generation == witness.generation
+        }
+        pub(crate) fn installed_macos_review(&self, session_id: &str) -> Option<ReviewWitness> {
+            let r = self.inner.lock(); let a = r.active.as_ref()?;
+            if a.session.id != session_id || !reviewing(&self.inner, &r, a) { return None; }
+            Some(ReviewWitness { document: document(&self.inner, &r)?, session: a.session.clone(),
+                project_id: a.projection.project_id.clone(), revision: a.projection.revision()?.to_owned(),
+                plan: a.projection.plan_token()?.to_owned(), counters: a.prepare_counters?, review_end: a.review_end })
+        }
+        pub(crate) fn installed_macos_review_retained(&self, witness: &ReviewWitness) -> bool {
+            let r = self.inner.lock(); let Some(a) = r.active.as_ref() else { return false; };
+            same_document(&self.inner, &witness.document) && reviewing(&self.inner, &r, a)
+                && r.generation == witness.document.generation && r.loss_generation == witness.document.tombstone
+                && Arc::ptr_eq(&a.session, &witness.session) && a.review_end == witness.review_end
+                && a.projection.project_id == witness.project_id && a.projection.revision() == Some(witness.revision.as_str())
+                && a.projection.plan_token() == Some(witness.plan.as_str()) && a.prepare_counters == Some(witness.counters)
+        }
+        pub(crate) fn installed_macos_lost(&self, witness: &ReviewWitness) -> bool {
+            let r = self.inner.lock();
+            let (Some(last), Some(facts)) = (&r.last, &r.installed_final) else { return false; };
+            same_document(&self.inner, &witness.document) && healthy(&self.inner, &r)
+                && r.document_lost && r.generation == witness.document.tombstone && r.loss_generation == witness.document.generation
+                && r.active.is_none() && facts.original.upgrade().is_some_and(|original| Arc::ptr_eq(&original, &witness.session))
+                && last.domain == EditDomain::Configuration && last.session_id == witness.session.id
+                && last.project_id == witness.project_id && last.owner_generation == witness.document.generation
+                && last.revision() == Some(witness.revision.as_str()) && last.plan_token() == Some(witness.plan.as_str())
+                && !last.apply_submitted && last.phase == Phase::Final && last.native_reason == Reason::WindowLost
+                && last.native_finality == NativeFinality::Settled && !last.late_settled
+                && last.core_outcome.as_ref().is_some_and(|core| core.effect == Effect::NotStarted
+                    && core.journal == Journal::NotCreated && core.resources == ResourceState::Settled && core.reason == CoreReason::Cancelled)
+                && facts.session_id == last.session_id && facts.project_id == last.project_id && facts.owner_generation == last.owner_generation
+                && facts.inspection_joined && facts.acquisition_joined && facts.child_waited_success
+                && facts.stdin_closed && facts.stdout_eof_closed && facts.stderr_eof_closed && facts.io_joined
+                && facts.driver_joined && facts.watchdog_joined && facts.manager_joined
+                && facts.runtime_ledger_settled && facts.runtime_settlement_joined
+        }
+    }
+}
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+    target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use installed_macos_observation::{DocumentWitness as InstalledMacDocumentWitness, ReviewWitness as InstalledMacReviewWitness};
 
 // Decision DATA from actual original slots/joins, never a replacement receipt.
 #[derive(Clone, Copy)]
@@ -418,6 +613,10 @@ impl Inner {
     }
     fn trigger_locked(&self, r: &mut Registry, id: &str, reason: Reason, at: Instant) {
         let Some(a) = r.active.as_mut().filter(|a| a.session.id == id) else { return; };
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64"))]
+        installed_macos_observation::retire(&a.session);
         if a.cleanup_start.is_none() { a.cleanup_start = Some(at); }
         if a.projection.native_reason == Reason::None && reason != Reason::None { a.projection.native_reason = reason; }
         if !a.unknown { a.projection.phase = Phase::Finalizing; }
@@ -436,6 +635,10 @@ impl Inner {
         self.expire_locked(&mut r, id, Instant::now());
         r.disabled = true;
         if let Some(a) = r.active.as_mut().filter(|a| a.session.id == id) {
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                target_os = "macos", target_arch = "aarch64"))]
+            installed_macos_observation::retire(&a.session);
             a.unknown = true;
             a.projection.phase = Phase::Unknown;
             a.projection.native_finality = NativeFinality::Unknown;
@@ -519,14 +722,18 @@ impl EditOwner {
             registry: Mutex::new(Registry { generation, loss_generation, window: None, document_bound: false, document_lost: false,
                 revision: 0, exhausted: false, stopping: false, disabled, active: None, last: None, blocked_projects: BTreeSet::new(),
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-                    not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                    not(feature = "ubuntu-runtime-publisher"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
                 installed_final: None,
             }) }) }
     }
     pub fn subscribe(&self) -> watch::Receiver<u32> { self.inner.changes.subscribe() }
     pub fn status(&self) -> Result<ConfigEditStatus, BridgeError> { self.inner.snapshot(&self.inner.lock()) }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-        not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        not(feature = "ubuntu-runtime-publisher"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn installed_observation_final(&self, session_id: &str) -> Option<InstalledConfigFinality> {
         let r = self.inner.lock();
         let last = r.last.as_ref()?;
@@ -686,6 +893,10 @@ impl EditOwner {
             fixture_watchdog_loss: AtomicBool::new(false),
             #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
             fixture_schedule: self.inner.fixture_next_schedule.lock().map_err(|_| edit_unknown())?.take().unwrap_or_default(),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                target_os = "macos", target_arch = "aarch64"))]
+            installed_macos_pending: Mutex::new(installed_macos_observation::PendingReview::default()),
             startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(frame_rx),
                 // Pure allocation BEFORE this Session is admitted or any
                 // original worker is registered/released. No passive custody.
@@ -819,6 +1030,10 @@ impl EditOwner {
             let Some(phase_end) = claim_phase(a.review_end, now) else {
                 let at = a.review_end; self.inner.trigger_locked(&mut r, session_id, Reason::ReviewExpired, at); return Err(invalid_owner());
             };
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                target_os = "macos", target_arch = "aarch64"))]
+            installed_macos_observation::retire(&a.session);
             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
             a.projection.phase = Phase::Applying;
             a.claimed_seq = 2;
@@ -1639,6 +1854,10 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
 }
 
 async fn drive(inner: Arc<Inner>, owner: Arc<Session>) {
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_arch = "aarch64"))]
+    let _pending_observation = installed_macos_observation::DriverScope::new(&owner);
     start_original(&inner, &owner).await;
     continue_original(inner, owner, true).await;
 }
@@ -1742,6 +1961,10 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
     // Called normally by the one driver, or inline by its surviving monitor
     // only after that original driver has failed and released this book.
     // Pending startup/pipe/IO objects remain here across a dropped future.
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_arch = "aarch64"))]
+    if !_original_driver { installed_macos_observation::retire(&owner); }
     let mut book = owner.resources.lock().await;
     if book.inspection.is_some() && !book.inspection_joined && !book.inspection_join_failed {
         match join_with_clock(&mut book.inspection, &inner, &owner).await {
@@ -1813,6 +2036,10 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
         if _original_driver && owner.fixture_driver_loss.swap(false, Ordering::SeqCst) { panic!("fixed hosted original driver loss"); }
         let endpoint = clock_endpoint(&inner, &owner);
         if owner.force_due.load(Ordering::SeqCst) && book.child.is_some() && !book.force_attempted && book.waited.is_none() {
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                target_os = "macos", target_arch = "aarch64"))]
+            installed_macos_observation::retire(&owner);
             book.force_attempted = true;
             if let Some(child) = book.child.as_mut() {
                 if child.start_kill().is_err() { inner.unknown(&owner.id); }
@@ -1824,10 +2051,18 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
         let err_pending = book.stderr.is_some() && !book.err_join_failed;
         let force_pending = book.child.is_some() && book.waited.is_none() && !book.force_attempted;
         if !wait_pending && !write_pending && !out_pending && !err_pending && !force_pending {
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+                target_os = "macos", target_arch = "aarch64"))]
+            installed_macos_observation::retire(&owner);
             // Consume all bounded already-queued receipts before finality.
             drain_frames(&mut book, &inner, &owner);
             break;
         }
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64"))]
+        installed_macos_observation::publish(&inner, &owner, &book, _original_driver);
         let event = {
             let Resources { child, writer, stdout, stderr, frames, .. } = &mut *book;
             tokio::select! {
@@ -1840,6 +2075,10 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
                 _ = clock_wait(endpoint) => Event::Wake,
             }
         };
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+            not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+            target_os = "macos", target_arch = "aarch64"))]
+        installed_macos_observation::returned(&owner, matches!(&event, Event::Wake));
         match event {
             Event::Wait(Ok(status)) => {
                 let success = status.success();
@@ -1887,6 +2126,10 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
         // latch. Independent original closes, wait/joins, and the same force
         // endpoint continue; no sibling abort or replacement owner is created.
     }
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
+        target_os = "macos", target_arch = "aarch64"))]
+    installed_macos_observation::retire(&owner);
     if child_expected { require_terminal(&inner, &owner); }
     // Retain installed originals throughout Open/Prepare/Review/Apply and all
     // actual child wait/IO consumers. The existing driver/continuation joins the
@@ -2025,7 +2268,9 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         return;
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-        not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        not(feature = "ubuntu-runtime-publisher"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     let mut installed_observed = None;
     let settled = {
         let mut book = owner.resources.lock().await;
@@ -2051,11 +2296,15 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             && !owner.driver_join_failed.load(Ordering::SeqCst) && !owner.watchdog_join_failed.load(Ordering::SeqCst)
             && !owner.resource_unknown.load(Ordering::SeqCst);
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-            not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            not(feature = "ubuntu-runtime-publisher"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
         if settled && configuration_installed_selected(owner.domain, inner.runtime.configuration_edit_profile_available()) && startup.returned {
             if let (Some(write), Some(out), Some(err)) = (&book.write_end, &book.out_end, &book.err_end) {
                 if !write.failed && !out.failed && !err.failed && err.bytes == 0 {
                     installed_observed = Some(InstalledConfigFinality {
+                        #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation"))]
+                        original: Arc::downgrade(&owner),
                         session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
                         writer_frames: write.frames, stdout_frames: out.frames,
                         inspection_joined: book.inspection_joined, acquisition_joined: book.acquisition_joined,
@@ -2096,7 +2345,9 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             a.projection.native_finality = NativeFinality::Settled;
         }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-            not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            not(feature = "ubuntu-runtime-publisher"),
+        any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
         {
             // Freeze the actual original resource facts at the SAME atomic
             // retirement as the correlated projection; never derive them from
