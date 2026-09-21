@@ -118,7 +118,7 @@ impl Step {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pending { Dom(Step), Project(Step), Evidence(Step), Path(PathStep), Close, Gtk }
 #[derive(Clone, Copy)]
-enum Boundary { Bootstrap, Request, Result, Dom, Gtk, Settlement, Exit }
+enum Boundary { Bootstrap, Request, Result, Dom, Gtk, Settlement, Deadline, Exit }
 impl Boundary {
     fn failure_line(self) -> &'static [u8] {
         match self {
@@ -128,6 +128,7 @@ impl Boundary {
             Self::Dom => b"MRK_INSTALLED_SHELL_FAILURE_PHASE=dom\n",
             Self::Gtk => b"MRK_INSTALLED_SHELL_FAILURE_PHASE=gtk\n",
             Self::Settlement => b"MRK_INSTALLED_SHELL_FAILURE_PHASE=settlement\n",
+            Self::Deadline => b"MRK_INSTALLED_SHELL_FAILURE_PHASE=deadline\n",
             Self::Exit => b"MRK_INSTALLED_SHELL_FAILURE_PHASE=exit\n",
         }
     }
@@ -226,7 +227,8 @@ fn failure_pair(trace: (Step, Boundary)) -> Option<([u8; FAILURE_PAIR_LIMIT], us
 fn assert_failure_pair_contract() {
     // Pure byte contracts only; no open, write, GTK or process work.
     for trace in [(Step::Bootstrap, Boundary::Bootstrap), (Step::PrepareSave, Boundary::Request),
-        (Step::Paths(PathStep::Settled(10)), Boundary::Settlement), (Step::Exit, Boundary::Exit)] {
+        (Step::Paths(PathStep::Settled(10)), Boundary::Settlement), (Step::SelectProject, Boundary::Deadline),
+        (Step::Exit, Boundary::Exit)] {
         let expected = [trace.0.failure_line(), trace.1.failure_line()].concat();
         assert!(failure_pair(trace).is_some_and(|(bytes, length)|
             length <= FAILURE_PAIR_LIMIT && bytes.get(..length) == Some(expected.as_slice())));
@@ -239,9 +241,49 @@ struct Picker {
     disposal: bool, destroyed: bool, released: bool, returned: bool,
 }
 impl Picker {
+    fn activation_returned(&mut self, result: Result<bool, ()>) -> bool {
+        // Only the actual completed activation callback latches return. GTK
+        // may defer its genuine response until after emit_clicked unwinds.
+        if result != Ok(true) || !self.created || !self.activated || self.returned { return false; }
+        self.returned = true; true
+    }
     fn settled(&self, select: bool) -> bool {
         self.created && self.activated && self.responded && self.destroyed && self.released && self.returned
             && self.selected == select && self.filename == select
+    }
+}
+
+fn assert_picker_activation_return_contract() {
+    // Inert state assertions only, never native response or settlement receipts.
+    for select in [false, true] {
+        for response_first in [false, true] {
+            let mut p = Picker { created: true, selected: select, activated: true, ..Picker::default() };
+            if response_first { p.responded = true; p.filename = select; }
+            assert!(p.activation_returned(Ok(true)));
+            assert!(!p.settled(select));
+            assert!(!p.activation_returned(Ok(true))); // No second activation return.
+            if !response_first { p.responded = true; p.filename = select; }
+            assert!(!p.settled(select));
+            p.destroyed = true; assert!(!p.settled(select));
+            p.released = true; assert!(p.settled(select));
+            assert!(!p.settled(!select));
+        }
+        let complete = || Picker { created: true, selected: select, activated: true, responded: true,
+            filename: select, destroyed: true, released: true, returned: true, ..Picker::default() };
+        for incomplete in [Picker { created: false, ..complete() }, Picker { activated: false, ..complete() },
+            Picker { responded: false, ..complete() }, Picker { destroyed: false, ..complete() },
+            Picker { released: false, ..complete() }, Picker { returned: false, ..complete() },
+            Picker { selected: !select, ..complete() }, Picker { filename: !select, ..complete() }] {
+            assert!(!incomplete.settled(select));
+        }
+        for result in [Ok(false), Err(())] {
+            let mut p = Picker { created: true, selected: select, activated: true, ..Picker::default() };
+            assert!(!p.activation_returned(result)); assert!(!p.returned);
+        }
+    }
+    for (created, activated) in [(false, true), (true, false)] {
+        let mut p = Picker { created, activated, ..Picker::default() };
+        assert!(!p.activation_returned(Ok(true))); assert!(!p.returned);
     }
 }
 
@@ -1487,8 +1529,9 @@ impl Observation {
         match result {
             Ok(false) if !op.picker.activated && (!selecting || !op.picker.selected) => {},
             Ok(true) if selecting && op.picker.selected && !op.picker.activated => r.step = Step::Paths(PathStep::Activate(index)),
-            Ok(true) if !selecting && op.picker.activated && op.picker.responded && !op.picker.returned => {
-                op.picker.returned = true; r.step = Step::Paths(PathStep::Settled(index));
+            Ok(true) if !selecting => {
+                if !op.picker.activation_returned(result) { self.fail(); return; }
+                r.step = Step::Paths(PathStep::Settled(index));
             }, _ => self.fail(),
         }
     }
@@ -1596,7 +1639,15 @@ impl Observation {
     }
     pub(super) fn tick(self: &Arc<Self>, app: &tauri::AppHandle) {
         if self.failed.load(Ordering::SeqCst) { self.report_failure(); return; }
-        if Instant::now() >= self.end || std::thread::current().id() == self.main { self.fail(); self.report_failure(); return; }
+        if Instant::now() >= self.end {
+            // Preserve the first failure even if another callback failed while
+            // this relay was acquiring the record. Report only after unlock.
+            if let Some(mut r) = self.record() {
+                if !self.failed.swap(true, Ordering::SeqCst) { r.trace = (r.step, Boundary::Deadline); }
+            }
+            self.report_failure(); return;
+        }
+        if std::thread::current().id() == self.main { self.fail(); self.report_failure(); return; }
         let step = {
             let Some(mut r) = self.record_at(Boundary::Settlement) else { return; };
             if !r.attached || !r.loaded || r.pending.is_some() { return; }
@@ -2024,8 +2075,8 @@ impl Observation {
         match result {
             Ok(false) if !r.pickers[index].activated && (step != Step::SetProject || !r.pickers[index].selected) => {},
             Ok(true) if step == Step::SetProject && r.pickers[1].selected && !r.pickers[1].activated => r.step = Step::SelectProject,
-            Ok(true) if r.pickers[index].activated && r.pickers[index].responded && !r.pickers[index].returned => {
-                r.pickers[index].returned = true;
+            Ok(true) if matches!(step, Step::Cancel | Step::SelectProject) => {
+                if !r.pickers[index].activation_returned(result) { self.fail(); return; }
                 r.step = if index == 0 { Step::Cancelled } else { Step::Selected };
             },
             _ => self.fail(),
@@ -2080,8 +2131,8 @@ impl Observation {
         match result {
             Ok(false) if !r.candidate.pickers[index].activated && (step != Step::SetEvidence || !r.candidate.pickers[index].selected) => {},
             Ok(true) if step == Step::SetEvidence && r.candidate.pickers[1].selected && !r.candidate.pickers[1].activated => r.step = Step::SelectEvidence,
-            Ok(true) if r.candidate.pickers[index].activated && r.candidate.pickers[index].responded && !r.candidate.pickers[index].returned => {
-                r.candidate.pickers[index].returned = true;
+            Ok(true) if matches!(step, Step::CancelEvidence | Step::SelectEvidence) => {
+                if !r.candidate.pickers[index].activation_returned(result) { self.fail(); return; }
                 r.step = if index == 0 { Step::EvidenceCancelled } else { Step::EvidenceSelected };
             },
             _ => self.fail(),
@@ -2917,6 +2968,7 @@ pub(crate) fn main() -> std::process::ExitCode {
     crate::runtime::assert_packaged_shell_allowlist_contract();
     assert_recent_files_suppression_contract();
     assert_failure_pair_contract();
+    assert_picker_activation_return_contract();
     if case == Case::Positive {
         crate::asset_session::assert_project_selection_gate_contract();
         crate::asset_session::assert_installed_evidence_gate_contract();

@@ -1150,7 +1150,10 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
         self.assertEqual(set(lifecycle.SHELL_FAILURE_STEPS), steps)
         self.assertEqual(set(lifecycle.SHELL_FAILURE_BOUNDARIES), boundaries)
         self.assertEqual(len(lifecycle.SHELL_FAILURE_STEPS), len(steps))
-        self.assertEqual(len(lifecycle.SHELL_FAILURE_BOUNDARIES), 7)
+        self.assertEqual(len(lifecycle.SHELL_FAILURE_BOUNDARIES), 8)
+        for boundary in boundaries:
+            self.assertEqual(lifecycle._shell_label_pair(b"MRK_INSTALLED_SHELL_FAILURE_STEP=SelectProject\n" + boundary),
+                             {"step": "SelectProject", "boundary": boundary.decode("ascii").strip().split("=", 1)[1]})
         self.assertLessEqual(max(map(len, steps)) + max(map(len, boundaries)), 512)
         self.assertIn("const FAILURE_PAIR_LIMIT: usize = 512;", source)
         self.assertIn("fn assert_failure_pair_contract()", source)
@@ -1161,6 +1164,68 @@ class InstalledFailureLabelSourceContracts(unittest.TestCase):
             self.assertIn('"shell-' + case + '-failure.labels"', source)
         self.assertNotIn("shell-normal-failure.labels", source)
         self.assertFalse(any(name.endswith("failure.labels") for name in lifecycle.public_files({"shell": {}})))
+
+    def test_folder_selection_waits_for_the_exact_current_folder_before_one_activation(self):
+        source = (SOURCE / "desktop/src-tauri/src/shell.rs").read_text()
+        selecting = source.split("    pub(super) fn select_observed_folder(", 1)[1].split("    #[cfg(", 1)[0]
+        activating = source.split("    pub(super) fn activate_observed_folder(", 1)[1].split("    #[cfg(", 1)[0]
+        self.assertEqual(selecting.count("dialog.set_current_folder(path)"), 1)
+        self.assertEqual(selecting.count("q.project_selection(id)?"), 1)
+        self.assertEqual(selecting.count("q.evidence_selection(id)?"), 1)
+        self.assertNotIn(".set_filename(", selecting); self.assertNotIn(".filename(", selecting + activating)
+        self.assertNotIn("set_current_folder", activating)
+        readiness = "if dialog.current_folder().as_deref() != Some(path) { return Ok(false); }"
+        self.assertEqual(activating.count("dialog.current_folder()"), 1)
+        self.assertIn("if select {", activating)
+        self.assertIn("if evidence { q.evidence_path() } else { q.project_path() }", activating)
+        self.assertIn(readiness, activating)
+        self.assertLess(activating.index(readiness), activating.index("dialog.widget_for_response(response)"))
+        self.assertLess(activating.index(readiness), activating.index("q.project_activation(id, select)?"))
+        self.assertLess(activating.index(readiness), activating.index("q.evidence_activation(id, select)?"))
+        self.assertEqual(activating.count("button.emit_clicked()"), 1)
+        # This source correspondence cannot prove GTK readiness or acceptance.
+
+    def test_picker_return_latch_keeps_response_and_original_finality_independent(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        latch = source.split("    fn activation_returned(", 1)[1].split("    fn settled(", 1)[0]
+        self.assertIn("result != Ok(true) || !self.created || !self.activated || self.returned", latch)
+        self.assertEqual(latch.count("self.returned = true"), 1)
+        self.assertNotIn("self.responded", latch)
+        self.assertIn("self.created && self.activated && self.responded && self.destroyed && self.released && self.returned", source)
+        self.assertIn("&& self.selected == select && self.filename == select", source)
+        for name, next_name, pending, waiting in (
+            ("project_gtk_returned", "evidence_created", "Project(step)", ("Step::Cancelled", "Step::Selected")),
+            ("evidence_gtk_returned", "native_created", "Evidence(step)", ("Step::EvidenceCancelled", "Step::EvidenceSelected")),
+            ("path_gtk_returned", "preview_request", "Path(path)", ("Step::Paths(PathStep::Settled(index))",)),
+        ):
+            caller = source.split("    fn " + name + "(", 1)[1].split("    pub(super) fn " + next_name, 1)[0]
+            self.assertIn("r.pending.take() != Some(Pending::" + pending + ")", caller)
+            self.assertEqual(caller.count(".activation_returned(result)"), 1)
+            self.assertNotIn(".responded", caller)
+            for step in waiting: self.assertIn(step, caller)
+        self.assertIn("Ok(true) if matches!(step, Step::Cancel | Step::SelectProject)", source)
+        self.assertIn("Ok(true) if matches!(step, Step::CancelEvidence | Step::SelectEvidence)", source)
+        self.assertIn("PathStep::Set(i) => (i,true), PathStep::Activate(i) => (i,false)", source)
+        self.assertIn("Ok(true) if !selecting =>", source)
+        self.assertIn("fn assert_picker_activation_return_contract()", source)
+        self.assertLess(source.index("    assert_picker_activation_return_contract();"),
+                        source.index("let returned = super::run_builder("))
+        # The actual helper's inert assertions run in the reviewed observer
+        # before GTK. Original response, owner and finality evidence is separate.
+
+    def test_deadline_label_latches_once_before_report_outside_the_record_lock(self):
+        source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
+        tick = source.split("    pub(super) fn tick(", 1)[1].split("        let step = {", 1)[0]
+        deadline = tick.split("        if Instant::now() >= self.end {", 1)[1].split(
+            "        if std::thread::current().id() == self.main", 1)[0]
+        self.assertIn("if let Some(mut r) = self.record() {", deadline)
+        self.assertIn("if !self.failed.swap(true, Ordering::SeqCst) { r.trace = (r.step, Boundary::Deadline); }", deadline)
+        self.assertEqual(deadline.count("Boundary::Deadline"), 1)
+        self.assertIn("\n            }\n            self.report_failure(); return;\n        }", deadline)
+        self.assertIn("if self.failed.load(Ordering::SeqCst) { self.report_failure(); return; }", tick)
+        self.assertIn("if std::thread::current().id() == self.main { self.fail(); self.report_failure(); return; }", tick)
+        self.assertNotIn("self.end ||", tick)
+        self.assertIn("if !self.failed.load(Ordering::SeqCst) { r.trace = (r.step, boundary); }", source)
 
     def test_test_only_original_fd_sink_has_one_attempt_before_existing_stderr(self):
         source = (SOURCE / "desktop/src-tauri/src/installed_shell_observation.rs").read_text()
