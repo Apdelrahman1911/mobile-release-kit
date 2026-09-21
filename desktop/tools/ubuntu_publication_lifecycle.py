@@ -2534,6 +2534,88 @@ def _shell_window_pid(value, pid):
          and os.readlink(proc / "exe") == str(_ROOT / "shell-normal"), "Window does not report this task's original normal executable")
 
 
+def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, error,
+                          join_error=None, capture_error=None):
+    """Best-effort diagnosis from original memory, never finality or read authority.
+
+    A failed service cannot export its private files. Its existing stderr can
+    still explain a failed synthetic, no-project normal launch. In particular,
+    an unjoined holder is never inspected and no diagnostic error replaces the
+    operation's original failure.
+    """
+    try:
+        safe_messages = {
+            "Normal window controller endpoint expired",
+            "Normal original returned before controller command",
+            "Normal window controller command bound exhausted",
+            "No original controller command budget remains",
+            "Original normal shell returned before Quit",
+            "Original private shell window did not become visible in the finite observation",
+            "Original normal shell/controller did not settle",
+            "Original shell capture failed/incomplete",
+            "Actual normal capabilities/catalogue or observer completion missing",
+            "owned command failed, timed out, or produced incomplete output",
+            "owned command cleanup could not be confirmed",
+            "owned command executable could not be started",
+            "owned command produced incomplete output",
+            "owned command output exceeds its bound",
+        }
+
+        def error_data(original):
+            name = type(original).__name__
+            row = {"type": name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other"}
+            # Never call exception formatting: it may contain argv, environment
+            # or other context, or itself raise. Only fixed public messages pass.
+            args = original.args
+            if type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in safe_messages:
+                row["message"] = args[0]
+            return row
+
+        errors = [item for item in (error, join_error, capture_error) if item is not None]
+        result = None
+        data = {"schemaVersion": 1, "scope": "original-normal-failure-diagnostic-only",
+                "qualified": False, "cleanupEstablished": False, "joined": joined,
+                "stage": stage, "inputs": inputs, "controllerCommands": len(commands),
+                "lastControllerCommand": commands[-1]["phase"] if commands else None,
+                "workerGuardState": None, "workerErrorCount": None, "capture": None}
+        if joined:
+            state = holder.get("guardState")
+            data["workerGuardState"] = state if state in ("NEW", "INSTALLED", "ACTIVE", "RESTORED", "UNKNOWN") else "other"
+            worker_errors = holder.get("errors", [])
+            if type(worker_errors) is list:
+                data["workerErrorCount"] = len(worker_errors)
+                errors.extend(worker_errors[:4])
+            result = holder.get("result")
+        data["errors"] = [error_data(item) for item in errors[:4]]
+        data["errorsTruncated"] = len(errors) > 4
+        if (type(result) is subprocess.CompletedProcess and result.args == argv
+                and type(result.returncode) is int and type(result.stdout) is bytes
+                and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= LIMIT):
+            captured = {"exitCode": result.returncode}
+            for name, raw, head, tail in (("stdout", result.stdout, 256, 256),
+                                          ("stderr", result.stderr, 1024, 2048)):
+                prefix, suffix = raw[:head], raw[max(head, len(raw) - tail):]
+                captured[name] = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                                  "head": prefix.decode("utf-8", "replace"), "tail": suffix.decode("utf-8", "replace"),
+                                  "truncated": len(prefix) + len(suffix) < len(raw)}
+            data["capture"] = captured
+        marker = b"MRK_INSTALLED_SHELL_FAILURE="
+        raw = marker + canonical(data)
+        if len(raw) > 32768:
+            # JSON escaping counts toward the complete output cap too.
+            for row in (data["capture"] or {}).values():
+                if type(row) is dict:
+                    row.pop("head", None)
+                    row.pop("tail", None)
+                    row["truncated"] = row["size"] != 0
+            raw = marker + canonical(data)
+        if len(raw) <= 32768:
+            sys.stderr.write(raw.decode("ascii"))
+            sys.stderr.flush()
+    except BaseException:
+        pass  # A diagnostic is not authority to replace the original error.
+
+
 def _shell_normal(value, environment, expected):
     global _FAILED, _PHASE
     need(not _FAILED, "Prior shell/root failure")
@@ -2546,9 +2628,19 @@ def _shell_normal(value, environment, expected):
     worker = threading.Thread(target=_overlap_worker, args=(holder, argv, environment, seconds),
                               name="mrk-installed-shell-normal", daemon=False)
     failure, join_error, capture_error, joined, inputs = None, None, None, False, 0
+    stage, diagnostic_attempted = "start", False
+
+    def diagnose(error):
+        nonlocal diagnostic_attempted
+        if not diagnostic_attempted:
+            diagnostic_attempted = True
+            _shell_normal_failure(holder, argv, joined=joined, stage=stage, inputs=inputs, commands=commands,
+                                  error=error, join_error=join_error, capture_error=capture_error)
 
     def xdo(label, args, *, codes=(0,)):
-        need(time.monotonic() < end and worker.is_alive() and len(commands) < 96, "Normal window controller exhausted or original returned")
+        need(time.monotonic() < end, "Normal window controller endpoint expired")
+        need(worker.is_alive(), "Normal original returned before controller command")
+        need(len(commands) < 96, "Normal window controller command bound exhausted")
         timeout = min(5, math.floor(end - time.monotonic()))
         need(timeout > 0, "No original controller command budget remains")
         command_argv = _drop(value, ["/usr/bin/xdotool", *args])
@@ -2597,6 +2689,7 @@ def _shell_normal(value, environment, expected):
 
     try:
         worker.start()
+        stage = "initial-window"
         title = "^Mobile Release Kit$"
         window = wait_window(title)
         reported = xdo("window-pid", ["getwindowpid", str(window)])
@@ -2606,14 +2699,18 @@ def _shell_normal(value, environment, expected):
         _shell_window_pid(value, pid)
         # Scheduling margin only, never a success receipt. Both genuine
         # original core returns are still required from the bounded capture.
+        stage = "bootstrap-margin"
         margin = min(time.monotonic() + 22, end - 8)
         while time.monotonic() < margin:
             need(worker.is_alive(), "Original normal shell returned before Quit")
             time.sleep(min(0.25, max(0.0, margin - time.monotonic())))
+        stage = "quit-input"
         input_key(window, title, pid, "ctrl+q")
         title = r"^Quit and discard unsaved drafts\?$"
+        stage = "quit-dialog"
         dialog = wait_window(title, pid)
         need(dialog != window, "GTK Quit did not create its own real dialog")
+        stage = "quit-confirmation"
         input_key(dialog, title, pid, "alt+o")
     except BaseException as error:
         failure = error
@@ -2631,18 +2728,28 @@ def _shell_normal(value, environment, expected):
                 _command_capture("shell-normal", argv, holder["result"], seconds)
             except BaseException as error:
                 capture_error = error
-    _retain("shell-normal-control.json", canonical({"joined": joined, "inputs": inputs, "commands": commands,
-        "workerGuardState": holder.get("guardState") if joined else None,
-        "workerErrorCount": len(holder.get("errors", [])) if joined else None,
-        "startMonotonic": started, "controllerEndpoint": end, "carrierTimeoutSeconds": seconds,
-        "originalDeadline": _END, "errorType": type(failure).__name__ if failure is not None else None}))
-    for error in (failure, join_error, capture_error, *(holder.get("errors", []) if joined else [])):
-        if error is not None:
-            raise error
-    need(joined and inputs == 2 and holder.get("guardState") == "RESTORED" and "result" in holder
-         and time.monotonic() < _END, "Original normal shell/controller did not settle")
-    result = holder["result"]
-    observed = shell_result(result.stdout, result.stderr, "normal", result.returncode, expected)
+    errors = (failure, join_error, capture_error, *(holder.get("errors", []) if joined else []))
+    primary = next((error for error in errors if error is not None), None)
+    if primary is not None:
+        diagnose(primary)
+    else:
+        stage = "final-verification"
+    try:
+        _retain("shell-normal-control.json", canonical({"joined": joined, "inputs": inputs, "commands": commands,
+            "workerGuardState": holder.get("guardState") if joined else None,
+            "workerErrorCount": len(holder.get("errors", [])) if joined else None,
+            "startMonotonic": started, "controllerEndpoint": end, "carrierTimeoutSeconds": seconds,
+            "originalDeadline": _END, "errorType": type(failure).__name__ if failure is not None else None}))
+        for error in errors:
+            if error is not None:
+                raise error
+        need(joined and inputs == 2 and holder.get("guardState") == "RESTORED" and "result" in holder
+             and time.monotonic() < _END, "Original normal shell/controller did not settle")
+        result = holder["result"]
+        observed = shell_result(result.stdout, result.stderr, "normal", result.returncode, expected)
+    except BaseException as error:
+        diagnose(error)
+        raise
     _FAILED = False
     return observed
 

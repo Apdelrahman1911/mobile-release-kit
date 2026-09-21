@@ -4,6 +4,7 @@ import ast
 import errno
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -440,8 +441,11 @@ class LifecycleData(unittest.TestCase):
         value, expected = installed_handoff(), map_data()
         value.pop("installed")
         value["shell"] = {}
-        for case in ("complete", "start-return-error", "input-error", "unjoined"):
+        for case in ("complete", "start-return-error", "input-error", "unjoined", "early-return",
+                     "controller-deadline", "command-bound", "final-result-failure", "diagnostic-write-error"):
             events, originals, retained, now, focused = [], [], {}, [100.0], [31]
+            clock_calls, searches = [0], [0]
+            primary = RuntimeError("inert controller failure; context must not be exported")
             class Original:
                 def __init__(self, **options):
                     originals.append(self)
@@ -449,6 +453,8 @@ class LifecycleData(unittest.TestCase):
                     holder, argv, _, _ = options["args"]
                     holder.update(guardState="RESTORED", errors=[], result=subprocess.CompletedProcess(argv, 0,
                         b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n", b""))
+                    if case in ("early-return", "final-result-failure"):
+                        holder["result"] = subprocess.CompletedProcess(argv, 127, b"", b"synthetic native startup refusal\n")
                 def start(self):
                     events.append("start")
                     if case == "start-return-error":
@@ -457,17 +463,23 @@ class LifecycleData(unittest.TestCase):
                     events.append("join")
                     self.joined = case != "unjoined"
                 def is_alive(self):
-                    return not self.joined
+                    return not self.joined and case != "early-return"
             def clock():
-                now[0] += 0.05
+                clock_calls[0] += 1
+                now[0] += 46.0 if case == "controller-deadline" and clock_calls[0] == 2 else 0.001
                 return now[0]
+            def sleep(seconds):
+                now[0] += seconds
             def owned(argv, **options):
                 args = argv[argv.index("/usr/bin/xdotool") + 1:]
                 events.append(args[0])
-                if case == "input-error":
-                    raise RuntimeError("inert controller failure")
+                if case in ("input-error", "diagnostic-write-error"):
+                    raise primary
                 output = b""
                 if args[0] == "search":
+                    searches[0] += 1
+                    if case == "command-bound" and (searches[0] < 50 or args[-1].startswith("^Quit")):
+                        return subprocess.CompletedProcess(argv, 1, b"", b"")
                     output = b"32\n" if args[-1].startswith("^Quit") else b"31\n"
                 elif args[0] == "getwindowpid":
                     output = b"123\n"
@@ -479,20 +491,103 @@ class LifecycleData(unittest.TestCase):
             with self.subTest(case=case), patch.multiple(L, _ROOT=L.root_path(value), _END=value["deadline"],
                     _FAILED=False, _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=owned)), \
                  patch.object(L.threading, "Thread", Original), patch.object(L.time, "monotonic", side_effect=clock), \
-                 patch.object(L.time, "sleep"), patch.object(L, "_shell_window_pid"), \
-                 patch.object(L, "_retain", side_effect=lambda name, raw: retained.update({name: raw})):
+                 patch.object(L.time, "sleep", side_effect=sleep), patch.object(L, "_shell_window_pid"), \
+                 patch.object(L, "_retain", side_effect=lambda name, raw: retained.update({name: raw})), \
+                 patch.object(L.sys, "stderr", new_callable=io.StringIO) as diagnostic:
+                if case == "diagnostic-write-error":
+                    diagnostic.write = Mock(side_effect=OSError("synthetic diagnostic output failure"))
                 if case == "complete":
                     result = L._shell_normal(value, L.shell_environment(value, "normal"), expected)
                     self.assertTrue(result["bootstrapReturned"])
                     control = L.decode(retained["shell-normal-control.json"])
                     self.assertEqual([row["argv"][-1] for row in control["commands"] if row["phase"] == "key"], ["ctrl+q", "alt+o"])
                     self.assertFalse(L._FAILED)
+                    self.assertEqual(diagnostic.getvalue(), "")
                 else:
-                    with self.assertRaises((ValueError, RuntimeError)):
+                    with self.assertRaises((ValueError, RuntimeError)) as raised:
                         L._shell_normal(value, L.shell_environment(value, "normal"), expected)
                     self.assertTrue(L._FAILED)
+                    if case == "diagnostic-write-error":
+                        self.assertIs(raised.exception, primary)
+                        self.assertEqual(diagnostic.write.call_count, 1)
+                    else:
+                        lines = diagnostic.getvalue().splitlines()
+                        self.assertEqual(len(lines), 1)
+                        self.assertTrue(lines[0].startswith("MRK_INSTALLED_SHELL_FAILURE="))
+                        observed = json.loads(lines[0].split("=", 1)[1])
+                        self.assertFalse(observed["qualified"])
+                        self.assertFalse(observed["cleanupEstablished"])
+                        if case == "early-return":
+                            self.assertEqual(observed["stage"], "initial-window")
+                            self.assertEqual(observed["capture"]["exitCode"], 127)
+                            self.assertEqual(observed["errors"][0]["message"], "Normal original returned before controller command")
+                        elif case == "controller-deadline":
+                            self.assertEqual(observed["errors"][0]["message"], "Normal window controller endpoint expired")
+                        elif case == "command-bound":
+                            self.assertEqual(observed["controllerCommands"], 96)
+                            self.assertEqual(observed["errors"][0]["message"], "Normal window controller command bound exhausted")
+                        elif case == "final-result-failure":
+                            self.assertEqual(observed["stage"], "final-verification")
+                            self.assertEqual(observed["capture"]["exitCode"], 127)
+                        elif case == "unjoined":
+                            self.assertIsNone(observed["capture"])
+                            self.assertIsNone(observed["workerGuardState"])
+                        elif case == "input-error":
+                            self.assertIs(raised.exception, primary)
+                            self.assertNotIn("context must not be exported", lines[0])
                 self.assertEqual(len(originals), 1)
                 self.assertEqual(events.count("join"), 1)
+
+    def test_normal_failure_diagnostic_is_bounded_joined_only_and_non_authoritative(self):
+        argv = ["/inert/original"]
+        original = subprocess.CompletedProcess(argv, 127, b"\x1b" * 1000, b"\x00" * 8192)
+        holder = {"result": original, "guardState": "RESTORED", "errors": []}
+        error = RuntimeError("private argv and environment must not be exported")
+        options = dict(joined=True, stage="initial-window", inputs=0, commands=[], error=error)
+        def observe(value=holder, **changes):
+            with patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+                L._shell_normal_failure(value, argv, **dict(options, **changes))
+            raw = stream.getvalue().encode("ascii")
+            self.assertLessEqual(len(raw), 32768)
+            self.assertEqual(raw.count(b"\n"), 1)
+            self.assertTrue(raw.startswith(b"MRK_INSTALLED_SHELL_FAILURE="))
+            self.assertNotIn(b"private argv", raw)
+            self.assertNotIn(b"/inert/original", raw)
+            self.assertNotIn(b"\x00", raw)
+            self.assertNotIn(b"\x1b", raw)
+            return json.loads(raw.split(b"=", 1)[1])
+        observed = observe()
+        self.assertFalse(observed["qualified"])
+        self.assertFalse(observed["cleanupEstablished"])
+        for name in ("stdout", "stderr"):
+            raw = getattr(original, name)
+            row = observed["capture"][name]
+            self.assertEqual(row["size"], len(raw))
+            self.assertEqual(row["sha256"], hashlib.sha256(raw).hexdigest())
+            self.assertTrue(row["truncated"])
+        class Unjoined:
+            def get(self, *args):
+                raise AssertionError("unjoined holder must never be read")
+        self.assertIsNone(observe(Unjoined(), joined=False)["capture"])
+        for result in (subprocess.CompletedProcess(["/inert/different"], 127, b"", b""),
+                       subprocess.CompletedProcess(argv, True, b"", b""),
+                       subprocess.CompletedProcess(argv, 127, "not bytes", b""),
+                       subprocess.CompletedProcess(argv, 127, b"", b"x" * (L.LIMIT + 1)), {}):
+            with self.subTest(result_type=type(result).__name__):
+                self.assertIsNone(observe(dict(holder, result=result))["capture"])
+        # Unknown exception formatting is never invoked; diagnostic encoder or
+        # output failure must return without replacing the caller's failure.
+        class BadFormat(Exception):
+            def __str__(self):
+                raise AssertionError("exception formatting is forbidden")
+        self.assertEqual(observe(error=BadFormat())["errors"], [{"type": "BadFormat"}])
+        with patch.object(L, "canonical", side_effect=OSError("synthetic encoder failure")), \
+             patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
+            L._shell_normal_failure(holder, argv, **options)
+            self.assertEqual(stream.getvalue(), "")
+        with patch.object(L.sys, "stderr", SimpleNamespace(write=Mock(side_effect=OSError("synthetic write failure")))) as stream:
+            L._shell_normal_failure(holder, argv, **options)
+            self.assertEqual(stream.write.call_count, 1)
 
     def test_version_store_prefixes_bind_exact_application_children(self):
         app = Path("/var/lib/mobile-release-kit")
