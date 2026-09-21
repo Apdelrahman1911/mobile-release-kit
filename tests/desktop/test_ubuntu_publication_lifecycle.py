@@ -441,17 +441,29 @@ class LifecycleData(unittest.TestCase):
         value, expected = installed_handoff(), map_data()
         value.pop("installed")
         value["shell"] = {}
+        class ProcessError(RuntimeError):
+            def __init__(self, message, *, cleanup_complete=True):
+                super().__init__(message)
+                self.dispatched, self.contained, self.cleanup_complete = True, True, cleanup_complete
+        owner_failures = {"second-search-timeout", "pid-query-timeout", "finish-clock-error"}
+        invalid_results = {"malformed-result", "malformed-object"}
+        original_failures = owner_failures | invalid_results | {"controller-policy-error"}
+        no_log_cases = {"unjoined", "worker-error", "guard-unknown", "missing-result", *original_failures}
         for case in ("complete", "start-return-error", "input-error", "unjoined", "early-return",
                      "controller-deadline", "command-bound", "final-result-failure", "diagnostic-write-error",
-                     "log-error", "input-and-log-error", "worker-error", "guard-unknown", "missing-result"):
+                     "log-error", "input-and-log-error", "worker-error", "guard-unknown", "missing-result",
+                     "second-search-timeout", "pid-query-timeout", "malformed-result", "malformed-object",
+                     "finish-clock-error", "controller-policy-error"):
             events, originals, retained, now, focused = [], [], {}, [100.0], [31]
-            clock_calls, searches = [0], [0]
-            primary = RuntimeError("inert controller failure; context must not be exported")
+            clock_calls, searches, fail_clock = [0], [0], [False]
+            primary = (ProcessError("owned command exceeded its original deadline") if case in owner_failures else
+                       RuntimeError("inert controller failure; context must not be exported"))
+            worker_error = ProcessError("owned command protocol or original ownership is incomplete", cleanup_complete=False)
             class Original:
                 def __init__(self, **options):
                     originals.append(self)
-                    self.joined = False
-                    holder, argv, _, _ = options["args"]
+                    self.joined, self.options = False, options
+                    holder, argv, _, seconds = options["args"]
                     holder.update(guardState="RESTORED", errors=[], result=subprocess.CompletedProcess(argv, 0,
                         b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n", b""))
                     if case in ("early-return", "final-result-failure"):
@@ -462,6 +474,11 @@ class LifecycleData(unittest.TestCase):
                         holder["guardState"] = "UNKNOWN"
                     if case == "missing-result":
                         holder.pop("result")
+                    if case in original_failures:
+                        holder.pop("result")
+                        holder.update(errors=[worker_error], shellDiagnostic={"errorOrigins": ["owner"],
+                            "ownerCall": {"timeoutSeconds": seconds, "ownerReturned": False,
+                                          "startMonotonic": 100.0, "endMonotonic": 160.0}})
                 def start(self):
                     events.append("start")
                     if case == "start-return-error":
@@ -473,6 +490,9 @@ class LifecycleData(unittest.TestCase):
                     return not self.joined and case != "early-return"
             def clock():
                 clock_calls[0] += 1
+                if fail_clock[0]:
+                    fail_clock[0] = False
+                    raise OSError("inert diagnostic finish clock unavailable")
                 now[0] += 46.0 if case == "controller-deadline" and clock_calls[0] == 2 else 0.001
                 return now[0]
             def sleep(seconds):
@@ -482,9 +502,20 @@ class LifecycleData(unittest.TestCase):
                 events.append(args[0])
                 if case in ("input-error", "diagnostic-write-error", "input-and-log-error"):
                     raise primary
+                if case in invalid_results:
+                    return object() if case == "malformed-object" else subprocess.CompletedProcess(argv, True, b"", b"")
+                if case == "controller-policy-error":
+                    return subprocess.CompletedProcess(argv, 2, b"", b"synthetic query refusal\n")
+                if ((case in ("second-search-timeout", "finish-clock-error") and searches[0] == 1)
+                        or (case == "pid-query-timeout" and args[0] == "getwindowpid")):
+                    now[0] += options["timeout"] + 0.25  # Enclosing owner includes its cleanup, not target runtime.
+                    fail_clock[0] = case == "finish-clock-error"
+                    raise primary
                 output = b""
                 if args[0] == "search":
                     searches[0] += 1
+                    if case in ("second-search-timeout", "finish-clock-error"):
+                        return subprocess.CompletedProcess(argv, 1, b"", b"synthetic display not ready\n")
                     if case == "command-bound" and (searches[0] < 50 or args[-1].startswith("^Quit")):
                         return subprocess.CompletedProcess(argv, 1, b"", b"")
                     output = b"32\n" if args[-1].startswith("^Quit") else b"31\n"
@@ -503,7 +534,7 @@ class LifecycleData(unittest.TestCase):
                     raise OSError("inert log retention failure")
                 return b"inert original display diagnostic\n"
             with self.subTest(case=case), patch.multiple(L, _ROOT=L.root_path(value), _END=value["deadline"],
-                    _FAILED=False, _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=owned)), \
+                    _FAILED=False, _COMMANDS=[], _OWNER=SimpleNamespace(run_owned=owned, ProcessError=ProcessError)), \
                  patch.object(L.threading, "Thread", Original), patch.object(L.time, "monotonic", side_effect=clock), \
                  patch.object(L.time, "sleep", side_effect=sleep), patch.object(L, "_shell_window_pid"), \
                  patch.object(L, "_shell_log_capture", side_effect=log_capture) as log, \
@@ -538,9 +569,12 @@ class LifecycleData(unittest.TestCase):
                             self.assertEqual(observed["errors"][0]["message"], "Normal original returned before controller command")
                         elif case == "controller-deadline":
                             self.assertEqual(observed["errors"][0]["message"], "Normal window controller endpoint expired")
+                            self.assertIsNone(observed["controller"]["lastAttempt"]["ownerCall"])
+                            self.assertEqual(observed["controller"]["lastAttempt"]["phase"], "admission")
                         elif case == "command-bound":
                             self.assertEqual(observed["controllerCommands"], 96)
                             self.assertEqual(observed["errors"][0]["message"], "Normal window controller command bound exhausted")
+                            self.assertEqual(observed["controller"]["lastAttempt"]["ordinal"], 97)
                         elif case == "final-result-failure":
                             self.assertEqual(observed["stage"], "final-verification")
                             self.assertEqual(observed["capture"]["exitCode"], 127)
@@ -550,11 +584,66 @@ class LifecycleData(unittest.TestCase):
                         elif case in ("input-error", "input-and-log-error", "worker-error"):
                             self.assertIs(raised.exception, primary)
                             self.assertNotIn("context must not be exported", lines[0])
-                        if case not in ("unjoined", "worker-error", "guard-unknown", "missing-result", "log-error", "input-and-log-error"):
+                        elif case in original_failures:
+                            self.assertIsNone(observed["capture"])
+                            self.assertTrue(observed["joined"])
+                            self.assertEqual(observed["workerGuardState"], "RESTORED")
+                            self.assertFalse(observed["workerCall"]["ownerReturned"])
+                            self.assertEqual(observed["workerCall"]["ownerElapsedSeconds"], 60.0)
+                            self.assertEqual(observed["errors"][-1]["origin"], "worker-owner")
+                            self.assertFalse(observed["errors"][-1]["originalProcessFacts"]["cleanup_complete"])
+                            controller = observed["controller"]
+                            attempt, completed = controller["lastAttempt"], controller["lastCompleted"]
+                            self.assertEqual(controller["controllerEndpoint"], controller["normalStartMonotonic"] + 45)
+                            self.assertEqual(controller["serviceEndpoint"], value["deadline"])
+                            self.assertEqual(controller["carrierTimeoutSeconds"], 60)
+                            self.assertGreaterEqual(controller["failureMonotonic"], attempt["ownerCall"]["startMonotonic"])
+                            self.assertEqual(attempt["stage"], "initial-window")
+                            self.assertEqual(attempt["validOriginalResult"], case == "controller-policy-error")
+                            self.assertEqual(attempt["ownerCall"]["timeoutSeconds"], 5)
+                            if case in owner_failures:
+                                self.assertIs(raised.exception, primary)
+                                self.assertEqual(observed["controllerCommands"], 1)
+                                self.assertEqual(observed["errors"][0]["message"], "owned command exceeded its original deadline")
+                                self.assertEqual(observed["errors"][0]["origin"], "main")
+                                self.assertTrue(observed["errors"][0]["originalProcessFacts"]["cleanup_complete"])
+                                self.assertEqual(attempt["label"], "window-pid" if case == "pid-query-timeout" else "search")
+                                self.assertEqual((attempt["ordinal"], completed["ordinal"]), (2, 1))
+                                self.assertEqual(attempt["phase"], "owner-call")
+                                self.assertFalse(attempt["ownerCall"]["ownerReturned"])
+                                if case == "finish-clock-error":
+                                    self.assertIsNone(attempt["ownerCall"]["endMonotonic"])
+                                    self.assertIsNone(attempt["ownerCall"]["ownerElapsedSeconds"])
+                                else:
+                                    self.assertGreater(attempt["ownerCall"]["ownerElapsedSeconds"], 5.25)
+                                self.assertEqual((completed["label"], completed["stage"]), ("search", "initial-window"))
+                                self.assertTrue(completed["ownerCall"]["ownerReturned"])
+                                self.assertGreater(completed["ownerCall"]["ownerElapsedSeconds"], 0)
+                                self.assertEqual(completed["capture"]["exitCode"], int(case != "pid-query-timeout"))
+                                stdout = b"31\n" if case == "pid-query-timeout" else b""
+                                stderr = b"" if case == "pid-query-timeout" else b"synthetic display not ready\n"
+                                for name, raw in (("stdout", stdout), ("stderr", stderr)):
+                                    self.assertEqual(completed["capture"][name]["sha256"], hashlib.sha256(raw).hexdigest())
+                                    self.assertEqual(completed["capture"][name]["size"], len(raw))
+                                    self.assertEqual(completed["capture"][name]["head"], raw.decode())
+                            elif case == "controller-policy-error":
+                                self.assertEqual(observed["controllerCommands"], 1)
+                                self.assertEqual(attempt["phase"], "policy")
+                                self.assertEqual((attempt["ordinal"], completed["ordinal"]), (1, 1))
+                                self.assertTrue(attempt["ownerCall"]["ownerReturned"])
+                                self.assertEqual(completed["capture"]["exitCode"], 2)
+                            else:
+                                self.assertEqual(observed["controllerCommands"], 0)
+                                self.assertIsNone(completed)
+                                self.assertEqual(attempt["ordinal"], 1)
+                                self.assertEqual(attempt["phase"], "result-validation")
+                                self.assertTrue(attempt["ownerCall"]["ownerReturned"])
+                        if case not in no_log_cases | {"log-error", "input-and-log-error"}:
                             self.assertEqual(observed["capture"]["display"]["head"], "inert original display diagnostic\n")
                 self.assertEqual(len(originals), 1)
+                self.assertEqual(originals[0].options["kwargs"], {"shell_diagnostic": True})
                 self.assertEqual(events.count("join"), 1)
-                self.assertEqual(log.call_count, int(case not in ("unjoined", "worker-error", "guard-unknown", "missing-result")))
+                self.assertEqual(log.call_count, int(case not in no_log_cases))
 
     def test_normal_failure_diagnostic_is_bounded_joined_only_and_non_authoritative(self):
         argv = ["/inert/original"]
@@ -584,10 +673,49 @@ class LifecycleData(unittest.TestCase):
             self.assertEqual(row["size"], len(raw))
             self.assertEqual(row["sha256"], hashlib.sha256(raw).hexdigest())
             self.assertTrue(row["truncated"])
+        query = subprocess.CompletedProcess(["/inert/controller"], 1, b"\x1b" * 512, b"\x00" * 3584)
+        call = {"timeoutSeconds": 5, "ownerReturned": True, "startMonotonic": 100.0, "endMonotonic": 101.0}
+        controller = {"normalStartMonotonic": 100.0, "controllerEndpoint": 145.0, "serviceEndpoint": 1300.0,
+                      "carrierTimeoutSeconds": 60, "failureMonotonic": 107.0,
+                      "lastAttempt": {"label": "search", "ordinal": 2, "stage": "initial-window", "phase": "owner-call",
+                                      "validOriginalResult": False, "ownerCall": {**call, "ownerReturned": False}},
+                      "lastCompleted": {"label": "search", "ordinal": 1, "stage": "initial-window",
+                                        "argv": query.args, "result": query, "ownerCall": call}}
+        observed = observe(controller=controller)
+        # The complete escaped payload forces the existing fallback. Both old
+        # and new snippets are stripped, while their sizes/hashes survive.
+        for capture in (observed["capture"], observed["controller"]["lastCompleted"]["capture"]):
+            for row in capture.values():
+                if type(row) is dict:
+                    self.assertNotIn("head", row)
+                    self.assertNotIn("tail", row)
+                    self.assertTrue(row["truncated"])
+        for name in ("stdout", "stderr"):
+            self.assertEqual(observed["controller"]["lastCompleted"]["capture"][name]["sha256"],
+                             hashlib.sha256(getattr(query, name)).hexdigest())
+        # A returned object is not a valid capture, and mistyped scalar facts
+        # must not be presented as known observations.
+        altered = deepcopy(controller)
+        altered["lastAttempt"].update(ordinal=True, validOriginalResult=1)
+        altered["lastAttempt"]["ownerCall"].update(timeoutSeconds=True, ownerReturned=1, endMonotonic=float("nan"))
+        altered["lastCompleted"]["result"] = subprocess.CompletedProcess(query.args, 1, b"", b"x" * 4097)
+        observed = observe(controller=altered)
+        self.assertIsNone(observed["controller"]["lastCompleted"]["capture"])
+        attempted = observed["controller"]["lastAttempt"]
+        self.assertIsNone(attempted["ordinal"])
+        self.assertIsNone(attempted["validOriginalResult"])
+        for key in ("timeoutSeconds", "ownerReturned", "endMonotonic", "ownerElapsedSeconds"):
+            self.assertIsNone(attempted["ownerCall"][key])
+        reversed_call = {**call, "endMonotonic": 99.0}
+        observed = observe(dict(holder, shellDiagnostic={"ownerCall": reversed_call, "errorOrigins": []}))
+        self.assertIsNone(observed["workerCall"]["ownerElapsedSeconds"])
         class Unjoined:
             def get(self, *args):
                 raise AssertionError("unjoined holder must never be read")
-        self.assertIsNone(observe(Unjoined(), joined=False)["capture"])
+        unjoined = observe(Unjoined(), joined=False, controller=controller)
+        self.assertIsNone(unjoined["capture"])
+        self.assertIsNone(unjoined["workerCall"])
+        self.assertIsNotNone(unjoined["controller"]["lastCompleted"]["capture"])
         for result in (subprocess.CompletedProcess(["/inert/different"], 127, b"", b""),
                        subprocess.CompletedProcess(argv, True, b"", b""),
                        subprocess.CompletedProcess(argv, 127, "not bytes", b""),
@@ -599,7 +727,43 @@ class LifecycleData(unittest.TestCase):
         class BadFormat(Exception):
             def __str__(self):
                 raise AssertionError("exception formatting is forbidden")
-        self.assertEqual(observe(error=BadFormat())["errors"], [{"type": "BadFormat"}])
+        self.assertEqual(observe(error=BadFormat())["errors"],
+                         [{"type": "BadFormat", "origin": "main", "originalProcessFacts": None}])
+        class ProcessError(RuntimeError):
+            def __init__(self, message):
+                super().__init__(message)
+                self.__dict__.update(dispatched=True, contained=False, cleanup_complete=False)
+        class ProcessCleanupError(ProcessError):
+            pass
+        class ProcessOutcomeUnknown(ProcessError):
+            pass
+        class Unknown(ProcessError):
+            @property
+            def dispatched(self):
+                raise AssertionError("unknown process properties must not be read")
+            @property
+            def args(self):
+                raise AssertionError("unknown exception args property must not be read")
+            def __str__(self):
+                raise AssertionError("unknown process formatting must not be used")
+        owner = SimpleNamespace(ProcessError=ProcessError, ProcessCleanupError=ProcessCleanupError,
+                                ProcessOutcomeUnknown=ProcessOutcomeUnknown)
+        with patch.object(L, "_OWNER", owner):
+            for error_type in (ProcessError, ProcessCleanupError, ProcessOutcomeUnknown, Unknown):
+                typed = error_type("owned command exceeded its original deadline")
+                row = observe(error=typed)["errors"][0]
+                self.assertEqual(row["message"], "owned command exceeded its original deadline")
+                self.assertEqual(row["originalProcessFacts"], None if error_type is Unknown else
+                                 {"dispatched": True, "contained": False, "cleanup_complete": False})
+            typed = ProcessError("not a public message")
+            typed.__dict__.update(dispatched=1, contained=None, cleanup_complete="true")
+            self.assertEqual(observe(error=typed)["errors"][0]["originalProcessFacts"],
+                             {"dispatched": None, "contained": None, "cleanup_complete": None})
+            worker = dict(holder, errors=[ProcessCleanupError("not a public message")],
+                          shellDiagnostic={"ownerCall": call, "errorOrigins": ["guard-restore"]})
+            rows = observe(worker, error=typed, error_origin="main", join_error=BadFormat(), capture_error=BadFormat())["errors"]
+            self.assertEqual([row["origin"] for row in rows], ["main", "join", "capture", "worker-guard-restore"])
+            self.assertFalse(rows[-1]["originalProcessFacts"]["cleanup_complete"])
         with patch.object(L, "canonical", side_effect=OSError("synthetic encoder failure")), \
              patch.object(L.sys, "stderr", new_callable=io.StringIO) as stream:
             L._shell_normal_failure(holder, argv, **options)
@@ -1232,39 +1396,78 @@ class LifecycleData(unittest.TestCase):
                 close.assert_called_once_with(51)
 
     def test_original_overlap_worker_restores_its_same_guard_on_every_return(self):
-        for case in ("complete", "owner-error", "install-error", "restore-error"):
-            calls, holder = [], {}
-            class Guard:
-                handler_state = "RESTORED"
-                def install(self):
-                    calls.append("install")
-                    if case == "install-error":
-                        raise RuntimeError("inert install loss")
-                def activate(self):
-                    calls.append("activate")
-                def restore(self):
-                    calls.append("restore")
-                    if case == "restore-error":
-                        raise RuntimeError("inert restoration loss")
-                def check(self):
-                    calls.append("check")
-            guard, argv = Guard(), ["/inert-overlap"]
-            result = subprocess.CompletedProcess(argv, 0, b"inert", b"")
-            def owned(*args, **kwargs):
-                calls.append("owned")
-                self.assertIs(kwargs["cancellation"], guard)
-                if case == "owner-error":
-                    raise RuntimeError("inert original owner failure")
-                return result
-            owner = SimpleNamespace(DefaultCancellation=Mock(return_value=guard), ProcessCleanupError=RuntimeError, run_owned=owned)
-            with self.subTest(case=case), patch.object(L, "_OWNER", owner), patch.object(L, "command") as command, patch.object(L, "_retain") as retain:
-                L._overlap_worker(holder, argv, {}, 30)
-                self.assertEqual(calls[-2:], ["restore", "check"])
-                self.assertEqual(len(holder["errors"]), 0 if case == "complete" else 1)
-                if case in {"complete", "restore-error"}:
-                    self.assertIs(holder["result"], result)
-                command.assert_not_called()
-                retain.assert_not_called()
+        for diagnostic in (False, True):
+            for case in ("complete", "owner-error", "install-error", "activate-error", "restore-error",
+                         "check-error", "state-error", "finish-clock-error"):
+                calls, holder = [], {}
+                primary = RuntimeError("inert original worker failure")
+                class Guard:
+                    @property
+                    def handler_state(self):
+                        if case == "state-error":
+                            raise primary
+                        return "RESTORED"
+                    def install(self):
+                        calls.append("install")
+                        if case == "install-error":
+                            raise primary
+                    def activate(self):
+                        calls.append("activate")
+                        if case == "activate-error":
+                            raise primary
+                    def restore(self):
+                        calls.append("restore")
+                        if case == "restore-error":
+                            raise primary
+                    def check(self):
+                        calls.append("check")
+                        if case == "check-error":
+                            raise primary
+                guard, argv = Guard(), ["/inert-overlap"]
+                result = subprocess.CompletedProcess(argv, 0, b"inert", b"")
+                def owned(*args, **kwargs):
+                    calls.append("owned")
+                    self.assertIs(kwargs["cancellation"], guard)
+                    self.assertEqual(kwargs["timeout"], 60)
+                    if case in {"owner-error", "finish-clock-error"}:
+                        raise primary
+                    return result
+                owner = SimpleNamespace(DefaultCancellation=Mock(return_value=guard), ProcessCleanupError=RuntimeError, run_owned=owned)
+                clock_values = [100.0, OSError("inert finish clock loss") if case == "finish-clock-error" else 102.5]
+                with self.subTest(case=case, diagnostic=diagnostic), patch.object(L, "_OWNER", owner), \
+                     patch.object(L, "command") as command, patch.object(L, "_retain") as retain, \
+                     patch.object(L.time, "monotonic", side_effect=clock_values) as clock:
+                    if diagnostic:
+                        L._overlap_worker(holder, argv, {}, 60, shell_diagnostic=True)
+                    else:
+                        L._overlap_worker(holder, argv, {}, 60)
+                    self.assertEqual(calls[-2:], ["restore", "check"])
+                    self.assertEqual(holder["errors"], [] if case == "complete" else [primary])
+                    returned = case in {"complete", "restore-error", "check-error", "state-error"}
+                    if returned:
+                        self.assertIs(holder["result"], result)
+                    else:
+                        self.assertNotIn("result", holder)
+                    if diagnostic:
+                        observation = holder["shellDiagnostic"]
+                        origins = {"install-error": "guard-install", "activate-error": "guard-activate", "owner-error": "owner",
+                                   "finish-clock-error": "owner", "restore-error": "guard-restore", "check-error": "guard-check",
+                                   "state-error": "guard-state"}
+                        self.assertEqual(observation["errorOrigins"], [] if case == "complete" else [origins[case]])
+                        if case in {"install-error", "activate-error"}:
+                            self.assertIsNone(observation["ownerCall"])
+                            clock.assert_not_called()
+                        else:
+                            call = L._shell_call_summary(observation["ownerCall"])
+                            self.assertEqual(clock.call_count, 2)
+                            self.assertEqual(call["ownerReturned"], returned)
+                            self.assertEqual(call["timeoutSeconds"], 60)
+                            self.assertEqual(call["ownerElapsedSeconds"], None if case == "finish-clock-error" else 2.5)
+                    else:
+                        self.assertNotIn("shellDiagnostic", holder)
+                        clock.assert_not_called()
+                    command.assert_not_called()
+                    retain.assert_not_called()
 
     def test_overlap_always_joins_original_before_serializing_and_never_releases_after_failure(self):
         expected, value = map_data(), installed_handoff()

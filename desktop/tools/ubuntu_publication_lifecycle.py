@@ -2187,29 +2187,59 @@ def _overlap_controls(value):
             "controlIdentity": list(identity(control.lstat())[:6])}
 
 
-def _overlap_worker(holder, argv, env, seconds):
+def _overlap_worker(holder, argv, env, seconds, *, shell_diagnostic=False):
     # This exact original thread owns its own cancellation installation and
     # restoration. It never calls command(), _retain(), or global bookkeeping.
     guard, errors = None, []
+    observation, origin = None, "guard-install"
+    if shell_diagnostic:
+        try:
+            observation = {"ownerCall": None, "errorOrigins": []}
+            holder["shellDiagnostic"] = observation
+        except BaseException:
+            observation = None
+
+    def note_error(label):
+        if observation is not None:
+            try:
+                observation["errorOrigins"].append(label)
+            except BaseException:
+                pass
+
     try:
         guard = _OWNER.DefaultCancellation(_OWNER.ProcessCleanupError, "overlap worker cancellation restoration unproven")
         guard.install()
+        origin = "guard-activate"
         guard.activate()
-        holder["result"] = _OWNER.run_owned(argv, environ=env, cwd=Path("/"), timeout=seconds, capture=True, text=False,
-                                           output_limit=LIMIT, cancellation=guard, execution_scope=None, journal_binding=None, cleanup=False)
+        origin = "owner"
+        call = _shell_call_started(seconds) if shell_diagnostic else None
+        if shell_diagnostic:
+            _shell_note(observation, ownerCall=call)
+        returned = False
+        try:
+            result = _OWNER.run_owned(argv, environ=env, cwd=Path("/"), timeout=seconds, capture=True, text=False,
+                                      output_limit=LIMIT, cancellation=guard, execution_scope=None, journal_binding=None, cleanup=False)
+            returned = True
+            holder["result"] = result
+        finally:
+            if shell_diagnostic:
+                _shell_call_finished(call, returned)
     except BaseException as error:
         errors.append(error)
+        note_error(origin)
     finally:
         if guard is not None:
-            for operation in (guard.restore, guard.check):
+            for label, operation in (("guard-restore", guard.restore), ("guard-check", guard.check)):
                 try:
                     operation()
                 except BaseException as error:
                     errors.append(error)
+                    note_error(label)
             try:
                 holder["guardState"] = guard.handler_state
             except BaseException as error:
                 errors.append(error)
+                note_error("guard-state")
         holder["errors"] = errors
 
 
@@ -2605,14 +2635,62 @@ def _shell_window_pid(value, pid):
          and os.readlink(proc / "exe") == str(_ROOT / "shell-normal"), "Window does not report this task's original normal executable")
 
 
-def _shell_capture_summary(result, argv, display_log=None):
+def _shell_diagnostic_time():
+    try:
+        value = time.monotonic()
+        return value if type(value) in (int, float) and math.isfinite(value) else None
+    except BaseException:
+        return None
+
+
+def _shell_note(record, **fields):
+    # Only private in-memory diagnostic dictionaries; never lifecycle authority.
+    try:
+        if type(record) is dict:
+            record.update(fields)
+    except BaseException:
+        pass
+
+
+def _shell_call_started(timeout):
+    try:
+        return {"timeoutSeconds": timeout, "ownerReturned": False,
+                "startMonotonic": _shell_diagnostic_time(), "endMonotonic": None}
+    except BaseException:
+        return None
+
+
+def _shell_call_finished(record, returned):
+    # Record the actual return before the optional finish-clock observation.
+    # In particular, a clock failure cannot replace an owner's original error.
+    _shell_note(record, ownerReturned=returned)
+    _shell_note(record, endMonotonic=_shell_diagnostic_time())
+
+
+def _shell_call_summary(record):
+    if type(record) is not dict:
+        return None
+    start, end = record.get("startMonotonic"), record.get("endMonotonic")
+    start = start if type(start) in (int, float) and math.isfinite(start) else None
+    end = end if type(end) in (int, float) and math.isfinite(end) else None
+    elapsed = end - start if start is not None and end is not None and end >= start else None
+    timeout, returned = record.get("timeoutSeconds"), record.get("ownerReturned")
+    return {"timeoutSeconds": timeout if type(timeout) is int and 0 < timeout <= 60 else None,
+            "ownerReturned": returned if type(returned) is bool else None,
+            "startMonotonic": start, "endMonotonic": end,
+            "ownerElapsedSeconds": elapsed if elapsed is not None and math.isfinite(elapsed) else None}
+
+
+def _shell_capture_summary(result, argv, display_log=None, *, controller=False):
+    limit = 4096 if controller else LIMIT
     if not (type(result) is subprocess.CompletedProcess and result.args == argv
             and type(result.returncode) is int and type(result.stdout) is bytes
-            and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= LIMIT):
+            and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= limit):
         return None
     captured = {"exitCode": result.returncode}
-    streams = [("stdout", result.stdout, 256, 256), ("stderr", result.stderr, 1024, 2048)]
-    if type(display_log) is bytes and len(result.stdout) + len(result.stderr) + len(display_log) <= LIMIT:
+    streams = [("stdout", result.stdout, 128 if controller else 256, 128 if controller else 256),
+               ("stderr", result.stderr, 256 if controller else 1024, 256 if controller else 2048)]
+    if not controller and type(display_log) is bytes and len(result.stdout) + len(result.stderr) + len(display_log) <= LIMIT:
         streams.append(("display", display_log, 1024, 2048))
     for name, raw, head, tail in streams:
         prefix, suffix = raw[:head], raw[max(head, len(raw) - tail):]
@@ -2626,11 +2704,13 @@ def _shell_failure_output(marker, data):
     # Includes JSON escaping and all metadata; never unbounded terminal text.
     raw = marker + canonical(data)
     if len(raw) > 32768:
-        for row in (data["capture"] or {}).values():
-            if type(row) is dict:
-                row.pop("head", None)
-                row.pop("tail", None)
-                row["truncated"] = row["size"] != 0
+        completed = (data.get("controller") or {}).get("lastCompleted") or {}
+        for capture in (data["capture"], completed.get("capture")):
+            for row in (capture or {}).values():
+                if type(row) is dict:
+                    row.pop("head", None)
+                    row.pop("tail", None)
+                    row["truncated"] = row["size"] != 0
         raw = marker + canonical(data)
     if len(raw) <= 32768:
         sys.stderr.write(raw.decode("ascii"))
@@ -2651,7 +2731,8 @@ def _shell_command_failure(argv, result, case, display_log, log_error):
 
 
 def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, error,
-                          join_error=None, capture_error=None, display_log=None):
+                          join_error=None, capture_error=None, display_log=None,
+                          controller=None, error_origin="main"):
     """Best-effort diagnosis from original memory, never finality or read authority.
 
     A failed service cannot export its private files. Its existing stderr can
@@ -2675,37 +2756,88 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
             "owned command executable could not be started",
             "owned command produced incomplete output",
             "owned command output exceeds its bound",
+            "owned command exceeded its original deadline",
+            "owned command protocol or original ownership is incomplete",
             "Original shell error log was replaced or changed",
             "Original shell error log changed during capture",
             "Combined shell output exceeds its bound",
         }
 
-        def error_data(original):
+        known_errors = tuple(value for name in ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown")
+                             if isinstance(value := getattr(_OWNER, name, None), type))
+
+        def error_data(original, origin):
             name = type(original).__name__
-            row = {"type": name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other"}
+            row = {"type": name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name) else "other",
+                   "origin": origin, "originalProcessFacts": None}
             # Never call exception formatting: it may contain argv, environment
             # or other context, or itself raise. Only fixed public messages pass.
-            args = original.args
+            args = BaseException.args.__get__(original)
             if type(args) is tuple and len(args) == 1 and type(args[0]) is str and args[0] in safe_messages:
                 row["message"] = args[0]
+            if type(original) in known_errors:
+                # Exact trusted family only; read stored fields, not properties.
+                fields = vars(original)
+                row["originalProcessFacts"] = {key: fields.get(key) if type(fields.get(key)) is bool else None
+                                               for key in ("dispatched", "contained", "cleanup_complete")}
             return row
 
-        errors = [item for item in (error, join_error, capture_error) if item is not None]
+        errors = [(item, origin) for item, origin in
+                  ((error, error_origin), (join_error, "join"), (capture_error, "capture")) if item is not None]
         result = None
         data = {"schemaVersion": 1, "scope": "original-normal-failure-diagnostic-only",
                 "qualified": False, "cleanupEstablished": False, "joined": joined,
                 "stage": stage, "inputs": inputs, "controllerCommands": len(commands),
                 "lastControllerCommand": commands[-1]["phase"] if commands else None,
-                "workerGuardState": None, "workerErrorCount": None, "capture": None}
+                "workerGuardState": None, "workerErrorCount": None, "workerCall": None,
+                "controller": None, "capture": None}
+        if type(controller) is dict:
+            observation = {}
+            for name in ("normalStartMonotonic", "controllerEndpoint", "serviceEndpoint", "failureMonotonic"):
+                value = controller.get(name)
+                observation[name] = value if type(value) in (int, float) and math.isfinite(value) else None
+            budget = controller.get("carrierTimeoutSeconds")
+            observation["carrierTimeoutSeconds"] = budget if type(budget) is int and 45 < budget <= 60 else None
+            observation["lastAttempt"] = observation["lastCompleted"] = None
+            attempt = controller.get("lastAttempt")
+            labels = {"search", "window-pid", "focus", "focus-readback", "key"}
+            stages = {"initial-window", "bootstrap-margin", "quit-input", "quit-dialog", "quit-confirmation"}
+            if type(attempt) is dict and attempt.get("label") in labels:
+                ordinal, valid = attempt.get("ordinal"), attempt.get("validOriginalResult")
+                observation["lastAttempt"] = {"label": attempt["label"],
+                    "ordinal": ordinal if type(ordinal) is int and 1 <= ordinal <= 97 else None,
+                    "stage": attempt.get("stage") if attempt.get("stage") in stages else None,
+                    "phase": attempt.get("phase") if attempt.get("phase") in
+                             {"admission", "owner-call", "result-validation", "policy", "complete"} else None,
+                    "validOriginalResult": valid if type(valid) is bool else None,
+                    "ownerCall": _shell_call_summary(attempt.get("ownerCall"))}
+            completed = controller.get("lastCompleted")
+            if type(completed) is dict and completed.get("label") in labels:
+                ordinal = completed.get("ordinal")
+                observation["lastCompleted"] = {"label": completed["label"],
+                    "ordinal": ordinal if type(ordinal) is int and 1 <= ordinal <= 96 else None,
+                    "stage": completed.get("stage") if completed.get("stage") in stages else None,
+                    "ownerCall": _shell_call_summary(completed.get("ownerCall")),
+                    "capture": _shell_capture_summary(completed.get("result"), completed.get("argv"), controller=True)}
+            data["controller"] = observation
         if joined:
             state = holder.get("guardState")
             data["workerGuardState"] = state if state in ("NEW", "INSTALLED", "ACTIVE", "RESTORED", "UNKNOWN") else "other"
             worker_errors = holder.get("errors", [])
+            worker_observation = holder.get("shellDiagnostic")
+            worker_origins = []
+            if type(worker_observation) is dict:
+                data["workerCall"] = _shell_call_summary(worker_observation.get("ownerCall"))
+                worker_origins = worker_observation.get("errorOrigins", [])
             if type(worker_errors) is list:
                 data["workerErrorCount"] = len(worker_errors)
-                errors.extend(worker_errors[:4])
+                for index, item in enumerate(worker_errors[:4]):
+                    origin = worker_origins[index] if type(worker_origins) is list and index < len(worker_origins) else None
+                    label = "worker-" + origin if origin in {"guard-install", "guard-activate", "owner",
+                            "guard-restore", "guard-check", "guard-state"} else "worker"
+                    errors.append((item, label))
             result = holder.get("result")
-        data["errors"] = [error_data(item) for item in errors[:4]]
+        data["errors"] = [error_data(item, origin) for item, origin in errors[:4]]
         data["errorsTruncated"] = len(errors) > 4
         data["capture"] = _shell_capture_summary(result, argv, display_log if joined else None)
         _shell_failure_output(b"MRK_INSTALLED_SHELL_FAILURE=", data)
@@ -2723,33 +2855,51 @@ def _shell_normal(value, environment, expected, log_binding):
     need(seconds > 45 and end > started + 35, "Insufficient original normal-window lifetime remains")
     argv, holder, commands = shell_argv(value, "normal"), {}, []
     worker = threading.Thread(target=_overlap_worker, args=(holder, argv, environment, seconds),
-                              name="mrk-installed-shell-normal", daemon=False)
+                              kwargs={"shell_diagnostic": True}, name="mrk-installed-shell-normal", daemon=False)
     failure, join_error, capture_error, joined, inputs = None, None, None, False, 0
     display_log = None
     stage, diagnostic_attempted = "start", False
+    controller = {"normalStartMonotonic": started, "controllerEndpoint": end, "serviceEndpoint": _END,
+                  "carrierTimeoutSeconds": seconds, "failureMonotonic": None,
+                  "lastAttempt": None, "lastCompleted": None}
 
-    def diagnose(error):
+    def diagnose(error, origin):
         nonlocal diagnostic_attempted
         if not diagnostic_attempted:
             diagnostic_attempted = True
             _shell_normal_failure(holder, argv, joined=joined, stage=stage, inputs=inputs, commands=commands,
-                                  error=error, join_error=join_error, capture_error=capture_error, display_log=display_log)
+                                  error=error, join_error=join_error, capture_error=capture_error, display_log=display_log,
+                                  controller=controller, error_origin=origin)
 
     def xdo(label, args, *, codes=(0,)):
+        attempt = {"label": label, "ordinal": len(commands) + 1, "stage": stage,
+                   "phase": "admission", "ownerCall": None, "validOriginalResult": False}
+        _shell_note(controller, lastAttempt=attempt)
         need(time.monotonic() < end, "Normal window controller endpoint expired")
         need(worker.is_alive(), "Normal original returned before controller command")
         need(len(commands) < 96, "Normal window controller command bound exhausted")
         timeout = min(5, math.floor(end - time.monotonic()))
         need(timeout > 0, "No original controller command budget remains")
         command_argv = _drop(value, ["/usr/bin/xdotool", *args])
-        result = _OWNER.run_owned(command_argv, environ=environment, cwd=Path("/"), timeout=timeout,
-            capture=True, text=False, output_limit=4096, execution_scope=None, journal_binding=None, cleanup=False)
+        call, returned = _shell_call_started(timeout), False
+        _shell_note(attempt, phase="owner-call", ownerCall=call)
+        try:
+            result = _OWNER.run_owned(command_argv, environ=environment, cwd=Path("/"), timeout=timeout,
+                capture=True, text=False, output_limit=4096, execution_scope=None, journal_binding=None, cleanup=False)
+            returned = True
+        finally:
+            _shell_call_finished(call, returned)
+        _shell_note(attempt, phase="result-validation")
         need(type(result) is subprocess.CompletedProcess and result.args == command_argv and type(result.returncode) is int
              and type(result.stdout) is bytes and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= 4096,
              "Original private-display controller result incomplete")
+        _shell_note(attempt, phase="policy", validOriginalResult=True)
+        _shell_note(controller, lastCompleted={"label": label, "ordinal": attempt["ordinal"], "stage": stage,
+                                              "argv": command_argv, "result": result, "ownerCall": call})
         commands.append({"phase": label, "argv": command_argv, "exitCode": result.returncode,
                          "stdout": result.stdout.decode("ascii"), "stderr": result.stderr.decode("ascii"), "timeoutSeconds": timeout})
         need(result.returncode in codes and time.monotonic() < end, "Original private-display command failed/late")
+        _shell_note(attempt, phase="complete")
         return result
 
     def search(title, pid=None):
@@ -2812,6 +2962,7 @@ def _shell_normal(value, environment, expected, log_binding):
         input_key(dialog, title, pid, "alt+o")
     except BaseException as error:
         failure = error
+        _shell_note(controller, failureMonotonic=_shell_diagnostic_time())
     finally:
         try:
             # A failed start return does not prove that no thread was created.
@@ -2821,6 +2972,8 @@ def _shell_normal(value, environment, expected, log_binding):
             joined = not worker.is_alive()
         except BaseException as error:
             join_error = error
+            if failure is None:
+                _shell_note(controller, failureMonotonic=_shell_diagnostic_time())
         if joined and "result" in holder:
             try:
                 _command_capture("shell-normal", argv, holder["result"], seconds)
@@ -2828,10 +2981,13 @@ def _shell_normal(value, environment, expected, log_binding):
                     display_log = _shell_log_capture(value, "normal", log_binding, holder["result"])
             except BaseException as error:
                 capture_error = error
+                if failure is None and join_error is None:
+                    _shell_note(controller, failureMonotonic=_shell_diagnostic_time())
     errors = (failure, join_error, capture_error, *(holder.get("errors", []) if joined else []))
     primary = next((error for error in errors if error is not None), None)
     if primary is not None:
-        diagnose(primary)
+        origin = "main" if failure is not None else "join" if join_error is not None else "capture" if capture_error is not None else "worker"
+        diagnose(primary, origin)
     else:
         stage = "final-verification"
     try:
@@ -2848,7 +3004,9 @@ def _shell_normal(value, environment, expected, log_binding):
         result = holder["result"]
         observed = shell_result(result.stdout, result.stderr, "normal", result.returncode, expected)
     except BaseException as error:
-        diagnose(error)
+        if primary is None:
+            _shell_note(controller, failureMonotonic=_shell_diagnostic_time())
+        diagnose(error, "verification")
         raise
     _FAILED = False
     return observed
