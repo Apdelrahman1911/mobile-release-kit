@@ -256,8 +256,9 @@ jobs:
                    'protected-ancestor', {'path': path, **record(s)})
 
           def prepare_share_default_acl(fd, parent, name, before, ancestors):
-              # Only this final fixed directory may lose one exact universal default ACL.
-              # These are complete Linux version-2 encodings, not a generic ACL parser.
+              # Only this final fixed public directory has the disposable-host exception.
+              # The named-user form provisions that host; it is not generally monotonic.
+              # Fixed Linux version-2 encodings, never a generic ACL policy parser.
               universal = (
                   bytes.fromhex('02000000 01000700ffffffff 04000700ffffffff 20000700ffffffff'),
                   bytes.fromhex('02000000 01000700ffffffff 04000700ffffffff 10000700ffffffff 20000700ffffffff'),
@@ -348,7 +349,11 @@ jobs:
                       allowed = (permit_universal and before.st_dev == MOUNT_DEVICE
                                  and before.st_mode == stat.S_IFDIR | 0o777
                                  and before.st_uid == before.st_gid == 0
-                                 and type(value) is bytes and value in universal)
+                                 and type(value) is bytes and (value in universal
+                                     or len(value) == 44
+                                     and value[:16] == bytes.fromhex('02000000 01000700ffffffff 02000700')
+                                     and value[16:20] != b'\xff\xff\xff\xff'
+                                     and value[20:] == bytes.fromhex('04000700ffffffff 10000700ffffffff 20000700ffffffff')))
                       if not allowed:
                           error = failure(attribute, phase, result='present', probe=True, unknown=False,
                                           truncated=type(value) is not bytes or len(value) > 65536)
@@ -1171,8 +1176,9 @@ jobs:
                    'protected-ancestor', {'path': path, **record(s)})
 
           def prepare_share_default_acl(fd, parent, name, before, ancestors):
-              # Only this final fixed directory may lose one exact universal default ACL.
-              # These are complete Linux version-2 encodings, not a generic ACL parser.
+              # Only this final fixed public directory has the disposable-host exception.
+              # The named-user form provisions that host; it is not generally monotonic.
+              # Fixed Linux version-2 encodings, never a generic ACL policy parser.
               universal = (
                   bytes.fromhex('02000000 01000700ffffffff 04000700ffffffff 20000700ffffffff'),
                   bytes.fromhex('02000000 01000700ffffffff 04000700ffffffff 10000700ffffffff 20000700ffffffff'),
@@ -1263,7 +1269,11 @@ jobs:
                       allowed = (permit_universal and before.st_dev == MOUNT_DEVICE
                                  and before.st_mode == stat.S_IFDIR | 0o777
                                  and before.st_uid == before.st_gid == 0
-                                 and type(value) is bytes and value in universal)
+                                 and type(value) is bytes and (value in universal
+                                     or len(value) == 44
+                                     and value[:16] == bytes.fromhex('02000000 01000700ffffffff 02000700')
+                                     and value[16:20] != b'\xff\xff\xff\xff'
+                                     and value[20:] == bytes.fromhex('04000700ffffffff 10000700ffffffff 20000700ffffffff')))
                       if not allowed:
                           error = failure(attribute, phase, result='present', probe=True, unknown=False,
                                           truncated=type(value) is not bytes or len(value) > 65536)

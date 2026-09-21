@@ -55,6 +55,8 @@ UNIVERSAL_DEFAULT_ACLS = (
     bytes.fromhex("02000000 01000700ffffffff 04000700ffffffff 20000700ffffffff"),
     bytes.fromhex("02000000 01000700ffffffff 04000700ffffffff 10000700ffffffff 20000700ffffffff"),
 )
+HOST_DEFAULT_ACL = bytes.fromhex(
+    "02000000 01000700ffffffff 0200070044332211 04000700ffffffff 10000700ffffffff 20000700ffffffff")
 PREPARER_MARKER = ("          sudo /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC HOME=/nonexistent "
                    "/usr/bin/python3.12 -I -S -B - <<'PY'\n")
 
@@ -434,8 +436,19 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(observed, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
         return observed
 
-    def test_share_default_absence_or_exact_universal_encoding_retains_all_other_authority(self):
-        for value in (None, *UNIVERSAL_DEFAULT_ACLS):
+    def test_share_default_absence_or_exact_profile_encoding_retains_all_other_authority(self):
+        # Explicit disposable public-host provisioning, not preservation of all
+        # possible future ACL policies: mode0705 masks a named user to0 while
+        # ordinary OTHER permits5. This counterexample must not become an all7
+        # named-entry monotonicity claim or a generic runtime ACL exception.
+        requested = 0o705
+        named_inherited = 7 & (requested >> 3 & 7)
+        ordinary_other = requested & 7
+        self.assertEqual((named_inherited, ordinary_other), (0, 5))
+        self.assertNotEqual(ordinary_other & ~named_inherited, 0)
+        named_values = tuple(HOST_DEFAULT_ACL[:16] + principal.to_bytes(4, "little") + HOST_DEFAULT_ACL[20:]
+                             for principal in (0, 0x11223344, 0xfffffffe))
+        for value in (None, *UNIVERSAL_DEFAULT_ACLS, *named_values):
             filesystem = DirectoryMetadataOS()
             original = filesystem.node("/usr/share")
             original.st_mode = stat.S_IFDIR | 0o777
@@ -464,13 +477,20 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                 self.assertEqual(after["st_ctime_ns"], before["st_ctime_ns"] + 1 + int(value is not None))
                 self.assertNotIn("ffffffff", json.dumps(rows))
 
-    def test_share_default_nonuniversal_encodings_and_off_target_objects_are_never_removed(self):
+    def test_share_default_other_encodings_and_off_target_objects_are_never_removed(self):
         bare, masked = UNIVERSAL_DEFAULT_ACLS
-        named = bytes.fromhex("02000000 01000700ffffffff 02000700e9030000 04000700ffffffff 10000700ffffffff 20000700ffffffff")
+        named = HOST_DEFAULT_ACL
         values = (b"", b"private-unrecognized-default", bare[:-1], bare + b"\0",
                   b"\x03" + bare[1:], bare[:6] + b"\x06" + bare[7:],
                   masked[:22] + b"\x06" + masked[23:], bare[:8] + b"\0" + bare[9:],
-                  named, bytearray(bare), "private-unrecognized-default", None)
+                  bytearray(bare), "private-unrecognized-default", None,
+                  named[:16] + b"\xff" * 4 + named[20:],
+                  named[:12] + b"\x08\0" + named[14:],
+                  named[:20] + named[12:20] + named[20:],
+                  named[:20] + named[28:36] + named[20:28] + named[36:],
+                  named[:8] + b"\0" * 4 + named[12:], b"\x03" + named[1:],
+                  named[:-1], named + b"\0", bytearray(named))
+        values += tuple(named[:at] + b"\x06" + named[at + 1:] for at in (6, 14, 22, 30, 38))
         for index, value in enumerate(values):
             filesystem = DirectoryMetadataOS()
             original = filesystem.node("/usr/share")
@@ -489,12 +509,12 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
             filesystem = DirectoryMetadataOS()
             original = filesystem.node(path)
             original.st_mode, original.st_uid, original.st_gid = stat.S_IFDIR | mode, uid, gid
-            original.xattrs[DEFAULT_ACL] = bare
+            original.xattrs[DEFAULT_ACL] = named
             with self.subTest(path=path, mode=mode, uid=uid, gid=gid):
                 self.refused(self.run_inline(filesystem))
                 self.assertEqual(filesystem.xattr_removals, [])
                 self.assertEqual(filesystem.chmods, [])
-                self.assertEqual(original.xattrs[DEFAULT_ACL], bare)
+                self.assertEqual(original.xattrs[DEFAULT_ACL], named)
 
     def test_share_default_refusal_shape_is_bounded_private_and_never_adds_authority(self):
         def entry(tag, permissions=7, principal=0xffffffff):
@@ -502,9 +522,9 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                     + principal.to_bytes(4, "little"))
 
         header = b"\x02\0\0\0"
-        named = header + b"".join((entry(1), entry(2, principal=0x11223344),
+        named = header + b"".join((entry(1), entry(2, 6, principal=0x11223344),
                                    entry(4), entry(16), entry(32)))
-        expected_named = [["user-object", 7, "undefined"], ["user", 7, "defined"],
+        expected_named = [["user-object", 7, "undefined"], ["user", 6, "defined"],
                           ["group-object", 7, "undefined"], ["mask", 7, "undefined"],
                           ["other", 7, "undefined"]]
         maximum_entries = [["user-object", 7, "undefined"],
@@ -516,7 +536,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         odd_entries = [["unknown", "invalid", "defined"], ["group", 5, "undefined"]]
         odd = header + entry(64, 128, 0x55667788) + entry(8, 5)
         # "complete" describes only this bounded structural transcription,
-        # never ACL validity or permission to remove even an all-seven named ACL.
+        # never ACL validity or permission to remove an unsupported named ACL.
         cases = (
             (named, 44, True, True, 5, expected_named, True, None),
             (maximum, 132, True, True, 16, maximum_entries, True, None),
@@ -599,7 +619,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                 rows = self.refused(self.run_inline(filesystem))
                 self.assertNotIn("defaultAclShape", json.dumps(rows))
                 self.assertEqual(filesystem.xattr_removals, [])
-        for value in (None, *UNIVERSAL_DEFAULT_ACLS):
+        for value in (None, *UNIVERSAL_DEFAULT_ACLS, HOST_DEFAULT_ACL):
             filesystem = DirectoryMetadataOS()
             original = filesystem.node("/usr/share")
             original.st_mode = stat.S_IFDIR | 0o777
@@ -618,7 +638,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
             filesystem = DirectoryMetadataOS()
             original = filesystem.node("/usr/share")
             original.st_mode = stat.S_IFDIR | 0o777
-            original.xattrs[DEFAULT_ACL] = UNIVERSAL_DEFAULT_ACLS[0]
+            original.xattrs[DEFAULT_ACL] = HOST_DEFAULT_ACL
             original.xattrs[attribute] = value
             with self.subTest(attribute=attribute, errno=getattr(value, "errno", None)):
                 rows = self.refused(self.run_inline(filesystem))
@@ -632,7 +652,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
             filesystem = DirectoryMetadataOS()
             original = filesystem.node("/usr/share")
             original.st_mode = stat.S_IFDIR | 0o777
-            original.xattrs[DEFAULT_ACL] = UNIVERSAL_DEFAULT_ACLS[0]
+            original.xattrs[DEFAULT_ACL] = HOST_DEFAULT_ACL
             fired = False
 
             def hook(operation, path, _count):
@@ -666,7 +686,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
             filesystem = DirectoryMetadataOS()
             original = filesystem.node("/usr/share")
             original.st_mode = stat.S_IFDIR | 0o777
-            original.xattrs[DEFAULT_ACL] = UNIVERSAL_DEFAULT_ACLS[0]
+            original.xattrs[DEFAULT_ACL] = HOST_DEFAULT_ACL
 
             def hook(operation, path, _count):
                 if path != "/usr/share":
@@ -676,7 +696,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                 if operation != "removexattr-after":
                     return
                 if change == "default-reappears":
-                    original.xattrs[DEFAULT_ACL] = UNIVERSAL_DEFAULT_ACLS[0]
+                    original.xattrs[DEFAULT_ACL] = HOST_DEFAULT_ACL
                 elif change == "access-appears":
                     original.xattrs[ACCESS_ACL] = b""
                 elif change == "mount":
@@ -698,7 +718,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
             filesystem = DirectoryMetadataOS()
             original = filesystem.node("/usr/share")
             original.st_mode = stat.S_IFDIR | 0o777
-            original.xattrs[DEFAULT_ACL] = UNIVERSAL_DEFAULT_ACLS[0]
+            original.xattrs[DEFAULT_ACL] = HOST_DEFAULT_ACL
 
             def hook(operation, path, count):
                 if path == "/usr/share" and operation == "fchmod":
