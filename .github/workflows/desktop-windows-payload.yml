@@ -20,7 +20,7 @@ concurrency:
 jobs:
   windows-payload:
     if: github.ref == 'refs/heads/verify/desktop-windows-payload' && ((github.event_name == 'push' && !github.event.deleted) || github.event_name == 'workflow_dispatch')
-    runs-on: windows-2025
+    runs-on: windows-2025-vs2026
     # Disposal backstop, never original-child settlement evidence.
     timeout-minutes: 30
     env:
@@ -36,6 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == Windows && "$RUNNER_ARCH" == X64 ]]
+          [[ "${ImageOS:-}" == win25-vs2026 ]]
           [[ "$GITHUB_RUN_ATTEMPT" == 1 ]]
           [[ "$GITHUB_REF" == refs/heads/verify/desktop-windows-payload ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" != 0000000000000000000000000000000000000000 ]]

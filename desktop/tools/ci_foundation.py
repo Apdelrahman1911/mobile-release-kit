@@ -1257,7 +1257,7 @@ def admitted_host(*, retention_only: bool = False) -> str:
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_PAYLOAD_SCOPE:
         windows_payload_binding(os.environ)
         require(os.environ.get("RUNNER_OS") == "Windows" and os.environ.get("RUNNER_ARCH") == "X64"
-                and os.environ.get("ImageOS") == "win25", "Windows payload requires the Windows 2025 X64 image")
+                and os.environ.get("ImageOS") == "win25-vs2026", "Windows payload requires the Windows 2025 VS2026 X64 image")
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {WORKFLOW_NATIVE_SCOPE, METADATA_NATIVE_SCOPE, GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE}:
         require(os.environ.get("RUNNER_OS") == "Linux" and os.environ.get("RUNNER_ARCH") == "X64"
                 and os.environ.get("ImageOS") == "ubuntu24" and (retention_only or os.uname().machine == "x86_64")
@@ -5381,7 +5381,7 @@ def phase_windows_payload(name: str, context: dict) -> None:
     environment.update(MRK_DESKTOP_DEV_PYTHON=str(root / "runtime/python/python.exe"), MRK_DESKTOP_DEV_CORE=str(root / "runtime/core.zip"),
                        MRK_DESKTOP_TEST_ROOT=str(root / "windows-payload"), MRK_DESKTOP_TEST_CORE_ZIP=str(root / "runtime/core.zip"),
                        MRK_DESKTOP_HOSTED_CHECKS=WINDOWS_PAYLOAD_SCOPE, GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted",
-                       RUNNER_OS="Windows", RUNNER_ARCH="X64", ImageOS="win25")
+                       RUNNER_OS="Windows", RUNNER_ARCH="X64", ImageOS=os.environ["ImageOS"])
     for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF", "GITHUB_REF",
                 "GITHUB_EVENT_NAME", "GITHUB_JOB", "GITHUB_REPOSITORY"):
         environment[key] = os.environ[key]

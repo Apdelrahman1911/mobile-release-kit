@@ -219,6 +219,30 @@ class WindowsEmbeddedPayloadDataTests(unittest.TestCase):
         for platform in ("linux", "macos"):
             with self.assertRaises(foundation.CheckFailure):
                 foundation.admit_platform(scope, platform)
+        # Exercise real host and event admission without any path/tool/native
+        # operation. The fixed image family is not an invented host observation.
+        with patch.object(foundation.sys, "platform", "win32"), patch.object(foundation.sys, "version", foundation.PYTHON), \
+                patch.object(foundation, "run", side_effect=AssertionError("Host admission must not run a tool")):
+            for event in ("workflow_dispatch", "push"):
+                admitted = {**hosted_environment(), "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+                            "MRK_DESKTOP_PLATFORM": "windows", "RUNNER_OS": "Windows", "RUNNER_ARCH": "X64",
+                            "ImageOS": "win25-vs2026"}
+                if event == "push":
+                    admitted.pop("MRK_EXPECTED_SHA")
+                    admitted.update(GITHUB_EVENT_NAME=event, MRK_EVENT_AFTER=admitted["GITHUB_SHA"])
+                with patch.dict(foundation.os.environ, admitted, clear=True):
+                    self.assertEqual(foundation.admitted_host(retention_only=True), "windows")
+                for key, wrong in (("ImageOS", "win25"), ("ImageOS", "win22"), ("ImageOS", "win25-vs2026-altered"),
+                                   ("ImageOS", ""), ("ImageOS", None), ("RUNNER_OS", "Linux"),
+                                   ("RUNNER_ARCH", "ARM64"), ("RUNNER_ENVIRONMENT", "self-hosted")):
+                    changed = dict(admitted)
+                    if wrong is None:
+                        changed.pop(key)
+                    else:
+                        changed[key] = wrong
+                    with self.subTest(event=event, key=key, wrong=wrong), \
+                            patch.dict(foundation.os.environ, changed, clear=True), self.assertRaises(foundation.CheckFailure):
+                        foundation.admitted_host(retention_only=True)
 
     def test_ci_binding_refuses_other_sources_workflows_events_and_retries(self):
         for event in ("workflow_dispatch", "push"):

@@ -104,7 +104,11 @@ The probe measures a bounded current-process loaded-image roster against exact
 payload hashes or a finite named System32/API-set policy. Static PE imports and
 this prospective policy are not a measured complete dynamic closure.
 
-The fixed-ref Windows2025/X64 first-attempt workflow has five closed phases:
+The fixed-ref Windows2025/VS2026/X64 first-attempt workflow explicitly selects
+`windows-2025-vs2026` and requires the actual `ImageOS` to be `win25-vs2026`.
+This is an image-family pin, not an immutable VM build; actual ImageVersion is
+retained in the existing context. The native child receives the actual admitted
+ImageOS, not a value synthesized from the expected label. The workflow has five closed phases:
 prepare/acquire/compile/windows-payload/retain. One locked headless `--no-run`
 artifact is invoked directly once, never rebuilt by a Cargo native command.
 Only a non-deletion push to `verify/desktop-windows-payload` with actual event

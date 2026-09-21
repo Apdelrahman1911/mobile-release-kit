@@ -3264,7 +3264,7 @@ mod windows_payload {
         fn admit(end: Instant) -> Check<Self> {
             require(environment("MRK_DESKTOP_HOSTED_CHECKS")? == MODE && environment("GITHUB_ACTIONS")? == "true"
                 && environment("RUNNER_ENVIRONMENT")? == "github-hosted" && environment("RUNNER_OS")? == "Windows"
-                && environment("RUNNER_ARCH")? == "X64" && environment("ImageOS")? == "win25"
+                && environment("RUNNER_ARCH")? == "X64" && environment("ImageOS")? == "win25-vs2026"
                 && environment("GITHUB_JOB")? == "windows-payload"
                 && environment("GITHUB_REF")? == REF && environment("GITHUB_RUN_ATTEMPT")? == "1"
                 && crate::runtime::COMPILED_TARGET == "x86_64-pc-windows-msvc", "windows_payload_hosted_admission")?;
