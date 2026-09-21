@@ -8692,14 +8692,19 @@ def windows_installed_tool(path: Path, role: str) -> None:
     regular = stat.S_ISREG(details.st_mode)
     single_link = details.st_nlink == 1
     reparse = bool(getattr(details, "st_file_attributes", 0) & 0x400)
-    admitted = regular and single_link and not reparse
+    # Git is an input from the already trusted hosted-image distribution, kept
+    # in place with its dependencies. Produced executables/DATA do not get this
+    # role distinction; Python/rustup and their existing guards remain strict.
+    required_links = details.st_nlink > 0 if role == "git" else single_link
+    admitted = regular and required_links and not reparse
     if not admitted:
         # Only this original metadata observation and fixed role leave the
-        # helper. No path, raw exception, retry or relaxed tool admission.
+        # helper. No path, raw exception, retry or manufactured success receipt.
         print("MRK_WINDOWS_INSTALLED_TOOL_REFUSED=" + json.dumps(
             {"role": role, "regular": regular, "singleLink": single_link, "reparse": reparse},
             sort_keys=True, separators=(",", ":")), flush=True)
-    require(admitted, "Expected an ordinary, single-link file")
+    require(admitted, "Expected a regular, non-reparse hosted Git file with a positive link count"
+            if role == "git" else "Expected an ordinary, single-link file")
 
 
 def windows_installed_context(*, create: bool) -> dict:

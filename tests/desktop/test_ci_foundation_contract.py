@@ -178,6 +178,70 @@ def validate_transaction_eof(report: dict) -> dict:
 
 
 class FixedCompilerHelperTests(unittest.TestCase):
+    def test_windows_installed_tool_admission_distinguishes_hosted_git_input(self):
+        # Real private role gate; only original metadata/stdout are inert.
+        # This does not establish native Git provenance or execute a tool.
+        def exercise(role, *, links=1, mode=stat.S_IFREG | 0o755, attributes=0,
+                     admitted=True, error=None):
+            calls = []
+
+            class NamedInput:
+                def lstat(self):
+                    calls.append("lstat")
+                    if error is not None:
+                        raise error
+                    return SimpleNamespace(st_mode=mode, st_nlink=links,
+                                           st_file_attributes=attributes)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                if error is not None:
+                    with self.assertRaises(type(error)) as caught:
+                        helper.windows_installed_tool(NamedInput(), role)
+                    self.assertIs(caught.exception, error)
+                elif admitted:
+                    helper.windows_installed_tool(NamedInput(), role)
+                else:
+                    with self.assertRaises(helper.CheckFailure) as caught:
+                        helper.windows_installed_tool(NamedInput(), role)
+                    self.assertEqual(str(caught.exception),
+                        "Expected a regular, non-reparse hosted Git file with a positive link count"
+                        if role == "git" else "Expected an ordinary, single-link file")
+            self.assertEqual(calls, ["lstat"])
+            if admitted or error is not None:
+                self.assertEqual(output.getvalue(), "")
+            else:
+                expected = {"role": role, "regular": stat.S_ISREG(mode),
+                            "singleLink": links == 1, "reparse": bool(attributes & 0x400)}
+                self.assertEqual(output.getvalue(), "MRK_WINDOWS_INSTALLED_TOOL_REFUSED="
+                    + json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n")
+                self.assertLess(len(output.getvalue()), 160)
+
+        for links in (1, 2, 32):
+            exercise("git", links=links)
+        for links in (0, -1):
+            exercise("git", links=links, admitted=False)
+        for role in ("python", "rustup"):
+            exercise(role)
+            for links in (0, -1, 2):
+                exercise(role, links=links, admitted=False)
+        for role in ("python", "git", "rustup"):
+            exercise(role, mode=stat.S_IFDIR | 0o755, admitted=False)
+            exercise(role, attributes=0x400, admitted=False)
+            exercise(role, error=OSError("inert original metadata failure"))
+
+        class Unobserved:
+            def lstat(self):
+                self_case.fail("Unknown role must be refused before metadata observation")
+
+        self_case = self
+        for role in ("cargo", "Git", None, []):
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(helper.CheckFailure) as caught:
+                helper.windows_installed_tool(Unobserved(), role)
+            self.assertEqual(str(caught.exception), "Unknown Windows native tool role")
+            self.assertEqual(output.getvalue(), "")
+
     def test_windows_installed_reader_preserves_native_metadata_identity(self):
         # Actual reader, inert bytes and only path/stream/stat boundaries doubled.
         # These are CPython metadata contracts, not native Windows evidence.
