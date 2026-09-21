@@ -724,23 +724,43 @@ class InstalledShellCompilerContracts(unittest.TestCase):
 def closed_project_draft_data(lifecycle):
     """Synthetic closed-result schema DATA only; no native/finality claim."""
     receipt = deepcopy(lifecycle.SHELL_PROJECT_RECEIPT)
-    fixture = {"fixture": "android-config-save-v1", "rootRetained": True, "hintUnchanged": True,
+    fixture = {"fixture": "android-saved-readonly-v1", "rootRetained": True, "hintUnchanged": True,
                "savedOutputsMatched": True, "noUnexpectedEntries": True, "noPendingState": True,
-               "entryCount": 6, "sourceBytes": len(lifecycle.SHELL_PROJECT_SOURCE), "releaseMode": 0o755,
+               "entryCount": 7, "sourceBytes": len(lifecycle.SHELL_PROJECT_SOURCE) + len(lifecycle.SHELL_PROJECT_VERSION), "releaseMode": 0o755,
                "config": {"size": len(lifecycle.SHELL_PROJECT_CONFIG), "sha256": hashlib.sha256(lifecycle.SHELL_PROJECT_CONFIG).hexdigest(), "mode": 0o600},
                "gitignore": {"size": len(lifecycle.SHELL_PROJECT_IGNORE), "sha256": hashlib.sha256(lifecycle.SHELL_PROJECT_IGNORE).hexdigest(), "mode": 0o600},
                "before": {"size": 512, "sha256": "a" * 64}, "after": {"size": 1024, "sha256": "b" * 64}}
+    candidate = deepcopy(lifecycle.SHELL_CANDIDATE_RECEIPT)
+    candidate_fixture = {"fixture": "android-candidate-documents-v1", "rootRetained": True, "documentsUnchanged": True,
+        "noUnexpectedEntries": True, "artifactTargetsAbsent": True, "entryCount": 5, "documentBytes": 11366,
+        "directoryMode": 0o700, "fileMode": 0o600,
+        "documents": [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+                      for name, raw in lifecycle.SHELL_CANDIDATE_DOCUMENTS.items()],
+        "before": {"size": 1536, "sha256": "c" * 64}, "after": {"size": 1536, "sha256": "c" * 64}}
+    paths = deepcopy(lifecycle.SHELL_PATH_RECEIPT)
+    path_fixture = {"fixture": "project-paths-v1", "rootRetained": True, "originalsRetained": True, "noUnexpectedEntries": True,
+        "noPendingState": True, "inertBytesUnchanged": True, "beforeCount": 14, "afterCount": 15, "fileCount": 5, "fileBytes": 130,
+        "mutations": ["symlink", "directory-for-file", "file-for-directory", "root-mode"], "rootModes": [0o700, 0o500],
+        "before": {"size": 4000, "sha256": "d" * 64}, "after": {"size": 4200, "sha256": "e" * 64}}
     return {"state": "normal-shell-installed-runtime-connection-observed", "productQualified": False,
             "packageLifecycleQualified": False, "shellPackageBuilt": False,
             "cases": {
                 "normal": {"case": "normal", "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": False, "maps": []},
                 "positive": {"case": "positive", "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
-                             "maps": [], "projectDraft": receipt},
+                             "maps": [], "projectDraft": receipt, "candidateDocuments": candidate},
                 "quit-outstanding": {"case": "quit-outstanding", "exitCode": 0, "bootstrapReturned": False,
                                      "domAndGtkObserved": True, "maps": [[{"DATA": True}]]},
+                "project-paths": {"case": "project-paths", "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
+                                  "maps": [], "projectPaths": paths},
             }, "projectDraft": {"native": deepcopy(receipt), "fixture": fixture},
+            "candidateDocuments": {"native": deepcopy(candidate), "fixture": candidate_fixture},
+            "projectPaths": {"native": deepcopy(paths), "fixture": path_fixture},
             "files": [{"path": "lifecycle-shell-positive-project-" + phase + ".json", **fixture[phase]}
-                      for phase in ("before", "after")]}
+                      for phase in ("before", "after")]
+                     + [{"path": "lifecycle-shell-positive-candidate-" + phase + ".json", **candidate_fixture[phase]}
+                        for phase in ("before", "after")]
+                     + [{"path": "lifecycle-shell-project-paths-" + phase + ".json", **path_fixture[phase]}
+                        for phase in ("before", "after")]}
 
 
 class InstalledProjectDraftReceiptContracts(unittest.TestCase):
@@ -749,10 +769,15 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         observed = closed_project_draft_data(lifecycle)
         result = S.shell_project_draft_observation(observed, lifecycle)
         self.assertEqual(result, observed["projectDraft"])
-        self.assertEqual(result["native"]["methods"], "eight-passive")
+        self.assertEqual(result["native"]["schemaVersion"], 3)
+        self.assertEqual(result["native"]["fixture"], "android-saved-readonly-v1")
+        self.assertEqual(result["native"]["methods"], "twelve-passive")
+        self.assertEqual(result["native"]["quit"]["operation"], 6)
         self.assertFalse(result["native"]["passiveActions"])
+        self.assertEqual(result["native"]["snapshot"]["sourceFiles"], 2)
         self.assertEqual(result["native"]["save"]["requests"], {"open": 2, "prepare": 2, "apply": 1, "close": 0})
         self.assertTrue(result["native"]["save"]["confirmation"]["keepReviewing"])
+        self.assertTrue(result["native"]["save"]["createReleaseDirectory"])
         self.assertEqual(result["native"]["save"]["outcome"], ["committed", "clean", "settled", "none"])
         self.assertEqual(result["native"]["noop"]["outcome"], ["not_started", "not_created", "settled", "cancelled"])
         self.assertEqual(result["native"]["noop"]["nativeReason"], "shutdown")
@@ -768,14 +793,23 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
         self.assertEqual(guidance["github"]["workflowCount"], 4)
         self.assertFalse(guidance["assuranceActions"])
         self.assertEqual(guidance["releaseReadiness"], "unknown")
+        self.assertEqual(result["native"]["savedReads"], {
+            "version": {"requestResultDomMatched": True, "pairMatched": True, "name": "1.2.3", "build": 7},
+            "metadata": {"observeRequestResultDomMatched": True, "absent": 3, "validateRequestResultDomMatched": True,
+                         "browserEdit": "insertText", "draftRetained": True},
+            "scope": "single-request-non-atomic",
+        })
         encoded = lifecycle.canonical(result["native"])
         self.assertTrue(encoded.endswith(b"\n"))
-        self.assertEqual(len(encoded), 2029)
+        self.assertEqual(len(encoded), 2041)
+        self.assertEqual(hashlib.sha256(encoded).hexdigest(), "9896be85da12227c4920d61c65a0c50d6701ca4ae5c405a6d5c6a072a133d9af")
         self.assertLessEqual(len(encoded), 2048)
         self.assertTrue(result["fixture"]["savedOutputsMatched"])
         self.assertTrue(result["fixture"]["hintUnchanged"])
+        self.assertEqual(result["fixture"]["entryCount"], 7)
+        self.assertEqual(result["fixture"]["sourceBytes"], 149)
         self.assertNotEqual(result["fixture"]["before"], result["fixture"]["after"])
-        self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding"})
+        self.assertEqual(set(observed["cases"]), {"normal", "positive", "quit-outstanding", "project-paths"})
 
     def test_rejects_legacy_partial_mistyped_or_relabelled_positive_receipts(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
@@ -783,21 +817,26 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
             lambda v: v.pop("projectDraft"), lambda v: v["cases"]["positive"].pop("projectDraft"),
             lambda v: v["cases"]["positive"]["projectDraft"].update(methods="six-passive"),
             lambda v: v["cases"]["positive"]["projectDraft"].pop("save"),
+            lambda v: v["cases"]["positive"]["projectDraft"].update(schemaVersion=2),
             lambda v: v["projectDraft"]["native"].pop("originals"),
             lambda v: v["projectDraft"]["native"].update(guidance={"draftUnchanged": True}),
+            lambda v: v["projectDraft"]["native"].pop("savedReads"),
             lambda v: v["cases"]["positive"].update(exitCode=True),
             lambda v: v["cases"]["positive"].update(domAndGtkObserved=1),
             lambda v: v["cases"]["positive"]["projectDraft"]["select"].update(originalsSettled=False),
             lambda v: v["cases"]["positive"]["projectDraft"]["quit"].update(relayJoined=False),
             lambda v: v["projectDraft"]["native"]["cancel"].update(originalsSettled=1),
             lambda v: v["projectDraft"]["fixture"].update(rootRetained=1),
+            lambda v: v["projectDraft"]["fixture"].update(fixture="android-config-save-v1"),
             lambda v: v["projectDraft"]["fixture"].update(hintUnchanged=False),
             lambda v: v["projectDraft"]["fixture"].update(savedOutputsMatched=False),
             lambda v: v["projectDraft"]["fixture"].update(noUnexpectedEntries=False),
             lambda v: v["projectDraft"]["fixture"].update(noPendingState=False),
             lambda v: v["projectDraft"]["fixture"].update(configAbsent=True),
             lambda v: v["projectDraft"]["fixture"].update(entryCount=True),
+            lambda v: v["projectDraft"]["fixture"].update(entryCount=6),
             lambda v: v["projectDraft"]["fixture"].update(sourceBytes=0),
+            lambda v: v["projectDraft"]["fixture"].update(sourceBytes=len(lifecycle.SHELL_PROJECT_SOURCE)),
             lambda v: v["projectDraft"]["fixture"].update(releaseMode=0o700),
             lambda v: v["projectDraft"]["fixture"]["config"].update(sha256="f" * 64),
             lambda v: v["projectDraft"]["fixture"]["gitignore"].update(mode=0o644),
@@ -813,10 +852,18 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
 
         expected = lifecycle.SHELL_PROJECT_RECEIPT
         variants = {
-            "save-only": {key: child for key, child in expected.items() if key != "guidance"},
-            "guidance-only": {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals"}},
+            "legacy-v2": {**expected, "schemaVersion": 2},
+            "prior-R-v3": {**expected, "methods": "eleven-passive", "quit": {**expected["quit"], "operation": 3}},
+            "save-only": {key: child for key, child in expected.items() if key not in {"guidance", "savedReads"}},
+            "guidance-only": {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals", "savedReads"}},
+            "saved-reads-only": {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals", "guidance"}},
             "partial-guidance": {**expected, "guidance": {"draftUnchanged": True}},
             "wrong-guidance-type": {**expected, "guidance": []},
+            "no-saved-reads": {key: child for key, child in expected.items() if key != "savedReads"},
+            "partial-saved-reads": {**expected, "savedReads": {"version": expected["savedReads"]["version"]}},
+            "wrong-saved-reads-type": {**expected, "savedReads": []},
+            "wrong-version-type": {**expected, "savedReads": {**expected["savedReads"], "version": []}},
+            "wrong-metadata-type": {**expected, "savedReads": {**expected["savedReads"], "metadata": None}},
         }
         for name, partial in variants.items():
             for side in ("case", "native", "both"):
@@ -861,7 +908,7 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
     def test_missing_duplicate_or_mismatched_original_inventory_exports_refuse(self):
         lifecycle = S.local("ubuntu_publication_lifecycle")
         for mutate in (
-            lambda v: v["files"].pop(), lambda v: v["files"].append(deepcopy(v["files"][0])),
+            lambda v: v["files"].pop(1), lambda v: v["files"].append(deepcopy(v["files"][0])),
             lambda v: v["files"][1].update(sha256="c" * 64), lambda v: v["files"][0].update(size=513),
             lambda v: v["files"][1].update(size=True), lambda v: v["files"][1].update(path="unbound-after.json"),
             lambda v: v["files"][0].update(extra=True),
@@ -870,6 +917,128 @@ class InstalledProjectDraftReceiptContracts(unittest.TestCase):
             observed = closed_project_draft_data(lifecycle); mutate(observed)
             with self.subTest(mutate=mutate), self.assertRaises(S.D.Refused):
                 S.shell_project_draft_observation(observed, lifecycle)
+
+
+class InstalledCandidateDocumentsReceiptContracts(unittest.TestCase):
+    def test_candidate_is_a_separate_bounded_companion_not_replacement_project_proof(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        observed = closed_project_draft_data(lifecycle)
+        self.assertEqual(S.shell_project_draft_observation(observed, lifecycle), observed["projectDraft"])
+        candidate = observed["candidateDocuments"]
+        self.assertEqual(candidate["native"], observed["cases"]["positive"]["candidateDocuments"])
+        raw = lifecycle.canonical(candidate["native"])
+        self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()),
+                         (1069, "e7a6cf04edfd5b331ca0a2e8fa8afab42d1fdfda1a6cbc40c979188679ac5902"))
+        self.assertLessEqual(len(raw), 2048)
+        self.assertEqual([candidate["native"][key]["operation"] for key in ("cancel", "select", "observe", "quit")], [3, 4, 5, 6])
+        self.assertTrue(candidate["native"]["cancel"]["probeUnstarted"])
+        self.assertTrue(candidate["native"]["cancel"]["tokenJoined"])
+        self.assertEqual(candidate["native"]["observe"]["requests"], 1)
+        self.assertEqual(candidate["native"]["scope"], {"documents": 3, "formatsDigestsBindingsMatched": True,
+            "artifactPayloadsObserved": False, "sourceCompared": False, "signingVerified": False,
+            "storeObserved": False, "releaseReady": False, "recoveryAuthority": False})
+        fixture = candidate["fixture"]
+        self.assertEqual((fixture["entryCount"], fixture["documentBytes"], fixture["directoryMode"], fixture["fileMode"]), (5, 11366, 0o700, 0o600))
+        self.assertEqual(fixture["before"], fixture["after"])
+        self.assertEqual(len(observed["files"]), 6)
+        # The original exporter allows at most 128 root files plus the same
+        # original client's two captures; adding fixtures cannot raise it.
+        observed["files"].extend({"path": "inert-" + str(index), "size": 0, "sha256": "0" * 64} for index in range(124))
+        S.shell_project_draft_observation(observed, lifecycle)
+        observed["files"].append({"path": "over-cap", "size": 0, "sha256": "0" * 64})
+        with self.assertRaises(S.D.Refused):
+            S.shell_project_draft_observation(observed, lifecycle)
+
+    def test_missing_partial_extra_or_nonpositive_candidate_receipts_refuse(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        mutations = (
+            lambda v: v.pop("candidateDocuments"), lambda v: v["cases"]["positive"].pop("candidateDocuments"),
+            lambda v: v["candidateDocuments"].pop("native"), lambda v: v["candidateDocuments"].pop("fixture"),
+            lambda v: v["candidateDocuments"].update(extra=True),
+            lambda v: v["cases"]["positive"].update(candidateDocuments=[]),
+            lambda v: v["candidateDocuments"].update(native={}),
+            lambda v: v["candidateDocuments"]["native"].update(selectionId="unbound"),
+            lambda v: v["candidateDocuments"]["native"].update(scope={"documents": 3}),
+            lambda v: v["candidateDocuments"]["native"].pop("preserved"),
+            lambda v: v["candidateDocuments"]["native"].pop("quit"),
+            lambda v: v["cases"]["normal"].update(candidateDocuments=deepcopy(lifecycle.SHELL_CANDIDATE_RECEIPT)),
+            lambda v: v["cases"]["quit-outstanding"].update(candidateDocuments=deepcopy(lifecycle.SHELL_CANDIDATE_RECEIPT)),
+        )
+        for mutate in mutations:
+            observed = closed_project_draft_data(lifecycle); mutate(observed)
+            with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError)):
+                S.shell_project_draft_observation(observed, lifecycle)
+
+    def test_each_candidate_leaf_requires_typed_original_correspondence_on_both_copies(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        expected = lifecycle.SHELL_CANDIDATE_RECEIPT
+        def leaves(value, prefix=()):
+            for key, child in value.items():
+                if type(child) is dict:
+                    yield from leaves(child, (*prefix, key))
+                else:
+                    yield (*prefix, key), child
+        for path, original in leaves(expected):
+            for mode in ("missing", "changed", "wrong-type"):
+                changed = deepcopy(expected)
+                parent = changed
+                for key in path[:-1]:
+                    parent = parent[key]
+                if mode == "missing":
+                    del parent[path[-1]]
+                elif mode == "wrong-type":
+                    parent[path[-1]] = int(original) if type(original) is bool else True if type(original) is int else None
+                else:
+                    parent[path[-1]] = not original if type(original) is bool else original + 1 if type(original) is int else original + "-other"
+                for side in ("case", "native", "both"):
+                    observed = closed_project_draft_data(lifecycle)
+                    if side in {"case", "both"}:
+                        observed["cases"]["positive"]["candidateDocuments"] = deepcopy(changed)
+                    if side in {"native", "both"}:
+                        observed["candidateDocuments"]["native"] = deepcopy(changed)
+                    with self.subTest(path=path, mode=mode, side=side), self.assertRaises((S.D.Refused, ValueError)):
+                        S.shell_project_draft_observation(observed, lifecycle)
+
+    def test_candidate_fixture_flags_bytes_and_both_original_export_pins_are_mandatory(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        mutations = (
+            lambda v: v["candidateDocuments"].update(fixture=[]),
+            lambda v: v["candidateDocuments"]["fixture"].update(fixture="android-saved-readonly-v1"),
+            lambda v: v["candidateDocuments"]["fixture"].update(rootRetained=1),
+            lambda v: v["candidateDocuments"]["fixture"].update(documentsUnchanged=False),
+            lambda v: v["candidateDocuments"]["fixture"].update(noUnexpectedEntries=False),
+            lambda v: v["candidateDocuments"]["fixture"].update(artifactTargetsAbsent=False),
+            lambda v: v["candidateDocuments"]["fixture"].update(entryCount=True),
+            lambda v: v["candidateDocuments"]["fixture"].update(entryCount=6),
+            lambda v: v["candidateDocuments"]["fixture"].update(documentBytes=0),
+            lambda v: v["candidateDocuments"]["fixture"].update(directoryMode=0o755),
+            lambda v: v["candidateDocuments"]["fixture"].update(fileMode=0o644),
+            lambda v: v["candidateDocuments"]["fixture"].update(extra=True),
+            lambda v: v["candidateDocuments"]["fixture"]["documents"].pop(),
+            lambda v: v["candidateDocuments"]["fixture"]["documents"].reverse(),
+            lambda v: v["candidateDocuments"]["fixture"]["documents"][0].update(sha256="f" * 64),
+            lambda v: v["candidateDocuments"]["fixture"]["documents"][0].update(size=True),
+            lambda v: v["candidateDocuments"]["fixture"]["documents"][0].update(path="reader-1.2.3-42.aab"),
+            lambda v: v["candidateDocuments"]["fixture"]["before"].update(size=8193),
+            lambda v: v["candidateDocuments"]["fixture"]["before"].update(size=True),
+            lambda v: v["candidateDocuments"]["fixture"]["after"].update(sha256="unbound"),
+            lambda v: v["candidateDocuments"]["fixture"]["after"].update(extra=True),
+            lambda v: v["files"].pop(2), lambda v: v["files"].pop(3),
+            lambda v: v["files"].append(deepcopy(v["files"][2])),
+            lambda v: v["files"][2].update(sha256="f" * 64), lambda v: v["files"][3].update(size=1537),
+            lambda v: v["files"][2].update(size=True), lambda v: v["files"][2].update(path="unbound-before.json"),
+            lambda v: v["files"][3].update(extra=True),
+        )
+        for mutate in mutations:
+            observed = closed_project_draft_data(lifecycle); mutate(observed)
+            with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError)):
+                S.shell_project_draft_observation(observed, lifecycle)
+        # Matching an altered after export cannot hide changed original nodes.
+        observed = closed_project_draft_data(lifecycle)
+        observed["candidateDocuments"]["fixture"]["after"]["sha256"] = "f" * 64
+        observed["files"][3]["sha256"] = "f" * 64
+        with self.assertRaises(S.D.Refused):
+            S.shell_project_draft_observation(observed, lifecycle)
 
 
 class HostBindingDiagnosticContracts(unittest.TestCase):
@@ -888,6 +1057,58 @@ class HostBindingDiagnosticContracts(unittest.TestCase):
         self.assertTrue(all(32 <= ord(character) < 127 for character in escaped))
         self.assertEqual(json.loads(escaped[len(message) + 2:])["selectedPath"], "/example/\u00e9\n")
         self.assertEqual(S.shell_host_diagnostic(message, "/" + "x" * 2048, "/example", item), message)
+
+
+
+class InstalledProjectPathReceiptContracts(unittest.TestCase):
+    def test_requires_all_four_cases_and_both_typed_inventory_export_pins(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        observed = closed_project_draft_data(lifecycle)
+        self.assertEqual(S.shell_project_draft_observation(observed, lifecycle), observed["projectDraft"])
+        paths = observed["projectPaths"]
+        raw = lifecycle.canonical(paths["native"])
+        self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (1482, "b3784f485377a9e7b249d5dcac1eae98ae4825dd1e9bf1fbce4b0f2e82698633"))
+        self.assertEqual(paths["fixture"]["mutations"], ["symlink", "directory-for-file", "file-for-directory", "root-mode"])
+        self.assertEqual(paths["fixture"]["rootModes"], [0o700, 0o500])
+        self.assertNotEqual(paths["fixture"]["before"], paths["fixture"]["after"])
+        mutations = (
+            lambda v: v.pop("projectPaths"), lambda v: v["cases"].pop("project-paths"),
+            lambda v: v["cases"]["project-paths"].update(exitCode=True), lambda v: v["cases"]["project-paths"].update(bootstrapReturned=1),
+            lambda v: v["cases"]["project-paths"].update(maps=[[]]), lambda v: v["cases"]["positive"].update(projectPaths=v["projectPaths"]["native"]),
+            lambda v: v["cases"]["normal"].update(projectPaths=v["projectPaths"]["native"]),
+            lambda v: v["cases"]["quit-outstanding"].update(projectPaths=v["projectPaths"]["native"]),
+            lambda v: v["projectPaths"]["fixture"].update(rootRetained=1), lambda v: v["projectPaths"]["fixture"].update(beforeCount=True),
+            lambda v: v["projectPaths"]["fixture"].update(afterCount=14), lambda v: v["projectPaths"]["fixture"].update(rootModes=[0o700, 0o700]),
+            lambda v: v["projectPaths"]["fixture"]["mutations"].reverse(), lambda v: v["projectPaths"]["fixture"].update(extra=True),
+            lambda v: v["projectPaths"]["fixture"].pop("inertBytesUnchanged"),
+            lambda v: v["projectPaths"]["fixture"].update(after=deepcopy(v["projectPaths"]["fixture"]["before"])),
+            lambda v: v["files"].pop(), lambda v: v["files"].append(deepcopy(v["files"][-1])),
+            lambda v: v["files"][-2].update(sha256="0" * 64), lambda v: v["files"][-1].update(size=True),
+            lambda v: v["files"][-1].update(path="lifecycle-shell-positive-project-after.json"),
+            lambda v: v["projectPaths"]["fixture"]["before"].update(size=8193), lambda v: v["projectPaths"]["fixture"]["after"].update(sha256="invalid"),
+        )
+        for mutate in mutations:
+            changed = deepcopy(observed); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises((S.D.Refused, ValueError, KeyError)):
+                S.shell_project_draft_observation(changed, lifecycle)
+
+    def test_every_nested_receipt_leaf_is_matched_on_both_original_projections(self):
+        lifecycle = S.local("ubuntu_publication_lifecycle")
+        expected = closed_project_draft_data(lifecycle)
+        def leaves(value, prefix=()):
+            if type(value) is dict:
+                for key, child in value.items(): yield from leaves(child, (*prefix, key))
+            elif type(value) is list:
+                for key, child in enumerate(value): yield from leaves(child, (*prefix, key))
+            else: yield prefix, value
+        for path, old in leaves(expected["projectPaths"]["native"]):
+            for target in ("case", "combined"):
+                changed = deepcopy(expected)
+                parent = changed["cases"]["project-paths"]["projectPaths"] if target == "case" else changed["projectPaths"]["native"]
+                for key in path[:-1]: parent = parent[key]
+                parent[path[-1]] = int(old) if type(old) is bool else True if type(old) is int else None
+                with self.subTest(path=path, target=target), self.assertRaises((S.D.Refused, ValueError)):
+                    S.shell_project_draft_observation(changed, lifecycle)
 
 
 if __name__ == "__main__":

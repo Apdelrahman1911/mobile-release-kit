@@ -100,7 +100,7 @@ pub(crate) struct Observation {
     saved_config: ContentComparison, saved_version: ContentComparison,
 }
 
-fn relative_display_path(path: &str) -> bool {
+pub(crate) fn relative_display_path(path: &str) -> bool {
     // Transport/display checks only. The core owns private-tree, Unicode
     // normalization, original-object admission and saved-config selection.
     if path.is_empty() || path.len() > 512 { return false; }

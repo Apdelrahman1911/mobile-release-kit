@@ -5,7 +5,7 @@
   "windows": ["main"],
   "local": true,
   "permissions": [
-    "allow-app-info", "allow-choose-project", "allow-project-snapshot", "allow-catalog",
+    "allow-app-info", "allow-choose-project", "allow-choose-project-path", "allow-project-snapshot", "allow-catalog",
     "allow-environment-requirements", "allow-release-version-observe",
     "allow-artifact-evidence-choose", "allow-artifact-evidence-status", "allow-artifact-evidence-observe", "allow-artifact-evidence-cancel",
     "allow-start-environment-diagnostics", "allow-environment-diagnostics-status", "allow-cancel-environment-diagnostics",

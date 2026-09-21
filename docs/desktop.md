@@ -21,7 +21,9 @@ There is now a separate, fixed Linux installed-runtime path for the normal
 shell, with per-request original custody and finality. Its current scope is
 capabilities/help, native project selection, a static project snapshot, and
 in-memory configuration suggestion, validation and redacted review, plus
-draft-based Environment prerequisites and read-only GitHub workflow proposals.
+draft-based Environment prerequisites and read-only GitHub workflow proposals,
+saved release-version reads, public locale-text observation/validation, and a
+separate candidate-document inspector.
 Prerequisites do not inspect tools; proposals do not read or write repository
 files, verify remote refs or contact GitHub. The installed-shell and
 project/draft/guidance native checks are still pending; this is not general Linux
@@ -37,8 +39,8 @@ disappear. No complete installer or clean-machine qualification is claimed here.
 ## Foundation capabilities
 
 This table describes implemented surfaces, not a grant to execute them. The
-installed path above admits its eight passive core methods, the separate
-project-only picker and configuration-only edit profile; the UI shows an explicit
+installed path above admits its twelve passive core methods, separate
+project/evidence-folder pickers and configuration-only edit profile; the UI shows an explicit
 reason for unavailable actions.
 Choosing a project does not enable the credential/asset session. Draft changes
 stay in memory until a separately reviewed and confirmed native Save.
@@ -58,7 +60,7 @@ stay in memory until a separately reviewed and confirmed native Save.
 | Build-tool diagnostics implementation (disabled) | Explicit, cancellable version observations through a separate native owner and the ordinary core command owner | Enabled diagnostics, complete SDK checks, native document/runtime qualification or release readiness |
 | Saved Android offline checks implementation (disabled) | Saved-input consent, the existing shared offline core policy and original cancellation/finality ownership; core builds disabled | Enabled execution, a sandbox, no-network/no-write behavior, native/runtime qualification or release readiness |
 | Saved Android build implementation (disabled) | Guided saved-input review, one explicit app/variant, build progress/cancellation and captured AAB observations through the existing core | Enabled execution, fresh-source provenance, verified signing, a release candidate, qualified tools or Store approval |
-| Candidate evidence inspector (disabled) | Separate evidence-folder picker, three fixed candidate documents, core-owned format/self-digest/binding checks and a guided documents-only summary | Artifact-byte inspection, authenticated provenance, source-project comparison, Store state, release readiness or safe recovery |
+| Candidate evidence inspector (installed verification pending) | Separate evidence-folder picker, three fixed candidate documents, core-owned format/self-digest/binding checks and a guided documents-only summary | Artifact-byte inspection, authenticated provenance, source-project comparison, Store state, release readiness or safe recovery |
 | Credentials, releases, recovery | Guided navigation and honest unavailable states | Stored credentials, completed operations, authenticated evidence or “no recovery needed” |
 
 Windows can use the portable passive services. Its original-parent static reader
@@ -163,10 +165,11 @@ provenance and artifact bytes unverified.”** Choosing evidence never replaces 
 source project, discards a draft or changes GitHub context. The separate original
 operation ID permits exact cancellation and status recovery after a lost reply;
 “Stopping” is not proof of settlement, and cleanup-unknown remains blocking.
-Earlier observations are shown only as stale. Inspection is currently
-qualification-gated and Linux-only; preview builds and older native fixtures
-cannot run it. macOS/Windows evidence adapters and production runtime admission
-remain outstanding.
+Earlier observations are shown only as stale. The inspector now has a separate
+fixed installed Linux profile, without granting private-asset authority. Its
+installed native verification is pending; preview/development builds and older
+native fixtures cannot run it. macOS/Windows evidence adapters and general
+production runtime admission remain outstanding.
 
 Typed saving does **not** expand this passive method list. Configuration's separate
 finite owner and core transaction contract are documented in
@@ -221,8 +224,8 @@ observation; they are not file custody, build consent or release-readiness evide
 This read does not match a build Prepare snapshot or implement a build Start
 recheck. Retry is explicit, and retiring a UI result does not cancel or
 claim settlement of its native owner. Browser preview never fabricates a read.
-This saved-version method is not part of the installed eight-method passive profile,
-and Windows observation remains unavailable. The card reports real
+This saved-version method is included in the installed twelve-method passive
+profile, with installed native verification pending. Windows observation remains unavailable. The card reports real
 runtime/platform unavailability rather than using ambient Python.
 
 This is build-input preparation, **not offline preflight**. Even core preflight
@@ -570,7 +573,7 @@ standalone distribution**:
 - The Linux installed-runtime inspection module retains original descriptor
   custody, refuses unknown namespace/mount/permission observations and records
   consuming close results. Separate fixed installed-A selectors connect the
-  eight-method passive profile and configuration edit owner on the exact
+  twelve-method passive profile and configuration edit owner on the exact
   reviewed Linux x86_64 GNU host profile (including its pinned kernel). This is
   not general Ubuntu/Linux qualification or permission to use an arbitrary
   manifest, host or engine; installed shell/Save verification remains pending.

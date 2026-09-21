@@ -4,6 +4,7 @@ import { draftStatus } from '../certainty.ts';
 import { saveHelp } from '../configEdit.ts';
 import { isDirty, reviewFresh, savedRevisionFresh, validationFresh } from '../drafts.ts';
 import type { ProjectSession } from '../drafts.ts';
+import type { ProjectPathControls } from '../projectPaths.ts';
 import type { Catalog, HelpContent, JsonValue } from '../types.ts';
 import { Badge, EmptyState, ErrorNotice, HelpButton, Issues, SectionHeading } from './Common.tsx';
 import { DraftField } from './Fields.tsx';
@@ -36,6 +37,7 @@ interface EditorProps {
   metadataOnly?: boolean;
   preview: boolean;
   chooseReason: string | null;
+  pathPicker: ProjectPathControls;
   validateReason: string | null;
   reviewReason: string | null;
   suggestReason: string | null;
@@ -56,7 +58,7 @@ interface EditorProps {
   onHelp: (help: HelpContent) => void;
 }
 
-export function DraftEditor({ catalog, session, metadataOnly = false, preview, chooseReason, validateReason, reviewReason, suggestReason, saveReason, discardReason, onChoose, onNewDraft, onEdit, onValidate, onReview, onSuggest, onPrepareSave, onAdoptSuggestion, onRemoveForbidden, onUndoRemoval, onForgetRemoval, onDiscard, onHelp }: EditorProps) {
+export function DraftEditor({ catalog, session, metadataOnly = false, preview, chooseReason, pathPicker, validateReason, reviewReason, suggestReason, saveReason, discardReason, onChoose, onNewDraft, onEdit, onValidate, onReview, onSuggest, onPrepareSave, onAdoptSuggestion, onRemoveForbidden, onUndoRemoval, onForgetRemoval, onDiscard, onHelp }: EditorProps) {
   const [tab, setTab] = useState<string>('general');
   const [search, setSearch] = useState('');
   if (!session) return <div className="card"><EmptyState icon="folder" title="First, choose a project" description="The native folder picker establishes the project boundary. Drafts remain separate for every project you open."><button className="button primary" disabled={chooseReason !== null} aria-describedby={chooseReason ? 'draft-choose-reason' : undefined} onClick={onChoose}><Icon name="folder" size={17} />{preview ? 'Load example workspace' : 'Choose project folder'}</button>{chooseReason && <p id="draft-choose-reason" className="toolbar-reason">{chooseReason}</p>}</EmptyState></div>;
@@ -86,13 +88,14 @@ export function DraftEditor({ catalog, session, metadataOnly = false, preview, c
     {session.snapshotError && <ErrorNotice error={session.snapshotError} title="Refresh failed; your draft was preserved" />}
     {session.editError && <ErrorNotice error={session.editError} title="The draft was not changed" />}
     {!contextFresh && <p className="context-refresh-note">{session.review ? 'Field context is stale after your changes.' : 'Active field requirements have not been reviewed.'} Use <strong>Review draft changes</strong> for core-derived requirements and conflicts. No dependent values are automatically removed.</p>}
+    <p className="context-refresh-note">{preview ? 'Example only; no native project boundary: ' : 'Current project boundary: '}<code>{session.project.path}</code>. Browsing selects existing descendants only; it never creates files, saves the draft, or clears the other Xcode field.</p>
     <div className="editor-controls">
       {!metadataOnly && <div className="tabs" role="group" aria-label="Settings section">{tabs.map((item) => <button className={item.id === tab ? 'active' : ''} type="button" key={item.id} aria-pressed={item.id === tab} onClick={() => setTab(item.id)}>{item.label}</button>)}</div>}
       <label className="search-field"><Icon name="search" size={17} /><span className="sr-only">Search {metadataOnly ? 'metadata' : 'current section'} fields</span><input type="search" value={search} placeholder="Find a setting…" onChange={(event) => setSearch(event.target.value)} /></label>
     </div>
     {groups.map((group) => {
       const fields = fieldsFor(catalog, group.prefixes, search);
-      return fields.length > 0 ? <section className="card form-card" key={group.title}><SectionHeading title={group.title} description={group.description} /><div className="form-grid">{fields.map((field) => <DraftField key={field.path} field={field} draft={draft} context={contexts.get(field.path)} contextFresh={contextFresh} onChange={onEdit} onHelp={onHelp} />)}</div></section> : null;
+      return fields.length > 0 ? <section className="card form-card" key={group.title}><SectionHeading title={group.title} description={group.description} /><div className="form-grid">{fields.map((field) => <DraftField key={field.path} field={field} draft={draft} context={contexts.get(field.path)} contextFresh={contextFresh} pathPicker={pathPicker} onChange={onEdit} onHelp={onHelp} />)}</div></section> : null;
     })}
     {count === 0 && <div className="card"><EmptyState compact icon="search" title="No matching settings in this section" description="Try a different term or select another settings section." /></div>}
     <div className="draft-toolbar"><div className="draft-toolbar-status"><Badge tone={status.tone}>{status.label}</Badge><span>Local edits stay in memory</span></div><div className="button-row">

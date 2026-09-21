@@ -11,7 +11,7 @@ const suggestionHelp: HelpContent = {
   why: 'Provide a starting point without silently initializing files, approving identities or replacing an existing draft.',
   where: 'Prepare a suggestion, inspect its provenance and validation, then explicitly choose Use as an in-memory draft.',
   format: 'Only hinted platforms, singular unambiguous app identifiers, and version-source/key hints are projected. Missing platforms stay disabled and require an explicit decision. Default branches and example identities are not observations.',
-  failure: 'Unverified, incomplete or malformed hints cannot establish a real application or Store identity. Suggestions create no files, workflows, metadata or version values. Saving remains disabled.',
+  failure: 'Unverified, incomplete or malformed hints cannot establish a real application or Store identity. Suggestions create no files, workflows, metadata or version values. To save a draft, choose Prepare save review when native saving is available, then review and confirm the changes.',
 };
 
 interface SuggestionProps {

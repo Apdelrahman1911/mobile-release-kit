@@ -3068,24 +3068,26 @@ def shell_project_draft_observation(observed, lifecycle):
     cases, combined, files = observed.get("cases"), observed.get("projectDraft"), observed.get("files")
     # The unchanged root cap is 128; its exporter adds the original client's
     # stdout/stderr, not two more root evidence slots or another capture.
-    D.need(type(cases) is dict and set(cases) == {"normal", "positive", "quit-outstanding"}
+    D.need(type(cases) is dict and set(cases) == {"normal", "positive", "quit-outstanding", "project-paths"}
            and type(combined) is dict and set(combined) == {"native", "fixture"}
            and type(files) is list and len(files) <= 130, "Closed project/draft receipt or exported original roster is missing")
     positive = cases["positive"]
-    D.need(type(positive) is dict and set(positive) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "projectDraft"}
+    D.need(type(positive) is dict and set(positive) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "projectDraft", "candidateDocuments"}
            and positive["case"] == "positive" and type(positive["exitCode"]) is int and positive["exitCode"] == 0
            and positive["bootstrapReturned"] is True and positive["domAndGtkObserved"] is True and positive["maps"] == [],
            "Closed positive original result is incomplete")
+    D.need(all(type(cases[name]) is dict and set(cases[name]) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps"}
+               for name in ("normal", "quit-outstanding")), "A nonpositive case advertised a document receipt")
     receipt = lifecycle.shell_project_receipt(D.canonical(positive["projectDraft"]))
     D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed positive native receipt correspondence differs")
     fixture = combined["fixture"]
     D.need(type(fixture) is dict and set(fixture) == {"fixture", "rootRetained", "hintUnchanged", "savedOutputsMatched",
                                                    "noUnexpectedEntries", "noPendingState", "entryCount", "sourceBytes",
                                                    "releaseMode", "config", "gitignore", "before", "after"}
-           and fixture["fixture"] == "android-config-save-v1"
+           and fixture["fixture"] == "android-saved-readonly-v1"
            and all(fixture[key] is True for key in ("rootRetained", "hintUnchanged", "savedOutputsMatched", "noUnexpectedEntries", "noPendingState"))
-           and type(fixture["entryCount"]) is int and fixture["entryCount"] == 6
-           and type(fixture["sourceBytes"]) is int and fixture["sourceBytes"] == len(lifecycle.SHELL_PROJECT_SOURCE)
+           and type(fixture["entryCount"]) is int and fixture["entryCount"] == 7
+           and type(fixture["sourceBytes"]) is int and fixture["sourceBytes"] == len(lifecycle.SHELL_PROJECT_SOURCE) + len(lifecycle.SHELL_PROJECT_VERSION)
            and type(fixture["releaseMode"]) is int and fixture["releaseMode"] == 0o755,
            "Closed positive Save fixture inventory DATA differs")
     for key, expected in (("config", lifecycle.SHELL_PROJECT_CONFIG), ("gitignore", lifecycle.SHELL_PROJECT_IGNORE)):
@@ -3112,6 +3114,8 @@ def shell_project_draft_observation(observed, lifecycle):
                and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"]
                and matches[0]["sha256"] == pin["sha256"], "Original positive before/after export pin differs")
     D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Save fixture incorrectly claims an unchanged inventory")
+    _shell_candidate_documents_observation(positive, observed.get("candidateDocuments"), files, lifecycle)
+    _shell_project_paths_observation(cases["project-paths"], observed.get("projectPaths"), files, lifecycle)
     return {"native": receipt, "fixture": fixture}
 
 
@@ -3121,6 +3125,71 @@ def shell_handoff_bytes(request, deadline):
     D.need(len(raw) <= 1 << 20, "Shell handoff exceeds original byte bound (bytes=" + str(len(raw)) + ", limit=1048576)")
     D.need(time.monotonic() < deadline, "Original shell handoff endpoint expired")
     return raw
+
+
+def _shell_candidate_documents_observation(positive, combined, files, lifecycle):
+    """The companion receipt/fixture is mandatory, never standalone success."""
+    D.need(type(combined) is dict and set(combined) == {"native", "fixture"}, "Closed candidate documents observation is missing")
+    receipt = lifecycle.shell_candidate_receipt(D.canonical(positive["candidateDocuments"]))
+    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed candidate native receipt correspondence differs")
+    fixture = combined["fixture"]
+    D.need(type(fixture) is dict and set(fixture) == {"fixture", "rootRetained", "documentsUnchanged", "noUnexpectedEntries",
+                                                   "artifactTargetsAbsent", "entryCount", "documentBytes", "directoryMode", "fileMode",
+                                                   "documents", "before", "after"}
+           and fixture["fixture"] == "android-candidate-documents-v1"
+           and all(fixture[key] is True for key in ("rootRetained", "documentsUnchanged", "noUnexpectedEntries", "artifactTargetsAbsent"))
+           and type(fixture["entryCount"]) is int and fixture["entryCount"] == 5
+           and type(fixture["documentBytes"]) is int and fixture["documentBytes"] == sum(len(raw) for raw in lifecycle.SHELL_CANDIDATE_DOCUMENTS.values())
+           and type(fixture["directoryMode"]) is int and fixture["directoryMode"] == 0o700
+           and type(fixture["fileMode"]) is int and fixture["fileMode"] == 0o600,
+           "Closed candidate five-node unchanged inventory DATA differs")
+    expected = [{"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+                for name, raw in lifecycle.SHELL_CANDIDATE_DOCUMENTS.items()]
+    D.need(D.canonical(fixture["documents"]) == D.canonical(expected)
+           and receipt["scope"]["documents"] == len(expected), "Closed candidate document bytes or native correspondence differ")
+    # These pins bind the separate before/after exports copied only after the
+    # original service gate. Unlike Save, every candidate node must be unchanged.
+    for phase in ("before", "after"):
+        pin = fixture[phase]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"}
+               and type(pin["size"]) is int and 0 < pin["size"] <= 8192
+               and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+               "Closed candidate before/after inventory pin differs")
+        name = "lifecycle-shell-positive-candidate-" + phase + ".json"
+        matches = [row for row in files if type(row) is dict and row.get("path") == name]
+        D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+               and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"]
+               and matches[0]["sha256"] == pin["sha256"], "Original candidate before/after export pin differs")
+    D.need(fixture["before"] == fixture["after"], "Candidate documents incorrectly claim a changed inventory")
+
+
+
+def _shell_project_paths_observation(case, combined, files, lifecycle):
+    """The separately completed path case cannot replace Save/candidate proof."""
+    D.need(type(case) is dict and set(case) == {"case", "exitCode", "bootstrapReturned", "domAndGtkObserved", "maps", "projectPaths"}
+           and case["case"] == "project-paths" and type(case["exitCode"]) is int and case["exitCode"] == 0
+           and case["bootstrapReturned"] is True and case["domAndGtkObserved"] is True and case["maps"] == [],
+           "Closed project-path original result is incomplete")
+    D.need(type(combined) is dict and set(combined) == {"native", "fixture"}, "Closed project-path observation is missing")
+    receipt = lifecycle.shell_path_receipt(D.canonical(case["projectPaths"]))
+    D.need(D.canonical(combined["native"]) == D.canonical(receipt), "Closed project-path native receipt correspondence differs")
+    fixture = combined["fixture"]
+    expected = {"fixture": "project-paths-v1", "rootRetained": True, "originalsRetained": True, "noUnexpectedEntries": True,
+                "noPendingState": True, "inertBytesUnchanged": True, "beforeCount": 14, "afterCount": 15, "fileCount": 5, "fileBytes": 130,
+                "mutations": ["symlink", "directory-for-file", "file-for-directory", "root-mode"], "rootModes": [0o700, 0o500]}
+    D.need(type(fixture) is dict and set(fixture) == set(expected) | {"before", "after"}
+           and D.canonical({key: fixture[key] for key in expected}) == D.canonical(expected),
+           "Closed project-path fourteen/fifteen-node fixture correspondence differs")
+    for phase in ("before", "after"):
+        pin = fixture[phase]
+        D.need(type(pin) is dict and set(pin) == {"size", "sha256"} and type(pin["size"]) is int and 0 < pin["size"] <= 8192
+               and type(pin["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", pin["sha256"]) is not None,
+               "Closed project-path original inventory pin differs")
+        matches = [row for row in files if type(row) is dict and row.get("path") == "lifecycle-shell-project-paths-" + phase + ".json"]
+        D.need(len(matches) == 1 and set(matches[0]) == {"path", "size", "sha256"}
+               and type(matches[0]["size"]) is int and matches[0]["size"] == pin["size"] and matches[0]["sha256"] == pin["sha256"],
+               "Original project-path before/after export pin differs")
+    D.need(fixture["before"]["sha256"] != fixture["after"]["sha256"], "Project-path inventory incorrectly claims unchanged fixture state")
 
 
 def verify_installed_shell():
@@ -3186,12 +3255,12 @@ def verify_installed_shell():
         source_check("after")
         D.need(time.monotonic() < deadline, "Original shell result endpoint expired")
         D.write(public / "result.json", D.canonical({**source_record, "lifecycle": observed,
-            "projectDraft": project_draft,
-            "commands": check.commands, "cases": ["normal", "positive", "quit-outstanding"], "compilerRerun": False,
+            "projectDraft": project_draft, "candidateDocuments": observed["candidateDocuments"], "projectPaths": observed["projectPaths"],
+            "commands": check.commands, "cases": ["normal", "positive", "quit-outstanding", "project-paths"], "compilerRerun": False,
             "supplierRebuilt": False, "packageBuilt": False, "upgradeOrRefusalRerun": False,
             "scope": "normal-shell-to-accepted-installed-runtime-connection-only"}))
         D.need(time.monotonic() < deadline, "Original shell result close/readback was late")
-        print("Normal window and two original observer cases retained with service finality; no product/package qualification.", flush=True)
+        print("Normal window and three original observer cases retained with service finality; no product/package qualification.", flush=True)
     except BaseException as error:
         retain_failure(root, phase if check is None else check.phase, [] if check is None else check.commands, error)
         raise

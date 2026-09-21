@@ -4,8 +4,10 @@
 
 The narrow desktop path is **configure locale → load public text → edit and
 validate → review exact files → confirm typed Save**. This is an app-managed
-preview/save implementation, not a manual-copy substitute. The metadata writer,
-native qualification and packaged-runtime gates remain closed. A visible
+preview/save implementation, not a manual-copy substitute. The fixed installed
+Linux profile includes passive text observation and validation; its native
+verification remains pending. The metadata writer and its native qualification
+and packaged-runtime gates remain closed. A visible
 editor, source-authored inert tests, another edit domain's evidence or a browser
 preview does not enable or qualify Save. No test execution or native/Store
 readiness is asserted by this document.

@@ -2,7 +2,7 @@
 //! The operation retains SourceBook outside its worker. A panic/uncertain close
 //! therefore cannot erase its original acquisition facts or authorize a retry.
 use std::{path::{Path, PathBuf}, sync::Arc};
-use crate::{asset_commands::Reason, credential_format::FileKind};
+use crate::{asset_commands::{ProjectPathField, Reason}, credential_format::FileKind};
 
 pub(crate) const PATH_LIMIT: usize = 4096;
 const COMPONENT_LIMIT: usize = 128;
@@ -74,6 +74,10 @@ impl ProjectProbe {
     pub(crate) fn path(&self) -> &Path { &self.path }
     pub(crate) fn identity(&self) -> DirectoryIdentity { self.identity }
 }
+// Metadata-only, point-in-time descendant proof. No native absolute path,
+// payload, source witness or reusable file/write authority reaches the DTO.
+pub(crate) struct ProjectPathProbe { relative_path: String }
+impl ProjectPathProbe { pub(crate) fn into_relative_path(self) -> String { self.relative_path } }
 
 pub(crate) fn material_limit(kind: FileKind) -> usize {
     match kind { FileKind::AndroidKeystore => 32 * 1024 * 1024, FileKind::AndroidFirebase => 4 * 1024 * 1024 }
@@ -434,9 +438,148 @@ mod linux {
         book.finish(result, stop)
     }
 
+    struct ProjectPathSpelling<'a> { components: Vec<&'a [u8]>, root_depth: usize, relative_path: String }
+    fn project_path_spelling<'a>(root: &Path, path: &'a Path, field: ProjectPathField) -> Result<ProjectPathSpelling<'a>, Reason> {
+        // Compare exact admitted component bytes BEFORE any SourceBook effect.
+        // Path::components/strip_prefix/canonicalize would normalize spellings
+        // this route must refuse. In particular /project2 is not /project.
+        let root_parts = parts(root)?;
+        let components = parts(path)?;
+        if root.to_str().is_none() || path.to_str().is_none() || components.len() <= root_parts.len()
+            || !components.starts_with(&root_parts) { return Err(Reason::SourceRefused); }
+        let start = root.as_os_str().as_bytes().len() + usize::from(!root_parts.is_empty());
+        let relative = std::str::from_utf8(&path.as_os_str().as_bytes()[start..]).map_err(|_| Reason::SourceRefused)?;
+        if !crate::release_version_protocol::relative_display_path(relative)
+            || !field.accepts_basename(relative.rsplit('/').next().ok_or(Reason::SourceRefused)?) { return Err(Reason::SourceRefused); }
+        let relative_path = crate::asset_commands::copy_text(relative).map_err(|error| error.reason)?;
+        Ok(ProjectPathSpelling { components, root_depth: root_parts.len(), relative_path })
+    }
+    fn project_path_file_leaf(file: FileIdentity, parent: DirectoryIdentity) -> bool {
+        file.common.mode & SFlag::S_IFMT.bits() == SFlag::S_IFREG.bits()
+            && file.nlink == 1 && file.common.dev == parent.dev
+    }
+    pub(crate) fn probe_project_path(book: &mut SourceBook, root: &RegisteredRoot, path: PathBuf, field: ProjectPathField,
+        stop: &mut dyn FnMut() -> bool) -> Result<ProjectPathProbe, Reason> {
+        let spelling = project_path_spelling(&root.path, &path, field)?;
+        let file = !field.directory();
+        let capacity = roster_limit([spelling.components.len() - usize::from(file)], 0)?;
+        book.begin(capacity, usize::from(file))?;
+        let result = (|| {
+            book.root(stop)?;
+            let root_chain = book.chain(&spelling.components[..spelling.root_depth], stop)?;
+            let mut parent = *root_chain.last().ok_or(Reason::SourceRefused)?;
+            if book.directory(parent)? != root.identity { return Err(Reason::SourceChanged); }
+            let (leaf, parents) = spelling.components[spelling.root_depth..].split_last().ok_or(Reason::SourceRefused)?;
+            // Descendants continue from the SAME checked registered-root
+            // descriptor, never a second pathname traversal or fresh parent.
+            for name in parents { parent = book.child(parent, name, false, stop)?; }
+            if field.directory() {
+                book.child(parent, leaf, false, stop)?;
+            } else {
+                let name = copy_bytes(leaf)?;
+                let parent_identity = book.directory(parent)?;
+                checkpoint(stop)?;
+                // No child(..., true), open/read/hash, extension requirement or
+                // credential private_file change. Only no-follow leaf metadata.
+                let metadata = stat::fstatat(book.fd(parent)?, OsStr::from_bytes(leaf), AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|_| Reason::SourceRefused)?;
+                checkpoint(stop)?;
+                let identity = file_identity(&metadata)?;
+                if !project_path_file_leaf(identity, parent_identity) { return Err(Reason::SourceRefused); }
+                book.probes.push(LeafProbe { parent, name, identity });
+            }
+            Ok(ProjectPathProbe { relative_path: spelling.relative_path })
+        })();
+        // Includes the original no-follow leaf probe and directory checks,
+        // then every original consuming close, even after refusal/STOP.
+        book.finish(result, stop)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert_project_path_source_contracts() {
+        // Pure spelling, policy and custody-model contracts only. No stat,
+        // descriptor, real filesystem proof or native qualification is created.
+        let root = Path::new("/inert/project");
+        for (path, field, relative) in [
+            ("/inert/project/VERSION", ProjectPathField::VersionSource, "VERSION"),
+            ("/inert/project/config/release.json", ProjectPathField::VersionSource, "config/release.json"),
+            ("/inert/project/ios/App.xcodeproj", ProjectPathField::IosProject, "ios/App.xcodeproj"),
+            ("/inert/project/ios/App.xcworkspace", ProjectPathField::IosWorkspace, "ios/App.xcworkspace"),
+            ("/inert/project/metadata/en-US", ProjectPathField::MetadataRoot, "metadata/en-US"),
+        ] {
+            let spelling = project_path_spelling(root, Path::new(path), field).expect("contained spelling");
+            assert_eq!(spelling.relative_path, relative); assert_eq!(spelling.root_depth, 2);
+            assert_eq!(spelling.components[spelling.root_depth..].join(&b'/'), relative.as_bytes());
+        }
+        assert_eq!(project_path_spelling(Path::new("/"), Path::new("/release/VERSION"), ProjectPathField::VersionSource)
+            .expect("root descendant").relative_path, "release/VERSION");
+        assert_eq!(project_path_spelling(Path::new("/inert/prøject"), Path::new("/inert/prøject/versión"), ProjectPathField::VersionSource)
+            .expect("exact UTF-8").relative_path, "versión");
+        for path in ["/inert/project", "/inert/project2/VERSION", "/inert/other/VERSION", "/VERSION", "relative/VERSION",
+            "/inert/project//VERSION", "/inert/project/./VERSION", "/inert/project/../VERSION", "/inert/project/VERSION/",
+            "/inert/project/.hidden", "/inert/project/PrIvAtE/VERSION", "/inert/project/secrets/VERSION",
+            "/inert/project/dir/a\0b", "/inert/project/dir/a\nb", "/inert/project/dir/name ", "/inert/project/dir/name.",
+            "/inert/project/dir/NUL.txt", "/inert/project/dir/a\\b", "/inert/project/dir/a:b"] {
+            assert!(project_path_spelling(root, Path::new(path), ProjectPathField::VersionSource).is_err());
+        }
+        for bad_root in ["relative", "/inert//project", "/inert/./project", "/inert/project/"] {
+            assert!(project_path_spelling(Path::new(bad_root), Path::new("/inert/project/VERSION"), ProjectPathField::VersionSource).is_err());
+        }
+        assert!(project_path_spelling(root, Path::new(OsStr::from_bytes(b"/inert/project/bad\xff")), ProjectPathField::VersionSource).is_err());
+        assert!(project_path_spelling(Path::new(OsStr::from_bytes(b"/inert/pr\xffject")),
+            Path::new(OsStr::from_bytes(b"/inert/pr\xffject/VERSION")), ProjectPathField::VersionSource).is_err());
+        let twelve = format!("/inert/project/{}", vec!["a"; 12].join("/"));
+        assert!(project_path_spelling(root, Path::new(&twelve), ProjectPathField::MetadataRoot).is_ok());
+        assert!(project_path_spelling(root, Path::new(&format!("{twelve}/a")), ProjectPathField::MetadataRoot).is_err());
+        let exactly_512 = format!("{}/{}/c", "a".repeat(255), "b".repeat(254));
+        assert!(project_path_spelling(root, Path::new(&format!("/inert/project/{exactly_512}")), ProjectPathField::VersionSource).is_ok());
+        assert!(project_path_spelling(root, Path::new(&format!("/inert/project/{exactly_512}d")), ProjectPathField::VersionSource).is_err());
+        assert!(project_path_spelling(root, Path::new(&format!("/inert/project/{}", "é".repeat(128))), ProjectPathField::VersionSource).is_err());
+        assert!(project_path_spelling(root, Path::new(&format!("/inert/project/{}", "a".repeat(PATH_LIMIT))), ProjectPathField::VersionSource).is_err());
+        for (field, path) in [(ProjectPathField::IosProject, "/inert/project/App.XCODEPROJ"),
+            (ProjectPathField::IosWorkspace, "/inert/project/App.xcodeproj"),
+            (ProjectPathField::IosProject, "/inert/project/App.xcodeproj/child")] {
+            assert!(project_path_spelling(root, Path::new(path), field).is_err());
+        }
+
+        let parent = DirectoryIdentity { dev: 1, ino: 2, mode: 0o40755, uid: 123, gid: 456 };
+        let file = FileIdentity { common: DirectoryIdentity { ino: 3, mode: 0o100644, ..parent }, nlink: 1, size: 0, mtime: (1, 2), ctime: (3, 4) };
+        assert!(project_path_file_leaf(file, parent));
+        assert!(!private_file(file.common.mode)); // Version metadata is not a weakening of credential capture.
+        for nlink in [0, 2, u64::MAX] { assert!(!project_path_file_leaf(FileIdentity { nlink, ..file }, parent)); }
+        assert!(!project_path_file_leaf(FileIdentity { common: DirectoryIdentity { dev: 2, ..file.common }, ..file }, parent));
+        for mode in [0o040755, 0o120777, 0o010600, 0o020600, 0o060600, 0o140600] {
+            assert!(!project_path_file_leaf(FileIdentity { common: DirectoryIdentity { mode, ..file.common }, ..file }, parent));
+        }
+        assert!(project_path_file_leaf(FileIdentity { size: u64::MAX, ..file }, parent)); // No invented content/size policy.
+        for changed in [FileIdentity { nlink: 2, ..file }, FileIdentity { size: 1, ..file },
+            FileIdentity { mtime: (2, 2), ..file }, FileIdentity { ctime: (3, 5), ..file },
+            FileIdentity { common: DirectoryIdentity { ino: 4, ..file.common }, ..file }] { assert!(changed != file); }
+        for changed in [DirectoryIdentity { dev: 2, ..parent }, DirectoryIdentity { ino: 3, ..parent },
+            DirectoryIdentity { mode: 0o40700, ..parent }, DirectoryIdentity { uid: 456, ..parent },
+            DirectoryIdentity { gid: 123, ..parent }] { assert!(changed != parent); }
+
+        // The real probe rejects these before even SourceBook::begin. A
+        // permanently-STOPped callback additionally forbids any native effect
+        // if that lexical barrier regresses; this test never issues a syscall.
+        let registered = RegisteredRoot { path: root.to_path_buf(), identity: parent };
+        for (path, field) in [("/inert/outside/VERSION", ProjectPathField::VersionSource),
+            ("/inert/project2/VERSION", ProjectPathField::VersionSource), ("/inert/project", ProjectPathField::MetadataRoot),
+            ("/inert/project/App.XCODEPROJ", ProjectPathField::IosProject)] {
+            let mut book = SourceBook::new();
+            let result = probe_project_path(&mut book, &registered, PathBuf::from(path), field, &mut || true);
+            assert!(matches!(result, Err(Reason::SourceRefused))); assert!(book.not_started() && !book.settled());
+        }
+        let mut book = SourceBook::new(); book.begin(1, 1).expect("bounded model reservation");
+        book.reserve(None, b"/").expect("model slot"); book.slots[0].state = OriginalState::Acquiring; book.terminal = true;
+        assert!(!book.settled()); book.slots[0].state = OriginalState::Unknown; assert!(!book.settled());
+        // A spent/uncertain close is never retried or changed to a known receipt.
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn project_path_containment_type_and_original_custody_are_conservative() { assert_project_path_source_contracts(); }
         #[test]
         fn native_spelling_subset_is_byte_exact_without_resolving_anything() {
             for bad in ["relative/a.jks", "/tmp//a.jks", "/tmp/./a.jks", "/tmp/../a.jks", "/tmp/a.jks/", "/tmp/a\0.jks"] { assert!(parts(Path::new(bad)).is_err()); }
@@ -460,7 +603,9 @@ mod linux {
     }
 }
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-pub(crate) use linux::{SourceBook, capture, probe_project, suffix, path_hint};
+pub(crate) use linux::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use linux::assert_project_path_source_contracts;
 
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
 mod unsupported {
@@ -471,9 +616,10 @@ mod unsupported {
     pub(crate) fn path_hint(_: &Path) -> Result<(), Reason> { Err(Reason::UnsupportedPlatform) }
     pub(crate) fn capture(_: &mut SourceBook, _: PathBuf, _: &[RegisteredRoot], _: FileKind, _: &mut dyn FnMut() -> bool) -> Result<CapturedSource, Reason> { Err(Reason::UnsupportedPlatform) }
     pub(crate) fn probe_project(_: &mut SourceBook, _: PathBuf, _: &[Arc<OriginWitness>], _: &mut dyn FnMut() -> bool) -> Result<ProjectProbe, Reason> { Err(Reason::UnsupportedPlatform) }
+    pub(crate) fn probe_project_path(_: &mut SourceBook, _: &RegisteredRoot, _: PathBuf, _: ProjectPathField, _: &mut dyn FnMut() -> bool) -> Result<ProjectPathProbe, Reason> { Err(Reason::UnsupportedPlatform) }
 }
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
-pub(crate) use unsupported::{SourceBook, capture, probe_project, suffix, path_hint};
+pub(crate) use unsupported::{SourceBook, capture, probe_project, probe_project_path, suffix, path_hint};
 
 #[cfg(test)]
 mod tests {

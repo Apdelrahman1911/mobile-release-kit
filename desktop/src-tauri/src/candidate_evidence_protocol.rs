@@ -299,6 +299,18 @@ impl Status {
 }
 
 #[cfg(test)]
+pub(crate) fn assert_candidate_wire_contract() {
+    // Explicit entry for the harness=false observer, reusing the existing
+    // bounded wire DATA tests rather than creating another execution suite.
+    tests::closed_commands_cannot_supply_paths_or_cancel_by_selection_alone_body();
+    tests::observation_is_consistency_only_and_big_decimals_remain_text_body();
+    tests::core_result_fixtures_round_trip_without_native_normalization_body();
+    tests::positional_nested_documents_and_noncanonical_summary_shapes_are_refused_body();
+    tests::failure_precedence_and_no_partial_summary_are_wire_contracts_body();
+    tests::status_cleanup_unknown_and_terminal_cancellation_cannot_be_relabelled_body();
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     pub(super) fn consistent() -> Value {
@@ -312,7 +324,9 @@ mod tests {
             "assurance":{"level":"local-document-consistency","documentsOnly":true,"artifactBytesVerified":false,"workflowAuthenticated":false,"storeStateObserved":false,"comparedWithSourceProject":false,"releaseReady":false,"recoveryAuthorized":false}})
     }
     #[test]
-    fn closed_commands_cannot_supply_paths_or_cancel_by_selection_alone() {
+    fn closed_commands_cannot_supply_paths_or_cancel_by_selection_alone() { closed_commands_cannot_supply_paths_or_cancel_by_selection_alone_body(); }
+
+    pub(super) fn closed_commands_cannot_supply_paths_or_cancel_by_selection_alone_body() {
         assert!(empty_request(&json!({})).is_ok());
         assert!(observe_request(&json!({"selectionId":"evidence-abc"})).is_ok());
         assert!(cancel_request(&json!({"operationId":"42","selectionId":"evidence-abc"})).is_ok());
@@ -326,7 +340,9 @@ mod tests {
         }
     }
     #[test]
-    fn observation_is_consistency_only_and_big_decimals_remain_text() {
+    fn observation_is_consistency_only_and_big_decimals_remain_text() { observation_is_consistency_only_and_big_decimals_remain_text_body(); }
+
+    pub(super) fn observation_is_consistency_only_and_big_decimals_remain_text_body() {
         let value = consistent();
         assert_eq!(serde_json::to_value(result(value.clone()).unwrap()).unwrap(), value);
         for flag in ["artifactBytesVerified", "workflowAuthenticated", "storeStateObserved", "comparedWithSourceProject", "releaseReady", "recoveryAuthorized"] {
@@ -347,7 +363,9 @@ mod tests {
         let mut bad = value.clone(); bad["summary"]["artifacts"].as_array_mut().unwrap().push(value["summary"]["artifacts"][0].clone()); assert!(result(bad).is_err());
     }
     #[test]
-    fn core_result_fixtures_round_trip_without_native_normalization() {
+    fn core_result_fixtures_round_trip_without_native_normalization() { core_result_fixtures_round_trip_without_native_normalization_body(); }
+
+    pub(super) fn core_result_fixtures_round_trip_without_native_normalization_body() {
         // The same five core-produced projections are consumed by the renderer
         // tests. This guards the cross-language contract, not provenance or IO.
         let fixtures: Value = serde_json::from_str(include_str!("../../tests/fixtures/candidate-evidence.json")).unwrap();
@@ -360,7 +378,9 @@ mod tests {
         }
     }
     #[test]
-    fn positional_nested_documents_and_noncanonical_summary_shapes_are_refused() {
+    fn positional_nested_documents_and_noncanonical_summary_shapes_are_refused() { positional_nested_documents_and_noncanonical_summary_shapes_are_refused_body(); }
+
+    pub(super) fn positional_nested_documents_and_noncanonical_summary_shapes_are_refused_body() {
         let value = consistent(); assert!(result(value.clone()).is_ok());
         for (pointer, positional) in [
             ("/documents/0", json!(["manifest", "valid"])),
@@ -389,7 +409,9 @@ mod tests {
         assert!(!display_text("Evidence\u{200b}",128,512));
     }
     #[test]
-    fn failure_precedence_and_no_partial_summary_are_wire_contracts() {
+    fn failure_precedence_and_no_partial_summary_are_wire_contracts() { failure_precedence_and_no_partial_summary_are_wire_contracts_body(); }
+
+    pub(super) fn failure_precedence_and_no_partial_summary_are_wire_contracts_body() {
         for (outcome, states) in [("incomplete", ["valid","missing","valid"]), ("invalid", ["invalid","missing","valid"]), ("inconsistent", ["valid","valid","valid"])] {
             let mut value = consistent(); value["outcome"] = json!(outcome); value["summary"] = Value::Null;
             for (i,state) in states.iter().enumerate() { value["documents"][i]["state"] = json!(state); }
@@ -403,7 +425,9 @@ mod tests {
         assert!(!refused(Problem::ObservationFailed).message.contains("private"));
     }
     #[test]
-    fn status_cleanup_unknown_and_terminal_cancellation_cannot_be_relabelled() {
+    fn status_cleanup_unknown_and_terminal_cancellation_cannot_be_relabelled() { status_cleanup_unknown_and_terminal_cancellation_cannot_be_relabelled_body(); }
+
+    pub(super) fn status_cleanup_unknown_and_terminal_cancellation_cannot_be_relabelled_body() {
         let mut status = Status::unavailable(9); status.availability = "available"; status.phase = Phase::Unknown; status.problem = Some(Problem::CleanupUnknown);
         assert!(status.clone().checked().is_ok());
         for phase in [Phase::Idle, Phase::Refused, Phase::Cancelled, Phase::Stopping] {

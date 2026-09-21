@@ -16,12 +16,20 @@ pub struct Project { pub id: String, pub name: String, pub path: String }
 pub struct AppInfo {
     pub app_name: &'static str, pub app_version: &'static str,
     pub runtime: RuntimeStatus, pub capabilities: Option<Value>, pub project_selection: ProjectSelectionAvailability,
+    pub project_path_selection: ProjectPathSelectionAvailability,
 }
 #[derive(Serialize)]
 pub struct ProjectSelectionAvailability { pub available: bool, pub reason: Option<&'static str> }
 impl ProjectSelectionAvailability {
     fn new(available: bool) -> Self {
         Self { available, reason: if available { None } else { Some("Project selection is not available in the current desktop runtime profile.") } }
+    }
+}
+#[derive(Serialize)]
+pub struct ProjectPathSelectionAvailability { pub available: bool, pub reason: Option<&'static str> }
+impl ProjectPathSelectionAvailability {
+    fn new(available: bool) -> Self {
+        Self { available, reason: if available { None } else { Some("Browsing existing project paths is not available in the current desktop runtime profile.") } }
     }
 }
 
@@ -88,7 +96,8 @@ impl DesktopBridge {
         // Display DATA only. Selection does not imply that snapshot or any
         // other core method is available, nor that live native admission holds.
         AppInfo { app_name: "Mobile Release Kit", app_version: env!("CARGO_PKG_VERSION"), runtime, capabilities,
-            project_selection: ProjectSelectionAvailability::new(document.project_selection_available()) }
+            project_selection: ProjectSelectionAvailability::new(document.project_selection_available()),
+            project_path_selection: ProjectPathSelectionAvailability::new(document.project_path_selection_available()) }
     }
     pub(crate) async fn catalog(&self, document: &crate::asset_session::DocumentBinding) -> Result<Value, BridgeError> { document.passive_query(self, Method::Catalog, json!({}))?.wait().await }
     pub(crate) async fn environment_requirements(&self, document: &crate::asset_session::DocumentBinding, input: crate::environment::Request) -> Result<crate::environment::Requirements, BridgeError> {
@@ -367,8 +376,21 @@ pub(crate) fn assert_native_capability_intersection_contract() {
 }
 
 #[cfg(test)]
+pub(crate) fn assert_project_path_availability_contract() {
+    // Display DATA only: no runtime resolution, native owner or asset permit.
+    for available in [false, true] {
+        let value = serde_json::to_value(ProjectPathSelectionAvailability::new(available)).unwrap();
+        assert_eq!(value, json!({"available": available, "reason": if available { None } else {
+            Some("Browsing existing project paths is not available in the current desktop runtime profile.") }}));
+        assert!(serde_json::to_vec(&value).unwrap().len() <= 1024);
+    }
+}
+
+#[cfg(test)]
 mod capability_tests {
     use super::*;
+    #[test]
+    fn project_path_availability_is_separate_bounded_display_data() { assert_project_path_availability_contract(); }
     #[test]
     fn core_availability_is_intersected_without_enabling_actions_or_rewriting_core_failures() {
         assert_native_capability_intersection_contract();

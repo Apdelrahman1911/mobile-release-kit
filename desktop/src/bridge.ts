@@ -25,6 +25,7 @@ import type { OfflinePreflightStatus } from './offlinePreflightTypes.ts';
 import { ANDROID_BUILD_EVENT, encodeAndroidBuildRequest, androidBuildError, parseAndroidBuildStatus } from './androidBuildProtocol.ts';
 import type { AndroidBuildCommand } from './androidBuildProtocol.ts';
 import type { AndroidBuildStatus } from './androidBuildTypes.ts';
+import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
 export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'metadata-text-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
@@ -145,6 +146,17 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     mode,
     appInfo: () => call<AppInfo>('app_info'),
     chooseProject: () => call<ProjectReference | null>('choose_project'),
+    chooseProjectPath: async (input) => {
+      try {
+        if (mode !== 'native') throw { code: 'project_path_unavailable' };
+        const request = parseProjectPathRequest(input);
+        if (!request) throw { code: 'project_path_invalid' };
+        // Exactly these two non-path arguments; no draft, root, title or filter.
+        const result = parseProjectPathSelection(await invoke<unknown>('choose_project_path', { projectId: request.projectId, field: request.field }), request);
+        if (result === undefined) throw projectPathError(null);
+        return result;
+      } catch (error) { throw projectPathError(error); }
+    },
     chooseEvidenceFolder: () => evidenceCall('artifact_evidence_choose', {}),
     evidenceStatus: () => evidenceCall('artifact_evidence_status', {}),
     observeEvidence: (selectionId) => evidenceCall('artifact_evidence_observe', { selectionId }),

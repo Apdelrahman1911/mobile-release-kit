@@ -16,6 +16,7 @@ import { environmentError, environmentRequestFits } from './environment.ts';
 import { environmentDiagnosticsError } from './environmentDiagnosticsProtocol.ts';
 import { releaseVersionError } from './releaseVersion.ts';
 import { evidenceError } from './candidateEvidence.ts';
+import { projectPathError } from './projectPaths.ts';
 import type { EnvironmentRequest, EnvironmentResult, EnvironmentRole, EnvironmentRequirement } from './environment.ts';
 import type { ApiError, Assurance, Catalog, DesktopApi, FieldHelp, JsonObject, ProjectSnapshot } from './types.ts';
 
@@ -120,8 +121,11 @@ export const previewApi: DesktopApi = {
     appName: 'Mobile Release Kit', appVersion: 'Example only',
     runtime: { state: 'unavailable', mode: 'unavailable', reason: 'Browser preview has no native runtime or core validation.' },
     capabilities: null,
+    projectPathSelection: { available: false, reason: 'Browser preview has no native project-path picker.' },
   }),
   chooseProject: async () => ({ id: 'preview-example', name: 'Northstar Notes', path: example.root }),
+  // No invented relative path or successful native selection in design mode.
+  chooseProjectPath: async () => { throw projectPathError({ code: 'project_path_unavailable' }); },
   // No fabricated folder, documents, lifecycle or successful result in preview.
   chooseEvidenceFolder: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },
   evidenceStatus: async () => { throw evidenceError({ code: 'artifact_evidence_unavailable' }); },

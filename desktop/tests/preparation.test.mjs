@@ -2,10 +2,12 @@
 // DTO fixtures, not policy implementations or evidence of core/native execution.
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import { blockingAncestor, getValue, sameJson, setValue } from '../src/catalog.ts';
 import { canUndoRemoval, initialWorkspace, isDirty, reviewFresh, suggestionFresh, validationFresh, workspaceReducer as reduce } from '../src/drafts.ts';
 import { methodReason } from '../src/certainty.ts';
 import { pathsOverlap, suggestionHints, valueSummary } from '../src/preparation.ts';
+import { PROJECT_PATH_FIELDS, beginProjectPath, finishProjectPath, initialProjectPathState, projectPathDraftReason, projectPathOwnerReason, retireProjectPath } from '../src/projectPaths.ts';
 
 const assurance = {
   basis: 'schema-policy', projectCodeExecuted: false, toolsProbed: false,
@@ -359,4 +361,169 @@ test('undo capacity refuses additional removal instead of silently evicting earl
   state = reduce(state, { type: 'edit', projectId: 'a', path: 'field64', value: undefined });
   assert.equal(state.projects.a.removedFields.length, 64);
   assert.equal(state.projects.a.draft.field64, undefined);
+});
+
+const pathDraft = { ...original, version: { source: 'release/old-version', nameKey: 'NAME', buildKey: 'BUILD' },
+  ios: { enabled: true, project: 'ios/Old.xcodeproj', workspace: 'ios/Keep.xcworkspace', scheme: 'KeepScheme' },
+  metadata: { root: 'release/old-store', androidLocales: ['en-US'], iosLocales: ['en-US'] } };
+const pathValues = { 'version.source': 'release/VERSION', 'ios.project': 'ios/New.xcodeproj',
+  'ios.workspace': 'ios/New.xcworkspace', 'metadata.root': 'release/store' };
+function pathWorkspace() {
+  let state = loaded(pathDraft);
+  state = observed(reduce(state, { type: 'select', project: project('b') }), { keep: 'other project draft' }, 1, 'b');
+  return reduce(state, { type: 'switch', projectId: 'a' });
+}
+function pathReply(binding) { return { projectId: binding.projectId, field: binding.field, relativePath: pathValues[binding.field] }; }
+
+test('a bound path result is consumed once through the ordinary one-field edit, never a save or Xcode conflict repair', () => {
+  for (const field of PROJECT_PATH_FIELDS) {
+    const before = pathWorkspace();
+    const originalData = structuredClone(before);
+    const service = {};
+    let picker = beginProjectPath(initialProjectPathState, before, field, service);
+    const binding = picker.pending;
+    assert.equal(picker.eligible, binding);
+    assert.deepEqual(binding, { projectId: 'a', field, revision: before.projects.a.revision,
+      baselineGeneration: before.projects.a.baselineGeneration, serviceGeneration: service });
+    assert.notEqual(projectPathOwnerReason(picker), null);
+    assert.equal(beginProjectPath(picker, before, field, service), picker, 'a second request cannot replace the original');
+    assert.equal(finishProjectPath(picker, { ...binding }, before, service, { reply: pathReply(binding) }).state, picker, 'copied identity is not the original request');
+    const completion = finishProjectPath(picker, binding, before, service, { reply: pathReply(binding) });
+    assert.deepEqual(completion.edit, { field, value: pathValues[field] });
+    picker = completion.state; // App consumes the binding before onEdit dispatch.
+    assert.equal(picker.pending, null); assert.equal(picker.eligible, null); assert.equal(picker.unverified, null);
+    const after = reduce(before, { type: 'edit', projectId: 'a', path: completion.edit.field, value: completion.edit.value });
+    assert.deepEqual(after.projects.a.draft, setValue(before.projects.a.draft, field, pathValues[field]));
+    assert.equal(after.projects.a.baseline, before.projects.a.baseline);
+    assert.equal(after.projects.a.baselineGeneration, before.projects.a.baselineGeneration);
+    assert.equal(after.projects.a.snapshot, before.projects.a.snapshot);
+    assert.equal(after.projects.a.lastSave, before.projects.a.lastSave);
+    assert.equal(after.projects.a.revision, before.projects.a.revision + 1);
+    assert.equal(after.projects.b, before.projects.b);
+    assert.equal(after.selectedId, 'a');
+    for (const other of PROJECT_PATH_FIELDS.filter((path) => path !== field)) assert.equal(getValue(after.projects.a.draft, other), getValue(before.projects.a.draft, other));
+    assert.deepEqual(before, originalData, 'the input workspace is not mutated');
+    assert.deepEqual(finishProjectPath(picker, binding, after, service, { reply: pathReply(binding) }), { state: picker, edit: null });
+    const later = beginProjectPath(picker, after, field, service);
+    assert.notEqual(later.pending, binding);
+    assert.equal(finishProjectPath(later, binding, after, service, { reply: pathReply(binding) }).state, later, 'an old reply cannot settle a later original');
+  }
+});
+
+test('path browsing preserves malformed ancestors and non-text values instead of coercing them', () => {
+  const service = {};
+  for (const field of PROJECT_PATH_FIELDS) {
+    const [parent, leaf] = field.split('.');
+    for (const value of [null, false, 7, [], {}, ['inert']]) {
+      const draft = { ...pathDraft, [parent]: { [leaf]: value } };
+      const state = loaded(draft);
+      assert.notEqual(projectPathDraftReason(state.projects.a.draft, field), null);
+      assert.equal(beginProjectPath(initialProjectPathState, state, field, service), initialProjectPathState);
+      assert.deepEqual(state.projects.a.draft, draft);
+    }
+    for (const parentValue of [null, false, 7, 'preserve parent text', [], ['inert']]) {
+      const state = loaded({ ...pathDraft, [parent]: parentValue });
+      assert.notEqual(projectPathDraftReason(state.projects.a.draft, field), null);
+      assert.equal(beginProjectPath(initialProjectPathState, state, field, service), initialProjectPathState);
+      assert.deepEqual(state.projects.a.draft[parent], parentValue);
+    }
+    for (const draft of [{}, { [parent]: {} }, { [parent]: { [leaf]: '' } }, { [parent]: { [leaf]: 'not-yet-present' } }]) {
+      assert.equal(projectPathDraftReason(draft, field), null, 'browsing does not impose a policy on existing draft text');
+      assert.ok(beginProjectPath(initialProjectPathState, loaded(draft), field, service).pending);
+    }
+  }
+  const current = pathWorkspace();
+  for (const field of [null, 'ios.scheme', 'android.bundletool', 'credential.file', '__proto__.path'])
+    assert.equal(beginProjectPath(initialProjectPathState, current, field, service), initialProjectPathState);
+  for (const property of ['revision', 'baselineGeneration']) for (const value of [-1, NaN, 0x1_0000_0000]) {
+    const state = { ...current, projects: { ...current.projects, a: { ...current.projects.a, [property]: value } } };
+    assert.equal(beginProjectPath(initialProjectPathState, state, 'version.source', service), initialProjectPathState);
+  }
+  for (const state of [initialWorkspace, loaded(null), { ...current, selectedId: 'not-registered' }])
+    assert.equal(beginProjectPath(initialProjectPathState, state, 'version.source', service), initialProjectPathState);
+});
+
+test('Save, unchanged dispatch, switch-away-and-back and service changes retire eligibility without releasing the original', () => {
+  const actions = [
+    [{ type: 'edit', projectId: 'a', path: 'source.candidateBranch', value: 'later-user-choice' }],
+    [{ type: 'edit', projectId: 'a', path: 'source.candidateBranch', value: 'main' }],
+    [{ type: 'config-save-intent', projectId: 'a' }],
+    [{ type: 'snapshot-failed', projectId: 'a', requestId: 999, error: { code: 'inert', message: 'Inert refusal', retryable: false } }],
+    [{ type: 'switch', projectId: 'b' }, { type: 'switch', projectId: 'a' }],
+    [{ type: 'select', project: project('a') }],
+    [{ type: 'reset', projectId: 'a' }],
+  ];
+  for (const sequence of actions) {
+    let workspace = pathWorkspace();
+    const service = {};
+    let picker = beginProjectPath(initialProjectPathState, workspace, 'ios.project', service);
+    const original = picker.pending;
+    for (const action of sequence) {
+      if (action.type === 'snapshot-failed') assert.equal(reduce(workspace, action), workspace, 'An obsolete snapshot failure really is an unchanged reducer result');
+      picker = retireProjectPath(picker); // Must happen before reducer early return.
+      workspace = reduce(workspace, action);
+      assert.equal(picker.pending, original);
+      assert.equal(picker.eligible, null);
+      assert.notEqual(projectPathOwnerReason(picker), null);
+      assert.equal(beginProjectPath(picker, workspace, 'version.source', service), picker);
+    }
+    const beforeReply = structuredClone(workspace);
+    const completion = finishProjectPath(picker, original, workspace, service, { reply: pathReply(original) });
+    assert.equal(completion.edit, null);
+    assert.equal(completion.state.pending, null);
+    assert.equal(completion.state.unverified, null, 'a stale display still consumes its own settled original result');
+    assert.deepEqual(workspace, beforeReply);
+  }
+  const workspace = pathWorkspace(), service = {};
+  const picker = beginProjectPath(initialProjectPathState, workspace, 'version.source', service), binding = picker.pending;
+  for (const [changed, generation] of [
+    [workspace, {}],
+    [reduce(workspace, { type: 'switch', projectId: 'b' }), service],
+    [{ ...workspace, projects: { ...workspace.projects, a: { ...workspace.projects.a, draft: { version: null } } } }, service],
+    ...['revision', 'baselineGeneration'].map((key) => [{ ...workspace, projects: { ...workspace.projects,
+      a: { ...workspace.projects.a, [key]: workspace.projects.a[key] + 1 } } }, service]),
+  ]) assert.equal(finishProjectPath(picker, binding, changed, generation, { reply: pathReply(binding) }).edit, null);
+  // SOURCE integration guard only, not a mounted React/native test.
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const dispatch = app.slice(app.indexOf('const dispatch ='), app.indexOf('const [configEdit]'));
+  const retire = dispatch.indexOf('retirePathPicker()');
+  assert.ok(retire >= 0 && retire < dispatch.indexOf('workspaceReducer(previous, action)'));
+  assert.ok(retire < dispatch.indexOf('if (next === previous) return'));
+  assert.match(app, /onPrepareSave=.*dispatch\(\{ type: 'config-save-intent'/);
+  assert.match(app, /workspaceRef.current.projects\[session.project.id\] !== session/);
+  const finish = app.slice(app.indexOf('const finish = (outcome:'), app.indexOf('const draftRetained'));
+  const consumed = finish.indexOf('publishPathPicker(completion.state)'), edit = finish.indexOf('edit(completion.edit.field, completion.edit.value)');
+  assert.ok(consumed >= 0 && consumed < edit);
+  assert.match(app, /preflightBusy\(\) \?\? androidBusy\(\) \?\? projectPathOwnerReason\(pathPickerRef.current\)/);
+});
+
+test('Cancel and refusals preserve drafts; malformed replies and CleanupUnknown retain a non-retryable original witness', () => {
+  const known = ['invalid', 'unavailable', 'busy', 'stale', 'unsafe', 'changed', 'limit', 'deadline'];
+  const outcomes = [{ reply: null }, ...known.map((suffix) => ({ error: { code: `project_path_${suffix}`, message: '/INERT_PRIVATE/not-displayed' } }))];
+  const unknown = [{ error: { code: 'project_path_cleanup_unknown', message: '/INERT_PRIVATE/cleanup' } },
+    { error: new Error('/INERT_PRIVATE/native-exception') }, { reply: undefined }, { reply: {} },
+    { reply: { projectId: 'wrong-project', field: 'version.source', relativePath: 'release/VERSION' } },
+    { reply: { projectId: 'a', field: 'version.source', relativePath: '/INERT_PRIVATE/outside' } }];
+  for (const retired of [false, true]) for (const outcome of [...outcomes, ...unknown]) {
+    const workspace = pathWorkspace(), before = structuredClone(workspace), service = {};
+    let picker = beginProjectPath(initialProjectPathState, workspace, 'version.source', service);
+    const binding = picker.pending;
+    if (retired) picker = retireProjectPath(picker);
+    const completion = finishProjectPath(picker, binding, workspace, service, outcome);
+    assert.equal(completion.edit, null);
+    assert.equal(completion.state.pending, null);
+    assert.equal(completion.state.eligible, null);
+    assert.equal(completion.state.message.includes('INERT_PRIVATE'), false);
+    assert.deepEqual(workspace, before);
+    if (unknown.includes(outcome)) {
+      assert.equal(completion.state.unverified, binding, 'the original witness survives the ended invoke');
+      const retained = retireProjectPath(completion.state);
+      assert.notEqual(projectPathOwnerReason(retained), null);
+      assert.equal(beginProjectPath(retained, workspace, 'metadata.root', {}), retained, 'reconnection cannot imply cleanup');
+      assert.equal(finishProjectPath(retained, binding, workspace, service, { reply: pathReply(binding) }).state, retained, 'a duplicate callback cannot erase uncertainty');
+    } else {
+      assert.equal(completion.state.unverified, null);
+      assert.equal(projectPathOwnerReason(completion.state), null);
+    }
+  }
 });

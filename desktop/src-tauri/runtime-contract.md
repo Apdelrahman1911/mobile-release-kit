@@ -6,11 +6,18 @@ backend, or replacement for the audited CLI's ownership services.
 
 ## Current executable scope
 
-The installed passive renderer commands are `app_info`, `choose_project`,
+The installed read-only/preparation renderer commands are `app_info`, `choose_project`,
 `project_snapshot {projectId}`, `catalog`, `validate_config {draft}`,
 `suggest_config {hints}`, `preview_config {base, draft}`,
-`environment_requirements {draft, platform, operation}`, and
-`propose_github_setup {draft, toolingRepository, toolingSha, suppliedSnapshot}`.
+`environment_requirements {draft, platform, operation}`,
+`propose_github_setup {draft, toolingRepository, toolingSha, suppliedSnapshot}`,
+`release_version_observe {projectId}`,
+`metadata_text_observe {projectId, platform, locale}`, and
+`metadata_text_validate {platform, fields}`.
+Evidence has separate lifecycle commands: `artifact_evidence_choose {}`,
+`artifact_evidence_status {}`, `artifact_evidence_observe {selectionId}`, and
+`artifact_evidence_cancel {operationId, selectionId}`. Cancellation addresses
+the original owner; it is not another passive core method.
 Snapshot and draft validation return the core result without inventing verified
 facts or saving files. Project IDs refer to Rust-held native picker selections;
 renderer-provided roots/executables/command lines/method names are not admitted.
@@ -33,7 +40,8 @@ or renderer override. Other platforms/profiles do not gain production launch.
 
 That installed profile admits exactly `capabilities`, `catalog`,
 `project.snapshot`, `config.validate`, `config.suggest`, `config.preview`,
-`environment.requirements` and `github.setup.propose`.
+`environment.requirements`, `github.setup.propose`, `release.version.observe`,
+`metadata.text.observe`, `metadata.text.validate` and `artifacts.candidate.observe`.
 The native bridge intersects core availability with this allowlist. A separate
 project-only gate uses the existing document/picker/source/registry chain, not
 the closed credential/asset-session grant. `app_info.projectSelection` is
@@ -44,6 +52,13 @@ do not save; the separate native review/confirmation flow is required.
 The two guidance methods use the current draft: prerequisites do not inspect
 installed tools, and workflow proposals do not observe or modify a repository,
 resolve a remote ref, contact GitHub or grant Apply authority.
+Version and public-text reads use the saved configuration, never unsaved drafts.
+Candidate inspection has a separate evidence registry and native folder picker;
+its gate intersects installed project-selection availability with the exact
+candidate passive method, while retaining the original shared lifecycle gates.
+It never grants private-asset authority or replaces the source project. Its
+three document checks prove consistency only, not artifact bytes, authenticated
+provenance, Store state, source correspondence, readiness or recovery authority.
 Configuration saving separately uses the existing `EditOwner`, a sealed
 configuration-only installed-A selector and its own original runtime ledger.
 Passive queries never grant write authority. Inspection and acquisition workers
@@ -51,7 +66,8 @@ are registered before effects; the final one-use claim is serialized against
 the same original session/document, STOP and deadlines. Custody remains retained
 through review and Apply, and settles only after original borrowers/child IO
 return; its original settlement worker must also join before final success.
-Installed-shell/project/guidance/Save native acceptance is still pending. These changes
+Installed-shell/project/guidance/Save and the read-only batch's native acceptance
+are still pending. These changes
 do not qualify a standalone installer, general Linux, macOS or Windows. There
 is no source, PATH, ambient-Python, browser-preview or synthetic-result fallback.
 `inspect_bundle_for_packaging` is explicitly **unqualified preparation work**;

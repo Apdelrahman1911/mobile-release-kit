@@ -298,6 +298,9 @@ export interface ProjectSnapshot {
 }
 
 export interface ProjectReference { id: string; name: string; path: string }
+export type ProjectPathField = 'version.source' | 'ios.project' | 'ios.workspace' | 'metadata.root';
+export interface ProjectPathRequest { projectId: string; field: ProjectPathField }
+export interface ProjectPathSelection extends ProjectPathRequest { relativePath: string }
 export interface ApiError { code: string; message: string; retryable: false }
 
 export interface AppInfo {
@@ -312,6 +315,8 @@ export interface AppInfo {
   // Optional additive profile DATA. It grants neither a live native request
   // nor availability of any core method or asset-session operation.
   projectSelection?: { available: boolean; reason: string | null };
+  // A separate installed-project profile, never the compatibility folder picker.
+  projectPathSelection?: { available: boolean; reason: string | null };
 }
 
 export type BridgeMode = 'native' | 'preview' | 'unavailable';
@@ -375,6 +380,7 @@ export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitH
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   chooseProject(): Promise<ProjectReference | null>;
+  chooseProjectPath(request: ProjectPathRequest): Promise<ProjectPathSelection | null>;
   snapshot(projectId: string): Promise<ProjectSnapshot>;
   catalog(): Promise<Catalog>;
   validate(draft: JsonObject): Promise<ValidationResult>;

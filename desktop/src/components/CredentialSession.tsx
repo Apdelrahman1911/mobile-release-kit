@@ -79,12 +79,14 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
   useEffect(() => { setReplacement(null); setConfirmLock(false); }, [project?.project.id, state.scope.platform, state.scope.stage, state.scope.purpose]);
   const status = state.status;
   const operation = status?.operation;
+  const projectPathOperation = operation?.operation === 'choose-project-path';
   const baseReason = nativeBusyReason ?? assetSessionReason(state);
   const contextReason = nativeBusyReason ?? assetContextReason(state);
   const cancellationReason = assetCancellationReason(state);
   const inSession = status?.mode === 'session';
   const nativeAvailable = state.mode === 'native' && status?.capability.available === true && !state.blocked && !state.observationFailed;
   const idle = !operation || (operation.phase === 'idle' && operation.settlement === 'known');
+  const projectPathActive = projectPathOperation && !idle;
   const intentPending = assetIntentPending(state);
   const effectiveKindId = intentPending && state.intent ? state.intent.kind : kindId;
   const originalKind = guide?.kinds.find((item) => item.id === (operation?.selectionToken ? state.selectionKind : effectiveKindId));
@@ -119,9 +121,9 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
     <div className="button-row">
       {!inSession && <button className="button" disabled={!!baseReason || !guide} onClick={() => controller.open()}><Icon name="key" size={16} />Start session — keep inputs in memory</button>}
       <button className="button secondary" disabled={state.mode !== 'native' || state.observing} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={16} />{state.observing ? 'Checking original status…' : 'Check session status'}</button>
-      {inSession && <button className="button secondary" disabled={!!state.busy} onClick={() => setConfirmLock(true)}>Discard session…</button>}
+      {inSession && <button className="button secondary" disabled={!!state.busy || projectPathActive} onClick={() => setConfirmLock(true)}>Discard session…</button>}
     </div>
-    {confirmLock && <div className="session-review" role="group" aria-label="Confirm session discard"><div className="inline-heading"><h3>Discard all session copies and assignments?</h3>{controlHelp('lock')}</div><p>Original files stay untouched. This cannot force cleanup of an unsettled operation. No record is kept for your next launch.</p><div className="button-row"><button className="button secondary" onClick={() => setConfirmLock(false)}>Keep this session</button><button className="button danger" disabled={!!state.busy} onClick={() => { if (controller.lock()) setConfirmLock(false); }}>Discard session copies</button></div></div>}
+    {confirmLock && <div className="session-review" role="group" aria-label="Confirm session discard"><div className="inline-heading"><h3>Discard all session copies and assignments?</h3>{controlHelp('lock')}</div><p>Original files stay untouched. This cannot force cleanup of an unsettled operation. No record is kept for your next launch.</p><div className="button-row"><button className="button secondary" onClick={() => setConfirmLock(false)}>Keep this session</button><button className="button danger" disabled={!!state.busy || projectPathActive} onClick={() => { if (controller.lock()) setConfirmLock(false); }}>Discard session copies</button></div></div>}
     <div className="session-context">
       <div className="inline-heading"><h3>Release context</h3>{controlHelp('project')}<Badge tone={state.contextCurrent ? 'info' : 'warning'}>{state.contextCurrent ? 'Context submitted · not yet policy-validated' : 'Context not current'}</Badge></div>
       <p><strong>Project:</strong> {project?.project.name ?? 'Choose a project first'} · {project?.draft ? 'Current in-memory draft' : 'Prepare a draft in Project settings'}</p>
@@ -131,7 +133,7 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
       <p>Changing the project, draft, platform, stage or purpose makes prior assignment displays stale immediately. The core—not these selectors—decides which inputs are required.</p>
       <button className="button secondary small" disabled={!nativeAvailable || !inSession || !project || state.updatingContext || nativeBusyReason !== null} onClick={() => controller.submitContext()}>{state.updatingContext ? 'Submitting current context…' : 'Submit current context'}</button>
     </div>
-    {nativeAvailable && inSession && guide && <>
+    {nativeAvailable && inSession && guide && !projectPathActive && <>
       <div className="session-selection">
         {idle && !intentPending ? <>
           <div className="field"><div className="field-label"><label htmlFor={`${id}-kind`}>What would you like to provide?</label>{controlHelp('choose')}</div><select id={`${id}-kind`} value={kindId} disabled={!!state.busy} onChange={(event) => { setKind(event.target.value as AssetKind); setReplacement(null); }}>{ASSET_KINDS.map((kind) => <option key={kind} value={kind}>{guide.kinds.find((entry) => entry.id === kind)?.label ?? 'Supported session input'}</option>)}</select></div>
@@ -149,7 +151,8 @@ export function CredentialSession({ state, controller, project, guide, onHelp, n
       </div>
     </>}
     {cancellationReason && <p className="review-caution" role="status">{cancellationReason}</p>}
-    {operation && <div className="session-progress" role="status" aria-live="polite"><div className="credential-row-heading"><h3>Original operation status</h3><Badge tone={operation.settlement === 'unknown' || operation.settlement === 'late-known' ? 'warning' : 'neutral'}>{operation.phase}</Badge></div><p><strong>Source custody:</strong> {operation.source} · <strong>Settlement:</strong> {operation.settlement}</p><p>{ASSET_REASON_HELP[operation.reason]}</p>{operation.phase !== 'idle' && <button className="button secondary small" disabled={!!cancellationReason} onClick={() => controller.discard()}>Request cancel / discard this operation</button>}<p>A pending result is not a successful import. Cancellation does not erase an unknown owner or restore an old assignment.</p></div>}
+    {operation && (projectPathOperation ? <div className="session-progress" role="status" aria-live="polite"><div className="credential-row-heading"><h3>Original project-path picker status</h3><Badge>{operation.phase}</Badge></div><p><strong>Settlement:</strong> {operation.settlement} · <strong>Reason:</strong> {operation.reason}</p><p>This selects a project-relative draft path, not a credential or asset. Only the original picker offers Cancel; a pending or unknown result does not confirm selection or cleanup.</p></div>
+      : <div className="session-progress" role="status" aria-live="polite"><div className="credential-row-heading"><h3>Original operation status</h3><Badge tone={operation.settlement === 'unknown' || operation.settlement === 'late-known' ? 'warning' : 'neutral'}>{operation.phase}</Badge></div><p><strong>Source custody:</strong> {operation.source} · <strong>Settlement:</strong> {operation.settlement}</p><p>{ASSET_REASON_HELP[operation.reason]}</p>{operation.phase !== 'idle' && <button className="button secondary small" disabled={!!cancellationReason} onClick={() => controller.discard()}>Request cancel / discard this operation</button>}<p>A pending result is not a successful import. Cancellation does not erase an unknown owner or restore an old assignment.</p></div>)}
     {operation?.assessment && guide && <Assessment value={operation.assessment} guide={guide} onHelp={onHelp} />}
     {preview && <div className="session-review" aria-label="Explicit session review"><div className="inline-heading"><h3>{preview.action === 'save' ? 'Keep this input for this session?' : preview.action === 'bind' ? 'Assign this record to the submitted context?' : 'Remove this session copy?'}</h3>{controlHelp(preview.action === 'bind' ? 'assign' : preview.action)}</div>
       <p><strong>Exact target:</strong> {reviewTarget ?? 'Not established — confirmation is unavailable'}{preview.subject.change === 'replace' ? ' · Replace this revision' : ''}</p>

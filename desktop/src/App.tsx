@@ -27,7 +27,9 @@ import { metadataProjectDirty } from './metadataText.ts';
 import { MetadataTextEditController, metadataOwnerReason, metadataRetainsDraft } from './metadataTextEditController.ts';
 import { githubSetupError } from './githubSetupProtocol.ts';
 import { suggestionHints } from './preparation.ts';
-import type { ApiError, AppInfo, Catalog, DesktopApi, HelpContent, JsonValue, Page } from './types.ts';
+import { beginProjectPath, finishProjectPath, initialProjectPathState, projectPathAvailabilityReason, projectPathOwnerReason, retireProjectPath } from './projectPaths.ts';
+import type { ProjectPathState } from './projectPaths.ts';
+import type { ApiError, AppInfo, Catalog, DesktopApi, HelpContent, JsonValue, Page, ProjectPathField } from './types.ts';
 import { Badge, ConfirmDialog, ErrorNotice, HelpDialog, PageHeading } from './components/Common.tsx';
 import { DraftEditor } from './components/DraftEditor.tsx';
 import { ConfigSave } from './components/ConfigSave.tsx';
@@ -100,9 +102,20 @@ export function App() {
   const workflowControllerRef = useRef<GitHubWorkflowEditController | null>(null);
   const assetControllerRef = useRef<AssetSessionController | null>(null);
   const metadataControllerRef = useRef<MetadataTextEditController | null>(null);
+  const [pathPicker, setPathPicker] = useState(initialProjectPathState);
+  const pathPickerRef = useRef(pathPicker);
+  // Object identity is a service generation, including reconnect-away-and-back.
+  const pathService = useRef<{ api: DesktopApi | null; info: AppInfo | null }>({ api: null, info: null });
+  const publishPathPicker = useCallback((next: ProjectPathState) => { pathPickerRef.current = next; setPathPicker(next); }, []);
+  const retirePathPicker = useCallback(() => {
+    const next = retireProjectPath(pathPickerRef.current);
+    if (next !== pathPickerRef.current) publishPathPicker(next);
+  }, [publishPathPicker]);
   const preflightBusy = useCallback(() => offlinePreflightControllerRef.current ? offlinePreflightOwnerReason(offlinePreflightControllerRef.current.getSnapshot()) : null, []);
   const androidBusy = useCallback(() => androidBuildControllerRef.current ? androidBuildOwnerReason(androidBuildControllerRef.current.getSnapshot()) : null, []);
-  const savedCommandBusy = useCallback(() => preflightBusy() ?? androidBusy(), [preflightBusy, androidBusy]);
+  // Existing reciprocal admission callbacks also retain the original path
+  // picker, even after its display eligibility was retired by a local edit.
+  const savedCommandBusy = useCallback(() => preflightBusy() ?? androidBusy() ?? projectPathOwnerReason(pathPickerRef.current), [preflightBusy, androidBusy]);
   const syncConnectionContext = useCallback(() => {
     const selected = workspaceRef.current.selectedId;
     const project = selected && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] : null;
@@ -123,6 +136,7 @@ export function App() {
   const dispatch = useCallback((action: WorkspaceAction) => {
     // Intent/event retirement must precede even an unchanged reducer result:
     // failed refresh and unchanged/older saves need not advance generations.
+    retirePathPicker();
     offlinePreflightControllerRef.current?.beforeWorkspaceAction(action);
     androidBuildControllerRef.current?.beforeWorkspaceAction(action);
     releaseVersionControllerRef.current?.beforeWorkspaceAction(action);
@@ -154,7 +168,7 @@ export function App() {
     workflowControllerRef.current?.syncContext();
     editControllerRef.current?.syncDraft();
     syncConnectionContext();
-  }, [syncConnectionContext]);
+  }, [syncConnectionContext, retirePathPicker]);
   const [configEdit] = useState(() => new ConfigEditController({
     project: (projectId) => Object.hasOwn(workspaceRef.current.projects, projectId) ? workspaceRef.current.projects[projectId] ?? null : null,
     otherEditReason: (projectId) => savedCommandBusy() ?? (diagnosticsControllerRef.current ? diagnosticsOwnerReason(diagnosticsControllerRef.current.getSnapshot()) : null) ??
@@ -244,7 +258,8 @@ export function App() {
   const [candidateEvidence] = useState(() => new CandidateEvidenceController(savedCommandBusy));
   const evidenceState = useSyncExternalStore(candidateEvidence.subscribe, candidateEvidence.getSnapshot, candidateEvidence.getSnapshot);
   const savedCommandPrerequisiteReason = (): string | null => {
-    if (bootstrapPending.current || connectionPicking.current) return 'Finish the original service or project-selection request before reviewing saved checks.';
+    const pathOwner = projectPathOwnerReason(pathPickerRef.current); if (pathOwner) return pathOwner;
+    if (bootstrapPending.current || connectionPicking.current) return 'Finish the original service or project-selection request before browsing or reviewing saved checks.';
     const projectId = workspaceRef.current.selectedId ?? '';
     const owned = configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId) ??
       metadataOwnerReason(metadataText.getSnapshot(), projectId) ?? diagnosticsOwnerReason(diagnostics.getSnapshot());
@@ -301,6 +316,10 @@ export function App() {
   const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
 
   const bootstrap = useCallback(async () => {
+    retirePathPicker();
+    pathService.current = { api: null, info: null };
+    // Reconnection cannot discard a pending or unverified original picker.
+    if (projectPathOwnerReason(pathPickerRef.current)) return;
     offlinePreflight.beginConnection();
     androidBuild.beginConnection();
     if (savedCommandBusy()) { setBootError(androidBusy() ? androidBuildError({ code: 'android_build_busy' }) : offlinePreflightError({ code: 'offline_preflight_busy' })); return; }
@@ -344,6 +363,7 @@ export function App() {
       void githubConnection.attach(port);
       const appInfo = await connection.appInfo();
       if (generation !== bootGeneration.current) return;
+      pathService.current = { api: connection, info: appInfo };
       setInfo(appInfo);
       githubSetup.setConnection(connection, appInfo);
       environment.setConnection(connection, appInfo);
@@ -373,6 +393,7 @@ export function App() {
       }
     } catch (error) {
       if (generation === bootGeneration.current) {
+        pathService.current = { api: null, info: null };
         connectionHandoffRef.current = null; connectionPortRef.current = null;
         githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null);
         setInfo(null); setCatalog(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); releaseVersion.connectionUnavailable(); releaseInputs.connectionUnavailable(); setBootError(apiError(error));
@@ -381,7 +402,7 @@ export function App() {
       passivePending.current -= 1; setPassivePending(passivePending.current);
       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); }
     }
-  }, [githubSetup, githubConnection, environment, releaseVersion, releaseInputs, diagnostics, candidateEvidence, offlinePreflight, androidBuild, androidBusy, savedCommandBusy, metadataText, syncConnectionContext]);
+  }, [githubSetup, githubConnection, environment, releaseVersion, releaseInputs, diagnostics, candidateEvidence, offlinePreflight, androidBuild, androidBusy, savedCommandBusy, metadataText, syncConnectionContext, retirePathPicker]);
 
   // Subscribe before bootstrap. A version read/replacement retires consent
   // synchronously, before React publishes another frame of the review.
@@ -389,7 +410,7 @@ export function App() {
 
   useEffect(() => {
     void bootstrap();
-    return () => { bootGeneration.current += 1; connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
+    return () => { bootGeneration.current += 1; pathService.current = { api: null, info: null }; retirePathPicker(); connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
   }, [bootstrap]);
 
   useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
@@ -426,7 +447,7 @@ export function App() {
     return () => window.removeEventListener('beforeunload', warn);
   }, []);
 
-  const navigate = (next: Page) => { offlinePreflight.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); diagnostics.setVisible(next === 'environment'); setPage(next); main.current?.focus({ preventScroll: true }); };
+  const navigate = (next: Page) => { retirePathPicker(); offlinePreflight.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); diagnostics.setVisible(next === 'environment'); setPage(next); main.current?.focus({ preventScroll: true }); };
   const refreshReason = savedCommandBusy() ?? methodReason(info, 'project.snapshot', mode);
   const validateReason = savedCommandBusy() ?? methodReason(info, 'config.validate', mode);
   const reviewReason = savedCommandBusy() ?? methodReason(info, 'config.preview', mode);
@@ -441,6 +462,7 @@ export function App() {
   const chooseDisabled = chooseReason !== null;
 
   const loadSnapshot = async (projectId: string) => {
+    retirePathPicker();
     offlinePreflight.snapshotIntent(projectId);
     androidBuild.snapshotIntent(projectId);
     if (!api || savedCommandBusy() || (refreshReason !== null && !preview)) return;
@@ -456,6 +478,7 @@ export function App() {
   };
 
   const chooseProject = async () => {
+    retirePathPicker();
     offlinePreflight.selectionIntent();
     androidBuild.selectionIntent();
     if (!api || savedCommandBusy() || chooseDisabled || connectionPicking.current) return;
@@ -540,12 +563,40 @@ export function App() {
     if (session) dispatch({ type: 'edit', projectId: session.project.id, path, value });
   };
 
+  const projectPathStartReason = (): string | null => {
+    const owner = projectPathOwnerReason(pathPickerRef.current); if (owner) return owner;
+    if (bootstrapPending.current) return 'Application capabilities are being loaded. Text entry remains available.';
+    const service = pathService.current;
+    return projectPathAvailabilityReason(service.info, service.api?.mode ?? 'unavailable')
+      ?? savedCommandBusy() ?? savedCommandPrerequisiteReason();
+  };
+  const chooseProjectPath = async (field: ProjectPathField) => {
+    const service = pathService.current;
+    // A queued click from an older editor cannot select into a different view.
+    if (!session || workspaceRef.current.selectedId !== session.project.id || workspaceRef.current.projects[session.project.id] !== session) return;
+    if (!service.api || projectPathStartReason() !== null || !catalog?.fields.some((entry) => entry.path === field && entry.input === 'text')) return;
+    const next = beginProjectPath(pathPickerRef.current, workspaceRef.current, field, service);
+    if (next === pathPickerRef.current || !next.pending) return;
+    const binding = next.pending;
+    publishPathPicker(next);
+    const finish = (outcome: { reply: unknown } | { error: unknown }) => {
+      const completion = finishProjectPath(pathPickerRef.current, binding, workspaceRef.current, pathService.current, outcome);
+      // Consume once before ordinary onEdit dispatch, never auto-save, replace a
+      // baseline, switch projects or unset the other Xcode field.
+      publishPathPicker(completion.state);
+      if (completion.edit) edit(completion.edit.field, completion.edit.value);
+    };
+    try { finish({ reply: await service.api.chooseProjectPath({ projectId: binding.projectId, field: binding.field }) }); }
+    catch (error) { finish({ error }); }
+  };
+
   const draftRetained = (projectId: string) => editRetainsDraft(configEdit.getSnapshot(), projectId) || workflowRetainsDraft(workflowEdit.getSnapshot(), projectId) || metadataRetainsDraft(metadataText.getSnapshot(), projectId);
 
   const editor = (metadataOnly = false) => <DraftEditor
     key={`${session?.project.id ?? 'none'}-${metadataOnly ? 'metadata' : 'settings'}`}
     catalog={catalog} session={session} metadataOnly={metadataOnly} preview={preview}
     chooseReason={chooseReason}
+    pathPicker={{ reason: projectPathStartReason(), pendingField: pathPicker.eligible?.field ?? null, onBrowse: (field) => void chooseProjectPath(field) }}
     validateReason={loading ? 'Engine capabilities are being loaded.' : validateReason}
     reviewReason={loading ? 'Engine capabilities are being loaded.' : reviewReason}
     suggestReason={loading ? 'Engine capabilities are being loaded.' : suggestReason}
@@ -595,6 +646,8 @@ export function App() {
         {bootError && <><ErrorNotice error={bootError} title="The native service is unavailable" /><div className="bridge-retry"><button className="button small secondary" disabled={loading || savedCommandBusy() !== null} onClick={() => void bootstrap()}><Icon name="refresh" size={15} />Retry connection</button><span>No browser fallback or mock engine has been enabled.</span></div></>}
         {catalogError && <ErrorNotice error={catalogError} title="The field catalogue could not be loaded" />}
         {chooseError && <ErrorNotice error={chooseError} title="The project could not be selected" />}
+        {(pathPicker.pending || pathPicker.unverified || pathPicker.message) && <div className={`notice ${pathPicker.unverified ? 'notice-warning' : 'notice-info'}`} role={pathPicker.unverified ? 'alert' : 'status'}>
+          <Icon name="info" /><span>{projectPathOwnerReason(pathPicker) ?? pathPicker.message}{pathPicker.pending ? ' If the original picker is still open, its Cancel button leaves the draft unchanged.' : ''}</span></div>}
         {info?.runtime.state !== 'available' && info && !preview && <div className="notice notice-warning"><Icon name="info" /><div><strong>{info.runtime.state === 'disabled' ? 'The engine is disabled' : 'Bundled engine unavailable'}</strong><p>{info.runtime.reason ?? 'A trusted packaged runtime has not been supplied. The app will not select an ambient Python or a mock engine.'} Folder selection does not establish a project observation.</p></div></div>}
         {page !== 'releases' && <OfflinePreflight state={offlinePreflightState} controller={offlinePreflight} compact
           projectName={session?.project.name ?? null} operationProjectName={offlinePreflightState.status?.operation ? workspace.projects[offlinePreflightState.status.operation.context.projectId]?.project.name ?? null : null}

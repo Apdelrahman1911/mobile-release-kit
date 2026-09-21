@@ -1,5 +1,6 @@
 """Inert lifecycle policy tests; never start a service, child or package tool."""
 from copy import deepcopy
+from itertools import permutations
 import ast
 import errno
 import hashlib
@@ -694,6 +695,11 @@ class LifecycleData(unittest.TestCase):
         observed = observe()
         self.assertFalse(observed["qualified"])
         self.assertFalse(observed["cleanupEstablished"])
+        self.assertEqual(set(observed["bootstrap"]), {"stdout", "stderr"})
+        for row in observed["bootstrap"].values():
+            self.assertTrue(all(count == 0 for count in row["markers"].values()))
+            self.assertTrue(all(count == 0 for count in row["stages"].values()))
+            self.assertEqual((row["unexpectedMrk"], row["unexpectedBootstrap"]), (0, 0))
         self.assertEqual(observed["resources"], resource_observation())
         self.assertLess(len(L.canonical(observed["resources"])), 1024)
         unavailable = observe(resources=resource_observation(unavailable=True))
@@ -716,6 +722,7 @@ class LifecycleData(unittest.TestCase):
                                         "argv": query.args, "result": query, "ownerCall": call}}
         observed = observe(controller=controller)
         self.assertEqual(observed["resources"], resource_observation())
+        self.assertIsNotNone(observed["bootstrap"])
         # The complete escaped payload forces the existing fallback. Both old
         # and new snippets are stripped, while their sizes/hashes survive.
         for capture in (observed["capture"], observed["controller"]["lastCompleted"]["capture"]):
@@ -748,6 +755,7 @@ class LifecycleData(unittest.TestCase):
                 raise AssertionError("unjoined holder must never be read")
         unjoined = observe(Unjoined(), joined=False, controller=controller)
         self.assertIsNone(unjoined["capture"])
+        self.assertIsNone(unjoined["bootstrap"])
         self.assertIsNone(unjoined["workerCall"])
         self.assertIsNotNone(unjoined["controller"]["lastCompleted"]["capture"])
         self.assertEqual(unjoined["resources"], resource_observation())
@@ -756,7 +764,16 @@ class LifecycleData(unittest.TestCase):
                        subprocess.CompletedProcess(argv, 127, "not bytes", b""),
                        subprocess.CompletedProcess(argv, 127, b"", b"x" * (L.LIMIT + 1)), {}):
             with self.subTest(result_type=type(result).__name__):
-                self.assertIsNone(observe(dict(holder, result=result))["capture"])
+                with patch.object(L, "_shell_normal_markers") as counter:
+                    invalid = observe(dict(holder, result=result))
+                    self.assertIsNone(invalid["capture"])
+                    self.assertIsNone(invalid["bootstrap"])
+                    counter.assert_not_called()
+        with patch.object(L, "_shell_normal_markers", side_effect=ValueError("synthetic classifier failure")):
+            failed_count = observe()
+            self.assertIsNone(failed_count["bootstrap"])
+            self.assertIsNotNone(failed_count["capture"])
+            self.assertEqual(failed_count["errors"], [{"type": "RuntimeError", "origin": "main", "originalProcessFacts": None}])
         # Unknown exception formatting is never invoked; diagnostic encoder or
         # output failure must return without replacing the caller's failure.
         class BadFormat(Exception):
@@ -806,6 +823,33 @@ class LifecycleData(unittest.TestCase):
         with patch.object(L.sys, "stderr", SimpleNamespace(write=Mock(side_effect=OSError("synthetic write failure")))) as stream:
             L._shell_normal_failure(holder, argv, **options)
             self.assertEqual(stream.write.call_count, 1)
+
+    def test_normal_marker_diagnostic_counts_only_complete_original_records(self):
+        markers = (b"MRK_DESKTOP_CAPABILITIES=available\n", b"MRK_DESKTOP_CAPABILITIES=unavailable\n",
+                   b"MRK_DESKTOP_CATALOGUE=returned\n", b"MRK_DESKTOP_CATALOGUE=refused\n")
+        stages = ("setup-enter", "page-start-trusted", "page-start-untrusted", "page-finish-trusted",
+                  "page-finish-untrusted", "hook-installed", "app-info-enter", "catalog-enter", "content-terminated")
+        prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
+        stdout = (b"ordinary wrapper text\n" + b"".join(markers) + markers[0]
+                  + b"".join(prefix + stage.encode("ascii") + b"\n" for stage in stages)
+                  + b"MRK_DESKTOP_CAPABILITIES=available extra\nMRK_DESKTOP_CAPABILITIES=available\r\n"
+                  + b"MRK_UNKNOWN=private-value\n" + prefix + b"unknown-private\n"
+                  + prefix + b"hook-installed extra\n" + prefix + b"catalog-enter\r\n"
+                  + b"noise prefix " + markers[0] + prefix + b"setup-enter")
+        stderr = markers[1] + prefix + b"catalog-enter\n" + markers[0].rstrip(b"\n")
+        counted = L._shell_normal_markers(stdout, stderr)
+        self.assertEqual(counted["stdout"], {
+            "markers": {"capabilitiesAvailable": 2, "capabilitiesUnavailable": 1, "catalogueReturned": 1, "catalogueRefused": 1},
+            "unexpectedMrk": 3, "stages": dict.fromkeys(stages, 1), "unexpectedBootstrap": 4})
+        self.assertEqual(counted["stderr"], {
+            "markers": {"capabilitiesAvailable": 0, "capabilitiesUnavailable": 1, "catalogueReturned": 0, "catalogueRefused": 0},
+            "unexpectedMrk": 1, "stages": {stage: int(stage == "catalog-enter") for stage in stages}, "unexpectedBootstrap": 0})
+        self.assertNotIn(b"private", L.canonical(counted))
+        # Counts are diagnostic-only; a completed or empty stage sequence
+        # cannot manufacture normal bootstrap success.
+        with self.assertRaises(ValueError):
+            L.shell_result(prefix + b"setup-enter\n", b"", "normal", 0, map_data())
+
 
     def test_normal_resource_diagnostic_is_original_bounded_and_failure_only(self):
         value = installed_handoff()
@@ -1986,64 +2030,159 @@ class LifecycleData(unittest.TestCase):
 def project_draft_receipt():
     """Expected typed schema DATA, not a native observation or original owner."""
     return {
-        "schemaVersion": 2, "fixture": "android-config-save-v1", "projectGateContract": True,
-        "methods": "eight-passive", "passiveActions": False,
+        "schemaVersion": 3, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
+        "methods": "twelve-passive", "passiveActions": False,
         "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
         "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
-        "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 1},
+        "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 2},
         "suggestion": {"coreProvenance": True, "explicitAdoption": True},
         "save": {"capability": True, "requests": {"open": 2, "prepare": 2, "apply": 1, "close": 0},
                  "bindingsMatched": True, "draftRevisions": [1, 1], "baselineGenerations": [1, 2],
                  "reviewMatched": True, "confirmation": {"opened": 2, "keepReviewing": True, "applyBeforeAck": 0, "acknowledged": True},
                  "outcome": ["committed", "clean", "settled", "none"], "nativeFinality": "settled",
-                 "savedVisible": True, "baselineAdvanced": True},
-        "readback": {"fresh": True, "domMatched": True, "draftMatched": True, "size": 692,
-                     "sha256": "4b3a5aaa718b018101ee0fcd0e612285be8a1b93cab20c5ff15e8d441069b917"},
+                 "savedVisible": True, "baselineAdvanced": True, "createReleaseDirectory": True},
+        "readback": {"fresh": True, "domMatched": True, "draftMatched": True, "size": 684,
+                     "sha256": "0c47aaffe3971b122f21ebddf8070ab29014c4b7c79a56e23335ed110f1e6acc"},
         "noop": {"reviewMatched": True, "apply": 0, "quitOutstanding": True,
                  "outcome": ["not_started", "not_created", "settled", "cancelled"], "nativeReason": "shutdown"},
         "originals": {"sessions": 2, "writerFrames": [3, 2], "stdoutFrames": [3, 3],
                       "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
                       "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
-        "quit": {"operation": 3, "originalsSettled": True, "relayJoined": True, "exit": True},
+        "quit": {"operation": 6, "originalsSettled": True, "relayJoined": True, "exit": True},
         "guidance": {
             "draftUnchanged": True,
-            "requirements": {"requestResultDomMatched": True, "context": "android/build", "roles": 3,
-                             "presence": "unknown", "version": "unknown", "inspection": "not-run",
-                             "nativeInspection": "unavailable", "dependencies": "unknown"},
+            "requirements": {"requestResultDomMatched": True, "context": "android/build", "roles": 3},
             "github": {"requestResultDomMatched": True, "explicitInputs": True, "browserEdit": "insertText",
-                       "comparison": "not-supplied", "workflowCount": 4, "tooling": "format-only", "githubContacted": False,
-                       "repositoryObserved": False, "toolingRefResolved": False, "templateCompatibility": "unknown", "applyAvailable": False},
+                       "workflowCount": 4},
             "assuranceActions": False, "releaseReadiness": "unknown",
+        },
+        "savedReads": {
+            "version": {"requestResultDomMatched": True, "pairMatched": True, "name": "1.2.3", "build": 7},
+            "metadata": {"observeRequestResultDomMatched": True, "absent": 3, "validateRequestResultDomMatched": True,
+                         "browserEdit": "insertText", "draftRetained": True},
+            "scope": "single-request-non-atomic",
         },
     }
 
 
-def positive_capture(receipt=None):
-    return (b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+CANDIDATE_FIXTURE_PINS = (
+    ("candidate-manifest.json", "candidate-valid.json", 3907, "285685846ac73e215aacc77436884e42f3e973a105dc5e40f1add0a020f2e06d"),
+    ("candidate-receipt.json", "receipt-candidate-valid.json", 3363, "375d5b895b62b62842338acff9c8ed9cfafe9a618eb51439d9ebc042d401e183"),
+    ("operation/candidate-operation-intent.json", "intent-candidate-valid.json", 4096, "e56ad77ee3cb4b1d3e12d1a6f5be8f7d0e90497934d1ebbd5bd9312b53362e42"),
+)
+
+
+def candidate_documents_receipt():
+    """Independent compact expected DATA; no paths, IDs or release authority."""
+    return {
+        "schemaVersion": 1, "fixture": "android-candidate-documents-v1",
+        "gate": "installed-project-profile+candidate-passive", "privacy": "independent-predicate+gtk-readback",
+        "cancel": {"operation": 3, "requestMatched": True, "gtkSettled": True, "tokenJoined": True,
+                   "probeUnstarted": True, "coordinatorJoined": True, "noRegistration": True},
+        "select": {"operation": 4, "requestMatched": True, "gtkSettled": True, "filenameMatched": True,
+                   "tokenJoined": True, "probeJoined": True, "coordinatorJoined": True, "selectionMatched": True},
+        "observe": {"operation": 5, "requests": 1, "requestResultDomMatched": True, "bindingMatched": True,
+                    "coordinatorJoined": True, "supervisorIdle": True, "knownIdle": True},
+        "preserved": {"sourceProject": True, "registry": True, "credentialStateEmpty": True, "savedReads": True, "wholeDraft": True},
+        "scope": {"documents": 3, "formatsDigestsBindingsMatched": True, "artifactPayloadsObserved": False,
+                  "sourceCompared": False, "signingVerified": False, "storeObserved": False, "releaseReady": False, "recoveryAuthority": False},
+        "quit": {"operation": 6, "gtkSettled": True, "coordinatorJoined": True, "relayJoined": True, "exit": True},
+    }
+
+
+def positive_capture(receipt=None, candidate=None):
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
             + L.SHELL_PROJECT_MARKER + L.canonical(project_draft_receipt() if receipt is None else receipt)
-            + b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n",
-            b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n")
+            + L.SHELL_CANDIDATE_MARKER + L.canonical(candidate_documents_receipt() if candidate is None else candidate)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n", b"")
 
 
 def project_fixture_data(value, *, saved=False):
     source = (b'plugins { id("com.android.application") }\n'
               b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
+    version = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
     uid, gid = value["runnerUid"], value["runnerGid"]
     stamp = 22 if saved else 11
     rows = [{"path": ".", "kind": "directory", "identity": [1, 100, stat.S_IFDIR | 0o700, uid, gid, 4 if saved else 3, 4096, stamp, stamp],
-             "children": [".gitignore", "app", "release"] if saved else ["app"]},
+             "children": [".gitignore", "app", "release", "version.properties"] if saved else ["app", "version.properties"]},
             {"path": "app", "kind": "directory", "identity": [1, 101, stat.S_IFDIR | 0o555, 0, 0, 2, 4096, 11, 11], "children": ["build.gradle.kts"]}]
     if saved:
-        rows.append({"path": "release", "kind": "directory", "identity": [1, 103, stat.S_IFDIR | 0o755, uid, gid, 2, 4096, 22, 22],
+        rows.append({"path": "release", "kind": "directory", "identity": [1, 103, stat.S_IFDIR | 0o755, uid, gid, 2, 4096, stamp, stamp],
                      "children": ["mobile-release.json"]})
-    rows.append({"path": "app/build.gradle.kts", "kind": "file", "identity": [1, 102, stat.S_IFREG | 0o444, 0, 0, 1, len(source), 11, 11],
-                 "size": len(source), "sha256": hashlib.sha256(source).hexdigest()})
+    rows.extend(({"path": "app/build.gradle.kts", "kind": "file", "identity": [1, 102, stat.S_IFREG | 0o444, 0, 0, 1, len(source), 11, 11],
+             "size": len(source), "sha256": hashlib.sha256(source).hexdigest()},
+            {"path": "version.properties", "kind": "file", "identity": [1, 104, stat.S_IFREG | 0o600, uid, gid, 1, len(version), 11, 11],
+             "size": len(version), "sha256": hashlib.sha256(version).hexdigest()}))
     if saved:
         for index, (relative, data) in enumerate((("release/mobile-release.json", L.SHELL_PROJECT_CONFIG), (".gitignore", L.SHELL_PROJECT_IGNORE))):
-            rows.append({"path": relative, "kind": "file", "identity": [1, 104 + index, stat.S_IFREG | 0o600, uid, gid, 1, len(data), 22, 22],
+            rows.append({"path": relative, "kind": "file", "identity": [1, 105 + index, stat.S_IFREG | 0o600, uid, gid, 1, len(data), 22, 22],
                          "size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
-    return {"schemaVersion": 2, "fixture": "android-config-save-v1", "root": str(L.root_path(value) / "positive-project"),
-            "saved": saved, "entries": rows, "absent": [] if saved else [".gitignore", "release"]}
+    return {"schemaVersion": 2, "fixture": "android-saved-readonly-v1", "root": str(L.root_path(value) / "positive-project"),
+            "saved": saved, "entries": rows,
+            "absent": ["release/store"] if saved else [".gitignore", "release"]}
+
+
+def candidate_fixture_data(value):
+    uid, gid = value["runnerUid"], value["runnerGid"]
+    rows = [{"path": ".", "kind": "directory", "identity": [1, 200, stat.S_IFDIR | 0o700, uid, gid, 3, 4096, 11, 11],
+             "children": ["candidate-manifest.json", "candidate-receipt.json", "operation"]},
+            {"path": "operation", "kind": "directory", "identity": [1, 201, stat.S_IFDIR | 0o700, uid, gid, 2, 4096, 11, 11],
+             "children": ["candidate-operation-intent.json"]}]
+    for index, (relative, _, size, digest) in enumerate(CANDIDATE_FIXTURE_PINS):
+        rows.append({"path": relative, "kind": "file", "identity": [1, 202 + index, stat.S_IFREG | 0o600, uid, gid, 1, size, 11, 11],
+                     "size": size, "sha256": digest})
+    return {"schemaVersion": 1, "fixture": "android-candidate-documents-v1", "root": str(L.root_path(value) / "candidate-evidence"),
+            "entries": rows, "absent": ["reader-1.2.3-42.aab", "store-metadata-1.2.3-42.zip", "validation-report-1.2.3-42.json"]}
+
+
+def project_path_receipt():
+    # Independent fixed protocol DATA from the accepted native plan.
+    return json.loads('{"assetAuthorityCreated":false,"cancel":[{"field":"version.source","operation":3},{"field":"metadata.root","operation":7}],"draft":{"baselineUnchanged":true,"positivePatchMatched":true,"previews":3,"refusalsUnchanged":true,"xcodePairRetained":true},"fixture":"project-paths-v1","fixtureMutations":{"actorReturned":4,"newWorker":false},"gate":"installed-project-profile","originals":{"childNew":2,"childReturned":9,"coordinatorReturned":11,"failedJoins":0,"filenameReads":9,"guiSettled":11,"sourceClosed":8,"sourceUnstarted":3},"projectOriginalsSettled":true,"quit":{"exit":true,"operation":14,"originalsSettled":true,"relayJoined":true},"refused":[{"case":"outside","code":"project_path_unsafe","operation":9},{"case":"post-selection-symlink","code":"project_path_unsafe","operation":10},{"case":"post-selection-directory-for-file","code":"project_path_unsafe","operation":11},{"case":"post-selection-file-for-directory","code":"project_path_unsafe","operation":12},{"case":"changed-root-mode","code":"project_path_changed","operation":13}],"registryUnchanged":true,"requestResultDomMatched":11,"saveRequests":0,"schemaVersion":1,"scope":"point-in-time-path-metadata-only","select":[{"field":"version.source","operation":4,"relativePath":"inputs/VERSION"},{"field":"ios.project","operation":5,"relativePath":"ios/Example.xcodeproj"},{"field":"ios.workspace","operation":6,"relativePath":"ios/Example.xcworkspace"},{"field":"metadata.root","operation":8,"relativePath":"metadata"}]}')
+
+
+
+def path_capture(receipt=None):
+    return (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n"
+            + b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
+            + b"MRK_INSTALLED_SHELL_PROJECT_PATHS=" + L.canonical(project_path_receipt() if receipt is None else receipt)
+            + b"MRK_INSTALLED_SHELL_OBSERVATION=project-paths-verified\n", b"")
+
+
+PATH_FIXTURE_NODES = (
+    ("path-project", True), ("path-project/inputs", True), ("path-project/inputs/VERSION", False),
+    ("path-project/inputs/link-input", False), ("path-project/inputs/kind-input", False), ("path-project/inputs/kind-directory", True),
+    ("path-project/ios", True), ("path-project/ios/Example.xcodeproj", True), ("path-project/ios/Example.xcworkspace", True),
+    ("path-project/ios/Kind.xcodeproj", True), ("path-project/ios/Kind.file", False), ("path-project/metadata", True),
+    ("path-outside", True), ("path-outside/VERSION", False),
+)
+
+
+def path_fixture_data(value, *, changed=False):
+    moves = {3: "path-project/inputs/link-original", 4: "path-project/inputs/kind-original", 5: "path-project/inputs/kind-input",
+             9: "path-project/ios/Kind.original", 10: "path-project/ios/Kind.xcodeproj"}
+    names = [(moves.get(i, name) if changed else name, kind) for i, (name, kind) in enumerate(PATH_FIXTURE_NODES)]
+    all_names = [name for name, _ in names] + (["path-project/inputs/link-input"] if changed else [])
+    rows = []
+    for index, (name, directory) in enumerate(names):
+        children = sorted(Path(child).name for child in all_names if str(Path(child).parent) == name)
+        nlink = 2 + sum(is_directory and str(Path(child).parent) == name for child, is_directory in names) if directory else 1
+        mode = stat.S_IFDIR | (0o500 if changed and index == 0 else 0o700) if directory else stat.S_IFREG | 0o600
+        modified = changed and index in (1, 6)
+        identity = [1, 300 + index, mode, value["runnerUid"], value["runnerGid"], nlink, 4096 if directory else 26,
+                    22 if modified else 11, 22 if changed and (index in (0, 1, 6) or index in moves) else 11]
+        row = {"path": name, "kind": "directory" if directory else "file", "identity": identity}
+        row.update({"children": children} if directory else {"size": 26, "sha256": "b6443459323e40905f046fab46eb17047c7720b9dcd1931d5f6eac0ccd27785f"})
+        rows.append(row)
+    if changed:
+        rows.append({"path": "path-project/inputs/link-input", "kind": "symlink",
+                     "identity": [1, 314, stat.S_IFLNK | 0o777, value["runnerUid"], value["runnerGid"], 1, 13, 22, 22], "target": "link-original"})
+    absent = ["path-project/.gitignore", "path-project/release", "path-project/.mobile-release",
+              "path-project/.mobile-release-init-prepare", "path-project/.mobile-release-init", "path-project/.mobile-release-init-cleanup",
+              "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup"]
+    absent += ["path-project/inputs/kind-directory", "path-project/ios/Kind.file"] if changed else [
+        "path-project/inputs/link-original", "path-project/inputs/kind-original", "path-project/ios/Kind.original"]
+    return {"schemaVersion": 1, "fixture": "project-paths-v1", "root": str(L.root_path(value)), "changed": changed, "entries": rows, "absent": absent}
 
 
 def closed_shell_data():
@@ -2056,7 +2195,8 @@ def closed_shell_data():
     captures = {"normal": (b"MRK_DESKTOP_CAPABILITIES=available\nMRK_DESKTOP_CATALOGUE=returned\n", b""),
                 "positive": positive_capture(),
                 "quit-outstanding": (b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified\n"
-                    + L.CHILD_MARKER.encode() + L.canonical(maps) + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n", b"")}
+                    + L.CHILD_MARKER.encode() + L.canonical(maps) + b"MRK_INSTALLED_SHELL_OBSERVATION=quit-outstanding-verified\n", b""),
+                "project-paths": path_capture()}
     cases, files, commands = {}, {}, []
     for case, (stdout, stderr) in captures.items():
         cases[case] = L.shell_result(stdout, stderr, case, 0, expected)
@@ -2066,6 +2206,9 @@ def closed_shell_data():
     files["shell-cases.json"] = L.canonical(cases)
     files["shell-positive-project-before.json"] = L.canonical(project_fixture_data(value))
     files["shell-positive-project-after.json"] = L.canonical(project_fixture_data(value, saved=True))
+    for phase in ("before", "after"):
+        files["shell-positive-candidate-" + phase + ".json"] = L.canonical(candidate_fixture_data(value))
+        files["shell-project-paths-" + phase + ".json"] = L.canonical(path_fixture_data(value, changed=phase == "after"))
     keys = [{"phase": "key", "exitCode": 0, "stdout": "", "stderr": "",
              "argv": L._drop(value, ["/usr/bin/xdotool", "key", "--clearmodifiers", key])} for key in ("ctrl+q", "alt+o")]
     files["shell-normal-control.json"] = L.canonical({"joined": True, "inputs": 2, "workerGuardState": "RESTORED",
@@ -2084,9 +2227,24 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         # check is explicitly run. No lease, filesystem fixture, bootstrap or
         # native transaction is constructed. Production lifecycle imports none.
         from mobile_release.api._preview import suggest_config
+        from mobile_release.api._release_version import _source_path
         from mobile_release.config_payloads import prepare_edit_ignore, serialize_config_data
-        proposed = suggest_config({"platforms": ["android"], "androidApplicationId": "org.example.mrk.observed"})
+        from mobile_release.discovery import parse_project_sources
+        discovered = parse_project_sources({"app/build.gradle.kts": L.SHELL_PROJECT_SOURCE.decode("ascii"),
+                                            "version.properties": L.SHELL_PROJECT_VERSION.decode("ascii")}, ("app",))
+        hints = {"platforms": ["android"], "androidApplicationId": discovered["android"]["applicationId"],
+                 **{key: discovered[key] for key in ("versionSource", "versionNameKey", "versionBuildKey")}}
+        self.assertEqual(hints, {"platforms": ["android"], "androidApplicationId": "org.example.mrk.observed",
+                                "versionSource": "version.properties", "versionNameKey": "VERSION_NAME", "versionBuildKey": "BUILD_NUMBER"})
+        self.assertTrue(_source_path(hints["versionSource"]))  # Named-reader admission is pure; no file opens.
+        proposed = suggest_config(hints)
         self.assertTrue(proposed["validation"]["valid"])
+        provenance = {row["path"]: row["source"] for row in proposed["provenance"]}
+        hinted = ("android.enabled", "android.applicationId", "version.source", "version.nameKey", "version.buildKey")
+        self.assertEqual({path: provenance[path] for path in hinted}, dict.fromkeys(hinted, "hint"))
+        self.assertEqual(L.SHELL_PROJECT_VERSION, b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n")
+        self.assertEqual(len(L.SHELL_PROJECT_VERSION), 34)
+        self.assertEqual(hashlib.sha256(L.SHELL_PROJECT_VERSION).hexdigest(), "a811da0677c243236101fb4aa93319d28b731f963f8a295c1028b8aee136386b")
         # serde_json::Value uses its default sorted-key Map; the fixed native
         # Prepare serializes that genuine renderer draft to the Python adapter.
         wire_draft = json.loads(json.dumps(proposed["draft"], sort_keys=True))
@@ -2105,15 +2263,21 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                          {"shell-positive-project-before.json", "shell-positive-project-after.json"})
         self.assertEqual({name for name in roster if name.endswith("-xvfb.stderr")},
                          {"shell-" + case + "-xvfb.stderr" for case in L.SHELL_CASES})
-        self.assertEqual(len(roster), 77)
+        self.assertEqual({name for name in roster if name.startswith("shell-positive-candidate-")},
+                         {"shell-positive-candidate-before.json", "shell-positive-candidate-after.json"})
+        self.assertEqual(len(roster), 84)
+        self.assertEqual(len(roster) + 2, 86)
+        self.assertEqual(len(L.root_phases(value)), 18)
         self.assertLessEqual(len(roster), 128)
         for case in ("positive", "refuse-writable", "refuse-pth"):
             self.assertFalse(any(name.startswith("shell-positive-project-") for name in L.public_files(installed_handoff(case))))
+            self.assertFalse(any(name.startswith("shell-positive-candidate-") for name in L.public_files(installed_handoff(case))))
 
     def test_positive_typed_schema_rejects_each_missing_or_changed_leaf(self):
         expected = project_draft_receipt()
         raw = L.canonical(expected)
-        self.assertEqual(len(raw), 2029)  # The one receipt includes its trailing newline.
+        self.assertEqual(len(raw), 2041)  # The one receipt includes its trailing newline.
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), "9896be85da12227c4920d61c65a0c50d6701ca4ae5c405a6d5c6a072a133d9af")
         self.assertTrue(raw.endswith(b"\n"))
         self.assertLessEqual(len(raw), 2048)
         self.assertEqual(L.shell_project_receipt(raw), expected)
@@ -2151,22 +2315,44 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                     altered["shell-cases.json"] = L.canonical(cases)
                     with patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
                         L.shell_closed_result(value, outcome, altered)
-        legacy = deepcopy(expected)
+        prior_u = deepcopy(expected)
+        prior_u["save"]["createReleaseDirectory"] = False
+        prior_u["readback"].update(size=692, sha256="4b3a5aaa718b018101ee0fcd0e612285be8a1b93cab20c5ff15e8d441069b917")
+        self.assertEqual(hashlib.sha256(L.canonical(prior_u)).hexdigest(), "40389f4ea473b4324690bf44bbc98fb8cc8106e829364fe07d1a3a2b8b9340ad")
+        legacy = deepcopy(prior_u)
         legacy.pop("save")
         legacy.update(schemaVersion=1, fixture="android-static-v1", guidance={"draftUnchanged": True})
-        save_only = {key: child for key, child in expected.items() if key != "guidance"}
-        guidance_only = {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals"}}
-        for changed in (b"", b"{}", L.canonical(legacy), L.canonical({**expected, "methods": "six-passive"}),
-                        L.canonical(save_only), L.canonical(guidance_only),
+        legacy_v2 = deepcopy(prior_u)
+        legacy_v2.update(schemaVersion=2, fixture="android-config-save-v1", methods="eight-passive")
+        legacy_v2["snapshot"]["sourceFiles"] = 1
+        legacy_v2["save"].pop("createReleaseDirectory")
+        legacy_v2.pop("savedReads")
+        legacy_v2["guidance"]["requirements"].update(presence="unknown", version="unknown", inspection="not-run",
+                                                    nativeInspection="unavailable", dependencies="unknown")
+        legacy_v2["guidance"]["github"].update(comparison="not-supplied", tooling="format-only", githubContacted=False,
+                                              repositoryObserved=False, toolingRefResolved=False, templateCompatibility="unknown", applyAvailable=False)
+        self.assertEqual(len(L.canonical(legacy_v2)), 2029)
+        legacy_r = {**prior_u, "methods": "eleven-passive", "quit": {**prior_u["quit"], "operation": 3}}
+        self.assertEqual(hashlib.sha256(L.canonical(legacy_r)).hexdigest(), "aae33b86cb288492032b903bc845929b08e904173264762971e65b3903f05af8")
+        save_only = {key: child for key, child in expected.items() if key not in {"guidance", "savedReads"}}
+        guidance_only = {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals", "savedReads"}}
+        saved_reads_only = {key: child for key, child in expected.items() if key not in {"save", "readback", "noop", "originals", "guidance"}}
+        for changed in (b"", b"{}", L.canonical(prior_u), L.canonical(legacy), L.canonical(legacy_v2), L.canonical(legacy_r), L.canonical({**expected, "methods": "six-passive"}),
+                        L.canonical(save_only), L.canonical(guidance_only), L.canonical(saved_reads_only),
                         L.canonical({key: child for key, child in expected.items() if key != "save"}),
                         L.canonical({**expected, "save": {}}), L.canonical({**expected, "save": []}),
                         L.canonical({**expected, "save": {**expected["save"], "untrustedSuccess": True}}),
                         L.canonical({**expected, "guidance": {"draftUnchanged": True}}),
                         L.canonical({**expected, "guidance": {}}), L.canonical({**expected, "guidance": []}),
                         L.canonical({**expected, "guidance": {**expected["guidance"], "github": None}}),
+                        L.canonical({key: child for key, child in expected.items() if key != "savedReads"}),
+                        L.canonical({**expected, "savedReads": {}}), L.canonical({**expected, "savedReads": []}),
+                        L.canonical({**expected, "savedReads": {"version": expected["savedReads"]["version"]}}),
+                        L.canonical({**expected, "savedReads": {**expected["savedReads"], "metadata": None}}),
                         raw.replace(b'"fresh":true', b'"fresh":true,"fresh":true'),
                         raw.replace(b'"save":{', b'"save":{},"save":{'),
                         raw.replace(b'"guidance":{', b'"guidance":{},"guidance":{'),
+                        raw.replace(b'"savedReads":{', b'"savedReads":{},"savedReads":{'),
                         L.canonical({**expected, "message": "ConfigurationError text is not a receipt field"}), raw + b" " * 2048):
             with self.subTest(raw=changed), self.assertRaises(ValueError):
                 L.shell_project_receipt(changed)
@@ -2175,14 +2361,22 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         stdout, stderr = positive_capture()
         parsed = L.shell_result(stdout, stderr, "positive", 0, map_data())
         self.assertEqual(parsed["projectDraft"], project_draft_receipt())
+        self.assertEqual(parsed["candidateDocuments"], candidate_documents_receipt())
         lines = stdout.splitlines(keepends=True)
-        for out, err in ((stdout, b""), (b"", stderr), (stderr, stdout), (stdout + lines[-1], stderr),
-                         (b"".join([lines[-1], *lines[:-1]]), stderr), (b"".join([lines[1], lines[0], lines[2]]), stderr),
-                         (b"".join([lines[0], lines[2], lines[1]]), stderr), (stdout + lines[1], stderr),
-                         (lines[0] + lines[1] + lines[1] + lines[-1], stderr),
-                         (lines[0] + lines[-1], stderr), (lines[0] + lines[-1], stderr + lines[1]),
-                         (stdout, stderr + lines[1]), (stdout, stderr + stderr),
-                         (stdout, stderr.replace(b"=available", b"=unavailable"))):
+        noise = b"ordinary wrapper text\nMRKDBG_DESKTOP_BOOTSTRAP=setup-enter\n"
+        self.assertEqual(L.shell_result(noise + noise.join(lines), noise, "positive", 0, map_data()), parsed)
+        changes = [(b"", b""), (b"", stdout), (b"".join(lines[2:]), b"".join(lines[:2])),
+                   (stdout + b"MRK_UNEXPECTED=1\n", b""), (stdout, lines[0]),
+                   (stdout.replace(b"=available", b"=unavailable"), b""),
+                   (stdout.rstrip(b"\n"), b""), (stdout.replace(b"\n", b"\r\n"), b"")]
+        for index, line in enumerate(lines):
+            changes.extend(((b"".join(lines[:index] + lines[index + 1:]), b""), (stdout + line, b""),
+                            (b"".join(lines[:index] + lines[index + 1:]), line)))
+            if index + 1 < len(lines):
+                changed = list(lines)
+                changed[index], changed[index + 1] = changed[index + 1], changed[index]
+                changes.append((b"".join(changed), b""))
+        for out, err in changes:
             with self.subTest(stdout=out, stderr=err), self.assertRaises(ValueError):
                 L.shell_result(out, err, "positive", 0, map_data())
         for code in (True, False, 1, -1, None):
@@ -2192,16 +2386,18 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             with self.subTest(case=case), self.assertRaises(ValueError):
                 L.shell_result(stdout, stderr, case, 0, map_data())
 
-    def test_fixture_inventory_allows_only_exact_saved_outputs_and_preserves_original_hint(self):
+    def test_fixture_inventory_allows_only_exact_saved_outputs_and_preserves_original_hints(self):
         value = installed_handoff()
         original = project_fixture_data(value)
         saved = project_fixture_data(value, saved=True)
         raw, after_raw = L.canonical(original), L.canonical(saved)
         result = L.shell_project_fixture(value, raw, after_raw)
         self.assertTrue(all(result[key] for key in ("rootRetained", "hintUnchanged", "savedOutputsMatched", "noUnexpectedEntries", "noPendingState")))
-        self.assertEqual(result["fixture"], "android-config-save-v1")
-        self.assertEqual(result["entryCount"], 6)
-        self.assertEqual(result["sourceBytes"], original["entries"][2]["size"])
+        self.assertEqual(result["fixture"], "android-saved-readonly-v1")
+        self.assertEqual((len(original["entries"]), len(saved["entries"]), result["entryCount"]), (4, 7, 7))
+        self.assertEqual(original["absent"], [".gitignore", "release"])
+        self.assertEqual(result["sourceBytes"], original["entries"][2]["size"] + original["entries"][3]["size"])
+        self.assertEqual(result["sourceBytes"], 149)
         self.assertEqual(result["releaseMode"], 0o755)
         for phase, encoded in (("before", raw), ("after", after_raw)):
             self.assertEqual(result[phase], {"size": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()})
@@ -2209,12 +2405,15 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             self.assertEqual(result[key], {"size": len(expected), "sha256": hashlib.sha256(expected).hexdigest(), "mode": 0o600})
         mutations = (
             lambda v: v.update(schemaVersion=True), lambda v: v.update(root="/other/project"),
+            lambda v: v.update(fixture="android-config-save-v1"),
             lambda v: v.update(saved=1), lambda v: v.update(absent=[".gitignore"]),
+            lambda v: v.update(absent=[]),
             lambda v: v["entries"].append(deepcopy(v["entries"][-1])),
             lambda v: v["entries"][0].update(children=[".gitignore", ".mobile-release-init", "app", "release"]),
             lambda v: v["entries"][0].update(children=[".github", ".gitignore", "app", "release"]),
             lambda v: v["entries"][1].update(children=["build.gradle.kts", ".gitignore"]),
             lambda v: v["entries"][2].update(children=["mobile-release.json", "unexpected"]),
+            lambda v: v["entries"][2].update(children=["mobile-release.json", "store", "version.properties"]),
             lambda v: v["entries"][3].update(path="app/../build.gradle.kts"),
             lambda v: v["entries"][3].update(sha256="0" * 64), lambda v: v["entries"][3].update(size=True),
             lambda v: v["entries"][3]["identity"].__setitem__(2, stat.S_IFLNK | 0o444),
@@ -2226,18 +2425,39 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             lambda v: v["entries"][3]["identity"].__setitem__(8, 99),
             lambda v: v["entries"][0]["identity"].__setitem__(1, 999),
             lambda v: v["entries"][1]["identity"].__setitem__(1, 999),
+            lambda v: v["entries"][2]["identity"].__setitem__(1, v["entries"][0]["identity"][1]),
             lambda v: v["entries"][2]["identity"].__setitem__(2, stat.S_IFDIR | 0o700),
+            lambda v: v["entries"][2]["identity"].__setitem__(3, 0),
+            lambda v: v["entries"][4]["identity"].__setitem__(1, 999),
             lambda v: v["entries"][4]["identity"].__setitem__(2, stat.S_IFREG | 0o644),
             lambda v: v["entries"][4]["identity"].__setitem__(3, 0),
+            lambda v: v["entries"][4]["identity"].__setitem__(5, 2),
+            lambda v: v["entries"][4]["identity"].__setitem__(8, 99),
             lambda v: v["entries"][4].update(sha256="f" * 64),
+            lambda v: v["entries"][4].update(size=True),
+            lambda v: v["entries"][5]["identity"].__setitem__(2, stat.S_IFREG | 0o644),
+            lambda v: v["entries"][5]["identity"].__setitem__(3, 0),
             lambda v: v["entries"][5].update(sha256="f" * 64),
-            lambda v: v["entries"][5]["identity"].__setitem__(0, 2),
-            lambda v: v["entries"][5]["identity"].__setitem__(1, v["entries"][4]["identity"][1]),
+            lambda v: v["entries"][6].update(sha256="f" * 64),
+            lambda v: v["entries"][6]["identity"].__setitem__(0, 2),
+            lambda v: v["entries"][6]["identity"].__setitem__(1, v["entries"][5]["identity"][1]),
         )
         for mutate in mutations:
             changed = deepcopy(saved); mutate(changed)
             with self.subTest(mutate=mutate), self.assertRaises(ValueError):
                 L.shell_project_fixture(value, raw, L.canonical(changed))
+        # release is newly created, not a retained before-inode. Its precise
+        # inode may vary, but it must be unique and meet the saved policy.
+        fresh_release = deepcopy(saved); fresh_release["entries"][2]["identity"][1] = 999
+        self.assertEqual(L.shell_project_fixture(value, raw, L.canonical(fresh_release))["releaseMode"], 0o755)
+        for mutate in (lambda v: v["entries"].pop(),
+                       lambda v: v["entries"][0].update(children=["app", "release", "version.properties"]),
+                       lambda v: v["entries"].insert(2, deepcopy(saved["entries"][2])),
+                       lambda v: v["entries"][3].update(sha256="f" * 64),
+                       lambda v: v.update(absent=[".gitignore", "release/mobile-release.json"])):
+            changed = deepcopy(original); mutate(changed)
+            with self.subTest(initial=mutate), self.assertRaises(ValueError):
+                L.shell_project_fixture(value, L.canonical(changed), after_raw)
         for before, after in ((raw, raw), (after_raw, after_raw), (after_raw, raw),
                               (b"{}", after_raw), (raw, b"[]"), (json.dumps(original, indent=2).encode(), after_raw),
                               (raw, after_raw + b" " * 8192)):
@@ -2264,36 +2484,61 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                  patch.object(Path, "lstat", file_stat), patch.object(L.os, "scandir", side_effect=scan), \
                  patch.object(L, "record", side_effect=read_data) as reads, patch.object(L, "_absent") as absent:
                 self.assertEqual(L._shell_project_inventory(value, saved=saved), fixture)
-                self.assertEqual(reads.call_count, 3 if saved else 1)
-                self.assertEqual([call.args[0] for call in absent.call_args_list], [] if saved else [project / ".gitignore", project / "release"])
-                reads.reset_mock()
-                by_path[project]["children"].append(".mobile-release-init")
-                with self.assertRaises(ValueError):
-                    L._shell_project_inventory(value, saved=saved)
-                reads.assert_not_called()  # Never inspect an unadmitted journal.
+                self.assertEqual([call.args for call in reads.call_args_list],
+                                 [(project / row["path"], row["size"]) for row in fixture["entries"] if row["kind"] == "file"])
+                self.assertEqual(reads.call_count, 4 if saved else 2)
+                self.assertEqual([call.args[0] for call in absent.call_args_list], [project / relative for relative in fixture["absent"]])
+                for parent, extra in ((project, ".mobile-release-init"), (project / ("release" if saved else "app"), "store")):
+                    reads.reset_mock()
+                    by_path[parent]["children"].append(extra)
+                    with self.assertRaises(ValueError):
+                        L._shell_project_inventory(value, saved=saved)
+                    reads.assert_not_called()  # Never inspect an unadmitted journal/metadata subtree.
+                    by_path[parent]["children"].pop()
 
-    def test_prepare_creates_only_one_positive_fixture_without_running_anything(self):
-        value = installed_handoff(); root = L.root_path(value)
+    def test_prepare_creates_only_fixed_positive_siblings_without_running_anything(self):
+        value = installed_handoff(); root = L.root_path(value); project = root / "positive-project"
+        evidence = root / "candidate-evidence"
         for case in L.SHELL_CASES:
             writer = Mock()
             with self.subTest(case=case), patch.object(L, "_ROOT", root), patch.object(L, "_D", SimpleNamespace(write=writer)), \
-                 patch.object(Path, "mkdir") as mkdir, patch.object(L.os, "chown") as chown, patch.object(L.os, "chmod") as chmod, \
+                 patch.object(Path, "mkdir", autospec=True) as mkdir, patch.object(L.os, "chown") as chown, patch.object(L.os, "chmod") as chmod, \
                  patch.object(L, "_shell_log_prepare", return_value="original-log-binding") as log, \
                  patch.object(L, "_absent"), patch.object(L, "_retain") as retain, \
-                 patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)) as inventory:
+                 patch.object(L, "_shell_project_inventory", return_value=project_fixture_data(value)) as inventory, \
+                 patch.object(L, "_shell_candidate_inventory", return_value=candidate_fixture_data(value)) as candidate_inventory, \
+                 patch.object(L, "_shell_paths_inventory", return_value=path_fixture_data(value)) as path_inventory:
                 self.assertEqual(L._shell_prepare(value, case), (L.shell_environment(value, case), "original-log-binding"))
                 log.assert_called_once_with(value, case)
-                fixture_writes = [call for call in writer.call_args_list if call.args[0] == root / "positive-project/app/build.gradle.kts"]
-                self.assertEqual(len(fixture_writes), int(case == "positive"))
-                self.assertEqual(mkdir.call_count, 10 if case == "positive" else 8)
+                fixture_writes = [call.args for call in writer.call_args_list if project in call.args[0].parents]
+                self.assertEqual(fixture_writes, [(project / "app/build.gradle.kts", L.SHELL_PROJECT_SOURCE, 0o444),
+                                                (project / "version.properties", L.SHELL_PROJECT_VERSION, 0o600)] if case == "positive" else [])
+                candidate_writes = [call.args for call in writer.call_args_list if evidence in call.args[0].parents]
+                self.assertEqual(candidate_writes, [(evidence / relative, raw, 0o600) for relative, raw in L.SHELL_CANDIDATE_DOCUMENTS.items()]
+                                 if case == "positive" else [])
+                self.assertEqual(mkdir.call_count, 12 if case == "positive" else 17 if case == "project-paths" else 8)
                 if case == "positive":
-                    self.assertEqual(fixture_writes[0].args[1:], (L.SHELL_PROJECT_SOURCE, 0o444))
-                    self.assertEqual([call.args for call in chmod.call_args_list], [(root / "positive-project/app", 0o555)])
-                    self.assertIn((root / "positive-project", value["runnerUid"], value["runnerGid"]), [call.args for call in chown.call_args_list])
+                    self.assertNotIn(project / "release", [call.args[0] for call in mkdir.call_args_list])
+                    self.assertEqual([call.args for call in chmod.call_args_list], [(project / "app", 0o555)])
+                    self.assertEqual([call.args for call in chown.call_args_list if call.args[0] == project or project in call.args[0].parents],
+                                     [(path, value["runnerUid"], value["runnerGid"]) for path in
+                                      (project / "version.properties", project)])
                     inventory.assert_called_once_with(value)
-                    retain.assert_called_once_with("shell-positive-project-before.json", L.canonical(project_fixture_data(value)))
+                    candidate_inventory.assert_called_once_with(value)
+                    self.assertEqual([call.args for call in chown.call_args_list if call.args[0] == evidence or evidence in call.args[0].parents],
+                                     [(path, value["runnerUid"], value["runnerGid"]) for path in
+                                      (*(evidence / relative for relative in L.SHELL_CANDIDATE_DOCUMENTS), evidence / "operation", evidence)])
+                    self.assertEqual([call.args for call in retain.call_args_list], [
+                        ("shell-positive-project-before.json", L.canonical(project_fixture_data(value))),
+                        ("shell-positive-candidate-before.json", L.canonical(candidate_fixture_data(value)))])
+                elif case == "project-paths":
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); chmod.assert_not_called()
+                    path_inventory.assert_called_once_with(value)
+                    retain.assert_called_once_with("shell-project-paths-before.json", L.canonical(path_fixture_data(value)))
+                    self.assertEqual([call.args for call in writer.call_args_list if call.args[0].name not in {"authority", "shell-project-paths-bus.conf"}][-5:],
+                                     [(root / name, b"inert path-picker fixture\n", 0o600) for name, directory in PATH_FIXTURE_NODES if not directory])
                 else:
-                    inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
+                    inventory.assert_not_called(); candidate_inventory.assert_not_called(); path_inventory.assert_not_called(); retain.assert_not_called(); chmod.assert_not_called()
 
     def test_closed_case_requires_native_receipt_and_same_before_after_originals(self):
         value, outcome, files, expected = closed_shell_data()
@@ -2305,7 +2550,8 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
         self.assertEqual(result["cases"]["normal"]["domAndGtkObserved"], False)
         self.assertEqual(len(result["cases"]["quit-outstanding"]["maps"]), 1)
         for change in ("missing-before", "missing-after", "different-after", "coerced-case", "missing-receipt",
-                       "case-save-only", "stdout-save-only", "case-guidance-only", "stdout-guidance-only", "wrong-argv",
+                       "case-save-only", "stdout-save-only", "case-guidance-only", "stdout-guidance-only",
+                       "case-saved-reads-only", "stdout-saved-reads-only", "case-no-saved-reads", "stdout-no-saved-reads", "wrong-argv",
                        "no-display-log", "display-type", "combined-output"):
             changed, current = deepcopy(files), deepcopy(outcome)
             if change == "no-display-log":
@@ -2325,7 +2571,10 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
             elif change == "missing-receipt":
                 changed["shell-positive.stdout"] = b"MRK_INSTALLED_SHELL_OBSERVATION=positive-verified\n"
             elif change.startswith(("case-", "stdout-")):
-                omitted = {"guidance"} if change.endswith("save-only") else {"save", "readback", "noop", "originals"}
+                omitted = {"save-only": {"guidance", "savedReads"},
+                           "guidance-only": {"save", "readback", "noop", "originals", "savedReads"},
+                           "saved-reads-only": {"save", "readback", "noop", "originals", "guidance"},
+                           "no-saved-reads": {"savedReads"}}[change.split("-", 1)[1]]
                 partial = {key: child for key, child in project_draft_receipt().items() if key not in omitted}
                 if change.startswith("case-"):
                     altered = L.decode(changed["shell-cases.json"]); altered["positive"]["projectDraft"] = partial
@@ -2336,6 +2585,422 @@ class ProjectDraftLifecycleContracts(unittest.TestCase):
                 current["commands"][1]["argv"][-1] = "quit-outstanding"
             with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=expected), self.assertRaises((ValueError, KeyError)):
                 L.shell_closed_result(value, current, changed)
+
+
+class CandidateDocumentsLifecycleContracts(unittest.TestCase):
+    def test_fixed_literal_bytes_produce_the_existing_android_documents_only_dto(self):
+        # Only an explicitly run DATA check imports the actual pure validators.
+        # The production lifecycle never imports them or constructs a sealer.
+        from mobile_release import provenance
+        from mobile_release.api import _candidate_evidence as evidence
+        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
+        literal = next(node.value for node in tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == "SHELL_CANDIDATE_DOCUMENTS" for target in node.targets))
+        self.assertIsInstance(literal, ast.Dict)
+        self.assertTrue(all(isinstance(node, ast.Constant) and type(node.value) is bytes for node in literal.values))
+        self.assertEqual(list(L.SHELL_CANDIDATE_DOCUMENTS), [row[0] for row in CANDIDATE_FIXTURE_PINS])
+        for relative, source, size, digest in CANDIDATE_FIXTURE_PINS:
+            raw = L.SHELL_CANDIDATE_DOCUMENTS[relative]
+            self.assertEqual(raw, (SOURCE / "tests/fixtures" / source).read_bytes())
+            self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (size, digest))
+        expected_raw = (SOURCE / "desktop/tests/fixtures/candidate-evidence.json").read_bytes()
+        self.assertEqual((len(expected_raw), hashlib.sha256(expected_raw).hexdigest()),
+                         (6652, "a5689c1d0067cff8a2315f65fb8dc4d828ee041aab7f11d3c5eebf5ce0ec5923"))
+        expected = json.loads(expected_raw)["androidConsistent"]
+        inventory = SimpleNamespace(counts={"sourceBytes": 0}, tick=lambda: True)
+        def read_document(relative, *, limit):
+            raw = L.SHELL_CANDIDATE_DOCUMENTS[relative]
+            self.assertLessEqual(len(raw), limit)
+            inventory.counts["sourceBytes"] += len(raw)
+            return raw.decode("utf-8")
+        reader = SimpleNamespace(read=Mock(side_effect=read_document))
+        with patch.object(os, "open", side_effect=AssertionError("No fixture or artifact open")), \
+             patch.object(Path, "open", side_effect=AssertionError("No document-directed read")), \
+             patch.object(provenance, "sha256_file", side_effect=AssertionError("No artifact payload hashing")), \
+             patch.object(provenance, "seal", side_effect=AssertionError("No evidence generation")), \
+             patch.object(subprocess, "Popen", side_effect=AssertionError("No execution")):
+            actual = evidence._read_outcome(reader, inventory)
+        self.assertEqual(actual, expected)
+        self.assertEqual([call.args[0] for call in reader.read.call_args_list], list(L.SHELL_CANDIDATE_DOCUMENTS))
+        self.assertEqual(inventory.counts["sourceBytes"], 11366)
+        manifest = json.loads(L.SHELL_CANDIDATE_DOCUMENTS["candidate-manifest.json"])
+        self.assertEqual(tuple(row["fileName"] for row in manifest["artifacts"]), L.SHELL_CANDIDATE_ARTIFACT_TARGETS)
+        self.assertTrue(actual["assurance"]["documentsOnly"])
+        for key in ("artifactBytesVerified", "workflowAuthenticated", "storeStateObserved", "comparedWithSourceProject", "releaseReady", "recoveryAuthorized"):
+            self.assertIs(actual["assurance"][key], False)
+        self.assertNotEqual(actual["summary"]["documentPayloadSha256"]["manifest"], CANDIDATE_FIXTURE_PINS[0][3])
+
+    def test_candidate_receipt_rejects_each_missing_changed_or_wrongly_typed_leaf(self):
+        expected = candidate_documents_receipt()
+        raw = L.canonical(expected)
+        self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()),
+                         (1069, "e7a6cf04edfd5b331ca0a2e8fa8afab42d1fdfda1a6cbc40c979188679ac5902"))
+        self.assertLessEqual(len(raw), 2048)
+        self.assertEqual(L.shell_candidate_receipt(raw), expected)
+        value, outcome, files, mappings = closed_shell_data()
+        def leaves(value, prefix=()):
+            for key, child in value.items():
+                if type(child) is dict:
+                    yield from leaves(child, (*prefix, key))
+                else:
+                    yield (*prefix, key), child
+        for path, original in leaves(expected):
+            for mode in ("missing", "changed", "wrong-type"):
+                changed = deepcopy(expected)
+                parent = changed
+                for key in path[:-1]:
+                    parent = parent[key]
+                if mode == "missing":
+                    del parent[path[-1]]
+                elif mode == "wrong-type":
+                    parent[path[-1]] = int(original) if type(original) is bool else True if type(original) is int else None
+                else:
+                    parent[path[-1]] = not original if type(original) is bool else original + 1 if type(original) is int else original + "-other"
+                with self.subTest(path=path, mode=mode):
+                    with self.assertRaises(ValueError):
+                        L.shell_candidate_receipt(L.canonical(changed))
+                    with self.assertRaises(ValueError):
+                        L.shell_result(*positive_capture(candidate=changed), "positive", 0, mappings)
+                    altered = dict(files)
+                    cases = L.decode(altered["shell-cases.json"])
+                    cases["positive"]["candidateDocuments"] = changed
+                    altered["shell-cases.json"] = L.canonical(cases)
+                    with patch.object(L, "shell_closed_loader", return_value=mappings), self.assertRaises(ValueError):
+                        L.shell_closed_result(value, outcome, altered)
+        for changed in (b"", b"{}", b"[]", b"null", raw + b" " * 2048,
+                        raw.replace(b'"scope":{', b'"scope":{},"scope":{'),
+                        raw.replace(b'"exit":true', b'"exit":true,"exit":true'),
+                        L.canonical({**expected, "selectionId": "untrusted"}),
+                        L.canonical({**expected, "scope": {**expected["scope"], "workflowAuthenticated": True}}),
+                        *(L.canonical({key: child for key, child in expected.items() if key != omitted})
+                          for omitted in ("cancel", "select", "observe", "preserved", "scope", "quit"))):
+            with self.subTest(raw=changed), self.assertRaises(ValueError):
+                L.shell_candidate_receipt(changed)
+
+    def test_both_independent_receipts_must_precede_completion_in_exact_stdout_order(self):
+        stdout, stderr = positive_capture()
+        lines = stdout.splitlines(keepends=True)
+        self.assertEqual(len(lines), 6)
+        # Permute the independent contract/receipt/completion suffix; the
+        # positive transport test covers both bootstrap records and all cuts.
+        for order in permutations(range(2, 6)):
+            if order == (2, 3, 4, 5):
+                continue
+            with self.subTest(order=order), self.assertRaises(ValueError):
+                L.shell_result(b"".join(lines[:2] + [lines[index] for index in order]), stderr, "positive", 0, map_data())
+        for index in range(6):
+            for changed in (b"".join(lines[:index] + lines[index + 1:]), b"".join(lines[:index] + [lines[index]] + lines[index:])):
+                with self.subTest(index=index, stdout=changed), self.assertRaises(ValueError):
+                    L.shell_result(changed, stderr, "positive", 0, map_data())
+        for index in (3, 4):
+            with self.subTest(stderr=index), self.assertRaises(ValueError):
+                L.shell_result(b"".join(lines[:index] + lines[index + 1:]), stderr + lines[index], "positive", 0, map_data())
+            # Exactly 2048 bytes of JSON without LF must fail once the
+            # independent line terminator is counted, not share another cap.
+            marker = L.SHELL_PROJECT_MARKER if index == 3 else L.SHELL_CANDIDATE_MARKER
+            raw = lines[index][len(marker):-1]
+            inflated = list(lines)
+            inflated[index] = marker + raw + b" " * (2048 - len(raw)) + b"\n"
+            with self.subTest(oversize=index), self.assertRaises(ValueError):
+                L.shell_result(b"".join(inflated), stderr, "positive", 0, map_data())
+        value, _, files, mappings = closed_shell_data()
+        for case in ("normal", "quit-outstanding"):
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                L.shell_result(files["shell-" + case + ".stdout"] + lines[4], files["shell-" + case + ".stderr"], case, 0, mappings)
+
+    def test_candidate_inventory_requires_exact_five_unchanged_nodes_and_absent_artifacts(self):
+        value = installed_handoff()
+        fixture = candidate_fixture_data(value)
+        raw = L.canonical(fixture)
+        with patch.object(Path, "lstat", side_effect=AssertionError("Closed DATA cannot inspect possible-live work")):
+            result = L.shell_candidate_fixture(value, raw, raw)
+        self.assertEqual(result, {"fixture": "android-candidate-documents-v1", "rootRetained": True, "documentsUnchanged": True,
+            "noUnexpectedEntries": True, "artifactTargetsAbsent": True, "entryCount": 5, "documentBytes": 11366,
+            "directoryMode": 0o700, "fileMode": 0o600,
+            "documents": [{"path": name, "size": size, "sha256": digest} for name, _, size, digest in CANDIDATE_FIXTURE_PINS],
+            "before": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+            "after": {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}})
+        for index, row in enumerate(fixture["entries"]):
+            for field in range(9):
+                changed = deepcopy(fixture)
+                changed["entries"][index]["identity"][field] += 1
+                for before, after in ((raw, L.canonical(changed)), (L.canonical(changed), raw)):
+                    with self.subTest(node=index, identity=field), self.assertRaises(ValueError):
+                        L.shell_candidate_fixture(value, before, after)
+        mutations = (
+            lambda v: v.update(schemaVersion=True), lambda v: v.update(fixture="android-saved-readonly-v1"),
+            lambda v: v.update(root=str(L.root_path(value) / "positive-project")), lambda v: v.update(saved=True),
+            lambda v: v.update(absent=[]), lambda v: v["absent"].append("unbound"),
+            lambda v: v["entries"].pop(), lambda v: v["entries"].append(deepcopy(v["entries"][-1])),
+            lambda v: v["entries"].reverse(), lambda v: v["entries"][0]["children"].append("reader-1.2.3-42.aab"),
+            lambda v: v["entries"][1]["children"].append("credentials"),
+            lambda v: v["entries"][2].update(path="../candidate-manifest.json"),
+            lambda v: v["entries"][2].update(kind="directory"), lambda v: v["entries"][2].update(size=True),
+            lambda v: v["entries"][2].update(sha256="0" * 64), lambda v: v["entries"][2].update(extra=True),
+            lambda v: v["entries"][2]["identity"].__setitem__(1, True),
+            lambda v: v["entries"][2]["identity"].__setitem__(2, stat.S_IFLNK | 0o600),
+            lambda v: v["entries"][2]["identity"].__setitem__(3, 0),
+            lambda v: v["entries"][2]["identity"].__setitem__(4, 0),
+            lambda v: v["entries"][2]["identity"].__setitem__(5, 2),
+            lambda v: v["entries"][3]["identity"].__setitem__(0, 2),
+            lambda v: v["entries"][3]["identity"].__setitem__(1, v["entries"][2]["identity"][1]),
+        )
+        for mutate in mutations:
+            changed = deepcopy(fixture); mutate(changed)
+            # Two mutually agreeing but invalid inventories still cannot pass.
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                L.shell_candidate_fixture(value, L.canonical(changed), L.canonical(changed))
+        for malformed in (b"{}", b"[]", raw + b" " * 8192, json.dumps(fixture, indent=2).encode(),
+                          raw.replace(b'"entries":[', b'"entries":[],"entries":[')):
+            with self.subTest(raw=malformed), self.assertRaises(ValueError):
+                L.shell_candidate_fixture(value, malformed, raw)
+
+    def test_actual_candidate_inventory_never_reads_artifacts_or_unexpected_subtrees(self):
+        value = installed_handoff(); root = L.root_path(value); evidence = root / "candidate-evidence"
+        for case in ("complete", "artifact", "private-subtree", "mode", "owner", "links", "special", "bytes", "alias", "device", "drift"):
+            fixture = candidate_fixture_data(value)
+            by_path = {evidence if row["path"] == "." else evidence / row["path"]: row for row in fixture["entries"]}
+            if case == "artifact": by_path[evidence]["children"].append("reader-1.2.3-42.aab")
+            if case == "private-subtree": by_path[evidence / "operation"]["children"].append("credentials")
+            first, second = (by_path[evidence / name] for name in ("candidate-manifest.json", "candidate-receipt.json"))
+            if case == "mode": first["identity"][2] = stat.S_IFREG | 0o644
+            if case == "owner": first["identity"][3] = 0
+            if case == "links": first["identity"][5] = 2
+            if case == "special": first["identity"][2] = stat.S_IFLNK | 0o600
+            if case == "bytes": first["sha256"] = "f" * 64
+            if case == "alias": second["identity"][1] = first["identity"][1]
+            if case == "device": second["identity"][0] = 2
+            def file_stat(path):
+                values = by_path[path]["identity"]
+                return SimpleNamespace(**dict(zip(("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"), values)))
+            def scan(path):
+                context = Mock()
+                context.__enter__ = Mock(return_value=iter(SimpleNamespace(name=name) for name in by_path[path]["children"]))
+                context.__exit__ = Mock(return_value=False)
+                return context
+            def read_data(path, limit):
+                row = by_path[path]
+                self.assertEqual(limit, row["size"])
+                if case == "drift" and path.name == "candidate-receipt.json":
+                    first["identity"][8] += 1
+                return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
+            with self.subTest(case=case), patch.object(L, "_ROOT", root), patch.object(L, "directory"), \
+                 patch.object(Path, "lstat", file_stat), patch.object(L.os, "scandir", side_effect=scan) as scans, \
+                 patch.object(L, "record", side_effect=read_data) as reads, patch.object(L, "_absent") as absent:
+                if case == "complete":
+                    self.assertEqual(L._shell_candidate_inventory(value), fixture)
+                    self.assertEqual([call.args for call in reads.call_args_list], [(evidence / name, size) for name, _, size, _ in CANDIDATE_FIXTURE_PINS])
+                    self.assertEqual([call.args[0] for call in absent.call_args_list], [evidence / relative for relative in fixture["absent"]])
+                else:
+                    with self.assertRaises(ValueError):
+                        L._shell_candidate_inventory(value)
+                    if case in {"artifact", "private-subtree", "mode", "owner", "links", "special"}:
+                        reads.assert_not_called()
+                self.assertTrue(all(call.args[0] in {evidence, evidence / "operation"} for call in scans.call_args_list))
+                self.assertTrue(all(call.args[0] in {evidence / name for name in L.SHELL_CANDIDATE_DOCUMENTS} for call in reads.call_args_list))
+
+    def test_closed_candidate_requires_both_receipts_and_separate_original_exports(self):
+        value, outcome, files, mappings = closed_shell_data()
+        with patch.object(L, "shell_closed_loader", return_value=mappings):
+            result = L.shell_closed_result(value, outcome, files)
+        self.assertEqual(result["candidateDocuments"]["native"], candidate_documents_receipt())
+        self.assertEqual(result["candidateDocuments"]["fixture"]["before"], result["candidateDocuments"]["fixture"]["after"])
+        self.assertEqual(result["projectDraft"]["native"], project_draft_receipt())
+        for change in ("missing-before", "missing-after", "changed-after", "case-partial", "case-missing", "stdout-partial", "stdout-missing", "wrong-exit"):
+            changed, current = dict(files), deepcopy(outcome)
+            if change.startswith("missing-"):
+                changed.pop("shell-positive-candidate-" + change.removeprefix("missing-") + ".json")
+            elif change == "changed-after":
+                fixture = L.decode(changed["shell-positive-candidate-after.json"])
+                fixture["entries"][0]["identity"][1] += 1
+                changed["shell-positive-candidate-after.json"] = L.canonical(fixture)
+            elif change.startswith("case-"):
+                cases = L.decode(changed["shell-cases.json"])
+                if change == "case-missing": cases["positive"].pop("candidateDocuments")
+                else: cases["positive"]["candidateDocuments"].pop("observe")
+                changed["shell-cases.json"] = L.canonical(cases)
+            elif change == "stdout-partial":
+                partial = candidate_documents_receipt(); partial.pop("quit")
+                changed["shell-positive.stdout"] = positive_capture(candidate=partial)[0]
+            elif change == "stdout-missing":
+                changed["shell-positive.stdout"] = b"".join(line for line in changed["shell-positive.stdout"].splitlines(keepends=True)
+                                                          if not line.startswith(L.SHELL_CANDIDATE_MARKER))
+            else:
+                current["commands"][1]["exitCode"] = 1
+            with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=mappings), \
+                 patch.object(L, "_shell_candidate_inventory", side_effect=AssertionError("No failed-work rescan")), self.assertRaises((ValueError, KeyError)):
+                L.shell_closed_result(value, current, changed)
+        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
+        body = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "unit_start")
+        calls = [(node.func.id, node.lineno) for node in ast.walk(body) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
+        gated = [line for name, line in calls if name == "shell_result"]
+        inventories = [line for name, line in calls if name == "_shell_candidate_inventory"]
+        self.assertEqual((len(gated), len(inventories)), (1, 1))
+        self.assertLess(gated[0], inventories[0])
+        loop = next(node for node in ast.walk(body) if isinstance(node, ast.For)
+                    and isinstance(node.iter, ast.Name) and node.iter.id == "SHELL_CASES")
+        branch = next(node for node in loop.body if isinstance(node, ast.If))
+        gate = next(index for index, node in enumerate(branch.orelse) if isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name) and node.value.func.id == "shell_result")
+        positive = branch.orelse[gate + 1]
+        self.assertIsInstance(positive, ast.If)
+        self.assertEqual(ast.unparse(positive.test), "case == 'positive'")
+        # The sole post-exit inventory is a direct, subsequent positive-branch
+        # assignment, not an exception/finally path after a failed gate.
+        self.assertTrue(any(isinstance(node, ast.Assign) and node.lineno <= inventories[0] <= node.end_lineno for node in positive.body))
+
+
+
+class ProjectPathLifecycleContracts(unittest.TestCase):
+    def test_receipt_exact_size_every_leaf_and_closed_original_correspondence(self):
+        receipt = project_path_receipt(); raw = L.canonical(receipt)
+        self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (1482, "b3784f485377a9e7b249d5dcac1eae98ae4825dd1e9bf1fbce4b0f2e82698633"))
+        self.assertEqual(L.shell_path_receipt(raw), receipt)
+        value, outcome, files, expected = closed_shell_data()
+        with patch.object(L, "shell_closed_loader", return_value=expected):
+            result = L.shell_closed_result(value, outcome, files)
+        self.assertEqual(result["projectPaths"]["native"], receipt)
+        self.assertEqual(result["projectPaths"]["fixture"]["rootModes"], [0o700, 0o500])
+        stdout, stderr = path_capture()
+        lines = stdout.splitlines(keepends=True)
+        self.assertEqual(len(lines), 5)
+        noise = b"ordinary wrapper text\nMRKDBG_DESKTOP_BOOTSTRAP=hook-installed\n"
+        self.assertEqual(L.shell_result(noise + noise.join(lines), noise, "project-paths", 0, expected), result["cases"]["project-paths"])
+        changes = [(b"".join(lines[2:]), b"".join(lines[:2])), (stdout.rstrip(b"\n"), stderr),
+                   (stdout + b"MRK_UNKNOWN=1\n", stderr), (stdout.replace(b"=available", b"=unavailable"), stderr)]
+        for index, line in enumerate(lines):
+            changes.extend(((b"".join(lines[:index] + lines[index + 1:]), stderr), (stdout + line, stderr),
+                            (b"".join(lines[:index] + lines[index + 1:]), line)))
+            if index + 1 < len(lines):
+                changed = list(lines); changed[index], changed[index + 1] = changed[index + 1], changed[index]
+                changes.append((b"".join(changed), stderr))
+        for out, err in changes:
+            with self.subTest(stdout=out, stderr=err), self.assertRaises(ValueError):
+                L.shell_result(out, err, "project-paths", 0, expected)
+        def leaves(value, prefix=()):
+            if type(value) is dict:
+                for key, child in value.items():
+                    yield from leaves(child, (*prefix, key))
+            elif type(value) is list:
+                for key, child in enumerate(value):
+                    yield from leaves(child, (*prefix, key))
+            else:
+                yield prefix, value
+        for path, old in leaves(receipt):
+            for mode in ("missing", "changed", "wrong-type"):
+                changed = deepcopy(receipt); parent = changed
+                for key in path[:-1]:
+                    parent = parent[key]
+                if mode == "missing":
+                    del parent[path[-1]]
+                else:
+                    parent[path[-1]] = (int(old) if type(old) is bool else True if type(old) is int else None) if mode == "wrong-type" else (
+                        not old if type(old) is bool else old + 1 if type(old) is int else old + "-other")
+                with self.subTest(path=path, mode=mode), self.assertRaises(ValueError):
+                    L.shell_path_receipt(L.canonical(changed))
+        for raw in (b"{}", L.canonical(receipt) + b" ", json.dumps(receipt, indent=2).encode(),
+                    L.canonical(receipt).replace(b'"exit":true', b'"exit":true,"exit":true'),
+                    L.canonical({**receipt, "select": list(reversed(receipt["select"]))}),
+                    L.canonical({**receipt, "scope": "release-ready"}), b" " * 2049):
+            with self.subTest(raw=raw[:40]), self.assertRaises(ValueError):
+                L.shell_path_receipt(raw)
+        for change in ("missing-case", "case-type", "stdout", "stderr-only", "reorder", "line-endings", "exit", "display", "combined-cap", "before", "after"):
+            current = deepcopy(outcome); altered = dict(files)
+            if change in ("missing-case", "case-type"):
+                cases = L.decode(altered["shell-cases.json"])
+                if change == "missing-case":
+                    cases.pop("project-paths")
+                else:
+                    cases["project-paths"]["projectPaths"]["originals"]["childNew"] = True
+                altered["shell-cases.json"] = L.canonical(cases)
+            elif change in ("before", "after"):
+                altered.pop("shell-project-paths-" + change + ".json")
+            elif change == "stdout":
+                altered["shell-project-paths.stdout"] = b"MRK_INSTALLED_SHELL_OBSERVATION=project-paths-verified\n"
+            elif change == "stderr-only":
+                altered["shell-project-paths.stderr"] += altered["shell-project-paths.stdout"]
+                altered["shell-project-paths.stdout"] = b""
+            elif change == "reorder":
+                altered["shell-project-paths.stdout"] = b"".join(reversed(altered["shell-project-paths.stdout"].splitlines(keepends=True)))
+            elif change == "line-endings":
+                altered["shell-project-paths.stdout"] = altered["shell-project-paths.stdout"].replace(b"\n", b"\r\n")
+            elif change == "exit":
+                next(row for row in current["commands"] if row["phase"] == "shell-project-paths")["exitCode"] = 1
+            elif change == "display":
+                altered.pop("shell-project-paths-xvfb.stderr")
+            else:
+                altered["shell-project-paths-xvfb.stderr"] = b"x" * L.LIMIT
+            with self.subTest(change=change), patch.object(L, "shell_closed_loader", return_value=expected), \
+                 patch.object(L, "_shell_paths_inventory", side_effect=AssertionError("No live/failed original rescan")), self.assertRaises((ValueError, KeyError)):
+                L.shell_closed_result(value, current, altered)
+
+    def test_exact_fixture_transitions_reject_aliases_kind_content_or_identity_drift(self):
+        value, _, _, _ = closed_shell_data()
+        before = path_fixture_data(value); after = path_fixture_data(value, changed=True)
+        result = L.shell_paths_fixture(value, L.canonical(before), L.canonical(after))
+        self.assertEqual((result["beforeCount"], result["afterCount"], result["fileCount"], result["fileBytes"]), (14, 15, 5, 130))
+        self.assertNotEqual(result["before"]["sha256"], result["after"]["sha256"])
+        mutations = (
+            lambda d: d.update(changed=False), lambda d: d.update(schemaVersion=True), lambda d: d.update(root="/other"),
+            lambda d: d["entries"].pop(), lambda d: d["entries"].reverse(), lambda d: d["absent"].pop(),
+            lambda d: d["entries"][0]["identity"].__setitem__(2, stat.S_IFDIR | 0o700),
+            lambda d: d["entries"][0]["identity"].__setitem__(1, 999), lambda d: d["entries"][0]["identity"].__setitem__(7, 22),
+            lambda d: d["entries"][1]["children"].append("extra"), lambda d: d["entries"][1]["identity"].__setitem__(3, 0),
+            lambda d: d["entries"][3]["identity"].__setitem__(1, 999), lambda d: d["entries"][3]["identity"].__setitem__(5, 2),
+            lambda d: d["entries"][5].update(kind="file"), lambda d: d["entries"][9].update(path="path-project/ios/Kind.xcodeproj"),
+            lambda d: d["entries"][10]["identity"].__setitem__(1, d["entries"][2]["identity"][1]),
+            lambda d: d["entries"][11]["identity"].__setitem__(8, 22), lambda d: d["entries"][13].update(size=True),
+            lambda d: d["entries"][13].update(sha256="0" * 64), lambda d: d["entries"][14].update(target="../VERSION"),
+            lambda d: d["entries"][14]["identity"].__setitem__(0, 2), lambda d: d["entries"][14]["identity"].__setitem__(1, 300),
+        )
+        for mutate in mutations:
+            changed = deepcopy(after); mutate(changed)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                L.shell_paths_fixture(value, L.canonical(before), L.canonical(changed))
+        for left, right in ((after, before), (before, before), (after, after)):
+            with self.assertRaises(ValueError):
+                L.shell_paths_fixture(value, L.canonical(left), L.canonical(right))
+
+    def test_inventory_admits_all_parents_before_only_fixed_inert_reads_and_no_link_follow(self):
+        value, _, _, _ = closed_shell_data(); root = L.root_path(value)
+        for changed in (False, True):
+            expected = path_fixture_data(value, changed=changed)
+            by_path = {root / row["path"]: row for row in expected["entries"]}
+            def metadata(path):
+                if path == root:
+                    return SimpleNamespace(st_dev=1)
+                row = by_path[path]; n = row["identity"]
+                return SimpleNamespace(**dict(zip(("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"), n)))
+            class Entries:
+                def __init__(self, path): self.children = by_path[path]["children"]
+                def __enter__(self): return iter(SimpleNamespace(name=name) for name in self.children)
+                def __exit__(self, *_): return False
+            def read_file(path, limit):
+                self.assertEqual(limit, 26); row = by_path[path]; self.assertEqual(row["kind"], "file")
+                return {"path": str(path), "size": row["size"], "sha256": row["sha256"]}
+            with patch.object(L, "_ROOT", root), patch.object(L, "directory"), patch.object(L, "_absent"), \
+                 patch.object(Path, "lstat", metadata), patch.object(L.os, "scandir", side_effect=Entries), \
+                 patch.object(L.os, "readlink", return_value="link-original") as link, patch.object(L, "record", side_effect=read_file) as reads:
+                self.assertEqual(L._shell_paths_inventory(value, changed=changed), expected)
+                self.assertEqual(reads.call_count, 5)
+                self.assertEqual(link.call_count, int(changed))
+                reads.reset_mock(); by_path[root / "path-project"]["children"].append("unexpected")
+                with self.assertRaises(ValueError):
+                    L._shell_paths_inventory(value, changed=changed)
+                reads.assert_not_called()
+
+    def test_after_inventory_is_only_after_success_in_the_existing_original_case_branch(self):
+        tree = ast.parse((SOURCE / "desktop/tools/ubuntu_publication_lifecycle.py").read_text())
+        body = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "unit_start")
+        loop = next(n for n in ast.walk(body) if isinstance(n, ast.For) and isinstance(n.iter, ast.Name) and n.iter.id == "SHELL_CASES")
+        branch = next(n for n in loop.body if isinstance(n, ast.If))
+        gate = next(i for i,n in enumerate(branch.orelse) if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                    and isinstance(n.value.func, ast.Name) and n.value.func.id == "shell_result")
+        path_branch = next(n for n in branch.orelse[gate+1:] if isinstance(n, ast.If) and ast.unparse(n.test) == "case == 'project-paths'")
+        calls = [n for n in ast.walk(path_branch) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_shell_paths_inventory"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([(arg.arg, ast.literal_eval(arg.value)) for arg in calls[0].keywords], [("changed", True)])
+        self.assertEqual(set(L.SHELL_CASES), {"normal", "positive", "quit-outstanding", "project-paths"})
 
 
 if __name__ == "__main__":

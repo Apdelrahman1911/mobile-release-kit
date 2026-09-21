@@ -44,10 +44,66 @@ INSTALLED_TESTS = {key: "supervisor::tests::installed_candidate_a_" + suffix for
     ("overlap", "child_spans_f1_publication"))}
 CHILD_MARKER = "MRK_INSTALLED_NATIVE_CHILD="
 EMFILE_MARKER = "MRK_INSTALLED_NATIVE_EMFILE_RETAINED_UNKNOWN"
-SHELL_CASES = ("normal", "positive", "quit-outstanding")
+SHELL_CASES = ("normal", "positive", "quit-outstanding", "project-paths")
+SHELL_PATH_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_PATHS="
+SHELL_PATH_RECEIPT = {'assetAuthorityCreated': False,
+ 'cancel': [{'field': 'version.source', 'operation': 3}, {'field': 'metadata.root', 'operation': 7}],
+ 'draft': {'baselineUnchanged': True,
+           'positivePatchMatched': True,
+           'previews': 3,
+           'refusalsUnchanged': True,
+           'xcodePairRetained': True},
+ 'fixture': 'project-paths-v1',
+ 'fixtureMutations': {'actorReturned': 4, 'newWorker': False},
+ 'gate': 'installed-project-profile',
+ 'originals': {'childNew': 2,
+               'childReturned': 9,
+               'coordinatorReturned': 11,
+               'failedJoins': 0,
+               'filenameReads': 9,
+               'guiSettled': 11,
+               'sourceClosed': 8,
+               'sourceUnstarted': 3},
+ 'projectOriginalsSettled': True,
+ 'quit': {'exit': True, 'operation': 14, 'originalsSettled': True, 'relayJoined': True},
+ 'refused': [{'case': 'outside', 'code': 'project_path_unsafe', 'operation': 9},
+             {'case': 'post-selection-symlink', 'code': 'project_path_unsafe', 'operation': 10},
+             {'case': 'post-selection-directory-for-file', 'code': 'project_path_unsafe', 'operation': 11},
+             {'case': 'post-selection-file-for-directory', 'code': 'project_path_unsafe', 'operation': 12},
+             {'case': 'changed-root-mode', 'code': 'project_path_changed', 'operation': 13}],
+ 'registryUnchanged': True,
+ 'requestResultDomMatched': 11,
+ 'saveRequests': 0,
+ 'schemaVersion': 1,
+ 'scope': 'point-in-time-path-metadata-only',
+ 'select': [{'field': 'version.source', 'operation': 4, 'relativePath': 'inputs/VERSION'},
+            {'field': 'ios.project', 'operation': 5, 'relativePath': 'ios/Example.xcodeproj'},
+            {'field': 'ios.workspace', 'operation': 6, 'relativePath': 'ios/Example.xcworkspace'},
+            {'field': 'metadata.root', 'operation': 8, 'relativePath': 'metadata'}]}
+
+SHELL_PATH_BYTES = b"inert path-picker fixture\n"
+SHELL_PATH_NODES = (
+    ("path-project", "directory"), ("path-project/inputs", "directory"), ("path-project/inputs/VERSION", "file"),
+    ("path-project/inputs/link-input", "file"), ("path-project/inputs/kind-input", "file"), ("path-project/inputs/kind-directory", "directory"),
+    ("path-project/ios", "directory"), ("path-project/ios/Example.xcodeproj", "directory"), ("path-project/ios/Example.xcworkspace", "directory"),
+    ("path-project/ios/Kind.xcodeproj", "directory"), ("path-project/ios/Kind.file", "file"), ("path-project/metadata", "directory"),
+    ("path-outside", "directory"), ("path-outside/VERSION", "file"),
+)
+SHELL_PATH_MOVES = {
+    "path-project/inputs/link-input": "path-project/inputs/link-original",
+    "path-project/inputs/kind-input": "path-project/inputs/kind-original",
+    "path-project/inputs/kind-directory": "path-project/inputs/kind-input",
+    "path-project/ios/Kind.xcodeproj": "path-project/ios/Kind.original",
+    "path-project/ios/Kind.file": "path-project/ios/Kind.xcodeproj",
+}
+SHELL_PATH_ABSENT = ("path-project/.gitignore", "path-project/release", "path-project/.mobile-release",
+    "path-project/.mobile-release-init-prepare", "path-project/.mobile-release-init", "path-project/.mobile-release-init-cleanup",
+    "path-project/.mobile-release-metadata-text-prepare", "path-project/.mobile-release-metadata-text", "path-project/.mobile-release-metadata-text-cleanup")
+
 SHELL_FEATURES = ["custom-protocol", "desktop-shell"]
 SHELL_PROJECT_SOURCE = (b'plugins { id("com.android.application") }\n'
                         b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
+SHELL_PROJECT_VERSION = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
 # Fixed synthetic output DATA, not a second configuration serializer. The
 # focused contract compares these bytes with the actual pure core suggestion
 # and payload builders after the native Value wire's sorted-key round trip.
@@ -85,7 +141,7 @@ SHELL_PROJECT_CONFIG = b'''{
   "version": {
     "buildKey": "BUILD_NUMBER",
     "nameKey": "VERSION_NAME",
-    "source": "release/version.properties"
+    "source": "version.properties"
   }
 }
 '''
@@ -94,35 +150,421 @@ SHELL_PROJECT_IGNORE = (b".mobile-release/\n.mobile-release-init-prepare/\n.mobi
                         b".mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n")
 SHELL_PROJECT_MARKER = b"MRK_INSTALLED_SHELL_PROJECT_DRAFT="
 SHELL_PROJECT_RECEIPT = {
-    "schemaVersion": 2, "fixture": "android-config-save-v1", "projectGateContract": True,
-    "methods": "eight-passive", "passiveActions": False,
+    "schemaVersion": 3, "fixture": "android-saved-readonly-v1", "projectGateContract": True,
+    "methods": "twelve-passive", "passiveActions": False,
     "cancel": {"operation": 1, "widget": "cancel", "guiSettled": True, "originalsSettled": True, "registered": False},
     "select": {"operation": 2, "widget": "select", "filenameRead": True, "guiSettled": True, "originalsSettled": True, "registered": True},
-    "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 1},
+    "snapshot": {"initial": "missing", "androidHint": True, "sourceFiles": 2},
     "suggestion": {"coreProvenance": True, "explicitAdoption": True},
     "save": {"capability": True, "requests": {"open": 2, "prepare": 2, "apply": 1, "close": 0},
              "bindingsMatched": True, "draftRevisions": [1, 1], "baselineGenerations": [1, 2],
              "reviewMatched": True, "confirmation": {"opened": 2, "keepReviewing": True, "applyBeforeAck": 0, "acknowledged": True},
              "outcome": ["committed", "clean", "settled", "none"], "nativeFinality": "settled",
-             "savedVisible": True, "baselineAdvanced": True},
-    "readback": {"fresh": True, "domMatched": True, "draftMatched": True, "size": 692,
-                 "sha256": "4b3a5aaa718b018101ee0fcd0e612285be8a1b93cab20c5ff15e8d441069b917"},
+             "savedVisible": True, "baselineAdvanced": True, "createReleaseDirectory": True},
+    "readback": {"fresh": True, "domMatched": True, "draftMatched": True, "size": 684,
+                 "sha256": "0c47aaffe3971b122f21ebddf8070ab29014c4b7c79a56e23335ed110f1e6acc"},
     "noop": {"reviewMatched": True, "apply": 0, "quitOutstanding": True,
              "outcome": ["not_started", "not_created", "settled", "cancelled"], "nativeReason": "shutdown"},
     "originals": {"sessions": 2, "writerFrames": [3, 2], "stdoutFrames": [3, 3],
                   "startupJoined": 2, "childWaited": 2, "ioSettled": 2, "ownersJoined": 2,
                   "runtimeLedgerSettled": 2, "runtimeSettlementJoined": 2},
-    "quit": {"operation": 3, "originalsSettled": True, "relayJoined": True, "exit": True},
+    "quit": {"operation": 6, "originalsSettled": True, "relayJoined": True, "exit": True},
     "guidance": {
         "draftUnchanged": True,
-        "requirements": {"requestResultDomMatched": True, "context": "android/build", "roles": 3,
-                         "presence": "unknown", "version": "unknown", "inspection": "not-run",
-                         "nativeInspection": "unavailable", "dependencies": "unknown"},
+        "requirements": {"requestResultDomMatched": True, "context": "android/build", "roles": 3},
         "github": {"requestResultDomMatched": True, "explicitInputs": True, "browserEdit": "insertText",
-                   "comparison": "not-supplied", "workflowCount": 4, "tooling": "format-only", "githubContacted": False,
-                   "repositoryObserved": False, "toolingRefResolved": False, "templateCompatibility": "unknown", "applyAvailable": False},
+                   "workflowCount": 4},
         "assuranceActions": False, "releaseReadiness": "unknown",
     },
+    "savedReads": {
+        "version": {"requestResultDomMatched": True, "pairMatched": True, "name": "1.2.3", "build": 7},
+        "metadata": {"observeRequestResultDomMatched": True, "absent": 3, "validateRequestResultDomMatched": True,
+                     "browserEdit": "insertText", "draftRetained": True},
+        "scope": "single-request-non-atomic",
+    },
+}
+# Fixed public synthetic document DATA. Never import core serializers/sealers
+# here or open any declared artifact payload. Focused DATA contracts bind these
+# exact literals to the existing repository fixtures and Android result DTO.
+SHELL_CANDIDATE_DOCUMENTS = {
+    "candidate-manifest.json": b'''{
+  "schemaVersion": 2,
+  "tooling": {
+    "version": "0.2.0",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "repository": {
+    "fullName": "example/mobile-app",
+    "id": "100000000"
+  },
+  "source": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333",
+    "ref": "refs/heads/main"
+  },
+  "configuration": {
+    "path": "release/mobile-release.json",
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "version": {
+    "marketing": "1.2.3",
+    "build": 42
+  },
+  "platforms": {
+    "android": {
+      "applicationId": "com.example.reader"
+    }
+  },
+  "artifacts": [
+    {
+      "logicalName": "android-aab",
+      "platform": "android",
+      "kind": "aab",
+      "fileName": "reader-1.2.3-42.aab",
+      "size": 12345678,
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "architectures": [
+        "arm64-v8a",
+        "x86_64"
+      ]
+    },
+    {
+      "logicalName": "store-metadata",
+      "platform": "shared",
+      "kind": "metadata",
+      "fileName": "store-metadata-1.2.3-42.zip",
+      "size": 34567,
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "architectures": []
+    },
+    {
+      "logicalName": "validation-report",
+      "platform": "shared",
+      "kind": "validation-report",
+      "fileName": "validation-report-1.2.3-42.json",
+      "size": 2345,
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "architectures": []
+    }
+  ],
+  "signing": [
+    {
+      "platform": "android",
+      "kind": "android-upload",
+      "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "storeReceipts": [
+    {
+      "provider": "google-play",
+      "applicationId": "com.example.reader",
+      "storeBuildId": "42",
+      "marketingVersion": "1.2.3",
+      "build": 42,
+      "channel": "internal",
+      "state": "available-to-testers",
+      "observedAt": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "createdAt": "2026-01-01T00:00:00Z",
+  "documentType": "candidate-manifest",
+  "operationIntentSha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29",
+  "authorizedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "executedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "producedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "integrity": {
+    "algorithm": "sha256",
+    "sha256": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16"
+  }
+}
+''',
+    "candidate-receipt.json": b'''{
+  "schemaVersion": 3,
+  "stage": "candidate",
+  "candidateManifestSha256": "177b5f3e92b3b02b99489bb6e7a6aaca183b16c371218715f79872e1597e8c16",
+  "tooling": {
+    "version": "0.2.0",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "repository": {
+    "fullName": "example/mobile-app",
+    "id": "100000000"
+  },
+  "source": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333"
+  },
+  "platform": "android",
+  "provider": "google-play",
+  "applicationId": "com.example.reader",
+  "version": {
+    "marketing": "1.2.3",
+    "build": 42
+  },
+  "storeBuildId": "42",
+  "operation": "uploaded",
+  "destination": {
+    "channel": "internal",
+    "releaseStatus": "completed"
+  },
+  "readback": {
+    "state": "available-to-testers",
+    "observedAt": "2026-01-01T00:00:00Z"
+  },
+  "createdAt": "2026-01-01T00:00:00Z",
+  "outcome": "mutated",
+  "storeState": {
+    "canonicalization": "mrk-play-track-state-v2",
+    "mode": "mutation",
+    "mutationEditId": "mutation-edit",
+    "readbackEditId": "readback-edit",
+    "destinationBeforeSha256": "ada011349b750526e1d4a7ac17913384d14fea9c0d67f2c49e4ddb7ad801475d",
+    "destinationExpectedSha256": "0c2ae4a70510eb9e1db11f922c983bdd5fb28116b46b602614db017dd361f85d",
+    "destinationCommittedSha256": "0c2ae4a70510eb9e1db11f922c983bdd5fb28116b46b602614db017dd361f85d",
+    "unrelatedBeforeSha256": "d29df4c391084898c9e1235849f1114ed9b174a335a72299a80fa7d1a2822a36",
+    "unrelatedCommittedSha256": "d29df4c391084898c9e1235849f1114ed9b174a335a72299a80fa7d1a2822a36",
+    "targetReleaseSha256": "6f2ad47688bd1cee19c3929489f3840095ded8f373fa0cf2a7a8a3b286ccb0cf"
+  },
+  "documentType": "store-receipt",
+  "operationIntentSha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29",
+  "authorizedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "executedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "producedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "integrity": {
+    "algorithm": "sha256",
+    "sha256": "2633c2a44967b6cc6900f3f88831d383b0b5b1f43d0876d6f8b7b4fcdda53018"
+  }
+}
+''',
+    "operation/candidate-operation-intent.json": b'''{
+  "documentType": "store-operation-intent",
+  "schemaVersion": 1,
+  "stage": "candidate",
+  "platform": "android",
+  "tooling": {
+    "version": "0.2.0",
+    "commit": "1111111111111111111111111111111111111111"
+  },
+  "repository": {
+    "fullName": "example/mobile-app",
+    "id": "100000000"
+  },
+  "candidateSource": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333",
+    "ref": "refs/heads/main"
+  },
+  "operationSource": {
+    "commit": "2222222222222222222222222222222222222222",
+    "tree": "3333333333333333333333333333333333333333",
+    "ref": "refs/heads/main"
+  },
+  "authorizedBy": {
+    "workflow": "Mobile candidate",
+    "callerPath": ".github/workflows/mobile-candidate.yml",
+    "reusableRepository": "example/mobile-release-kit",
+    "reusablePath": ".github/workflows/reusable-candidate.yml",
+    "reusableCommit": "1111111111111111111111111111111111111111",
+    "runId": "1000000000",
+    "attempt": 1,
+    "headSha": "2222222222222222222222222222222222222222",
+    "ref": "refs/heads/main",
+    "event": "workflow_dispatch"
+  },
+  "confirmation": "candidate:android:1.2.3:42",
+  "application": {
+    "id": "com.example.reader"
+  },
+  "version": {
+    "marketing": "1.2.3",
+    "build": 42
+  },
+  "destination": {
+    "channel": "internal",
+    "releaseStatus": "completed"
+  },
+  "configuration": {
+    "path": "release/mobile-release.json",
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "metadataSha256": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "artifacts": [
+    {
+      "logicalName": "android-aab",
+      "platform": "android",
+      "kind": "aab",
+      "fileName": "reader-1.2.3-42.aab",
+      "size": 12345678,
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "architectures": [
+        "arm64-v8a",
+        "x86_64"
+      ]
+    },
+    {
+      "logicalName": "store-metadata",
+      "platform": "shared",
+      "kind": "metadata",
+      "fileName": "store-metadata-1.2.3-42.zip",
+      "size": 34567,
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "architectures": []
+    },
+    {
+      "logicalName": "validation-report",
+      "platform": "shared",
+      "kind": "validation-report",
+      "fileName": "validation-report-1.2.3-42.json",
+      "size": 2345,
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "architectures": []
+    }
+  ],
+  "signing": [
+    {
+      "platform": "android",
+      "kind": "android-upload",
+      "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "predecessors": {},
+  "storePrecondition": {
+    "schemaVersion": 1,
+    "documentType": "store-precondition",
+    "operation": "android_internal_upload",
+    "platform": "android",
+    "appIdentity": "com.example.reader",
+    "marketingVersion": "1.2.3",
+    "buildNumber": 42,
+    "observedAt": "2026-01-01T00:00:00Z",
+    "snapshot": {
+      "canonicalization": "mrk-play-operation-v1",
+      "destinationTrack": "internal",
+      "destinationState": {
+        "canonicalization": "mrk-play-track-state-v2",
+        "track": "internal",
+        "releases": []
+      },
+      "sourceTrack": null,
+      "sourceState": null,
+      "bundles": [],
+      "targetPresent": false,
+      "targetRelease": {
+        "name": "1.2.3",
+        "status": "completed",
+        "versionCodes": [
+          "42"
+        ]
+      },
+      "destinationTargetState": {
+        "canonicalization": "mrk-play-track-state-v2",
+        "track": "internal",
+        "releases": [
+          {
+            "name": "1.2.3",
+            "status": "completed",
+            "versionCodes": [
+              "42"
+            ]
+          }
+        ]
+      },
+      "sourceAllowedStates": []
+    }
+  },
+  "privateStateCommitments": {},
+  "createdAt": "2026-01-01T00:00:00Z",
+  "integrity": {
+    "algorithm": "sha256",
+    "sha256": "24b9829c7ee58f579ec82f16cc469d5b27641054baece581bec588cb370f8b29"
+  }
+}
+''',
+}
+SHELL_CANDIDATE_ARTIFACT_TARGETS = (
+    "reader-1.2.3-42.aab", "store-metadata-1.2.3-42.zip", "validation-report-1.2.3-42.json",
+)
+SHELL_CANDIDATE_MARKER = b"MRK_INSTALLED_SHELL_CANDIDATE_DOCUMENTS="
+SHELL_CANDIDATE_RECEIPT = {
+    "schemaVersion": 1, "fixture": "android-candidate-documents-v1",
+    "gate": "installed-project-profile+candidate-passive", "privacy": "independent-predicate+gtk-readback",
+    "cancel": {"operation": 3, "requestMatched": True, "gtkSettled": True, "tokenJoined": True,
+               "probeUnstarted": True, "coordinatorJoined": True, "noRegistration": True},
+    "select": {"operation": 4, "requestMatched": True, "gtkSettled": True, "filenameMatched": True,
+               "tokenJoined": True, "probeJoined": True, "coordinatorJoined": True, "selectionMatched": True},
+    "observe": {"operation": 5, "requests": 1, "requestResultDomMatched": True, "bindingMatched": True,
+                "coordinatorJoined": True, "supervisorIdle": True, "knownIdle": True},
+    "preserved": {"sourceProject": True, "registry": True, "credentialStateEmpty": True, "savedReads": True, "wholeDraft": True},
+    "scope": {"documents": 3, "formatsDigestsBindingsMatched": True, "artifactPayloadsObserved": False,
+              "sourceCompared": False, "signingVerified": False, "storeObserved": False, "releaseReady": False, "recoveryAuthority": False},
+    "quit": {"operation": 6, "gtkSettled": True, "coordinatorJoined": True, "relayJoined": True, "exit": True},
 }
 OS_SONAMES = {"libc.so.6", "ld-linux-x86-64.so.2", "libm.so.6", "libmvec.so.1", "libdl.so.2",
               "libpthread.so.0", "librt.so.1", "libutil.so.1", "libgcc_s.so.1"}
@@ -1254,6 +1696,8 @@ def public_files(value):
     if "shell" in value:
         return fixed | {"loader-entry.json", "loader-final.json", "loader-runtime.json", "shell-cases.json",
                         "shell-normal-control.json", "shell-positive-project-before.json", "shell-positive-project-after.json",
+                        "shell-positive-candidate-before.json", "shell-positive-candidate-after.json",
+                        "shell-project-paths-before.json", "shell-project-paths-after.json",
                         "published-before-upgrade.txt", "mutation-denials.txt"} \
             | {"shell-" + case + "-xvfb.stderr" for case in SHELL_CASES} \
             | {"shell-root-data-" + str(index) + ".json" for index in range(len(SHELL_DATA_ROOTS))}
@@ -2444,7 +2888,7 @@ def _shell_project_inventory(value, *, saved=False):
     root = _ROOT / "positive-project"
     directory(root.parent, protected=True)
     owner = (value["runnerUid"], value["runnerGid"])
-    directories = [(".", [".gitignore", "app", "release"] if saved else ["app"], 0o700, owner),
+    directories = [(".", [".gitignore", "app", "release", "version.properties"] if saved else ["app", "version.properties"], 0o700, owner),
                    ("app", ["build.gradle.kts"], 0o555, (0, 0))]
     if saved:
         directories.append(("release", ["mobile-release.json"], 0o755, owner))
@@ -2463,7 +2907,8 @@ def _shell_project_inventory(value, *, saved=False):
         need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Positive fixture directory changed")
         rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
         original_directories.append((path, identity(before)))
-    files = [("app/build.gradle.kts", SHELL_PROJECT_SOURCE, 0o444, (0, 0))]
+    files = [("app/build.gradle.kts", SHELL_PROJECT_SOURCE, 0o444, (0, 0)),
+             ("version.properties", SHELL_PROJECT_VERSION, 0o600, owner)]
     if saved:
         files.extend((("release/mobile-release.json", SHELL_PROJECT_CONFIG, 0o600, owner),
                       (".gitignore", SHELL_PROJECT_IGNORE, 0o600, owner)))
@@ -2476,12 +2921,12 @@ def _shell_project_inventory(value, *, saved=False):
         need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest()
              and identity(path.lstat()) == identity(before), "Positive fixture file bytes or identity differ")
         rows.append({**observed, "path": relative, "kind": "file", "identity": list(identity(before))})
-    absent = [] if saved else [".gitignore", "release"]
+    absent = ["release/store"] if saved else [".gitignore", "release"]
     for relative in absent:
         _absent(root / relative)
     need(all(identity(path.lstat()) == original for path, original in original_directories),
          "Positive fixture parent changed during its bounded inventory")
-    return {"schemaVersion": 2, "fixture": "android-config-save-v1", "root": str(root), "saved": saved,
+    return {"schemaVersion": 2, "fixture": "android-saved-readonly-v1", "root": str(root), "saved": saved,
             "entries": rows, "absent": absent}
 
 
@@ -2493,14 +2938,16 @@ def shell_project_fixture(value, before_raw, after_raw):
     for document, raw, saved in ((before, before_raw, False), (after, after_raw, True)):
         need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "saved", "entries", "absent"}
              and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 2
-             and document["fixture"] == "android-config-save-v1" and document["saved"] is saved
+             and document["fixture"] == "android-saved-readonly-v1" and document["saved"] is saved
              and document["root"] == str(root_path(value) / "positive-project")
-             and document["absent"] == ([] if saved else [".gitignore", "release"]), "Positive fixture inventory is incomplete or out of phase")
-        roster = [(".", stat.S_IFDIR | 0o700, owner, [".gitignore", "app", "release"] if saved else ["app"]),
+             and document["absent"] == (["release/store"] if saved else [".gitignore", "release"]),
+             "Positive fixture inventory is incomplete or out of phase")
+        roster = [(".", stat.S_IFDIR | 0o700, owner, [".gitignore", "app", "release", "version.properties"] if saved else ["app", "version.properties"]),
                   ("app", stat.S_IFDIR | 0o555, (0, 0), ["build.gradle.kts"])]
         if saved:
             roster.append(("release", stat.S_IFDIR | 0o755, owner, ["mobile-release.json"]))
-        roster.append(("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), SHELL_PROJECT_SOURCE))
+        roster.extend((("app/build.gradle.kts", stat.S_IFREG | 0o444, (0, 0), SHELL_PROJECT_SOURCE),
+                       ("version.properties", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_VERSION)))
         if saved:
             roster.extend((("release/mobile-release.json", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_CONFIG),
                            (".gitignore", stat.S_IFREG | 0o600, owner, SHELL_PROJECT_IGNORE)))
@@ -2527,16 +2974,106 @@ def shell_project_fixture(value, before_raw, after_raw):
              and len({tuple(row["identity"][:2]) for row in rows}) == len(rows), "Positive fixture node aliases or cross-device entries differ")
         inventories.append(observed)
     first, last = inventories
-    # The config transaction necessarily changes root timestamps/size/link count,
-    # not its dev/inode/type/mode/ownership. The unrelated hint is exact in full.
+    # Save creates release and may change root timestamps/size/link count,
+    # never its dev/inode/type/mode/ownership. Both original hints stay exact.
     need(first["."]["identity"][:5] == last["."]["identity"][:5]
-         and all(first[name] == last[name] for name in ("app", "app/build.gradle.kts")),
-         "Positive fixture root was replaced or its unrelated hint changed")
-    return {"fixture": "android-config-save-v1", "rootRetained": True, "hintUnchanged": True,
+         and all(first[name] == last[name] for name in ("app", "app/build.gradle.kts", "version.properties")),
+         "Positive fixture root was replaced or an original hint changed")
+    return {"fixture": "android-saved-readonly-v1", "rootRetained": True, "hintUnchanged": True,
             "savedOutputsMatched": True, "noUnexpectedEntries": True, "noPendingState": True,
-            "entryCount": 6, "sourceBytes": len(SHELL_PROJECT_SOURCE), "releaseMode": 0o755,
+            "entryCount": len(last), "sourceBytes": first["app/build.gradle.kts"]["size"] + first["version.properties"]["size"],
+            "releaseMode": stat.S_IMODE(last["release"]["identity"][2]),
             "config": {"size": len(SHELL_PROJECT_CONFIG), "sha256": hashlib.sha256(SHELL_PROJECT_CONFIG).hexdigest(), "mode": 0o600},
             "gitignore": {"size": len(SHELL_PROJECT_IGNORE), "sha256": hashlib.sha256(SHELL_PROJECT_IGNORE).hexdigest(), "mode": 0o600},
+            "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
+
+
+def _shell_candidate_inventory(value):
+    """Only the five fixed nodes, before launch or after successful finality.
+
+    Unexpected children refuse before any leaf read or subtree inspection.
+    Artifact names are checked for absence, never opened, measured or hashed.
+    """
+    need(_ROOT == root_path(value), "Candidate fixture differs from the original service root")
+    root = _ROOT / "candidate-evidence"
+    directory(root.parent, protected=True)
+    owner = (value["runnerUid"], value["runnerGid"])
+    rows, originals = [], []
+    for relative, expected in ((".", ["candidate-manifest.json", "candidate-receipt.json", "operation"]),
+                               ("operation", ["candidate-operation-intent.json"])):
+        path = root if relative == "." else root / relative
+        directory(path)
+        before = path.lstat()
+        need(stat.S_ISDIR(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o700 and (before.st_uid, before.st_gid) == owner
+             and 0 < before.st_nlink <= 16, "Candidate directory ownership or mode differs")
+        children = []
+        with os.scandir(path) as entries:
+            for entry in entries:
+                need(len(children) < len(expected) and entry.name in expected, "Unexpected candidate fixture entry")
+                children.append(entry.name)
+        need(sorted(children) == expected and identity(path.lstat()) == identity(before), "Candidate directory changed")
+        rows.append({"path": relative, "kind": "directory", "identity": list(identity(before)), "children": expected})
+        originals.append((path, identity(before)))
+    for relative, expected in SHELL_CANDIDATE_DOCUMENTS.items():
+        path = root / relative
+        before = path.lstat()
+        need(stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o600
+             and before.st_nlink == 1 and (before.st_uid, before.st_gid) == owner,
+             "Candidate document ownership or mode differs")
+        observed = record(path, len(expected))
+        need(observed["size"] == len(expected) and observed["sha256"] == hashlib.sha256(expected).hexdigest()
+             and identity(path.lstat()) == identity(before), "Candidate document bytes or identity differ")
+        rows.append({**observed, "path": relative, "kind": "file", "identity": list(identity(before))})
+        originals.append((path, identity(before)))
+    for relative in SHELL_CANDIDATE_ARTIFACT_TARGETS:
+        _absent(root / relative)
+    need(all(row["identity"][0] == rows[0]["identity"][0] for row in rows)
+         and len({tuple(row["identity"][:2]) for row in rows}) == 5
+         and all(identity(path.lstat()) == original for path, original in originals),
+         "Candidate fixture node aliases, cross-device entry or inventory drift")
+    return {"schemaVersion": 1, "fixture": "android-candidate-documents-v1", "root": str(root),
+            "entries": rows, "absent": list(SHELL_CANDIDATE_ARTIFACT_TARGETS)}
+
+
+def shell_candidate_fixture(value, before_raw, after_raw):
+    """Closed original DATA, never authority to inspect a failed/live fixture."""
+    before, after = decode(before_raw, 8192), decode(after_raw, 8192)
+    owner = (value["runnerUid"], value["runnerGid"])
+    roster = [(".", stat.S_IFDIR | 0o700, ["candidate-manifest.json", "candidate-receipt.json", "operation"]),
+              ("operation", stat.S_IFDIR | 0o700, ["candidate-operation-intent.json"]),
+              *((relative, stat.S_IFREG | 0o600, raw) for relative, raw in SHELL_CANDIDATE_DOCUMENTS.items())]
+    for document, raw in ((before, before_raw), (after, after_raw)):
+        need(type(document) is dict and set(document) == {"schemaVersion", "fixture", "root", "entries", "absent"}
+             and canonical(document) == raw and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+             and document["fixture"] == "android-candidate-documents-v1"
+             and document["root"] == str(root_path(value) / "candidate-evidence")
+             and document["absent"] == list(SHELL_CANDIDATE_ARTIFACT_TARGETS), "Candidate inventory shape or root differs")
+        rows = document["entries"]
+        need(type(rows) is list and len(rows) == 5, "Candidate fixture must contain exactly five nodes")
+        for row, (relative, mode, expected) in zip(rows, roster):
+            is_directory = stat.S_ISDIR(mode)
+            wanted = {"path", "kind", "identity", "children"} if is_directory else {"path", "kind", "identity", "size", "sha256"}
+            need(type(row) is dict and set(row) == wanted and row["path"] == relative
+                 and row["kind"] == ("directory" if is_directory else "file"), "Candidate node kind/path differs")
+            original = row["identity"]
+            need(type(original) is list and len(original) == 9 and all(type(number) is int and 0 <= number < 1 << 64 for number in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode and tuple(original[3:5]) == owner
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Candidate original identity differs")
+            if is_directory:
+                need(row["children"] == expected, "Candidate fixture has an unexpected child")
+            else:
+                need(original[5] == 1 and original[6] == len(expected) and type(row["size"]) is int
+                     and row["size"] == len(expected) and row["sha256"] == hashlib.sha256(expected).hexdigest(),
+                     "Candidate document differs from the fixed literal DATA")
+        need(all(row["identity"][0] == rows[0]["identity"][0] for row in rows)
+             and len({tuple(row["identity"][:2]) for row in rows}) == 5, "Candidate nodes alias or cross devices")
+    need(before_raw == after_raw, "Candidate original nodes, bytes or absent artifact targets changed")
+    return {"fixture": "android-candidate-documents-v1", "rootRetained": True, "documentsUnchanged": True,
+            "noUnexpectedEntries": True, "artifactTargetsAbsent": True, "entryCount": 5,
+            "documentBytes": sum(len(raw) for raw in SHELL_CANDIDATE_DOCUMENTS.values()), "directoryMode": 0o700, "fileMode": 0o600,
+            "documents": [{"path": relative, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+                          for relative, raw in SHELL_CANDIDATE_DOCUMENTS.items()],
             "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
             "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
@@ -2547,6 +3084,141 @@ def shell_project_receipt(raw):
     # cannot turn missing boolean/original settlement DATA into a success.
     need(canonical(receipt) == canonical(SHELL_PROJECT_RECEIPT), "Positive project/draft receipt is missing, malformed or premature")
     return receipt
+
+
+def shell_candidate_receipt(raw):
+    receipt = decode(raw, 2048)
+    need(canonical(receipt) == canonical(SHELL_CANDIDATE_RECEIPT), "Candidate documents receipt is missing, malformed or premature")
+    return receipt
+
+
+
+def shell_path_receipt(raw):
+    receipt = decode(raw, 2048)
+    need(raw == canonical(receipt) == canonical(SHELL_PATH_RECEIPT), "Project-path receipt is missing, malformed or premature")
+    return receipt
+
+
+def _shell_path_roster(changed):
+    return tuple((SHELL_PATH_MOVES.get(name, name) if changed else name, kind) for name, kind in SHELL_PATH_NODES) + (
+        (("path-project/inputs/link-input", "symlink"),) if changed else ())
+
+
+def _shell_path_absent(changed):
+    return list(SHELL_PATH_ABSENT) + (["path-project/inputs/kind-directory", "path-project/ios/Kind.file"] if changed else
+        ["path-project/inputs/link-original", "path-project/inputs/kind-original", "path-project/ios/Kind.original"])
+
+
+def _shell_paths_inventory(value, *, changed=False):
+    """Fixed before/after fixture; after is reachable only after actual success.
+
+    No failed-work scan, repair, restoration or target-file follow is admitted.
+    A directory's exact children are admitted before any descendant is opened.
+    """
+    need(_ROOT == root_path(value) and type(changed) is bool, "Different original path fixture or phase")
+    directory(_ROOT, protected=True)
+    roster = _shell_path_roster(changed)
+    rows, originals = {}, []
+    # Parent roster admission is first, including both fixed sibling roots.
+    for name, kind in roster:
+        if kind != "directory":
+            continue
+        path = _ROOT / name
+        before = path.lstat()
+        mode = 0o500 if changed and name == "path-project" else 0o700
+        need(stat.S_ISDIR(before.st_mode) and stat.S_IMODE(before.st_mode) == mode
+             and (before.st_uid, before.st_gid) == (value["runnerUid"], value["runnerGid"])
+             and 0 < before.st_nlink <= 16, "Path fixture directory identity differs")
+        expected = sorted(Path(child).name for child, _ in roster if str(Path(child).parent) == name)
+        found = []
+        with os.scandir(path) as entries:
+            for entry in entries:
+                need(len(found) < len(expected) and entry.name in expected, "Unexpected project-path fixture entry")
+                found.append(entry.name)
+        need(sorted(found) == expected and identity(path.lstat()) == identity(before), "Project-path directory changed")
+        rows[name] = {"path": name, "kind": kind, "identity": list(identity(before)), "children": expected}
+        originals.append((path, identity(before)))
+    for name, kind in roster:
+        if kind == "directory":
+            continue
+        path = _ROOT / name
+        before = path.lstat()
+        need((before.st_uid, before.st_gid) == (value["runnerUid"], value["runnerGid"])
+             and before.st_nlink == 1, "Path fixture leaf ownership differs")
+        if kind == "file":
+            need(stat.S_ISREG(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o600, "Path fixture leaf kind differs")
+            observed = record(path, len(SHELL_PATH_BYTES))
+            need(observed["size"] == len(SHELL_PATH_BYTES) and observed["sha256"] == hashlib.sha256(SHELL_PATH_BYTES).hexdigest(),
+                 "Path fixture inert bytes changed")
+            row = {**observed, "path": name, "kind": kind, "identity": list(identity(before))}
+        else:
+            need(kind == "symlink" and stat.S_ISLNK(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o777
+                 and before.st_size == 13 and os.readlink(path) == "link-original", "Path fixture link transition differs")
+            row = {"path": name, "kind": kind, "identity": list(identity(before)), "target": "link-original"}
+        need(identity(path.lstat()) == identity(before), "Path fixture leaf changed during observation")
+        rows[name] = row
+        originals.append((path, identity(before)))
+    for name in _shell_path_absent(changed):
+        _absent(_ROOT / name)
+    need(len({(row["identity"][0], row["identity"][1]) for row in rows.values()}) == len(roster)
+         and all(row["identity"][0] == _ROOT.lstat().st_dev for row in rows.values())
+         and all(identity(path.lstat()) == original for path, original in originals), "Path fixture aliases or original identity drift")
+    return {"schemaVersion": 1, "fixture": "project-paths-v1", "root": str(_ROOT), "changed": changed,
+            "entries": [rows[name] for name, _ in roster], "absent": _shell_path_absent(changed)}
+
+
+def shell_paths_fixture(value, before_raw, after_raw):
+    """Typed correspondence only; not authority to observe a live/failed case."""
+    documents = []
+    for raw, changed in ((before_raw, False), (after_raw, True)):
+        doc = decode(raw, 8192)
+        roster = _shell_path_roster(changed)
+        need(type(doc) is dict and set(doc) == {"schemaVersion", "fixture", "root", "changed", "entries", "absent"}
+             and canonical(doc) == raw and type(doc["schemaVersion"]) is int and doc["schemaVersion"] == 1
+             and doc["fixture"] == "project-paths-v1" and doc["root"] == str(root_path(value)) and doc["changed"] is changed
+             and doc["absent"] == _shell_path_absent(changed), "Project-path inventory shape, root or phase differs")
+        rows = doc["entries"]
+        need(type(rows) is list and len(rows) == len(roster), "Project-path fixture must have exactly fourteen/fifteen nodes")
+        for row, (name, kind) in zip(rows, roster):
+            fields = {"path", "kind", "identity"} | ({"children"} if kind == "directory" else {"target"} if kind == "symlink" else {"size", "sha256"})
+            need(type(row) is dict and set(row) == fields and row["path"] == name and row["kind"] == kind, "Project-path node roster differs")
+            original = row["identity"]
+            mode = (stat.S_IFDIR | (0o500 if changed and name == "path-project" else 0o700)) if kind == "directory" else (
+                stat.S_IFLNK | 0o777 if kind == "symlink" else stat.S_IFREG | 0o600)
+            need(type(original) is list and len(original) == 9 and all(type(n) is int and 0 <= n < 1 << 64 for n in original)
+                 and original[0] > 0 and original[1] > 0 and original[2] == mode
+                 and original[3:5] == [value["runnerUid"], value["runnerGid"]]
+                 and 0 < original[5] <= 16 and original[6] <= 1 << 20, "Project-path node identity differs")
+            if kind == "directory":
+                need(row["children"] == sorted(Path(child).name for child, _ in roster if str(Path(child).parent) == name), "Project-path directory has unexpected children")
+            elif kind == "symlink":
+                need(original[5] == 1 and original[6] == 13 and row["target"] == "link-original", "Project-path symlink differs")
+            else:
+                need(original[5] == 1 and original[6] == len(SHELL_PATH_BYTES) and type(row["size"]) is int
+                     and row["size"] == len(SHELL_PATH_BYTES) and row["sha256"] == hashlib.sha256(SHELL_PATH_BYTES).hexdigest(), "Project-path fixed inert bytes differ")
+        need(len({tuple(row["identity"][:2]) for row in rows}) == len(roster)
+             and all(row["identity"][0] == rows[0]["identity"][0] for row in rows), "Project-path nodes alias or cross devices")
+        documents.append({row["path"]: row for row in rows})
+    before, after = documents
+    for name, kind in SHELL_PATH_NODES:
+        new_name = SHELL_PATH_MOVES.get(name, name)
+        old, new = before[name]["identity"], after[new_name]["identity"]
+        if name == "path-project":
+            need(old[:2] == new[:2] and old[3:8] == new[3:8] and new[8] >= old[8], "Registered path root changed beyond the fixed mode transition")
+        elif name in ("path-project/inputs", "path-project/ios"):
+            need(old[:6] == new[:6] and new[7] >= old[7] and new[8] >= old[8], "Path mutation parent identity changed")
+        elif new_name != name:
+            need(old[:8] == new[:8] and new[8] >= old[8], "Path transition did not preserve the original moved node")
+        else:
+            need(old == new, "Unchanged project-path node identity changed")
+        if kind == "file":
+            need(before[name]["sha256"] == after[new_name]["sha256"], "Moved original file bytes changed")
+    need(before_raw != after_raw, "Project-path mutations were not observed")
+    return {"fixture": "project-paths-v1", "rootRetained": True, "originalsRetained": True, "noUnexpectedEntries": True,
+            "noPendingState": True, "inertBytesUnchanged": True, "beforeCount": 14, "afterCount": 15, "fileCount": 5,
+            "fileBytes": len(SHELL_PATH_BYTES) * 5, "mutations": ["symlink", "directory-for-file", "file-for-directory", "root-mode"],
+            "rootModes": [0o700, 0o500], "before": {"size": len(before_raw), "sha256": hashlib.sha256(before_raw).hexdigest()},
+            "after": {"size": len(after_raw), "sha256": hashlib.sha256(after_raw).hexdigest()}}
 
 
 def _shell_prepare(value, case):
@@ -2574,11 +3246,31 @@ def _shell_prepare(value, case):
         project.mkdir(mode=0o700)
         (project / "app").mkdir(mode=0o700)
         _D.write(project / "app/build.gradle.kts", SHELL_PROJECT_SOURCE, 0o444)
-        # Only this original fixture root is app-writable. The inert source and
-        # its directory remain root-owned/read-only; Save must not change them.
+        _D.write(project / "version.properties", SHELL_PROJECT_VERSION, 0o600)
+        # Keep release absent: the actual reviewed Save must create it. The
+        # named version input has project-owner ancestry; app stays read-only.
         os.chmod(project / "app", 0o555)
+        os.chown(project / "version.properties", value["runnerUid"], value["runnerGid"])
         os.chown(project, value["runnerUid"], value["runnerGid"])
         _retain("shell-positive-project-before.json", canonical(_shell_project_inventory(value)))
+        evidence = _ROOT / "candidate-evidence"
+        evidence.mkdir(mode=0o700)
+        (evidence / "operation").mkdir(mode=0o700)
+        for relative, raw in SHELL_CANDIDATE_DOCUMENTS.items():
+            _D.write(evidence / relative, raw, 0o600)
+            os.chown(evidence / relative, value["runnerUid"], value["runnerGid"])
+        for path in (evidence / "operation", evidence):
+            os.chown(path, value["runnerUid"], value["runnerGid"])
+        _retain("shell-positive-candidate-before.json", canonical(_shell_candidate_inventory(value)))
+    if case == "project-paths":
+        for name, kind in SHELL_PATH_NODES:
+            path = _ROOT / name
+            if kind == "directory":
+                path.mkdir(mode=0o700)
+            else:
+                _D.write(path, SHELL_PATH_BYTES, 0o600)
+            os.chown(path, value["runnerUid"], value["runnerGid"])
+        _retain("shell-project-paths-before.json", canonical(_shell_paths_inventory(value)))
     return environment, log_binding
 
 
@@ -2591,14 +3283,31 @@ def shell_result(stdout, stderr, case, code, expected):
     marker = b"MRK_INSTALLED_SHELL_OBSERVATION=" + case.encode("ascii") + b"-verified"
     contracts = b"MRK_INSTALLED_SHELL_CONTRACTS=capability-intersection,packaged-allowlist-verified"
     if case == "positive":
-        output = [line for line in stdout.splitlines() if line.startswith(b"MRK_")]
+        # The admitted xvfb-run transport merges application stderr into
+        # stdout. Keep each original LF and each independent receipt bound.
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
         diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
-        need(len(output) == 3 and output[0] == contracts and output[1].startswith(SHELL_PROJECT_MARKER)
-             and output[2] == marker and diagnostics == [b"MRK_DESKTOP_CAPABILITIES=available", b"MRK_DESKTOP_CATALOGUE=returned"],
+        need(len(output) == 6 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
+             b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[3].startswith(SHELL_PROJECT_MARKER) and output[3].endswith(b"\n")
+             and output[4].startswith(SHELL_CANDIDATE_MARKER) and output[4].endswith(b"\n")
+             and output[5] == marker + b"\n" and diagnostics == [],
              "Positive original bootstrap/contract/receipt/completion order differs")
-        receipt = shell_project_receipt(output[1][len(SHELL_PROJECT_MARKER):])
+        # Each independent JSON+LF retains its original 2048-byte bound.
+        receipt = shell_project_receipt(output[3][len(SHELL_PROJECT_MARKER):])
+        candidate = shell_candidate_receipt(output[4][len(SHELL_CANDIDATE_MARKER):])
         return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True,
-                "maps": [], "projectDraft": receipt}
+                "maps": [], "projectDraft": receipt, "candidateDocuments": candidate}
+    if case == "project-paths":
+        output = [line for line in stdout.splitlines(keepends=True) if line.startswith(b"MRK_")]
+        diagnostics = [line for line in stderr.splitlines() if line.startswith(b"MRK_")]
+        need(len(output) == 5 and output[:3] == [b"MRK_DESKTOP_CAPABILITIES=available\n",
+             b"MRK_DESKTOP_CATALOGUE=returned\n", contracts + b"\n"]
+             and output[3].startswith(SHELL_PATH_MARKER) and output[3].endswith(b"\n")
+             and output[4] == marker + b"\n" and diagnostics == [],
+             "Project-path original bootstrap/contract/receipt/completion order differs")
+        receipt = shell_path_receipt(output[3][len(SHELL_PATH_MARKER):])
+        return {"case": case, "exitCode": 0, "bootstrapReturned": True, "domAndGtkObserved": True, "maps": [], "projectPaths": receipt}
     if case == "normal":
         wanted = [b"MRK_DESKTOP_CAPABILITIES=available", b"MRK_DESKTOP_CATALOGUE=returned"]
         need(sorted(lines) == sorted(wanted), "Actual normal capabilities/catalogue or observer completion missing")
@@ -2707,6 +3416,34 @@ def _shell_capture_summary(result, argv, display_log=None, *, controller=False):
                           "head": prefix.decode("utf-8", "replace"), "tail": suffix.decode("utf-8", "replace"),
                           "truncated": len(prefix) + len(suffix) < len(raw)}
     return captured
+
+
+def _shell_normal_markers(stdout, stderr):
+    """Closed counts from an already validated, joined original capture only."""
+    markers = {b"MRK_DESKTOP_CAPABILITIES=available\n": "capabilitiesAvailable",
+               b"MRK_DESKTOP_CAPABILITIES=unavailable\n": "capabilitiesUnavailable",
+               b"MRK_DESKTOP_CATALOGUE=returned\n": "catalogueReturned",
+               b"MRK_DESKTOP_CATALOGUE=refused\n": "catalogueRefused"}
+    stages = ("setup-enter", "page-start-trusted", "page-start-untrusted",
+              "page-finish-trusted", "page-finish-untrusted", "hook-installed",
+              "app-info-enter", "catalog-enter", "content-terminated")
+    prefix = b"MRKDBG_DESKTOP_BOOTSTRAP="
+    stage_lines = {prefix + stage.encode("ascii") + b"\n": stage for stage in stages}
+    result = {}
+    for name, raw in (("stdout", stdout), ("stderr", stderr)):
+        row = {"markers": {label: 0 for label in markers.values()}, "unexpectedMrk": 0,
+               "stages": {stage: 0 for stage in stages}, "unexpectedBootstrap": 0}
+        for line in raw.splitlines(keepends=True):
+            if line in markers:
+                row["markers"][markers[line]] += 1
+            elif line.startswith(b"MRK_"):
+                row["unexpectedMrk"] += 1
+            elif line in stage_lines:
+                row["stages"][stage_lines[line]] += 1
+            elif line.startswith(prefix):
+                row["unexpectedBootstrap"] += 1
+        result[name] = row
+    return result
 
 
 def _shell_resource_summary(value):
@@ -2884,7 +3621,8 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
                 "stage": stage, "inputs": inputs, "controllerCommands": len(commands),
                 "lastControllerCommand": commands[-1]["phase"] if commands else None,
                 "workerGuardState": None, "workerErrorCount": None, "workerCall": None,
-                "controller": None, "capture": None, "resources": _shell_resource_summary(resources)}
+                "controller": None, "capture": None, "bootstrap": None,
+                "resources": _shell_resource_summary(resources)}
         if type(controller) is dict:
             observation = {}
             for name in ("normalStartMonotonic", "controllerEndpoint", "serviceEndpoint", "failureMonotonic"):
@@ -2934,6 +3672,11 @@ def _shell_normal_failure(holder, argv, *, joined, stage, inputs, commands, erro
         data["errors"] = [error_data(item, origin) for item, origin in errors[:4]]
         data["errorsTruncated"] = len(errors) > 4
         data["capture"] = _shell_capture_summary(result, argv, display_log if joined else None)
+        if data["capture"] is not None:
+            try:
+                data["bootstrap"] = _shell_normal_markers(result.stdout, result.stderr)
+            except BaseException:
+                pass  # Keep the primary diagnostic even if optional counting fails.
         _shell_failure_output(b"MRK_INSTALLED_SHELL_FAILURE=", data)
     except BaseException:
         pass  # A diagnostic is not authority to replace the original error.
@@ -3252,6 +3995,13 @@ def unit_start():
                     after = canonical(_shell_project_inventory(value, saved=True))
                     _retain("shell-positive-project-after.json", after)
                     shell_project_fixture(value, read(_ROOT / "public/shell-positive-project-before.json", 8192), after)
+                    candidate_after = canonical(_shell_candidate_inventory(value))
+                    _retain("shell-positive-candidate-after.json", candidate_after)
+                    shell_candidate_fixture(value, read(_ROOT / "public/shell-positive-candidate-before.json", 8192), candidate_after)
+                if case == "project-paths":
+                    paths_after = canonical(_shell_paths_inventory(value, changed=True))
+                    _retain("shell-project-paths-after.json", paths_after)
+                    shell_paths_fixture(value, read(_ROOT / "public/shell-project-paths-before.json", 8192), paths_after)
         need(_tree(PREFIX / M, M, published=True) == original, "Published A changed during shell observations")
         state("shell-finished", "install ok installed", "P0")
         _finish_body(value, request_sha, start, states, observations, traces, cases, loader)
@@ -3516,9 +4266,11 @@ def shell_closed_result(value, outcome, raw_files):
         need(all(type(raw) is bytes for raw in streams) and sum(map(len, streams)) <= LIMIT,
              "Closed original shell combined output differs")
         result = shell_result(raw_files[phase + ".stdout"], raw_files[phase + ".stderr"], case, commands[phase]["exitCode"], expected)
-        need(canonical(result) == canonical(cases[case]) if case == "positive" else result == cases[case],
+        need(canonical(result) == canonical(cases[case]) if case in ("positive", "project-paths") else result == cases[case],
              "Closed original shell capture differs")
     fixture = shell_project_fixture(value, raw_files["shell-positive-project-before.json"], raw_files["shell-positive-project-after.json"])
+    candidate = shell_candidate_fixture(value, raw_files["shell-positive-candidate-before.json"], raw_files["shell-positive-candidate-after.json"])
+    paths = shell_paths_fixture(value, raw_files["shell-project-paths-before.json"], raw_files["shell-project-paths-after.json"])
     control = decode(raw_files["shell-normal-control.json"])
     need(control.get("joined") is True and control.get("inputs") == 2 and control.get("workerGuardState") == "RESTORED"
          and control.get("workerErrorCount") == 0 and control.get("errorType") is None
@@ -3535,6 +4287,8 @@ def shell_closed_result(value, outcome, raw_files):
     return {"shellRosterSha256": shell["rosterSha256"], "shellProducerAttempt": shell["producerAttempt"],
             "shellArtifactId": shell["artifactId"], "consumerAttempt": value["attempt"], "acceptedU": shell["acceptedU"],
             "cases": cases, "projectDraft": {"native": cases["positive"]["projectDraft"], "fixture": fixture},
+            "candidateDocuments": {"native": cases["positive"]["candidateDocuments"], "fixture": candidate},
+            "projectPaths": {"native": cases["project-paths"]["projectPaths"], "fixture": paths},
             "packageLifecycleQualified": False, "shellPackageBuilt": False}
 
 
