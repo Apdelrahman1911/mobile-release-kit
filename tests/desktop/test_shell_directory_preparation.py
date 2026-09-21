@@ -47,6 +47,7 @@ class DirectoryMetadataOS:
         self.root = self.make("/", stat.S_IFDIR | 0o755)
         self.live, self.calls, self.listings = {}, {}, {}
         self.opened, self.open_attempts, self.closed, self.reads, self.chmods = [], [], [], [], []
+        self.chowns = []
         self.hook = None
         self.uids = self.gids = (0, 0, 0)
         for path in PREPARE:
@@ -147,6 +148,14 @@ class DirectoryMetadataOS:
         self.chmods.append((node.path, node.st_ino, mode))
         node.st_mode = stat.S_IFMT(node.st_mode) | mode
 
+    def fchown(self, fd, uid, gid):
+        node = self.live[fd]
+        self.call("fchown", node.path)
+        if (uid, gid) != (-1, 0):
+            raise AssertionError("Only the fixed group normalization is admitted")
+        self.chowns.append((node.path, node.st_ino, uid, gid))
+        node.st_gid = gid
+
     def close(self, fd):
         # A failed mocked close is not successful-close evidence. Record the
         # sole attempt and reject the run; do not retry this numeric identity.
@@ -174,7 +183,7 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
         namespace, output, error = {"__name__": "workflow_directory_preparation"}, io.StringIO(), None
         replacements = {name: forbidden for name in ("lstat", "read", "readlink", "write", "chmod", "chown", "fchown",
                                                      "mkdir", "rmdir", "unlink", "rename", "symlink")}
-        replacements.update({name: getattr(filesystem, name) for name in ("open", "stat", "fstat", "listdir", "fchmod", "close")})
+        replacements.update({name: getattr(filesystem, name) for name in ("open", "stat", "fstat", "listdir", "fchmod", "fchown", "close")})
         replacements.update(getresuid=lambda: filesystem.uids, getresgid=lambda: filesystem.gids)
         with patch.multiple(os, **replacements), redirect_stdout(output):
             try:
@@ -215,9 +224,49 @@ class ShellDirectoryPreparationContracts(unittest.TestCase):
                 self.assertEqual(receipt["metadata"]["unsafeCount"], 0)
                 self.assertEqual({row["path"] for row in receipt["prepared"]}, set(PREPARE))
                 self.assertEqual([row[0] for row in filesystem.chmods], [] if mode == 0o755 else sorted(PREPARE, key=lambda path: (path.count("/"), path)))
+                self.assertEqual(filesystem.chowns, [])
                 for row in receipt["prepared"]:
                     self.assertEqual(row["before"]["mode"], format(stat.S_IFDIR | mode, "06o"))
                     self.assertEqual(row["after"], {**row["before"], "mode": "040755"})
+
+    def test_only_exact_root_staff_local_fonts_can_normalize_group(self):
+        path = "/usr/local/share/fonts"
+        for change in ("exact", "other-group", "other-mode", "other-target", "other-owner", "chown-error", "replacement"):
+            filesystem = DirectoryMetadataOS()
+            selected = "/usr/share/fonts" if change == "other-target" else path
+            original = filesystem.node(selected)
+            original.st_mode = stat.S_IFDIR | (0o775 if change == "other-mode" else 0o2775)
+            original.st_gid = 51 if change == "other-group" else 50
+            original.st_uid = 1 if change == "other-owner" else 0
+
+            def hook(operation, current, count):
+                if operation == "fchown" and current == selected and count == 1:
+                    if change == "chown-error":
+                        raise OSError(errno.EIO, "Mock group normalization failure")
+                    if change == "replacement":
+                        filesystem.add(selected, stat.S_IFDIR | 0o2775, gid=50)
+
+            filesystem.hook = hook
+            with self.subTest(change=change):
+                result = self.run_inline(filesystem)
+                if change == "exact":
+                    _, rows, error = result
+                    self.assertIsNone(error)
+                    observed = next(row for row in rows[0]["prepared"] if row["path"] == path)
+                    self.assertEqual(observed["before"]["mode"], "042775")
+                    self.assertEqual(observed["before"]["gid"], 50)
+                    self.assertEqual(observed["after"], {**observed["before"], "mode": "040755", "gid": 0})
+                else:
+                    self.refused(result)
+                if change in {"exact", "replacement"}:
+                    self.assertEqual(filesystem.chowns, [(selected, original.st_ino, -1, 0)])
+                    self.assertEqual(filesystem.chmods, [(selected, original.st_ino, 0o755)])
+                else:
+                    self.assertEqual(filesystem.chowns, [])
+                    self.assertEqual(filesystem.chmods, [])
+                if change == "replacement":
+                    self.assertEqual(filesystem.node(path).st_gid, 50)
+                    self.assertEqual(filesystem.node(path).st_mode, stat.S_IFDIR | 0o2775)
 
     def test_target_policy_and_protected_ancestry_refuse_without_other_repairs(self):
         cases = [("/etc/fonts", mode, 0, 0) for mode in (0o700, 0o750, 0o774, 0o1777, 0o2775)]

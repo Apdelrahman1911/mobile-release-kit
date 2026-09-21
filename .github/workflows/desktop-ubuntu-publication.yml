@@ -144,15 +144,25 @@ jobs:
                       need(identity(before) == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)),
                            'directory-name', {'path': current, **record(before)})
                       if index + 1 == len(parts):
-                          need(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
-                               and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777),
+                          # Ubuntu's fixed local font directory is root:staff 02775.
+                          # Only this exact original may have its group normalized;
+                          # all descendants/files and other groups remain excluded.
+                          local_fonts = (path == '/usr/local/share/fonts' and stat.S_ISDIR(before.st_mode)
+                                         and before.st_uid == 0 and before.st_gid == 50
+                                         and stat.S_IMODE(before.st_mode) == 0o2775)
+                          need(local_fonts or (stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+                               and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777)),
                                'target-policy', {'path': current, **record(before)})
+                          originals.append((fd, parent, name, before))
+                          recheck()
+                          if local_fonts:
+                              os.fchown(fd, -1, 0)
                           if stat.S_IMODE(before.st_mode) != 0o755:
                               os.fchmod(fd, 0o755)
                           after = os.fstat(fd)
-                          need(identity(after) == (before.st_dev, before.st_ino, before.st_mode & ~0o022,
-                                                   before.st_uid, before.st_gid), 'same-object-mode-change')
-                          originals.append((fd, parent, name, after))
+                          need(identity(after) == (before.st_dev, before.st_ino, stat.S_IFDIR | 0o755, 0, 0),
+                               'same-object-mode-change')
+                          originals[-1] = (fd, parent, name, after)
                           recheck()
                           return {'path': path, 'before': record(before), 'after': record(after)}
                       protected(before, current)
@@ -439,15 +449,25 @@ jobs:
                       need(identity(before) == identity(os.stat(name, dir_fd=parent, follow_symlinks=False)),
                            'directory-name', {'path': current, **record(before)})
                       if index + 1 == len(parts):
-                          need(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
-                               and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777),
+                          # Ubuntu's fixed local font directory is root:staff 02775.
+                          # Only this exact original may have its group normalized;
+                          # all descendants/files and other groups remain excluded.
+                          local_fonts = (path == '/usr/local/share/fonts' and stat.S_ISDIR(before.st_mode)
+                                         and before.st_uid == 0 and before.st_gid == 50
+                                         and stat.S_IMODE(before.st_mode) == 0o2775)
+                          need(local_fonts or (stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0
+                               and stat.S_IMODE(before.st_mode) in (0o755, 0o775, 0o777)),
                                'target-policy', {'path': current, **record(before)})
+                          originals.append((fd, parent, name, before))
+                          recheck()
+                          if local_fonts:
+                              os.fchown(fd, -1, 0)
                           if stat.S_IMODE(before.st_mode) != 0o755:
                               os.fchmod(fd, 0o755)
                           after = os.fstat(fd)
-                          need(identity(after) == (before.st_dev, before.st_ino, before.st_mode & ~0o022,
-                                                   before.st_uid, before.st_gid), 'same-object-mode-change')
-                          originals.append((fd, parent, name, after))
+                          need(identity(after) == (before.st_dev, before.st_ino, stat.S_IFDIR | 0o755, 0, 0),
+                               'same-object-mode-change')
+                          originals[-1] = (fd, parent, name, after)
                           recheck()
                           return {'path': path, 'before': record(before), 'after': record(after)}
                       protected(before, current)
