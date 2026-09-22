@@ -6918,6 +6918,9 @@ class WindowsReaderGateTests(unittest.TestCase):
         packages[0]["dependencies"].extend({"name": name, "source": registry, "req": "=" + versions[name],
             "kind": None, "rename": None, "optional": False, "uses_default_features": True, "features": [],
             "target": None, "registry": None} for name in direct if name in versions)
+        packages[1]["dependencies"] = [{"name": "windows-sys", "source": registry, "req": "=0.61.2",
+            "kind": None, "rename": None, "optional": False, "uses_default_features": True, "features": [],
+            "target": None, "registry": None}]
         edges = {"mobile-release-kit-desktop": direct, "mrk-windows-installed-native": ["windows-sys"], "windows-sys": ["windows-link"]}
         nodes = []
         for name in ["mobile-release-kit-desktop", "mrk-windows-installed-native", *versions]:
@@ -7022,6 +7025,8 @@ class WindowsReaderGateTests(unittest.TestCase):
         mutations = {
             "declared-but-unselected-dependency-test": lambda data: data.insert(0, deepcopy(dependency_unit)),
             "dependency-library-test-profile": lambda data: data.insert(0, {**deepcopy(dependency_unit), "target": dependency["targets"][0]}),
+            "other-dependency-feature-equality": lambda data: data.insert(0, {**deepcopy(dependency_unit),
+                "target": dependency["targets"][0], "profile": {"test": False}, "features": ["allowed"]}),
             "duplicate-libtest": lambda data: data.insert(3, deepcopy(data[2])),
             "after-final": lambda data: data.append(deepcopy(data[2])),
             "failed-build": lambda data: data[-1].update(success=False),
@@ -7038,6 +7043,83 @@ class WindowsReaderGateTests(unittest.TestCase):
             with self.subTest(case=label):
                 altered = deepcopy(rows); change(altered)
                 with self.assertRaises(helper.CheckFailure): parse(altered)
+
+    @classmethod
+    def feature_graph_data(cls):
+        value, lock, context = cls.graph_data()
+        packages = {row["name"]: row for row in value["packages"]}
+        nodes = {row["id"]: row for row in value["resolve"]["nodes"]}
+        native, tokio, platform = (packages[name] for name in ("mrk-windows-installed-native", "tokio", "windows-sys"))
+        platform["features"] = {"default": ["Base"], "Base": ["Win32"], "Win32": ["Base"],
+                                "Declared": ["Base"], "Forwarded": ["Base"], "Weak": ["Base"], "Inactive": []}
+        nodes[platform["id"]]["features"] = sorted(platform["features"])
+        native["dependencies"][0]["features"] = ["Declared"]
+        tokio["dependencies"] = [{**deepcopy(native["dependencies"][0]), "features": [], "optional": True,
+                                  "uses_default_features": False, "target": "cfg(windows)"}]
+        tokio["dependencies"].append({**deepcopy(tokio["dependencies"][0]), "kind": "dev", "features": ["Inactive"]})
+        tokio["features"] = {"process": ["windows-sys/Forwarded", "windows-sys?/Weak", "other?/Inactive"],
+                             "unselected": ["windows-sys/Inactive"]}
+        nodes[tokio["id"]].update(features=["process"], dependencies=[platform["id"]],
+            deps=[{"name": "windows_sys", "pkg": platform["id"], "dep_kinds": [{"kind": None, "target": "cfg(windows)"}]}])
+        return value, lock, context, packages, nodes
+
+    def test_windows_reader_active_features_are_exact_closed_and_not_metadata_surplus(self):
+        value, lock, context, packages, _ = self.feature_graph_data()
+        source, root = Path(context["source"]), Path(context["root"])
+        graph = helper.windows_installed_app_graph(value, lock, source=source, root=root)
+        platform, tokio = packages["windows-sys"], packages["tokio"]
+        expected = ["Base", "Declared", "Forwarded", "Weak", "Win32", "default"]
+        unit_features = helper.windows_installed_app_unit_features(graph)
+        self.assertEqual(unit_features[platform["id"]], expected)
+        self.assertIn("Inactive", graph["nodes"][platform["id"]]["features"])
+        self.assertEqual(unit_features[tokio["id"]], ["process"])
+        # Match forwarding to the actual declaration alias, not its normalized edge spelling.
+        tokio["dependencies"][0]["rename"] = "platform-api"
+        tokio["features"]["process"] = ["platform-api/Forwarded", "platform-api?/Weak"]
+        graph["nodes"][tokio["id"]]["deps"][0]["name"] = "platform_api"
+        self.assertEqual(helper.windows_installed_app_unit_features(graph)[platform["id"]], expected)
+        app = packages["mobile-release-kit-desktop"]
+        executable = root / "target/x86_64-pc-windows-msvc/debug/deps/mobile_release_desktop-fixed.exe"
+        unit = {"reason": "compiler-artifact", "package_id": platform["id"], "manifest_path": platform["manifest_path"],
+                "target": platform["targets"][0], "profile": {"test": False}, "features": expected, "executable": None}
+        libtest = {**unit, "package_id": app["id"], "manifest_path": app["manifest_path"], "target": app["targets"][0],
+                   "profile": {"test": True, "debug_assertions": True}, "features": [], "executable": str(executable), "fresh": False}
+        for features in (expected, expected[:-1], sorted(expected + ["Inactive"]), expected + ["Base"]):
+            raw = b"\n".join(json.dumps(row).encode("ascii") for row in (
+                {**unit, "features": features}, libtest, {"reason": "build-finished", "success": True}))
+            with patch.object(helper, "ordinary_windows_executable", side_effect=lambda path, **_: Path(path)):
+                if features == expected:
+                    self.assertEqual(helper.windows_installed_app_test_path(raw, graph, source=source, root=root), executable)
+                else:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.windows_installed_app_test_path(raw, graph, source=source, root=root)
+
+    def test_windows_reader_active_feature_declarations_fail_closed(self):
+        def invalid(label, change):
+            with self.subTest(case=label):
+                value, lock, context, packages, nodes = self.feature_graph_data()
+                change(packages, nodes)
+                with self.assertRaises(helper.CheckFailure):
+                    graph = helper.windows_installed_app_graph(value, lock,
+                        source=Path(context["source"]), root=Path(context["root"]))
+                    helper.windows_installed_app_unit_features(graph)
+        for field, changed in (("target", "cfg(unix)"), ("source", "git+https://example.invalid/other"),
+                               ("rename", "foreign"), ("uses_default_features", 1), ("optional", 0),
+                               ("features", ["Unknown"]), ("features", ()), ("kind", "build")):
+            invalid(field, lambda p, n, f=field, v=changed: p["tokio"]["dependencies"][0].update({f: v}))
+        for field in ("name", "source", "req", "kind", "rename", "optional", "uses_default_features",
+                      "features", "target", "registry"):
+            invalid("missing-" + field, lambda p, n, f=field: p["tokio"]["dependencies"][0].pop(f))
+        invalid("ambiguous-declaration", lambda p, n: p["tokio"]["dependencies"].append(deepcopy(p["tokio"]["dependencies"][0])))
+        invalid("duplicate-edge", lambda p, n: n[p["tokio"]["id"]]["deps"].append(deepcopy(n[p["tokio"]["id"]]["deps"][0])))
+        invalid("unreviewed-dev-unit", lambda p, n: n[p["tokio"]["id"]]["deps"][0]["dep_kinds"][0].update(kind="dev"))
+        invalid("missing-metadata-feature", lambda p, n: n[p["windows-sys"]["id"]]["features"].remove("Forwarded"))
+        invalid("unknown-forwarding", lambda p, n: p["tokio"]["features"].update(process=["windows-sys/Unknown"]))
+        invalid("aliased-forwarding", lambda p, n: p["tokio"]["features"].update(process=["windows_sys/Forwarded"]))
+        for expression in ("dep:windows-link", "windows-link/feature", "Unknown"):
+            invalid(expression, lambda p, n, e=expression: p["windows-sys"]["features"].update(Base=[e]))
+        invalid("feature-map-bound", lambda p, n: p["windows-sys"]["features"].update({"extra_" + str(i): [] for i in range(512)}))
+        invalid("feature-list-bound", lambda p, n: p["windows-sys"]["features"].update(Base=["Win32"] * 129))
 
     def test_windows_reader_selected_eleven_and_compile_argv_are_closed(self):
         names = (

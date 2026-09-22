@@ -8948,10 +8948,98 @@ def windows_installed_app_metadata(context: dict) -> dict:
     return windows_installed_app_graph(value, lock, source=source, root=root)
 
 
+def windows_installed_app_unit_features(graph: dict) -> dict:
+    """One source-locked platform unit, not a general Cargo feature resolver.
+
+    Filtered metadata can retain features unified through inactive platforms.
+    Derive windows-sys' exact normal-unit closure from its active incoming
+    declarations; keep ordinary metadata equality for every other package.
+    """
+    packages, nodes = graph["packages"], graph["nodes"]
+    expected = {key: node["features"] for key, node in nodes.items()}
+    selected = [key for key in nodes if (packages[key]["name"], packages[key]["version"], packages[key].get("source"))
+                == ("windows-sys", "0.61.2", "registry+https://github.com/rust-lang/crates.io-index")]
+    require(len(selected) == 1, "Windows app platform feature package is missing/ambiguous")
+    key = selected[0]
+    package, feature_map = packages[key], packages[key]["features"]
+    require(type(feature_map) is dict and 0 < len(feature_map) <= 512
+            and all(type(name) is str and re.fullmatch(r"[A-Za-z0-9_+\-]{1,128}", name) for name in feature_map),
+            "Windows app platform feature map differs")
+    for refs in feature_map.values():
+        require(type(refs) is list and len(refs) <= 128
+                and all(type(ref) is str and ref in feature_map for ref in refs),
+                "Windows app platform feature map has an unknown/nonlocal expression")
+    seeds, seen_edges = set(), set()
+    for parent_key, node in nodes.items():
+        incoming = [dep for dep in node["deps"] if dep["pkg"] == key]
+        if not incoming:
+            continue
+        parent = packages[parent_key]
+        declarations = parent.get("dependencies")
+        require(type(declarations) is list and 0 < len(declarations) <= 512
+                and all(type(dep) is dict for dep in declarations),
+                "Windows app incoming feature declarations differ")
+        for edge in incoming:
+            for kind in edge["dep_kinds"]:
+                # The fixed headless graph has normal windows-sys users only.
+                # A new host/build/dev split needs review, not union guessing.
+                require(kind["kind"] is None, "Windows app platform feature unit has an unreviewed dependency kind")
+                identity = (parent_key, edge["name"], kind["kind"], kind["target"])
+                require(identity not in seen_edges and len(seen_edges) < 256,
+                        "Windows app incoming feature edge is duplicated/overbound")
+                seen_edges.add(identity)
+                matched = []
+                for dep in declarations:
+                    alias = dep.get("rename") if dep.get("rename") is not None else dep.get("name")
+                    if (dep.get("name") == package["name"] and dep.get("source") == package["source"]
+                            and type(alias) is str and alias.replace("-", "_") == edge["name"]
+                            and dep.get("kind") == kind["kind"] and dep.get("target") == kind["target"]):
+                        matched.append((dep, alias))
+                require(len(matched) == 1, "Windows app incoming feature declaration is missing/ambiguous")
+                dep, alias = matched[0]
+                require({"name", "source", "req", "kind", "rename", "optional", "uses_default_features",
+                         "features", "target", "registry"} <= set(dep),
+                        "Windows app incoming feature declaration is incomplete")
+                require(0 < len(alias) <= 128 and type(dep.get("optional")) is bool
+                        and type(dep.get("uses_default_features")) is bool
+                        and type(dep.get("features")) is list and len(dep["features"]) <= 512
+                        and all(type(name) is str and name in feature_map for name in dep["features"]),
+                        "Windows app incoming feature declaration values differ")
+                seeds.update(dep["features"])
+                if dep["uses_default_features"] and "default" in feature_map:
+                    seeds.add("default")
+                for feature in node["features"]:
+                    refs = parent["features"][feature]
+                    require(type(refs) is list and len(refs) <= 512
+                            and all(type(ref) is str and 0 < len(ref) <= 256 for ref in refs),
+                            "Windows app incoming selected feature expressions differ")
+                    for ref in refs:
+                        if "/" not in ref:
+                            continue  # Local/dep: activation is already represented by active resolve edges.
+                        dependency, name = ref.split("/", 1)
+                        dependency = dependency.removesuffix("?")
+                        if dependency.replace("-", "_") != edge["name"]:
+                            continue
+                        require(dependency == alias and name in feature_map,
+                                "Windows app incoming feature forwarding differs")
+                        seeds.add(name)  # Weak forwarding is valid only on this already active edge.
+    require(seen_edges, "Windows app platform feature unit has no active incoming edge")
+    closed, pending = set(), list(seeds)
+    while pending:
+        feature = pending.pop()
+        if feature not in closed:
+            closed.add(feature)
+            pending.extend(feature_map[feature])  # Visited set handles real Win32/Foundation cycles.
+    require(closed <= set(nodes[key]["features"]), "Windows app active unit features are missing from metadata")
+    expected[key] = sorted(closed)
+    return expected
+
+
 def windows_installed_app_test_path(raw: bytes, graph: dict, *, source: Path, root: Path) -> Path:
     require(type(raw) is bytes and 0 < len(raw) <= 16 << 20, "Windows app compiler output exceeds its bound")
     found, finished, script_units = None, False, set()
     packages, nodes = graph["packages"], graph["nodes"]
+    unit_features = windows_installed_app_unit_features(graph)
     for line in raw.splitlines():
         require(not finished, "Windows app compiler output followed its final result")
         row = bounded_json(line, 2 << 20)
@@ -8980,7 +9068,7 @@ def windows_installed_app_test_path(raw: bytes, graph: dict, *, source: Path, ro
         if reason == "compiler-message":
             continue
         profile = row.get("profile")
-        require(row.get("features") == nodes[key]["features"] and row.get("manifest_path") == package["manifest_path"]
+        require(row.get("features") == unit_features[key] and row.get("manifest_path") == package["manifest_path"]
                 and type(profile) is dict and type(profile.get("test")) is bool,
                 "Windows app compiler unit features/source differ")
         if target["kind"] == ["custom-build"]:
