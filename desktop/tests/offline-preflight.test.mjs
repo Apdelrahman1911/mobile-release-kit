@@ -7,6 +7,7 @@ import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { initialWorkspace, isDirty, workspaceReducer } from '../src/drafts.ts';
 import { OfflinePreflightController, offlinePreflightOwnerReason } from '../src/offlinePreflight.ts';
+import { selectOfflinePreflightFindings } from '../src/offlinePreflightFindings.ts';
 import { OFFLINE_CORE_STATUSES, OFFLINE_CHECK_IDS, OFFLINE_LIMITATIONS, OFFLINE_PREFLIGHT_CONSENT,
   OFFLINE_PREFLIGHT_COUNTER_MAX, OFFLINE_PREFLIGHT_DISCLOSURE, OFFLINE_PREFLIGHT_EVENT, copyOfflinePreflightRequest,
   encodeOfflinePreflightRequest, offlineOperationProgress, offlinePreflightError, parseOfflinePreflightResult,
@@ -191,6 +192,40 @@ test('closed result projection preserves nine statuses, first-128 ordering, all 
   let reads = 0;
   const hooked = report(); Object.defineProperty(hooked.findings[0], 'message', { enumerable: true, get() { reads++; return 'version-source'; } });
   assert.equal(parseOfflinePreflightResult(hooked), null); assert.equal(reads, 0);
+});
+
+test('report filters preserve all nine statuses, emitted row identities and complete counts without mutation', () => {
+  const result = parseOfflinePreflightResult(report(18));
+  assert.ok(result);
+  const before = JSON.stringify(result);
+  Object.freeze(result); Object.freeze(result.findings); result.findings.forEach(Object.freeze);
+  Object.freeze(result.summary); Object.freeze(result.summary.counts);
+  const all = selectOfflinePreflightFindings(result, 'all');
+  assert.equal(all.rows, result.findings);
+  assert.deepEqual(all, { rows: result.findings, reported: 18, visible: 18, omitted: 0 });
+  for (const [index, status] of OFFLINE_CORE_STATUSES.entries()) {
+    const selected = selectOfflinePreflightFindings(result, status);
+    assert.deepEqual(selected.rows.map((row) => row.ordinal), [index, index + 9]);
+    assert.equal(selected.rows[0], result.findings[index]); assert.equal(selected.rows[1], result.findings[index + 9]);
+    assert.equal(selected.reported, 2); assert.equal(selected.visible, 2); assert.equal(selected.omitted, 0);
+  }
+  assert.equal(JSON.stringify(result), before);
+});
+
+test('report filters distinguish genuinely zero findings from an omitted-only status', () => {
+  const empty = parseOfflinePreflightResult(report(0));
+  assert.ok(empty);
+  for (const filter of ['all', 'FAIL']) assert.deepEqual(selectOfflinePreflightFindings(empty, filter), { rows: [], reported: 0, visible: 0, omitted: 0 });
+  const raw = report(129);
+  raw.findings.forEach((finding) => { finding.status = 'PASS'; });
+  raw.summary.counts = Object.fromEntries(OFFLINE_CORE_STATUSES.map((status) => [status, status === 'PASS' ? 128 : status === 'FAIL' ? 1 : 0]));
+  const result = parseOfflinePreflightResult(raw);
+  assert.ok(result);
+  const all = selectOfflinePreflightFindings(result, 'all'), pass = selectOfflinePreflightFindings(result, 'PASS');
+  assert.equal(all.visible, 128); assert.equal(all.reported, 129); assert.equal(all.omitted, 1);
+  assert.equal(pass.visible, 128); assert.equal(pass.reported, 128); assert.equal(pass.omitted, 0);
+  assert.deepEqual(selectOfflinePreflightFindings(result, 'FAIL'), { rows: [], reported: 1, visible: 0, omitted: 1 });
+  assert.deepEqual(selectOfflinePreflightFindings(result, 'MISSING'), { rows: [], reported: 0, visible: 0, omitted: 0 });
 });
 
 test('phase/outcome/content correlations distinguish complete-negative, refusal, incomplete and sticky Unknown', () => {
@@ -497,6 +532,15 @@ test('passive/evidence admission uses reciprocal callback, while source integrat
   assert.doesNotMatch(ui, /controller\.dispose|\.message\s*\}|dangerouslySetInnerHTML/);
   assert.match(ui, /Run offline checks \(Android\)/); assert.match(ui, /Core builds are disabled/); assert.match(ui, /Run saved offline checks/);
   assert.match(ui, /checkbox/); assert.match(ui, /Check original status/); assert.match(ui, /Cancel original offline checks/);
+  assert.match(ui, /useState<OfflinePreflightFindingFilter>\('all'\)/);
+  assert.match(ui, /<label htmlFor=\{filterId\}>Filter findings by status<\/label>/);
+  assert.match(ui, /<select id=\{filterId\} value=\{filter\} aria-describedby=\{`\$\{filterId\}-help`\}/);
+  assert.match(ui, /Filter the checks shown below; this does not run checks again/);
+  assert.match(ui, /key=\{`\$\{op\.ownerGeneration\}:\$\{op\.operationId\}`\}/);
+  assert.match(ui, /selected\.rows\.map\(\(finding\) => <li key=\{finding\.ordinal\} value=\{finding\.ordinal \+ 1\}>/);
+  assert.match(ui, /summary\.counts\[status\]/); assert.match(ui, /Omitted findings can include negative statuses/);
+  assert.match(ui, /Historical \/ stale context/); assert.match(ui, /Complete is not PASS or release readiness/);
+  assert.match(ui, /Matching findings were reported, but none are included/); assert.match(ui, /No findings were reported for this filter/);
   assert.match(OFFLINE_PREFLIGHT_DISCLOSURE, /Only run a project you trust/); assert.match(OFFLINE_PREFLIGHT_DISCLOSURE, /contact the network/);
   assert.match(OFFLINE_PREFLIGHT_DISCLOSURE, /not a network-isolation or sandbox guarantee/); assert.match(OFFLINE_PREFLIGHT_DISCLOSURE, /does not undo effects/);
   assert.doesNotMatch(app, /No builds or release operations/);

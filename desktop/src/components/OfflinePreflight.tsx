@@ -1,6 +1,8 @@
-import { useId } from 'react';
+import { useId, useState } from 'react';
 import type { OfflinePreflightController, OfflinePreflightState } from '../offlinePreflight.ts';
 import { offlinePreflightOwnerReason } from '../offlinePreflight.ts';
+import { selectOfflinePreflightFindings } from '../offlinePreflightFindings.ts';
+import type { OfflinePreflightFindingFilter } from '../offlinePreflightFindings.ts';
 import { OFFLINE_CORE_STATUSES, OFFLINE_PREFLIGHT_DISCLOSURE, offlineAvailabilityText, offlineFindingText,
   offlineLimitationText, offlineReasonText } from '../offlinePreflightProtocol.ts';
 import type { OfflineCoreStatus, OfflinePreflightPhase, OfflinePreflightResult } from '../offlinePreflightTypes.ts';
@@ -13,17 +15,33 @@ const phases: Record<OfflinePreflightPhase, string> = {
 };
 const negative = (status: OfflineCoreStatus) => ['FAIL', 'MISSING', 'BLOCKED', 'INVALID'].includes(status);
 function Report({ result, historical }: { result: OfflinePreflightResult; historical: boolean }) {
+  const filterId = useId();
+  const [filter, setFilter] = useState<OfflinePreflightFindingFilter>('all');
   const summary = result.summary;
+  const selected = selectOfflinePreflightFindings(result, filter);
   return <section className="offline-report" aria-label="Saved offline check findings">
     <div className="inline-heading"><h3>Returned offline-check report</h3><Badge tone={historical ? 'warning' : 'info'}>{historical ? 'Historical / stale context' : 'This invocation only'}</Badge></div>
     <p><strong>Complete is not PASS or release readiness.</strong> The shared preflight returned a report and original native cleanup settled. Some checks may legitimately fail, be skipped or not run. No release candidate was created by this action.</p>
-    <p>{summary.total} total findings · {summary.shown} shown · {summary.omitted} omitted from the list. Counts below include every reported finding.</p>
-    {summary.omitted > 0 && <p className="review-caution">Only the first 128 findings are displayed. Omitted findings can include negative statuses; use the complete status counts, not the visible rows alone.</p>}
+    <p>{summary.total} total findings · {summary.shown} included in the returned list · {summary.omitted} omitted from that list. Counts below include every reported finding.</p>
+    {summary.omitted > 0 && <p className="review-caution">Only the first 128 findings are available in the returned list. Omitted findings can include negative statuses; use the complete status counts, not the visible rows alone.</p>}
     <dl className="offline-counts">{OFFLINE_CORE_STATUSES.map((status) => <div key={status}><dt>{status}</dt><dd>{summary.counts[status]}</dd></div>)}</dl>
-    <ol className="offline-findings">{result.findings.map((finding) => <li key={finding.ordinal}>
+    <div className="form-field"><label htmlFor={filterId}>Filter findings by status</label>
+      <select id={filterId} value={filter} aria-describedby={`${filterId}-help`} onChange={(event) => {
+        const value = event.target.value;
+        const next = value === 'all' ? 'all' : OFFLINE_CORE_STATUSES.find((status) => status === value);
+        if (next !== undefined) setFilter(next);
+      }}><option value="all">All statuses</option>{OFFLINE_CORE_STATUSES.map((status) => <option key={status} value={status}>{status}</option>)}</select>
+      <p id={`${filterId}-help`} className="save-note">Filter the checks shown below; this does not run checks again.</p>
+    </div>
+    <div role="status"><p>{selected.visible} visible of {selected.reported} reported {filter === 'all' ? 'findings' : `${filter} findings`} · {selected.omitted} omitted from the returned list.</p>
+      {selected.visible === 0 && <p className={selected.reported > 0 ? 'review-caution' : 'save-note'}>{selected.reported > 0
+        ? 'Matching findings were reported, but none are included in the first 128 returned findings. The complete count above still applies.'
+        : 'No findings were reported for this filter. This is not a readiness assessment.'}</p>}
+    </div>
+    {selected.visible > 0 && <ol className="offline-findings">{selected.rows.map((finding) => <li key={finding.ordinal} value={finding.ordinal + 1}>
       <Badge tone={negative(finding.status) ? 'warning' : 'neutral'}>{finding.status}</Badge>
       <span>{offlineFindingText[finding.message]}{finding.projectCheckIndex !== null ? ` Check ${finding.projectCheckIndex + 1}.` : ''}</span>
-    </li>)}</ol>
+    </li>)}</ol>}
     <h4>Limits of this result</h4><ul>{result.limitations.map((limitation) => <li key={limitation}>{offlineLimitationText[limitation]}</li>)}</ul>
   </section>;
 }
@@ -77,6 +95,6 @@ export function OfflinePreflight({ state, controller, projectName, operationProj
     </div>}
     {controls}
     <p className="save-note">Leaving Releases keeps a started run’s original status and Cancel accessible throughout the app. Cancellation is not rollback. Unknown cleanup is sticky; reconnecting cannot reset it.</p>
-    {op?.result && <Report result={op.result} historical={state.historical} />}
+    {op?.result && <Report key={`${op.ownerGeneration}:${op.operationId}`} result={op.result} historical={state.historical} />}
   </section>;
 }
