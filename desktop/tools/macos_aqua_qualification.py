@@ -29,7 +29,7 @@ WORKFLOW = REPOSITORY + "/.github/workflows/desktop-macos-aqua.yml@" + REF
 MARKER = b"MRK_MACOS_AQUA_RESULT="
 OUTPUT_LIMIT = 2 * 1024 * 1024
 JSON_LIMIT = 16383
-FAILURE_CONTEXT_LIMIT = 1024
+FAILURE_CONTEXT_LIMIT = 1536
 TRACEBACK_LIMIT = 64
 SCOPE = "programmatic genuine controls; no Store, release, distribution or physical-device evidence"
 FAILURE_STEPS = frozenset((
@@ -49,6 +49,7 @@ FAILURE_REASONS = frozenset((
     "native-ineligible native-action-attempted native-action-returned native-callback-returned "
     "native-response-present native-selection-present native-close-attempted native-closed "
     "native-attachment-lost native-preaction-history native-dismissed native-duplicate-action "
+    "native-ax-not-trusted native-ax-trust native-ax-binding native-ax-input native-ax-custody "
     "cancel-unexpected-project cancel-duplicate-result adapter-wrong-thread adapter-book-borrow "
     "adapter-original-call adapter-original-owner adapter-original-binding adapter-missing-facts "
     "adapter-missing-panel adapter-ineligible adapter-native-observation adapter-native-action "
@@ -88,6 +89,14 @@ NATIVE_ACTION_SITES = {
     "button-hidden": ("would-block", 24, True), "project-cancel": ("none", 1, True),
     "project-open": ("none", 4, True), "quit-cancel": ("none", 8, True), "quit-confirm": ("none", 16, True),
 }
+ACCESSIBILITY_SITES = frozenset((
+    "binding entry application windows parent-identity children panel-identity panel-role panel-parent "
+    "default-button button-role button-enabled ancestry default-recheck press cleanup"
+).split())
+ACCESSIBILITY_ERRORS = frozenset((
+    "none wrong-thread invalid-input ineligible unsupported ambiguous malformed limit deadline custody "
+    "invalid-element cannot-complete ax-other changed objc-exception cleanup-unknown"
+).split())
 SOURCE = (b'plugins { id("com.android.application") }\n'
           b'android { defaultConfig { applicationId = "org.example.mrk.observed" } }\n')
 VERSION = b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n"
@@ -206,6 +215,12 @@ def expected_result(binding, case):
         "native": {"projectCancelSettled": first, "selectedPathMatched": case != "picker-loss",
             "panelAttachments": [True, True, first, first],
             "controlReturns": [first, case != "picker-loss", case != "picker-loss", first, True],
+            "accessibilityTrustedWithoutPrompt": True,
+            "projectOpenInput": None if case == "picker-loss" else {
+                "mechanism": "accessibility-press", "step": "OpenProject", "id": 2 if first else 1,
+                "prepared": True, "entered": True, "attempted": True, "pressReturned": True, "returned": True,
+                "retired": True, "identityMatched": True, "controlMatched": True, "cleanupReturned": True,
+                "site": "press", "error": "none"},
             "quitCancelKeptOriginalReview": first, "originalDocumentAndQuitSettled": True},
         "saveSessions": sessions, "freshCoreReadback": first, "syntheticFileReadback": True,
         "staleMarkerWriterReturnedAndClosed": stale,
@@ -333,6 +348,61 @@ def _native_action_context(value, native, panel):
         return None
 
 
+def _accessibility_context(value, native, panel):
+    # Closed same-original input DATA only. In-flight flags are UNKNOWN, not
+    # fabricated false; neither this sample nor a Press return is a receipt.
+    if value is None:
+        return None
+    try:
+        flags = ("attempted", "pressReturned", "identityMatched", "controlMatched", "cleanupReturned")
+        need(type(value) is dict and set(value) == {"mechanism", "step", "id", "prepared", "entered", "returned",
+             "retired", "site", "error", *flags}, "accessibility-data")
+        need(type(value["mechanism"]) is str and type(value["step"]) is str
+             and value["mechanism"] == "accessibility-press" and value["step"] == "OpenProject"
+             and type(value["id"]) is int and value["id"] in (1, 2), "accessibility-data")
+        need(native is not None, "accessibility-data")
+        if native["step"] == "OpenProject":
+            # During this original Open, preparation must actually have returned
+            # on the same project panel. A successful sample may remain as
+            # history after a later native handler replaces these two fields.
+            need(native["entered"] and native["returned"] and panel is not None
+                 and panel["step"] == "OpenProject" and panel["kind"] == "project"
+                 and panel["id"] == value["id"], "accessibility-data")
+        need(all(type(value[key]) is bool for key in ("prepared", "entered", "returned", "retired"))
+             and all(value[key] is None or type(value[key]) is bool for key in flags), "accessibility-data")
+        site, error = value["site"], value["error"]
+        need(site is None and error is None or type(site) is str and site in ACCESSIBILITY_SITES
+             and type(error) is str and error in ACCESSIBILITY_ERRORS, "accessibility-data")
+        need((not value["entered"] or value["prepared"]) and (not value["returned"] or value["entered"])
+             and (not value["retired"] or value["prepared"]), "accessibility-data")
+        if not value["entered"]:
+            need(value["attempted"] is False and value["pressReturned"] is False
+                 and all(value[key] is None for key in flags[2:]) and site in (None, "binding", "entry")
+                 and error != "none", "accessibility-data")
+            if value["retired"]:
+                need(site == "entry" and error in ("deadline", "ineligible"), "accessibility-data")
+        elif not value["returned"]:
+            need(not value["retired"] and all(value[key] is None for key in flags)
+                 and site is None and error is None, "accessibility-data")
+        elif all(value[key] is None for key in flags):
+            need(not value["retired"] and (site, error) == ("entry", "custody"), "accessibility-data")
+        else:
+            need(all(type(value[key]) is bool for key in flags) and site not in (None, "binding") and error is not None,
+                 "accessibility-data")
+            need((not value["controlMatched"] or value["identityMatched"])
+                 and (not value["attempted"] or value["controlMatched"])
+                 and (not value["pressReturned"] or value["attempted"])
+                 and (not value["attempted"] or value["pressReturned"] or error == "objc-exception")
+                 and (not value["retired"] or value["cleanupReturned"] and error != "custody"), "accessibility-data")
+            if error in ("objc-exception", "cleanup-unknown"):
+                need(not value["cleanupReturned"], "accessibility-data")
+            if error == "none":
+                need(site == "press" and all(value[key] for key in flags), "accessibility-data")
+        return value
+    except (Refused, TypeError, ValueError):
+        return None
+
+
 def failure_context(stdout, stderr):
     row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_CONTEXT", FAILURE_CONTEXT_LIMIT)
     if row is None:
@@ -341,13 +411,15 @@ def failure_context(stdout, stderr):
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
         need(type(value) is dict and set(value) in ({"pending", "nativeHandler", "lastPanel"},
-                                                  {"pending", "nativeHandler", "lastPanel", "nativeAction"}), "failure-context")
+                                                  {"pending", "nativeHandler", "lastPanel", "nativeAction"},
+                                                  {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
         pending, native, panel = value["pending"], value["nativeHandler"], value["lastPanel"]
         if pending is not None:
             need(type(pending) is dict and set(pending) == {"kind", "step"}
                  and type(pending["kind"]) is str, "failure-context")
             kind, step = pending["kind"], pending["step"]
-            allowed = {"dom": FAILURE_STEPS, "native": NATIVE_STEPS, "close": {"Close", "CloseCancel"}}
+            allowed = {"dom": FAILURE_STEPS, "native": NATIVE_STEPS, "accessibility": {"OpenProject"},
+                       "close": {"Close", "CloseCancel"}}
             need(kind in ("reload", "failure-close") and step is None
                  or kind in allowed and type(step) is str and step in allowed[kind], "failure-context")
         if native is not None:
@@ -369,6 +441,8 @@ def failure_context(stdout, stderr):
                  "failure-context")
         if "nativeAction" in value:
             value["nativeAction"] = _native_action_context(value["nativeAction"], native, panel)
+        if "accessibility" in value:
+            value["accessibility"] = _accessibility_context(value["accessibility"], native, panel)
         return value
     except (Refused, ValueError, RecursionError, UnicodeError, TypeError):
         return None

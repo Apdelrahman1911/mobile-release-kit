@@ -176,18 +176,18 @@ impl Panel {
 // The integration target's cfg(test) does not reach this dependency. Explicit
 // nondefault feature forwarding selects BOTH this Rust seam and the C controls.
 #[cfg(feature = "installed-observation")]
-pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, installed_observation_flags_data_check};
+pub use observation::{PanelAction, PanelActionDiagnostic, PanelObservation, OpenIdentity, AxDiagnostic, AxReport,
+    AxInputReturn, installed_accessibility_trusted, installed_accessibility_press, installed_observation_flags_data_check};
 #[cfg(feature = "installed-observation")]
 mod observation {
     use super::*;
-    use std::path::Path;
+    use std::{path::Path, panic::{catch_unwind, AssertUnwindSafe}, time::{Duration, Instant}};
 
     pub enum PanelAction<'a> {
         ProjectCancel,
         /// A caller-prebound synthetic directory, once per original panel.
         /// Navigation returning is NOT evidence that Open selected this path.
         ProjectDirectory(&'a Path),
-        ProjectOpen,
         QuitCancel,
         QuitConfirm,
     }
@@ -203,6 +203,7 @@ mod observation {
             4 => Some("quit-cancel"), 5 => Some("quit-confirm"), _ => None }
     }
     // Same numbered sites and Darwin errno values as the feature-gated shim.
+    // Code 3 remains historical diagnostic DATA only, never a callable action.
     // label, original native-return status (-1 = exception-only), action mask,
     // whether an EXISTING Objective-C query/action at this site can throw.
     const ACTION_SITES: [(&str, c_int, u8, bool); 35] = [
@@ -287,6 +288,134 @@ mod observation {
             response: *mut c_int, path: *mut u8, capacity: usize) -> c_int;
         fn mrk_panel_observe_action(panel: *mut c_void, action: c_int, directory: *const c_char,
             diagnostic: *mut u32) -> c_int;
+        fn mrk_observation_ax_trusted() -> c_int;
+        fn mrk_panel_observe_open_identity(panel: *mut c_void, parent: *mut u8, sheet: *mut u8, capacity: usize) -> c_int;
+        fn mrk_observation_ax_press(parent: *const u8, sheet: *const u8, capacity: usize,
+            admission: unsafe extern "C" fn(*mut c_void, u64, c_int, *mut AxTimeout) -> c_int,
+            context: *mut c_void, result: *mut AxWire);
+    }
+    /// Copied public tags only. No AppKit/CF object can leave its original owner.
+    pub struct OpenIdentity { parent: [u8; 64], panel: [u8; 64] }
+    fn identity_tag(bytes: &[u8; 64], prefix: &[u8]) -> bool {
+        let end = prefix.len() + 36;
+        bytes.starts_with(prefix) && bytes[end..].iter().all(|byte| *byte == 0)
+            && bytes[prefix.len()..end].iter().enumerate().all(|(i, byte)|
+                if [8, 13, 18, 23].contains(&i) { *byte == b'-' } else { byte.is_ascii_hexdigit() })
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct AxDiagnostic { pub site: &'static str, pub error: &'static str }
+    const AX_SITES: [&str; 16] = ["binding", "entry", "application", "windows", "parent-identity", "children",
+        "panel-identity", "panel-role", "panel-parent", "default-button", "button-role", "button-enabled",
+        "ancestry", "default-recheck", "press", "cleanup"];
+    const AX_ERRORS: [&str; 16] = ["none", "wrong-thread", "invalid-input", "ineligible", "unsupported", "ambiguous",
+        "malformed", "limit", "deadline", "custody", "invalid-element", "cannot-complete", "ax-other", "changed",
+        "objc-exception", "cleanup-unknown"];
+    #[repr(C)]
+    #[derive(Default)]
+    struct AxWire { site: u32, error: u32, flags: u32 }
+    #[derive(Clone, Copy)]
+    pub struct AxReport {
+        pub diagnostic: AxDiagnostic, pub identity_matched: bool, pub control_matched: bool,
+        pub attempted: bool, pub press_returned: bool, pub cleanup_returned: bool,
+    }
+    impl AxReport {
+        pub fn succeeded(self) -> bool {
+            self.diagnostic == (AxDiagnostic { site: "press", error: "none" }) && self.identity_matched
+                && self.control_matched && self.attempted && self.press_returned && self.cleanup_returned
+        }
+    }
+    fn ax_return(wire: AxWire) -> Option<AxReport> {
+        let site = *AX_SITES.get(wire.site.checked_sub(1)? as usize)?;
+        let error = *AX_ERRORS.get(wire.error as usize)?;
+        let f = wire.flags;
+        if site == "binding" || f & !31 != 0 || f & 2 != 0 && f & 1 == 0 || f & 4 != 0 && f & 2 == 0
+            || f & 8 != 0 && f & 4 == 0 || f & 4 != 0 && f & 8 == 0 && error != "objc-exception"
+            || error == "none" && (site != "press" || f != 31)
+            || matches!(error, "objc-exception" | "cleanup-unknown") && f & 16 != 0 { return None; }
+        Some(AxReport { diagnostic: AxDiagnostic { site, error }, identity_matched: f & 1 != 0,
+            control_matched: f & 2 != 0, attempted: f & 4 != 0, press_returned: f & 8 != 0, cleanup_returned: f & 16 != 0 })
+    }
+    pub struct AxInputReturn { pub report: Option<AxReport>, pub custody_known: bool, end: Instant }
+    impl AxInputReturn { pub fn timely(&self) -> bool { Instant::now() < self.end } }
+    #[repr(C)]
+    struct AxTimeout { seconds: f32, required_ns: u64 }
+    fn ax_timeout(remaining_ns: u64) -> Option<AxTimeout> {
+        if remaining_ns == 0 { return None; }
+        let upper = remaining_ns.min(100_000_000) as f64 / 1_000_000_000.0;
+        let mut seconds = upper as f32;
+        // Float conversion rounds to nearest; explicitly move DOWN if needed.
+        if f64::from(seconds) > upper { seconds = f32::from_bits(seconds.to_bits().checked_sub(1)?); }
+        if !seconds.is_finite() || seconds <= 0.0 { return None; }
+        let required_ns = (f64::from(seconds) * 1_000_000_000.0).ceil() as u64;
+        (required_ns > 0 && required_ns <= remaining_ns).then_some(AxTimeout { seconds, required_ns })
+    }
+    fn ax_deadline_allows(remaining_ns: u64, required_ns: u64) -> bool {
+        remaining_ns > 0 && remaining_ns >= required_ns
+    }
+    struct AxAdmission<'a, F> { end: Instant, admit: &'a mut F, custody_known: bool }
+    unsafe extern "C" fn ax_admission<F: FnMut(bool) -> Option<bool>>(context: *mut c_void, required_ns: u64,
+        after_press: c_int, timeout: *mut AxTimeout) -> c_int {
+        // SAFETY: one synchronous caller; this borrowed context and optional
+        // writable timeout cell cannot escape the C routine. No unwind over C.
+        let context = unsafe { &mut *context.cast::<AxAdmission<'_, F>>() };
+        let checked = catch_unwind(AssertUnwindSafe(|| {
+            if !context.custody_known || !matches!(after_press, 0 | 1) { context.custody_known = false; return 9; }
+            let Some(admitted) = (context.admit)(after_press == 1) else { context.custody_known = false; return 9; };
+            // Check Eax AFTER every potentially blocking admission/owner lock.
+            let remaining = u64::try_from(context.end.saturating_duration_since(Instant::now()).as_nanos()).unwrap_or(0);
+            if !ax_deadline_allows(remaining, required_ns) { return 8; }
+            if !admitted { return 3; }
+            if !timeout.is_null() {
+                let Some(value) = ax_timeout(remaining) else { return 8; };
+                unsafe { *timeout = value; }
+            }
+            0
+        }));
+        match checked {
+            Ok(code) => code,
+            Err(payload) => { context.custody_known = false; std::mem::forget(payload); 9 },
+        }
+    }
+    pub fn installed_accessibility_trusted() -> Result<bool, ()> {
+        // The actual installed executable, no prompt, before the builder/UI.
+        match unsafe { mrk_observation_ax_trusted() } { 1 => Ok(true), 0 => Ok(false), _ => Err(()) }
+    }
+    pub fn installed_accessibility_press<F: FnMut(bool) -> Option<bool>>(identity: &OpenIdentity,
+        observer_end: Instant, mut admit: F) -> AxInputReturn {
+        // One fixed sub-bound at the synchronous FFI entry, never per query.
+        let end = observer_end.min(Instant::now() + Duration::from_secs(2));
+        let mut context = AxAdmission { end, admit: &mut admit, custody_known: true };
+        let mut wire = AxWire::default();
+        // SAFETY: only bounded copied bytes and the scoped non-unwinding
+        // callback cross C. All Create/Copy results are retired there, not sent.
+        unsafe { mrk_observation_ax_press(identity.parent.as_ptr(), identity.panel.as_ptr(), identity.parent.len(),
+            ax_admission::<F>, (&mut context as *mut AxAdmission<'_, F>).cast(), &mut wire); }
+        let report = ax_return(wire);
+        AxInputReturn { custody_known: context.custody_known && report.is_some(), report, end }
+    }
+    fn ax_data_check() -> bool {
+        for remaining in [1, 2, 99, 99_999_999, 100_000_000, 100_000_001, 2_000_000_000] {
+            let Some(t) = ax_timeout(remaining) else { return false; };
+            if f64::from(t.seconds) > remaining.min(100_000_000) as f64 / 1_000_000_000.0
+                || t.seconds <= 0.0 || !ax_deadline_allows(remaining, t.required_ns)
+                || ax_deadline_allows(t.required_ns - 1, t.required_ns) { return false; }
+        }
+        if ax_timeout(0).is_some() || ax_deadline_allows(0, 0) { return false; }
+        let mut tag = [0; 64]; let text = b"mrk-parent-00000000-0000-0000-0000-000000000000";
+        tag[..text.len()].copy_from_slice(text);
+        if !identity_tag(&tag, b"mrk-parent-") || identity_tag(&tag, b"mrk-panel-") { return false; }
+        tag[63] = 1; if identity_tag(&tag, b"mrk-parent-") { return false; }
+        for flags in 0..=63 {
+            let success = ax_return(AxWire { site: 15, error: 0, flags });
+            if success.is_some_and(AxReport::succeeded) != (flags == 31) { return false; }
+        }
+        // CannotComplete is a SPENT actual attempt, never EAGAIN/no-effect.
+        let uncertain = ax_return(AxWire { site: 15, error: 11, flags: 31 });
+        uncertain.is_some_and(|r| r.attempted && r.press_returned && r.cleanup_returned && !r.succeeded())
+            && ax_return(AxWire { site: 4, error: 4, flags: 16 }).is_some_and(|r| !r.attempted && r.cleanup_returned)
+            && ax_return(AxWire { site: 15, error: 14, flags: 7 }).is_some_and(|r| r.attempted && !r.press_returned && !r.cleanup_returned)
+            && [0, 17, u32::MAX].into_iter().all(|site| ax_return(AxWire { site, error: 4, flags: 16 }).is_none())
+            && ax_return(AxWire { site: 15, error: 16, flags: 31 }).is_none()
     }
     fn observation_flags_valid(flags: u32) -> bool {
         let both_present = flags & 0x3000 == 0x3000;
@@ -297,12 +426,25 @@ mod observation {
     /// Pure checks called by the existing instrumented observer entry, not a
     /// native query or a separate test executable/qualification route.
     pub fn installed_observation_flags_data_check() -> bool {
-        action_diagnostics_data_check() && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x1ffff]
+        action_diagnostics_data_check() && ax_data_check() && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x1ffff]
             .into_iter().all(observation_flags_valid)
             && [2, 0x4000, 0x8000, 0x10000, 0x14000, 0x1f000, 0x20000, u32::MAX]
                 .into_iter().all(|flags| !observation_flags_valid(flags))
     }
     impl Panel {
+        pub fn installed_open_identity(&mut self) -> Result<OpenIdentity, AxDiagnostic> {
+            self.usable().map_err(|_| AxDiagnostic { site: "binding", error: "ineligible" })?;
+            let mut identity = OpenIdentity { parent: [0; 64], panel: [0; 64] };
+            // SAFETY: same retained main-thread original; only tag bytes return.
+            let status = unsafe { mrk_panel_observe_open_identity(self.original.as_ptr(), identity.parent.as_mut_ptr(),
+                identity.panel.as_mut_ptr(), identity.parent.len()) };
+            if status == 0 && identity_tag(&identity.parent, b"mrk-parent-") && identity_tag(&identity.panel, b"mrk-panel-") {
+                return Ok(identity);
+            }
+            if status == 0 || status == 14 || !(1..16).contains(&status) { self.unknown = true; }
+            Err(AxDiagnostic { site: "binding", error: usize::try_from(status).ok().filter(|s| *s != 0)
+                .and_then(|s| AX_ERRORS.get(s)).copied().unwrap_or("malformed") })
+        }
         pub fn installed_observation(&mut self) -> io::Result<PanelObservation> {
             self.usable()?;
             let mut kind = 0; let mut flags = 0; let mut response = 0; let mut path = [0u8; 4097];
@@ -338,7 +480,7 @@ mod observation {
         pub fn installed_action(&mut self, action: PanelAction<'_>, diagnostic: &mut Option<PanelActionDiagnostic>) -> io::Result<bool> {
             *diagnostic = None; // Never expose a previous action's diagnostic.
             let name = match &action { PanelAction::ProjectCancel => "project-cancel",
-                PanelAction::ProjectDirectory(_) => "project-directory", PanelAction::ProjectOpen => "project-open",
+                PanelAction::ProjectDirectory(_) => "project-directory",
                 PanelAction::QuitCancel => "quit-cancel", PanelAction::QuitConfirm => "quit-confirm" };
             if let Err(error) = self.usable() {
                 *diagnostic = Some(PanelActionDiagnostic { action: name, domain: "rust-precondition",
@@ -363,7 +505,6 @@ mod observation {
                             site: "directory-cstring", error: "invalid-input" }); io::ErrorKind::InvalidInput
                     })?))
                 }
-                PanelAction::ProjectOpen => (3, None),
                 PanelAction::QuitCancel => (4, None),
                 PanelAction::QuitConfirm => (5, None),
             };

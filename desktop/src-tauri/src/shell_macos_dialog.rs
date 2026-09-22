@@ -12,6 +12,9 @@ struct OriginalPanel {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
     observed_call: std::sync::Weak<GuiCall>,
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+        not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+    open_release: Option<Arc<observation::OpenRelease>>,
 }
 thread_local! { static PANEL: RefCell<Option<OriginalPanel>> = const { RefCell::new(None) }; }
 
@@ -19,6 +22,7 @@ thread_local! { static PANEL: RefCell<Option<OriginalPanel>> = const { RefCell::
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
 pub(super) mod observation {
     use super::*;
+    use std::{sync::atomic::{AtomicU8, Ordering}, time::Instant};
     pub(crate) use native::PanelAction;
 
     #[derive(Clone, Copy)]
@@ -26,6 +30,7 @@ pub(super) mod observation {
         WrongThread, BookBorrow, OriginalCall, OriginalOwner, OriginalBinding,
         MissingFacts, MissingPanel, Ineligible, NativeObservation,
         NativeAction(Option<native::PanelActionDiagnostic>),
+        OpenBinding(native::AxDiagnostic), OpenCustody,
     }
     impl ObservationError {
         pub(crate) fn reason(self) -> &'static str { match self {
@@ -34,9 +39,13 @@ pub(super) mod observation {
             Self::OriginalBinding => "adapter-original-binding", Self::MissingFacts => "adapter-missing-facts",
             Self::MissingPanel => "adapter-missing-panel", Self::Ineligible => "adapter-ineligible",
             Self::NativeObservation => "adapter-native-observation", Self::NativeAction(_) => "adapter-native-action",
+            Self::OpenBinding(_) => "native-ax-binding", Self::OpenCustody => "native-ax-custody",
         }}
         pub(crate) fn action_diagnostic(self) -> Option<native::PanelActionDiagnostic> {
             match self { Self::NativeAction(diagnostic) => diagnostic, _ => None }
+        }
+        pub(crate) fn binding_diagnostic(self) -> Option<native::AxDiagnostic> {
+            match self { Self::OpenBinding(diagnostic) => Some(diagnostic), _ => None }
         }
     }
     pub(crate) struct ObservedPanel {
@@ -56,6 +65,84 @@ pub(super) mod observation {
         Ok(!owner.interrupted() && facts.dispatched && facts.created && facts.showing && !facts.constructing
             && !facts.not_created && facts.refusal.is_none() && !facts.response && !facts.close_queued
             && !facts.destroyed && !facts.close_ack && !facts.release_queued && !facts.released)
+    }
+    #[repr(u8)]
+    #[derive(Clone, Copy)]
+    enum OpenPhase { Prepared, Entered, Returned, Retired, Unknown }
+    pub(crate) struct OpenRelease(AtomicU8);
+    impl OpenRelease {
+        fn new() -> Self { Self(AtomicU8::new(OpenPhase::Prepared as u8)) }
+        fn advance(&self, from: OpenPhase, to: OpenPhase) -> bool {
+            self.0.compare_exchange(from as u8, to as u8, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+        }
+        pub(super) fn release_ready(&self) -> bool { self.0.load(Ordering::SeqCst) == OpenPhase::Retired as u8 }
+        fn enter(&self) -> bool { self.advance(OpenPhase::Prepared, OpenPhase::Entered) }
+        fn no_entry(&self, custody: bool) -> bool {
+            self.advance(OpenPhase::Prepared, if custody { OpenPhase::Retired } else { OpenPhase::Unknown }) && custody
+        }
+        fn returned(&self, cleanup: bool, custody: bool) -> bool {
+            if !self.advance(OpenPhase::Entered, OpenPhase::Returned) { return false; }
+            self.advance(OpenPhase::Returned, if cleanup && custody { OpenPhase::Retired } else { OpenPhase::Unknown })
+                && cleanup && custody
+        }
+    }
+    pub(crate) struct PreparedOpenInput {
+        pub(crate) id: u32, identity: native::OpenIdentity,
+        call: Arc<GuiCall>, owner: Arc<OriginalWork>, release: Arc<OpenRelease>,
+    }
+    impl PreparedOpenInput {
+        /// Called only inside the scoped AX admission; never touches PANEL or
+        /// AppKit. The Record caller releases its guard before any AX IPC.
+        pub(crate) fn admitted(&self, after_press: bool) -> Option<bool> {
+            let owner = self.call.owner()?;
+            if owner.id != self.id || !Arc::ptr_eq(&owner, &self.owner) || !Arc::ptr_eq(&owner.gui, &self.call) { return None; }
+            if after_press {
+                // An early REAL callback/close must not be mistaken for a
+                // failed pre-action gate. Poisoned custody still stays unknown.
+                let _facts = self.call.facts()?; Some(true)
+            } else { allowed(&self.call, &owner).ok() }
+        }
+        pub(crate) fn stopped(&self) -> bool { self.owner.stopped() }
+        pub(crate) fn enter(&self) -> bool { self.release.enter() }
+        pub(crate) fn press(&self, end: Instant, admit: impl FnMut(bool) -> Option<bool>) -> native::AxInputReturn {
+            native::installed_accessibility_press(&self.identity, end, admit)
+        }
+        pub(crate) fn no_entry(&self, custody: bool) -> bool { self.release.no_entry(custody) }
+        pub(crate) fn returned(&self, result: &native::AxInputReturn, matching: bool) -> bool {
+            self.release.returned(result.report.is_some_and(|r| r.cleanup_returned),
+                matching && result.custody_known && result.report.is_some_and(|r| r.diagnostic.error != "custody"))
+        }
+    }
+    pub(crate) fn prepare_open_input(id: u32) -> Result<PreparedOpenInput, ObservationError> {
+        if !native::main_thread() { return Err(ObservationError::WrongThread); }
+        PANEL.with(|book| {
+            let mut book = book.try_borrow_mut().map_err(|_| ObservationError::BookBorrow)?;
+            let entry = book.as_mut().filter(|entry| entry.id == id).ok_or(ObservationError::OriginalBinding)?;
+            if entry.open_release.is_some() { return Err(ObservationError::OpenCustody); }
+            let (call, owner) = original(entry)?;
+            if !allowed(&call, &owner)? || owner.interrupted() { return Err(ObservationError::Ineligible); }
+            let identity = entry.panel.as_mut().ok_or(ObservationError::MissingPanel)?
+                .installed_open_identity().map_err(ObservationError::OpenBinding)?;
+            let release = Arc::new(OpenRelease::new());
+            entry.open_release = Some(release.clone());
+            Ok(PreparedOpenInput { id, identity, call, owner, release })
+        })
+    }
+    pub(crate) fn open_release_data_check() -> bool {
+        // Inert state-machine DATA: no original owner, panel or callback exists.
+        for custody in [false, true] {
+            let no_entry = OpenRelease::new();
+            if no_entry.release_ready() || no_entry.no_entry(custody) != custody
+                || no_entry.release_ready() != custody || no_entry.enter() || no_entry.no_entry(true) { return false; }
+            for cleanup in [false, true] {
+                let entered = OpenRelease::new();
+                if !entered.enter() || entered.enter() || entered.release_ready() { return false; }
+                if entered.returned(cleanup, custody) != (cleanup && custody)
+                    || entered.release_ready() != (cleanup && custody) || entered.returned(true, true)
+                    || entered.no_entry(true) { return false; }
+            }
+        }
+        true
     }
     pub(crate) fn observed_panel() -> Result<Option<ObservedPanel>, ObservationError> {
         if !native::main_thread() { return Err(ObservationError::WrongThread); }
@@ -127,6 +214,9 @@ fn construct(call: &Arc<GuiCall>, choice: PanelKind) -> NativeResult {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
             observed_call: Arc::downgrade(call),
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+                not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+            open_release: None,
         }); Ok(())
     });
     if let Err(reason) = reserved {
@@ -197,6 +287,11 @@ fn tick(call: &Arc<GuiCall>, id: u32, quit: bool) -> NativeResult {
             let release = {
                 let mut facts = call.facts().ok_or(())?;
                 let ready = facts.destroyed && facts.close_ack && !facts.release_queued;
+                // The original may poll/respond/close during AX IPC, but must
+                // retain its exact panel/parent until actual AX retirement.
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "macos-installed-observation", feature = "custom-protocol",
+                    not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer")))]
+                let ready = ready && entry.open_release.as_ref().is_none_or(|barrier| barrier.release_ready());
                 if ready { facts.release_queued = true; } ready
             };
             if !release { false } else {

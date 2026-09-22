@@ -12,7 +12,8 @@ use tauri::Manager;
 use crate::{asset_session::{DocumentBinding, InstalledMacProjectWitness, InstalledMacPickerWitness, NativeResponse}, bridge::{AppInfo, Project},
     edit_owner::{EditOwner, InstalledConfigFinality, InstalledMacReviewWitness}, edit_protocol::{self as edit, ConfigEditStatus, EditProjection},
     error::BridgeError, supervisor::Supervisor};
-use super::owned_macos::observation::{observed_panel, observe_panel_action, ObservedPanel, PanelAction};
+use super::owned_macos::observation::{observed_panel, observe_panel_action, prepare_open_input,
+    ObservedPanel, PanelAction, PreparedOpenInput};
 
 // Closed public categories only. The first winner is published before failure;
 // no Record lock, native call, path, or arbitrary error text enters this latch.
@@ -25,6 +26,7 @@ const FAILURE_REASONS: &[&str] = &[
     "native-action-returned", "native-callback-returned", "native-response-present",
     "native-selection-present", "native-close-attempted", "native-closed", "native-attachment-lost",
     "native-preaction-history", "native-dismissed", "native-duplicate-action",
+    "native-ax-not-trusted", "native-ax-trust", "native-ax-binding", "native-ax-input", "native-ax-custody",
     "cancel-unexpected-project", "cancel-duplicate-result",
     "adapter-wrong-thread", "adapter-book-borrow", "adapter-original-call", "adapter-original-owner",
     "adapter-original-binding", "adapter-missing-facts", "adapter-missing-panel", "adapter-ineligible",
@@ -152,7 +154,7 @@ enum Step {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DomDispatch { step: Step, sequence: u16 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Pending { Dom(DomDispatch), Native(Step), Close(Step), Reload, FailureClose }
+enum Pending { Dom(DomDispatch), Native(Step), Accessibility(u32), Close(Step), Reload, FailureClose }
 
 fn dom_step_entry(pending: Option<Pending>, current: Step, original: DomDispatch) -> bool {
     (1..=160).contains(&original.sequence) && current == original.step && pending == Some(Pending::Dom(original))
@@ -197,6 +199,52 @@ fn native_step_entry(on_main: bool, timely: bool) -> Result<bool, &'static str> 
 fn retire_returned_native(pending: &mut Option<Pending>, current: Step, returned: Step) -> bool {
     if current != returned || *pending != Some(Pending::Native(returned)) { return false; }
     *pending = None; true
+}
+fn open_step_entry(pending: Option<Pending>, current: Step, id: u32) -> bool {
+    matches!(id, 1 | 2) && current == Step::OpenProject && pending == Some(Pending::Accessibility(id))
+}
+fn retire_returned_open(pending: &mut Option<Pending>, current: Step, id: u32) -> bool {
+    if !open_step_entry(*pending, current, id) { return false; }
+    *pending = None; true
+}
+#[derive(Clone, Copy)]
+struct OpenInputSample {
+    id: u32, prepared: bool, entered: bool, attempted: Option<bool>, press_returned: Option<bool>,
+    returned: bool, retired: bool, identity_matched: Option<bool>, control_matched: Option<bool>,
+    cleanup_returned: Option<bool>, diagnostic: Option<mrk_macos_installed_native::AxDiagnostic>,
+}
+impl OpenInputSample {
+    fn preparing(id: u32) -> Self {
+        Self { id, prepared: false, entered: false, attempted: Some(false), press_returned: Some(false),
+            returned: false, retired: false, identity_matched: None, control_matched: None, cleanup_returned: None, diagnostic: None }
+    }
+    fn enter(&mut self) {
+        self.entered = true; self.attempted = None; self.press_returned = None;
+    }
+    fn complete(&mut self, result: &mrk_macos_installed_native::AxInputReturn, retired: bool) {
+        self.returned = true; self.retired = retired;
+        if let Some(report) = result.report {
+            self.attempted = Some(report.attempted); self.press_returned = Some(report.press_returned);
+            self.identity_matched = Some(report.identity_matched); self.control_matched = Some(report.control_matched);
+            self.cleanup_returned = Some(report.cleanup_returned); self.diagnostic = Some(report.diagnostic);
+            if report.diagnostic.error == "none" && !result.timely() {
+                self.diagnostic = Some(mrk_macos_installed_native::AxDiagnostic { site: "cleanup", error: "deadline" });
+            }
+        } else { self.diagnostic = Some(mrk_macos_installed_native::AxDiagnostic { site: "entry", error: "custody" }); }
+    }
+    fn succeeded(self) -> bool {
+        self.prepared && self.entered && self.returned && self.retired && self.attempted == Some(true)
+            && self.press_returned == Some(true) && self.identity_matched == Some(true) && self.control_matched == Some(true)
+            && self.cleanup_returned == Some(true)
+            && self.diagnostic == Some(mrk_macos_installed_native::AxDiagnostic { site: "press", error: "none" })
+    }
+    fn value(self) -> Value {
+        json!({"mechanism":"accessibility-press", "step":"OpenProject", "id":self.id,
+            "prepared":self.prepared, "entered":self.entered, "attempted":self.attempted, "pressReturned":self.press_returned,
+            "returned":self.returned, "retired":self.retired, "identityMatched":self.identity_matched,
+            "controlMatched":self.control_matched, "cleanupReturned":self.cleanup_returned,
+            "site":self.diagnostic.map(|d| d.site), "error":self.diagnostic.map(|d| d.error)})
+    }
 }
 #[derive(Clone, Copy)]
 struct NativeDispatch { step: Step, entered: bool, returned: bool }
@@ -400,6 +448,7 @@ impl Session {
 struct Record {
     step: Step, pending: Option<Pending>, evaluations: u16, attached: bool, started: bool, loaded: bool,
     native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
+    ax_trusted: bool, prepared_open: Option<PreparedOpenInput>, accessibility: Option<OpenInputSample>,
     initial_navigation: bool, info: bool, catalog: bool, methods: usize, capability: bool,
     project_calls: u8, cancel_returned: bool, project_returned: bool, project: Option<Project>,
     project_witness: Option<InstalledMacProjectWitness>, picker_witness: Option<InstalledMacPickerWitness>,
@@ -420,6 +469,7 @@ fn failure_context(r: &Record) -> Value {
     let pending = r.pending.map(|pending| {
         let (kind, step) = match pending {
             Pending::Dom(original) => ("dom", Some(original.step)), Pending::Native(step) => ("native", Some(step)),
+            Pending::Accessibility(_) => ("accessibility", Some(Step::OpenProject)),
             Pending::Close(step) => ("close", Some(step)), Pending::Reload => ("reload", None),
             Pending::FailureClose => ("failure-close", None),
         };
@@ -436,7 +486,8 @@ fn failure_context(r: &Record) -> Value {
     let action = r.native_action.map(|action| json!({"step":format!("{:?}", action.step), "id":action.id,
         "action":action.diagnostic.action, "domain":action.diagnostic.domain,
         "site":action.diagnostic.site, "error":action.diagnostic.error}));
-    json!({"pending":pending, "nativeHandler":native, "lastPanel":panel, "nativeAction":action})
+    json!({"pending":pending, "nativeHandler":native, "lastPanel":panel, "nativeAction":action,
+        "accessibility":r.accessibility.map(OpenInputSample::value)})
 }
 pub(super) struct Observation {
     case: Case, main: ThreadId, end: Instant, project_path: PathBuf, base: Value,
@@ -451,6 +502,7 @@ impl Observation {
             record: Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
                 native_dispatch: None, last_panel: None, native_action: None,
+                ax_trusted: false, prepared_open: None, accessibility: None,
                 initial_navigation: false, info: false, catalog: false, methods: 0, capability: false,
                 project_calls: 0, cancel_returned: false, project_returned: false, project: None,
                 project_witness: None, picker_witness: None,
@@ -483,10 +535,13 @@ impl Observation {
         // This reason is latched only after the original action body returns.
         // Let its matching Record publication precede the one-shot report;
         // unrelated failures still report truthful unknown/nonreturned DATA.
-        if reason == "adapter-native-action" && r.pending == Some(Pending::Native(r.step))
+        if matches!(reason, "adapter-native-action" | "native-ax-binding") && r.pending == Some(Pending::Native(r.step))
             && r.native_dispatch.is_some_and(|native| native.step == r.step && native.entered && !native.returned) {
             return;
         }
+        if matches!(reason, "native-ax-input" | "native-ax-custody")
+            && matches!(r.pending, Some(Pending::Accessibility(_)))
+            && r.accessibility.is_some_and(|sample| sample.entered && !sample.returned) { return; }
         if self.failure_reported.swap(true, Ordering::SeqCst) { return; }
         // Fixed labels and the already recorded sample only; no new native
         // observation. Later cleanup cannot replace the first reason/sample.
@@ -857,8 +912,14 @@ impl Observation {
         r.status_revision = Some(status.status_revision);
     }
     pub(super) fn tick(self: &Arc<Self>, app: &tauri::AppHandle) {
-        if !self.timely() { self.report_failure(); self.failure_shutdown(app); return; }
         if std::thread::current().id() == self.main { self.fail(); return; }
+        // Drain the one prepared original even after failure/deadline: known
+        // non-entry may retire its barrier, never dispatch a late Press.
+        if self.accessibility_step() {
+            if !self.timely() { self.report_failure(); self.failure_shutdown(app); }
+            return;
+        }
+        if !self.timely() { self.report_failure(); self.failure_shutdown(app); return; }
         let state = app.state::<super::ShellState>();
         let step = {
             let Some(mut r) = self.record() else { return; };
@@ -1031,6 +1092,68 @@ impl Observation {
             self.fail_with("dom-dispatch-refused");
         }
     }
+    fn open_admission(&self, input: &PreparedOpenInput, after_press: bool) -> Option<bool> {
+        let admitted = {
+            let r = self.record()?;
+            if !r.ax_trusted || input.id != self.case.selected_id() || !open_step_entry(r.pending, r.step, input.id)
+                || r.prepared_open.is_some() || !r.accessibility.is_some_and(|s|
+                    s.id == input.id && s.prepared && s.entered && !s.returned && !s.retired) { return None; }
+            input.admitted(after_press)?
+        }; // ALL Record/GuiFacts/owner-endpoint guards gone before AX IPC.
+        Some(admitted && self.timely() && (after_press || !input.stopped()))
+    }
+    fn accessibility_step(&self) -> bool {
+        let input = {
+            let Some(mut r) = self.record() else { return true; };
+            let Some(Pending::Accessibility(id)) = r.pending else { return false; };
+            if id != self.case.selected_id() || !open_step_entry(r.pending, r.step, id) {
+                self.fail_with("native-ax-custody"); return true;
+            }
+            // The synchronous relay owns a taken packet until actual return.
+            // Missing/unknown custody is never permission to prepare again.
+            let Some(input) = r.prepared_open.take() else { return true; };
+            if input.id != id || !r.accessibility.is_some_and(|s| s.id == id && s.prepared && !s.entered && !s.returned)
+                || !r.native_dispatch.is_some_and(|n| n.step == Step::OpenProject && n.entered && n.returned) {
+                self.fail_with("native-ax-custody"); return true;
+            }
+            if !self.timely() {
+                let retired = input.no_entry(input.admitted(true).is_some());
+                if let Some(sample) = r.accessibility.as_mut() {
+                    sample.retired = retired;
+                    sample.diagnostic = Some(mrk_macos_installed_native::AxDiagnostic { site: "entry",
+                        error: if Instant::now() >= self.end { "deadline" } else { "ineligible" } });
+                }
+                let current = r.step;
+                if !retired || !retire_returned_open(&mut r.pending, current, id) { self.fail_with("native-ax-custody"); }
+                return true; // Positive no FFI entry; no CF work or action flags.
+            }
+            if !input.enter() { self.fail_with("native-ax-custody"); return true; }
+            if let Some(sample) = r.accessibility.as_mut() { sample.enter(); }
+            input
+        };
+        // Existing retained/joined relay only: no spawn, task, thread or wait.
+        // The main preparation body returned and its PANEL borrow is gone.
+        let result = input.press(self.end, |after_press| self.open_admission(&input, after_press));
+        if result.report.is_some_and(|r| !r.succeeded()) || !result.timely() { self.fail_with("native-ax-input"); }
+        else if !result.custody_known { self.fail_with("native-ax-custody"); }
+        let Some(mut r) = self.record() else { input.returned(&result, false); return true; };
+        let matching = open_step_entry(r.pending, r.step, input.id) && r.prepared_open.is_none()
+            && r.accessibility.is_some_and(|s| s.id == input.id && s.prepared && s.entered && !s.returned && !s.retired);
+        // A publication lock may have waited after the final C callback. Check
+        // same-original facts custody again; poison cannot retire the barrier.
+        let retired = input.returned(&result, matching && input.admitted(true).is_some());
+        if !matching { self.fail_with("native-ax-custody"); return true; }
+        if let Some(sample) = r.accessibility.as_mut() { sample.complete(&result, retired); }
+        if !retired { self.fail_with("native-ax-custody"); return true; }
+        let current = r.step;
+        if !retire_returned_open(&mut r.pending, current, input.id) { self.fail_with("native-ax-custody"); return true; }
+        if !result.timely() { self.fail_with("native-ax-input"); return true; }
+        if self.timely() && r.accessibility.is_some_and(OpenInputSample::succeeded) {
+            if r.native_actions_returned[2] { self.fail_with("native-duplicate-action"); return true; }
+            r.native_actions_returned[2] = true; r.selected_native = true; r.step = Step::ProjectSettled;
+        }
+        true
+    }
     fn native_step(&self, step: Step) {
         let timely = self.timely();
         {
@@ -1040,7 +1163,8 @@ impl Observation {
             }
         }
         let mut action_diagnostic = None;
-        let result = self.native_step_body(step, timely, &mut action_diagnostic);
+        let mut prepared_open = None; let mut open_sample = None;
+        let result = self.native_step_body(step, timely, &mut action_diagnostic, &mut prepared_open, &mut open_sample);
         // Preserve the exact first refusal before any Record/cleanup failure.
         if let Err(reason) = result { self.fail_with(reason); }
         let Some(mut r) = self.record() else { return; };
@@ -1049,29 +1173,43 @@ impl Observation {
         if result == Err("adapter-native-action") && first_failure_reason(&self.failure_reason) == Some("adapter-native-action") {
             r.native_action = action_diagnostic; // This same first error's returned DATA only.
         }
+        if let Some(sample) = open_sample {
+            if r.accessibility.is_some() { self.fail_with("native-ax-custody"); return; }
+            r.accessibility = Some(sample);
+        }
         // Keep the historical wrong-thread refusal conservative. Diagnostics
         // never authorize retirement; a different/unknown owner is untouched.
         if matches!(result, Err("native-wrong-thread" | "native-pending-custody")) { return; }
         let current = r.step;
         if !retire_returned_native(&mut r.pending, current, step) { self.fail_with("native-pending-custody"); return; }
+        if let Some(input) = prepared_open {
+            if step != Step::OpenProject || result != Ok(false) || r.prepared_open.is_some()
+                || !r.native_dispatch.is_some_and(|n| n.step == step && n.entered && n.returned) {
+                self.fail_with("native-ax-custody"); return;
+            }
+            // Publish only the returned preparation, not an action/dispatch
+            // success. Nothing native runs after this handoff from the body.
+            r.pending = Some(Pending::Accessibility(input.id)); r.prepared_open = Some(input); return;
+        }
         match result {
             Ok(false) => {},
             Err(_) => {},
             Ok(true) => {
                 let (index,next) = match step {
                     Step::CancelProject => (0,Step::CancelSettled), Step::SetProject => (1,Step::OpenProject),
-                    Step::OpenProject => (2,Step::ProjectSettled), Step::QuitCancel => (3,Step::QuitCancelled),
+                    Step::QuitCancel => (3,Step::QuitCancelled),
                     Step::Quit => (4,Step::Exit), Step::PickerPending => { r.step = Step::Reload; return; },
                     _ => { self.fail_with("native-step"); return; },
                 };
                 if r.native_actions_returned[index] { self.fail_with("native-duplicate-action"); return; }
                 r.native_actions_returned[index] = true;
-                if step == Step::OpenProject { r.selected_native = true; } r.step = next;
+                r.step = next;
             },
         }
     }
     fn native_step_body(&self, step: Step, timely: bool,
-        action_diagnostic: &mut Option<NativeActionSample>) -> Result<bool, &'static str> {
+        action_diagnostic: &mut Option<NativeActionSample>, prepared_open: &mut Option<PreparedOpenInput>,
+        open_sample: &mut Option<OpenInputSample>) -> Result<bool, &'static str> {
         // This returned body has made no native query/action. Keep failed,
         // first reason, Step and original endpoint; only its matching slot may
         // retire in the caller, permitting ordinary failure shutdown to check.
@@ -1102,9 +1240,19 @@ impl Observation {
         if step == Step::OpenProject && (!panel.native.directory_ready || !panel.native.directory_bound || !panel.native.directory_returned) {
             return Ok(false); // Before any Open action; original deadline remains unchanged.
         }
+        if step == Step::OpenProject {
+            if !self.timely() { return Err("observer-deadline"); }
+            let mut sample = OpenInputSample::preparing(id);
+            let prepared = prepare_open_input(id).map_err(|error| {
+                sample.diagnostic = error.binding_diagnostic(); error.reason()
+            });
+            sample.prepared = prepared.is_ok(); *open_sample = Some(sample);
+            *prepared_open = Some(prepared?);
+            return Ok(false); // Deliberately NOT a native action return.
+        }
         let action = match step {
             Step::CancelProject => PanelAction::ProjectCancel,
-            Step::SetProject => PanelAction::ProjectDirectory(&self.project_path), Step::OpenProject => PanelAction::ProjectOpen,
+            Step::SetProject => PanelAction::ProjectDirectory(&self.project_path),
             Step::QuitCancel => PanelAction::QuitCancel, Step::Quit => PanelAction::QuitConfirm, _ => return Err("native-step"),
         };
         if !self.timely() { return Err("observer-deadline"); }
@@ -1299,6 +1447,9 @@ impl Observation {
         let r = self.record()?;
         let common = r.attached && r.loaded && r.info && r.catalog && r.capability && r.actual_exit && r.originals_final
             && r.relay_joined && r.pending.is_none() && r.step == Step::Exit && r.file_readback
+            && r.ax_trusted && r.prepared_open.is_none()
+            && (if self.case == Case::PickerLoss { r.accessibility.is_none() }
+                else { r.accessibility.is_some_and(|s| s.id == self.case.selected_id() && s.succeeded()) })
             && r.sessions.len() == self.case.rounds() && r.sessions.iter().all(|s| s.review_visible && s.finality.is_some())
             && (self.case == Case::FirstSave || r.panel_attached == [true,true,false,false])
             && r.project_calls == (if self.case == Case::FirstSave { 2 } else { 1 });
@@ -1328,6 +1479,7 @@ impl Observation {
             "shippingBinaryQualified":false,"distributionQualified":false,"methods":"eight-passive","actionsAvailable":false,
             "native":{"projectCancelSettled":r.cancel_settled,"selectedPathMatched":r.selected_native && r.project_settled,
                 "panelAttachments":r.panel_attached,"controlReturns":r.native_actions_returned,
+                "accessibilityTrustedWithoutPrompt":r.ax_trusted,"projectOpenInput":r.accessibility.map(OpenInputSample::value),
                 "quitCancelKeptOriginalReview":r.quit_cancelled,"originalDocumentAndQuitSettled":r.originals_final},
             "saveSessions":sessions,"freshCoreReadback":self.case == Case::FirstSave && r.snapshots == 2,
             "syntheticFileReadback":r.file_readback,"staleMarkerWriterReturnedAndClosed":r.fixture.mutated,
@@ -1512,7 +1664,28 @@ fn observer_data_checks() -> bool {
     let profile = crate::runtime::RuntimeConfig::packaged(PathBuf::from("/inert-mrk-profile-not-opened"));
     if !profile.project_selection_profile_available() || profile.project_path_selection_profile_available()
         || profile.evidence_selection_profile_available() { return false; }
-    if !mrk_macos_installed_native::installed_observation_flags_data_check() { return false; }
+    if !mrk_macos_installed_native::installed_observation_flags_data_check()
+        || !super::owned_macos::observation::open_release_data_check() { return false; }
+    let mut prepared = OpenInputSample::preparing(2);
+    prepared.prepared = true;
+    if prepared.succeeded() || prepared.entered || prepared.attempted != Some(false) || prepared.returned { return false; }
+    prepared.enter();
+    if prepared.succeeded() || !prepared.entered || prepared.attempted.is_some() || prepared.press_returned.is_some()
+        || prepared.returned || prepared.retired { return false; }
+    for id in [1, 2] {
+        let mut pending = Some(Pending::Accessibility(id));
+        if !open_step_entry(pending, Step::OpenProject, id)
+            || retire_returned_open(&mut pending, Step::ProjectSettled, id)
+            || retire_returned_open(&mut pending, Step::OpenProject, 3 - id)
+            || pending != Some(Pending::Accessibility(id))
+            || !retire_returned_open(&mut pending, Step::OpenProject, id) || pending.is_some() { return false; }
+    }
+    for pending in [None, Some(Pending::Native(Step::OpenProject)), Some(Pending::Accessibility(0)),
+        Some(Pending::Accessibility(3)), Some(Pending::Close(Step::OpenProject)), Some(Pending::FailureClose)] {
+        let mut unchanged = pending;
+        if open_step_entry(unchanged, Step::OpenProject, 2) || retire_returned_open(&mut unchanged, Step::OpenProject, 2)
+            || unchanged != pending { return false; }
+    }
     let fresh = || ObservedPanel { id: 1, action_allowed: true, native: PanelObservation {
         kind: PanelKind::Project, started: true, attached: false, directory_bound: false,
         parent_present: true, panel_present: true, parent_references_panel: Some(false),
@@ -1551,7 +1724,7 @@ fn observer_data_checks() -> bool {
         prior[original] = true;
         if same_panel_action_returned(step, &prior) != Ok(true) { return false; }
     }
-    for pending in [None, Some(Pending::Native(Step::Quit)),
+    for pending in [None, Some(Pending::Native(Step::Quit)), Some(Pending::Accessibility(2)),
         Some(Pending::Dom(DomDispatch { step: Step::CancelProject, sequence: 1 })),
         Some(Pending::Close(Step::CancelProject)), Some(Pending::Reload), Some(Pending::FailureClose)] {
         let mut original = pending;
@@ -1573,7 +1746,7 @@ fn observer_data_checks() -> bool {
     }
     let first_dom = DomDispatch { step: Step::ChooseCancel, sequence: 1 };
     let next_dom = DomDispatch { sequence: 2, ..first_dom };
-    for pending in [None, Some(Pending::Native(first_dom.step)), Some(Pending::Close(first_dom.step)),
+    for pending in [None, Some(Pending::Native(first_dom.step)), Some(Pending::Close(first_dom.step)), Some(Pending::Accessibility(2)),
         Some(Pending::Reload), Some(Pending::FailureClose), Some(Pending::Dom(next_dom)),
         Some(Pending::Dom(DomDispatch { step: Step::ChooseProject, ..first_dom }))] {
         let mut unchanged = pending;
@@ -1667,6 +1840,13 @@ pub(crate) fn main() -> std::process::ExitCode {
     let input = route().filter(|_| args.next().is_none()).and_then(|(root,uid)| Fixture::capture(root.join(case.name()),uid,case).ok())
         .and_then(|fixture| Observation::new(case,fixture).ok());
     let Some(q) = input.map(Arc::new) else { super::diagnostic(b"MRK_MACOS_AQUA=fixture-refused\n"); return std::process::ExitCode::FAILURE; };
+    let trusted = mrk_macos_installed_native::installed_accessibility_trusted();
+    if trusted != Ok(true) {
+        q.fail_with(if trusted == Ok(false) { "native-ax-not-trusted" } else { "native-ax-trust" });
+        q.report_failure(); super::diagnostic(b"MRK_MACOS_AQUA=failed\n"); return std::process::ExitCode::FAILURE;
+    }
+    if let Some(mut r) = q.record() { r.ax_trusted = true; } else { return std::process::ExitCode::FAILURE; }
+    if !q.timely() { q.report_failure(); return std::process::ExitCode::FAILURE; }
     // Routing is DATA only. The ordinary builder/core/installed selector still
     // establish every runtime, native project, document and edit boundary.
     let returned = super::run_builder(super::builder().manage(q.clone()));

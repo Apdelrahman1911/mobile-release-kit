@@ -17,6 +17,10 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdio.h>
+#ifdef MRK_INSTALLED_OBSERVATION
+#import <ApplicationServices/ApplicationServices.h>
+#include <math.h>
+#endif
 
 int mrk_platform(void) {
     struct utsname u; char version[64] = {0}; size_t length = sizeof(version);
@@ -196,6 +200,7 @@ int mrk_panel_response(int kind, int64_t code, int programmatic) {
 #ifdef MRK_INSTALLED_OBSERVATION
     // Instrumentation only; never callback/cleanup/selection authority.
     BOOL observationDirectoryReturned, observationActionAttempted, observationActionReturned;
+    BOOL observationIdentityAttempted;
     char observationDirectory[4097];
 #endif
 }
@@ -378,7 +383,7 @@ int mrk_panel_observe_action(void *opaque, int action, const char *directory, ui
     // Split only the existing short-circuit predicates, in their original order.
     if (!pthread_main_np()) MRK_ACTION_RETURN(EINVAL);
     site = MRK_ACTION_POINTER; if (!opaque) MRK_ACTION_RETURN(EINVAL);
-    site = MRK_ACTION_CODE; if (action < 1 || action > 5) MRK_ACTION_RETURN(EINVAL);
+    site = MRK_ACTION_CODE; if (action < 1 || action > 5 || action == 3) MRK_ACTION_RETURN(EINVAL);
     site = MRK_ACTION_ARGUMENT; if ((action == 2) != (directory != NULL)) MRK_ACTION_RETURN(EINVAL);
     MRKInstalledPanel *s = opaque;
     site = MRK_ACTION_UNKNOWN; if (s->unknown) MRK_ACTION_RETURN(EIO);
@@ -412,11 +417,6 @@ int mrk_panel_observe_action(void *opaque, int action, const char *directory, ui
             [(NSOpenPanel *)s->window setDirectoryURL:url];
             s->observationDirectoryReturned = YES; MRK_ACTION_RETURN(0);
         }
-        if (action == 3) {
-            site = MRK_ACTION_DIRECTORY_UNBOUND; if (!s->observationDirectory[0]) MRK_ACTION_RETURN(EPERM);
-            site = MRK_ACTION_DIRECTORY_RETURNED; if (!s->observationDirectoryReturned) MRK_ACTION_RETURN(EPERM);
-            site = MRK_ACTION_DIRECTORY_READY; if (!mrk_observation_directory_ready(s)) MRK_ACTION_RETURN(EAGAIN);
-        }
         NSButton *button = nil;
         if (action >= 4) {
             site = MRK_ACTION_ALERT_BUTTONS;
@@ -431,7 +431,6 @@ int mrk_panel_observe_action(void *opaque, int action, const char *directory, ui
         }
         s->observationActionAttempted = YES;
         if (action == 1) { site = MRK_ACTION_PROJECT_CANCEL; [(NSOpenPanel *)s->window cancel:nil]; }
-        else if (action == 3) { site = MRK_ACTION_PROJECT_OPEN; [(NSOpenPanel *)s->window ok:nil]; }
         else { site = action == 4 ? MRK_ACTION_QUIT_CANCEL : MRK_ACTION_QUIT_CONFIRM; [button performClick:nil]; }
         s->observationActionReturned = YES;
         // No call of s->completion, endSheet:, close_once or selected-path
@@ -442,5 +441,238 @@ int mrk_panel_observe_action(void *opaque, int action, const char *directory, ui
         return mrk_observation_action_return(diagnostic, 2u, site, EIO);
     }
 #undef MRK_ACTION_RETURN
+}
+
+// Public AX input is a separate, synchronous off-main operation. None of this
+// ABI carries an AppKit object, native BOOL, title, path or private identifier.
+enum { MRK_AX_NONE, MRK_AX_THREAD, MRK_AX_INPUT, MRK_AX_INELIGIBLE, MRK_AX_UNSUPPORTED,
+    MRK_AX_AMBIGUOUS, MRK_AX_MALFORMED, MRK_AX_LIMIT, MRK_AX_DEADLINE, MRK_AX_CUSTODY,
+    MRK_AX_INVALID_ELEMENT, MRK_AX_CANNOT_COMPLETE, MRK_AX_OTHER, MRK_AX_CHANGED,
+    MRK_AX_EXCEPTION, MRK_AX_CLEANUP_UNKNOWN };
+enum { MRK_AX_BINDING = 1, MRK_AX_ENTRY, MRK_AX_APPLICATION, MRK_AX_WINDOWS,
+    MRK_AX_PARENT_ID, MRK_AX_CHILDREN, MRK_AX_PANEL_ID, MRK_AX_PANEL_ROLE, MRK_AX_PANEL_PARENT,
+    MRK_AX_DEFAULT, MRK_AX_BUTTON_ROLE, MRK_AX_ENABLED, MRK_AX_ANCESTRY, MRK_AX_RECHECK,
+    MRK_AX_PRESS, MRK_AX_CLEANUP };
+enum { MRK_AX_IDENTITY = 1u, MRK_AX_CONTROL = 2u, MRK_AX_ATTEMPTED = 4u,
+    MRK_AX_PRESS_RETURNED = 8u, MRK_AX_CLEANED = 16u, MRK_AX_CALL_LIMIT = 64 };
+typedef struct { float seconds; uint64_t required_ns; } MRKAXTimeout;
+typedef struct { uint32_t site, error, flags; } MRKAXResult;
+typedef int (*MRKAXAdmission)(void *, uint64_t, int, MRKAXTimeout *);
+
+int mrk_observation_ax_trusted(void) {
+    if (!pthread_main_np()) return -1;
+    CFDictionaryRef options = NULL; int trusted = -1;
+    @try {
+        const void *keys[] = { kAXTrustedCheckOptionPrompt };
+        const void *values[] = { kCFBooleanFalse };
+        options = CFDictionaryCreate(NULL, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        if (options) trusted = AXIsProcessTrustedWithOptions(options) ? 1 : 0;
+    } @catch (NSException *e) { (void)e; trusted = -1; }
+    @try { if (options) CFRelease(options); }
+    @catch (NSException *e) { (void)e; trusted = -1; }
+    return trusted; // A false result never prompts, waits, or opens a panel.
+}
+
+int mrk_panel_observe_open_identity(void *opaque, uint8_t *parent, uint8_t *panel, size_t capacity) {
+    if (!pthread_main_np()) return MRK_AX_THREAD;
+    if (!opaque || !parent || !panel || capacity != 64) return MRK_AX_INPUT;
+    memset(parent, 0, capacity); memset(panel, 0, capacity);
+    MRKInstalledPanel *s = opaque;
+    if (s->unknown || !s->started || s->kind != 1 || !s->parent || !s->window || !s->completion
+        || s->responded || s->callbackActive || s->closeAttempted || s->closed
+        || s->observationActionAttempted || s->observationActionReturned || s->observationIdentityAttempted)
+        return MRK_AX_INELIGIBLE;
+    s->observationIdentityAttempted = YES; // One binding, including refused/partial binding; never retag.
+    @try {
+        if (!mrk_observation_attached(s) || !mrk_observation_directory_ready(s)) return MRK_AX_INELIGIBLE;
+        NSString *parentTag = [@"mrk-parent-" stringByAppendingString:[[NSUUID UUID] UUIDString]];
+        NSString *panelTag = [@"mrk-panel-" stringByAppendingString:[[NSUUID UUID] UUIDString]];
+        if (![parentTag getCString:(char *)parent maxLength:capacity encoding:NSASCIIStringEncoding]
+            || ![panelTag getCString:(char *)panel maxLength:capacity encoding:NSASCIIStringEncoding]) return MRK_AX_INPUT;
+        [s->parent setAccessibilityIdentifier:parentTag];
+        [s->window setAccessibilityIdentifier:panelTag];
+        if (![[s->parent accessibilityIdentifier] isEqualToString:parentTag]
+            || ![[s->window accessibilityIdentifier] isEqualToString:panelTag]) return MRK_AX_UNSUPPORTED;
+        if (s->responded || s->callbackActive || s->closeAttempted || s->closed
+            || !mrk_observation_attached(s) || !mrk_observation_directory_ready(s)) return MRK_AX_INELIGIBLE;
+        return MRK_AX_NONE; // Preparation is NOT an action attempt or return.
+    } @catch (NSException *e) { (void)e; s->unknown = YES; return MRK_AX_EXCEPTION; }
+}
+
+typedef union { CFTypeRef value; CFArrayRef array; } MRKAXOwned;
+typedef struct {
+    MRKAXAdmission admit; void *context; MRKAXResult result;
+    MRKAXOwned owned[80]; size_t count; unsigned calls; BOOL cleanupKnown;
+} MRKAX;
+static BOOL mrk_ax_fail(MRKAX *s, uint32_t error) {
+    if (!s->result.error) s->result.error = error;
+    return NO;
+}
+static BOOL mrk_ax_status(MRKAX *s, AXError error) {
+    if (error == kAXErrorSuccess) return YES;
+    switch (error) {
+        case kAXErrorAttributeUnsupported: case kAXErrorActionUnsupported: case kAXErrorNoValue:
+        case kAXErrorNotImplemented: case kAXErrorAPIDisabled: return mrk_ax_fail(s, MRK_AX_UNSUPPORTED);
+        case kAXErrorInvalidUIElement: return mrk_ax_fail(s, MRK_AX_INVALID_ELEMENT);
+        case kAXErrorIllegalArgument: return mrk_ax_fail(s, MRK_AX_INPUT);
+        case kAXErrorCannotComplete: return mrk_ax_fail(s, MRK_AX_CANNOT_COMPLETE);
+        default: return mrk_ax_fail(s, MRK_AX_OTHER);
+    }
+}
+static MRKAXOwned *mrk_ax_slot(MRKAX *s) {
+    if (s->count == sizeof(s->owned) / sizeof(s->owned[0])) { mrk_ax_fail(s, MRK_AX_LIMIT); return NULL; }
+    // Reserve before Create/Copy, including an exception after writing its out
+    // parameter. Arrays stay owned until final cleanup; members are borrowed.
+    return &s->owned[s->count++];
+}
+static BOOL mrk_ax_admit(MRKAX *s, uint64_t required_ns, int after_press, MRKAXTimeout *timeout) {
+    int result = s->admit(s->context, required_ns, after_press, timeout);
+    if (!result) return YES;
+    if (result != MRK_AX_DEADLINE && result != MRK_AX_INELIGIBLE && result != MRK_AX_CUSTODY) {
+        s->cleanupKnown = NO; result = MRK_AX_CUSTODY;
+    }
+    return mrk_ax_fail(s, (uint32_t)result);
+}
+static BOOL mrk_ax_before(MRKAX *s, AXUIElementRef element) {
+    // Count BOTH the timeout setter and intended IPC, including final Press.
+    if (s->calls > MRK_AX_CALL_LIMIT - 2) return mrk_ax_fail(s, MRK_AX_LIMIT);
+    MRKAXTimeout timeout = {0};
+    if (!mrk_ax_admit(s, 0, 0, &timeout)) return NO;
+    if (!isfinite(timeout.seconds) || timeout.seconds <= 0 || (double)timeout.seconds > 0.1
+        || timeout.required_ns == 0 || timeout.required_ns > 100000000
+        || timeout.required_ns != (uint64_t)ceil((double)timeout.seconds * 1000000000.0))
+        return mrk_ax_fail(s, MRK_AX_INPUT);
+    s->calls++;
+    BOOL installed = mrk_ax_status(s, AXUIElementSetMessagingTimeout(element, timeout.seconds));
+    // Recheck the SAME Eax after the setter AND all callback lock waits. A new
+    // use always installs a fresh downward-rounded timeout on this exact ref.
+    BOOL admitted = mrk_ax_admit(s, timeout.required_ns, 0, NULL);
+    return installed && admitted;
+}
+static CFTypeRef mrk_ax_copy(MRKAX *s, AXUIElementRef element, CFStringRef attribute, uint32_t site) {
+    s->result.site = site;
+    MRKAXOwned *slot = mrk_ax_slot(s); if (!slot || !mrk_ax_before(s, element)) return NULL;
+    s->calls++;
+    BOOL copied = mrk_ax_status(s, AXUIElementCopyAttributeValue(element, attribute, &slot->value));
+    BOOL admitted = mrk_ax_admit(s, 0, 0, NULL); // Also after an error return; no query retry.
+    if (!copied || !admitted) return NULL;
+    if (!slot->value) { mrk_ax_fail(s, MRK_AX_UNSUPPORTED); return NULL; }
+    return slot->value;
+}
+static BOOL mrk_ax_type(MRKAX *s, CFTypeRef value, CFTypeID type) {
+    return value && CFGetTypeID(value) == type ? YES : mrk_ax_fail(s, MRK_AX_MALFORMED);
+}
+static CFArrayRef mrk_ax_array(MRKAX *s, AXUIElementRef element, CFStringRef attribute, CFIndex limit, uint32_t site) {
+    s->result.site = site;
+    MRKAXOwned *slot = mrk_ax_slot(s); if (!slot || !mrk_ax_before(s, element)) return NULL;
+    s->calls++;
+    BOOL copied = mrk_ax_status(s, AXUIElementCopyAttributeValues(element, attribute, 0, limit + 1, &slot->array));
+    BOOL admitted = mrk_ax_admit(s, 0, 0, NULL);
+    if (!copied || !admitted || !mrk_ax_type(s, slot->value, CFArrayGetTypeID())) return NULL;
+    CFIndex count = CFArrayGetCount(slot->array);
+    if (count < 0 || count >= limit + 1) { mrk_ax_fail(s, MRK_AX_LIMIT); return NULL; }
+    for (CFIndex i = 0; i < count; i++) {
+        if (!mrk_ax_type(s, CFArrayGetValueAtIndex(slot->array, i), AXUIElementGetTypeID())) return NULL;
+    }
+    return slot->array;
+}
+static AXUIElementRef mrk_ax_identified(MRKAX *s, CFArrayRef candidates, CFStringRef tag, uint32_t site) {
+    s->result.site = site;
+    AXUIElementRef found = NULL;
+    for (CFIndex i = 0; i < CFArrayGetCount(candidates); i++) {
+        AXUIElementRef element = (AXUIElementRef)CFArrayGetValueAtIndex(candidates, i);
+        CFTypeRef value = mrk_ax_copy(s, element, kAXIdentifierAttribute, site);
+        if (!value || !mrk_ax_type(s, value, CFStringGetTypeID())) return NULL;
+        if (CFStringGetLength(value) >= 64) { mrk_ax_fail(s, MRK_AX_LIMIT); return NULL; }
+        if (CFEqual(value, tag)) {
+            if (found) { mrk_ax_fail(s, MRK_AX_AMBIGUOUS); return NULL; }
+            found = element;
+        }
+    }
+    if (!found) mrk_ax_fail(s, MRK_AX_UNSUPPORTED);
+    return found;
+}
+static void mrk_ax_open(MRKAX *s, const uint8_t *parent_tag, const uint8_t *panel_tag) {
+    if (!mrk_ax_admit(s, 0, 0, NULL)) return;
+    MRKAXOwned *parent_text = mrk_ax_slot(s), *panel_text = mrk_ax_slot(s), *application = mrk_ax_slot(s);
+    if (!parent_text || !panel_text || !application) return;
+    s->result.site = MRK_AX_APPLICATION;
+    parent_text->value = CFStringCreateWithCString(NULL, (const char *)parent_tag, kCFStringEncodingASCII);
+    panel_text->value = CFStringCreateWithCString(NULL, (const char *)panel_tag, kCFStringEncodingASCII);
+    application->value = AXUIElementCreateApplication(getpid()); // THIS installed process only.
+    if (!mrk_ax_type(s, parent_text->value, CFStringGetTypeID()) || !mrk_ax_type(s, panel_text->value, CFStringGetTypeID())
+        || !mrk_ax_type(s, application->value, AXUIElementGetTypeID())) return;
+    CFArrayRef windows = mrk_ax_array(s, (AXUIElementRef)application->value, kAXWindowsAttribute, 4, MRK_AX_WINDOWS);
+    if (!windows) return;
+    AXUIElementRef parent = mrk_ax_identified(s, windows, parent_text->value, MRK_AX_PARENT_ID);
+    if (!parent) return;
+    CFArrayRef children = mrk_ax_array(s, parent, kAXChildrenAttribute, 16, MRK_AX_CHILDREN);
+    if (!children) return;
+    AXUIElementRef panel = mrk_ax_identified(s, children, panel_text->value, MRK_AX_PANEL_ID);
+    if (!panel) return;
+    CFTypeRef role = mrk_ax_copy(s, panel, kAXRoleAttribute, MRK_AX_PANEL_ROLE);
+    if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return;
+    if (!CFEqual(role, kAXSheetRole)) { mrk_ax_fail(s, MRK_AX_UNSUPPORTED); return; }
+    CFTypeRef link = mrk_ax_copy(s, panel, kAXParentAttribute, MRK_AX_PANEL_PARENT);
+    if (!link || !mrk_ax_type(s, link, AXUIElementGetTypeID())) return;
+    if (!CFEqual(link, parent)) { mrk_ax_fail(s, MRK_AX_CHANGED); return; }
+    s->result.flags |= MRK_AX_IDENTITY;
+    CFTypeRef control = mrk_ax_copy(s, panel, kAXDefaultButtonAttribute, MRK_AX_DEFAULT);
+    if (!control || !mrk_ax_type(s, control, AXUIElementGetTypeID())) return;
+    role = mrk_ax_copy(s, (AXUIElementRef)control, kAXRoleAttribute, MRK_AX_BUTTON_ROLE);
+    if (!role || !mrk_ax_type(s, role, CFStringGetTypeID())) return;
+    if (!CFEqual(role, kAXButtonRole)) { mrk_ax_fail(s, MRK_AX_UNSUPPORTED); return; }
+    CFTypeRef enabled = mrk_ax_copy(s, (AXUIElementRef)control, kAXEnabledAttribute, MRK_AX_ENABLED);
+    if (!enabled || !mrk_ax_type(s, enabled, CFBooleanGetTypeID())) return;
+    if (!CFBooleanGetValue(enabled)) { mrk_ax_fail(s, MRK_AX_INELIGIBLE); return; }
+    CFTypeRef chain[9] = {control}; size_t length = 1; BOOL reached = NO;
+    for (unsigned edge = 0; edge < 8; edge++) {
+        link = mrk_ax_copy(s, (AXUIElementRef)chain[length - 1], kAXParentAttribute, MRK_AX_ANCESTRY);
+        if (!link || !mrk_ax_type(s, link, AXUIElementGetTypeID())) return;
+        for (size_t i = 0; i < length; i++) {
+            if (CFEqual(link, chain[i])) { mrk_ax_fail(s, MRK_AX_MALFORMED); return; }
+        }
+        chain[length++] = link;
+        if (CFEqual(link, panel)) { reached = YES; break; }
+    }
+    if (!reached) { mrk_ax_fail(s, MRK_AX_LIMIT); return; }
+    CFTypeRef repeated = mrk_ax_copy(s, panel, kAXDefaultButtonAttribute, MRK_AX_RECHECK);
+    if (!repeated || !mrk_ax_type(s, repeated, AXUIElementGetTypeID())) return;
+    if (!CFEqual(repeated, control)) { mrk_ax_fail(s, MRK_AX_CHANGED); return; }
+    s->result.flags |= MRK_AX_CONTROL;
+    s->result.site = MRK_AX_PRESS;
+    if (!mrk_ax_before(s, (AXUIElementRef)control)) return;
+    // No query, wait or lock after that last scoped admission. Every return,
+    // including CannotComplete (which MAY have acted), spends this one attempt.
+    s->calls++; s->result.flags |= MRK_AX_ATTEMPTED;
+    AXError result = AXUIElementPerformAction((AXUIElementRef)control, kAXPressAction);
+    s->result.flags |= MRK_AX_PRESS_RETURNED;
+    mrk_ax_status(s, result);
+    mrk_ax_admit(s, 0, 1, NULL); // Real callback/close may already have happened.
+}
+void mrk_observation_ax_press(const uint8_t *parent, const uint8_t *panel, size_t capacity,
+    MRKAXAdmission admission, void *context, MRKAXResult *out) {
+    if (!out) return;
+    MRKAX s = {0}; s.admit = admission; s.context = context; s.cleanupKnown = YES; s.result.site = MRK_AX_ENTRY;
+    @try {
+        if (pthread_main_np()) mrk_ax_fail(&s, MRK_AX_THREAD);
+        else if (!parent || !panel || capacity != 64 || !admission || !context
+            || !parent[0] || !panel[0] || strnlen((const char *)parent, capacity) >= capacity
+            || strnlen((const char *)panel, capacity) >= capacity || !strcmp((const char *)parent, (const char *)panel))
+            mrk_ax_fail(&s, MRK_AX_INPUT);
+        else mrk_ax_open(&s, parent, panel);
+    } @catch (NSException *e) { (void)e; mrk_ax_fail(&s, MRK_AX_EXCEPTION); s.cleanupKnown = NO; }
+    while (s.count) {
+        CFTypeRef original = s.owned[--s.count].value; s.owned[s.count].value = NULL;
+        @try { if (original) CFRelease(original); }
+        @catch (NSException *e) {
+            (void)e; s.cleanupKnown = NO;
+            if (!s.result.error) { s.result.site = MRK_AX_CLEANUP; mrk_ax_fail(&s, MRK_AX_CLEANUP_UNKNOWN); }
+        }
+    }
+    // Cleanup and any final callback waits also spend the one original Eax.
+    if (!pthread_main_np() && admission && context) mrk_ax_admit(&s, 0, (s.result.flags & MRK_AX_ATTEMPTED) != 0, NULL);
+    if (s.cleanupKnown) s.result.flags |= MRK_AX_CLEANED;
+    *out = s.result; // No CF handle is handed off; CLEANED requires every release to return.
 }
 #endif

@@ -109,6 +109,16 @@ def action_context_data(step="OpenProject", *, site=None, domain="objc-exception
     return value
 
 
+def accessibility_context_data():
+    value = action_context_data()
+    value["nativeAction"] = None  # The old selector is historical DATA only.
+    value["accessibility"] = {"mechanism": "accessibility-press", "step": "OpenProject", "id": 2,
+        "prepared": True, "entered": True, "attempted": True, "pressReturned": True, "returned": True,
+        "retired": True, "identityMatched": True, "controlMatched": True, "cleanupReturned": True,
+        "site": "press", "error": "none"}
+    return value
+
+
 def _inert_command(argv, *, environ, cwd, timeout, capture, text, output_limit):
     """Literal DATA-only body rebound below; no owner import or command call."""
     global recursion
@@ -416,6 +426,98 @@ class AquaDataTests(unittest.TestCase):
         with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
             M.parse_result(captured(M.expected_result(BINDING, "first-save")), row, BINDING, "first-save")
 
+    def test_accessibility_samples_distinguish_preparation_unknown_and_actual_return(self):
+        value = accessibility_context_data()
+        examples = [deepcopy(value)]
+        same_first = deepcopy(value)
+        same_first["lastPanel"]["id"] = same_first["accessibility"]["id"] = 1
+        examples.append(same_first)
+        historical = deepcopy(value)
+        historical["nativeHandler"] = {"step": "Quit", "entered": False, "returned": False}
+        historical["lastPanel"] = None
+        historical["pending"] = {"kind": "native", "step": "Quit"}
+        examples.append(historical)  # The completed original Open sample persists.
+        sample = value["accessibility"]
+        flags = ("attempted", "pressReturned", "identityMatched", "controlMatched", "cleanupReturned")
+        sample.update(prepared=False, entered=False, returned=False, retired=False, attempted=False, pressReturned=False,
+                      identityMatched=None, controlMatched=None, cleanupReturned=None, site="binding", error="unsupported")
+        examples.append(deepcopy(value))
+        sample.update(prepared=True, site=None, error=None)
+        examples.append(deepcopy(value))
+        sample.update(retired=True, site="entry", error="deadline")  # Positively known no FFI entry.
+        examples.append(deepcopy(value))
+        sample.update(entered=True, retired=False, **{key: None for key in flags}, site=None, error=None)
+        value["pending"] = {"kind": "accessibility", "step": "OpenProject"}
+        examples.append(deepcopy(value))  # An unreturned call does not claim attempted=False.
+        sample.update(returned=True, site="entry", error="custody")
+        examples.append(deepcopy(value))  # Invalid returned ABI still cannot retire.
+        for error in ("unsupported", "ambiguous", "malformed", "limit", "deadline", "ineligible", "invalid-element"):
+            sample.update(attempted=False, pressReturned=False, identityMatched=False, controlMatched=False,
+                          cleanupReturned=True, retired=True, site="panel-identity", error=error)
+            value["pending"] = None
+            examples.append(deepcopy(value))
+        value = accessibility_context_data()
+        value["accessibility"]["error"] = "cannot-complete"  # Spent attempt, including possible actual effect.
+        examples.append(deepcopy(value))
+        value["accessibility"].update(pressReturned=False, cleanupReturned=False, retired=False, error="objc-exception")
+        value["pending"] = {"kind": "accessibility", "step": "OpenProject"}
+        examples.append(deepcopy(value))
+        for value in examples:
+            with self.subTest(sample=value["accessibility"]):
+                self.assertEqual(M.failure_context(context_row(value), b""), value)
+                self.assertLess(len(context_row(value)), M.FAILURE_CONTEXT_LIMIT)
+                with self.assertRaisesRegex(M.Refused, "^inner-failure-marker$"):
+                    M.parse_result(captured(M.expected_result(BINDING, "first-save")), context_row(value), BINDING, "first-save")
+
+    def test_accessibility_malformed_data_never_replaces_existing_failure_context(self):
+        good = accessibility_context_data()
+        for field, bad in (("id", True), ("id", 1), ("id", 3), ("step", "Quit"), ("mechanism", "selector"),
+                           ("prepared", False), ("entered", False), ("attempted", False), ("pressReturned", None),
+                           ("returned", False), ("retired", 1), ("identityMatched", False), ("controlMatched", False),
+                           ("cleanupReturned", False), ("site", "private-selector"), ("error", "PRIVATE"),
+                           ("identifier", "PRIVATE")):
+            value = deepcopy(good); value["accessibility"][field] = bad
+            expected = deepcopy(good); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(context_row(value), b""), expected, (field, bad))
+        for field, bad in (("id", 1), ("kind", "quit")):
+            value = deepcopy(good); value["lastPanel"][field] = bad
+            expected = deepcopy(value); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(context_row(value), b""), expected)
+        for missing_panel, returned in ((True, True), (False, False)):
+            value = deepcopy(good); value["nativeHandler"]["returned"] = returned
+            if missing_panel:
+                value["lastPanel"] = None
+            expected = deepcopy(value); expected["accessibility"] = None
+            self.assertEqual(M.failure_context(context_row(value), b""), expected)
+        row = context_row(good)
+        self.assertIsNone(M.failure_context(row.replace(b'"attempted":true', b'"attempted":true,"attempted":false'), b""))
+        empty = {"pending": None, "nativeHandler": None, "lastPanel": None, "nativeAction": None, "accessibility": None}
+        self.assertEqual(M.failure_context(context_row(empty), b""), empty)
+
+    def test_success_requires_actual_trust_and_one_retired_public_press(self):
+        fields = ("prepared", "entered", "attempted", "pressReturned", "returned", "retired", "identityMatched",
+                  "controlMatched", "cleanupReturned")
+        for case in M.CASES:
+            good = M.expected_result(BINDING, case)
+            variants = []
+            for bad in (False, None, 1):
+                value = deepcopy(good); value["native"]["accessibilityTrustedWithoutPrompt"] = bad; variants.append(value)
+            if case == "picker-loss":
+                self.assertIsNone(good["native"]["projectOpenInput"])
+                value = deepcopy(good); value["native"]["projectOpenInput"] = accessibility_context_data()["accessibility"]
+                variants.append(value)
+            else:
+                self.assertEqual(good["native"]["projectOpenInput"]["mechanism"], "accessibility-press")
+                for field in fields:
+                    for bad in (False, None, 1):
+                        value = deepcopy(good); value["native"]["projectOpenInput"][field] = bad; variants.append(value)
+                for field, bad in (("error", "cannot-complete"), ("site", "default-button"), ("mechanism", "ok-selector"),
+                                   ("id", 3)):
+                    value = deepcopy(good); value["native"]["projectOpenInput"][field] = bad; variants.append(value)
+            for value in variants:
+                with self.assertRaises(M.Refused):
+                    M.parse_result(captured(value), b"", BINDING, case)
+
     def test_original_exception_buffers_do_not_change_error_or_finality(self):
         for duplicate in (False, True):
             with self.subTest(repeated_identical_frame=duplicate), inert_exception_owner(duplicate=duplicate) as call:
@@ -656,7 +758,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn('if let Err(reason) = result { self.fail_with(reason); }', action)
         self.assertNotIn("r.pending.take()", action)
         self.assertLess(action.index("let timely = self.timely()"), action.index("let result = self.native_step_body("))
-        self.assertLess(action.index("let result = self.native_step_body(step, timely, &mut action_diagnostic)"), action.index("native.returned = true"))
+        self.assertLess(action.index("let result = self.native_step_body(step, timely, &mut action_diagnostic,"), action.index("native.returned = true"))
         body = action.split("fn native_step_body(", 1)[1]
         entry = "if !native_step_entry(std::thread::current().id() == self.main, timely)? { return Ok(false); }"
         self.assertLess(body.index(entry), body.index("observed_panel()"))
@@ -687,17 +789,21 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(len(rows), 35)
         self.assertEqual({site: (errors[int(status)], int(actions), exception == "true")
                           for site, status, actions, exception in rows}, M.NATIVE_ACTION_SITES)
-        action = native.split("int mrk_panel_observe_action(", 1)[1].split("#endif", 1)[0]
-        calls = ("pthread_main_np()", "mrk_observation_attached(s)", "mrk_observation_directory_ready(s)",
+        action = native.split("int mrk_panel_observe_action(", 1)[1].split("#undef MRK_ACTION_RETURN", 1)[0]
+        calls = ("pthread_main_np()", "mrk_observation_attached(s)",
                  "[NSString stringWithUTF8String:directory]", "[NSURL fileURLWithPath:text isDirectory:YES]",
                  "setDirectoryURL:url]", "[s->alert buttons]", "[buttons count]", "[buttons objectAtIndex:",
-                 "[button window]", "[button isEnabled]", "[button isHidden]", "cancel:nil]", "ok:nil]", "[button performClick:nil]")
+                 "[button window]", "[button isEnabled]", "[button isHidden]", "cancel:nil]", "[button performClick:nil]")
         for call in calls:
             self.assertEqual(action.count(call), 1, call)
         self.assertLess(action.index("[s->alert buttons]"), action.index("if (!s->alert)"))
         self.assertLess(action.index("[button isEnabled]"), action.index("[button isHidden]"))
-        self.assertLess(action.index("s->observationActionAttempted = YES"), action.index("ok:nil]"))
-        self.assertLess(action.index("ok:nil]"), action.index("s->observationActionReturned = YES"))
+        self.assertIn("action < 1 || action > 5 || action == 3", action)
+        self.assertNotIn("ok:nil]", native)
+        self.assertNotIn("PanelAction::ProjectOpen", rust)
+        for call in ("cancel:nil]", "[button performClick:nil]"):
+            self.assertLess(action.index("s->observationActionAttempted = YES"), action.index(call))
+            self.assertLess(action.index(call), action.index("s->observationActionReturned = YES"))
         self.assertIn("(void)e; s->unknown = YES;", action)
         self.assertIn("mrk_observation_action_return(diagnostic, 2u, site, EIO)", action)
         controls = M.re.sub(r"//[^\n]*", "", action)
@@ -718,7 +824,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertIn('first_failure_reason(&self.failure_reason) == Some("adapter-native-action")', observer)
         self.assertIn("r.native_action = action_diagnostic;", observer)
         report = observer.split("    fn report_failure(", 1)[1].split("    pub(super) fn attach(", 1)[0]
-        deferred = ('if reason == "adapter-native-action" && r.pending == Some(Pending::Native(r.step))\n'
+        deferred = ('if matches!(reason, "adapter-native-action" | "native-ax-binding") && r.pending == Some(Pending::Native(r.step))\n'
                     "            && r.native_dispatch.is_some_and(|native| native.step == r.step && native.entered && !native.returned) {\n"
                     "            return;\n        }")
         self.assertIn(deferred, report)
@@ -737,11 +843,137 @@ class AquaDataTests(unittest.TestCase):
                       "window.run_on_main_thread("):
             self.assertLess(dispatch.index("if !self.timely() { return; }"), dispatch.index(reset))
 
+    def test_public_ax_trust_and_exact_original_identity_have_no_fallback(self):
+        desktop = PATH.parents[1]
+        native = (desktop / "native/macos-installed-native/src/native.m").read_text(encoding="utf-8")
+        build = (desktop / "native/macos-installed-native/build.rs").read_text(encoding="utf-8")
+        observer = (desktop / "src-tauri/src/installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        link = build.split('if std::env::var_os("CARGO_FEATURE_INSTALLED_OBSERVATION")', 1)[1].split("\n    }", 1)[0]
+        self.assertIn("framework=ApplicationServices", link)
+        self.assertEqual(build.count("framework=ApplicationServices"), 1)
+        self.assertIn("#ifdef MRK_INSTALLED_OBSERVATION\n#import <ApplicationServices/ApplicationServices.h>", native)
+        trust = native.split("int mrk_observation_ax_trusted(", 1)[1].split("int mrk_panel_observe_open_identity(", 1)[0]
+        for required in ("kAXTrustedCheckOptionPrompt", "kCFBooleanFalse", "AXIsProcessTrustedWithOptions(options)", "CFRelease(options)"):
+            self.assertEqual(trust.count(required), 1)
+        self.assertNotIn("kCFBooleanTrue", trust)
+        main = observer.split("pub(crate) fn main()", 1)[1]
+        self.assertLess(main.index("Fixture::capture("), main.index("installed_accessibility_trusted()"))
+        self.assertLess(main.index("installed_accessibility_trusted()"), main.index("super::run_builder("))
+        refused = main.split("if trusted != Ok(true)", 1)[1].split("r.ax_trusted = true", 1)[0]
+        self.assertIn('"native-ax-not-trusted"', refused)
+        self.assertIn("return std::process::ExitCode::FAILURE", refused)
+        binding = native.split("int mrk_panel_observe_open_identity(", 1)[1].split("typedef union", 1)[0]
+        self.assertLess(binding.index("s->observationIdentityAttempted = YES"), binding.index("setAccessibilityIdentifier:"))
+        self.assertEqual(binding.count("setAccessibilityIdentifier:"), 2)
+        self.assertEqual(binding.count("accessibilityIdentifier] isEqualToString:"), 2)
+        self.assertIn("capacity != 64", binding)
+        for guard in ("s->responded", "s->callbackActive", "s->closeAttempted", "s->closed", "s->observationIdentityAttempted",
+                      "mrk_observation_attached(s)", "mrk_observation_directory_ready(s)"):
+            self.assertIn(guard, binding)
+        for forbidden in ("observationActionAttempted =", "observationActionReturned =", "s->selected", "s->completion("):
+            self.assertNotIn(forbidden, binding)
+        ax = native.split("// Public AX input", 1)[1]
+        self.assertEqual(ax.count("AXUIElementCreateApplication(getpid())"), 1)
+        for forbidden in ("AXUIElementCreateSystemWide", "kAXTitleAttribute", "kAXPositionAttribute", "CGEvent",
+                          "AXUIElementPostKeyboardEvent", "NSSelectorFromString", "objc_msgSend", "ok:nil]"):
+            self.assertNotIn(forbidden, ax)
+
+    def test_public_ax_queries_are_bounded_timed_per_use_and_press_is_single(self):
+        native_root = PATH.parents[1] / "native/macos-installed-native/src"
+        native = (native_root / "native.m").read_text(encoding="utf-8")
+        rust = (native_root / "lib.rs").read_text(encoding="utf-8")
+        before = native.split("static BOOL mrk_ax_before(", 1)[1].split("static CFTypeRef mrk_ax_copy(", 1)[0]
+        self.assertIn("MRK_AX_CALL_LIMIT - 2", before)
+        self.assertLess(before.index("mrk_ax_admit(s, 0, 0, &timeout)"), before.index("AXUIElementSetMessagingTimeout(element, timeout.seconds)"))
+        self.assertLess(before.index("AXUIElementSetMessagingTimeout(element, timeout.seconds)"),
+                        before.index("mrk_ax_admit(s, timeout.required_ns, 0, NULL)"))
+        timeout = rust.split("fn ax_timeout(", 1)[1].split("struct AxAdmission", 1)[0]
+        for required in ("remaining_ns.min(100_000_000)", "seconds.to_bits().checked_sub(1)?", ".ceil() as u64",
+                         "remaining_ns > 0 && remaining_ns >= required_ns"):
+            self.assertIn(required, timeout)
+        callback = rust.split('unsafe extern "C" fn ax_admission', 1)[1].split("pub fn installed_accessibility_trusted", 1)[0]
+        self.assertLess(callback.index("(context.admit)(after_press == 1)"), callback.index("context.end.saturating_duration_since(Instant::now())"))
+        self.assertIn("catch_unwind", callback)
+        self.assertIn("std::mem::forget(payload)", callback)
+        self.assertIn("observer_end.min(Instant::now() + Duration::from_secs(2))", rust)
+        self.assertNotIn("context.end =", rust)
+        arrays = native.split("static CFArrayRef mrk_ax_array(", 1)[1].split("static AXUIElementRef mrk_ax_identified(", 1)[0]
+        self.assertLess(arrays.index("mrk_ax_before(s, element)"), arrays.index("AXUIElementCopyAttributeValues("))
+        self.assertIn("attribute, 0, limit + 1, &slot->array", arrays)
+        self.assertIn("count < 0 || count >= limit + 1", arrays)
+        identified = native.split("static AXUIElementRef mrk_ax_identified(", 1)[1].split("static void mrk_ax_open(", 1)[0]
+        self.assertIn("if (found) { mrk_ax_fail(s, MRK_AX_AMBIGUOUS); return NULL; }", identified)
+        self.assertIn("if (!found) mrk_ax_fail(s, MRK_AX_UNSUPPORTED);", identified)
+        body = native.split("static void mrk_ax_open(", 1)[1].split("void mrk_observation_ax_press(", 1)[0]
+        for required in ("kAXWindowsAttribute, 4", "kAXChildrenAttribute, 16", "kAXSheetRole", "CFEqual(link, parent)",
+                         "kAXButtonRole", "CFBooleanGetValue(enabled)", "edge < 8", "CFEqual(link, chain[i])", "CFEqual(link, panel)",
+                         "CFEqual(repeated, control)"):
+            self.assertIn(required, body)
+        self.assertEqual(body.count("kAXDefaultButtonAttribute"), 2)
+        self.assertLess(body.index("CFEqual(repeated, control)"), body.index("mrk_ax_before(s, (AXUIElementRef)control)"))
+        press = body.split("if (!mrk_ax_before(s, (AXUIElementRef)control)) return;", 1)[1]
+        self.assertEqual(native.count("AXUIElementPerformAction("), 1)
+        self.assertLess(press.index("s->result.flags |= MRK_AX_ATTEMPTED"), press.index("AXUIElementPerformAction("))
+        self.assertLess(press.index("AXUIElementPerformAction("), press.index("s->result.flags |= MRK_AX_PRESS_RETURNED"))
+        for forbidden in ("mrk_ax_copy(", "mrk_ax_array(", "mrk_ax_before(", "EAGAIN", "while (", "for ("):
+            self.assertNotIn(forbidden, press)
+        cleanup = native.split("void mrk_observation_ax_press(", 1)[1].split("#endif", 1)[0]
+        self.assertIn("MRKAXOwned owned[80]", native)
+        self.assertLess(cleanup.index("s.owned[s.count].value = NULL"), cleanup.index("CFRelease(original)"))
+        self.assertEqual(cleanup.count("CFRelease(original)"), 1)
+        self.assertIn("s.cleanupKnown = NO", cleanup)
+        self.assertLess(cleanup.index("mrk_ax_admit(&s, 0,"), cleanup.index("if (s.cleanupKnown)"))
+        for table, expected in (("AX_SITES", M.ACCESSIBILITY_SITES), ("AX_ERRORS", M.ACCESSIBILITY_ERRORS)):
+            rows = rust.split(f"const {table}:", 1)[1].split("];", 1)[0]
+            self.assertEqual(set(M.re.findall(r'"([a-z-]+)"', rows)), expected)
+
+    def test_public_ax_handoff_keeps_original_barrier_and_does_not_forge_native_flags(self):
+        root = PATH.parents[1] / "src-tauri/src"
+        adapter = (root / "shell_macos_dialog.rs").read_text(encoding="utf-8")
+        observer = (root / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
+        packet = adapter.split("struct PreparedOpenInput", 1)[1].split("impl PreparedOpenInput", 1)[0]
+        for required in ("native::OpenIdentity", "Arc<GuiCall>", "Arc<OriginalWork>", "Arc<OpenRelease>"):
+            self.assertIn(required, packet)
+        for forbidden in ("CFTypeRef", "AXUIElementRef", "*mut", "Option<Panel>"):
+            self.assertNotIn(forbidden, packet)
+        gate = adapter.split("pub(crate) fn admitted(", 1)[1].split("pub(crate) fn stopped(", 1)[0]
+        self.assertIn("owner.id != self.id", gate)
+        self.assertIn("!Arc::ptr_eq(&owner, &self.owner) || !Arc::ptr_eq(&owner.gui, &self.call)", gate)
+        self.assertIn("if after_press", gate)  # Do not reject a real early callback as a pre-action response.
+        release = adapter.split("            let release = {", 1)[1].split("        if released {", 1)[0]
+        self.assertLess(release.index("barrier.release_ready()"), release.index("facts.release_queued = true"))
+        self.assertLess(release.index("facts.release_queued = true"), release.index("entry.panel.take()"))
+        self.assertIn("OpenPhase::Unknown", adapter)
+        self.assertIn("open_release_data_check()", observer)
+        tick = observer.split("pub(super) fn tick(", 1)[1].split("let state = app.state", 1)[0]
+        self.assertLess(tick.index("if self.accessibility_step()"), tick.rindex("if !self.timely()"))
+        run = observer.split("fn accessibility_step(", 1)[1].split("fn native_step(", 1)[0]
+        self.assertEqual(run.count("r.prepared_open.take()"), 1)
+        self.assertEqual(run.count("input.press("), 1)
+        self.assertLess(run.index("input.no_entry("), run.index("input.enter()"))
+        self.assertLess(run.index("input.enter()"), run.index("input.press("))
+        returned = run.split("let result = input.press(", 1)[1]
+        self.assertLess(returned.index('self.fail_with("native-ax-input")'), returned.index("let Some(mut r) = self.record()"))
+        self.assertLess(returned.index("input.returned(&result, matching && input.admitted(true).is_some())"),
+                        returned.index("retire_returned_open("))
+        self.assertLess(returned.index("if !retired"), returned.index("r.native_actions_returned[2] = true"))
+        for forbidden in ("run_on_main_thread(", "tokio::spawn", "std::thread::spawn", ".await", "observe_panel_action("):
+            self.assertNotIn(forbidden, run)
+        wrapper = observer.split("fn native_step(", 1)[1].split("fn native_step_body(", 1)[0]
+        self.assertLess(wrapper.index("self.native_step_body("), wrapper.index("native.returned = true"))
+        self.assertLess(wrapper.index("native.returned = true"), wrapper.index("r.prepared_open = Some(input)"))
+        body = observer.split("fn native_step_body(", 1)[1].split("pub(super) fn close_prevented", 1)[0]
+        self.assertIn("prepare_open_input(id)", body)
+        self.assertIn("return Ok(false); // Deliberately NOT a native action return.", body)
+        self.assertNotIn("PanelAction::ProjectOpen", observer)
+        report = observer.split("fn report_failure(", 1)[1].split("pub(super) fn attach(", 1)[0]
+        self.assertLess(report.index('"native-ax-input" | "native-ax-custody"'), report.index("self.failure_reported.swap(true"))
+
     def test_dom_callback_custody_wraps_only_the_original_returned_body(self):
         # Source controls only: the actual Rust DATA entry and native callback
         # are executed by the reviewed macOS qualification, not these tests.
         observer = (PATH.parents[1] / "src-tauri" / "src" / "installed_shell_observation_macos.rs").read_text(encoding="utf-8")
-        dispatch = observer.split("if r.evaluations >= 160", 1)[1].split("fn native_step(", 1)[0]
+        dispatch = observer.split("if r.evaluations >= 160", 1)[1].split("fn open_admission(", 1)[0]
         self.assertLess(dispatch.index("r.evaluations += 1"), dispatch.index("sequence: r.evaluations"))
         self.assertIn("r.pending = Some(Pending::Dom(original)); original", dispatch)
         self.assertIn("if r.pending == Some(Pending::Dom(original)) { r.pending = None; }", dispatch)
